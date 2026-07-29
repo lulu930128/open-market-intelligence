@@ -272,6 +272,79 @@ def mutate_market_intraday_history(
     return changed_count
 
 
+def load_persisted_market_intraday_history(
+    db: Session,
+    *,
+    stock_id: str,
+    market: str,
+    market_timezone: tzinfo,
+    interval: str = "1m",
+    limit: int = 3_000,
+) -> dict[str, Any]:
+    """Read bounded regional intraday history without provider side effects."""
+    rows = (
+        db.query(MarketIntradayBar)
+        .filter(MarketIntradayBar.stock_id == stock_id)
+        .filter(MarketIntradayBar.market == market)
+        .filter(MarketIntradayBar.interval == interval)
+        .order_by(MarketIntradayBar.bar_time.desc(), MarketIntradayBar.id.desc())
+        .limit(max(1, min(int(limit), MAX_INTRADAY_ROWS)))
+        .all()
+    )
+    rows.reverse()
+    points: list[dict[str, Any]] = []
+    for row in rows:
+        bar_time = row.bar_time
+        if bar_time.tzinfo is None:
+            bar_time = bar_time.replace(tzinfo=market_timezone)
+        else:
+            bar_time = bar_time.astimezone(market_timezone)
+        points.append(
+            {
+                "time": bar_time.isoformat(),
+                "event_time": bar_time.isoformat(),
+                "session": "regular",
+                "price": row.close_price,
+                "open": row.open_price,
+                "high": row.high_price,
+                "low": row.low_price,
+                "volume": row.trade_volume,
+                "trade_value": row.trade_value,
+                "source": row.source,
+                "provider": row.provider,
+            }
+        )
+    latest = rows[-1] if rows else None
+    latest_time = points[-1]["time"] if points else None
+    return {
+        "stock_id": stock_id,
+        "symbol": latest.symbol if latest is not None else stock_id,
+        "source": latest.source if latest is not None else "market_intraday_bar_cache",
+        "provider": latest.provider if latest is not None else None,
+        "source_url": latest.source_url if latest is not None else None,
+        "interval": interval,
+        "requested_interval": interval,
+        "source_interval": interval,
+        "effective_interval": interval,
+        "interval_status": "ready" if points else "unavailable",
+        "session_scope": "regular",
+        "session_phase": "regular" if points else None,
+        "point_count": len(points),
+        "cached_count": len(points),
+        "refreshed_count": 0,
+        "cache_status": "persisted_hit" if points else "persisted_miss",
+        "cache_hit": bool(points),
+        "cache_trade_date": latest_time[:10] if latest_time else None,
+        "cache_latest_time": latest_time,
+        "fallback_used": False,
+        "volume_unit": "shares",
+        "canonical_volume_unit": "shares",
+        "volume_semantics": "interval_volume",
+        "points": points,
+        "warnings": [],
+    }
+
+
 def build_stock_volume_pace(
     db: Session,
     *,

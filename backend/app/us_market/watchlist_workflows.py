@@ -181,6 +181,7 @@ def get_us_watchlist_ranking(
             )
 
             if overlay is not None:
+                row["intraday_overlay_applied"] = True
                 row["time"] = overlay["time"]
                 row["session"] = overlay["session"]
                 row["close"] = overlay["close"]
@@ -229,17 +230,38 @@ def get_us_watchlist_ranking(
         dependencies=dependencies,
         requested_symbol_count=len(unique_items),
     )
+    requested_symbol_count = len(rows)
+    ranked_count = len(rows) - no_data_count
+    is_live = bool(
+        use_intraday
+        and any(row.get("intraday_overlay_applied") for row in rows)
+    )
 
     return {
         "group_id": group_id,
         "include_children": include_children,
         "rank_by": rank_by,
         "sort_order": sort_order,
-        "requested_symbol_count": len(rows),
-        "ranked_count": len(rows) - no_data_count,
+        "requested_symbol_count": requested_symbol_count,
+        "ranked_count": ranked_count,
         "no_data_count": no_data_count,
         "error_count": 0,
         **freshness,
+        "underlying_trade_date": freshness.get("trade_date"),
+        "coverage_ratio": (
+            ranked_count / requested_symbol_count
+            if requested_symbol_count
+            else 1.0
+        ),
+        "is_live": is_live,
+        "is_full": (
+            ranked_count == requested_symbol_count and no_data_count == 0
+        ),
+        "ranking_semantics": (
+            "live_intraday_rows"
+            if is_live
+            else "latest_completed_daily_rows"
+        ),
         "results": rows,
     }
 

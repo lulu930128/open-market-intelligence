@@ -180,7 +180,10 @@ try {
         Write-ServiceLog "Starting service. file=$FilePath args=$($arguments -join ' ') cwd=$WorkingDirectory launcher_pid=$LauncherPid instance_id=$instanceId restart_attempt=$restartAttempt" "SYSTEM"
         Write-ServiceLog "Process runner. file=$processFilePath args=$processArguments" "SYSTEM"
 
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        # Windows PowerShell can expose the lazily initialized environment
+        # dictionaries as null to the indexer. Reading Count materializes the
+        # collection before backend-specific values are assigned.
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $processFilePath
         $startInfo.Arguments = $processArguments
         $startInfo.WorkingDirectory = $WorkingDirectory
@@ -188,6 +191,7 @@ try {
         $startInfo.CreateNoWindow = $true
         $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
         if ($ServiceName -eq "backend") {
+            $null = $startInfo.EnvironmentVariables.Count
             $startInfo.EnvironmentVariables["PYTHONFAULTHANDLER"] = "1"
             $startInfo.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
         }

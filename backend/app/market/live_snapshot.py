@@ -54,8 +54,8 @@ def market_status_from_session(calendar_status: dict[str, Any]) -> str:
         "lunch_break": "lunch_break",
         "closing_auction": "closing_auction",
         "after_hours": "after_hours",
-        "post_close": "latest_session_close",
-        "post_close_snapshot": "latest_session_close",
+        "post_close": "closed",
+        "post_close_snapshot": "closed",
         "market_closed": "closed",
     }.get(phase, phase)
 

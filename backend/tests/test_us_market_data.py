@@ -885,6 +885,134 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         )
         self.assertNotIn("us_intraday_trend", context["missing"])
 
+    @patch("app.ai.agentic_tools.us_market_service.get_us_intraday_trend")
+    def test_read_us_stock_context_selects_exact_historical_close(
+        self,
+        mock_intraday,
+    ) -> None:
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="AAPL",
+                    trade_date=date(2026, 7, 20),
+                    open_price=320.0,
+                    high_price=330.0,
+                    low_price=319.0,
+                    close_price=326.59,
+                    adjusted_close=None,
+                    trade_volume=10_000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://example.test/chart/AAPL",
+                    raw_payload_hash="aapl-20260720",
+                ),
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="AAPL",
+                    trade_date=date(2026, 7, 24),
+                    open_price=328.0,
+                    high_price=332.0,
+                    low_price=327.0,
+                    close_price=329.0,
+                    adjusted_close=None,
+                    trade_volume=12_000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://example.test/chart/AAPL",
+                    raw_payload_hash="aapl-20260724",
+                ),
+            ],
+        )
+
+        with patch(
+            "app.ai.market_context.us_context.build_us_calendar_status",
+            return_value={
+                "checked_at": "2026-07-26T10:00:00-04:00",
+                "phase": "closed",
+                "previous_trading_day": "2026-07-24",
+            },
+        ):
+            context = agentic_tools.read_us_stock_context(
+                db=self.db,
+                symbol="AAPL",
+                market_data_params={
+                    "trade_date": "2026-07-20",
+                    "include_intraday": True,
+                    "session_scope": "all",
+                },
+            )
+
+        mock_intraday.assert_not_called()
+        quote = context["data"]["compact"]["quote"]
+        self.assertEqual(context["as_of"], "2026-07-20T16:00:00-04:00")
+        self.assertEqual(quote["status"], "historical")
+        self.assertEqual(quote["price"], 326.59)
+        self.assertEqual(quote["currency"], "USD")
+        self.assertEqual(quote["volume_unit"], "shares")
+        self.assertEqual(quote["volume_semantics"], "daily_shares")
+        self.assertEqual(quote["trade_date"], "2026-07-20")
+        self.assertEqual(
+            quote["quote_semantics"],
+            "historical_regular_session_close",
+        )
+        self.assertTrue(quote["is_historical"])
+        self.assertFalse(quote["is_realtime"])
+        self.assertFalse(quote["is_latest_session_quote"])
+        self.assertEqual(quote["timezone"], "America/New_York")
+        self.assertEqual(
+            [row["trade_date"] for row in context["data"]["daily_prices"]],
+            ["2026-07-20"],
+        )
+        self.assertFalse(context["data"]["compact"]["resources"]["include_intraday"])
+
+    def test_read_us_stock_context_does_not_fallback_when_trade_date_is_missing(
+        self,
+    ) -> None:
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="AAPL",
+                    trade_date=date(2026, 7, 24),
+                    open_price=328.0,
+                    high_price=332.0,
+                    low_price=327.0,
+                    close_price=329.0,
+                    adjusted_close=None,
+                    trade_volume=12_000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://example.test/chart/AAPL",
+                    raw_payload_hash="aapl-latest-only",
+                )
+            ],
+        )
+
+        context = agentic_tools.read_us_stock_context(
+            db=self.db,
+            symbol="AAPL",
+            market_data_params={"trade_date": "2026-07-19"},
+        )
+
+        quote = context["data"]["compact"]["quote"]
+        self.assertEqual(quote["status"], "missing")
+        self.assertIsNone(quote["price"])
+        self.assertEqual(quote["requested_trade_date"], "2026-07-19")
+        self.assertEqual(context["data"]["daily_prices"], [])
+        self.assertIn(
+            "us_daily_price_requested_trade_date",
+            context["missing"],
+        )
+        self.assertTrue(
+            any(
+                "did not fall back to another date" in warning
+                for warning in context["warnings"]
+            )
+        )
+
     def _set_daily_fetched_at(
         self,
         *,
@@ -1293,6 +1421,13 @@ class USMarketStorageIsolationTests(unittest.TestCase):
 
         self.assertEqual(ranking["requested_symbol_count"], 2)
         self.assertEqual(ranking["ranked_count"], 2)
+        self.assertEqual(ranking["coverage_ratio"], 1.0)
+        self.assertFalse(ranking["is_live"])
+        self.assertTrue(ranking["is_full"])
+        self.assertEqual(
+            ranking["ranking_semantics"],
+            "latest_completed_daily_rows",
+        )
         self.assertEqual(ranking["results"][0]["symbol"], "AAPL")
         self.assertEqual(ranking["results"][0]["change_pct"], 10.0)
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
@@ -1888,6 +2023,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(chart["points"][0]["low"], 9.0)
         self.assertEqual(chart["points"][0]["close"], 15.0)
         self.assertEqual(chart["points"][0]["volume"], 300)
+        self.assertEqual(chart["volume_unit"], "shares")
+        self.assertEqual(chart["volume_semantics"], "monthly_traded_shares")
+        self.assertEqual(chart["volume_status"], "available")
 
     def test_us_ohlc_chart_data_keeps_raw_daily_close(self) -> None:
         records = [

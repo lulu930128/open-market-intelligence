@@ -466,8 +466,144 @@ def _evidence_result(response: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _provider_failures(response: dict[str, Any]) -> list[dict[str, Any]]:
-    failures: list[dict[str, Any]] = []
+SOURCE_HEALTH_DOMAIN_HINTS: dict[str, tuple[str, ...]] = {
+    "quote": ("quote", "stock_quote_snapshot", "twse_mis"),
+    "intraday": ("intraday", "minute_state", "minute_bar"),
+    "chart": ("daily_price", "daily_ohlcv", "ohlc"),
+    "technical": ("daily_price", "daily_ohlcv", "ohlc", "technical"),
+    "breadth": ("breadth", "market_index"),
+    "market_volume": ("trade_value", "market_volume", "minute_state"),
+    "chips": ("institutional", "margin", "shareholding"),
+    "fundamentals": ("fundamental", "financial", "revenue", "sec_fact"),
+    "broker_branch": ("broker_branch",),
+    "ownership": ("shareholding", "ownership"),
+    "source_health": ("source_health",),
+}
+SOURCE_HEALTH_CAPABILITY_HINTS: dict[str, tuple[str, ...]] = {
+    "quote.snapshot": SOURCE_HEALTH_DOMAIN_HINTS["quote"],
+    "intraday.bars": SOURCE_HEALTH_DOMAIN_HINTS["intraday"],
+    "daily.ohlcv": SOURCE_HEALTH_DOMAIN_HINTS["chart"],
+    "technical.structure": SOURCE_HEALTH_DOMAIN_HINTS["technical"],
+    "market.breadth": SOURCE_HEALTH_DOMAIN_HINTS["breadth"],
+    "market.volume": SOURCE_HEALTH_DOMAIN_HINTS["market_volume"],
+    "chips.institutional": ("institutional",),
+    "chips.margin": ("margin",),
+    "broker_branch.summary": ("broker_branch",),
+    "ownership.distribution": ("shareholding", "ownership"),
+    "fundamentals.revenue": ("revenue",),
+    "fundamentals.financials": ("fundamental", "financial", "sec_fact"),
+    "diagnostics.source_health": ("source_health",),
+    "source.health": ("source_health",),
+}
+
+
+def _source_health_relevance_context(
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    query_plan = _dict(response.get("query_plan"))
+    selection = _dict(query_plan.get("selection"))
+    selected_values = [
+        *_list(query_plan.get("selected_capabilities")),
+        *_list(selection.get("required")),
+        *_list(selection.get("optional")),
+        *_list(selection.get("include")),
+    ]
+    requested_domains = [
+        *_list(query_plan.get("required_domains")),
+        *_list(query_plan.get("requested_domains")),
+    ]
+    selected_hints: set[str] = set()
+    select_all_source_health = False
+    for value in selected_values:
+        capability_id = str(value or "").strip()
+        if capability_id in {"diagnostics.source_health", "source.health"}:
+            select_all_source_health = True
+        selected_hints.update(
+            SOURCE_HEALTH_CAPABILITY_HINTS.get(capability_id, ())
+        )
+    for value in requested_domains:
+        domain = str(value or "").strip()
+        if domain == "source_health":
+            select_all_source_health = True
+        selected_hints.update(SOURCE_HEALTH_DOMAIN_HINTS.get(domain, ()))
+
+    target = _dict(response.get("target"))
+    resolution_target = _dict(_dict(response.get("resolution")).get("target"))
+    target_ids = {
+        str(value).strip().casefold()
+        for value in (
+            target.get("id"),
+            target.get("symbol"),
+            target.get("market"),
+            resolution_target.get("id"),
+            resolution_target.get("symbol"),
+            resolution_target.get("market"),
+        )
+        if str(value or "").strip()
+    }
+    source_ref_hints: set[str] = set()
+    for ref in _list(response.get("source_refs")):
+        if not isinstance(ref, dict):
+            continue
+        for key in ("name", "kind", "provider"):
+            value = str(ref.get(key) or "").strip().casefold()
+            if value:
+                source_ref_hints.add(value)
+    return {
+        "selected_hints": {
+            str(value).casefold() for value in selected_hints if str(value).strip()
+        },
+        "target_ids": target_ids,
+        "source_ref_hints": source_ref_hints,
+        "select_all_source_health": select_all_source_health,
+    }
+
+
+def _source_health_relevance(
+    entry: dict[str, Any],
+    *,
+    context: dict[str, Any],
+) -> str:
+    if context["select_all_source_health"]:
+        return "selected"
+    text = " ".join(
+        str(entry.get(key) or "").casefold()
+        for key in ("resource", "provider", "target", "market", "source")
+    )
+    explicit_entry_targets = {
+        str(entry.get(key) or "").strip().casefold()
+        for key in ("target", "symbol")
+        if str(entry.get(key) or "").strip()
+    }
+    entry_markets = {
+        str(entry.get("market") or "").strip().casefold()
+    } - {""}
+    target_matches = (
+        bool(explicit_entry_targets & context["target_ids"])
+        if explicit_entry_targets
+        else bool(not entry_markets or entry_markets & context["target_ids"])
+    )
+    selected_resource = any(
+        hint in text for hint in context["selected_hints"]
+    )
+    source_ref_resource = any(
+        hint in text for hint in context["source_ref_hints"]
+    )
+    if target_matches and selected_resource:
+        return "selected"
+    if target_matches and source_ref_resource:
+        return "dependent"
+    return "supplemental"
+
+
+def _provider_failure_scopes(
+    response: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    current_request_failures: list[dict[str, Any]] = []
+    background_source_health: list[dict[str, Any]] = []
+    supplemental_source_health: list[dict[str, Any]] = []
+    historical_provider_events: list[dict[str, Any]] = []
+    relevance_context = _source_health_relevance_context(response)
     for run in _list(response.get("tool_runs")):
         if not isinstance(run, dict):
             continue
@@ -482,26 +618,33 @@ def _provider_failures(response: dict[str, Any]) -> list[dict[str, Any]]:
             "unavailable",
         }:
             continue
-        failures.append(
+        current_request_failures.append(
             {
-                key: deepcopy(run[key])
-                for key in (
-                    "tool",
-                    "provider",
-                    "status",
-                    "error",
-                    "error_code",
-                    "message",
-                    "duration_ms",
-                    "retryable",
-                )
-                if key in run
+                "failure_scope": "current_request",
+                **{
+                    key: deepcopy(run[key])
+                    for key in (
+                        "tool",
+                        "provider",
+                        "status",
+                        "error",
+                        "error_code",
+                        "message",
+                        "duration_ms",
+                        "retryable",
+                    )
+                    if key in run
+                },
             }
         )
     result = _dict(response.get("result"))
 
     def walk(value: Any, *, depth: int = 0) -> None:
-        if depth > 7 or len(failures) >= 100:
+        if (
+            depth > 7
+            or len(background_source_health) + len(supplemental_source_health)
+            >= 200
+        ):
             return
         if isinstance(value, dict):
             entries = value.get("entries")
@@ -526,8 +669,17 @@ def _provider_failures(response: dict[str, Any]) -> list[dict[str, Any]]:
                         "unavailable",
                     }:
                         continue
-                    failures.append(
-                        {
+                    relevance = _source_health_relevance(
+                        entry,
+                        context=relevance_context,
+                    )
+                    scoped_entry = {
+                            "failure_scope": (
+                                "background_source_health"
+                                if relevance in {"selected", "dependent"}
+                                else "supplemental_source_health"
+                            ),
+                            "source_health_relevance": relevance,
                             "provider": entry.get("provider"),
                             "resource": entry.get("resource"),
                             "target": entry.get("target"),
@@ -542,6 +694,37 @@ def _provider_failures(response: dict[str, Any]) -> list[dict[str, Any]]:
                             ),
                             "latest_event": entry.get("latest_event"),
                         }
+                    if relevance in {"selected", "dependent"}:
+                        background_source_health.append(scoped_entry)
+                    else:
+                        supplemental_source_health.append(scoped_entry)
+                    latest_event = entry.get("latest_event")
+                    if isinstance(latest_event, dict):
+                        historical_provider_events.append(
+                            {
+                                "failure_scope": "historical_provider_event",
+                                "source_health_relevance": relevance,
+                                **deepcopy(latest_event),
+                                "resource": (
+                                    latest_event.get("resource")
+                                    or entry.get("resource")
+                                ),
+                                "target": (
+                                    latest_event.get("target")
+                                    or entry.get("target")
+                                ),
+                            }
+                        )
+            provider_events = value.get("provider_events")
+            if isinstance(provider_events, list):
+                for event in provider_events[:100]:
+                    if not isinstance(event, dict):
+                        continue
+                    historical_provider_events.append(
+                        {
+                            "failure_scope": "historical_provider_event",
+                            **deepcopy(event),
+                        }
                     )
             for item in value.values():
                 if isinstance(item, (dict, list)):
@@ -552,7 +735,22 @@ def _provider_failures(response: dict[str, Any]) -> list[dict[str, Any]]:
                     walk(item, depth=depth + 1)
 
     walk(result)
-    return failures
+    return {
+        "current_request_failures": current_request_failures[:100],
+        "background_source_health": background_source_health[:100],
+        "selected_source_health": [
+            item
+            for item in background_source_health
+            if item.get("source_health_relevance") == "selected"
+        ][:100],
+        "dependent_source_health": [
+            item
+            for item in background_source_health
+            if item.get("source_health_relevance") == "dependent"
+        ][:100],
+        "supplemental_source_health": supplemental_source_health[:100],
+        "historical_provider_events": historical_provider_events[:100],
+    }
 
 
 def build(response: dict[str, Any]) -> dict[str, Any]:
@@ -572,6 +770,7 @@ def build(response: dict[str, Any]) -> dict[str, Any]:
         "fallback_used": bool(response.get("fallback_used")),
         "cached_data_returned": bool(response.get("cached_data_returned")),
     }
+    provider_failure_scopes = _provider_failure_scopes(response)
     return {
         "kind": KIND,
         "contract_version": CONTRACT_VERSION,
@@ -597,7 +796,10 @@ def build(response: dict[str, Any]) -> dict[str, Any]:
         "limitations": {
             "missing": _unique_strings(response.get("missing")),
             "warnings": _unique_strings(response.get("warnings")),
-            "provider_failures": _provider_failures(response),
+            "provider_failures": provider_failure_scopes[
+                "current_request_failures"
+            ],
+            **provider_failure_scopes,
         },
         "execution": {
             "strategy_profile": response.get("strategy_profile"),

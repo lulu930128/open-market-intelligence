@@ -11,8 +11,10 @@ class MarketCalendarReleaseWindowRead(BaseModel):
     release_at: datetime
     next_release_at: datetime
     expected_trade_date: date | None = None
+    expected_data_key: str | None = None
     status: str
     is_released: bool
+    assumption: str | None = None
 
 
 class MarketCalendarSessionRead(BaseModel):
@@ -312,6 +314,7 @@ class TaiwanSourceHealthEntryRead(BaseModel):
     latest_data_key: str | None = None
     latest_updated_at: datetime | None = None
     expected_data_date: date | None = None
+    expected_data_key: str | None = None
     freshness_lag_days: int | None = None
     release_status: str | None = None
     release_is_released: bool | None = None
@@ -748,6 +751,9 @@ class TaiwanStockQuoteDepthLevelRead(BaseModel):
     level: int
     price: float | None = None
     size_lots: int | None = None
+    volume_lots: int | None = None
+    order_count: int | None = None
+    order_count_status: str = "not_provided"
 
 
 class TaiwanStockQuoteDepthFreshnessRead(BaseModel):
@@ -779,6 +785,9 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     holiday_name: str | None = None
     trade_date: date | None = None
     quote_time: datetime | None = None
+    snapshot_time: datetime | None = None
+    snapshot_time_basis: str | None = None
+    provider_event_time: datetime | None = None
     fetched_at: datetime | None = None
 
     last_price: float | None = None
@@ -801,9 +810,117 @@ class TaiwanStockQuoteDepthRead(BaseModel):
 
     bid_levels: list[TaiwanStockQuoteDepthLevelRead]
     ask_levels: list[TaiwanStockQuoteDepthLevelRead]
+    bid_depth: list[TaiwanStockQuoteDepthLevelRead] = Field(default_factory=list)
+    ask_depth: list[TaiwanStockQuoteDepthLevelRead] = Field(default_factory=list)
+    bid_depth_status: str = "unavailable"
+    ask_depth_status: str = "unavailable"
+    depth_volume_unit: str = "lots"
+    depth_order_count_status: str = "not_provided"
+    top5_bid_volume_lots: int | None = None
+    top5_ask_volume_lots: int | None = None
+    top5_imbalance: float | None = None
+    top5_imbalance_formula: str | None = None
     depth_available: bool
+    ohlc_summary: dict[str, Any]
+    quote_semantics: str
+    delivery_status: str
+    fallback_used: bool
+    price_available: bool
+    last_trade_available: bool
+    last_trade_price: float | None = None
+    last_trade_time: datetime | None = None
+    last_trade_is_current_session: bool
+    last_trade_before_auction: bool = False
+    auction_book_available: bool = False
+    auction_book_status: str = "unavailable"
+    auction_book_time: datetime | None = None
+    auction_best_bid: float | None = None
+    auction_best_ask: float | None = None
+    auction_indicative_available: bool
+    auction_indicative_status: str
+    auction_phase: str | None = None
+    auction_event_time: datetime | None = None
+    indicative_match_available: bool
+    indicative_match_price: float | None = None
+    indicative_match_volume_lots: int | None = None
+    indicative_unmatched_buy_volume_lots: int | None = None
+    indicative_unmatched_sell_volume_lots: int | None = None
+    indicative_match_status: str = "not_provided"
+    indicative_price_available: bool
+    indicative_price: float | None = None
+    indicative_bid: float | None = None
+    indicative_ask: float | None = None
+    official_close_available: bool
+    official_close_status: str
+    official_close_price: float | None = None
+    official_close_trade_date: date | None = None
+    official_close_source: str | None = None
+    official_close_raw: str | None = None
+    official_close_display: str | None = None
+    official_close_precision: int | None = None
+    official_close_precision_semantics: str
     refresh_outcome: str = "not_attempted"
     freshness: TaiwanStockQuoteDepthFreshnessRead
+
+
+class TaiwanQuoteContractReplaySnapshotRead(BaseModel):
+    capture_slot: str
+    status: str
+    scheduled_at: datetime | None = None
+    captured_at: datetime | None = None
+    quote_time: datetime | None = None
+    freshness_status: str | None = None
+    refresh_outcome: str | None = None
+    error: str | None = None
+    quote: dict[str, Any] | None = None
+
+
+class TaiwanQuoteContractReplayRead(BaseModel):
+    kind: str
+    stock_id: str
+    trade_date: date | None = None
+    timezone: str
+    required_slots: list[str]
+    required_count: int
+    captured_count: int
+    coverage_ratio: float
+    complete: bool
+    missing_slots: list[str]
+    snapshots: list[TaiwanQuoteContractReplaySnapshotRead]
+    source: str
+    replay_semantics: str
+    read_path_side_effects: bool
+
+
+class TaiwanIndexContractReplaySnapshotRead(BaseModel):
+    capture_slot: str
+    status: str
+    scheduled_at: datetime | None = None
+    captured_at: datetime | None = None
+    session_phase: str | None = None
+    selected_candidate: str | None = None
+    selected_value: float | None = None
+    selection_reason: str | None = None
+    official_close_status: str | None = None
+    error: str | None = None
+    payload: dict[str, Any] | None = None
+
+
+class TaiwanIndexContractReplayRead(BaseModel):
+    kind: str
+    index_id: str
+    trade_date: date | None = None
+    timezone: str
+    required_slots: list[str]
+    required_count: int
+    captured_count: int
+    coverage_ratio: float
+    complete: bool
+    missing_slots: list[str]
+    snapshots: list[TaiwanIndexContractReplaySnapshotRead]
+    source: str
+    replay_semantics: str
+    read_path_side_effects: bool
 
 
 class MarketIntradayChartPointRead(BaseModel):
@@ -815,14 +932,29 @@ class MarketIntradayChartPointRead(BaseModel):
     close: float | None = None
 
     volume: int | None = None
+    volume_shares: int | None = None
+    volume_lots: float | None = None
+    canonical_volume_unit: str = "shares"
+    provider_volume_unit: str = "unknown"
+    volume_status: str = "not_provided"
     trade_value: int | None = None
+    approx_trade_value: float | None = None
+    trade_value_status: str = "not_provided"
     transaction_count: int | None = None
+    bar_close_time: datetime | None = None
+    elapsed_seconds: int | None = None
+    is_partial: bool = False
+    finalized: bool = False
 
 
 class MarketIntradayChartRead(BaseModel):
     stock_id: str
     symbol: str | None = None
     interval: str
+    requested_interval: str
+    source_interval: str
+    effective_interval: str
+    interval_status: str
     range: str
     provider: str
     source: str
@@ -831,12 +963,34 @@ class MarketIntradayChartRead(BaseModel):
     point_count: int
     cached_count: int
     refreshed_count: int
+    cache_status: str | None = None
+    cache_hit: bool = False
+    cache_trade_date: date | None = None
+    cache_latest_time: datetime | None = None
+    fallback_used: bool = False
     trading_mode: str = "continuous"
     analysis_basis: str = "time_bars"
     batch_interval_minutes: int | None = None
     disposition_start_date: date | None = None
     disposition_end_date: date | None = None
     effective_match_count: int | None = None
+    canonical_volume_unit: str = "shares"
+    provider_volume_unit: str = "unknown"
+    volume_conversion: str = "unknown"
+    cumulative_volume_shares: int | None = None
+    cumulative_volume_lots: float | None = None
+    cumulative_trade_value: int | None = None
+    available_cumulative_trade_value: int | None = None
+    estimated_cumulative_trade_value: int | None = None
+    trade_value_unit: str = "TWD"
+    trade_value_status: str = "not_provided"
+    official_vwap: float | None = None
+    approx_vwap: float | None = None
+    vwap_method: str = "unavailable"
+    vwap_confidence: str = "unavailable"
+    partial_bar_count: int = 0
+    indicator_eligible_point_count: int = 0
+    partial_bar_policy: str = "exclude_partial_bars_from_indicators"
     points: list[MarketIntradayChartPointRead]
 
 

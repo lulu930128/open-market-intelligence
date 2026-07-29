@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime, timezone
 import hashlib
 import json
 from typing import Any
+
+from app.ai import public_contract
 
 
 OUTPUT_MODES = {"evidence_only", "decision", "decision_with_evidence"}
@@ -27,6 +30,7 @@ READY_STATUSES = {
     "current",
     "daily_close",
     "fresh",
+    "historical",
     "latest_completed_session",
     "latest_session_close",
     "live",
@@ -58,6 +62,35 @@ EXECUTABLE_FILL_OPERATIONS = {
     "crypto.refresh_ohlcv",
     "crypto.refresh_order_book",
     "crypto.refresh_derivatives",
+}
+FILL_OPERATION_PRODUCED_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "tw.refresh_quote": (
+        "quote.snapshot",
+        "quote.order_book",
+        "quote.auction",
+        "quote.official_close",
+    ),
+    "tw.refresh_intraday": ("intraday.bars",),
+    "tw.refresh_daily_price": ("daily.ohlcv",),
+    "tw.refresh_institutional": ("chips.institutional",),
+    "tw.refresh_margin": ("chips.margin",),
+    "tw.refresh_broker_branch": ("broker_branch.summary",),
+    "tw.refresh_shareholding": ("ownership.distribution",),
+    "tw.refresh_revenue": ("fundamentals.revenue",),
+    "tw.refresh_financials": ("fundamentals.financials",),
+    "us.read_intraday_trend": ("quote.snapshot", "intraday.bars"),
+    "us.refresh_daily_price": ("daily.ohlcv",),
+    "us.refresh_sec_facts": ("fundamentals.financials",),
+    "jp.read_intraday_trend": ("quote.snapshot", "intraday.bars"),
+    "jp.refresh_daily_price": ("daily.ohlcv",),
+    "kr.read_stock_intraday_trend": ("quote.snapshot", "intraday.bars"),
+    "kr.read_index_intraday_trend": ("quote.snapshot", "intraday.bars"),
+    "kr.refresh_daily_price": ("daily.ohlcv",),
+    "kr.refresh_index_daily_price": ("daily.ohlcv",),
+    "crypto.refresh_ticker": ("quote.snapshot",),
+    "crypto.refresh_ohlcv": ("intraday.bars", "daily.ohlcv"),
+    "crypto.refresh_order_book": ("crypto.order_book",),
+    "crypto.refresh_derivatives": ("crypto.derivatives",),
 }
 FILL_OPERATIONS_WRITING_CACHE = {
     "tw.refresh_daily_price",
@@ -92,9 +125,33 @@ class CapabilitySpec:
     default_limit: int
     fill_operations: tuple[tuple[str, str], ...] = ()
     writes_cache: bool = False
+    title: str = ""
+    description: str = ""
+    markets: tuple[str, ...] = ()
+    parameter_schema: dict[str, Any] = field(default_factory=dict)
+    frequency: str = "request"
+    unit_semantics: str = "field_defined"
+    event_time_basis: str = "capability_defined"
+    deprecated: bool = False
+    replacement_capabilities: tuple[str, ...] = ()
+    side_effect_policy: str = "read_only"
 
     def as_public_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        payload["title"] = self.title or self.capability_id
+        payload["description"] = (
+            self.description
+            or f"Canonical OMI capability {self.capability_id}."
+        )
+        payload["parameter_schema"] = (
+            dict(self.parameter_schema)
+            if self.parameter_schema
+            else {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            }
+        )
         payload["fill_operations"] = {
             scope: operation for scope, operation in self.fill_operations
         }
@@ -148,6 +205,131 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "price",
             "latest_price",
             "last_price",
+            "price_available",
+            "last_trade_available",
+            "last_trade_price",
+            "last_trade_time",
+            "last_trade_is_current_session",
+            "last_trade_before_auction",
+            "facts_usable_for_current_session",
+            "fallback_quote",
+            "fallback_used",
+            "previous_close",
+            "previous_close_trade_date",
+            "open_price",
+            "high_price",
+            "low_price",
+            "change",
+            "change_pct",
+            "currency",
+            "price_unit",
+            "volume",
+            "volume_unit",
+            "volume_semantics",
+            "volume_status",
+            "canonical_volume_unit",
+            "provider_volume_unit",
+            "trade_value",
+            "trade_value_unit",
+            "trade_value_status",
+            "trade_value_source",
+            "total_volume_lots",
+            "total_volume_contracts",
+            "bid",
+            "ask",
+            "best_bid_price",
+            "best_bid_size_lots",
+            "best_ask_price",
+            "best_ask_size_lots",
+            "spread",
+            "spread_pct",
+            "bid_levels",
+            "ask_levels",
+            "bid_depth",
+            "ask_depth",
+            "top5_bid_volume_lots",
+            "top5_ask_volume_lots",
+            "top5_imbalance",
+            "depth_volume_unit",
+            "depth_order_count_status",
+            "trade_date",
+            "quote_time",
+            "quote_time_basis",
+            "snapshot_time",
+            "snapshot_time_basis",
+            "provider_event_time",
+            "event_time",
+            "fetched_at",
+            "refresh_outcome",
+            "received_at",
+            "source",
+            "provider",
+            "market_status",
+            "session_phase",
+            "quote_semantics",
+            "is_historical",
+            "requested_trade_date",
+            "regular_session_close",
+            "regular_session_close_time",
+            "regular_session_close_trade_date",
+            "delivery_status",
+            "is_live",
+            "is_realtime",
+            "is_current_session_quote",
+            "is_latest_session_quote",
+            "age_seconds",
+            "quote_age_seconds",
+            "latency_ms",
+            "depth_available",
+            "depth_status",
+            "auction_book_available",
+            "auction_book_status",
+            "auction_book_time",
+            "auction_best_bid",
+            "auction_best_ask",
+            "auction_indicative_available",
+            "indicative_match_available",
+            "indicative_match_price",
+            "indicative_match_volume_lots",
+            "indicative_unmatched_buy_volume_lots",
+            "indicative_unmatched_sell_volume_lots",
+            "indicative_unmatched_status",
+            "indicative_price_available",
+            "indicative_price",
+            "indicative_bid",
+            "indicative_ask",
+            "official_close_available",
+            "official_close_status",
+            "official_close_price",
+            "official_close_trade_date",
+            "official_close_source",
+            "official_close_raw",
+            "official_close_display",
+            "official_close_precision",
+            "official_vwap",
+            "approx_vwap",
+            "vwap_method",
+            "vwap_confidence",
+            "selected_candidate",
+            "selection_reason",
+            "quote_candidates",
+            "freshness",
+            "timezone",
+        ),
+        default_fields=(
+            "status",
+            "price",
+            "latest_price",
+            "last_price",
+            "price_available",
+            "last_trade_available",
+            "last_trade_price",
+            "last_trade_time",
+            "last_trade_is_current_session",
+            "last_trade_before_auction",
+            "facts_usable_for_current_session",
+            "fallback_quote",
+            "fallback_used",
             "previous_close",
             "open_price",
             "high_price",
@@ -158,80 +340,93 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "price_unit",
             "volume",
             "volume_unit",
+            "volume_semantics",
+            "volume_status",
+            "canonical_volume_unit",
+            "provider_volume_unit",
             "trade_value",
             "trade_value_unit",
+            "trade_value_status",
+            "trade_value_source",
             "total_volume_lots",
+            "total_volume_contracts",
             "bid",
             "ask",
             "best_bid_price",
-            "best_bid_size_lots",
             "best_ask_price",
-            "best_ask_size_lots",
             "spread",
-            "spread_pct",
+            "bid_levels",
+            "ask_levels",
+            "bid_depth",
+            "ask_depth",
+            "top5_bid_volume_lots",
+            "top5_ask_volume_lots",
+            "top5_imbalance",
+            "depth_volume_unit",
+            "depth_order_count_status",
             "trade_date",
             "quote_time",
+            "quote_time_basis",
+            "snapshot_time",
+            "snapshot_time_basis",
+            "provider_event_time",
             "event_time",
             "fetched_at",
-            "refresh_outcome",
             "received_at",
             "source",
             "provider",
             "market_status",
             "session_phase",
             "quote_semantics",
+            "is_historical",
+            "requested_trade_date",
+            "regular_session_close",
+            "regular_session_close_time",
+            "regular_session_close_trade_date",
             "delivery_status",
             "is_live",
             "is_realtime",
             "is_current_session_quote",
             "is_latest_session_quote",
-            "age_seconds",
             "quote_age_seconds",
             "latency_ms",
             "depth_available",
+            "depth_status",
+            "auction_book_available",
+            "auction_book_status",
+            "auction_book_time",
+            "auction_best_bid",
+            "auction_best_ask",
+            "auction_indicative_available",
+            "indicative_match_available",
+            "indicative_match_price",
+            "indicative_match_volume_lots",
+            "indicative_unmatched_buy_volume_lots",
+            "indicative_unmatched_sell_volume_lots",
+            "indicative_unmatched_status",
+            "indicative_price_available",
+            "indicative_price",
+            "indicative_bid",
+            "indicative_ask",
+            "official_close_available",
+            "official_close_status",
+            "official_close_price",
+            "official_close_trade_date",
+            "official_close_source",
+            "official_close_raw",
+            "official_close_display",
+            "official_close_precision",
+            "official_vwap",
+            "approx_vwap",
+            "vwap_method",
+            "vwap_confidence",
+            "selected_candidate",
+            "selection_reason",
+            "quote_candidates",
             "freshness",
             "timezone",
         ),
-        default_fields=(
-            "status",
-            "price",
-            "latest_price",
-            "last_price",
-            "change",
-            "change_pct",
-            "currency",
-            "price_unit",
-            "volume",
-            "volume_unit",
-            "trade_value",
-            "trade_value_unit",
-            "total_volume_lots",
-            "bid",
-            "ask",
-            "best_bid_price",
-            "best_ask_price",
-            "spread",
-            "trade_date",
-            "quote_time",
-            "event_time",
-            "fetched_at",
-            "received_at",
-            "source",
-            "provider",
-            "market_status",
-            "session_phase",
-            "quote_semantics",
-            "delivery_status",
-            "is_live",
-            "is_realtime",
-            "is_current_session_quote",
-            "is_latest_session_quote",
-            "quote_age_seconds",
-            "latency_ms",
-            "freshness",
-            "timezone",
-        ),
-        default_limit=1,
+        default_limit=5,
         fill_operations=(
             ("stock", "tw.refresh_quote"),
             ("us_stock", "us.read_intraday_trend"),
@@ -243,6 +438,195 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
     ),
     CapabilitySpec(
+        capability_id="quote.order_book",
+        domain="quote",
+        slot="quote_order_book",
+        scopes=("stock",),
+        paths=(
+            "compact.quote.components.order_book",
+            "data.quote.components.order_book",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "available",
+            "best_bid_price",
+            "best_bid_size_lots",
+            "best_ask_price",
+            "best_ask_size_lots",
+            "spread",
+            "spread_pct",
+            "bid_levels",
+            "ask_levels",
+            "top5_bid_volume_lots",
+            "top5_ask_volume_lots",
+            "top5_imbalance",
+            "volume_unit",
+            "order_count_status",
+            "snapshot_time",
+            "snapshot_time_basis",
+            "provider_event_time",
+            "fetched_at",
+            "latency_ms",
+            "provider",
+            "source",
+            "freshness",
+        ),
+        default_fields=(
+            "status",
+            "available",
+            "best_bid_price",
+            "best_bid_size_lots",
+            "best_ask_price",
+            "best_ask_size_lots",
+            "spread",
+            "spread_pct",
+            "bid_levels",
+            "ask_levels",
+            "top5_bid_volume_lots",
+            "top5_ask_volume_lots",
+            "top5_imbalance",
+            "volume_unit",
+            "order_count_status",
+            "snapshot_time",
+            "provider_event_time",
+            "latency_ms",
+            "provider",
+            "source",
+            "freshness",
+        ),
+        default_limit=5,
+        fill_operations=(("stock", "tw.refresh_quote"),),
+        title="Taiwan quote order book",
+        description=(
+            "Taiwan five-level order book with provider event time, latency, "
+            "spread, and top-five imbalance. Last-trade availability is not "
+            "required for this component to be current."
+        ),
+        markets=("TW",),
+        frequency="intraday",
+        unit_semantics="prices_and_lots",
+        event_time_basis="provider_event_time",
+    ),
+    CapabilitySpec(
+        capability_id="quote.auction",
+        domain="quote",
+        slot="quote_auction",
+        scopes=("stock",),
+        paths=(
+            "compact.quote.components.auction",
+            "data.quote.components.auction",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "available",
+            "session_phase",
+            "auction_time",
+            "best_bid",
+            "best_ask",
+            "indicative_available",
+            "indicative_match_available",
+            "indicative_match_price",
+            "indicative_match_volume_lots",
+            "unmatched_buy_volume_lots",
+            "unmatched_sell_volume_lots",
+            "unmatched_status",
+            "trading_mode",
+            "analysis_basis",
+            "batch_interval_minutes",
+            "next_batch_time",
+            "provider_event_time",
+            "latency_ms",
+            "provider",
+            "source",
+            "freshness",
+        ),
+        default_fields=(
+            "status",
+            "available",
+            "session_phase",
+            "auction_time",
+            "best_bid",
+            "best_ask",
+            "indicative_available",
+            "indicative_match_available",
+            "indicative_match_price",
+            "indicative_match_volume_lots",
+            "unmatched_buy_volume_lots",
+            "unmatched_sell_volume_lots",
+            "unmatched_status",
+            "trading_mode",
+            "analysis_basis",
+            "batch_interval_minutes",
+            "next_batch_time",
+            "provider_event_time",
+            "latency_ms",
+            "provider",
+            "source",
+            "freshness",
+        ),
+        default_limit=5,
+        fill_operations=(("stock", "tw.refresh_quote"),),
+        title="Taiwan quote auction state",
+        description=(
+            "Taiwan pre-open, closing, or disposition batch-auction state. "
+            "An auction book can be current while the last trade is unavailable."
+        ),
+        markets=("TW",),
+        frequency="intraday",
+        unit_semantics="prices_lots_and_minutes",
+        event_time_basis="provider_event_time",
+    ),
+    CapabilitySpec(
+        capability_id="quote.official_close",
+        domain="quote",
+        slot="quote_official_close",
+        scopes=("stock", "tw_index"),
+        paths=(
+            "compact.quote.components.official_close",
+            "data.quote.components.official_close",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "available",
+            "price",
+            "trade_date",
+            "source",
+            "raw",
+            "display",
+            "precision",
+            "quote_semantics",
+            "delivery_status",
+            "freshness",
+        ),
+        default_fields=(
+            "status",
+            "available",
+            "price",
+            "trade_date",
+            "source",
+            "raw",
+            "display",
+            "precision",
+            "quote_semantics",
+            "delivery_status",
+            "freshness",
+        ),
+        default_limit=1,
+        fill_operations=(("stock", "tw.refresh_quote"),),
+        title="Taiwan official close",
+        description=(
+            "Confirmed Taiwan stock or index close with explicit availability, "
+            "source, display precision, and completed-session date semantics."
+        ),
+        markets=("TW",),
+        frequency="daily",
+        unit_semantics="index_or_security_price",
+        event_time_basis="taiwan_completed_trade_date",
+    ),
+    CapabilitySpec(
         capability_id="intraday.bars",
         domain="intraday",
         slot="intraday",
@@ -250,6 +634,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         paths=(
             "compact.intraday_bars",
             "compact.index_intraday",
+            "compact.intraday_chart",
             "data.intraday_bars",
             "data.index_intraday",
             "compact.intraday",
@@ -263,12 +648,18 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "payload_level",
             "date",
             "interval",
+            "requested_interval",
             "source_interval",
             "effective_interval",
+            "interval_status",
             "sampling_mode",
             "original_point_count",
             "session",
             "session_scope",
+            "session_phase",
+            "market_status",
+            "official_close_status",
+            "delivery_status",
             "is_current_session",
             "point_count",
             "returned_point_count",
@@ -286,9 +677,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "low_price",
             "close_price",
             "base_volume",
+            "base_volume_unit",
             "volume_unit",
+            "volume_contracts",
+            "volume_event_time",
+            "cumulative_volume",
+            "cumulative_volume_unit",
+            "cumulative_volume_contracts",
+            "lot_size",
             "trade_value_unit",
             "quote_volume",
+            "quote_volume_unit",
             "currency",
             "price_unit",
             "event_time",
@@ -302,6 +701,41 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "continuity",
             "volume_semantics",
             "volume_status",
+            "volume_shares",
+            "volume_lots",
+            "canonical_volume_unit",
+            "provider_volume_unit",
+            "volume_conversion",
+            "cumulative_volume_shares",
+            "cumulative_volume_lots",
+            "cumulative_trade_value",
+            "available_cumulative_trade_value",
+            "estimated_cumulative_trade_value",
+            "trade_value_status",
+            "official_vwap",
+            "approx_vwap",
+            "vwap_method",
+            "vwap_confidence",
+            "bar_close_time",
+            "elapsed_seconds",
+            "finalized",
+            "partial_bar_count",
+            "indicator_eligible_point_count",
+            "partial_bar_policy",
+            "aggregation_method",
+            "source_point_count",
+            "aggregated_point_count",
+            "expected_point_count",
+            "cache_status",
+            "cache_hit",
+            "cache_trade_date",
+            "cache_latest_time",
+            "cached_count",
+            "refreshed_count",
+            "fallback_used",
+            "market_events",
+            "sessions",
+            "sort_order",
         ),
         default_fields=(
             "as_of",
@@ -309,12 +743,18 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "kind",
             "payload_level",
             "interval",
+            "requested_interval",
             "source_interval",
             "effective_interval",
+            "interval_status",
             "sampling_mode",
             "original_point_count",
             "session",
             "session_scope",
+            "session_phase",
+            "market_status",
+            "official_close_status",
+            "delivery_status",
             "is_current_session",
             "point_count",
             "returned_point_count",
@@ -331,8 +771,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "low_price",
             "close_price",
             "base_volume",
+            "base_volume_unit",
             "volume_unit",
+            "volume_contracts",
+            "volume_event_time",
+            "cumulative_volume",
+            "cumulative_volume_unit",
+            "cumulative_volume_contracts",
+            "lot_size",
             "trade_value_unit",
+            "quote_volume",
+            "quote_volume_unit",
             "event_time",
             "fetched_at",
             "received_at",
@@ -344,6 +793,33 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "continuity",
             "volume_semantics",
             "volume_status",
+            "canonical_volume_unit",
+            "provider_volume_unit",
+            "volume_conversion",
+            "cumulative_volume_shares",
+            "cumulative_volume_lots",
+            "cumulative_trade_value",
+            "available_cumulative_trade_value",
+            "estimated_cumulative_trade_value",
+            "trade_value_status",
+            "official_vwap",
+            "approx_vwap",
+            "vwap_method",
+            "vwap_confidence",
+            "partial_bar_count",
+            "indicator_eligible_point_count",
+            "partial_bar_policy",
+            "aggregation_method",
+            "source_point_count",
+            "aggregated_point_count",
+            "cache_status",
+            "cache_hit",
+            "cache_trade_date",
+            "cache_latest_time",
+            "fallback_used",
+            "market_events",
+            "sessions",
+            "sort_order",
         ),
         default_limit=20,
         fill_operations=(
@@ -384,9 +860,14 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "low_price",
             "close_price",
             "base_volume",
+            "base_volume_unit",
             "volume_unit",
+            "lot_size",
             "trade_value_unit",
             "quote_volume",
+            "quote_volume_unit",
+            "volume_semantics",
+            "volume_status",
             "currency",
             "price_unit",
             "event_time",
@@ -411,8 +892,14 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "low_price",
             "close_price",
             "base_volume",
+            "base_volume_unit",
             "volume_unit",
+            "lot_size",
             "trade_value_unit",
+            "quote_volume",
+            "quote_volume_unit",
+            "volume_semantics",
+            "volume_status",
             "event_time",
             "fetched_at",
             "received_at",
@@ -807,15 +1294,40 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "currency",
             "scope",
             "coverage",
+            "market",
+            "market_segment",
+            "index_id",
+            "universe_count",
+            "coverage_count",
+            "coverage_ratio",
+            "classified_count",
+            "unknown_count",
+            "reconciliation_status",
+            "reconciliation_formula",
             "universe_definition",
             "authority",
             "inclusion_rule",
             "instrument_type_policy",
             "missing_quote_policy",
             "official_full_market",
+            "is_full_market",
+            "universe_type",
+            "coverage_limitation",
+            "direct_market_breadth",
+            "proxy_used",
+            "coverage_note",
             "included_markets",
             "missing_markets",
             "markets",
+            "trade_value_available",
+            "trade_value_complete",
+            "trade_value_status",
+            "trade_value_included_markets",
+            "trade_value_missing_markets",
+            "trade_value_estimate",
+            "trade_value_estimate_method",
+            "market_completion_ratio",
+            "close_reconciliation",
             "source",
             "freshness",
         ),
@@ -840,13 +1352,659 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "currency",
             "scope",
             "coverage",
+            "market",
+            "market_segment",
+            "index_id",
+            "universe_count",
+            "coverage_count",
+            "coverage_ratio",
+            "classified_count",
+            "unknown_count",
+            "reconciliation_status",
+            "is_full_market",
+            "universe_type",
+            "coverage_limitation",
+            "direct_market_breadth",
+            "proxy_used",
+            "coverage_note",
             "included_markets",
             "missing_markets",
             "markets",
+            "trade_value_complete",
+            "trade_value_status",
+            "market_completion_ratio",
+            "close_reconciliation",
             "source",
             "freshness",
         ),
         default_limit=10,
+    ),
+    CapabilitySpec(
+        capability_id="market.indices",
+        domain="indices",
+        slot="market_indices",
+        scopes=("market",),
+        paths=("compact.market.indices", "data.market.indices"),
+        fields=(
+            "kind",
+            "status",
+            "as_of",
+            "count",
+            "items",
+            "source",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "as_of",
+            "count",
+            "items",
+            "source",
+            "missing",
+            "warnings",
+        ),
+        default_limit=20,
+        title="Taiwan market indices",
+        description=(
+            "Canonical TAIEX and TPEx index snapshots from the shared Taiwan "
+            "market-index summary reader."
+        ),
+        markets=("TW",),
+        frequency="intraday",
+        unit_semantics="index_points",
+        event_time_basis="index_quote_or_completed_trade_date",
+    ),
+    CapabilitySpec(
+        capability_id="events.upcoming",
+        domain="events",
+        slot="events_upcoming",
+        scopes=("stock",),
+        paths=("compact.events.upcoming", "data.events.upcoming"),
+        fields=(
+            "kind",
+            "status",
+            "stock_id",
+            "as_of",
+            "days",
+            "limit",
+            "result_count",
+            "total_count",
+            "events",
+            "source",
+            "cache_policy",
+            "cache_status",
+            "cache_fetched_at",
+            "empty_result_is_valid",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "stock_id",
+            "as_of",
+            "days",
+            "result_count",
+            "events",
+            "source",
+            "cache_policy",
+            "cache_status",
+            "empty_result_is_valid",
+            "missing",
+            "warnings",
+        ),
+        default_limit=50,
+        title="Taiwan stock upcoming events",
+        description=(
+            "Upcoming official Taiwan stock events from the bounded local "
+            "corporate-event cache. A current empty result is distinct from a "
+            "missing event cache."
+        ),
+        markets=("TW",),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 365,
+                    "default": 30,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 10,
+                },
+            },
+            "additionalProperties": False,
+        },
+        frequency="daily",
+        unit_semantics="event_records",
+        event_time_basis="official_event_date",
+        side_effect_policy="cache_only",
+    ),
+    CapabilitySpec(
+        capability_id="events.calendar",
+        domain="events",
+        slot="events_calendar",
+        scopes=("market",),
+        paths=(
+            "compact.events.calendar",
+            "data.events.calendar",
+            "data.market.events_calendar",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "as_of",
+            "date_from",
+            "date_to",
+            "event_types",
+            "markets",
+            "stock_ids",
+            "pagination",
+            "result_count",
+            "events",
+            "source",
+            "sources",
+            "cache_policy",
+            "empty_result_is_valid",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "as_of",
+            "date_from",
+            "date_to",
+            "event_types",
+            "markets",
+            "stock_ids",
+            "pagination",
+            "result_count",
+            "events",
+            "source",
+            "cache_policy",
+            "empty_result_is_valid",
+            "missing",
+            "warnings",
+        ),
+        default_limit=300,
+        title="Taiwan corporate-event calendar",
+        description=(
+            "Bounded Taiwan market corporate-event calendar over the existing "
+            "official cache. The market target replaces a redundant calendar "
+            "target while retaining explicit date, market, event-type, stock, "
+            "pagination, and freshness semantics."
+        ),
+        markets=("TW",),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "date_from": {"type": "string", "format": "date"},
+                "date_to": {"type": "string", "format": "date"},
+                "event_types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "ex_dividend",
+                            "financial_report",
+                            "investor_conference",
+                        ],
+                    },
+                    "maxItems": 3,
+                },
+                "markets": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["TWSE", "TPEX"],
+                    },
+                    "maxItems": 2,
+                    "default": ["TWSE", "TPEX"],
+                },
+                "stock_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 2500,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 300,
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 5000,
+                    "default": 0,
+                },
+            },
+            "additionalProperties": False,
+        },
+        frequency="daily",
+        unit_semantics="event_records",
+        event_time_basis="official_event_date",
+        side_effect_policy="cache_only",
+    ),
+    CapabilitySpec(
+        capability_id="events.history",
+        domain="events",
+        slot="events_history",
+        scopes=("stock",),
+        paths=("compact.events.history", "data.events.history"),
+        fields=(
+            "kind",
+            "status",
+            "stock_id",
+            "as_of",
+            "years",
+            "limit",
+            "result_count",
+            "total_count",
+            "events",
+            "source",
+            "cache_policy",
+            "cache_status",
+            "cache_fetched_at",
+            "empty_result_is_valid",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "stock_id",
+            "as_of",
+            "years",
+            "result_count",
+            "total_count",
+            "events",
+            "source",
+            "cache_policy",
+            "cache_status",
+            "empty_result_is_valid",
+            "missing",
+            "warnings",
+        ),
+        default_limit=200,
+        title="Taiwan stock event history",
+        description=(
+            "Official Taiwan stock event history from the bounded archive "
+            "cache with explicit coverage and cache freshness."
+        ),
+        markets=("TW",),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "years": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 5,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 20,
+                },
+            },
+            "additionalProperties": False,
+        },
+        frequency="daily",
+        unit_semantics="event_records",
+        event_time_basis="official_event_date",
+        side_effect_policy="cache_only",
+    ),
+    CapabilitySpec(
+        capability_id="regulation.disposition",
+        domain="regulation",
+        slot="regulation_disposition",
+        scopes=("stock",),
+        paths=(
+            "compact.regulation.disposition",
+            "data.regulation.disposition",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "stock_id",
+            "as_of",
+            "is_disposition",
+            "is_active",
+            "disposition_status",
+            "announced_date",
+            "start_date",
+            "end_date",
+            "reason",
+            "measure",
+            "matching_interval_minutes",
+            "requires_full_precollection",
+            "margin_trading_suspended",
+            "provider",
+            "source",
+            "source_url",
+            "cache_policy",
+            "cache_status",
+            "cache_fetched_at",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "stock_id",
+            "as_of",
+            "is_disposition",
+            "is_active",
+            "disposition_status",
+            "start_date",
+            "end_date",
+            "reason",
+            "measure",
+            "matching_interval_minutes",
+            "requires_full_precollection",
+            "margin_trading_suspended",
+            "provider",
+            "source",
+            "cache_status",
+            "missing",
+            "warnings",
+        ),
+        default_limit=1,
+        title="Taiwan stock disposition status",
+        description=(
+            "Official Taiwan disposition status with effective dates, measure "
+            "details, cache provenance, and explicit missing semantics."
+        ),
+        markets=("TW",),
+        frequency="daily",
+        unit_semantics="regulatory_status",
+        event_time_basis="official_disposition_effective_date",
+        side_effect_policy="cache_only",
+    ),
+    CapabilitySpec(
+        capability_id="regulation.trading_restrictions",
+        domain="regulation",
+        slot="regulation_trading_restrictions",
+        scopes=("stock",),
+        paths=(
+            "compact.regulation.trading_restrictions",
+            "data.regulation.trading_restrictions",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "stock_id",
+            "as_of",
+            "trading_mode",
+            "analysis_basis",
+            "matching_interval_minutes",
+            "requires_full_precollection",
+            "margin_trading_suspended",
+            "effective_start_date",
+            "effective_end_date",
+            "upcoming_disposition",
+            "source",
+            "provider",
+            "cache_policy",
+            "cache_status",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "stock_id",
+            "as_of",
+            "trading_mode",
+            "analysis_basis",
+            "matching_interval_minutes",
+            "requires_full_precollection",
+            "margin_trading_suspended",
+            "effective_start_date",
+            "effective_end_date",
+            "upcoming_disposition",
+            "source",
+            "provider",
+            "cache_status",
+            "missing",
+            "warnings",
+        ),
+        default_limit=1,
+        title="Taiwan stock trading restrictions",
+        description=(
+            "Backend-derived Taiwan trading mode and restrictions. Unknown "
+            "disposition cache state never defaults to unrestricted trading."
+        ),
+        markets=("TW",),
+        frequency="daily",
+        unit_semantics="restriction_flags_and_minutes",
+        event_time_basis="official_disposition_effective_date",
+        side_effect_policy="cache_only",
+    ),
+    CapabilitySpec(
+        capability_id="market.sectors",
+        domain="sectors",
+        slot="market_sectors",
+        scopes=("market",),
+        paths=("compact.market.sectors", "data.market.sectors"),
+        fields=(
+            "kind",
+            "status",
+            "as_of",
+            "ranking_basis",
+            "is_full_market",
+            "coverage",
+            "count",
+            "items",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "as_of",
+            "ranking_basis",
+            "is_full_market",
+            "coverage",
+            "count",
+            "items",
+            "missing",
+            "warnings",
+        ),
+        default_limit=100,
+        title="Taiwan sector performance",
+        description=(
+            "Taiwan sector performance with explicit ranking basis and coverage. "
+            "The v1 fallback is labeled as an OMI local stock-sample aggregate, "
+            "not an official full-market sector-index ranking."
+        ),
+        markets=("TW",),
+        frequency="daily",
+        unit_semantics="percent_counts_and_twd",
+        event_time_basis="taiwan_completed_trade_date",
+    ),
+    CapabilitySpec(
+        capability_id="market.index_contributions",
+        domain="index_contributions",
+        slot="market_index_contributions",
+        scopes=("market", "tw_index"),
+        paths=(
+            "compact.market.index_contributions",
+            "data.market.index_contributions",
+            "compact.contributions",
+            "data.contributions",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "as_of",
+            "index_ids",
+            "indices",
+            "method",
+            "cache_policy",
+            "missing",
+            "warnings",
+            "index_id",
+            "market",
+            "source",
+            "trade_date",
+            "index_close",
+            "index_change",
+            "total_market_value",
+            "positive",
+            "negative",
+        ),
+        default_fields=(
+            "status",
+            "as_of",
+            "index_ids",
+            "indices",
+            "method",
+            "cache_policy",
+            "missing",
+            "warnings",
+            "index_id",
+            "market",
+            "source",
+            "trade_date",
+            "positive",
+            "negative",
+        ),
+        default_limit=20,
+        title="Taiwan index contribution leaders",
+        description=(
+            "Positive and negative stock contribution leaders for selected "
+            "Taiwan indices. The estimated market-cap-weight method and source "
+            "are always returned."
+        ),
+        markets=("TW",),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "index_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["TAIEX", "TPEX"],
+                    },
+                    "maxItems": 2,
+                    "default": ["TAIEX", "TPEX"],
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 10,
+                },
+            },
+            "additionalProperties": False,
+        },
+        frequency="intraday",
+        unit_semantics="index_points_prices_and_twd",
+        event_time_basis="taiwan_market_trade_date",
+        side_effect_policy="bounded_external_read_when_authorized",
+    ),
+    CapabilitySpec(
+        capability_id="market.institutional_flow",
+        domain="chips",
+        slot="market_institutional_flow",
+        scopes=("market",),
+        paths=(
+            "compact.market.institutional_flow",
+            "data.market.institutional_flow",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "trade_date",
+            "trade_dates",
+            "same_trade_date",
+            "markets",
+            "rows",
+            "source_grade",
+            "unit",
+            "aggregate",
+            "freshness",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "trade_date",
+            "trade_dates",
+            "same_trade_date",
+            "markets",
+            "rows",
+            "source_grade",
+            "unit",
+            "aggregate",
+            "freshness",
+            "missing",
+            "warnings",
+        ),
+        default_limit=20,
+        title="Taiwan market institutional flow",
+        description=(
+            "Official TWSE/TPEx institutional net-flow values in TWD. Combined "
+            "totals are withheld when component market dates do not match."
+        ),
+        markets=("TW",),
+        frequency="daily",
+        unit_semantics="TWD",
+        event_time_basis="taiwan_completed_trade_date",
+    ),
+    CapabilitySpec(
+        capability_id="market.margin_short",
+        domain="chips",
+        slot="market_margin_short",
+        scopes=("market",),
+        paths=(
+            "compact.market.margin_short",
+            "data.market.margin_short",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "trade_date",
+            "trade_dates",
+            "same_trade_date",
+            "markets",
+            "rows",
+            "source_grade",
+            "unit_semantics",
+            "aggregate",
+            "margin_status",
+            "freshness",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "trade_date",
+            "trade_dates",
+            "same_trade_date",
+            "markets",
+            "rows",
+            "source_grade",
+            "unit_semantics",
+            "aggregate",
+            "margin_status",
+            "freshness",
+            "missing",
+            "warnings",
+        ),
+        default_limit=20,
+        title="Taiwan market margin and short flow",
+        description=(
+            "Official TWSE/TPEx margin-balance and short-balance changes with "
+            "field-level TWD/share units and release status."
+        ),
+        markets=("TW",),
+        frequency="daily",
+        unit_semantics="field_defined_twd_or_shares",
+        event_time_basis="taiwan_completed_trade_date",
     ),
     CapabilitySpec(
         capability_id="market.sample_ranking",
@@ -880,6 +2038,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "industry_strength_label",
         ),
         default_limit=20,
+        title="Taiwan local sample ranking",
+        description=(
+            "Ranking over the bounded Taiwan daily sample available in the local "
+            "OMI context. It is not a full-market screener."
+        ),
+        markets=("TW",),
+        deprecated=True,
+        replacement_capabilities=(
+            "screening.ranking",
+            "screening.coverage",
+        ),
     ),
     CapabilitySpec(
         capability_id="market.cross_market",
@@ -938,6 +2107,206 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "warnings",
         ),
         default_limit=20,
+        title="Taiwan market chips",
+        description=(
+            "Taiwan market-level institutional and margin context from completed "
+            "official datasets."
+        ),
+        markets=("TW",),
+        frequency="daily",
+        unit_semantics="field_defined_shares_or_twd",
+        event_time_basis="taiwan_trade_date",
+    ),
+    CapabilitySpec(
+        capability_id="screening.ranking",
+        domain="screening",
+        slot="screening_ranking",
+        scopes=("market",),
+        paths=("compact.screening.ranking", "data.screening.ranking"),
+        fields=(
+            "kind",
+            "version",
+            "snapshot_id",
+            "status",
+            "metric",
+            "unit",
+            "frequency",
+            "sort_order",
+            "tie_policy",
+            "window",
+            "universe",
+            "pagination",
+            "rows",
+            "as_of",
+            "generated_at",
+            "cache_policy",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "snapshot_id",
+            "status",
+            "metric",
+            "unit",
+            "sort_order",
+            "tie_policy",
+            "window",
+            "universe",
+            "pagination",
+            "rows",
+            "as_of",
+            "cache_policy",
+            "missing",
+            "warnings",
+        ),
+        default_limit=200,
+        title="Taiwan stock screening ranking",
+        description=(
+            "Deterministic ranking over the cached active TWSE/TPEx ordinary-stock "
+            "universe. Reads only local normalized data and never triggers an "
+            "implicit full-market refresh."
+        ),
+        markets=("TW",),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "metric": {
+                    "type": "string",
+                    "enum": [
+                        "foreign_investor_net_shares",
+                        "investment_trust_net_shares",
+                        "margin_balance_change_pct",
+                    ],
+                    "default": "foreign_investor_net_shares",
+                },
+                "window": {
+                    "type": "integer",
+                    "enum": [1, 5, 10, 20],
+                    "default": 1,
+                },
+                "sort_order": {
+                    "type": "string",
+                    "enum": ["asc", "desc"],
+                    "default": "desc",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 20,
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 5000,
+                    "default": 0,
+                },
+                "universe": {
+                    "type": "object",
+                    "properties": {
+                        "markets": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["TWSE", "TPEX"],
+                            },
+                            "maxItems": 2,
+                            "default": ["TWSE", "TPEX"],
+                        },
+                        "stock_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 2500,
+                        },
+                        "exclude_stock_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 2500,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "additionalProperties": False,
+        },
+        frequency="daily",
+        unit_semantics="metric_defined_shares_or_percent",
+        event_time_basis="taiwan_completed_trade_date",
+        side_effect_policy="cache_read_only_no_refresh",
+    ),
+    CapabilitySpec(
+        capability_id="screening.coverage",
+        domain="screening",
+        slot="screening_coverage",
+        scopes=("market",),
+        paths=("compact.screening.coverage", "data.screening.coverage"),
+        fields=(
+            "kind",
+            "version",
+            "snapshot_id",
+            "status",
+            "metric",
+            "dataset",
+            "unit",
+            "frequency",
+            "requested_window_trade_days",
+            "available_window_trade_days",
+            "window_start",
+            "window_end",
+            "universe_count",
+            "eligible_count",
+            "covered_count",
+            "complete_window_count",
+            "partial_window_count",
+            "missing_count",
+            "coverage_ratio",
+            "is_full_market_request",
+            "is_full_requested_universe",
+            "markets",
+            "instrument_types",
+            "dedupe_policy",
+            "cache_policy",
+            "as_of",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "snapshot_id",
+            "status",
+            "metric",
+            "dataset",
+            "unit",
+            "requested_window_trade_days",
+            "available_window_trade_days",
+            "window_start",
+            "window_end",
+            "universe_count",
+            "covered_count",
+            "complete_window_count",
+            "partial_window_count",
+            "missing_count",
+            "coverage_ratio",
+            "is_full_market_request",
+            "is_full_requested_universe",
+            "markets",
+            "instrument_types",
+            "dedupe_policy",
+            "cache_policy",
+            "as_of",
+            "missing",
+            "warnings",
+        ),
+        default_limit=20,
+        title="Taiwan stock screening coverage",
+        description=(
+            "Coverage and provenance for the screening snapshot returned by "
+            "screening.ranking, including universe, window, and cache policy."
+        ),
+        markets=("TW",),
+        frequency="daily",
+        unit_semantics="counts_and_ratio",
+        event_time_basis="taiwan_completed_trade_date",
+        side_effect_policy="cache_read_only_no_refresh",
     ),
     CapabilitySpec(
         capability_id="market.volume_state",
@@ -956,6 +2325,14 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "currency",
             "trade_value_unit",
             "current_cumulative_trade_value",
+            "available_cumulative_trade_value",
+            "trade_value_available",
+            "trade_value_complete",
+            "trade_value_status",
+            "included_markets",
+            "missing_markets",
+            "trade_value_estimate",
+            "trade_value_estimate_method",
             "current_value_source",
             "previous_minute_cumulative_trade_value",
             "one_minute_trade_value_change",
@@ -978,6 +2355,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "currency",
             "trade_value_unit",
             "current_cumulative_trade_value",
+            "available_cumulative_trade_value",
+            "trade_value_available",
+            "trade_value_complete",
+            "trade_value_status",
+            "included_markets",
+            "missing_markets",
             "current_value_source",
             "previous_minute_cumulative_trade_value",
             "one_minute_trade_value_change",
@@ -989,6 +2372,15 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "limitations",
         ),
         default_limit=20,
+        title="Taiwan market volume state",
+        description=(
+            "Taiwan same-time cumulative market trade-value state and historical "
+            "pace baselines."
+        ),
+        markets=("TW",),
+        frequency="intraday",
+        unit_semantics="TWD",
+        event_time_basis="taiwan_market_event_time",
     ),
     CapabilitySpec(
         capability_id="derivatives.positioning",
@@ -1053,7 +2445,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "error_count",
             "trade_date",
             "target_trade_date",
+            "underlying_trade_date",
             "is_current",
+            "is_live",
+            "is_full",
+            "coverage_ratio",
+            "ranking_semantics",
             "current_stock_count",
             "stale_stock_count",
             "result_count",
@@ -1070,7 +2467,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "error_count",
             "trade_date",
             "target_trade_date",
+            "underlying_trade_date",
             "is_current",
+            "is_live",
+            "is_full",
+            "coverage_ratio",
+            "ranking_semantics",
             "stale_stock_count",
             "returned_count",
             "results",
@@ -1558,10 +2960,42 @@ DOMAIN_CAPABILITIES = {
         "derivatives.structure",
     ),
     "breadth": ("market.breadth",),
+    "indices": ("market.indices",),
+    "sectors": ("market.sectors",),
+    "index_contributions": ("market.index_contributions",),
     "volume": ("market.volume_state",),
     "sample_ranking": ("market.sample_ranking",),
+    "screening": ("screening.ranking", "screening.coverage"),
+    "events": (
+        "events.upcoming",
+        "events.history",
+        "events.calendar",
+    ),
+    "regulation": (
+        "regulation.disposition",
+        "regulation.trading_restrictions",
+    ),
     "source_health": ("source.health",),
     "freshness": ("data.freshness",),
+}
+SCOPE_DOMAIN_CAPABILITIES = {
+    "market": {
+        "events": ("events.calendar",),
+    },
+    "stock": {
+        "events": ("events.upcoming", "events.history"),
+        "regulation": (
+            "regulation.disposition",
+            "regulation.trading_restrictions",
+        ),
+    },
+    "tw_futures": {
+        # Futures volume is contract-count data. The cumulative session value
+        # remains on quote.snapshot, while intraday.bars exposes interval
+        # contract volume. It must not fall through to the cash-market
+        # market.volume_state capability.
+        "volume": ("intraday.bars",),
+    },
 }
 
 
@@ -1580,8 +3014,47 @@ def _string_list(value: Any, *, name: str) -> tuple[str, ...]:
     return tuple(output)
 
 
-def _compatible(spec: CapabilitySpec, scope_type: str) -> bool:
-    return "*" in spec.scopes or scope_type in spec.scopes
+SCOPE_MARKETS = {
+    "market": "TW",
+    "stock": "TW",
+    "watchlist": "TW",
+    "tw_index": "TW",
+    "tw_futures": "TW",
+    "us_stock": "US",
+    "us_watchlist": "US",
+    "us_macro": "US",
+    "jp_stock": "JP",
+    "jp_index": "JP",
+    "jp_watchlist": "JP",
+    "kr_stock": "KR",
+    "kr_index": "KR",
+    "kr_watchlist": "KR",
+    "crypto_market": "CRYPTO",
+    "crypto_asset": "CRYPTO",
+    "resource_asset": "RESOURCE",
+}
+
+
+def _target_market(scope_type: str, target_market: str | None) -> str | None:
+    normalized = str(target_market or "").strip().upper()
+    if normalized in {"TWSE", "TPEX", "TAIWAN"}:
+        return "TW"
+    if normalized:
+        return normalized
+    return SCOPE_MARKETS.get(scope_type)
+
+
+def _compatible(
+    spec: CapabilitySpec,
+    scope_type: str,
+    target_market: str | None = None,
+) -> bool:
+    if "*" not in spec.scopes and scope_type not in spec.scopes:
+        return False
+    if not spec.markets:
+        return True
+    normalized_market = _target_market(scope_type, target_market)
+    return normalized_market in spec.markets
 
 
 def _default_capabilities(scope_type: str, question_intent: str) -> tuple[str, ...]:
@@ -1690,10 +3163,21 @@ def _default_capabilities(scope_type: str, question_intent: str) -> tuple[str, .
     return ("target.identity", "data.freshness")
 
 
-def _capabilities_from_domains(domains: tuple[str, ...]) -> tuple[str, ...]:
+def _capabilities_from_domains(
+    domains: tuple[str, ...],
+    *,
+    scope_type: str | None = None,
+) -> tuple[str, ...]:
     output: list[str] = []
     for domain in domains:
-        for capability_id in DOMAIN_CAPABILITIES.get(domain, ()):
+        scoped_capabilities = SCOPE_DOMAIN_CAPABILITIES.get(
+            str(scope_type or ""),
+            {},
+        )
+        for capability_id in scoped_capabilities.get(
+            domain,
+            DOMAIN_CAPABILITIES.get(domain, ()),
+        ):
             if capability_id not in output:
                 output.append(capability_id)
     return tuple(output)
@@ -1703,6 +3187,7 @@ def _normalized_fields(
     raw_fields: Any,
     *,
     selected: tuple[str, ...],
+    ignored_capabilities: frozenset[str] = frozenset(),
 ) -> dict[str, list[str]]:
     if raw_fields is None:
         return {}
@@ -1714,6 +3199,8 @@ def _normalized_fields(
         spec = CAPABILITIES.get(normalized_id)
         if spec is None:
             raise ValueError(f"Unknown capability in selection.fields: {normalized_id}")
+        if normalized_id in ignored_capabilities:
+            continue
         if normalized_id not in selected:
             raise ValueError(
                 f"selection.fields references unselected capability: {normalized_id}"
@@ -1731,7 +3218,11 @@ def _normalized_fields(
     return output
 
 
-def _normalized_limits(raw_limits: Any) -> dict[str, int]:
+def _normalized_limits(
+    raw_limits: Any,
+    *,
+    ignored_capabilities: frozenset[str] = frozenset(),
+) -> dict[str, int]:
     if raw_limits is None:
         return {}
     if not isinstance(raw_limits, dict):
@@ -1742,9 +3233,173 @@ def _normalized_limits(raw_limits: Any) -> dict[str, int]:
         key = str(raw_key or "").strip()
         if key not in CAPABILITIES and key not in allowed_aliases:
             raise ValueError(f"Unknown selection limit key: {key}")
+        if key in ignored_capabilities:
+            continue
         if isinstance(raw_value, bool) or not isinstance(raw_value, int):
             raise ValueError(f"selection.limits.{key} must be an integer.")
         output[key] = max(1, min(raw_value, 500))
+    return output
+
+
+def _validate_parameter_value(
+    value: Any,
+    *,
+    schema: dict[str, Any],
+    path: str,
+) -> Any:
+    expected_type = str(schema.get("type") or "").strip()
+    if expected_type == "object":
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} must be an object.")
+        properties = schema.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        required = {
+            str(item)
+            for item in schema.get("required", [])
+            if str(item).strip()
+        }
+        missing = sorted(required - set(value))
+        if missing:
+            raise ValueError(
+                f"{path} is missing required parameter(s): {', '.join(missing)}"
+            )
+        if schema.get("additionalProperties") is False:
+            unknown = sorted(set(value) - set(properties))
+            if unknown:
+                raise ValueError(
+                    f"{path} contains unsupported parameter(s): "
+                    + ", ".join(unknown)
+                )
+        return {
+            key: _validate_parameter_value(
+                item,
+                schema=(
+                    properties.get(key)
+                    if isinstance(properties.get(key), dict)
+                    else {}
+                ),
+                path=f"{path}.{key}",
+            )
+            for key, item in value.items()
+        }
+    if expected_type == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"{path} must be an array.")
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            raise ValueError(f"{path} must contain at most {max_items} items.")
+        item_schema = schema.get("items")
+        item_schema = item_schema if isinstance(item_schema, dict) else {}
+        return [
+            _validate_parameter_value(
+                item,
+                schema=item_schema,
+                path=f"{path}[{index}]",
+            )
+            for index, item in enumerate(value)
+        ]
+    if expected_type == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"{path} must be a string.")
+        normalized = value.strip()
+        if schema.get("format") == "date":
+            try:
+                date.fromisoformat(normalized)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{path} must use YYYY-MM-DD."
+                ) from exc
+        if "enum" in schema and normalized not in schema["enum"]:
+            raise ValueError(
+                f"{path} must be one of: "
+                + ", ".join(str(item) for item in schema["enum"])
+            )
+        return normalized
+    if expected_type == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{path} must be an integer.")
+        if "enum" in schema and value not in schema["enum"]:
+            raise ValueError(
+                f"{path} must be one of: "
+                + ", ".join(str(item) for item in schema["enum"])
+            )
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        if isinstance(minimum, int) and value < minimum:
+            raise ValueError(f"{path} must be at least {minimum}.")
+        if isinstance(maximum, int) and value > maximum:
+            raise ValueError(f"{path} must be at most {maximum}.")
+        return value
+    if expected_type == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{path} must be a number.")
+        if "enum" in schema and value not in schema["enum"]:
+            raise ValueError(
+                f"{path} must be one of: "
+                + ", ".join(str(item) for item in schema["enum"])
+            )
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            raise ValueError(f"{path} must be at least {minimum}.")
+        if isinstance(maximum, (int, float)) and value > maximum:
+            raise ValueError(f"{path} must be at most {maximum}.")
+        return value
+    if expected_type == "boolean":
+        if not isinstance(value, bool):
+            raise ValueError(f"{path} must be a boolean.")
+        return value
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(
+            f"{path} must be one of: "
+            + ", ".join(str(item) for item in schema["enum"])
+        )
+    return value
+
+
+def _normalized_parameters(
+    raw_parameters: Any,
+    *,
+    selected: tuple[str, ...],
+    ignored_capabilities: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, Any]]:
+    if raw_parameters is None:
+        return {}
+    if not isinstance(raw_parameters, dict):
+        raise ValueError(
+            "selection.parameters must be an object keyed by capability id."
+        )
+    output: dict[str, dict[str, Any]] = {}
+    for capability_id, raw_value in raw_parameters.items():
+        normalized_id = str(capability_id or "").strip()
+        spec = CAPABILITIES.get(normalized_id)
+        if spec is None:
+            raise ValueError(
+                f"Unknown capability in selection.parameters: {normalized_id}"
+            )
+        if normalized_id in ignored_capabilities:
+            continue
+        if normalized_id not in selected:
+            raise ValueError(
+                "selection.parameters references unselected capability: "
+                f"{normalized_id}"
+            )
+        if not isinstance(raw_value, dict):
+            raise ValueError(
+                f"selection.parameters.{normalized_id} must be an object."
+            )
+        if not spec.parameter_schema:
+            if raw_value:
+                raise ValueError(
+                    f"{normalized_id} does not accept parameters."
+                )
+            output[normalized_id] = {}
+            continue
+        output[normalized_id] = _validate_parameter_value(
+            raw_value,
+            schema=spec.parameter_schema,
+            path=f"selection.parameters.{normalized_id}",
+        )
     return output
 
 
@@ -1756,6 +3411,7 @@ def normalize_selection(
     payload_level: str,
     scope_type: str,
     question_intent: str,
+    target_market: str | None = None,
     requested_domains: tuple[str, ...] = (),
     excluded_domains: tuple[str, ...] = (),
     requested_capabilities: tuple[str, ...] = (),
@@ -1789,9 +3445,14 @@ def normalize_selection(
                     domain
                     for domain in requested_domains
                     if domain not in requested_specific_domains
-                )
+                ),
+                scope_type=scope_type,
             )
-            if _compatible(CAPABILITIES[capability_id], scope_type)
+            if _compatible(
+                CAPABILITIES[capability_id],
+                scope_type,
+                target_market,
+            )
         )
     )
     legacy_exclude = tuple(
@@ -1801,19 +3462,39 @@ def normalize_selection(
                 domain
                 for domain in excluded_domains
                 if domain not in requested_specific_domains
-            )
+            ),
+            scope_type=scope_type,
         )
-        if _compatible(CAPABILITIES[capability_id], scope_type)
+        if _compatible(
+            CAPABILITIES[capability_id],
+            scope_type,
+            target_market,
+        )
     )
     required = list(explicit_include)
     if not required:
-        required.extend(_default_capabilities(scope_type, question_intent))
+        required.extend(
+            capability_id
+            for capability_id in _default_capabilities(
+                scope_type,
+                question_intent,
+            )
+            if _compatible(
+                CAPABILITIES[capability_id],
+                scope_type,
+                target_market,
+            )
+        )
         required.extend(legacy_include)
         required.extend(
             capability_id
             for capability_id in requested_capabilities
             if capability_id in CAPABILITIES
-            and _compatible(CAPABILITIES[capability_id], scope_type)
+            and _compatible(
+                CAPABILITIES[capability_id],
+                scope_type,
+                target_market,
+            )
         )
     optional = list(explicit_optional)
     excluded = list(
@@ -1845,16 +3526,106 @@ def normalize_selection(
     if unknown:
         raise ValueError(f"Unknown capability id(s): {', '.join(dict.fromkeys(unknown))}")
 
-    incompatible = [
-        capability_id
-        for capability_id in (*required, *optional)
-        if not _compatible(CAPABILITIES[capability_id], scope_type)
-    ]
-    if incompatible:
-        raise ValueError(
-            f"Capability not supported for target scope {scope_type}: "
-            + ", ".join(dict.fromkeys(incompatible))
+    unsupported_capabilities: list[dict[str, Any]] = []
+
+    def record_unsupported(
+        capability_id: str,
+        *,
+        requested_as: str,
+        request_source: str,
+    ) -> None:
+        if capability_id not in CAPABILITIES:
+            return
+        spec = CAPABILITIES[capability_id]
+        if _compatible(spec, scope_type, target_market):
+            return
+        if any(
+            item.get("capability") == capability_id
+            for item in unsupported_capabilities
+        ):
+            return
+        scope_supported = (
+            "*" in spec.scopes or scope_type in spec.scopes
         )
+        normalized_market = _target_market(scope_type, target_market)
+        reason_code = (
+            "unsupported_market"
+            if scope_supported and spec.markets
+            else "unsupported_target_scope"
+        )
+        unsupported_capabilities.append(
+            {
+                "capability": capability_id,
+                "status": "unsupported",
+                "reason_code": reason_code,
+                "requested_as": requested_as,
+                "request_source": request_source,
+                "target_scope": scope_type,
+                "target_market": normalized_market,
+                "supported_scopes": list(spec.scopes),
+                "supported_markets": list(spec.markets),
+                "message": (
+                    f"{capability_id} is not supported for target "
+                    f"scope={scope_type}, market={normalized_market or 'unspecified'}."
+                ),
+            }
+        )
+
+    for capability_id in required:
+        record_unsupported(
+            capability_id,
+            requested_as="required",
+            request_source=(
+                "explicit_selection"
+                if capability_id in explicit_include
+                else "derived_selection"
+            ),
+        )
+    for capability_id in optional:
+        record_unsupported(
+            capability_id,
+            requested_as="optional",
+            request_source="explicit_selection",
+        )
+    for capability_id in requested_capabilities:
+        record_unsupported(
+            capability_id,
+            requested_as="required",
+            request_source="requested_capability",
+        )
+    requested_domain_capabilities = _capabilities_from_domains(
+        tuple(
+            domain
+            for domain in requested_domains
+            if domain not in requested_specific_domains
+        ),
+        scope_type=scope_type,
+    )
+    for capability_id in requested_domain_capabilities:
+        record_unsupported(
+            capability_id,
+            requested_as="required",
+            request_source="requested_domain",
+        )
+
+    unsupported_ids = frozenset(
+        str(item["capability"]) for item in unsupported_capabilities
+    )
+    unmet_required_capabilities = [
+        dict(item)
+        for item in unsupported_capabilities
+        if item.get("requested_as") == "required"
+    ]
+    required = [
+        capability_id
+        for capability_id in required
+        if capability_id not in unsupported_ids
+    ]
+    optional = [
+        capability_id
+        for capability_id in optional
+        if capability_id not in unsupported_ids
+    ]
 
     required = [
         capability_id
@@ -1867,8 +3638,20 @@ def normalize_selection(
         if capability_id not in excluded and capability_id not in required
     ]
     selected = tuple((*required, *optional))
-    fields = _normalized_fields(raw.get("fields"), selected=selected)
-    limits = _normalized_limits(raw.get("limits"))
+    fields = _normalized_fields(
+        raw.get("fields"),
+        selected=selected,
+        ignored_capabilities=unsupported_ids,
+    )
+    limits = _normalized_limits(
+        raw.get("limits"),
+        ignored_capabilities=unsupported_ids,
+    )
+    parameters = _normalized_parameters(
+        raw.get("parameters"),
+        selected=selected,
+        ignored_capabilities=unsupported_ids,
+    )
 
     output_mode = str(output or raw.get("output") or "").strip().lower()
     if scope_type in DIAGNOSTIC_SCOPES:
@@ -1896,23 +3679,32 @@ def normalize_selection(
         )
 
     return {
-        "version": "omi.capability.selection.v1",
+        "version": public_contract.CAPABILITY_SELECTION_VERSION,
         "output": output_mode,
         "realtime_policy": realtime,
+        "target_market": _target_market(scope_type, target_market),
         "required": required,
         "optional": optional,
         "excluded": excluded,
         "fields": fields,
         "limits": limits,
+        "parameters": parameters,
+        "unsupported_capabilities": unsupported_capabilities,
+        "unmet_required_capabilities": unmet_required_capabilities,
         "max_response_bytes": max_response_bytes,
     }
 
 
-def capability_catalog(*, scope_type: str | None = None) -> list[dict[str, Any]]:
+def capability_catalog(
+    *,
+    scope_type: str | None = None,
+    target_market: str | None = None,
+) -> list[dict[str, Any]]:
     return [
         spec.as_public_dict()
         for spec in CAPABILITY_SPECS
-        if scope_type is None or _compatible(spec, scope_type)
+        if scope_type is None
+        or _compatible(spec, scope_type, target_market)
     ]
 
 
@@ -1986,12 +3778,59 @@ def _bounded_value(value: Any, *, limit: int, depth: int = 0) -> Any:
     return value
 
 
+def _series_point_sort_key(point: Any) -> datetime:
+    if not isinstance(point, dict):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    for key in ("bar_time", "event_time", "time", "date", "trade_date"):
+        raw_value = point.get(key)
+        if isinstance(raw_value, datetime):
+            parsed = raw_value
+        else:
+            text = str(raw_value or "").strip()
+            if not text:
+                continue
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _normalize_intraday_order(value: dict[str, Any]) -> dict[str, Any]:
+    output = dict(value)
+    for key in ("points", "bars"):
+        rows = output.get(key)
+        if not isinstance(rows, list):
+            continue
+        output[key] = sorted(rows, key=_series_point_sort_key)
+        output["sort_order"] = "asc"
+    rows = (
+        output.get("points")
+        if isinstance(output.get("points"), list)
+        else output.get("bars")
+        if isinstance(output.get("bars"), list)
+        else []
+    )
+    if rows and isinstance(rows[-1], dict):
+        output["latest_point"] = rows[-1]
+        output["event_time"] = (
+            rows[-1].get("event_time")
+            or rows[-1].get("bar_time")
+            or rows[-1].get("time")
+            or output.get("event_time")
+        )
+    return output
+
+
 def _canonical_intraday_value(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
     series = value.get("series")
     if not isinstance(series, dict):
-        return value
+        return _normalize_intraday_order(value)
 
     selected_key: str | None = None
     selected: dict[str, Any] = {}
@@ -2024,9 +3863,15 @@ def _canonical_intraday_value(value: Any) -> Any:
     for key in (
         "session",
         "session_scope",
+        "session_phase",
+        "market_status",
+        "official_close_status",
+        "delivery_status",
         "is_current_session",
+        "requested_interval",
         "source_interval",
         "effective_interval",
+        "interval_status",
         "sampling_mode",
         "original_point_count",
         "point_count",
@@ -2040,8 +3885,15 @@ def _canonical_intraday_value(value: Any) -> Any:
         "low_price",
         "close_price",
         "base_volume",
+        "base_volume_unit",
         "volume_unit",
+        "volume_contracts",
+        "cumulative_volume",
+        "cumulative_volume_unit",
+        "cumulative_volume_contracts",
+        "lot_size",
         "quote_volume",
+        "quote_volume_unit",
         "currency",
         "price_unit",
         "event_time",
@@ -2054,9 +3906,24 @@ def _canonical_intraday_value(value: Any) -> Any:
         "volume_semantics",
         "volume_status",
         "trade_value_unit",
+        "aggregation_method",
+        "source_point_count",
+        "aggregated_point_count",
+        "partial_bar_count",
+        "cache_status",
+        "cache_hit",
+        "cache_trade_date",
+        "cache_latest_time",
+        "cached_count",
+        "refreshed_count",
+        "fallback_used",
+        "market_events",
+        "sessions",
+        "sort_order",
     ):
         if key not in output and key in selected:
             output[key] = selected[key]
+    output = _normalize_intraday_order(output)
     points = output.get("points") if isinstance(output.get("points"), list) else []
     latest_point = (
         selected.get("latest_point")
@@ -2069,11 +3936,11 @@ def _canonical_intraday_value(value: Any) -> Any:
     )
     if latest_point is not None:
         output["latest_point"] = latest_point
-        output.setdefault(
-            "event_time",
+        output["event_time"] = (
             latest_point.get("event_time")
             or latest_point.get("bar_time")
-            or latest_point.get("time"),
+            or latest_point.get("time")
+            or output.get("event_time")
         )
     return output
 
@@ -2174,13 +4041,12 @@ def _reconcile_projected_series_counts(
     )
     if capability_id == "intraday.bars" and rows:
         value["latest_point"] = rows[-1]
-        value.setdefault(
-            "event_time",
+        value["event_time"] = (
             rows[-1].get("event_time")
             or rows[-1].get("bar_time")
             or rows[-1].get("time")
             if isinstance(rows[-1], dict)
-            else None,
+            else None
         )
     return value
 
@@ -2193,12 +4059,27 @@ def project_selected_data(
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     data = result.get("data") if isinstance(result.get("data"), dict) else {}
     compact = data.get("compact") if isinstance(data.get("compact"), dict) else {}
+    freshness = response.get("freshness")
+    if not isinstance(freshness, dict) or not freshness:
+        freshness = result.get("freshness")
+    if not isinstance(freshness, dict) or not freshness:
+        freshness = data.get("freshness")
+    freshness = dict(freshness) if isinstance(freshness, dict) else {}
+    if freshness:
+        freshness.setdefault("as_of", result.get("as_of"))
+        if not freshness.get("status"):
+            if freshness.get("is_current") is True:
+                freshness["status"] = "current"
+            elif freshness.get("missing"):
+                freshness["status"] = "missing"
+            else:
+                freshness["status"] = "stale"
     source = {
         "target": response.get("target") or {},
         "result": result,
         "data": data,
         "compact": compact,
-        "freshness": response.get("freshness") or {},
+        "freshness": freshness,
     }
     projected: dict[str, Any] = {}
     unavailable: list[str] = []
@@ -2354,9 +4235,23 @@ def build_manifest(
                 ),
             }
         )
+    unsupported_capabilities = [
+        dict(item)
+        for item in selection.get("unsupported_capabilities") or []
+        if isinstance(item, dict)
+    ]
+    unmet_required_capabilities = [
+        dict(item)
+        for item in selection.get("unmet_required_capabilities") or []
+        if isinstance(item, dict)
+    ]
     return {
         "version": "omi.data.manifest.v1",
         "capabilities": capabilities,
+        "unsupported_capabilities": unsupported_capabilities,
+        "unsupported_count": len(unsupported_capabilities),
+        "unmet_required_capabilities": unmet_required_capabilities,
+        "unmet_required_count": len(unmet_required_capabilities),
         "ready_count": sum(item["status_class"] == "ready" for item in capabilities),
         "limited_count": sum(item["status_class"] == "limited" for item in capabilities),
         "blocked_count": sum(item["status_class"] == "blocked" for item in capabilities),
@@ -2453,6 +4348,20 @@ def build_fill_plan(
         operation = spec.fill_operation_for_scope(scope_type)
         if not operation:
             continue
+        produced_capabilities = list(
+            FILL_OPERATION_PRODUCED_CAPABILITIES.get(operation, ())
+        )
+        if capability_id not in produced_capabilities:
+            deferred_actions.append(
+                {
+                    "capability": capability_id,
+                    "status": item.get("status"),
+                    "reason": "operation_does_not_produce_capability",
+                    "operation": operation,
+                    "produced_capabilities": produced_capabilities,
+                }
+            )
+            continue
         action_id = fill_action_id(
             capability_id=capability_id,
             target=target,
@@ -2464,6 +4373,7 @@ def build_fill_plan(
                 "capability": capability_id,
                 "target": target,
                 "operation": operation,
+                "produced_capabilities": produced_capabilities,
                 "status": "planned",
                 "executable": operation in EXECUTABLE_FILL_OPERATIONS,
                 "required": bool(item.get("required")),
@@ -2738,7 +4648,7 @@ def fill_action_id(
     *,
     capability_id: str,
     target: dict[str, Any],
-    selection_version: str = "omi.capability.selection.v1",
+    selection_version: str = public_contract.CAPABILITY_SELECTION_VERSION,
 ) -> str:
     action_seed = json.dumps(
         {
@@ -2809,6 +4719,11 @@ def selected_fill_capabilities(
             continue
         operation = spec.fill_operation_for_scope(scope_type)
         if operation not in EXECUTABLE_FILL_OPERATIONS:
+            continue
+        if str(capability_id) not in FILL_OPERATION_PRODUCED_CAPABILITIES.get(
+            operation,
+            (),
+        ):
             continue
         expected_action_id = fill_action_id(
             capability_id=str(capability_id),

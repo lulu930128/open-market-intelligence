@@ -312,13 +312,36 @@ def _combined_trade_value(rows_by_market: dict[str, TaiwanMarketMinuteState]) ->
     return sum(int(value) for value in values if value is not None)
 
 
-def _baseline_payload(current_value: int | None, values: list[int], days: int) -> dict[str, Any]:
+def _baseline_payload(
+    current_value: int | None,
+    values: list[int],
+    days: int,
+    *,
+    dates: list[str] | None = None,
+) -> dict[str, Any]:
     selected = values[-days:]
+    selected_dates = (dates or [])[-len(selected) :] if selected else []
     baseline = int(median(selected)) if selected else None
     ratio = current_value / baseline if current_value is not None and baseline not in {None, 0} else None
     return {
         "requested_days": days,
         "sample_days": len(selected),
+        "sample_status": (
+            "complete"
+            if len(selected) >= days
+            else "provisional"
+            if selected
+            else "empty"
+        ),
+        "samples": [
+            {
+                "trade_date": selected_dates[index]
+                if index < len(selected_dates)
+                else None,
+                "cumulative_trade_value": value,
+            }
+            for index, value in enumerate(selected)
+        ],
         "median_cumulative_trade_value": baseline,
         "pace_ratio": ratio,
     }
@@ -344,6 +367,14 @@ def read_taiwan_market_volume_state(
             "currency": "TWD",
             "trade_value_unit": "TWD",
             "current_cumulative_trade_value": None,
+            "available_cumulative_trade_value": None,
+            "trade_value_available": False,
+            "trade_value_complete": False,
+            "trade_value_status": "missing",
+            "included_markets": [],
+            "missing_markets": ["TWSE", "TPEX"],
+            "trade_value_estimate": None,
+            "trade_value_estimate_method": "not_estimated",
             "same_time_baseline_5d": _baseline_payload(None, [], 5),
             "same_time_baseline_20d": _baseline_payload(None, [], 20),
             "field_status": {
@@ -382,6 +413,24 @@ def read_taiwan_market_volume_state(
     selected_minute = max(complete_current or current_groups.keys())
     selected_rows = current_groups[selected_minute]
     current_value = _combined_trade_value(selected_rows)
+    available_markets = [
+        market
+        for market in ("TWSE", "TPEX")
+        if market in selected_rows
+        and selected_rows[market].cumulative_trade_value is not None
+        and selected_rows[market].quality_status == "ready"
+    ]
+    missing_markets = [
+        market for market in ("TWSE", "TPEX") if market not in available_markets
+    ]
+    available_current_value = (
+        sum(
+            int(selected_rows[market].cumulative_trade_value or 0)
+            for market in available_markets
+        )
+        if available_markets
+        else None
+    )
 
     previous_minutes = [minute_at for minute_at in complete_current if minute_at < selected_minute]
     previous_value = (
@@ -510,11 +559,35 @@ def read_taiwan_market_volume_state(
         "comparison_minute": selected_minute.strftime("%H:%M"),
         "calculation_basis": "TWSE+TPEX cumulative trade value compared with prior sessions at or before the same minute",
         "current_cumulative_trade_value": current_value,
+        "available_cumulative_trade_value": available_current_value,
+        "trade_value_available": available_current_value is not None,
+        "trade_value_complete": current_value is not None,
+        "trade_value_status": (
+            "complete"
+            if current_value is not None
+            else "partial"
+            if available_current_value is not None
+            else "missing"
+        ),
+        "included_markets": available_markets,
+        "missing_markets": missing_markets,
+        "trade_value_estimate": None,
+        "trade_value_estimate_method": "not_estimated",
         "previous_minute_cumulative_trade_value": previous_value,
         "one_minute_trade_value_change": one_minute_change,
         "field_status": field_status,
-        "same_time_baseline_5d": _baseline_payload(current_value, historical_values, 5),
-        "same_time_baseline_20d": _baseline_payload(current_value, historical_values, 20),
+        "same_time_baseline_5d": _baseline_payload(
+            current_value,
+            historical_values,
+            5,
+            dates=historical_dates,
+        ),
+        "same_time_baseline_20d": _baseline_payload(
+            current_value,
+            historical_values,
+            20,
+            dates=historical_dates,
+        ),
         "history_trade_dates": historical_dates,
         "markets": market_payloads,
         "warnings": warnings,

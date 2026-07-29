@@ -5,6 +5,7 @@ from typing import Any
 
 from app.ai import capability_contract, pipeline_progress
 from app.ai.ask_stage_models import ToolStageState
+from app.ai.market_date_request import requested_us_trade_date
 from app.ai.schemas import AiAskRequest
 
 
@@ -84,6 +85,25 @@ def execute_tool_stages(
             scope_type=scope_type,
         )
 
+    us_market_params = (
+        payload.market_data_params
+        if isinstance(payload.market_data_params, dict)
+        else {}
+    )
+    us_requested_trade_date = (
+        requested_us_trade_date(
+            payload.question,
+            explicit_value=us_market_params.get("trade_date"),
+        )
+        if scope_type == "us_stock"
+        else None
+    )
+    us_session_scope = str(
+        us_market_params.get("session_scope") or "regular"
+    ).strip().lower()
+    if us_session_scope not in {"regular", "extended", "all"}:
+        us_session_scope = "regular"
+
     if (
         scope_type == "us_stock"
         and query_plan.get("realtime_policy") != "cache_only"
@@ -98,6 +118,12 @@ def execute_tool_stages(
                 policy=policy,
                 raw_budget=payload.tool_budget,
                 requested_capabilities=selected_v4_capabilities,
+                requested_trade_date=(
+                    us_requested_trade_date.isoformat()
+                    if us_requested_trade_date is not None
+                    else None
+                ),
+                session_scope=us_session_scope,
                 progress_callback=progress_callback,
             ),
         )

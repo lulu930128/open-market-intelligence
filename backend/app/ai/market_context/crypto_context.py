@@ -109,8 +109,17 @@ def _crypto_capability_limit(
 
 
 def _crypto_ohlcv_projection(rows: list[Any]) -> list[dict[str, Any]]:
-    return _list_rows(
-        rows,
+    def bar_time(row: Any) -> str:
+        value = (
+            row.get("bar_time")
+            if isinstance(row, dict)
+            else getattr(row, "bar_time", None)
+        )
+        return str(_json_ready(value) or "")
+
+    chronological_rows = sorted(rows, key=bar_time)
+    projected = _list_rows(
+        chronological_rows,
         (
             "provider",
             "exchange",
@@ -124,9 +133,25 @@ def _crypto_ohlcv_projection(rows: list[Any]) -> list[dict[str, Any]]:
             "close_price",
             "base_volume",
             "quote_volume",
+            "base_asset",
+            "quote_asset",
             "fetched_at",
         ),
     )
+    for item in projected:
+        base_unit = str(item.pop("base_asset", "") or "").strip().upper() or None
+        quote_unit = str(item.pop("quote_asset", "") or "").strip().upper() or None
+        item["base_volume_unit"] = base_unit
+        item["quote_volume_unit"] = quote_unit
+        item["volume_unit"] = base_unit
+        item["volume_semantics"] = "interval_base_and_quote_volume"
+        item["volume_status"] = (
+            "available"
+            if item.get("base_volume") is not None
+            or item.get("quote_volume") is not None
+            else "missing"
+        )
+    return projected
 
 
 def _crypto_market_cap_matches_asset(row: Any, asset_definition: Any) -> bool:
@@ -745,6 +770,7 @@ def read_crypto_context(
         )
         data["compact"]["intraday_bars"] = {
             "interval": "1m",
+            "sort_order": "asc",
             "point_count": len(intraday_ohlcv_rows),
             "returned_point_count": len(intraday_bars),
             "bars": intraday_bars,
@@ -760,6 +786,7 @@ def read_crypto_context(
         daily_bars = _crypto_ohlcv_projection(daily_ohlcv_rows[:daily_limit])
         data["compact"]["daily_chart"] = {
             "interval": "1d",
+            "sort_order": "asc",
             "point_count": len(daily_ohlcv_rows),
             "returned_point_count": len(daily_bars),
             "bars": daily_bars,

@@ -334,7 +334,7 @@ Consumer 不得把 `missing` / `planned` 當作 0，也不得把 daily fallback 
 | `tw_stock` | 是，如 `2330` | quote、daily/intraday、技術、籌碼、基本面、分點等 evidence 與 decision brief | 即時/五檔/分點取決於 provider、session 與 cache coverage |
 | `tw_watchlist` | 是，numeric group id | 自選群組 context、ranking、Radar、signals、brief | snapshot/coverage 需由 scheduler 或明確 maintenance job 累積 |
 | `tw_index` | 是，`TAIEX` / `TPEX` | 指數 quote/intraday/daily 與技術 context | 分項資料 cadence 不一；盤中 provisional 與收盤 finalized 必須區分 |
-| `tw_futures` | 是，`TXF` / `MXF` / `TMF` | 期貨、法人 OI、PCR、TXO chain、large traders、basis/term structure | 法人、選擇權與大額交易人主要是官方盤後資料，不是夜盤即時流 |
+| `tw_futures` | 是，`TXF` / `MXF` / `TMF` | 最新 session quote（含 session 累計成交口數）、1 分 K interval 成交口數、法人 OI、PCR、TXO chain、large traders、basis/term structure | Quote 成交量是 session cumulative contracts；`intraday.bars` 是每分鐘 interval contracts。法人、選擇權與大額交易人主要是官方盤後資料，不是夜盤即時流 |
 | `us_stock` | 是，如 `MU` | local-cache evidence、bounded quote/intraday/daily/fundamental context，並有 dedicated LLM path | 即時與 fundamentals 視 provider/key/quota；US options flow/earnings 未接 |
 | `jp_stock` | 是，如 `7203.T` | 日股 local-cache daily/resource context、bounded intraday、brief/full | 無 dedicated LLM path；TDnet 未接，calendar/freshness 仍有限制 |
 | `jp_index` | 是，`^N225` / `1306.T` | 日經/指數 OHLC 與 bounded intraday context | 同日股限制 |
@@ -350,6 +350,12 @@ Consumer 不得把 `missing` / `planned` 當作 0，也不得把 daily fallback 
 | `kr_watchlist` | 是，numeric group id | 韓股自選群組 context/Radar | data-only；同 KR provider/disclosure 限制 |
 | `source_health` | 否；可用 id/filter | 跨市場 provider freshness、missing 與 incident context | 反映 runtime 狀態，不等同 capability 是否已實作 |
 | `capability_status` | 否；可指定 capability id | 查詢已接、derived、private、需 key、未接 provider 的 contract | 反映 implementation readiness，不等同資料此刻 current |
+
+外部工具詢問「TXF 夜盤目前成交量」時，`omi.ask` 會依 `tw_futures`
+scope 選取 `quote.snapshot`、`intraday.bars` 與 `data.freshness`。Consumer
+應分別顯示 `total_volume_contracts`（目前 session 累計）與
+`volume_contracts`（`volume_event_time` 所指最近一個有成交量的 1 分 K
+interval），不得把兩者相加或混稱成同一個量。
 
 `source_health` 的 `market_data_params` 支援 `market`、`resource`、`target`、`provider`、`status_filter`、`problems_only`、`include_healthy` 與 bounded `health_limit`。`total_*` 是套用 market/resource/target/provider 後的基礎集合，`matched_*` 是再套用 status/problem filter 的命中集合，`returned_*` 則是 limit 後實際回傳集合。
 

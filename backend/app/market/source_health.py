@@ -19,9 +19,11 @@ from app.market.quote_depth import TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS
 from app.market.taiwan_market_state import SUPPORTED_MARKETS
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.taiwan_rules import (
+    TAIWAN_DATASET_FINANCIAL_METRICS,
     TAIWAN_DATASET_SPECS,
     TaiwanDatasetSpec,
     expected_date_for_dataset,
+    expected_financial_metrics_period,
     is_equity_only_dataset_required,
 )
 from app.observability.provider_health import (
@@ -53,6 +55,7 @@ class TaiwanSourceHealthEntry:
     latest_data_key: str | None = None
     latest_updated_at: datetime | None = None
     expected_data_date: date | None = None
+    expected_data_key: str | None = None
     freshness_lag_days: int | None = None
     release_status: str | None = None
     release_is_released: bool | None = None
@@ -80,6 +83,7 @@ class TaiwanSourceHealthEntry:
             "latest_data_key": self.latest_data_key,
             "latest_updated_at": self.latest_updated_at.isoformat() if self.latest_updated_at else None,
             "expected_data_date": self.expected_data_date.isoformat() if self.expected_data_date else None,
+            "expected_data_key": self.expected_data_key,
             "freshness_lag_days": self.freshness_lag_days,
             "release_status": self.release_status,
             "release_is_released": self.release_is_released,
@@ -606,6 +610,13 @@ def _dataset_entry(
         if spec.has_expected_date
         else None
     )
+    expected_data_key = window.get("expected_data_key")
+    if not isinstance(expected_data_key, str) or not expected_data_key:
+        expected_data_key = (
+            expected_financial_metrics_period(now=now)
+            if spec.key == TAIWAN_DATASET_FINANCIAL_METRICS
+            else None
+        )
 
     if not required:
         return TaiwanSourceHealthEntry(
@@ -618,6 +629,7 @@ def _dataset_entry(
             row_count=0,
             required=False,
             expected_data_date=expected_data_date,
+            expected_data_key=expected_data_key,
             release_status=window.get("status"),
             release_is_released=window.get("is_released"),
             release_at=window.get("release_at"),
@@ -646,6 +658,17 @@ def _dataset_entry(
         expected_data_date=expected_data_date,
         freshness_required=spec.has_expected_date,
     )
+    if expected_data_key and row_count > 0 and latest_data_key:
+        if latest_data_key >= expected_data_key:
+            status_value = "current"
+            ok = True
+            data_quality = "current"
+            reason = "Latest local key reaches the expected release key."
+        else:
+            status_value = "stale"
+            ok = False
+            data_quality = "stale"
+            reason = "Latest local key is behind the expected release key."
     if (
         spec.key == "shareholding_distribution_weekly"
         and window.get("status") == "pending"
@@ -670,6 +693,7 @@ def _dataset_entry(
         latest_data_key=latest_data_key,
         latest_updated_at=latest_updated_at,
         expected_data_date=expected_data_date,
+        expected_data_key=expected_data_key,
         freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
         release_status=window.get("status"),
         release_is_released=window.get("is_released"),

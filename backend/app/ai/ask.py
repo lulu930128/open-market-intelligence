@@ -115,13 +115,12 @@ def _infer_analysis_horizon(payload: AiAskRequest) -> str:
     return horizon
 
 
-def _include_tw_intraday(payload: AiAskRequest) -> bool:
-    return decision_core.include_tw_intraday(
-        question=payload.question,
-        requested_horizon=payload.analysis_horizon,
-        strategy_profile=payload.strategy_profile,
-        allow_external_fetch=payload.allow_external_fetch,
-    )
+def _include_tw_intraday(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> bool:
+    return ask_execution._include_tw_intraday(payload, policy=policy)
 
 
 _normalize_text = scope_resolution._normalize_text
@@ -314,6 +313,7 @@ def ask(
     execution_plan = query_plan.build_query_plan(
         payload=payload,
         scope_type=scope_type,
+        target_market=resolution.selected_market,
         question_intent=question_intent,
         effective_mode=effective_mode,
     )
@@ -345,6 +345,9 @@ def ask(
                     *execution_plan.optional_selected_capabilities,
                 ],
                 "capability_limits": dict(execution_plan.selection.get("limits") or {}),
+                "capability_parameters": dict(
+                    execution_plan.selection.get("parameters") or {}
+                ),
                 "external_fetch_allowed": bool(policy.get("can_external_fetch")),
             }
         }

@@ -80,6 +80,7 @@ from app.market.stock_volume_pace import (
     build_stock_volume_pace,
     intraday_history_needs_bootstrap,
     latest_market_trade_date_points,
+    load_persisted_market_intraday_history,
     mutate_market_intraday_history,
     previous_regular_close_from_history,
 )
@@ -943,17 +944,30 @@ def get_jp_watchlist_ranking(
         requested_symbol_count=len(unique_items),
         expected_trade_date=resolved_expected_trade_date,
     )
+    requested_symbol_count = len(rows)
+    ranked_count = len(rows) - no_data_count
 
     return {
         "group_id": group_id,
         "include_children": include_children,
         "rank_by": rank_by,
         "sort_order": sort_order,
-        "requested_symbol_count": len(rows),
-        "ranked_count": len(rows) - no_data_count,
+        "requested_symbol_count": requested_symbol_count,
+        "ranked_count": ranked_count,
         "no_data_count": no_data_count,
         "error_count": 0,
         **freshness,
+        "underlying_trade_date": freshness.get("trade_date"),
+        "coverage_ratio": (
+            ranked_count / requested_symbol_count
+            if requested_symbol_count
+            else 1.0
+        ),
+        "is_live": False,
+        "is_full": (
+            ranked_count == requested_symbol_count and no_data_count == 0
+        ),
+        "ranking_semantics": "latest_completed_daily_rows",
         "results": rows,
     }
 
@@ -1270,6 +1284,12 @@ def get_jp_market_overview(
         "calendar_status": calendar_status,
         "coverage": {
             "scope": "active_jp_stock_master_with_local_daily_prices",
+            "universe_type": "active_local_stock_master",
+            "is_full_market": False,
+            "coverage_limitation": (
+                "local_active_master_and_cached_daily_prices_not_official_"
+                "full_exchange_breadth"
+            ),
             "active_stock_count": active_stock_count,
             "observed_symbol_count": observed_symbol_count,
             "current_symbol_count": current_symbol_count,
@@ -1294,8 +1314,53 @@ def get_jp_market_overview(
             **breadth,
             "total_count": sum(breadth.values()),
             "coverage_count": current_symbol_count,
+            "universe_count": active_stock_count,
+            "coverage_ratio": (
+                current_symbol_count / active_stock_count
+                if active_stock_count
+                else None
+            ),
+            "classified_count": (
+                breadth["advance_count"]
+                + breadth["decline_count"]
+                + breadth["unchanged_count"]
+            ),
+            "unknown_count": max(
+                active_stock_count
+                - breadth["advance_count"]
+                - breadth["decline_count"]
+                - breadth["unchanged_count"],
+                0,
+            ),
+            "reconciliation_status": (
+                "balanced"
+                if coverage_status == "current"
+                and breadth["no_comparison_count"] == 0
+                else "partial"
+            ),
+            "reconciliation_formula": (
+                "advance_count+decline_count+unchanged_count+unknown_count=universe_count"
+            ),
+            "market": "JP",
+            "scope": "active_stock_master_local_daily_coverage",
+            "status": (
+                "ready"
+                if coverage_status == "current"
+                and breadth["no_comparison_count"] == 0
+                else "partial"
+                if current_symbol_count
+                else "missing"
+            ),
             "source": "omi_local_jp_daily_price_partial",
             "is_partial": coverage_status != "current",
+            "direct_market_breadth": True,
+            "proxy_used": False,
+            "is_full_market": False,
+            "universe_type": "active_local_stock_master",
+            "coverage_limitation": (
+                "local_active_master_and_cached_daily_prices_not_official_"
+                "full_exchange_breadth"
+            ),
         },
         "sectors": sectors[:resolved_sector_limit],
         "indices": indices,
@@ -3032,6 +3097,8 @@ def list_jp_ohlc_chart_data(
         if resolved_expected_data_date is not None and latest_data_date > resolved_expected_data_date
         else "current"
     )
+    has_volume = any(point.get("volume") is not None for point in points)
+    is_index = normalized_symbol.startswith("^")
 
     return {
         "symbol": normalized_symbol,
@@ -3042,6 +3109,21 @@ def list_jp_ohlc_chart_data(
         "to_date": end_date,
         "point_count": len(points),
         "points": points,
+        "volume_unit": "shares" if has_volume and not is_index else None,
+        "volume_semantics": (
+            f"{timeframe}_traded_shares"
+            if has_volume and not is_index
+            else "index_volume_not_equivalent_to_market_volume"
+            if is_index
+            else None
+        ),
+        "volume_status": (
+            "available"
+            if has_volume and not is_index
+            else "not_applicable"
+            if is_index
+            else "not_provided"
+        ),
         "backfill": backfill_result,
         "latest_data_date": latest_data_date,
         "expected_data_date": resolved_expected_data_date,
@@ -3198,7 +3280,7 @@ def _persist_jp_intraday_history(
     payload: dict,
 ) -> dict:
     result = _copy_jp_intraday_payload(payload)
-    if symbol.startswith("^") or not result.get("points"):
+    if not result.get("points"):
         return result
     try:
         changed_count = mutate_market_intraday_history(
@@ -3285,6 +3367,7 @@ def get_jp_intraday_trend(
     symbol: str,
     db: Session | None = None,
     refresh: bool = False,
+    external_fetch_allowed: bool = True,
 ) -> dict:
     normalized_symbol = _valid_symbol(symbol)
     cache_key = f"JP:{normalized_symbol}"
@@ -3301,6 +3384,65 @@ def get_jp_intraday_trend(
                 db=db,
                 symbol=normalized_symbol,
             )
+        if db is not None:
+            persisted = load_persisted_market_intraday_history(
+                db,
+                stock_id=normalized_symbol,
+                market="JP",
+                market_timezone=JP_MARKET_TIMEZONE,
+            )
+            if persisted.get("points"):
+                persisted["trade_value_unit"] = "JPY"
+                cached_persisted = _set_jp_intraday_cache(
+                    cache_key,
+                    persisted,
+                )
+                return _apply_jp_intraday_previous_close_reference(
+                    _project_jp_intraday_payload(
+                        cached_persisted,
+                        db=db,
+                        symbol=normalized_symbol,
+                    ),
+                    db=db,
+                    symbol=normalized_symbol,
+                )
+
+    if not external_fetch_allowed:
+        payload = {
+            "stock_id": normalized_symbol,
+            "symbol": normalized_symbol,
+            "source": "unavailable",
+            "session_scope": "regular",
+            "session_phase": None,
+            "has_extended_hours": False,
+            "regular_point_count": 0,
+            "extended_point_count": 0,
+            "previous_close": None,
+            "previous_close_source": None,
+            "previous_close_trade_date": None,
+            "previous_close_provider": None,
+            "regular_session_close": None,
+            "regular_session_close_time": None,
+            "point_count": 0,
+            "points": [],
+            "source_url": None,
+            "cache_status": "persisted_miss",
+            "cache_hit": False,
+            "fallback_used": False,
+            "warnings": [
+                "Japan intraday cache-only read found no persisted data; "
+                "external fetch was not attempted."
+            ],
+        }
+        return _apply_jp_intraday_previous_close_reference(
+            _project_jp_intraday_payload(
+                payload,
+                db=db,
+                symbol=normalized_symbol,
+            ),
+            db=db,
+            symbol=normalized_symbol,
+        )
 
     try:
         range_value = (
@@ -3333,26 +3475,48 @@ def get_jp_intraday_trend(
                 payload=payload,
             )
     except Exception as exc:
-        payload = {
-            "stock_id": normalized_symbol,
-            "symbol": normalized_symbol,
-            "source": "unavailable",
-            "session_scope": "regular",
-            "session_phase": None,
-            "has_extended_hours": False,
-            "regular_point_count": 0,
-            "extended_point_count": 0,
-            "previous_close": None,
-            "previous_close_source": None,
-            "previous_close_trade_date": None,
-            "previous_close_provider": None,
-            "regular_session_close": None,
-            "regular_session_close_time": None,
-            "point_count": 0,
-            "points": [],
-            "source_url": None,
-            "warnings": [f"Japan intraday source is unavailable: {exc}"],
-        }
+        persisted = (
+            load_persisted_market_intraday_history(
+                db,
+                stock_id=normalized_symbol,
+                market="JP",
+                market_timezone=JP_MARKET_TIMEZONE,
+            )
+            if db is not None
+            else {}
+        )
+        if persisted.get("points"):
+            payload = persisted
+            payload["trade_value_unit"] = "JPY"
+            payload["cache_status"] = "refresh_fallback_hit"
+            payload["fallback_used"] = True
+            payload.setdefault("warnings", []).append(
+                f"Japan intraday refresh failed; using persisted cache: {exc}"
+            )
+        else:
+            payload = {
+                "stock_id": normalized_symbol,
+                "symbol": normalized_symbol,
+                "source": "unavailable",
+                "session_scope": "regular",
+                "session_phase": None,
+                "has_extended_hours": False,
+                "regular_point_count": 0,
+                "extended_point_count": 0,
+                "previous_close": None,
+                "previous_close_source": None,
+                "previous_close_trade_date": None,
+                "previous_close_provider": None,
+                "regular_session_close": None,
+                "regular_session_close_time": None,
+                "point_count": 0,
+                "points": [],
+                "source_url": None,
+                "cache_status": "refresh_fallback_miss",
+                "cache_hit": False,
+                "fallback_used": False,
+                "warnings": [f"Japan intraday source is unavailable: {exc}"],
+            }
 
     payload = _set_jp_intraday_cache(cache_key, payload)
     return _apply_jp_intraday_previous_close_reference(

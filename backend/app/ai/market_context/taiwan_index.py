@@ -16,6 +16,7 @@ from app.ai.market_context.taiwan_projection import (
     _with_evidence_passport,
 )
 from app.ai.market_payload_contract import bounded_int_param as _bounded_int_param
+from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.market_chips import market_chip_daily_to_dict
 
 
@@ -53,6 +54,7 @@ def read_tw_index_context(
     dependencies: TaiwanIndexDependencies,
 ) -> dict[str, Any]:
     normalized_index_id = index_id.strip().upper()
+    calendar_status = build_taiwan_calendar_status(now=dependencies.now())
     missing: list[str] = []
     warnings: list[str] = [
         "Taiwan index context uses market index evidence, not stock_master or individual stock daily tables.",
@@ -224,6 +226,7 @@ def read_tw_index_context(
                 missing=missing,
                 warnings=warnings,
                 source_refs=source_refs,
+                calendar_status=calendar_status,
             ),
         },
         "missing": list(dict.fromkeys(missing)),

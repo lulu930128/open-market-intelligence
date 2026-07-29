@@ -2536,6 +2536,17 @@ def _merge_index_intraday_snapshot(base: dict, snapshot: dict) -> dict:
         merged["points"].append(snapshot_point)
         merged["points"].sort(key=lambda item: str(item.get("time") or ""))
 
+    if snapshot_point.get("volume") is not None:
+        snapshot_point["provider_volume_unit"] = "provider_units"
+        snapshot_point["volume_status"] = "provider_specific"
+        merged["volume_unit"] = "provider_units"
+        merged["provider_volume_unit"] = "provider_units"
+        merged["canonical_volume_unit"] = None
+        merged["volume_status"] = "provider_specific"
+        merged["volume_semantics"] = (
+            "snapshot_provider_value_not_market_trade_value"
+        )
+
     merged["point_count"] = len(merged["points"])
     merged["source"] = (
         "yahoo_finance_chart_twse_mis_snapshot"

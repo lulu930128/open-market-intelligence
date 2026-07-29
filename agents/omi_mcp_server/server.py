@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import traceback
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -152,44 +153,59 @@ PAYLOAD_LEVEL_SCHEMA: dict[str, Any] = {
 }
 
 CAPABILITY_IDS = [
-    "broker_branch.summary",
+    "target.identity",
+    "quote.snapshot",
+    "quote.order_book",
+    "quote.auction",
+    "quote.official_close",
+    "intraday.bars",
+    "daily.ohlcv",
+    "technical.structure",
     "chips.institutional",
     "chips.margin",
+    "broker_branch.summary",
+    "ownership.distribution",
+    "fundamentals.revenue",
+    "fundamentals.financials",
+    "cross_market.overnight",
     "company.profile",
     "corporate.actions",
-    "cross_market.overnight",
-    "crypto.derivatives",
-    "crypto.order_book",
-    "daily.ohlcv",
-    "data.freshness",
+    "market.short_volume",
+    "market.breadth",
+    "market.indices",
+    "events.upcoming",
+    "events.calendar",
+    "events.history",
+    "regulation.disposition",
+    "regulation.trading_restrictions",
+    "market.sectors",
+    "market.index_contributions",
+    "market.institutional_flow",
+    "market.margin_short",
+    "market.sample_ranking",
+    "market.cross_market",
+    "market.chips",
+    "screening.ranking",
+    "screening.coverage",
+    "market.volume_state",
     "derivatives.positioning",
     "derivatives.structure",
+    "watchlist.ranking",
+    "watchlist.radar",
+    "watchlist.coverage",
+    "portfolio.summary",
+    "portfolio.holdings",
+    "portfolio.valuation",
+    "macro.series",
+    "macro.observations",
+    "resource.metadata",
+    "crypto.order_book",
+    "crypto.derivatives",
     "diagnostics.capabilities",
     "diagnostics.data_freshness",
     "diagnostics.source_health",
-    "fundamentals.financials",
-    "fundamentals.revenue",
-    "intraday.bars",
-    "macro.observations",
-    "macro.series",
-    "market.breadth",
-    "market.chips",
-    "market.cross_market",
-    "market.sample_ranking",
-    "market.short_volume",
-    "market.volume_state",
-    "ownership.distribution",
-    "portfolio.holdings",
-    "portfolio.summary",
-    "portfolio.valuation",
-    "quote.snapshot",
-    "resource.metadata",
     "source.health",
-    "target.identity",
-    "technical.structure",
-    "watchlist.coverage",
-    "watchlist.radar",
-    "watchlist.ranking",
+    "data.freshness",
 ]
 
 CAPABILITY_ID_SCHEMA: dict[str, Any] = {
@@ -246,11 +262,37 @@ INCLUDE_INTRADAY_SCHEMA: dict[str, Any] = {
     "description": "Request bounded intraday evidence when the backend trust policy allows external/cache refresh.",
 }
 
+INTRADAY_INTERVAL_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": ["1m", "5m", "15m", "30m", "1h", "4h"],
+    "description": (
+        "Requested intraday bar interval. OMI responses expose requested_interval, "
+        "source_interval, and effective_interval so provider aggregation or fallback "
+        "is never silently relabeled."
+    ),
+}
+
+INTERVAL_ALIAS_SCHEMA: dict[str, Any] = {
+    **INTRADAY_INTERVAL_SCHEMA,
+    "description": (
+        "Compatibility alias for intraday_interval. Prefer intraday_interval for new callers."
+    ),
+}
+
 SESSION_SCOPE_SCHEMA: dict[str, Any] = {
     "type": "string",
     "enum": ["regular", "extended", "all"],
     "default": "regular",
     "description": "US intraday session scope. Use all to include pre-market and after-hours bars.",
+}
+
+TRADE_DATE_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "pattern": r"^\d{4}-\d{2}-\d{2}$",
+    "description": (
+        "Target-market trade date. For US stocks this is the America/New_York "
+        "exchange date; exact close requests never fall back to another date."
+    ),
 }
 
 ASK_TOOL: dict[str, Any] = {
@@ -420,7 +462,9 @@ ASK_TOOL: dict[str, Any] = {
                 "description": "Independent diagnostic projection; it does not change answer mode.",
             },
             "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+            "intraday_interval": INTRADAY_INTERVAL_SCHEMA,
             "session_scope": SESSION_SCOPE_SCHEMA,
+            "trade_date": TRADE_DATE_SCHEMA,
             "include_children": {"type": "boolean", "default": True},
             "enabled_only": {"type": "boolean", "default": True},
             "conversation_context": {
@@ -439,8 +483,9 @@ ASK_TOOL: dict[str, Any] = {
                 "description": (
                     "Optional bounded market-data parameters forwarded to OMI readers, "
                     "for example provider, providers, symbol, symbols, instrument_type, "
-                    "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
-                    "intraday_limit, session_scope, or limit."
+                    "intraday_interval, interval, timeframe, bars, daily_limit, "
+                    "include_intraday, payload_level, "
+                    "intraday_limit, session_scope, trade_date, or limit."
                 ),
             },
         },
@@ -460,20 +505,93 @@ ASK_STREAM_TOOL: dict[str, Any] = {
     ),
 }
 
+
+def _load_public_contract_snapshot() -> dict[str, Any]:
+    snapshot_path = Path(__file__).with_name(
+        "public_contract_snapshot.json"
+    )
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version")
+        != "omi.mcp.public_contract_snapshot.v1"
+        or not isinstance(payload.get("ask_input_schema"), dict)
+    ):
+        return {}
+    return payload
+
+
+def _apply_public_contract_snapshot() -> None:
+    snapshot = _load_public_contract_snapshot()
+    if not snapshot:
+        return
+    target_types = [
+        str(value)
+        for value in snapshot.get("target_types") or []
+        if str(value).strip()
+    ]
+    capability_ids = [
+        str(value)
+        for value in snapshot.get("capability_ids") or []
+        if str(value).strip()
+    ]
+    if target_types:
+        ASK_TARGET_TYPES[:] = target_types
+    if capability_ids:
+        CAPABILITY_IDS[:] = capability_ids
+    schema = json.loads(
+        json.dumps(snapshot["ask_input_schema"], ensure_ascii=False)
+    )
+    properties = schema.setdefault("properties", {})
+    properties.setdefault(
+        "include_raw",
+        {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Deprecated transport flag retained for caller "
+                "compatibility. v4 always returns the canonical backend "
+                "envelope."
+            ),
+        },
+    )
+    ASK_TOOL["inputSchema"] = schema
+    ASK_STREAM_TOOL["inputSchema"] = json.loads(
+        json.dumps(schema, ensure_ascii=False)
+    )
+    selection_schema = properties.get("selection")
+    if isinstance(selection_schema, dict):
+        CAPABILITY_SELECTION_SCHEMA.clear()
+        CAPABILITY_SELECTION_SCHEMA.update(
+            json.loads(
+                json.dumps(selection_schema, ensure_ascii=False)
+            )
+        )
+
+
+_apply_public_contract_snapshot()
+
 MARKET_DATA_PARAMS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Optional bounded market-data parameters forwarded to OMI readers, "
         "for example provider, providers, symbol, symbols, instrument_type, "
-        "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
-        "intraday_limit, session_scope, observations, holding_limit, health_limit, "
+        "intraday_interval, interval, timeframe, bars, daily_limit, "
+        "include_intraday, payload_level, "
+        "intraday_limit, session_scope, trade_date, observations, holding_limit, health_limit, "
         "radar_limit, market, resource, target, or limit."
     ),
     "properties": {
         "include_intraday": INCLUDE_INTRADAY_SCHEMA,
         "payload_level": PAYLOAD_LEVEL_SCHEMA,
         "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+        "intraday_interval": INTRADAY_INTERVAL_SCHEMA,
+        "interval": INTERVAL_ALIAS_SCHEMA,
         "session_scope": SESSION_SCOPE_SCHEMA,
+        "trade_date": TRADE_DATE_SCHEMA,
         "observations": {"type": "integer", "minimum": 1, "maximum": 240},
         "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
         "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
@@ -516,7 +634,9 @@ MARKET_PAYLOAD_CONTROL_PROPERTIES: dict[str, Any] = {
     "include_intraday": INCLUDE_INTRADAY_SCHEMA,
     "payload_level": PAYLOAD_LEVEL_SCHEMA,
     "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+    "intraday_interval": INTRADAY_INTERVAL_SCHEMA,
     "session_scope": SESSION_SCOPE_SCHEMA,
+    "trade_date": TRADE_DATE_SCHEMA,
     "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
 }
 
@@ -1189,7 +1309,10 @@ def _augment_market_payload_control_schema(tool: dict[str, Any]) -> dict[str, An
                 ("include_intraday", INCLUDE_INTRADAY_SCHEMA),
                 ("payload_level", PAYLOAD_LEVEL_SCHEMA),
                 ("intraday_limit", INTRADAY_LIMIT_SCHEMA),
+                ("intraday_interval", INTRADAY_INTERVAL_SCHEMA),
+                ("interval", INTERVAL_ALIAS_SCHEMA),
                 ("session_scope", SESSION_SCOPE_SCHEMA),
+                ("trade_date", TRADE_DATE_SCHEMA),
             ):
                 market_data_params["properties"].setdefault(key, value)
         market_data_params.setdefault("additionalProperties", True)
@@ -1525,10 +1648,18 @@ def _merge_market_data_params(arguments: dict[str, Any]) -> dict[str, Any]:
             params["intraday_limit"] = max(1, min(500, int(arguments["intraday_limit"])))
         except (TypeError, ValueError):
             pass
+    if "intraday_interval" in arguments and "intraday_interval" not in params:
+        interval = str(arguments.get("intraday_interval") or "").strip().lower()
+        if interval in {"1m", "5m", "15m", "30m", "1h", "4h"}:
+            params["intraday_interval"] = interval
     if "session_scope" in arguments and "session_scope" not in params:
         session_scope = str(arguments.get("session_scope") or "").strip().lower()
         if session_scope in {"regular", "extended", "all"}:
             params["session_scope"] = session_scope
+    if "trade_date" in arguments and "trade_date" not in params:
+        trade_date = str(arguments.get("trade_date") or "").strip()
+        if trade_date:
+            params["trade_date"] = trade_date
     return params
 
 
@@ -1541,6 +1672,8 @@ def _market_query_controls(arguments: dict[str, Any]) -> dict[str, Any]:
         query["payload_level"] = params["payload_level"]
     if "intraday_limit" in params:
         query["intraday_limit"] = params["intraday_limit"]
+    if "intraday_interval" in params:
+        query["intraday_interval"] = params["intraday_interval"]
     return query
 
 

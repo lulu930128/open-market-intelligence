@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from app.ai import capability_contract, decision_envelope, scope_resolution
 from app.ai.schemas import AiAskRequest
@@ -949,6 +950,461 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             0,
         )
 
+    def test_v4_reports_known_scope_incompatibility_without_rejecting(self) -> None:
+        response = _v2_response()
+        response["result"]["data"]["compact"]["freshness_by_capability"] = {}
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["market.breadth"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="market_breadth",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "stock"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        self.assertTrue(canonical["ok"])
+        self.assertEqual(canonical["request_status"], "completed")
+        unsupported = canonical["limitations"]["unsupported_capabilities"]
+        self.assertEqual(len(unsupported), 1)
+        self.assertEqual(unsupported[0]["capability"], "market.breadth")
+        self.assertEqual(
+            unsupported[0]["reason_code"],
+            "unsupported_target_scope",
+        )
+        self.assertEqual(
+            canonical["evidence"]["manifest"]["unsupported_capabilities"],
+            unsupported,
+        )
+        self.assertEqual(
+            canonical["evidence"]["manifest"]["unsupported_count"],
+            1,
+        )
+        self.assertEqual(
+            canonical["evidence"]["manifest"]["unmet_required_count"],
+            1,
+        )
+        self.assertEqual(
+            canonical["evidence"]["quality"]["status"],
+            "blocked",
+        )
+        self.assertFalse(
+            canonical["status"]["readiness"]["analysis_ready"],
+        )
+        self.assertNotEqual(
+            canonical["status"]["readiness"]["evidence_status"],
+            "ready",
+        )
+        self.assertIn(
+            "capability:market.breadth",
+            canonical["limitations"]["missing"],
+        )
+        self.assertEqual(
+            canonical["limitations"]["unmet_required_capabilities"],
+            unsupported,
+        )
+
+    def test_v4_synthesizes_tw_index_freshness_from_domain_contract(self) -> None:
+        response = _v2_response(
+            freshness_by_domain={
+                "quote": {
+                    "status": "latest_completed_session",
+                    "latest": "2026-07-27T13:30:00+08:00",
+                    "is_current": True,
+                }
+            },
+        )
+        response.pop("freshness", None)
+        response["target"] = {
+            "type": "tw_index",
+            "id": "TAIEX",
+            "market": "TW",
+            "label": "加權指數",
+        }
+        response["resolution"]["target"] = dict(response["target"])
+        response["result"]["data"]["compact"]["quote"] = {
+            "index_id": "TAIEX",
+            "latest_price": 43634.19,
+            "quote_time": "2026-07-27T13:30:00+08:00",
+            "source": "twse_index_5s",
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["quote.snapshot"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="tw_index",
+            question_intent="quote",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "tw_index"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        freshness = canonical["evidence"]["data"]["data.freshness"]
+        self.assertEqual(freshness["status"], "current")
+        self.assertEqual(freshness["scope"], "selected_capabilities")
+        self.assertEqual(freshness["selected_capabilities"], ["quote.snapshot"])
+        self.assertIn("quote.snapshot", freshness["dependency_datasets"])
+        self.assertNotIn(
+            "capability:data.freshness",
+            canonical["limitations"]["missing"],
+        )
+
+    def test_v4_preserves_realtime_metadata_and_quality_across_payload_levels(
+        self,
+    ) -> None:
+        for payload_level in ("compact", "standard", "full"):
+            with self.subTest(payload_level=payload_level):
+                response = _v2_response(
+                    freshness_by_domain={
+                        "quote": "current",
+                        "intraday": "current",
+                    },
+                )
+                response["mode"]["payload_level"] = payload_level
+                response["query_plan"]["payload_level"] = payload_level
+                compact = response["result"]["data"]["compact"]
+                compact["quote"] = {
+                    "latest_price": 43_634.19,
+                    "quote_time": "2026-07-27T13:34:00+08:00",
+                    "source": "twse_index_5s_snapshot",
+                    "volume": None,
+                    "volume_unit": None,
+                    "canonical_volume_unit": None,
+                    "volume_status": "not_provided",
+                    "trade_value": None,
+                    "trade_value_unit": "TWD",
+                    "trade_value_status": "not_provided",
+                    "trade_value_source": None,
+                    "official_close_status": "confirmed",
+                    "official_close_price": 43_634.19,
+                    "official_close_raw": 43_634.19,
+                    "official_close_display": "43,634.19",
+                    "official_close_precision": 2,
+                    "selected_candidate": "official_close",
+                    "selection_reason": "confirmed_official_close",
+                    "bid_levels": [
+                        {
+                            "level": level,
+                            "price": 43_634.0 - level,
+                            "volume_lots": 100 + level,
+                            "order_count": None,
+                            "order_count_status": "not_provided",
+                        }
+                        for level in range(1, 6)
+                    ],
+                    "ask_levels": [
+                        {
+                            "level": level,
+                            "price": 43_634.0 + level,
+                            "volume_lots": 90 + level,
+                            "order_count": None,
+                            "order_count_status": "not_provided",
+                        }
+                        for level in range(1, 6)
+                    ],
+                    "bid_depth": [
+                        {
+                            "level": level,
+                            "price": 43_634.0 - level,
+                            "volume_lots": 100 + level,
+                            "order_count": None,
+                            "order_count_status": "not_provided",
+                        }
+                        for level in range(1, 6)
+                    ],
+                    "ask_depth": [
+                        {
+                            "level": level,
+                            "price": 43_634.0 + level,
+                            "volume_lots": 90 + level,
+                            "order_count": None,
+                            "order_count_status": "not_provided",
+                        }
+                        for level in range(1, 6)
+                    ],
+                    "top5_bid_volume_lots": 1_230,
+                    "top5_ask_volume_lots": 1_100,
+                    "top5_imbalance": 130,
+                    "depth_order_count_status": "not_provided",
+                    "indicative_unmatched_buy_volume_lots": None,
+                    "indicative_unmatched_sell_volume_lots": None,
+                    "indicative_unmatched_status": "not_provided",
+                }
+                compact["intraday_bars"] = {
+                    "interval": "5m",
+                    "requested_interval": "5m",
+                    "source_interval": "1m",
+                    "effective_interval": "5m",
+                    "interval_status": "ready",
+                    "aggregation_method": "local_ohlcv_1m_to_5m",
+                    "source_point_count": 5,
+                    "aggregated_point_count": 1,
+                    "point_count": 1,
+                    "returned_point_count": 1,
+                    "volume_unit": "provider_units",
+                    "volume_status": "provider_specific",
+                    "points": [
+                        {
+                            "bar_time": "2026-07-27T09:00:00+08:00",
+                            "bar_close_time": "2026-07-27T09:05:00+08:00",
+                            "open": 43_100.0,
+                            "high": 43_200.0,
+                            "low": 43_050.0,
+                            "close": 43_180.0,
+                            "volume": 100,
+                            "is_partial": False,
+                            "finalized": True,
+                        }
+                    ],
+                    "cache_status": "persisted_hit",
+                    "cache_hit": True,
+                    "cache_trade_date": "2026-07-27",
+                    "cache_latest_time": "2026-07-27T09:04:00+08:00",
+                    "fallback_used": False,
+                    "source": "market_intraday_bar_cache",
+                }
+                selection = capability_contract.normalize_selection(
+                    selection={
+                        "required": [
+                            "quote.snapshot",
+                            "intraday.bars",
+                        ],
+                    },
+                    output="evidence_only",
+                    realtime_policy="cache_only",
+                    payload_level=payload_level,
+                    scope_type="tw_index",
+                    question_intent="quote",
+                )
+                response["query_plan"]["selection"] = selection
+                response["query_plan"]["target_type"] = "tw_index"
+
+                canonical = decision_envelope.for_requested_contract(
+                    response,
+                    requested_contract_version="omi.decision.v4",
+                )
+
+                quote = canonical["evidence"]["data"]["quote.snapshot"]
+                intraday = canonical["evidence"]["data"]["intraday.bars"]
+                quality = canonical["evidence"]["quality"]["capabilities"]
+                self.assertEqual(quote["volume_status"], "not_provided")
+                self.assertEqual(
+                    quote["depth_order_count_status"],
+                    "not_provided",
+                )
+                self.assertIsNone(
+                    quote["indicative_unmatched_buy_volume_lots"],
+                )
+                self.assertEqual(
+                    quote["indicative_unmatched_status"],
+                    "not_provided",
+                )
+                self.assertEqual(
+                    quote["selected_candidate"],
+                    "official_close",
+                )
+                self.assertEqual(len(quote["bid_levels"]), 5)
+                self.assertEqual(len(quote["ask_levels"]), 5)
+                self.assertIsNone(
+                    quote["bid_levels"][0]["order_count"],
+                )
+                self.assertEqual(
+                    intraday["aggregation_method"],
+                    "local_ohlcv_1m_to_5m",
+                )
+                self.assertEqual(
+                    intraday["cache_status"],
+                    "persisted_hit",
+                )
+                self.assertTrue(
+                    quality["quote.snapshot"]["payload_included"],
+                )
+                self.assertTrue(
+                    quality["intraday.bars"]["payload_included"],
+                )
+                self.assertNotIn(
+                    "volume_unit_missing",
+                    quality["intraday.bars"]["issues"],
+                )
+                self.assertNotIn(
+                    "missing_interval",
+                    quality["intraday.bars"]["issues"],
+                )
+
+    def test_v4_synthesizes_freshness_for_intraday_and_market_breadth(
+        self,
+    ) -> None:
+        cases = (
+            {
+                "scope_type": "tw_index",
+                "target": {
+                    "type": "tw_index",
+                    "id": "TAIEX",
+                    "market": "TW",
+                },
+                "capability": "intraday.bars",
+                "domain": "intraday",
+                "compact_key": "intraday_bars",
+                "value": {
+                    "interval": "1m",
+                    "source_interval": "1m",
+                    "effective_interval": "1m",
+                    "point_count": 1,
+                    "volume_unit": "provider_units",
+                    "points": [
+                        {
+                            "time": "2026-07-27T13:30:00+08:00",
+                            "price": 43_634.19,
+                            "volume": 100,
+                        }
+                    ],
+                    "source": "twse_index_5s_snapshot",
+                },
+            },
+            {
+                "scope_type": "market",
+                "target": {
+                    "type": "market",
+                    "id": "TW",
+                    "market": "TW",
+                },
+                "capability": "market.breadth",
+                "domain": "breadth",
+                "compact_key": "breadth",
+                "value": {
+                    "trade_date": "2026-07-27",
+                    "status": "partial",
+                    "advance_count": 900,
+                    "decline_count": 800,
+                    "unchanged_count": 100,
+                    "universe_count": 2_000,
+                    "classified_count": 1_800,
+                    "unknown_count": 200,
+                    "coverage_ratio": 0.9,
+                    "is_full_market": False,
+                    "source": "official_segment_breadth_partial",
+                },
+            },
+        )
+        for case in cases:
+            with self.subTest(capability=case["capability"]):
+                response = _v2_response(
+                    freshness_by_domain={
+                        case["domain"]: "latest_completed_session",
+                    },
+                )
+                response.pop("freshness", None)
+                response["target"] = case["target"]
+                response["resolution"]["target"] = dict(case["target"])
+                response["result"]["data"]["compact"][
+                    case["compact_key"]
+                ] = case["value"]
+                selection = capability_contract.normalize_selection(
+                    selection={
+                        "required": [
+                            case["capability"],
+                            "data.freshness",
+                        ],
+                    },
+                    output="evidence_only",
+                    realtime_policy="cache_only",
+                    payload_level="compact",
+                    scope_type=case["scope_type"],
+                    question_intent="data_freshness",
+                )
+                response["query_plan"]["selection"] = selection
+                response["query_plan"]["target_type"] = case["scope_type"]
+
+                canonical = decision_envelope.for_requested_contract(
+                    response,
+                    requested_contract_version="omi.decision.v4",
+                )
+
+                freshness = canonical["evidence"]["data"][
+                    "data.freshness"
+                ]
+                freshness_quality = canonical["evidence"]["quality"][
+                    "capabilities"
+                ]["data.freshness"]
+                self.assertIn("status", freshness)
+                self.assertIn("datasets", freshness)
+                self.assertIn("missing", freshness)
+                self.assertIn("warnings", freshness)
+                self.assertNotIn(
+                    "semantic_payload_empty",
+                    freshness_quality["issues"],
+                )
+
+    def test_v4_includes_freshness_and_source_health_payload_when_selected(
+        self,
+    ) -> None:
+        response = _v2_response(
+            freshness_by_domain={"source_health": "current"},
+        )
+        response["freshness"] = {
+            "status": "current",
+            "as_of": "2026-07-27T18:00:00+08:00",
+            "is_current": True,
+            "datasets": ["source_health_snapshot"],
+            "missing": [],
+            "warnings": [],
+        }
+        response["result"]["data"]["compact"]["source_health"] = {
+            "status": "current",
+            "as_of": "2026-07-27T18:00:00+08:00",
+            "summary": {
+                "healthy_count": 3,
+                "problem_count": 0,
+            },
+            "warnings": [],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["data.freshness", "source.health"],
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            question_intent="data_freshness",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "market"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        self.assertEqual(
+            canonical["evidence"]["data"]["data.freshness"]["status"],
+            "current",
+        )
+        self.assertEqual(
+            canonical["evidence"]["data"]["source.health"]["summary"],
+            {
+                "healthy_count": 3,
+                "problem_count": 0,
+            },
+        )
+        manifest = {
+            item["capability"]: item
+            for item in canonical["evidence"]["manifest"]["capabilities"]
+        }
+        self.assertTrue(manifest["data.freshness"]["payload_included"])
+        self.assertTrue(manifest["source.health"]["payload_included"])
+
     def test_v4_compacts_metadata_before_omitting_required_evidence(self) -> None:
         response = _v2_response()
         response["result"]["data"]["compact"]["quote"] = {
@@ -1598,10 +2054,14 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         response["query_plan"]["selection"] = selection
         response["query_plan"]["target_type"] = "stock"
 
-        canonical = decision_envelope.for_requested_contract(
-            response,
-            requested_contract_version="omi.decision.v4",
-        )
+        with patch(
+            "app.ai.realtime_contract._calendar_completed_session",
+            return_value=True,
+        ):
+            canonical = decision_envelope.for_requested_contract(
+                response,
+                requested_contract_version="omi.decision.v4",
+            )
 
         quote_quality = canonical["evidence"]["quality"]["capabilities"][
             "quote.snapshot"
@@ -1872,13 +2332,7 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertFalse(canonical["status"]["readiness"]["decision_ready"])
 
     def test_market_target_resolves_to_market_specific_context(self) -> None:
-        cases = (
-            ("US", "us_stock", "^GSPC"),
-            ("JP", "jp_index", "^N225"),
-            ("KR", "kr_index", "KOSPI"),
-            ("TW", "market", None),
-        )
-        for market, expected_type, expected_id in cases:
+        for market in ("US", "JP", "KR", "TW"):
             with self.subTest(market=market):
                 resolution = scope_resolution._resolve_scope(
                     None,
@@ -1887,14 +2341,88 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
                         target={"type": "market", "market": market},
                     ),
                 )
-                self.assertEqual(resolution.selected_scope_type, expected_type)
-                self.assertEqual(resolution.selected_scope_id, expected_id)
+                self.assertEqual(resolution.selected_scope_type, "market")
+                self.assertEqual(resolution.selected_scope_id, market)
                 self.assertEqual(resolution.selected_market, market)
 
-    def test_provider_failures_include_degraded_source_health_and_skipped_refresh(
+        id_only_resolution = scope_resolution._resolve_scope(
+            db=None,
+            payload=AiAskRequest(
+                question="US market context",
+                target={"type": "market", "id": "US"},
+            ),
+        )
+        self.assertEqual(id_only_resolution.selected_scope_type, "market")
+        self.assertEqual(id_only_resolution.selected_scope_id, "US")
+        self.assertEqual(id_only_resolution.selected_market, "US")
+
+    def test_v4_require_live_blocks_completed_session_fallback(self) -> None:
+        response = _v2_response(
+            freshness_by_domain={
+                "quote": "latest_completed_session",
+                "technical": "latest_completed_session",
+            }
+        )
+        response["result"]["data"]["compact"]["quote"] = {
+            "price": 2350,
+            "last_price": 2350,
+            "price_available": True,
+            "fallback_used": True,
+            "fallback_type": "latest_completed_session_close",
+            "trade_date": "2026-07-24",
+            "quote_time": "2026-07-24T13:30:00+08:00",
+            "provider": "local_daily_cache",
+            "source": "daily_price",
+            "status": "final_snapshot",
+            "market_status": "latest_session_close",
+            "session_phase": "post_close_snapshot",
+            "is_realtime": False,
+            "freshness": {
+                "status": "latest_completed_session",
+                "is_stale": False,
+            },
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["quote.snapshot"]},
+            output="evidence_only",
+            realtime_policy="require_live",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="quote",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "stock"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        realtime = canonical["evidence"]["realtime"]["quote.snapshot"]
+        quote_quality = canonical["evidence"]["quality"]["capabilities"][
+            "quote.snapshot"
+        ]
+        self.assertFalse(realtime["policy_satisfied"])
+        self.assertFalse(realtime["decision_usable"])
+        self.assertEqual(realtime["status_class"], "blocked")
+        self.assertFalse(quote_quality["decision_usable"])
+        self.assertFalse(canonical["status"]["readiness"]["decision_ready"])
+        self.assertIn(
+            "live_requirement_not_satisfied",
+            canonical["limitations"]["missing"],
+        )
+
+    def test_provider_failures_separate_request_background_and_history(
         self,
     ) -> None:
         response = _v2_response()
+        response["target"] = {
+            "type": "jp_index",
+            "id": "^N225",
+            "market": "JP",
+            "label": "Nikkei 225",
+        }
+        response["resolution"]["target"] = dict(response["target"])
         response["result"]["data"]["source_health"] = {
             "kind": "jp_source_health",
             "expected_daily_price_date": "2026-07-23",
@@ -1908,7 +2436,23 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
                     "expected_data_date": "2026-07-23",
                     "freshness_lag_days": 2,
                     "reason": "behind expected session",
-                }
+                    "latest_event": {
+                        "provider": "yahoo_chart",
+                        "resource": "daily_price",
+                        "target": "^N225",
+                        "status": "failed",
+                        "event_time": "2026-07-23T00:00:00+00:00",
+                    },
+                },
+                {
+                    "resource": "company_fundamental",
+                    "provider": "opendart",
+                    "target": "005930",
+                    "status": "stale",
+                    "latest_data_date": "2025-12-31",
+                    "expected_data_date": "2026-03-31",
+                    "reason": "unrelated KR fundamental cache is stale",
+                },
             ],
         }
         response["tool_runs"] = [
@@ -1921,6 +2465,10 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
 
         canonical = decision_envelope.build(response)
         failures = canonical["limitations"]["provider_failures"]
+        background = canonical["limitations"]["background_source_health"]
+        historical = canonical["limitations"]["historical_provider_events"]
+        selected = canonical["limitations"]["selected_source_health"]
+        supplemental = canonical["limitations"]["supplemental_source_health"]
 
         self.assertTrue(
             any(
@@ -1933,8 +2481,160 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             any(
                 item.get("provider") == "yahoo_chart"
                 and item.get("status") == "stale"
-                for item in failures
+                for item in background
             )
+        )
+        self.assertEqual(
+            selected[0]["source_health_relevance"],
+            "selected",
+        )
+        self.assertFalse(
+            any(item.get("provider") == "opendart" for item in background)
+        )
+        self.assertEqual(
+            supplemental[0]["source_health_relevance"],
+            "supplemental",
+        )
+        self.assertEqual(supplemental[0]["provider"], "opendart")
+        self.assertFalse(
+            any(item.get("provider") == "yahoo_chart" for item in failures)
+        )
+        self.assertTrue(
+            any(
+                item.get("resource") == "daily_price"
+                and item.get("status") == "failed"
+                for item in historical
+            )
+        )
+        self.assertEqual(
+            canonical["limitations"]["current_request_failures"],
+            failures,
+        )
+
+    def test_focused_quote_treats_same_target_unselected_resource_as_supplemental(
+        self,
+    ) -> None:
+        response = _v2_response(
+            freshness_by_domain={"quote": "current"},
+        )
+        response["query_plan"]["selected_capabilities"] = [
+            "quote.snapshot",
+            "data.freshness",
+        ]
+        response["query_plan"]["requested_domains"] = ["quote", "freshness"]
+        response["result"]["data"]["source_health"] = {
+            "kind": "taiwan_source_health",
+            "expected_daily_price_date": "2026-07-27",
+            "entries": [
+                {
+                    "resource": "taiwan_stock_quote_snapshot",
+                    "provider": "twse_mis",
+                    "target": "2330",
+                    "market": "TW",
+                    "status": "stale",
+                    "reason": "quote snapshot is stale",
+                },
+                {
+                    "resource": "financial_metric_quarterly",
+                    "provider": "twse_openapi",
+                    "target": "2330",
+                    "market": "TW",
+                    "status": "stale",
+                    "reason": "unselected fundamental resource is stale",
+                },
+                {
+                    "resource": "taiwan_stock_quote_snapshot",
+                    "provider": "twse_mis",
+                    "target": "2317",
+                    "market": "TW",
+                    "status": "stale",
+                    "reason": "different target in the same market",
+                },
+            ],
+        }
+
+        canonical = decision_envelope.build(response)
+
+        background = canonical["limitations"]["background_source_health"]
+        supplemental = canonical["limitations"]["supplemental_source_health"]
+        self.assertTrue(
+            any(
+                item.get("resource") == "taiwan_stock_quote_snapshot"
+                for item in background
+            )
+        )
+        self.assertFalse(
+            any(
+                item.get("resource") == "financial_metric_quarterly"
+                for item in background
+            )
+        )
+        self.assertTrue(
+            any(
+                item.get("resource") == "financial_metric_quarterly"
+                and item.get("source_health_relevance") == "supplemental"
+                for item in supplemental
+            )
+        )
+        self.assertTrue(
+            any(
+                item.get("target") == "2317"
+                and item.get("source_health_relevance") == "supplemental"
+                for item in supplemental
+            )
+        )
+
+    def test_successful_current_refresh_does_not_retain_old_event_as_failure(
+        self,
+    ) -> None:
+        response = _v2_response()
+        response["result"]["data"]["source_health"] = {
+            "kind": "taiwan_source_health",
+            "expected_daily_price_date": "2026-07-27",
+            "entries": [
+                {
+                    "resource": "taiwan_stock_quote_snapshot",
+                    "provider": "twse_mis",
+                    "target": "2330",
+                    "status": "stale",
+                    "reason": "historical snapshot is stale",
+                    "latest_event": {
+                        "provider": "twse_mis",
+                        "resource": "taiwan_stock_quote_snapshot",
+                        "target": "2330",
+                        "status": "failed",
+                        "event_time": "2026-07-24T05:24:00+00:00",
+                    },
+                }
+            ],
+        }
+        response["tool_runs"] = [
+            {
+                "tool": "tw.refresh_quote",
+                "provider": "twse_mis",
+                "status": "completed",
+                "message": "Current-session quote refreshed.",
+            }
+        ]
+
+        canonical = decision_envelope.build(response)
+
+        self.assertEqual(canonical["limitations"]["provider_failures"], [])
+        self.assertEqual(
+            canonical["limitations"]["current_request_failures"],
+            [],
+        )
+        self.assertEqual(
+            canonical["limitations"]["background_source_health"][0][
+                "resource"
+            ],
+            "taiwan_stock_quote_snapshot",
+        )
+        self.assertEqual(
+            canonical["limitations"]["historical_provider_events"][0][
+                "event_time"
+            ],
+            "2026-07-24T05:24:00+00:00",
         )
 
     def test_v4_projects_intraday_from_canonical_result_before_mode_projection(

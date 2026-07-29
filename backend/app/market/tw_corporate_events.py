@@ -493,10 +493,13 @@ def list_taiwan_corporate_events(
     *,
     stock_id: str | None = None,
     market: str | None = None,
+    stock_ids: set[str] | None = None,
+    markets: set[str] | None = None,
     event_types: set[str] | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = 500,
+    offset: int = 0,
     now: datetime | None = None,
     cache_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -506,9 +509,25 @@ def list_taiwan_corporate_events(
     end_filter = date_to or (as_of + timedelta(days=90))
     normalized_stock_id = str(stock_id or "").strip() or None
     normalized_market = str(market or "").strip().upper() or None
+    normalized_stock_ids = {
+        str(item).strip()
+        for item in (stock_ids or set())
+        if str(item).strip()
+    }
+    normalized_markets = {
+        str(item).strip().upper()
+        for item in (markets or set())
+        if str(item).strip()
+    }
+    if normalized_stock_id:
+        normalized_stock_ids = {normalized_stock_id}
+    if normalized_market:
+        normalized_markets = {normalized_market}
     normalized_types = {
         str(item).strip().lower() for item in (event_types or set()) if str(item).strip()
     }
+    normalized_limit = max(1, min(int(limit), 1000))
+    normalized_offset = max(0, min(int(offset), 5000))
     cache = read_taiwan_corporate_event_cache(path=cache_path)
     providers = cache.get("providers") or {}
     results: list[dict[str, Any]] = []
@@ -523,7 +542,10 @@ def list_taiwan_corporate_events(
 
     for provider_key in provider_keys:
         config = PROVIDER_CONFIG[provider_key]
-        if not _provider_matches_market(provider_key, normalized_market):
+        if normalized_markets and not any(
+            _provider_matches_market(provider_key, requested_market)
+            for requested_market in normalized_markets
+        ):
             continue
         provider_entry = providers.get(provider_key)
         metadata = _provider_cache_status(
@@ -552,9 +574,16 @@ def list_taiwan_corporate_events(
             event = _public_event(raw_entry, as_of=as_of)
             if event is None:
                 continue
-            if normalized_stock_id and event.get("stock_id") != normalized_stock_id:
+            if (
+                normalized_stock_ids
+                and str(event.get("stock_id") or "") not in normalized_stock_ids
+            ):
                 continue
-            if normalized_market and str(event.get("market") or "").upper() != normalized_market:
+            if (
+                normalized_markets
+                and str(event.get("market") or "").upper()
+                not in normalized_markets
+            ):
                 continue
             if normalized_types and str(event.get("event_type") or "").lower() not in normalized_types:
                 continue
@@ -580,7 +609,7 @@ def list_taiwan_corporate_events(
         ) > timing_priority.get(str(previous.get("timing_status")), 0):
             deduped[logical_key] = item
     type_priority = {"financial_report": 0, "ex_dividend": 1, "investor_conference": 2}
-    sorted_results = sorted(
+    all_results = sorted(
         deduped.values(),
         key=lambda item: (
             item["start_date"],
@@ -588,7 +617,10 @@ def list_taiwan_corporate_events(
             type_priority.get(str(item.get("event_type")), 9),
             str(item.get("stock_id") or ""),
         ),
-    )[: max(1, min(int(limit), 1000))]
+    )
+    sorted_results = all_results[
+        normalized_offset : normalized_offset + normalized_limit
+    ]
     warnings = [
         str(source["warning"])
         for source in source_status.values()
@@ -602,7 +634,12 @@ def list_taiwan_corporate_events(
         "date_to": end_filter,
         "stock_id": normalized_stock_id,
         "market": normalized_market,
+        "stock_ids": sorted(normalized_stock_ids),
+        "markets": sorted(normalized_markets),
         "event_types": sorted(normalized_types),
+        "offset": normalized_offset,
+        "limit": normalized_limit,
+        "total_count": len(all_results),
         "result_count": len(sorted_results),
         "warning": "；".join(dict.fromkeys(warnings)) or None,
         "sources": source_status,

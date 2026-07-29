@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass
 import re
 from typing import Any
 
+from app.ai.market_date_request import requested_us_trade_date
+
 
 REPORT_HINTS = (
     "ai report",
@@ -667,7 +669,10 @@ def infer_question_intent(
         return "broker_branch"
     if contains_hint(question, MARKET_BREADTH_QUERY_HINTS):
         return "market_breadth"
-    if contains_hint(question, QUOTE_ONLY_HINTS):
+    if (
+        contains_hint(question, QUOTE_ONLY_HINTS)
+        or requested_us_trade_date(question) is not None
+    ):
         return "quote"
     if contains_hint(question, RISK_PRIORITY_HINTS):
         return "risk_check"

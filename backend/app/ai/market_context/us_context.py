@@ -17,9 +17,11 @@ from app.ai.market_context.regional_params import (
     _market_data_int,
     _market_data_str,
 )
+from app.ai.market_date_request import parse_market_trade_date
 from app.ai.market_payload_contract import (
     intraday_point_limit as _market_intraday_point_limit,
     payload_level as _market_payload_level,
+    requested_intraday_interval as _requested_intraday_interval,
 )
 from app.db.models import USDailyPrice, USSecCompanyFact, USStockMaster
 from app.market.calendar_status import build_us_calendar_status
@@ -27,6 +29,10 @@ from app.observability.source_health_contract import summarize_source_health
 from app.us_market.chart_projection import filter_ohlc_source_rows
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
+from app.us_market.trading_calendar import (
+    US_MARKET_TIMEZONE,
+    US_SESSION_CLOSE_TIME,
+)
 
 
 @dataclass(frozen=True)
@@ -59,13 +65,34 @@ def _us_intraday_compact(
 ) -> dict[str, Any]:
     payload_level = _market_payload_level(market_data_params)
     point_limit = _market_intraday_point_limit(market_data_params)
+    requested_interval = (
+        _requested_intraday_interval(market_data_params, default="1m")
+        or "1m"
+    )
     if not isinstance(intraday_summary, dict) or not intraday_summary:
+        interval_status = (
+            "unavailable" if requested_interval == "1m" else "unsupported"
+        )
         return {
             "enabled": False,
+            "requested_interval": requested_interval,
+            "source_interval": "1m",
+            "effective_interval": None,
+            "interval_status": interval_status,
+            "sampling_mode": "not_available",
             "payload_level": payload_level,
             "bar_limit": point_limit,
             "series": {},
-            "warnings": ["US intraday trend was not requested or did not return data."],
+            "warnings": [
+                (
+                    "US intraday trend was not requested or did not return data."
+                    if interval_status == "unavailable"
+                    else (
+                        f"Requested US intraday interval {requested_interval} is "
+                        "unsupported; the provider contract only exposes 1m bars."
+                    )
+                )
+            ],
         }
 
     raw_points = intraday_summary.get("points") if isinstance(intraday_summary.get("points"), list) else []
@@ -102,6 +129,14 @@ def _us_intraday_compact(
         intraday_summary.get("effective_interval")
         or source_interval
     )
+    if requested_interval != effective_interval:
+        warnings = [
+            *warnings,
+            (
+                f"Requested US intraday interval {requested_interval} is not available; "
+                f"returned {effective_interval} source bars without relabeling."
+            ),
+        ]
     sampling_mode = str(
         intraday_summary.get("sampling_mode")
         or (
@@ -119,13 +154,20 @@ def _us_intraday_compact(
 
     return {
         "enabled": True,
+        "requested_interval": requested_interval,
         "payload_level": payload_level,
         "bar_limit": point_limit,
         "series": {
             source_interval: {
                 "interval": effective_interval,
+                "requested_interval": requested_interval,
                 "source_interval": source_interval,
                 "effective_interval": effective_interval,
+                "interval_status": (
+                    "ready"
+                    if requested_interval == effective_interval
+                    else "unsupported"
+                ),
                 "sampling_mode": sampling_mode,
                 "original_point_count": original_point_count,
                 "source": source,
@@ -149,6 +191,10 @@ def _us_intraday_compact(
                     intraday_summary.get("volume_semantics")
                     or ("interval_shares" if volume_unit else None)
                 ),
+                "volume_status": (
+                    intraday_summary.get("volume_status")
+                    or ("available" if volume_unit else "not_provided")
+                ),
             }
         },
         "warnings": warnings,
@@ -164,6 +210,26 @@ def _parse_market_datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _market_trade_date(value: Any) -> str | None:
+    parsed = _parse_market_datetime(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=US_MARKET_TIMEZONE)
+    return parsed.astimezone(US_MARKET_TIMEZONE).date().isoformat()
+
+
+def _intraday_quote_semantics(session: str | None) -> str:
+    normalized = str(session or "").strip().lower()
+    if normalized == "pre_market":
+        return "pre_market_last_trade"
+    if normalized == "after_hours":
+        return "after_hours_last_trade"
+    if normalized == "regular":
+        return "regular_session_last_trade"
+    return "intraday_last_trade"
 
 
 def _us_intraday_quote(
@@ -194,7 +260,7 @@ def _us_intraday_quote(
     current_phase = str(market_calendar.get("phase") or "closed")
     checked_at = _parse_market_datetime(market_calendar.get("checked_at"))
     quote_time = _parse_market_datetime(latest.get("time"))
-    quote_trade_date = quote_time.date().isoformat() if quote_time is not None else None
+    quote_trade_date = _market_trade_date(quote_time)
     latest_session_date = str(market_calendar.get("previous_trading_day") or "") or None
     is_latest_session_quote = bool(
         quote_trade_date and latest_session_date and quote_trade_date == latest_session_date
@@ -220,17 +286,23 @@ def _us_intraday_quote(
         volume = None
         volume_status = "provider_unavailable"
 
+    regular_session_close_time = intraday_summary.get("regular_session_close_time")
     return {
         "source": intraday_summary.get("source") or "yahoo_finance_chart",
         "price": price,
         "change": change,
         "change_pct": change_pct,
+        "currency": "USD",
         "volume": volume,
         "volume_unit": "shares" if volume is not None else None,
         "volume_semantics": "interval_shares" if volume is not None else None,
         "volume_status": volume_status,
         "instrument_type": instrument_type,
+        "trade_date": quote_trade_date,
         "quote_time": latest.get("time"),
+        "timezone": str(US_MARKET_TIMEZONE),
+        "quote_semantics": _intraday_quote_semantics(last_quote_session),
+        "is_historical": False,
         # Compatibility alias.  It now means that this quote is live in the
         # current market session, not merely that it came from a minute source.
         "is_realtime": is_live,
@@ -249,7 +321,10 @@ def _us_intraday_quote(
         "previous_close_trade_date": intraday_summary.get("previous_close_trade_date"),
         "previous_close_provider": intraday_summary.get("previous_close_provider"),
         "regular_session_close": intraday_summary.get("regular_session_close"),
-        "regular_session_close_time": intraday_summary.get("regular_session_close_time"),
+        "regular_session_close_time": regular_session_close_time,
+        "regular_session_close_trade_date": _market_trade_date(
+            regular_session_close_time
+        ),
         "point_count": intraday_summary.get("point_count"),
     }
 
@@ -274,6 +349,8 @@ def _us_daily_quote(
     latest_daily: USDailyPrice | None,
     *,
     intraday_requested: bool,
+    calendar_status: dict[str, Any] | None = None,
+    requested_trade_date: str | None = None,
     instrument_type: str = "stock",
 ) -> dict[str, Any]:
     volume = latest_daily.trade_volume if latest_daily else None
@@ -281,18 +358,66 @@ def _us_daily_quote(
     if instrument_type == "index":
         volume = None
         volume_status = "provider_unavailable"
+    trade_date = latest_daily.trade_date.isoformat() if latest_daily else None
+    close_time = (
+        datetime.combine(
+            latest_daily.trade_date,
+            US_SESSION_CLOSE_TIME,
+            tzinfo=US_MARKET_TIMEZONE,
+        ).isoformat()
+        if latest_daily
+        else None
+    )
+    is_historical = requested_trade_date is not None
+    latest_session_date = str(
+        (calendar_status or {}).get("previous_trading_day") or ""
+    ) or None
+    is_latest_session_quote = bool(
+        not is_historical
+        and trade_date
+        and latest_session_date
+        and trade_date == latest_session_date
+    )
     quote = {
         "source": "us_daily_price",
+        "status": (
+            "missing"
+            if latest_daily is None
+            else "historical"
+            if is_historical
+            else "daily_close"
+        ),
         "price": latest_daily.close_price if latest_daily else None,
         "volume": volume,
+        "volume_unit": "shares" if volume is not None else None,
+        "volume_semantics": "daily_shares" if volume is not None else None,
         "volume_status": volume_status,
+        "currency": latest_daily.currency if latest_daily else "USD",
         "instrument_type": instrument_type,
-        "quote_time": latest_daily.trade_date.isoformat() if latest_daily else None,
+        "trade_date": trade_date,
+        "quote_time": close_time,
+        "quote_time_basis": "scheduled_regular_session_close",
+        "timezone": str(US_MARKET_TIMEZONE),
         "is_realtime": False,
+        "is_live": False,
+        "is_latest_session_quote": is_latest_session_quote,
+        "is_historical": is_historical,
         "latency_ms": None,
-        "session_phase": "daily_close" if latest_daily else None,
+        "market_status": "historical" if is_historical else "closed",
+        "current_session_phase": (calendar_status or {}).get("phase"),
+        "session_phase": "regular_session_close" if latest_daily else None,
+        "quote_semantics": (
+            "historical_regular_session_close"
+            if is_historical
+            else "regular_session_close"
+        ),
         "provider": latest_daily.provider if latest_daily else None,
+        "regular_session_close": latest_daily.close_price if latest_daily else None,
+        "regular_session_close_time": close_time,
+        "regular_session_close_trade_date": trade_date,
     }
+    if requested_trade_date is not None:
+        quote["requested_trade_date"] = requested_trade_date
     if intraday_requested:
         quote["fallback_reason"] = "live_quote_not_available"
     return quote
@@ -387,7 +512,21 @@ def read_us_stock_context(
     include_intraday = _market_data_bool(market_data_params, "include_intraday", False)
     payload_level = _market_payload_level(market_data_params)
     session_scope = _market_data_str(market_data_params, "session_scope", "regular") or "regular"
-    intraday_summary = _latest_tool_result(tool_runs, "us.read_intraday_trend")
+    requested_trade_date_value = parse_market_trade_date(
+        _market_data_str(market_data_params, "trade_date")
+    )
+    requested_trade_date = (
+        requested_trade_date_value.isoformat()
+        if requested_trade_date_value is not None
+        else None
+    )
+    if requested_trade_date is not None:
+        include_intraday = False
+    intraday_summary = (
+        None
+        if requested_trade_date is not None
+        else _latest_tool_result(tool_runs, "us.read_intraday_trend")
+    )
     stock = (
         db.query(USStockMaster)
         .filter(USStockMaster.symbol == normalized_symbol)
@@ -396,6 +535,8 @@ def read_us_stock_context(
     daily_rows = dependencies.us_market_service.list_us_daily_prices(
         db=db,
         symbol=normalized_symbol,
+        from_date=requested_trade_date_value,
+        to_date=requested_trade_date_value,
         limit=daily_limit,
     )
     latest_daily = _select_latest_daily(daily_rows)
@@ -445,6 +586,20 @@ def read_us_stock_context(
         missing.append("us_sec_company_fact")
     if sec_warning:
         warnings.append(sec_warning)
+    if requested_trade_date is not None and latest_daily is None:
+        requested_missing = "us_daily_price_requested_trade_date"
+        if requested_missing not in missing:
+            missing.append(requested_missing)
+        warnings.append(
+            "No US regular-session close is available for requested trade date "
+            f"{requested_trade_date}; OMI did not fall back to another date."
+        )
+    if requested_trade_date is not None and latest_daily is not None:
+        warnings.append(
+            "US daily close time is projected from the regular 16:00 "
+            "America/New_York schedule; the local fallback calendar does not "
+            "model special early-close sessions."
+        )
 
     if include_intraday and intraday_summary is None:
         try:
@@ -472,6 +627,7 @@ def read_us_stock_context(
             outputsize="compact",
             adjusted=False,
             provider=provider,
+            to_date=requested_trade_date_value,
         )
         if intraday_requested and session_scope != "regular":
             chart["requested_session_scope"] = session_scope
@@ -543,14 +699,19 @@ def read_us_stock_context(
     quote = intraday_quote or _us_daily_quote(
         latest_daily,
         intraday_requested=intraday_requested,
+        calendar_status=us_calendar_status,
+        requested_trade_date=requested_trade_date,
         instrument_type=instrument_type,
     )
     intraday_bars = _us_intraday_compact(intraday_summary, market_data_params=market_data_params)
     intraday_as_of = _us_intraday_latest_time(intraday_summary)
+    quote_as_of = quote.get("quote_time") if isinstance(quote, dict) else None
     envelope = {
         "kind": "us_stock_context",
         "generated_at": context_now.isoformat(),
-        "as_of": intraday_as_of or (latest_daily.trade_date.isoformat() if latest_daily else None),
+        "as_of": quote_as_of
+        or intraday_as_of
+        or (latest_daily.trade_date.isoformat() if latest_daily else requested_trade_date),
         "scope": {
             "target": {
                 "type": "us_stock",
@@ -563,6 +724,8 @@ def read_us_stock_context(
         "summary": {
             "latest_close": latest_daily.close_price if latest_daily else None,
             "latest_trade_date": latest_daily.trade_date.isoformat() if latest_daily else None,
+            "requested_trade_date": requested_trade_date,
+            "quote_semantics": quote.get("quote_semantics"),
             "latest_volume": (
                 None if is_index else latest_daily.trade_volume if latest_daily else None
             ),
@@ -694,12 +857,19 @@ def read_us_stock_context(
             "payload_level": payload_level,
             "requested_provider": provider,
             "selected_provider": selected_daily_provider,
+            "requested_trade_date": requested_trade_date,
             "intraday": intraday_summary or {},
             "include_intraday": intraday_requested,
             "intraday_available": bool(intraday_quote),
         },
         freshness={
-            "price": "current" if latest_daily or intraday_quote else "missing",
+            "price": (
+                "historical"
+                if requested_trade_date is not None and latest_daily
+                else "current"
+                if latest_daily or intraday_quote
+                else "missing"
+            ),
             "profile": "current" if profile else "missing",
             "chart": "current" if chart else "missing",
             "intraday": (

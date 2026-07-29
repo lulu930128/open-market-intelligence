@@ -24,6 +24,7 @@ from app.db.models import (
     WatchlistItem,
     SourceHealthSnapshot,
 )
+from app.jp_market import service as jp_market_service
 from app.jp_market.schemas import (
     JPMarketOverviewRead,
     JPSourceHealthRead,
@@ -825,6 +826,17 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(ranking["target_trade_date"], datetime(2026, 6, 18).date())
         self.assertEqual(ranking["coverage_status"], "current")
         self.assertFalse(ranking["refresh_recommended"])
+        self.assertEqual(
+            ranking["underlying_trade_date"],
+            datetime(2026, 6, 18).date(),
+        )
+        self.assertEqual(ranking["coverage_ratio"], 1.0)
+        self.assertFalse(ranking["is_live"])
+        self.assertTrue(ranking["is_full"])
+        self.assertEqual(
+            ranking["ranking_semantics"],
+            "latest_completed_daily_rows",
+        )
         self.assertEqual(ranking["results"][0]["symbol"], "7203.T")
         self.assertEqual(ranking["results"][0]["close"], 3060.0)
         self.assertEqual(ranking["results"][0]["change"], 60.0)
@@ -1367,6 +1379,25 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(result["volume_pace"]["market"], "JP")
         self.assertEqual(result["volume_pace"]["status"], "partial")
 
+        jp_market_service._jp_intraday_cache.clear()
+        with patch(
+            "app.jp_market.service.fetch_yahoo_chart_payload",
+            side_effect=AssertionError(
+                "cache-only replay must not call the provider"
+            ),
+        ) as fetch_again:
+            replay = get_jp_intraday_trend(
+                db=self.db,
+                symbol="7203.T",
+                refresh=False,
+                external_fetch_allowed=False,
+            )
+
+        fetch_again.assert_not_called()
+        self.assertEqual(replay["point_count"], 4)
+        self.assertEqual(replay["cache_status"], "persisted_hit")
+        self.assertTrue(replay["cache_hit"])
+
     def test_refresh_jp_watchlist_resources_refreshes_group_symbols(self) -> None:
         with (
             patch(
@@ -1608,6 +1639,24 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(overview["breadth"]["advance_count"], 1)
         self.assertEqual(overview["breadth"]["decline_count"], 1)
         self.assertEqual(overview["breadth"]["total_count"], 2)
+        self.assertEqual(overview["breadth"]["universe_count"], 4)
+        self.assertEqual(overview["breadth"]["coverage_count"], 2)
+        self.assertEqual(overview["breadth"]["coverage_ratio"], 0.5)
+        self.assertEqual(overview["breadth"]["classified_count"], 2)
+        self.assertEqual(overview["breadth"]["unknown_count"], 2)
+        self.assertEqual(overview["breadth"]["reconciliation_status"], "partial")
+        self.assertTrue(overview["breadth"]["direct_market_breadth"])
+        self.assertFalse(overview["breadth"]["proxy_used"])
+        self.assertFalse(overview["coverage"]["is_full_market"])
+        self.assertFalse(overview["breadth"]["is_full_market"])
+        self.assertEqual(
+            overview["breadth"]["universe_type"],
+            "active_local_stock_master",
+        )
+        self.assertIn(
+            "not_official_full_exchange_breadth",
+            overview["breadth"]["coverage_limitation"],
+        )
         self.assertEqual(overview["top_gainers"][0]["symbol"], "1111.T")
         self.assertEqual(overview["top_losers"][0]["symbol"], "2222.T")
         self.assertEqual(len(overview["indices"]), 2)
@@ -1760,7 +1809,12 @@ class JPMarketDataTests(unittest.TestCase):
                 },
             )
 
-        intraday_reader.assert_called_once_with(symbol="7203.T", db=self.db)
+        intraday_reader.assert_called_once_with(
+            symbol="7203.T",
+            db=self.db,
+            refresh=True,
+            external_fetch_allowed=True,
+        )
         compact = context["data"]["compact"]
         self.assertEqual(context["as_of"], "2026-07-15T10:00:00+09:00")
         self.assertFalse(compact["quote"]["is_realtime"])
@@ -1769,6 +1823,17 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(compact["quote"]["price"], 3080.0)
         self.assertTrue(compact["resources"]["include_intraday"])
         self.assertTrue(compact["resources"]["intraday_available"])
+        self.assertEqual(compact["intraday_readiness"]["status"], "limited")
+        self.assertFalse(
+            compact["intraday_readiness"]["usable_for_intraday"]
+        )
+        self.assertTrue(
+            compact["intraday_readiness"]["independent_of_daily"]
+        )
+        self.assertEqual(
+            compact["intraday_readiness"]["daily_dependency"],
+            "none",
+        )
         self.assertEqual(
             compact["freshness_by_domain"]["intraday"],
             "delayed",
@@ -1780,6 +1845,24 @@ class JPMarketDataTests(unittest.TestCase):
             intraday_bars["series"]["1m"]["points"][0]["price"],
             3080.0,
         )
+
+    def test_read_jp_stock_context_treats_null_chart_points_as_empty(self) -> None:
+        with patch(
+            "app.ai.agentic_tools.jp_market_service.list_jp_ohlc_chart_data",
+            return_value={
+                "symbol": "7203.T",
+                "timeframe": "daily",
+                "point_count": 0,
+                "points": None,
+                "is_current": False,
+                "latest_data_date": None,
+                "expected_data_date": "2026-07-27",
+            },
+        ):
+            context = read_jp_stock_context(db=self.db, symbol="7203")
+
+        self.assertEqual(context["data"]["compact"]["resources"]["chart_points"], 0)
+        self.assertIn("jp_daily_price", context["missing"])
 
     def test_jp_resource_summary_reports_fundamental_slots(self) -> None:
         upsert_jp_company_fundamental_records(

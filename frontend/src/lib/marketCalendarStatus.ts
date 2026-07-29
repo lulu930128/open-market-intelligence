@@ -9,8 +9,10 @@ export type MarketCalendarReleaseWindow = {
   release_at: string;
   next_release_at: string;
   expected_trade_date: string | null;
+  expected_data_key?: string | null;
   status: string;
   is_released: boolean;
+  assumption?: string | null;
 };
 
 export type MarketCalendarSession = {

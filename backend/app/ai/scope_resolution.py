@@ -6,41 +6,19 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.ai import decision_core
+from app.ai import decision_core, public_contract
 from app.ai.schemas import AiAskRequest
 from app.crypto_market.assets import crypto_asset_codes, get_crypto_asset
 from app.db.models import JPStockMaster, KRStockMaster, StockMaster, USStockMaster, WatchlistGroup
 from app.jp_market.sources import normalize_jp_symbol
 from app.kr_market.sources import KR_INDEX_CONFIG_BY_ID, normalize_kr_index_id, normalize_kr_symbol
+from app.market.tw_futures import normalize_taiwan_futures_symbols
 from app.resource_market.contract import list_resource_instruments, normalize_resource_symbol
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 
 
-VALID_TARGET_TYPES = {
-    "auto",
-    "market",
-    "data_freshness",
-    "tw_stock",
-    "tw_watchlist",
-    "tw_index",
-    "tw_futures",
-    "us_stock",
-    "jp_stock",
-    "jp_index",
-    "kr_stock",
-    "kr_index",
-    "crypto_market",
-    "crypto_asset",
-    "resource_asset",
-    "portfolio",
-    "us_macro",
-    "us_watchlist",
-    "jp_watchlist",
-    "kr_watchlist",
-    "source_health",
-    "capability_status",
-}
+VALID_TARGET_TYPES = set(public_contract.PUBLIC_TARGET_TYPES)
 TAIWAN_INDEX_TARGET_IDS = {"TAIEX", "TPEX"}
 TAIWAN_FUTURES_TARGET_IDS = {"TXF", "MXF", "TMF"}
 JP_INDEX_TARGET_IDS = {"^N225", "1306.T"}
@@ -54,12 +32,19 @@ JP_INDEX_TARGET_ALIASES = {
 }
 KR_INDEX_TARGET_IDS = set(KR_INDEX_CONFIG_BY_ID)
 DEFAULT_MARKET_CONTEXTS = {
-    "TW": ("market", None, "Taiwan Market"),
-    "US": ("us_stock", "^GSPC", "S&P 500"),
-    "JP": ("jp_index", "^N225", "Nikkei 225"),
-    "KR": ("kr_index", "KOSPI", "KOSPI"),
+    "TW": ("market", "TW", "Taiwan Market"),
+    "US": ("market", "US", "United States Market"),
+    "JP": ("market", "JP", "Japan Market"),
+    "KR": ("market", "KR", "Korea Market"),
     "CRYPTO": ("crypto_market", None, "Crypto Market"),
 }
+
+
+def _normalize_taiwan_futures_target(value: Any) -> str | None:
+    try:
+        return normalize_taiwan_futures_symbols([str(value or "").strip()])[0]
+    except (IndexError, ValueError):
+        return None
 JP_MARKET_CONTEXT_HINTS = (
     "\u65e5\u80a1",
     "\u65e5\u672c",
@@ -154,52 +139,12 @@ US_MACRO_QUESTION_ALIASES = (
     (("cpi", "美國消費者物價", "美國消費者價格"), "CPIAUCSL"),
     (("unrate", "u.s. unemployment", "us unemployment", "美國失業率"), "UNRATE"),
 )
-INTERNAL_SCOPE_TO_TARGET_TYPE = {
-    "market": "market",
-    "data_freshness": "data_freshness",
-    "stock": "tw_stock",
-    "watchlist": "tw_watchlist",
-    "tw_index": "tw_index",
-    "tw_futures": "tw_futures",
-    "us_stock": "us_stock",
-    "jp_stock": "jp_stock",
-    "jp_index": "jp_index",
-    "kr_stock": "kr_stock",
-    "kr_index": "kr_index",
-    "crypto_market": "crypto_market",
-    "crypto_asset": "crypto_asset",
-    "resource_asset": "resource_asset",
-    "portfolio": "portfolio",
-    "us_macro": "us_macro",
-    "us_watchlist": "us_watchlist",
-    "jp_watchlist": "jp_watchlist",
-    "kr_watchlist": "kr_watchlist",
-    "source_health": "source_health",
-    "capability_status": "capability_status",
-}
-TARGET_TYPE_TO_INTERNAL_SCOPE = {
-    "market": "market",
-    "data_freshness": "data_freshness",
-    "tw_stock": "stock",
-    "tw_watchlist": "watchlist",
-    "tw_index": "tw_index",
-    "tw_futures": "tw_futures",
-    "us_stock": "us_stock",
-    "jp_stock": "jp_stock",
-    "jp_index": "jp_index",
-    "kr_stock": "kr_stock",
-    "kr_index": "kr_index",
-    "crypto_market": "crypto_market",
-    "crypto_asset": "crypto_asset",
-    "resource_asset": "resource_asset",
-    "portfolio": "portfolio",
-    "us_macro": "us_macro",
-    "us_watchlist": "us_watchlist",
-    "jp_watchlist": "jp_watchlist",
-    "kr_watchlist": "kr_watchlist",
-    "source_health": "source_health",
-    "capability_status": "capability_status",
-}
+INTERNAL_SCOPE_TO_TARGET_TYPE = dict(
+    public_contract.INTERNAL_SCOPE_TO_TARGET_TYPE
+)
+TARGET_TYPE_TO_INTERNAL_SCOPE = dict(
+    public_contract.TARGET_TYPE_TO_INTERNAL_SCOPE
+)
 REPORT_HINTS = decision_core.REPORT_HINTS
 ANALYSIS_HINTS = decision_core.ANALYSIS_HINTS
 FRESHNESS_HINTS = decision_core.FRESHNESS_HINTS
@@ -1460,6 +1405,11 @@ def _clarify_scope(scope_type: str, question: str, reason: str) -> ScopeResoluti
         clarification_question = "你想看哪一個台股指數？目前支援 TAIEX 或 TPEX。"
     elif scope_type == "tw_futures":
         clarification_question = "你想看哪一個台指期商品？目前支援 TXF、MXF 或 TMF。"
+    elif scope_type == "resource_asset":
+        clarification_question = (
+            "你想查哪一個商品或貨幣資產？"
+            "可提供 canonical symbol、Yahoo symbol 或中文名稱，例如 GC、GC=F、黃金。"
+        )
     elif scope_type == "stock":
         clarification_question = "你想看哪一檔股票？請提供股票代號或股票名稱。"
     else:
@@ -1487,7 +1437,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     if requested_target_type != "auto":
         if requested_target_type == "market":
             return _default_market_context_resolution(
-                target_market or "TW",
+                target_market or target_id or "TW",
                 source="explicit_market_context",
                 label=requested_label,
             )
@@ -1565,8 +1515,8 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             target_id = normalized_index_id
 
         if scope_type == "tw_futures":
-            normalized_futures_symbol = str(target_id or "").strip().upper()
-            if normalized_futures_symbol not in TAIWAN_FUTURES_TARGET_IDS:
+            normalized_futures_symbol = _normalize_taiwan_futures_target(target_id)
+            if normalized_futures_symbol is None:
                 return _clarify_scope(
                     scope_type,
                     question,
@@ -1813,7 +1763,9 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 ),
             )
 
-        if normalized_target_id in TAIWAN_FUTURES_TARGET_IDS:
+        normalized_futures_target = _normalize_taiwan_futures_target(target_id)
+        if normalized_futures_target in TAIWAN_FUTURES_TARGET_IDS:
+            normalized_target_id = normalized_futures_target
             label = requested_label or f"{normalized_target_id} 台指期"
             return ScopeResolution(
                 selected_scope_type="tw_futures",

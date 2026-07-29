@@ -11,11 +11,132 @@ from app.ai.market_context.crypto_context import (
     _crypto_core_source_health_status,
     _crypto_health_status,
     _crypto_market_cap_matches_asset,
+    _crypto_ohlcv_projection,
 )
 from app.crypto_market.assets import get_crypto_asset
 
 
 class AIMarketContextProjectionTests(unittest.TestCase):
+    def test_crypto_ohlcv_projection_sorts_ascending_and_declares_units(self) -> None:
+        rows = [
+            SimpleNamespace(
+                provider="binance",
+                exchange="Binance",
+                symbol="BTC-USDT",
+                instrument_type="spot",
+                interval="1m",
+                bar_time="2026-07-28T02:13:00Z",
+                open_price=101,
+                high_price=102,
+                low_price=100,
+                close_price=101.5,
+                base_volume=2.5,
+                quote_volume=253.75,
+                base_asset="BTC",
+                quote_asset="USDT",
+                fetched_at="2026-07-28T02:13:05Z",
+            ),
+            SimpleNamespace(
+                provider="binance",
+                exchange="Binance",
+                symbol="BTC-USDT",
+                instrument_type="spot",
+                interval="1m",
+                bar_time="2026-07-28T02:12:00Z",
+                open_price=100,
+                high_price=101,
+                low_price=99,
+                close_price=100.5,
+                base_volume=2,
+                quote_volume=201,
+                base_asset="BTC",
+                quote_asset="USDT",
+                fetched_at="2026-07-28T02:12:05Z",
+            ),
+        ]
+
+        projected = _crypto_ohlcv_projection(rows)
+
+        self.assertEqual(
+            [item["bar_time"] for item in projected],
+            ["2026-07-28T02:12:00Z", "2026-07-28T02:13:00Z"],
+        )
+        self.assertEqual(projected[-1]["base_volume_unit"], "BTC")
+        self.assertEqual(projected[-1]["quote_volume_unit"], "USDT")
+        self.assertEqual(
+            projected[-1]["volume_semantics"],
+            "interval_base_and_quote_volume",
+        )
+
+    def test_taiwan_quote_compact_preserves_depth_contract(self) -> None:
+        bid_levels = [
+            {
+                "level": 1,
+                "price": 2325.0,
+                "volume_lots": 100,
+                "order_count": None,
+                "order_count_status": "not_provided",
+            }
+        ]
+        ask_levels = [
+            {
+                "level": 1,
+                "price": 2330.0,
+                "volume_lots": 80,
+                "order_count": None,
+                "order_count_status": "not_provided",
+            }
+        ]
+        quote = taiwan_projection._compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth={
+                "source": "twse_mis_quote_depth",
+                "provider": "twse_mis",
+                "trade_date": "2026-07-27",
+                "quote_time": "2026-07-27T11:00:00+08:00",
+                "last_trade_price": 2325.0,
+                "price_available": True,
+                "depth_available": True,
+                "bid_levels": bid_levels,
+                "ask_levels": ask_levels,
+                "bid_depth": bid_levels,
+                "ask_depth": ask_levels,
+                "best_bid_price": 2325.0,
+                "best_ask_price": 2330.0,
+                "top5_bid_volume_lots": 500,
+                "top5_ask_volume_lots": 400,
+                "top5_imbalance": 1 / 9,
+                "depth_volume_unit": "lots",
+                "depth_order_count_status": "not_provided",
+                "indicative_unmatched_buy_volume_lots": None,
+                "indicative_unmatched_sell_volume_lots": None,
+                "indicative_unmatched_status": "not_provided",
+                "freshness": {
+                    "status": "live",
+                    "is_live": True,
+                    "is_stale": False,
+                },
+            },
+            quote_error=None,
+        )
+
+        self.assertEqual(quote["bid_levels"], bid_levels)
+        self.assertEqual(quote["ask_levels"], ask_levels)
+        self.assertEqual(quote["top5_bid_volume_lots"], 500)
+        self.assertEqual(quote["top5_ask_volume_lots"], 400)
+        self.assertAlmostEqual(quote["top5_imbalance"], 1 / 9)
+        self.assertEqual(
+            quote["depth_order_count_status"],
+            "not_provided",
+        )
+        self.assertIsNone(
+            quote["indicative_unmatched_buy_volume_lots"]
+        )
+        self.assertEqual(
+            quote["indicative_unmatched_status"],
+            "not_provided",
+        )
+
     def test_taiwan_market_breadth_combines_twse_and_tpex(self) -> None:
         summary = {
             "as_of": "2026-07-22T13:30:00+08:00",
@@ -73,9 +194,112 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(breadth["decline_count"], 721)
         self.assertEqual(breadth["total_count"], 1928)
         self.assertEqual(breadth["trade_value"], 1_212_272_846_003)
+        self.assertEqual(breadth["universe_count"], 1928)
+        self.assertEqual(breadth["coverage_count"], 1928)
+        self.assertEqual(breadth["coverage_ratio"], 1.0)
+        self.assertEqual(breadth["classified_count"], 1928)
+        self.assertEqual(breadth["unknown_count"], 0)
+        self.assertEqual(breadth["reconciliation_status"], "balanced")
+        self.assertTrue(breadth["trade_value_available"])
+        self.assertTrue(breadth["trade_value_complete"])
+        self.assertEqual(breadth["trade_value_status"], "complete")
+        self.assertEqual(
+            breadth["trade_value_included_markets"],
+            ["TWSE", "TPEX"],
+        )
+        self.assertEqual(breadth["trade_value_missing_markets"], [])
+        self.assertEqual(breadth["market_completion_ratio"], 1.0)
+        self.assertEqual(
+            breadth["close_reconciliation"]["status"],
+            "confirmed",
+        )
         self.assertEqual(breadth["markets"]["TWSE"]["total_count"], 1062)
         self.assertEqual(breadth["markets"]["TPEX"]["total_count"], 866)
         self.assertEqual(refs, [{"type": "derived", "name": "app.market.indices.summary"}])
+
+    def test_taiwan_market_breadth_keeps_partial_trade_value_visible(self) -> None:
+        summary = {
+            "as_of": "2026-07-22T13:30:00+08:00",
+            "indices": [
+                {
+                    "index_id": "TAIEX",
+                    "breadth": {
+                        "market": "TWSE",
+                        "scope": "full_market",
+                        "trade_date": "2026-07-22",
+                        "advance_count": 5,
+                        "decline_count": 4,
+                        "unchanged_count": 1,
+                        "total_count": 10,
+                        "trade_value": 1_000,
+                        "source": "twse_official",
+                    },
+                    "breadth_status": {"status": "ready"},
+                }
+            ],
+        }
+        breadth = taiwan_market._market_breadth_from_index_summary(
+            db=SimpleNamespace(),
+            dependencies=SimpleNamespace(
+                get_market_index_summary=lambda *_args, **_kwargs: summary
+            ),
+            warnings=[],
+            source_refs=[],
+        )
+
+        self.assertEqual(breadth["status"], "partial")
+        self.assertEqual(breadth["included_markets"], ["TWSE"])
+        self.assertEqual(breadth["missing_markets"], ["TPEX"])
+        self.assertTrue(breadth["trade_value_available"])
+        self.assertFalse(breadth["trade_value_complete"])
+        self.assertEqual(breadth["trade_value_status"], "partial")
+        self.assertEqual(breadth["trade_value"], 1_000)
+        self.assertEqual(breadth["trade_value_missing_markets"], ["TPEX"])
+        self.assertEqual(breadth["market_completion_ratio"], 0.5)
+
+    def test_taiwan_market_breadth_bounds_mismatched_coverage_ratio(self) -> None:
+        warnings: list[str] = []
+        breadth = taiwan_market._market_breadth_from_index_summary(
+            db=SimpleNamespace(),
+            dependencies=SimpleNamespace(
+                get_market_index_summary=lambda *_args, **_kwargs: {
+                    "as_of": "2026-07-22T13:30:00+08:00",
+                    "indices": [
+                        {
+                            "index_id": "TAIEX",
+                            "breadth": {
+                                "market": "TWSE",
+                                "scope": "registered_universe",
+                                "trade_date": "2026-07-22",
+                                "advance_count": 6,
+                                "decline_count": 4,
+                                "unchanged_count": 1,
+                                "total_count": 11,
+                                "universe_count": 10,
+                                "source": "mixed_snapshot",
+                            },
+                            "breadth_status": {"status": "ready"},
+                        }
+                    ],
+                }
+            ),
+            warnings=warnings,
+            source_refs=[],
+        )
+
+        self.assertEqual(breadth["coverage_ratio"], 1.0)
+        self.assertEqual(breadth["coverage_ratio_raw"], 1.1)
+        self.assertTrue(breadth["coverage_overflow"])
+        self.assertEqual(
+            breadth["coverage_issue"],
+            "coverage_count_exceeds_universe",
+        )
+        self.assertEqual(breadth["status"], "partial")
+        self.assertEqual(
+            breadth["markets"]["TWSE"]["reconciliation_status"],
+            "inconsistent",
+        )
+        self.assertTrue(any("bounded to 1.0" in warning for warning in warnings))
 
     def test_sample_derived_market_slots_are_partial_when_coverage_is_partial(self) -> None:
         slots = taiwan_projection._build_tw_market_slots(

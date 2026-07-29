@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.ai import capability_contract
+from app.ai import capability_contract, contract_manifest, public_contract
 
 
 CAPABILITY_ID_SCHEMA: dict[str, Any] = {
@@ -60,6 +60,19 @@ CAPABILITY_SELECTION_SCHEMA: dict[str, Any] = {
                 "minimum": 1,
                 "maximum": 500,
             },
+        },
+        "parameters": {
+            "type": "object",
+            "description": (
+                "Capability-keyed typed query parameters. Only capabilities with a "
+                "registered parameter schema accept entries here."
+            ),
+            "properties": {
+                spec.capability_id: spec.parameter_schema
+                for spec in capability_contract.CAPABILITY_SPECS
+                if spec.parameter_schema
+            },
+            "additionalProperties": False,
         },
         "max_response_bytes": {
             "type": "integer",
@@ -143,30 +156,9 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "properties": {
                                 "type": {
                                     "type": "string",
-                                    "enum": [
-                                        "auto",
-                                        "market",
-                                        "data_freshness",
-                                        "tw_stock",
-                                        "tw_watchlist",
-                                        "tw_index",
-                                        "tw_futures",
-                                        "us_stock",
-                                        "jp_stock",
-                                        "jp_index",
-                                        "kr_stock",
-                                        "kr_index",
-                                        "crypto_market",
-                                        "crypto_asset",
-                                        "resource_asset",
-                                        "portfolio",
-                                        "us_macro",
-                                        "us_watchlist",
-                                        "jp_watchlist",
-                                        "kr_watchlist",
-                                        "source_health",
-                                        "capability_status",
-                                    ],
+                                    "enum": list(
+                                        public_contract.PUBLIC_TARGET_TYPES
+                                    ),
                                     "default": "auto",
                                 },
                                 "id": {"type": "string"},
@@ -298,7 +290,8 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "description": (
                                 "Optional bounded market-data parameters for readers, for example "
                                 "provider, providers, symbols, symbol, instrument_type, interval, timeframe, bars, "
-                                "include_intraday, payload_level, intraday_limit, observations, holding_limit, "
+                                "include_intraday, payload_level, intraday_limit, session_scope, trade_date, "
+                                "observations, holding_limit, "
                                 "health_limit, radar_limit, market, resource, target, or limit."
                             ),
                             "properties": {
@@ -309,6 +302,35 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                     "default": "compact",
                                 },
                                 "intraday_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                                "intraday_interval": {
+                                    "type": "string",
+                                    "enum": ["1m", "5m", "15m", "30m", "1h", "4h"],
+                                    "description": (
+                                        "Requested intraday bar interval. Responses expose "
+                                        "requested_interval, source_interval, and effective_interval."
+                                    ),
+                                },
+                                "interval": {
+                                    "type": "string",
+                                    "enum": ["1m", "5m", "15m", "30m", "1h", "4h"],
+                                    "description": (
+                                        "Compatibility alias for intraday_interval. "
+                                        "Prefer intraday_interval for new callers."
+                                    ),
+                                },
+                                "session_scope": {
+                                    "type": "string",
+                                    "enum": ["regular", "extended", "all"],
+                                    "default": "regular",
+                                },
+                                "trade_date": {
+                                    "type": "string",
+                                    "pattern": r"^\d{4}-\d{2}-\d{2}$",
+                                    "description": (
+                                        "Target-market trade date. US dates use "
+                                        "America/New_York exchange dates."
+                                    ),
+                                },
                                 "observations": {"type": "integer", "minimum": 1, "maximum": 240},
                                 "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
                                 "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
@@ -347,8 +369,22 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     },
                     "required": ["question"],
                     "additionalProperties": False,
-                    "x-omi-capability-registry-version": "omi.capability.registry.v1",
-                    "x-omi-capabilities": capability_contract.capability_catalog(),
+                    "x-omi-capability-registry-version": (
+                        public_contract.CAPABILITY_REGISTRY_VERSION
+                    ),
+                    "x-omi-capability-selection-version": (
+                        public_contract.CAPABILITY_SELECTION_VERSION
+                    ),
+                    "x-omi-capability-registry-digest": (
+                        contract_manifest.public_contract_manifest()["digest"]
+                    ),
+                    "x-omi-public-contract-digest": (
+                        contract_manifest.public_contract_manifest()["digest"]
+                    ),
+                    "x-omi-targets": public_contract.target_catalog(),
+                    "x-omi-capabilities": (
+                        capability_contract.capability_catalog()
+                    ),
                 },
             },
             {
@@ -440,7 +476,26 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string"},
-                        "market_data_params": {"type": "object"},
+                        "market_data_params": {
+                            "type": "object",
+                            "properties": {
+                                "include_intraday": {"type": "boolean", "default": False},
+                                "session_scope": {
+                                    "type": "string",
+                                    "enum": ["regular", "extended", "all"],
+                                    "default": "regular",
+                                },
+                                "trade_date": {
+                                    "type": "string",
+                                    "pattern": r"^\d{4}-\d{2}-\d{2}$",
+                                    "description": (
+                                        "US exchange trade date in America/New_York; "
+                                        "an exact close request never falls back."
+                                    ),
+                                },
+                            },
+                            "additionalProperties": True,
+                        },
                     },
                     "required": ["symbol"],
                 },

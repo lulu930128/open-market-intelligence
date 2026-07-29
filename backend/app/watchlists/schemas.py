@@ -250,6 +250,19 @@ class WatchlistGroupRankingRead(BaseModel):
     current_stock_count: int = 0
     stale_stock_count: int = 0
 
+    underlying_trade_date: date | None = None
+    coverage_ratio: float = 1.0
+    is_live: bool = False
+    is_full: bool = False
+    is_live_ranking: bool = False
+    is_full_requested_universe: bool = False
+    is_full_market: bool = False
+    ranking_universe_type: str = "requested_watchlist"
+    ranking_universe_count: int = 0
+    ranking_returned_count: int = 0
+    ranking_coverage_ratio: float = 1.0
+    ranking_semantics: str = "latest_completed_daily_rows"
+
     results: list[WatchlistRankingItemRead]
 
 

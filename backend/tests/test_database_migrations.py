@@ -96,6 +96,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertTrue({"report_date", "released_at", "filed_at"}.issubset(financial_columns))
             self.assertIn("market_intraday_bar", table_names)
             self.assertIn("taiwan_stock_quote_snapshot", table_names)
+            self.assertIn("taiwan_quote_contract_snapshot", table_names)
             self.assertIn("chart_drawing_snapshot", table_names)
             self.assertIn("taiwan_futures_quote_snapshot", table_names)
             self.assertIn("taiwan_futures_intraday_bar", table_names)

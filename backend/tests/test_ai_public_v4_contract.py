@@ -54,3 +54,74 @@ class AiPublicV4ContractTests(unittest.TestCase):
             ]["$ref"],
             "#/components/schemas/AiDecisionEnvelopeV4",
         )
+
+    def test_openapi_exposes_us_exchange_trade_date_on_context_and_brief(self) -> None:
+        schema = app.openapi()
+
+        for path in (
+            "/api/ai/us-stocks/{symbol}/context",
+            "/api/ai/us-stocks/{symbol}/brief",
+        ):
+            with self.subTest(path=path):
+                parameters = {
+                    parameter["name"]: parameter
+                    for parameter in schema["paths"][path]["get"]["parameters"]
+                }
+                trade_date = parameters["trade_date"]
+                self.assertEqual(
+                    trade_date["description"],
+                    "US exchange trade date in America/New_York (YYYY-MM-DD).",
+                )
+                self.assertEqual(
+                    trade_date["schema"]["anyOf"][0]["format"],
+                    "date",
+                )
+
+    def test_openapi_exposes_taiwan_intraday_interval_and_metadata(self) -> None:
+        schema = app.openapi()
+
+        for path in (
+            "/api/ai/stocks/{stock_id}/context",
+            "/api/ai/stocks/{stock_id}/brief",
+        ):
+            with self.subTest(path=path):
+                parameters = {
+                    parameter["name"]: parameter
+                    for parameter in schema["paths"][path]["get"]["parameters"]
+                }
+                interval = parameters["intraday_interval"]
+                self.assertEqual(
+                    interval["schema"]["anyOf"][0]["pattern"],
+                    "^(1m|5m|15m|30m|1h|4h)$",
+                )
+
+        history = schema["components"]["schemas"]["MarketIntradayChartRead"]
+        self.assertTrue(
+            {
+                "requested_interval",
+                "source_interval",
+                "effective_interval",
+                "interval_status",
+                "cache_status",
+                "cache_hit",
+                "cache_trade_date",
+                "cache_latest_time",
+                "fallback_used",
+            }
+            <= set(history["properties"])
+        )
+
+    def test_openapi_exposes_read_only_taiwan_index_contract_replay(
+        self,
+    ) -> None:
+        schema = app.openapi()
+        operation = schema["paths"][
+            "/api/market/index/{index_id}/contract-replay"
+        ]["get"]
+
+        self.assertEqual(
+            operation["responses"]["200"]["content"]["application/json"][
+                "schema"
+            ]["$ref"],
+            "#/components/schemas/TaiwanIndexContractReplayRead",
+        )

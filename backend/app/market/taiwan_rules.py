@@ -22,9 +22,9 @@ from app.market.trading_calendar import (
 
 
 TAIWAN_DAILY_PRICE_RELEASE_TIME = time(hour=15, minute=15)
-TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME = time(hour=15, minute=10)
-TAIWAN_MARGIN_TRADE_RELEASE_TIME = time(hour=21, minute=10)
-TAIWAN_BROKER_BRANCH_RELEASE_TIME = time(hour=15, minute=10)
+TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME = time(hour=20, minute=0)
+TAIWAN_MARGIN_TRADE_RELEASE_TIME = time(hour=21, minute=0)
+TAIWAN_BROKER_BRANCH_RELEASE_TIME = time(hour=16, minute=0)
 TAIWAN_SHAREHOLDING_RELEASE_TIME = time(hour=12, minute=0)
 TAIWAN_DEFAULT_DAILY_METRIC_RELEASE_TIME = TAIWAN_MARGIN_TRADE_RELEASE_TIME
 
@@ -248,6 +248,148 @@ def expected_monthly_revenue_period(
     return date(year, month, 1)
 
 
+def expected_financial_metrics_period(
+    *,
+    include_today: bool | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Return the latest fiscal quarter whose statutory deadline has ended.
+
+    The general Taiwan public-company deadlines are three months after year
+    end and 45 days after Q1/Q2/Q3.  OMI advances the expected key at 00:00 on
+    the following day so the filing deadline itself remains fully available.
+    """
+    del include_today
+    local_now = now or datetime.now(TAIWAN_TZ)
+    if local_now.tzinfo is not None:
+        local_now = local_now.astimezone(TAIWAN_TZ)
+    current = local_now.date()
+    year = current.year
+
+    if current >= date(year, 11, 15):
+        return f"{year}Q3"
+    if current >= date(year, 8, 15):
+        return f"{year}Q2"
+    if current >= date(year, 5, 16):
+        return f"{year}Q1"
+    if current >= date(year, 4, 1):
+        return f"{year - 1}Q4"
+    return f"{year - 1}Q3"
+
+
+def monthly_revenue_release_window(
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Expose the conservative market-wide MOPS revenue deadline."""
+    local_now = now or datetime.now(TAIWAN_TZ)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=TAIWAN_TZ)
+    else:
+        local_now = local_now.astimezone(TAIWAN_TZ)
+    current_date = local_now.date()
+    current_boundary = datetime(
+        current_date.year,
+        current_date.month,
+        16,
+        tzinfo=TAIWAN_TZ,
+    )
+    if local_now >= current_boundary:
+        next_month = current_date.month + 1
+        next_year = current_date.year
+        if next_month > 12:
+            next_month = 1
+            next_year += 1
+        release_at = current_boundary
+        next_release_at = datetime(
+            next_year,
+            next_month,
+            16,
+            tzinfo=TAIWAN_TZ,
+        )
+        status = "released"
+    else:
+        previous_month = current_date.month - 1
+        previous_year = current_date.year
+        if previous_month < 1:
+            previous_month = 12
+            previous_year -= 1
+        release_at = datetime(
+            previous_year,
+            previous_month,
+            16,
+            tzinfo=TAIWAN_TZ,
+        )
+        next_release_at = current_boundary
+        status = "pending"
+    expected_period = expected_monthly_revenue_period(now=local_now)
+    expected_key = expected_period.isoformat()
+    return {
+        "key": TAIWAN_DATASET_MONTHLY_REVENUE,
+        "label": "Monthly revenue",
+        "release_time": "00:00",
+        "release_at": release_at.isoformat(),
+        "next_release_at": next_release_at.isoformat(),
+        "expected_trade_date": expected_key,
+        "expected_data_key": expected_key,
+        "status": status,
+        "is_released": status == "released",
+        "assumption": "market_wide_insurance_deadline",
+    }
+
+
+def financial_metrics_release_window(
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Expose the latest completed general financial filing deadline."""
+    local_now = now or datetime.now(TAIWAN_TZ)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=TAIWAN_TZ)
+    else:
+        local_now = local_now.astimezone(TAIWAN_TZ)
+    year = local_now.year
+    boundaries: list[tuple[datetime, str]] = []
+    for candidate_year in range(year - 1, year + 2):
+        boundaries.extend(
+            [
+                (
+                    datetime(candidate_year, 4, 1, tzinfo=TAIWAN_TZ),
+                    f"{candidate_year - 1}Q4",
+                ),
+                (
+                    datetime(candidate_year, 5, 16, tzinfo=TAIWAN_TZ),
+                    f"{candidate_year}Q1",
+                ),
+                (
+                    datetime(candidate_year, 8, 15, tzinfo=TAIWAN_TZ),
+                    f"{candidate_year}Q2",
+                ),
+                (
+                    datetime(candidate_year, 11, 15, tzinfo=TAIWAN_TZ),
+                    f"{candidate_year}Q3",
+                ),
+            ]
+        )
+    boundaries.sort(key=lambda item: item[0])
+    released = [item for item in boundaries if item[0] <= local_now]
+    pending = [item for item in boundaries if item[0] > local_now]
+    release_at, expected_key = released[-1]
+    next_release_at, _ = pending[0]
+    return {
+        "key": TAIWAN_DATASET_FINANCIAL_METRICS,
+        "label": "Quarterly financial metrics",
+        "release_time": "00:00",
+        "release_at": release_at.isoformat(),
+        "next_release_at": next_release_at.isoformat(),
+        "expected_trade_date": None,
+        "expected_data_key": expected_key,
+        "status": "released",
+        "is_released": True,
+        "assumption": "general_statutory_filing_deadline",
+    }
+
+
 TAIWAN_DATASET_DAILY_PRICE = "market_daily_price"
 TAIWAN_DATASET_INSTITUTIONAL_TRADE = "institutional_trade_daily"
 TAIWAN_DATASET_MARGIN_TRADING = "margin_trading_daily"
@@ -461,11 +603,14 @@ __all__ = [
     "expected_date_for_dataset",
     "expected_institutional_trade_date",
     "expected_margin_trade_date",
+    "expected_financial_metrics_period",
     "expected_monthly_revenue_period",
     "expected_shareholding_distribution_date",
     "is_equity_only_dataset_required",
     "normalize_refresh_profile",
     "refresh_profile_step_count",
     "refresh_profile_steps",
+    "financial_metrics_release_window",
+    "monthly_revenue_release_window",
     "shareholding_distribution_release_window",
 ]

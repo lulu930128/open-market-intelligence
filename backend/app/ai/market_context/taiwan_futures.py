@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -175,6 +176,97 @@ def _bounded_chart(chart: dict[str, Any] | None, *, point_limit: int) -> dict[st
     return output
 
 
+def _taipei_timestamp(value: Any) -> Any:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return value
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+    return parsed.isoformat()
+
+
+def _futures_volume_chart(
+    chart: dict[str, Any] | None,
+    *,
+    point_limit: int,
+) -> dict[str, Any] | None:
+    output = _bounded_chart(chart, point_limit=point_limit)
+    if not isinstance(output, dict):
+        return None
+    source_points = (
+        chart.get("points")
+        if isinstance(chart, dict) and isinstance(chart.get("points"), list)
+        else []
+    )
+    points = output.get("points") if isinstance(output.get("points"), list) else []
+    has_volume = False
+    sessions: list[str] = []
+    normalized_points: list[dict[str, Any]] = []
+    for raw_point in points:
+        if not isinstance(raw_point, dict):
+            continue
+        point = dict(raw_point)
+        point["time"] = _taipei_timestamp(point.get("time"))
+        volume_contracts = point.get("volume_contracts")
+        if volume_contracts is None:
+            volume_contracts = point.get("volume")
+        point["volume_contracts"] = volume_contracts
+        point["volume_unit"] = "contracts"
+        point["volume_semantics"] = "interval_contracts"
+        point["volume_status"] = (
+            "available" if volume_contracts is not None else "missing"
+        )
+        has_volume = has_volume or volume_contracts is not None
+        session = str(point.get("session") or "").strip()
+        if session and session not in sessions:
+            sessions.append(session)
+        normalized_points.append(point)
+    output["points"] = normalized_points
+    output["volume_unit"] = "contracts"
+    output["volume_semantics"] = "interval_contracts"
+    output["volume_status"] = "available" if has_volume else "missing"
+    output["session"] = sessions[0] if len(sessions) == 1 else None
+    output["sessions"] = sessions
+    latest_volume_point = next(
+        (
+            point
+            for point in reversed(source_points)
+            if isinstance(point, dict)
+            and (
+                point.get("volume_contracts") is not None
+                or point.get("volume") is not None
+            )
+        ),
+        None,
+    )
+    output["volume_contracts"] = (
+        latest_volume_point.get("volume_contracts")
+        if isinstance(latest_volume_point, dict)
+        and latest_volume_point.get("volume_contracts") is not None
+        else latest_volume_point.get("volume")
+        if isinstance(latest_volume_point, dict)
+        else None
+    )
+    output["volume_event_time"] = (
+        _taipei_timestamp(latest_volume_point.get("time"))
+        if isinstance(latest_volume_point, dict)
+        else None
+    )
+    output["volume_status"] = (
+        "available" if latest_volume_point is not None else "missing"
+    )
+    output["from_date"] = _taipei_timestamp(output.get("from_date"))
+    output["to_date"] = _taipei_timestamp(output.get("to_date"))
+    return output
+
+
 def _build_tw_futures_compact(
     *,
     symbol: str,
@@ -194,6 +286,17 @@ def _build_tw_futures_compact(
     quote_status = _slot_status_from_payload(
         raw_quote.get("last_price"),
         explicit_status=quote_freshness,
+    )
+    quote_domain_freshness = {
+        **quote_freshness,
+        "dataset": "quote.snapshot",
+        "capability": "quote.snapshot",
+        "latest": raw_quote.get("quote_time"),
+    }
+    quote_domain_freshness.setdefault("status", quote_status)
+    quote_domain_freshness.setdefault(
+        "is_current",
+        quote_status == "ready" and quote_freshness.get("is_stale") is not True,
     )
     daily_status = _slot_status_from_payload((latest_daily or {}).get("close_price"))
     intraday_status = _slot_status_from_payload(intraday_chart) if intraday_chart else "not_requested"
@@ -280,6 +383,14 @@ def _build_tw_futures_compact(
     }
     quote["settlement_price"] = _nonzero_optional(raw_quote.get("settlement_price"))
     quote["open_interest"] = _nonzero_optional(raw_quote.get("open_interest"))
+    quote["total_volume_contracts"] = raw_quote.get("total_volume")
+    quote["volume_unit"] = "contracts"
+    quote["volume_semantics"] = "session_cumulative_contracts"
+    quote["volume_status"] = (
+        "available"
+        if quote["total_volume_contracts"] is not None
+        else "missing"
+    )
     quote["field_status"] = {
         "settlement_price": "ready" if quote["settlement_price"] is not None else "missing",
         "open_interest": "ready" if quote["open_interest"] is not None else "missing",
@@ -401,7 +512,10 @@ def _build_tw_futures_compact(
         },
         "daily_close": daily_close,
         "daily_chart": _bounded_chart(daily_chart, point_limit=point_limit),
-        "intraday_chart": _bounded_chart(intraday_chart, point_limit=point_limit),
+        "intraday_chart": _futures_volume_chart(
+            intraday_chart,
+            point_limit=point_limit,
+        ),
         "technical": {"analysis": analysis},
         "institutional_position": institutional_position,
         "options_sentiment": options_sentiment,
@@ -411,6 +525,8 @@ def _build_tw_futures_compact(
         },
         "derivatives": _compact_derivatives_summary(derivatives),
         "freshness_by_domain": {
+            "quote": quote_domain_freshness,
+            "chart": daily_status,
             "latest_session_quote": quote_status,
             "daily": daily_status,
             "intraday": intraday_status,
@@ -716,6 +832,15 @@ def read_tw_futures_context(
     )
     daily_chart = _chart_from_points(timeframe="daily", points=daily_points)
     intraday_chart = _chart_from_points(timeframe="today", points=intraday_points)
+    if intraday_dicts:
+        latest_intraday_row = intraday_dicts[-1]
+        intraday_chart.update(
+            {
+                "interval": latest_intraday_row.get("interval") or "1m",
+                "source": latest_intraday_row.get("source"),
+                "provider": latest_intraday_row.get("provider"),
+            }
+        )
     as_of = _latest_date_string(
         [
             (latest_quote or {}).get("quote_time"),

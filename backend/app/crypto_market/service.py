@@ -1751,11 +1751,14 @@ def list_latest_crypto_ohlcv_bars(
         query = query.filter(CryptoOhlcvBar.instrument_type == normalize_instrument_type(instrument_type))
     if interval:
         query = query.filter(CryptoOhlcvBar.interval == interval.strip())
-    return (
+    rows = (
         query.order_by(CryptoOhlcvBar.bar_time.desc(), CryptoOhlcvBar.fetched_at.desc(), CryptoOhlcvBar.id.desc())
         .limit(max(1, min(limit, 5000)))
         .all()
     )
+    # Fetch the latest bounded window efficiently, then expose it in
+    # chronological order for technical analysis and public contracts.
+    return list(reversed(rows))
 
 
 def list_crypto_ohlcv_coverage(

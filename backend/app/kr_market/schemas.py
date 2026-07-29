@@ -136,18 +136,33 @@ class KRIndexDailyPriceRead(BaseModel):
 class KRMarketBreadthRead(BaseModel):
     index_id: str
     market_segment: str
+    market: str = "KR"
     trade_date: date | None = None
     advance_count: int
     decline_count: int
     unchanged_count: int
     total_count: int
+    coverage_count: int = 0
+    universe_count: int | None = None
+    coverage_ratio: float | None = None
+    classified_count: int = 0
+    unknown_count: int | None = None
+    reconciliation_status: str | None = None
+    reconciliation_formula: str | None = None
+    scope: str | None = None
     positive_ratio: float | None = None
     advance_decline_ratio: float | None = None
     average_change_pct: float | None = None
     trade_value: int | None = None
     source: str | None = None
     status: str
+    direct_market_breadth: bool = True
+    proxy_used: bool = False
+    missing: list[str] = Field(default_factory=list)
     coverage_note: str | None = None
+    is_full_market: bool = False
+    universe_type: str = "local_cached_market_segment"
+    coverage_limitation: str | None = None
 
 
 class KRMarketBreadthRefreshResultRead(BaseModel):
@@ -312,6 +327,9 @@ class KROhlcChartRead(BaseModel):
     to_date: date
     point_count: int
     points: list[KROhlcPointRead]
+    volume_unit: str | None = None
+    volume_semantics: str | None = None
+    volume_status: str = "not_provided"
     backfill: dict | None = None
     latest_data_date: date | None = None
     expected_data_date: date | None = None
@@ -332,6 +350,9 @@ class KRIndexOhlcChartRead(BaseModel):
     to_date: date
     point_count: int
     points: list[KROhlcPointRead]
+    volume_unit: str | None = None
+    volume_semantics: str | None = None
+    volume_status: str = "not_applicable"
     backfill: dict | None = None
     latest_data_date: date | None = None
     expected_data_date: date | None = None

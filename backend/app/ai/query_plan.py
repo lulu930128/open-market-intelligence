@@ -68,6 +68,27 @@ BROKER_BRANCH_EXCLUDED_READERS = tuple(
     for reader in QUOTE_ONLY_EXCLUDED_READERS
     if reader != "get_broker_branch_trade_summary"
 )
+EVENT_ONLY_PUBLIC_CAPABILITIES = frozenset(
+    {
+        "events.upcoming",
+        "events.history",
+        "regulation.disposition",
+        "regulation.trading_restrictions",
+    }
+)
+EVENT_ONLY_EXCLUDED_CAPABILITIES = (
+    "live_intraday_bars",
+    "daily_ohlc_chart",
+    "technical_decision_evidence",
+    "tw_chips_and_flows",
+    "tw_fundamentals",
+    "broker_branch",
+    "cross_market_context",
+)
+EVENT_ONLY_EXCLUDED_READERS = (
+    "get_latest_stock_daily_price",
+    *QUOTE_ONLY_EXCLUDED_READERS,
+)
 DOMAIN_HINTS = {
     "chart": ("日K", "日線", "K線", "daily chart", "daily ohlcv", "ohlcv"),
     "technical": (
@@ -109,6 +130,23 @@ DOMAIN_HINTS = {
         "top gainers",
         "top losers",
     ),
+}
+SCOPE_DOMAIN_HINTS = {
+    "tw_futures": {
+        "intraday": (
+            "夜盤",
+            "夜間盤",
+            "after hours",
+            "after-hours",
+            "after_hours",
+            "overnight",
+        ),
+        "volume": (
+            "成交量",
+            "交易量",
+            "volume",
+        ),
+    },
 }
 NEGATION_TERMS = ("不查", "不刷新", "不需要", "不要", "排除", "without", "except")
 RESTRICTIVE_CAPABILITY_TERMS = (
@@ -238,7 +276,12 @@ def _list_param(params: dict[str, Any], key: str) -> tuple[str, ...]:
     )
 
 
-def _query_domains(payload: AiAskRequest, question_intent: str) -> tuple[
+def _query_domains(
+    payload: AiAskRequest,
+    question_intent: str,
+    *,
+    scope_type: str,
+) -> tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
@@ -253,7 +296,19 @@ def _query_domains(payload: AiAskRequest, question_intent: str) -> tuple[
     requested: list[str] = list(explicit_requested)
     excluded: list[str] = list(explicit_excluded)
 
-    for domain, hints in DOMAIN_HINTS.items():
+    scoped_domain_hints = SCOPE_DOMAIN_HINTS.get(scope_type, {})
+    domain_hints = {
+        domain: tuple(
+            dict.fromkeys(
+                (
+                    *DOMAIN_HINTS.get(domain, ()),
+                    *scoped_domain_hints.get(domain, ()),
+                )
+            )
+        )
+        for domain in dict.fromkeys((*DOMAIN_HINTS, *scoped_domain_hints))
+    }
+    for domain, hints in domain_hints.items():
         for hint in hints:
             normalized_hint = hint.casefold()
             if normalized_hint not in question:
@@ -355,6 +410,7 @@ def build_query_plan(
     scope_type: str,
     question_intent: str,
     effective_mode: str,
+    target_market: str | None = None,
 ) -> QueryPlan:
     response_mode = canonical_response_mode(effective_mode)
     payload_level = normalized_payload_level(payload)
@@ -363,6 +419,7 @@ def build_query_plan(
     requested_domains, excluded_domains, positive_terms, negative_terms = _query_domains(
         payload,
         question_intent,
+        scope_type=scope_type,
     )
     raw_selection = payload.selection if isinstance(payload.selection, dict) else {}
     has_explicit_capability_selection = any(
@@ -431,6 +488,7 @@ def build_query_plan(
         payload_level=payload_level,
         scope_type=scope_type,
         question_intent=question_intent,
+        target_market=target_market,
         requested_domains=requested_domains,
         excluded_domains=excluded_domains,
         requested_capabilities=requested_capabilities,
@@ -468,6 +526,83 @@ def build_query_plan(
     providers = params.get("providers") if isinstance(params.get("providers"), list) else []
     requested_provider = str(params.get("provider") or (providers[0] if providers else "")).strip() or None
     strict_provider = params.get("strict_provider") is True
+
+    selected_capability_set = {
+        *selection.get("required", ()),
+        *selection.get("optional", ()),
+    }
+    if (
+        scope_type == "stock"
+        and has_explicit_capability_selection
+        and bool(
+            selected_capability_set & EVENT_ONLY_PUBLIC_CAPABILITIES
+        )
+        and selected_capability_set
+        <= {
+            "target.identity",
+            "data.freshness",
+            *EVENT_ONLY_PUBLIC_CAPABILITIES,
+        }
+    ):
+        event_required_readers = ["get_stock"]
+        event_required_capabilities = ["stock_master"]
+        if "events.upcoming" in selected_capability_set:
+            event_required_readers.append(
+                "get_taiwan_stock_event_summary"
+            )
+            event_required_capabilities.append(
+                "taiwan_corporate_events"
+            )
+        if "events.history" in selected_capability_set:
+            event_required_readers.append(
+                "get_taiwan_stock_event_history"
+            )
+            event_required_capabilities.append(
+                "taiwan_corporate_event_history"
+            )
+        if selected_capability_set & {
+            "regulation.disposition",
+            "regulation.trading_restrictions",
+        }:
+            event_required_readers.append(
+                "get_taiwan_disposition_status"
+            )
+            event_required_capabilities.append(
+                "taiwan_disposition"
+            )
+        return QueryPlan(
+            intent=question_intent,
+            intents=intents,
+            target_type="tw_stock",
+            response_mode=response_mode,
+            reader_profile="event_only",
+            payload_level=payload_level,
+            diagnostics_level=diagnostics_level,
+            required_capabilities=tuple(event_required_capabilities),
+            optional_capabilities=(),
+            excluded_capabilities=EVENT_ONLY_EXCLUDED_CAPABILITIES,
+            required_readers=tuple(event_required_readers),
+            excluded_readers=EVENT_ONLY_EXCLUDED_READERS,
+            freshness_scope=tuple(event_required_capabilities),
+            external_refresh_allowed=False,
+            requested_domains=requested_domains,
+            excluded_domains=excluded_domains,
+            matched_positive_terms=positive_terms,
+            matched_negative_terms=negative_terms,
+            capability_selection_mode=capability_selection_mode,
+            selected_action_reason=(
+                "Explicit Taiwan event/regulation capabilities use the "
+                "cache-only stock event reader and exclude price, chart, "
+                "technical, chip, fundamental, and broker-branch domains."
+            ),
+            requested_provider=requested_provider,
+            strict_provider=strict_provider,
+            selection=selection,
+            selected_capabilities=tuple(selection["required"]),
+            optional_selected_capabilities=tuple(selection["optional"]),
+            max_response_bytes=int(selection["max_response_bytes"]),
+            realtime_policy=str(selection["realtime_policy"]),
+        )
 
     if (
         scope_type == "stock"

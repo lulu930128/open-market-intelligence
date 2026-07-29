@@ -386,7 +386,7 @@ def _query_intraday_rows(
 
 def _intraday_row_to_point(row: MarketIntradayBar) -> dict:
     return {
-        "time": row.bar_time,
+        "time": _normalize_bar_time(row.bar_time),
         "open": row.open_price,
         "high": row.high_price,
         "low": row.low_price,
@@ -395,6 +395,197 @@ def _intraday_row_to_point(row: MarketIntradayBar) -> dict:
         "trade_value": row.trade_value,
         "transaction_count": None,
     }
+
+
+def _interval_seconds(interval: str) -> int:
+    normalized = str(interval or "1m").strip().lower()
+    if normalized.endswith("m") and normalized[:-1].isdigit():
+        return int(normalized[:-1]) * 60
+    if normalized.endswith("h") and normalized[:-1].isdigit():
+        return int(normalized[:-1]) * 3600
+    return 60
+
+
+def _provider_volume_unit(source: str) -> str:
+    normalized = str(source or "").lower()
+    if "twse_mis" in normalized or normalized.startswith("nstock"):
+        return "lots"
+    if "yahoo" in normalized:
+        return "shares"
+    return "unknown"
+
+
+def _enrich_intraday_contract(
+    points: list[dict],
+    *,
+    interval: str,
+    source: str,
+    now: datetime | None = None,
+) -> tuple[list[dict], dict]:
+    checked_at = (now or datetime.now(TAIPEI_TZ)).astimezone(TAIPEI_TZ)
+    provider_volume_unit = _provider_volume_unit(source)
+    interval_delta = timedelta(seconds=_interval_seconds(interval))
+    enriched: list[dict] = []
+    official_trade_value = 0
+    estimated_trade_value = 0.0
+    exact_value_points = 0
+    volume_points = 0
+    total_volume_shares = 0
+    weighted_price_volume = 0.0
+
+    for raw_point in points:
+        point = dict(raw_point)
+        point_time = _point_datetime(point)
+        volume_shares = _as_int(point.get("volume"))
+        if volume_shares is not None:
+            volume_points += 1
+            total_volume_shares += max(volume_shares, 0)
+        exact_trade_value = _as_int(point.get("trade_value"))
+        open_price = _as_float(point.get("open"))
+        high_price = _as_float(point.get("high"))
+        low_price = _as_float(point.get("low"))
+        close_price = _as_float(point.get("close") or point.get("price"))
+        typical_prices = [
+            value
+            for value in (high_price, low_price, close_price)
+            if value is not None
+        ]
+        typical_price = (
+            sum(typical_prices) / len(typical_prices)
+            if typical_prices
+            else open_price
+        )
+        approx_trade_value = (
+            typical_price * volume_shares
+            if typical_price is not None
+            and volume_shares is not None
+            and volume_shares >= 0
+            else None
+        )
+        if exact_trade_value is not None:
+            exact_value_points += 1
+            official_trade_value += exact_trade_value
+            estimated_trade_value += exact_trade_value
+        elif approx_trade_value is not None:
+            estimated_trade_value += approx_trade_value
+        if close_price is not None and volume_shares is not None and volume_shares > 0:
+            weighted_price_volume += close_price * volume_shares
+
+        bar_close_time = point_time + interval_delta if point_time is not None else None
+        is_partial = bool(
+            bar_close_time is not None
+            and point_time is not None
+            and point_time.date() == checked_at.date()
+            and checked_at < bar_close_time
+        )
+        elapsed_seconds = (
+            max(int((checked_at - point_time).total_seconds()), 0)
+            if point_time is not None
+            else None
+        )
+        point.update(
+            {
+                "volume_shares": volume_shares,
+                "volume_lots": (
+                    volume_shares / 1000 if volume_shares is not None else None
+                ),
+                "canonical_volume_unit": "shares",
+                "provider_volume_unit": provider_volume_unit,
+                "volume_status": (
+                    "available" if volume_shares is not None else "not_provided"
+                ),
+                "approx_trade_value": approx_trade_value,
+                "trade_value_status": (
+                    "official"
+                    if exact_trade_value is not None
+                    else "estimated"
+                    if approx_trade_value is not None
+                    else "not_provided"
+                ),
+                "bar_close_time": (
+                    bar_close_time.isoformat() if bar_close_time is not None else None
+                ),
+                "elapsed_seconds": elapsed_seconds,
+                "is_partial": is_partial,
+                "finalized": not is_partial if point_time is not None else False,
+            }
+        )
+        enriched.append(point)
+
+    exact_complete = volume_points > 0 and exact_value_points == volume_points
+    approximate_vwap = (
+        weighted_price_volume / total_volume_shares
+        if total_volume_shares > 0
+        else None
+    )
+    official_vwap = (
+        official_trade_value / total_volume_shares
+        if exact_complete and total_volume_shares > 0
+        else None
+    )
+    trade_value_status = (
+        "complete"
+        if exact_complete
+        else "partial"
+        if exact_value_points > 0
+        else "estimated"
+        if estimated_trade_value > 0
+        else "not_provided"
+    )
+    metadata = {
+        "canonical_volume_unit": "shares",
+        "provider_volume_unit": provider_volume_unit,
+        "volume_conversion": (
+            "provider_lots_x_1000_to_shares"
+            if provider_volume_unit == "lots"
+            else "identity"
+            if provider_volume_unit == "shares"
+            else "unknown"
+        ),
+        "cumulative_volume_shares": (
+            total_volume_shares if volume_points else None
+        ),
+        "cumulative_volume_lots": (
+            total_volume_shares / 1000 if volume_points else None
+        ),
+        "cumulative_trade_value": (
+            official_trade_value if exact_complete else None
+        ),
+        "available_cumulative_trade_value": (
+            official_trade_value if exact_value_points else None
+        ),
+        "estimated_cumulative_trade_value": (
+            int(round(estimated_trade_value))
+            if estimated_trade_value > 0
+            else None
+        ),
+        "trade_value_unit": "TWD",
+        "trade_value_status": trade_value_status,
+        "official_vwap": official_vwap,
+        "approx_vwap": approximate_vwap,
+        "vwap_method": (
+            "official_trade_value_divided_by_volume_shares"
+            if official_vwap is not None
+            else "close_price_volume_weighted_approximation"
+            if approximate_vwap is not None
+            else "unavailable"
+        ),
+        "vwap_confidence": (
+            "high"
+            if official_vwap is not None
+            else "medium"
+            if approximate_vwap is not None
+            else "unavailable"
+        ),
+        "partial_bar_count": sum(
+            1 for point in enriched if point.get("is_partial") is True
+        ),
+        "indicator_eligible_point_count": sum(
+            1 for point in enriched if point.get("finalized") is True
+        ),
+        "partial_bar_policy": "exclude_partial_bars_from_indicators",
+    }
+    return enriched, metadata
 
 
 def _aggregate_intraday_points(points: list[dict], interval_minutes: int) -> list[dict]:
@@ -432,12 +623,19 @@ def _aggregate_intraday_points(points: list[dict], interval_minutes: int) -> lis
         lows = [_as_float(point.get("low")) or _as_float(point.get("price")) for point in bucket_points]
         volumes = [_as_int(point.get("volume")) for point in bucket_points]
         volume_total = sum(volume for volume in volumes if volume is not None and volume > 0)
+        trade_values = [_as_int(point.get("trade_value")) for point in bucket_points]
+        trade_value_total = (
+            sum(value for value in trade_values if value is not None)
+            if any(value is not None for value in trade_values)
+            else None
+        )
 
         aggregated.append(
             {
                 "time": bucket_time.isoformat(),
                 "price": _as_float(last.get("price")),
                 "volume": volume_total if volume_total > 0 else None,
+                "trade_value": trade_value_total,
                 "open": _as_float(first.get("open")) or _as_float(first.get("price")),
                 "high": max((value for value in highs if value is not None), default=None),
                 "low": min((value for value in lows if value is not None), default=None),
@@ -484,7 +682,7 @@ def _upsert_market_intraday_bars(
             "low_price": _as_float(point.get("low")) or close_price,
             "close_price": close_price,
             "trade_volume": _as_int(point.get("volume")),
-            "trade_value": None,
+            "trade_value": _as_int(point.get("trade_value")),
             "source": source,
             "source_url": source_url,
             "updated_at": updated_at,
@@ -954,6 +1152,7 @@ def get_market_intraday_history(
         from_time=from_time,
     )
     refreshed_count = 0
+    refresh_failed = False
     source = "market_intraday_bar_cache"
     source_url = None
 
@@ -985,6 +1184,7 @@ def get_market_intraday_history(
         except Exception as exc:
             observe_provider_fallback(exc, operation="intraday.history_remote_refresh")
             source = "market_intraday_bar_cache"
+            refresh_failed = True
 
     if interval == "5m":
         one_minute_rows = _query_intraday_rows(
@@ -1032,11 +1232,22 @@ def get_market_intraday_history(
         source_url = rows[-1].source_url
     if rows and source == "market_intraday_bar_cache":
         source = rows[-1].source
+    points, contract_metadata = _enrich_intraday_contract(
+        points,
+        interval=interval,
+        source=source,
+    )
 
     return {
         "stock_id": stock_id,
         "symbol": symbol,
         "interval": interval,
+        "requested_interval": interval,
+        "source_interval": (
+            "1m" if source == "local_current_1m_aggregate" else interval
+        ),
+        "effective_interval": interval,
+        "interval_status": "ready",
         "range": fetch_range if range_value == "auto" else range_value,
         "provider": (
             "local_derived"
@@ -1049,11 +1260,34 @@ def get_market_intraday_history(
         ),
         "source": source,
         "source_url": source_url,
-        "from_time": rows[0].bar_time if rows else None,
-        "to_time": rows[-1].bar_time if rows else None,
+        "from_time": _normalize_bar_time(rows[0].bar_time) if rows else None,
+        "to_time": _normalize_bar_time(rows[-1].bar_time) if rows else None,
         "point_count": len(points),
         "cached_count": len(cached_rows),
         "refreshed_count": refreshed_count,
+        "cache_status": (
+            "refresh_fallback_hit"
+            if refresh_failed and rows
+            else "refresh_fallback_miss"
+            if refresh_failed
+            else "persisted_hit"
+            if rows and not refresh
+            else "persisted_miss"
+            if not rows and not refresh
+            else "refreshed"
+        ),
+        "cache_hit": bool(rows and (not refresh or refresh_failed)),
+        "cache_trade_date": (
+            _normalize_bar_time(rows[-1].bar_time).date().isoformat()
+            if rows
+            else None
+        ),
+        "cache_latest_time": (
+            _normalize_bar_time(rows[-1].bar_time)
+            if rows
+            else None
+        ),
+        "fallback_used": refresh_failed and bool(rows),
         "trading_mode": "disposition_batch_auction"
         if disposition.get("is_active")
         else "continuous",
@@ -1072,5 +1306,6 @@ def get_market_intraday_history(
         "disposition_end_date": disposition.get("end_date")
         if disposition.get("is_active")
         else None,
+        **contract_metadata,
         "points": points,
     }

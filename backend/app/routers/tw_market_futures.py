@@ -384,7 +384,7 @@ def list_taiwan_futures_intraday_bars_api(
     symbol: str,
     interval: str = Query(default="1m", pattern="^1m$"),
     limit: int = Query(default=390, ge=1, le=3000),
-    refresh: bool = True,
+    refresh: bool = False,
     session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
     provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
     trade_date: date | None = None,

@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.ai import agentic_tools, llm, tools
+from app.ai import agentic_tools, ask_execution, contract_manifest, llm, tools
+from app.ai.schemas import AiAskRequest
 from app.ai.market_context import common as market_context_common
 from app.ai.market_context import taiwan_market
 from app.ai.market_context.taiwan_futures import _build_tw_futures_compact
@@ -51,11 +52,63 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "797afc5f37a70178beb700a7868c9ce02f25012d97c3afe14e4253830bb256f3"
+    "57349622b99583195851fdc44678cd0d80cbadb308e333f33a144365eaa4e261"
 )
 
 
 class AIToolBoundaryTests(unittest.TestCase):
+    def test_explicit_us_market_uses_supplemental_index_without_tw_reader(
+        self,
+    ) -> None:
+        payload = AiAskRequest(
+            question="美國整體市場狀況",
+            target={"type": "market", "id": "US", "market": "US"},
+            output="evidence_only",
+        )
+        regional_result = {
+            "target": {
+                "type": "us_stock",
+                "id": "^GSPC",
+                "market": "US",
+            },
+            "data": {
+                "compact": {
+                    "target": {
+                        "type": "us_stock",
+                        "id": "^GSPC",
+                        "market": "US",
+                    }
+                }
+            },
+        }
+
+        with (
+            patch.object(
+                ask_execution.agentic_tools,
+                "read_us_stock_context",
+                return_value=regional_result,
+            ) as read_us,
+            patch.object(
+                ask_execution.tools,
+                "read_market_overview",
+            ) as read_tw,
+        ):
+            action, result = ask_execution._read_data_only(
+                db=object(),
+                payload=payload,
+                scope_type="market",
+            )
+
+        self.assertEqual(action, "omi.read_market_overview")
+        read_us.assert_called_once()
+        self.assertEqual(read_us.call_args.kwargs["symbol"], "^GSPC")
+        read_tw.assert_not_called()
+        self.assertEqual(result["target"]["type"], "market")
+        self.assertEqual(result["target"]["id"], "US")
+        reference = result["data"]["compact"]["representative_index"]
+        self.assertEqual(reference["id"], "^GSPC")
+        self.assertFalse(reference["scope_replacement"])
+
     def test_market_volume_uses_same_date_official_breadth_when_minute_cache_is_empty(
         self,
     ) -> None:
@@ -134,7 +187,23 @@ class AIToolBoundaryTests(unittest.TestCase):
         schema = catalog["tools"][0]["input_schema"]
         self.assertEqual(
             schema["x-omi-capability-registry-version"],
-            "omi.capability.registry.v1",
+            "omi.capability.registry.v2",
+        )
+        self.assertEqual(
+            schema["x-omi-capability-selection-version"],
+            "omi.capability.selection.v2",
+        )
+        self.assertEqual(
+            schema["x-omi-public-contract-digest"],
+            contract_manifest.public_contract_manifest()["digest"],
+        )
+        self.assertEqual(
+            schema["x-omi-targets"],
+            contract_manifest.public_contract_manifest()["targets"],
+        )
+        self.assertIn(
+            "parameters",
+            schema["properties"]["selection"]["properties"],
         )
         quote = next(
             item
@@ -149,6 +218,7 @@ class AIToolBoundaryTests(unittest.TestCase):
         )
         self.assertTrue(
             {
+                "requested_interval",
                 "source_interval",
                 "effective_interval",
                 "sampling_mode",
@@ -169,6 +239,11 @@ class AIToolBoundaryTests(unittest.TestCase):
         self.assertIn("include_healthy", market_data_params)
         self.assertIn("status_filter", market_data_params)
         self.assertIn("provider", market_data_params)
+        self.assertEqual(
+            market_data_params["intraday_interval"]["enum"],
+            ["1m", "5m", "15m", "30m", "1h", "4h"],
+        )
+        self.assertIn("interval", market_data_params)
 
     def test_internal_tool_catalog_contract_remains_stable(self) -> None:
         catalog = tools.list_ai_tools(include_internal=True)
@@ -308,8 +383,28 @@ class AIToolBoundaryTests(unittest.TestCase):
                     ],
                 },
             ) as read_volume_state,
+            patch.object(
+                tools,
+                "build_taiwan_source_health",
+                return_value={
+                    "kind": "taiwan_source_health",
+                    "generated_at": fixed_now.isoformat(),
+                    "summary": {
+                        "entry_count": 3,
+                        "ok_count": 2,
+                        "stale_count": 1,
+                    },
+                    "entries": [],
+                },
+            ) as build_source_health,
         ):
-            envelope = tools.read_market_overview(db=db, include_intraday=True)
+            envelope = tools.read_market_overview(
+                db=db,
+                include_intraday=True,
+                market_data_params={
+                    "requested_capabilities": ["source.health"],
+                },
+            )
 
         self.assertEqual(envelope["generated_at"], fixed_now)
         self.assertEqual(
@@ -323,6 +418,19 @@ class AIToolBoundaryTests(unittest.TestCase):
         read_cross_market.assert_called_once_with(db=db, now=fixed_now)
         read_market_chips.assert_called_once_with(db=db, limit=10)
         read_volume_state.assert_called_once_with(db=db)
+        build_source_health.assert_called_once_with(
+            db,
+            now=fixed_now,
+            sync_snapshots=False,
+        )
+        self.assertEqual(
+            envelope["data"]["compact"]["source_health"]["status"],
+            "partial",
+        )
+        self.assertEqual(
+            envelope["data"]["source_health"]["summary"]["stale_count"],
+            1,
+        )
         self.assertEqual(envelope["data"]["slots"]["cross_market"]["status"], "partial")
         self.assertEqual(envelope["data"]["slots"]["market_chips"]["status"], "partial")
         self.assertEqual(envelope["data"]["slots"]["market_volume"]["status"], "partial")
@@ -495,12 +603,92 @@ class AIToolBoundaryTests(unittest.TestCase):
         self.assertIsNone(compact["quote"]["open_interest"])
         self.assertEqual(compact["quote"]["field_status"]["open_interest"], "missing")
         self.assertEqual(compact["slots"]["latest_session_quote"]["status"], "ready")
+        self.assertEqual(
+            compact["freshness_by_domain"]["quote"]["status"],
+            "live",
+        )
+        self.assertTrue(compact["freshness_by_domain"]["quote"]["is_current"])
+        self.assertEqual(
+            compact["freshness_by_domain"]["quote"]["capability"],
+            "quote.snapshot",
+        )
+        self.assertEqual(compact["freshness_by_domain"]["chart"], "ready")
         self.assertEqual(compact["slots"]["institutional_position"]["status"], "ready")
         self.assertIn(
             "official_daily_post_close_not_live_night_session",
             compact["slots"]["options_sentiment"]["warnings"],
         )
         self.assertEqual(compact["slots"]["data_quality"]["status"], "partial")
+
+    def test_futures_compact_preserves_intraday_contract_volume(self) -> None:
+        compact = _build_tw_futures_compact(
+            symbol="TXF",
+            latest_quote={
+                "symbol": "TXF",
+                "session": "regular",
+                "quote_time": "2026-07-28T10:00:00+08:00",
+                "last_price": 23_500,
+                "total_volume": 12_345,
+                "freshness": {"status": "live", "is_stale": False},
+            },
+            latest_daily={
+                "trade_date": "2026-07-27",
+                "close_price": 23_400,
+                "source": "taifex_daily_market",
+            },
+            daily_chart={"points": [{"date": "2026-07-27", "close": 23_400}]},
+            intraday_chart={
+                "timeframe": "today",
+                "interval": "1m",
+                "point_count": 1,
+                "from_date": "2026-07-28T10:00:00",
+                "to_date": "2026-07-28T10:00:00",
+                "source": "TAIFEX MIS 1-minute chart",
+                "provider": "taifex_mis",
+                "points": [
+                    {
+                        "time": "2026-07-28T10:00:00",
+                        "open": 23_490,
+                        "high": 23_510,
+                        "low": 23_480,
+                        "close": 23_500,
+                        "volume": 321,
+                        "session": "regular",
+                    }
+                ],
+            },
+            analysis={"selected_title": "盤中"},
+            institutional_position=None,
+            options_sentiment=None,
+            market_chip_trend={
+                "status": "missing",
+                "as_of": None,
+                "latest": None,
+                "coverage": {"available_days": 0},
+                "windows": {},
+            },
+            derivatives={"status": "partial", "as_of": "2026-07-27"},
+            payload_level_value="compact",
+        )
+
+        self.assertEqual(compact["quote"]["total_volume_contracts"], 12_345)
+        self.assertEqual(compact["quote"]["volume_unit"], "contracts")
+        intraday = compact["intraday_chart"]
+        self.assertEqual(intraday["volume_unit"], "contracts")
+        self.assertEqual(intraday["volume_semantics"], "interval_contracts")
+        self.assertEqual(intraday["volume_contracts"], 321)
+        self.assertEqual(
+            intraday["volume_event_time"],
+            "2026-07-28T10:00:00+08:00",
+        )
+        self.assertEqual(intraday["source"], "TAIFEX MIS 1-minute chart")
+        self.assertEqual(intraday["provider"], "taifex_mis")
+        self.assertEqual(
+            intraday["points"][0]["time"],
+            "2026-07-28T10:00:00+08:00",
+        )
+        self.assertEqual(intraday["points"][0]["volume_contracts"], 321)
+        self.assertEqual(intraday["points"][0]["session"], "regular")
 
 
 if __name__ == "__main__":

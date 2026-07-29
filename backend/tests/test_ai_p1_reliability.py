@@ -171,6 +171,39 @@ class AiP1FreshnessContractTests(unittest.TestCase):
 
         self.assertEqual(passport["data_freshness"], "unknown")
 
+    def test_kr_provider_source_grades_distinguish_official_and_third_party(self) -> None:
+        passport = build_evidence_passport(
+            kind="kr_index_context",
+            as_of="2026-07-27T09:05:00+09:00",
+            source_refs=[
+                {
+                    "type": "external_or_cache",
+                    "name": "krx_daily_price",
+                    "provider": "krx_data",
+                },
+                {
+                    "type": "external_or_cache",
+                    "name": "kr_index_intraday",
+                    "provider": "naver_index_time",
+                },
+                {
+                    "type": "external_or_cache",
+                    "name": "kr_company_fundamental",
+                    "provider": "opendart",
+                },
+            ],
+            freshness={"status": "current", "is_current": True},
+        )
+
+        grades = {
+            item["name"]: item["grade"]
+            for item in passport["source_breakdown"]
+        }
+        self.assertEqual(grades["krx_daily_price"], "official")
+        self.assertEqual(grades["kr_index_intraday"], "third_party")
+        self.assertEqual(grades["kr_company_fundamental"], "official")
+        self.assertEqual(passport["source_grade"], "mixed")
+
 
 class AiP1ProviderAndTimeoutTests(unittest.TestCase):
     def test_latest_daily_uses_existing_canonical_provider_rule(self) -> None:

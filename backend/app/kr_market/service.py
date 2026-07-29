@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 import requests
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -86,6 +86,7 @@ from app.market.stock_volume_pace import (
     build_stock_volume_pace,
     intraday_history_needs_bootstrap,
     latest_market_trade_date_points,
+    load_persisted_market_intraday_history,
     mutate_market_intraday_history,
     previous_regular_close_from_history,
 )
@@ -792,7 +793,48 @@ def get_kr_market_breadth(
 ) -> dict:
     normalized_index_id = _valid_index_id(index_id)
     segment, suffix, coverage_note = _kr_index_breadth_segment(normalized_index_id)
+    if normalized_index_id == "KOSPI200":
+        return {
+            "index_id": normalized_index_id,
+            "market_segment": "KOSPI200",
+            "market": "KR",
+            "trade_date": trade_date,
+            "advance_count": 0,
+            "decline_count": 0,
+            "unchanged_count": 0,
+            "total_count": 0,
+            "coverage_count": 0,
+            "universe_count": None,
+            "coverage_ratio": None,
+            "classified_count": 0,
+            "unknown_count": None,
+            "positive_ratio": None,
+            "advance_decline_ratio": None,
+            "average_change_pct": None,
+            "trade_value": None,
+            "source": None,
+            "status": "unsupported",
+            "direct_market_breadth": False,
+            "proxy_used": False,
+            "is_full_market": False,
+            "universe_type": "unsupported_index_constituents",
+            "coverage_limitation": (
+                "official_kospi200_constituent_breadth_unavailable"
+            ),
+            "missing": ["krx_kospi200_constituent_breadth"],
+            "coverage_note": (
+                "KOSPI 200 direct constituent breadth is unavailable; "
+                "OMI does not substitute KOSPI market breadth."
+            ),
+        }
     query = db.query(KRDailyPrice).filter(KRDailyPrice.symbol.like(f"%{suffix}"))
+    active_master_count = int(
+        db.query(func.count(KRStockMaster.id))
+        .filter(KRStockMaster.is_active.is_(True))
+        .filter(KRStockMaster.symbol.like(f"%{suffix}"))
+        .scalar()
+        or 0
+    )
     target_trade_date = trade_date
 
     if target_trade_date is None:
@@ -818,6 +860,20 @@ def get_kr_market_breadth(
             "trade_value": None,
             "source": None,
             "status": "empty",
+            "market": "KR",
+            "coverage_count": 0,
+            "universe_count": active_master_count or None,
+            "coverage_ratio": None,
+            "classified_count": 0,
+            "unknown_count": None,
+            "reconciliation_status": "empty",
+            "direct_market_breadth": True,
+            "proxy_used": False,
+            "is_full_market": False,
+            "universe_type": "active_local_stock_master_segment",
+            "coverage_limitation": (
+                "local_cached_segment_not_official_full_exchange_breadth"
+            ),
             "coverage_note": coverage_note,
         }
 
@@ -893,12 +949,40 @@ def get_kr_market_breadth(
         "decline_count": decline_count,
         "unchanged_count": unchanged_count,
         "total_count": total_count,
+        "coverage_count": len(latest_by_symbol),
+        "universe_count": active_master_count or None,
+        "coverage_ratio": (
+            len(latest_by_symbol) / active_master_count
+            if active_master_count
+            else None
+        ),
+        "classified_count": total_count,
+        "unknown_count": (
+            max(active_master_count - total_count, 0)
+            if active_master_count
+            else excluded_change_count
+        ),
+        "reconciliation_status": (
+            "balanced" if excluded_change_count == 0 else "partial"
+        ),
+        "reconciliation_formula": (
+            "advance_count+decline_count+unchanged_count+unknown_count=universe_count"
+        ),
+        "market": "KR",
+        "scope": "local_cached_market_segment",
         "positive_ratio": positive_ratio,
         "advance_decline_ratio": advance_decline_ratio,
         "average_change_pct": average_change_pct,
         "trade_value": trade_value if has_trade_value else None,
         "source": source,
         "status": status,
+        "direct_market_breadth": True,
+        "proxy_used": False,
+        "is_full_market": False,
+        "universe_type": "active_local_stock_master_segment",
+        "coverage_limitation": (
+            "local_cached_segment_not_official_full_exchange_breadth"
+        ),
         "coverage_note": coverage_note,
     }
 
@@ -1924,16 +2008,29 @@ def get_kr_watchlist_ranking(
 
     no_data_count = sum(1 for row in rows if row["status"] == "no_data")
     freshness = _kr_ranking_freshness(rows, requested_symbol_count=len(unique_items))
+    requested_symbol_count = len(rows)
+    ranked_count = len(rows) - no_data_count
     return {
         "group_id": group_id,
         "include_children": include_children,
         "rank_by": rank_by,
         "sort_order": sort_order,
-        "requested_symbol_count": len(rows),
-        "ranked_count": len(rows) - no_data_count,
+        "requested_symbol_count": requested_symbol_count,
+        "ranked_count": ranked_count,
         "no_data_count": no_data_count,
         "error_count": 0,
         **freshness,
+        "underlying_trade_date": freshness.get("trade_date"),
+        "coverage_ratio": (
+            ranked_count / requested_symbol_count
+            if requested_symbol_count
+            else 1.0
+        ),
+        "is_live": False,
+        "is_full": (
+            ranked_count == requested_symbol_count and no_data_count == 0
+        ),
+        "ranking_semantics": "latest_completed_daily_rows",
         "results": rows,
     }
 
@@ -2559,6 +2656,7 @@ def get_kr_stock_intraday_trend(
     *,
     symbol: str,
     refresh: bool = False,
+    external_fetch_allowed: bool = True,
 ) -> dict:
     normalized_symbol = _valid_symbol(symbol)
     cache_key = f"KR_STOCK:{normalized_symbol}"
@@ -2571,6 +2669,63 @@ def get_kr_stock_intraday_trend(
                 db=db,
                 symbol=normalized_symbol,
             )
+        persisted = load_persisted_market_intraday_history(
+            db,
+            stock_id=normalized_symbol,
+            market="KR",
+            market_timezone=KR_MARKET_TIMEZONE,
+        )
+        if persisted.get("points"):
+            persisted["trade_value_unit"] = "KRW"
+            cached_persisted = _set_kr_stock_intraday_cache(
+                cache_key,
+                persisted,
+            )
+            return _finalize_kr_stock_intraday_payload(
+                cached_persisted,
+                db=db,
+                symbol=normalized_symbol,
+            )
+
+    if not external_fetch_allowed:
+        return _finalize_kr_stock_intraday_payload(
+            {
+                "stock_id": normalized_symbol,
+                "symbol": normalized_symbol,
+                "source": "unavailable",
+                "session_scope": "regular",
+                "session_phase": None,
+                "has_extended_hours": False,
+                "regular_point_count": 0,
+                "extended_point_count": 0,
+                "previous_close": None,
+                "previous_close_source": None,
+                "previous_close_trade_date": None,
+                "previous_close_provider": None,
+                "regular_session_close": None,
+                "regular_session_close_time": None,
+                "point_count": 0,
+                "points": [],
+                "as_of": None,
+                "total_volume": None,
+                "volume_unit": "shares",
+                "volume_semantics": "interval_with_cumulative_total",
+                "trade_value_unit": "KRW",
+                "is_partial": True,
+                "source_url": None,
+                "cache_status": "persisted_miss",
+                "cache_hit": False,
+                "fallback_used": False,
+                "warnings": [
+                    "KR stock intraday cache-only read found no persisted "
+                    "data; external fetch was not attempted."
+                ],
+                "fetched_pages": 0,
+                "polling_interval_seconds": 60,
+            },
+            db=db,
+            symbol=normalized_symbol,
+        )
 
     try:
         range_value = (
@@ -2601,34 +2756,52 @@ def get_kr_stock_intraday_trend(
             payload=payload,
         )
     except Exception as exc:
-        payload = {
-            "stock_id": normalized_symbol,
-            "symbol": normalized_symbol,
-            "source": "unavailable",
-            "session_scope": "regular",
-            "session_phase": None,
-            "has_extended_hours": False,
-            "regular_point_count": 0,
-            "extended_point_count": 0,
-            "previous_close": None,
-            "previous_close_source": None,
-            "previous_close_trade_date": None,
-            "previous_close_provider": None,
-            "regular_session_close": None,
-            "regular_session_close_time": None,
-            "point_count": 0,
-            "points": [],
-            "as_of": None,
-            "total_volume": None,
-            "volume_unit": "shares",
-            "volume_semantics": "interval_with_cumulative_total",
-            "trade_value_unit": "krw",
-            "is_partial": True,
-            "source_url": None,
-            "warnings": [f"KR stock intraday source is unavailable: {exc}"],
-            "fetched_pages": 0,
-            "polling_interval_seconds": 60,
-        }
+        persisted = load_persisted_market_intraday_history(
+            db,
+            stock_id=normalized_symbol,
+            market="KR",
+            market_timezone=KR_MARKET_TIMEZONE,
+        )
+        if persisted.get("points"):
+            payload = persisted
+            payload["trade_value_unit"] = "KRW"
+            payload["cache_status"] = "refresh_fallback_hit"
+            payload["fallback_used"] = True
+            payload.setdefault("warnings", []).append(
+                f"KR intraday refresh failed; using persisted cache: {exc}"
+            )
+        else:
+            payload = {
+                "stock_id": normalized_symbol,
+                "symbol": normalized_symbol,
+                "source": "unavailable",
+                "session_scope": "regular",
+                "session_phase": None,
+                "has_extended_hours": False,
+                "regular_point_count": 0,
+                "extended_point_count": 0,
+                "previous_close": None,
+                "previous_close_source": None,
+                "previous_close_trade_date": None,
+                "previous_close_provider": None,
+                "regular_session_close": None,
+                "regular_session_close_time": None,
+                "point_count": 0,
+                "points": [],
+                "as_of": None,
+                "total_volume": None,
+                "volume_unit": "shares",
+                "volume_semantics": "interval_with_cumulative_total",
+                "trade_value_unit": "KRW",
+                "is_partial": True,
+                "source_url": None,
+                "cache_status": "refresh_fallback_miss",
+                "cache_hit": False,
+                "fallback_used": False,
+                "warnings": [f"KR stock intraday source is unavailable: {exc}"],
+                "fetched_pages": 0,
+                "polling_interval_seconds": 60,
+            }
 
     cached_payload = _set_kr_stock_intraday_cache(cache_key, payload)
     return _finalize_kr_stock_intraday_payload(
@@ -2905,6 +3078,7 @@ def get_kr_index_intraday_trend(
     refresh: bool = False,
     reload_all: bool = False,
     max_pages: int = KR_INDEX_INTRADAY_FULL_MAX_PAGES,
+    external_fetch_allowed: bool = True,
 ) -> dict:
     normalized_index_id = _valid_index_id(index_id)
     index_config = KR_INDEX_CONFIG_BY_ID[normalized_index_id]
@@ -2914,6 +3088,111 @@ def get_kr_index_intraday_trend(
         fresh = _get_fresh_kr_index_intraday_cache(cache_key)
         if fresh is not None:
             return fresh
+        persisted = load_persisted_market_intraday_history(
+            db,
+            stock_id=normalized_index_id,
+            market="KR",
+            market_timezone=KR_MARKET_TIMEZONE,
+        )
+        if persisted.get("points"):
+            points = persisted.get("points") or []
+            latest_point = points[-1] if points else None
+            previous_close, previous_source, previous_trade_date, previous_provider = (
+                _previous_close_from_realtime_or_daily(
+                    db,
+                    index_id=normalized_index_id,
+                    realtime_price=None,
+                    realtime_change=None,
+                )
+            )
+            payload = {
+                **persisted,
+                "stock_id": normalized_index_id,
+                "symbol": index_config.provider_symbol,
+                "source": persisted.get("source")
+                or "market_intraday_bar_cache",
+                "session_scope": "regular",
+                "session_phase": "regular",
+                "has_extended_hours": False,
+                "regular_point_count": len(points),
+                "extended_point_count": 0,
+                "previous_close": previous_close,
+                "previous_close_source": previous_source,
+                "previous_close_trade_date": previous_trade_date,
+                "previous_close_provider": previous_provider,
+                "regular_session_close": (
+                    latest_point.get("price")
+                    if isinstance(latest_point, dict)
+                    else None
+                ),
+                "regular_session_close_time": (
+                    latest_point.get("time")
+                    if isinstance(latest_point, dict)
+                    else None
+                ),
+                "as_of": (
+                    latest_point.get("time")
+                    if isinstance(latest_point, dict)
+                    else None
+                ),
+                "total_volume": None,
+                "volume_unit": "thousand_shares",
+                "volume_semantics": "interval_volume",
+                "trade_value_unit": "million_krw",
+                "ohlc_semantics": "snapshot_price_only",
+                "ohlc_analysis_policy": "confirmed_interval_ohlc_only",
+                "continuity": _kr_intraday_continuity(points),
+                "is_partial": True,
+                "fetched_pages": 0,
+                "polling_interval_seconds": None,
+            }
+            return _set_kr_index_intraday_cache(cache_key, payload)
+        if not external_fetch_allowed:
+            return _set_kr_index_intraday_cache(
+                cache_key,
+                {
+                    "stock_id": normalized_index_id,
+                    "symbol": index_config.provider_symbol,
+                    "source": "unavailable",
+                    "session_scope": "regular",
+                    "session_phase": None,
+                    "has_extended_hours": False,
+                    "regular_point_count": 0,
+                    "extended_point_count": 0,
+                    "previous_close": None,
+                    "previous_close_source": None,
+                    "previous_close_trade_date": None,
+                    "previous_close_provider": None,
+                    "regular_session_close": None,
+                    "regular_session_close_time": None,
+                    "point_count": 0,
+                    "points": [],
+                    "as_of": None,
+                    "total_volume": None,
+                    "volume_unit": "thousand_shares",
+                    "volume_semantics": "interval_volume",
+                    "trade_value_unit": "million_krw",
+                    "ohlc_semantics": "snapshot_price_only",
+                    "ohlc_analysis_policy": "confirmed_interval_ohlc_only",
+                    "continuity": {
+                        "status": "empty",
+                        "expected_interval_seconds": 60,
+                        "gap_count": 0,
+                        "largest_gap_seconds": None,
+                    },
+                    "is_partial": True,
+                    "source_url": None,
+                    "cache_status": "persisted_miss",
+                    "cache_hit": False,
+                    "fallback_used": False,
+                    "warnings": [
+                        "KR index intraday cache-only read found no persisted "
+                        "data; external fetch was not attempted."
+                    ],
+                    "fetched_pages": 0,
+                    "polling_interval_seconds": None,
+                },
+            )
 
     stale = None if reload_all else _get_kr_index_intraday_cache(cache_key)
     thistime = _kr_index_intraday_thistime()
@@ -2951,9 +3230,36 @@ def get_kr_index_intraday_trend(
     except Exception as exc:
         warnings.append(f"Naver realtime index quote failed: {exc}")
 
-    merged_points = points
+    merged_points = [
+        {
+            **point,
+            "session_open": point.get("session_open", point.get("open")),
+            "session_high": point.get("session_high", point.get("high")),
+            "session_low": point.get("session_low", point.get("low")),
+            "open": None,
+            "high": None,
+            "low": None,
+            "bar_ohlc_semantics": "snapshot_price_only",
+        }
+        for point in points
+        if isinstance(point, dict)
+    ]
     if stale is not None:
-        merged_points = _merge_intraday_points(stale.get("points") or [], points)
+        stale_points = [
+            {
+                **point,
+                "session_open": point.get("session_open", point.get("open")),
+                "session_high": point.get("session_high", point.get("high")),
+                "session_low": point.get("session_low", point.get("low")),
+                "open": None,
+                "high": None,
+                "low": None,
+                "bar_ohlc_semantics": "snapshot_price_only",
+            }
+            for point in stale.get("points") or []
+            if isinstance(point, dict)
+        ]
+        merged_points = _merge_intraday_points(stale_points, merged_points)
 
     if realtime_quote is not None and realtime_quote.time is not None and realtime_quote.price is not None:
         realtime_time = _kr_index_intraday_minute(realtime_quote.time)
@@ -2967,9 +3273,13 @@ def get_kr_index_intraday_trend(
             "session": _kr_index_intraday_session(realtime_time),
             "price": realtime_quote.price,
             "volume": realtime_volume,
-            "open": realtime_quote.open_value,
-            "high": realtime_quote.high_value,
-            "low": realtime_quote.low_value,
+            "open": None,
+            "high": None,
+            "low": None,
+            "session_open": realtime_quote.open_value,
+            "session_high": realtime_quote.high_value,
+            "session_low": realtime_quote.low_value,
+            "bar_ohlc_semantics": "snapshot_price_only",
             "cumulative_volume": realtime_quote.cumulative_volume,
             "trade_value": realtime_quote.trade_value,
         }
@@ -3043,6 +3353,8 @@ def get_kr_index_intraday_trend(
         "volume_unit": "thousand_shares",
         "volume_semantics": "interval_with_cumulative_total",
         "trade_value_unit": "million_krw",
+        "ohlc_semantics": "snapshot_price_only",
+        "ohlc_analysis_policy": "confirmed_interval_ohlc_only",
         "continuity": continuity,
         "is_partial": (
             bool(warnings)
@@ -3056,6 +3368,27 @@ def get_kr_index_intraday_trend(
             realtime_quote.polling_interval_seconds if realtime_quote is not None else None
         ),
     }
+    try:
+        changed_count = mutate_market_intraday_history(
+            db,
+            provider=KR_INDEX_INTRADAY_PROVIDER,
+            stock_id=normalized_index_id,
+            market="KR",
+            symbol=index_config.provider_symbol,
+            interval="1m",
+            source=str(payload.get("source") or KR_INDEX_INTRADAY_PROVIDER),
+            source_url=payload.get("source_url"),
+            points=merged_points,
+            market_timezone=KR_MARKET_TIMEZONE,
+        )
+        if changed_count:
+            db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        payload.setdefault("warnings", []).append(
+            "KR index intraday persistence failed; restart-stable cache "
+            "coverage may be partial."
+        )
     return _set_kr_index_intraday_cache(cache_key, payload)
 
 
@@ -3226,6 +3559,7 @@ def list_kr_index_ohlc_chart_data(
         if resolved_expected_data_date is not None and latest_data_date > resolved_expected_data_date
         else "current"
     )
+    has_volume = any(point.get("volume") is not None for point in points)
 
     return {
         "index_id": normalized_index_id,
@@ -3239,6 +3573,13 @@ def list_kr_index_ohlc_chart_data(
         "to_date": end_date,
         "point_count": len(points),
         "points": points,
+        "volume_unit": "thousand_shares" if has_volume else None,
+        "volume_semantics": (
+            f"{timeframe}_provider_reported_index_volume"
+            if has_volume
+            else "index_volume_not_equivalent_to_market_volume"
+        ),
+        "volume_status": "available" if has_volume else "not_applicable",
         "backfill": backfill_result,
         "latest_data_date": latest_data_date,
         "expected_data_date": resolved_expected_data_date,
@@ -3426,6 +3767,7 @@ def list_kr_ohlc_chart_data(
         if resolved_expected_data_date is not None and latest_data_date > resolved_expected_data_date
         else "current"
     )
+    has_volume = any(point.get("volume") is not None for point in points)
 
     return {
         "symbol": normalized_symbol,
@@ -3436,6 +3778,11 @@ def list_kr_ohlc_chart_data(
         "to_date": end_date,
         "point_count": len(points),
         "points": points,
+        "volume_unit": "shares" if has_volume else None,
+        "volume_semantics": (
+            f"{timeframe}_traded_shares" if has_volume else None
+        ),
+        "volume_status": "available" if has_volume else "not_provided",
         "backfill": backfill_result,
         "latest_data_date": latest_data_date,
         "expected_data_date": resolved_expected_data_date,

@@ -63,17 +63,27 @@ CRYPTO_PROVIDER_PRIORITY = {
 }
 
 
-def _fallback_plan(*, symbol: str, gaps: dict[str, Any], question: str) -> dict[str, Any]:
+def _fallback_plan(
+    *,
+    symbol: str,
+    gaps: dict[str, Any],
+    question: str,
+    requested_trade_date: str | None = None,
+    session_scope: str = "regular",
+) -> dict[str, Any]:
     missing = set(gaps.get("missing") or [])
     required = set(gaps.get("required_capabilities") or missing)
     lowered_question = question.lower()
     steps: list[dict[str, Any]] = []
 
-    if "us_intraday_trend" in missing:
+    if "us_intraday_trend" in missing and requested_trade_date is None:
         steps.append(
             {
                 "tool": "us.read_intraday_trend",
-                "args": {"symbol": symbol},
+                "args": {
+                    "symbol": symbol,
+                    "session_scope": session_scope,
+                },
                 "reason": "The question asks for ADR/latest trading context.",
             }
         )
@@ -138,17 +148,32 @@ def _selected_us_plan(
     symbol: str,
     gaps: dict[str, Any],
     requested_capabilities: tuple[str, ...],
+    requested_trade_date: str | None = None,
+    session_scope: str = "regular",
 ) -> dict[str, Any]:
     missing = set(gaps.get("missing") or [])
     steps: list[dict[str, Any]] = []
     steps_by_tool: dict[str, dict[str, Any]] = {}
     for capability in requested_capabilities:
-        for requirement in US_CAPABILITY_REQUIREMENTS.get(capability, ()):
+        requirements = US_CAPABILITY_REQUIREMENTS.get(capability, ())
+        if requested_trade_date is not None:
+            if capability == "quote.snapshot":
+                requirements = ("us_daily_price",)
+            else:
+                requirements = tuple(
+                    requirement
+                    for requirement in requirements
+                    if requirement != "us_intraday_trend"
+                )
+        for requirement in requirements:
             if requirement not in missing:
                 continue
             if requirement == "us_intraday_trend":
                 tool_name = "us.read_intraday_trend"
-                args = {"symbol": symbol}
+                args = {
+                    "symbol": symbol,
+                    "session_scope": session_scope,
+                }
             elif requirement == "us_daily_price":
                 tool_name = "us.refresh_daily_price"
                 args = {
@@ -546,6 +571,8 @@ def plan_us_stock_tools(
     budget: dict[str, int],
     can_call_llm: bool,
     requested_capabilities: tuple[str, ...] | None = None,
+    requested_trade_date: str | None = None,
+    session_scope: str = "regular",
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     normalized_symbol = normalize_us_symbol(symbol)
@@ -556,12 +583,14 @@ def plan_us_stock_tools(
                 symbol=normalized_symbol,
                 gaps=gaps,
                 requested_capabilities=requested_capabilities,
+                requested_trade_date=requested_trade_date,
+                session_scope=session_scope,
             ),
             default_symbol=normalized_symbol,
             provider="capability_registry",
         ), warnings
 
-    if can_call_llm:
+    if can_call_llm and requested_trade_date is None:
         try:
             raw_plan = llm.generate_tool_plan(
                 _planner_input(
@@ -572,16 +601,26 @@ def plan_us_stock_tools(
                     allowed_tool_prefix="us.",
                 )
             )
-            return _normalize_plan(
+            normalized_plan = _normalize_plan(
                 raw_plan,
                 default_symbol=normalized_symbol,
                 provider="openai",
-            ), warnings
+            )
+            for step in normalized_plan.get("tool_plan") or []:
+                if step.get("tool") == "us.read_intraday_trend":
+                    step.setdefault("args", {})["session_scope"] = session_scope
+            return normalized_plan, warnings
         except llm.OpenAILLMError as exc:
             warnings.append(f"OMI LLM tool planner failed; used deterministic fallback. Error: {exc}")
 
     return _normalize_plan(
-        _fallback_plan(symbol=normalized_symbol, gaps=gaps, question=question),
+        _fallback_plan(
+            symbol=normalized_symbol,
+            gaps=gaps,
+            question=question,
+            requested_trade_date=requested_trade_date,
+            session_scope=session_scope,
+        ),
         default_symbol=normalized_symbol,
         provider="fallback",
     ), warnings

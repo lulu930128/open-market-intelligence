@@ -75,6 +75,35 @@ class AiRealtimeContractTests(unittest.TestCase):
         self.assertTrue(result["policy_satisfied"])
         self.assertTrue(result["decision_usable"])
 
+    def test_tw_futures_nested_after_hours_market_status_is_live(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "last_price": 23_500.0,
+                "quote_time": "2026-07-28T22:33:05+08:00",
+                "session": "after_hours",
+                "freshness": {
+                    "status": "live",
+                    "is_live": True,
+                    "is_stale": False,
+                    "market_status": {
+                        "status": "open",
+                        "phase": "after_hours",
+                        "is_open": True,
+                    },
+                },
+            },
+            market="TW",
+            realtime_policy="require_live",
+            now=datetime(2026, 7, 28, 14, 33, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "live")
+        self.assertEqual(result["market_status"], "open")
+        self.assertEqual(result["session_phase"], "after_hours")
+        self.assertEqual(result["observation_mode"], "live_quote")
+        self.assertTrue(result["policy_satisfied"])
+        self.assertTrue(result["decision_usable"])
+
     def test_open_us_quote_outside_delay_window_is_stale(self) -> None:
         result = realtime_contract.classify_observation(
             {
@@ -92,6 +121,46 @@ class AiRealtimeContractTests(unittest.TestCase):
         self.assertEqual(result["state"], "stale")
         self.assertFalse(result["decision_usable"])
         self.assertTrue(result["refresh_recommended"])
+
+    def test_jp_delayed_feed_uses_declared_provider_window_before_stale(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 42_000.0,
+                "quote_time": (self.now - timedelta(minutes=17)).isoformat(),
+                "market_status": "open",
+                "session_phase": "regular",
+                "is_live": False,
+            },
+            market="JP",
+            realtime_policy="prefer_live",
+            now=self.now,
+        )
+
+        self.assertEqual(result["state"], "delayed")
+        self.assertEqual(result["expected_provider_delay_seconds"], 900)
+        self.assertEqual(result["excess_delay_seconds"], 120)
+        self.assertEqual(
+            result["expected_provider_delay_source"],
+            "omi_market_provider_policy",
+        )
+        self.assertTrue(result["decision_usable"])
+
+    def test_jp_delayed_feed_beyond_excess_tolerance_is_stale(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 42_000.0,
+                "quote_time": (self.now - timedelta(minutes=19)).isoformat(),
+                "market_status": "open",
+                "session_phase": "regular",
+            },
+            market="JP",
+            realtime_policy="prefer_live",
+            now=self.now,
+        )
+
+        self.assertEqual(result["state"], "stale")
+        self.assertEqual(result["expected_provider_delay_seconds"], 900)
+        self.assertEqual(result["excess_delay_seconds"], 240)
 
     def test_weekend_us_close_matches_latest_completed_trading_session(
         self,
@@ -112,6 +181,122 @@ class AiRealtimeContractTests(unittest.TestCase):
         self.assertEqual(result["state"], "latest_completed_session")
         self.assertEqual(result["observation_mode"], "session_close")
         self.assertEqual(result["status_class"], "ready")
+        self.assertTrue(result["policy_satisfied"])
+        self.assertTrue(result["decision_usable"])
+        self.assertFalse(result["refresh_recommended"])
+
+    def test_old_us_close_label_cannot_override_expected_session_date(
+        self,
+    ) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 213.88,
+                "quote_time": "2026-07-24T16:00:00-04:00",
+                "market_status": "closed",
+                "session_phase": "post_close",
+                "quote_semantics": "latest_completed_session",
+                "is_latest_session_quote": True,
+            },
+            market="US",
+            realtime_policy="prefer_live",
+            now=datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "stale")
+        self.assertFalse(result["decision_usable"])
+        self.assertTrue(result["refresh_recommended"])
+
+    def test_tw_post_close_bar_matches_latest_completed_session(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 2_325.0,
+                "bar_time": "2026-07-27T13:30:00+08:00",
+                "provider": "yahoo_finance_chart",
+                "market_status": "closed",
+                "session_phase": "post_close",
+            },
+            market="TW",
+            realtime_policy="cache_only",
+            now=datetime(2026, 7, 27, 5, 40, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "latest_completed_session")
+        self.assertEqual(result["status_class"], "ready")
+        self.assertTrue(result["decision_usable"])
+
+    def test_jp_post_close_bar_matches_latest_completed_session(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 42_100.0,
+                "bar_time": "2026-07-27T15:30:00+09:00",
+                "provider": "yahoo_finance_chart",
+                "market_status": "closed",
+                "session_phase": "post_close",
+            },
+            market="JP",
+            realtime_policy="prefer_live",
+            now=datetime(2026, 7, 27, 7, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "latest_completed_session")
+        self.assertEqual(result["status_class"], "ready")
+
+    def test_kr_post_close_bar_matches_latest_completed_session(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 92_000.0,
+                "bar_time": "2026-07-27T15:30:00+09:00",
+                "provider": "naver_finance",
+                "market_status": "closed",
+                "session_phase": "post_close",
+            },
+            market="KR",
+            realtime_policy="prefer_live",
+            now=datetime(2026, 7, 27, 7, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "latest_completed_session")
+        self.assertEqual(result["status_class"], "ready")
+
+    def test_completed_session_does_not_satisfy_require_live(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 2_325.0,
+                "bar_time": "2026-07-27T13:30:00+08:00",
+                "provider": "yahoo_finance_chart",
+                "market_status": "closed",
+                "session_phase": "post_close",
+            },
+            market="TW",
+            realtime_policy="require_live",
+            now=datetime(2026, 7, 27, 5, 40, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "latest_completed_session")
+        self.assertFalse(result["policy_satisfied"])
+        self.assertEqual(result["status_class"], "blocked")
+
+    def test_explicit_historical_us_close_is_not_latest_or_live(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "status": "historical",
+                "price": 326.59,
+                "trade_date": "2026-07-20",
+                "quote_time": "2026-07-20T16:00:00-04:00",
+                "market_status": "historical",
+                "session_phase": "regular_session_close",
+                "quote_semantics": "historical_regular_session_close",
+                "is_historical": True,
+                "is_live": False,
+                "is_latest_session_quote": False,
+            },
+            market="US",
+            realtime_policy="prefer_live",
+            now=datetime(2026, 7, 26, 14, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "historical")
+        self.assertEqual(result["observation_mode"], "historical_close")
         self.assertTrue(result["policy_satisfied"])
         self.assertTrue(result["decision_usable"])
         self.assertFalse(result["refresh_recommended"])

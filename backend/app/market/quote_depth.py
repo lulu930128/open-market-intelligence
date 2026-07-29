@@ -10,7 +10,12 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import StockMaster, TaiwanStockQuoteSnapshot, utc_now
+from app.db.models import (
+    StockMaster,
+    TaiwanQuoteContractSnapshot,
+    TaiwanStockQuoteSnapshot,
+    utc_now,
+)
 from app.market.providers import http_get
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.live_snapshot import market_status_from_session
@@ -36,6 +41,22 @@ TAIWAN_QUOTE_DEPTH_PREOPEN = time(8, 30)
 TAIWAN_QUOTE_DEPTH_OPEN = time(9, 0)
 TAIWAN_QUOTE_DEPTH_CLOSING_AUCTION = time(13, 25)
 TAIWAN_QUOTE_DEPTH_CLOSE = time(13, 30)
+TAIWAN_QUOTE_DEPTH_OFFICIAL_CLOSE_DEADLINE = time(13, 33)
+TAIWAN_QUOTE_CONTRACT_SLOTS = (
+    "08:30",
+    "08:50",
+    "08:55",
+    "08:58",
+    "08:59",
+    "09:00",
+    "09:05",
+    "11:00",
+    "13:24",
+    "13:28",
+    "13:30",
+    "13:32",
+    "13:34",
+)
 LIVE_DEPTH_PHASES = {"preopen_auction", "regular_live", "closing_auction"}
 POST_CLOSE_PHASES = {"post_close_snapshot", "market_closed"}
 PHASE_LABELS = {
@@ -231,10 +252,10 @@ def _split_field(value: Any) -> list[str]:
     return str(value).split("_")
 
 
-def _parse_depth_levels(price_text: Any, size_text: Any) -> list[dict[str, int | float | None]]:
+def _parse_depth_levels(price_text: Any, size_text: Any) -> list[dict[str, Any]]:
     prices = _split_field(price_text)
     sizes = _split_field(size_text)
-    levels: list[dict[str, int | float | None]] = []
+    levels: list[dict[str, Any]] = []
 
     for index in range(5):
         price = _as_float(prices[index]) if index < len(prices) else None
@@ -246,26 +267,62 @@ def _parse_depth_levels(price_text: Any, size_text: Any) -> list[dict[str, int |
                 "level": index + 1,
                 "price": price,
                 "size_lots": size_lots,
+                "volume_lots": size_lots,
+                "order_count": None,
+                "order_count_status": "not_provided",
             }
         )
 
     return levels
 
 
-def _first_price_level(levels: list[dict[str, int | float | None]]) -> dict[str, int | float | None] | None:
+def _first_price_level(levels: list[dict[str, Any]]) -> dict[str, Any] | None:
     for level in levels:
         if level.get("price") is not None or level.get("size_lots") is not None:
             return level
     return None
 
 
-def _sum_level_sizes(levels: list[dict[str, int | float | None]]) -> int | None:
+def _sum_level_sizes(levels: list[dict[str, Any]]) -> int | None:
     total = sum(
         int(size)
         for size in (level.get("size_lots") for level in levels)
         if isinstance(size, (int, float))
     )
     return total if total > 0 else None
+
+
+def _depth_contract(
+    *,
+    bid_levels: list[dict[str, Any]],
+    ask_levels: list[dict[str, Any]],
+    depth_available: bool,
+) -> dict[str, Any]:
+    bid_total = _sum_level_sizes(bid_levels)
+    ask_total = _sum_level_sizes(ask_levels)
+    denominator = (bid_total or 0) + (ask_total or 0)
+    imbalance = (
+        ((bid_total or 0) - (ask_total or 0)) / denominator
+        if depth_available and denominator > 0
+        else None
+    )
+    status = "available" if depth_available else "unavailable"
+    return {
+        "bid_depth": bid_levels if depth_available else [],
+        "ask_depth": ask_levels if depth_available else [],
+        "bid_depth_status": status,
+        "ask_depth_status": status,
+        "depth_volume_unit": "lots",
+        "depth_order_count_status": "not_provided",
+        "top5_bid_volume_lots": bid_total if depth_available else None,
+        "top5_ask_volume_lots": ask_total if depth_available else None,
+        "top5_imbalance": imbalance,
+        "top5_imbalance_formula": (
+            "(bid_volume_lots-ask_volume_lots)/(bid_volume_lots+ask_volume_lots)"
+            if imbalance is not None
+            else None
+        ),
+    }
 
 
 def _percent_change(change: float | None, base: float | None) -> float | None:
@@ -281,7 +338,59 @@ def _loads_levels(value: str | None) -> list[dict[str, Any]]:
         loaded = json.loads(value)
     except json.JSONDecodeError:
         return []
-    return loaded if isinstance(loaded, list) else []
+    if not isinstance(loaded, list):
+        return []
+    return [
+        {
+            **level,
+            "volume_lots": level.get("volume_lots", level.get("size_lots")),
+            "order_count": level.get("order_count"),
+            "order_count_status": level.get(
+                "order_count_status",
+                "not_provided",
+            ),
+        }
+        for level in loaded
+        if isinstance(level, dict)
+    ]
+
+
+def _official_close_precision_contract(
+    row: TaiwanStockQuoteSnapshot | None,
+    *,
+    official_close_available: bool,
+) -> dict[str, Any]:
+    if row is None or not official_close_available:
+        return {
+            "official_close_raw": None,
+            "official_close_display": None,
+            "official_close_precision": None,
+            "official_close_precision_semantics": "unavailable",
+        }
+    raw_value: Any = None
+    try:
+        payload = json.loads(row.raw_payload_json or "{}")
+        message = (payload.get("msgArray") or [None])[0]
+        if isinstance(message, dict):
+            raw_value = message.get("z")
+    except (TypeError, json.JSONDecodeError):
+        raw_value = None
+    raw_text = str(raw_value).strip() if raw_value not in (None, "", "-") else None
+    if raw_text is None and row.last_price is not None:
+        raw_text = format(float(row.last_price), "g")
+    precision = (
+        len(raw_text.rsplit(".", 1)[1])
+        if raw_text is not None and "." in raw_text
+        else 0
+        if raw_text is not None
+        else None
+    )
+    return {
+        "official_close_raw": raw_text,
+        "official_close_display": raw_text,
+        "official_close_precision": precision,
+        "official_close_precision_semantics": "provider_decimal_preserved",
+    }
 
 
 def _fetch_mis_quote_depth(
@@ -598,6 +707,199 @@ def _freshness_for_row(
     }
 
 
+def _price_semantics_contract(
+    *,
+    row: TaiwanStockQuoteSnapshot | None,
+    phase: str,
+    freshness: dict[str, Any],
+    depth_available: bool,
+    best_bid_price: float | None,
+    best_ask_price: float | None,
+    refresh_outcome: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    local_now = _local_now(now)
+    expected_trade_date = _expected_trade_date_for_phase(phase, now=local_now)
+    last_trade_price = row.last_price if row is not None else None
+    last_trade_time = (
+        _taiwan_exchange_datetime(row.quote_time) if row is not None else None
+    )
+    last_trade_is_current_session = bool(
+        row is not None
+        and expected_trade_date is not None
+        and row.trade_date == expected_trade_date
+    )
+    fetched_at = (
+        _local_now(row.fetched_at)
+        if row is not None and row.fetched_at is not None
+        else None
+    )
+    snapshot_time = fetched_at
+    persisted_after_close = bool(
+        row is not None
+        and fetched_at is not None
+        and row.trade_date == fetched_at.date()
+        and fetched_at.time() >= TAIWAN_QUOTE_DEPTH_CLOSE
+    )
+    provider_observed_current_state = (
+        refresh_outcome in {"updated", "unchanged", "cache_hit"}
+        and not freshness.get("source_error")
+    )
+    closing_state_finalized = (
+        phase == "market_closed"
+        or (
+            phase == "post_close_snapshot"
+            and local_now.time()
+            >= TAIWAN_QUOTE_DEPTH_OFFICIAL_CLOSE_DEADLINE
+        )
+    )
+    official_close_available = bool(
+        closing_state_finalized
+        and last_trade_price is not None
+        and last_trade_is_current_session
+        and not freshness.get("source_error")
+        and (provider_observed_current_state or persisted_after_close)
+    )
+
+    if official_close_available:
+        official_close_status = "confirmed"
+    elif phase == "closing_auction":
+        official_close_status = "closing_auction_pending"
+    elif phase == "post_close_snapshot":
+        official_close_status = "pending"
+    elif phase == "market_closed":
+        official_close_status = "unverified_latest_session"
+    else:
+        official_close_status = "not_available_yet"
+
+    auction_phase = phase in {"preopen_auction", "closing_auction"}
+    auction_book_available = bool(
+        auction_phase
+        and depth_available
+        and (best_bid_price is not None or best_ask_price is not None)
+    )
+    # TWSE MIS exposes order-book depth during auction phases, but it does not
+    # expose an indicative match price/volume. Keep those contracts separate.
+    auction_indicative_available = False
+    auction_book_time = snapshot_time if auction_book_available else None
+    last_trade_available = bool(
+        last_trade_price is not None
+        and last_trade_is_current_session
+        and phase != "preopen_auction"
+    )
+    if phase == "preopen_auction":
+        quote_semantics = (
+            "preopen_depth_only"
+            if auction_book_available
+            else "preopen_unavailable"
+        )
+        price_available = False
+    elif phase == "regular_live":
+        quote_semantics = (
+            "live_trade_and_depth"
+            if last_trade_available and depth_available
+            else "delayed_current_session_trade"
+            if last_trade_available and freshness.get("status") != "live"
+            else "live_trade_only"
+            if last_trade_available
+            else "live_depth_only"
+            if depth_available
+            else "current_session_unavailable"
+        )
+        price_available = last_trade_available
+    elif phase == "closing_auction":
+        quote_semantics = (
+            "closing_auction_depth_only"
+            if auction_book_available
+            else "closing_auction_last_trade"
+            if last_trade_available
+            else "closing_auction_pending"
+        )
+        price_available = last_trade_available
+    elif phase in POST_CLOSE_PHASES:
+        quote_semantics = (
+            "official_close"
+            if official_close_available
+            else "official_close_pending"
+            if phase == "post_close_snapshot"
+            else "latest_session_close_unverified"
+        )
+        price_available = official_close_available
+    else:
+        quote_semantics = "unavailable"
+        price_available = False
+    delivery_status = (
+        "official_close"
+        if official_close_available
+        else "official_close_pending"
+        if phase == "post_close_snapshot"
+        else "closing_auction"
+        if phase == "closing_auction"
+        else "live_depth_only"
+        if phase == "preopen_auction" and depth_available
+        else str(freshness.get("status") or "unavailable")
+    )
+
+    return {
+        "quote_semantics": quote_semantics,
+        "delivery_status": delivery_status,
+        "fallback_used": False,
+        "price_available": price_available,
+        "last_trade_available": last_trade_available,
+        "last_trade_price": (
+            last_trade_price if last_trade_available else None
+        ),
+        "last_trade_time": (
+            last_trade_time if last_trade_available else None
+        ),
+        "last_trade_is_current_session": last_trade_is_current_session,
+        "last_trade_before_auction": bool(
+            phase == "closing_auction" and last_trade_available
+        ),
+        "snapshot_time": snapshot_time,
+        "snapshot_time_basis": "provider_response_received_at",
+        "provider_event_time": last_trade_time,
+        "auction_book_available": auction_book_available,
+        "auction_book_status": (
+            "depth_only" if auction_book_available else "unavailable"
+        ),
+        "auction_book_time": auction_book_time,
+        "auction_best_bid": (
+            best_bid_price if auction_book_available else None
+        ),
+        "auction_best_ask": (
+            best_ask_price if auction_book_available else None
+        ),
+        "auction_indicative_available": auction_indicative_available,
+        "auction_indicative_status": "not_provided",
+        "auction_phase": phase if auction_phase else None,
+        "auction_event_time": (
+            auction_book_time if auction_book_available else None
+        ),
+        "indicative_match_available": False,
+        "indicative_match_price": None,
+        "indicative_match_volume_lots": None,
+        "indicative_unmatched_buy_volume_lots": None,
+        "indicative_unmatched_sell_volume_lots": None,
+        "indicative_match_status": "not_provided",
+        "indicative_price_available": False,
+        "indicative_price": None,
+        "indicative_bid": None,
+        "indicative_ask": None,
+        "official_close_available": official_close_available,
+        "official_close_status": official_close_status,
+        "official_close_price": (
+            last_trade_price if official_close_available else None
+        ),
+        "official_close_trade_date": (
+            row.trade_date if row is not None and official_close_available else None
+        ),
+        "official_close_source": (
+            TWSE_MIS_SOURCE if official_close_available else None
+        ),
+    }
+
+
 def _empty_response(
     *,
     stock: StockMaster,
@@ -610,6 +912,35 @@ def _empty_response(
     calendar_status = build_taiwan_calendar_status(now=now)
     market_status = market_status_from_session(calendar_status)
     session = calendar_status.get("session") if isinstance(calendar_status.get("session"), dict) else {}
+    freshness = _freshness_for_row(
+        None,
+        phase=phase,
+        source_error=source_error,
+        source_error_detail=source_error_detail,
+        now=now,
+    )
+    semantics = _price_semantics_contract(
+        row=None,
+        phase=phase,
+        freshness=freshness,
+        depth_available=False,
+        best_bid_price=None,
+        best_ask_price=None,
+        refresh_outcome=refresh_outcome,
+        now=now,
+    )
+    if phase == "post_close_snapshot" and not source_error:
+        freshness["status"] = "official_close_pending"
+        freshness["is_stale"] = False
+        freshness["message"] = (
+            "The closing auction has ended, but an official close snapshot "
+            "has not been confirmed yet."
+        )
+    depth_contract = _depth_contract(
+        bid_levels=[],
+        ask_levels=[],
+        depth_available=False,
+    )
     return {
         "stock_id": stock.stock_id,
         "stock_name": stock.stock_name,
@@ -627,6 +958,8 @@ def _empty_response(
         "phase_label": PHASE_LABELS.get(phase, phase),
         "trade_date": None,
         "quote_time": None,
+        "snapshot_time": None,
+        "provider_event_time": None,
         "fetched_at": None,
         "last_price": None,
         "previous_close": None,
@@ -647,14 +980,23 @@ def _empty_response(
         "bid_levels": [],
         "ask_levels": [],
         "depth_available": False,
+        **depth_contract,
+        "ohlc_summary": {
+            "open": None,
+            "high": None,
+            "low": None,
+            "last": None,
+            "previous_close": None,
+            "event_time": None,
+            "semantics": "unavailable",
+        },
         "refresh_outcome": refresh_outcome,
-        "freshness": _freshness_for_row(
+        **semantics,
+        **_official_close_precision_contract(
             None,
-            phase=phase,
-            source_error=source_error,
-            source_error_detail=source_error_detail,
-            now=now,
+            official_close_available=False,
         ),
+        "freshness": freshness,
     }
 
 
@@ -685,6 +1027,43 @@ def _row_to_response(
     calendar_status = build_taiwan_calendar_status(now=now)
     market_status = market_status_from_session(calendar_status)
     session = calendar_status.get("session") if isinstance(calendar_status.get("session"), dict) else {}
+    semantics = _price_semantics_contract(
+        row=row,
+        phase=phase,
+        freshness=freshness,
+        depth_available=depth_available,
+        best_bid_price=row.best_bid_price,
+        best_ask_price=row.best_ask_price,
+        refresh_outcome=refresh_outcome,
+        now=now,
+    )
+    if semantics["official_close_available"]:
+        freshness["status"] = "official_close"
+        freshness["is_live"] = False
+        freshness["is_stale"] = False
+        freshness["message"] = (
+            "The latest completed regular-session close is confirmed."
+        )
+    elif (
+        phase == "post_close_snapshot"
+        and not freshness.get("source_error")
+        and not freshness.get("is_stale")
+    ):
+        freshness["status"] = "official_close_pending"
+        freshness["is_live"] = False
+        freshness["message"] = (
+            "The closing auction has ended, but an official close snapshot "
+            "has not been confirmed yet."
+        )
+    depth_contract = _depth_contract(
+        bid_levels=bid_levels,
+        ask_levels=ask_levels,
+        depth_available=depth_available,
+    )
+    close_precision = _official_close_precision_contract(
+        row,
+        official_close_available=bool(semantics["official_close_available"]),
+    )
 
     return {
         "stock_id": row.stock_id,
@@ -702,7 +1081,9 @@ def _row_to_response(
         "holiday_name": calendar_status.get("holiday_name"),
         "phase_label": PHASE_LABELS.get(phase, phase),
         "trade_date": row.trade_date,
-        "quote_time": _taiwan_exchange_datetime(row.quote_time),
+        "quote_time": _local_now(row.fetched_at),
+        "snapshot_time": _local_now(row.fetched_at),
+        "provider_event_time": _taiwan_exchange_datetime(row.quote_time),
         "fetched_at": row.fetched_at,
         "last_price": row.last_price,
         "previous_close": row.previous_close,
@@ -723,7 +1104,30 @@ def _row_to_response(
         "bid_levels": bid_levels,
         "ask_levels": ask_levels,
         "depth_available": depth_available,
+        **depth_contract,
+        "ohlc_summary": {
+            "open": row.open_price,
+            "high": row.high_price,
+            "low": row.low_price,
+            "last": (
+                row.last_price
+                if semantics["last_trade_available"]
+                or semantics["official_close_available"]
+                else None
+            ),
+            "previous_close": row.previous_close,
+            "event_time": _taiwan_exchange_datetime(row.quote_time),
+            "semantics": (
+                "current_session_to_date"
+                if phase in LIVE_DEPTH_PHASES
+                else "latest_completed_session"
+                if semantics["official_close_available"]
+                else "provider_snapshot_unconfirmed"
+            ),
+        },
         "refresh_outcome": refresh_outcome,
+        **semantics,
+        **close_precision,
         "freshness": freshness,
     }
 
@@ -804,3 +1208,317 @@ def get_taiwan_stock_quote_depth(
             suppress_depth=phase == "closed_waiting_preopen",
         ),
     )
+
+
+def _quote_contract_json_default(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"Unsupported quote contract snapshot value: {type(value)!r}")
+
+
+def _quote_contract_slot_time(capture_slot: str) -> time:
+    normalized = str(capture_slot or "").strip()
+    if normalized not in TAIWAN_QUOTE_CONTRACT_SLOTS:
+        raise ValueError(
+            "capture_slot must be one of: "
+            + ", ".join(TAIWAN_QUOTE_CONTRACT_SLOTS)
+        )
+    hour_text, minute_text = normalized.split(":", maxsplit=1)
+    return time(int(hour_text), int(minute_text))
+
+
+def _upsert_quote_contract_snapshot(
+    db: Session,
+    *,
+    stock_id: str,
+    trade_date: date,
+    capture_slot: str,
+    scheduled_at: datetime,
+    captured_at: datetime,
+    payload: dict[str, Any] | None,
+    error: str | None,
+) -> TaiwanQuoteContractSnapshot:
+    freshness = (
+        payload.get("freshness")
+        if isinstance(payload, dict) and isinstance(payload.get("freshness"), dict)
+        else {}
+    )
+    capture_status = (
+        "failed"
+        if payload is None
+        else "captured_degraded"
+        if error or freshness.get("source_error")
+        else "captured"
+    )
+    values = {
+        "provider": payload.get("provider") if payload else None,
+        "market": payload.get("market") if payload else None,
+        "scheduled_at": scheduled_at,
+        "captured_at": captured_at,
+        "quote_time": payload.get("quote_time") if payload else None,
+        "session_phase": payload.get("session_phase") if payload else None,
+        "capture_status": capture_status,
+        "refresh_outcome": payload.get("refresh_outcome") if payload else "failed",
+        "freshness_status": freshness.get("status"),
+        "source": (
+            str(payload.get("source") or TWSE_MIS_SOURCE)
+            if payload
+            else TWSE_MIS_SOURCE
+        ),
+        "payload_json": (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=_quote_contract_json_default,
+            )
+            if payload is not None
+            else None
+        ),
+        "error": error or freshness.get("source_error"),
+        "updated_at": captured_at,
+    }
+    row = (
+        db.query(TaiwanQuoteContractSnapshot)
+        .filter(TaiwanQuoteContractSnapshot.stock_id == stock_id)
+        .filter(TaiwanQuoteContractSnapshot.trade_date == trade_date)
+        .filter(TaiwanQuoteContractSnapshot.capture_slot == capture_slot)
+        .first()
+    )
+    if row is None:
+        row = TaiwanQuoteContractSnapshot(
+            stock_id=stock_id,
+            trade_date=trade_date,
+            capture_slot=capture_slot,
+            created_at=captured_at,
+            **values,
+        )
+        db.add(row)
+    else:
+        for key, value in values.items():
+            setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def capture_taiwan_quote_contract_snapshot(
+    *,
+    db: Session,
+    stock_id: str,
+    capture_slot: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    normalized_stock_id = _normalize_stock_id(stock_id)
+    local_now = _local_now(now)
+    if not is_taiwan_trading_day(local_now.date()):
+        raise ValueError(
+            f"Taiwan quote contract capture requires a trading day: {local_now.date()}."
+        )
+    slot_time = _quote_contract_slot_time(capture_slot)
+    scheduled_at = datetime.combine(
+        local_now.date(),
+        slot_time,
+        tzinfo=TAIWAN_TZ,
+    )
+    payload: dict[str, Any] | None = None
+    error: str | None = None
+    try:
+        payload = get_taiwan_stock_quote_depth(
+            db=db,
+            stock_id=normalized_stock_id,
+            refresh=True,
+            now=local_now,
+        )
+    except Exception as exc:
+        db.rollback()
+        error = str(exc) or exc.__class__.__name__
+
+    row = _upsert_quote_contract_snapshot(
+        db,
+        stock_id=normalized_stock_id,
+        trade_date=local_now.date(),
+        capture_slot=capture_slot,
+        scheduled_at=scheduled_at,
+        captured_at=local_now,
+        payload=payload,
+        error=error,
+    )
+    return {
+        "stock_id": row.stock_id,
+        "trade_date": row.trade_date,
+        "capture_slot": row.capture_slot,
+        "scheduled_at": _taiwan_exchange_datetime(row.scheduled_at),
+        "captured_at": _taiwan_exchange_datetime(row.captured_at),
+        "capture_delay_seconds": int(
+            (
+                _taiwan_exchange_datetime(row.captured_at)
+                - _taiwan_exchange_datetime(row.scheduled_at)
+            ).total_seconds()
+        ),
+        "capture_status": row.capture_status,
+        "refresh_outcome": row.refresh_outcome,
+        "freshness_status": row.freshness_status,
+        "error": row.error,
+    }
+
+
+def _project_replay_quote_contract(
+    payload: dict[str, Any] | None,
+    *,
+    captured_at: datetime,
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    output = dict(payload)
+    phase = str(output.get("session_phase") or "")
+    source = str(output.get("source") or "")
+    snapshot_time = (
+        output.get("snapshot_time")
+        or captured_at.isoformat()
+    )
+    provider_event_time = (
+        output.get("provider_event_time")
+        or output.get("last_trade_time")
+        or output.get("quote_time")
+    )
+    output["quote_time"] = snapshot_time
+    output["snapshot_time"] = snapshot_time
+    output.setdefault(
+        "snapshot_time_basis",
+        "persisted_capture_time",
+    )
+    output["provider_event_time"] = provider_event_time
+
+    if source == TWSE_MIS_SOURCE:
+        auction_phase = phase in {"preopen_auction", "closing_auction"}
+        auction_book_available = bool(
+            auction_phase and output.get("depth_available")
+        )
+        output["auction_book_available"] = auction_book_available
+        output["auction_book_status"] = (
+            "depth_only" if auction_book_available else "unavailable"
+        )
+        output["auction_book_time"] = (
+            snapshot_time if auction_book_available else None
+        )
+        output["auction_event_time"] = (
+            snapshot_time if auction_book_available else None
+        )
+        output["auction_best_bid"] = (
+            output.get("best_bid_price") if auction_book_available else None
+        )
+        output["auction_best_ask"] = (
+            output.get("best_ask_price") if auction_book_available else None
+        )
+        output["auction_indicative_available"] = False
+        output["auction_indicative_status"] = "not_provided"
+        output["indicative_match_available"] = False
+        output["indicative_match_price"] = None
+        output["indicative_match_volume_lots"] = None
+        output["indicative_unmatched_buy_volume_lots"] = None
+        output["indicative_unmatched_sell_volume_lots"] = None
+        output["indicative_match_status"] = "not_provided"
+        output["indicative_price_available"] = False
+        output["indicative_price"] = None
+        output["indicative_bid"] = None
+        output["indicative_ask"] = None
+        output["last_trade_before_auction"] = bool(
+            phase == "closing_auction"
+            and output.get("last_trade_available")
+        )
+
+    output["replay_projection"] = "current_public_contract"
+    return output
+
+
+def get_taiwan_quote_contract_replay(
+    *,
+    db: Session,
+    stock_id: str,
+    trade_date: date | None = None,
+) -> dict[str, Any]:
+    normalized_stock_id = _normalize_stock_id(stock_id)
+    _get_stock(db, normalized_stock_id)
+    target_trade_date = trade_date
+    if target_trade_date is None:
+        target_trade_date = (
+            db.query(TaiwanQuoteContractSnapshot.trade_date)
+            .filter(TaiwanQuoteContractSnapshot.stock_id == normalized_stock_id)
+            .order_by(TaiwanQuoteContractSnapshot.trade_date.desc())
+            .limit(1)
+            .scalar()
+        )
+
+    rows: list[TaiwanQuoteContractSnapshot] = []
+    if target_trade_date is not None:
+        rows = (
+            db.query(TaiwanQuoteContractSnapshot)
+            .filter(TaiwanQuoteContractSnapshot.stock_id == normalized_stock_id)
+            .filter(TaiwanQuoteContractSnapshot.trade_date == target_trade_date)
+            .order_by(TaiwanQuoteContractSnapshot.capture_slot.asc())
+            .all()
+        )
+    rows_by_slot = {row.capture_slot: row for row in rows}
+    slot_results: list[dict[str, Any]] = []
+    captured_count = 0
+    for capture_slot in TAIWAN_QUOTE_CONTRACT_SLOTS:
+        row = rows_by_slot.get(capture_slot)
+        if row is None:
+            slot_results.append(
+                {
+                    "capture_slot": capture_slot,
+                    "status": "missing",
+                    "quote": None,
+                }
+            )
+            continue
+        payload = (
+            json.loads(row.payload_json)
+            if row.payload_json
+            else None
+        )
+        payload = _project_replay_quote_contract(
+            payload,
+            captured_at=_taiwan_exchange_datetime(row.captured_at),
+        )
+        if row.capture_status.startswith("captured"):
+            captured_count += 1
+        slot_results.append(
+            {
+                "capture_slot": capture_slot,
+                "status": row.capture_status,
+                "scheduled_at": _taiwan_exchange_datetime(row.scheduled_at),
+                "captured_at": _taiwan_exchange_datetime(row.captured_at),
+                "quote_time": _taiwan_exchange_datetime(row.quote_time),
+                "freshness_status": row.freshness_status,
+                "refresh_outcome": row.refresh_outcome,
+                "error": row.error,
+                "quote": payload,
+            }
+        )
+    required_count = len(TAIWAN_QUOTE_CONTRACT_SLOTS)
+    missing_slots = [
+        item["capture_slot"]
+        for item in slot_results
+        if not str(item["status"]).startswith("captured")
+    ]
+    return {
+        "kind": "taiwan_quote_contract_replay",
+        "stock_id": normalized_stock_id,
+        "trade_date": target_trade_date,
+        "timezone": str(TAIWAN_TZ),
+        "required_slots": list(TAIWAN_QUOTE_CONTRACT_SLOTS),
+        "required_count": required_count,
+        "captured_count": captured_count,
+        "coverage_ratio": captured_count / required_count,
+        "complete": captured_count == required_count,
+        "missing_slots": missing_slots,
+        "snapshots": slot_results,
+        "source": "taiwan_quote_contract_snapshot",
+        "replay_semantics": (
+            "persisted_fixed_slot_evidence_projected_to_current_public_contract"
+        ),
+        "read_path_side_effects": False,
+    }

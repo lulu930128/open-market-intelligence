@@ -84,7 +84,11 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
             request,
         )
 
-    if job_type in {"market.daily_metrics_backfill", "scheduler.market_daily_refresh"}:
+    if job_type in {
+        "market.daily_metrics_backfill",
+        "scheduler.market_daily_refresh",
+        "scheduler.market_margin_daily_refresh",
+    }:
         return (
             backfill_tasks.run_market_daily_metrics_job,
             (
@@ -169,6 +173,23 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
             (
                 list(request.get("categories") or []),
                 bool(request.get("force", False)),
+                float(request.get("sleep_seconds", 0.2)),
+            ),
+            request,
+        )
+
+    if job_type in {
+        "scheduler.tw_stock_detail_shareholding_distribution_refresh",
+        "scheduler.tw_stock_detail_monthly_revenue_refresh",
+        "scheduler.tw_stock_detail_financial_metrics_refresh",
+    }:
+        return (
+            backfill_tasks.run_taiwan_fundamental_snapshot_refresh_job,
+            (
+                str(request.get("category")),
+                str(request.get("dataset")),
+                str(request.get("expected_key")),
+                str(request.get("completion_target")),
                 float(request.get("sleep_seconds", 0.2)),
             ),
             request,

@@ -37,7 +37,13 @@ from app.market.institutional_holding_ratios import (
     fetch_institutional_holding_ratios,
 )
 from app.market.intraday import get_intraday_trend, get_market_intraday_history
-from app.market.quote_depth import get_taiwan_stock_quote_depth
+from app.market.index_contract_snapshot import (
+    get_taiwan_index_contract_replay,
+)
+from app.market.quote_depth import (
+    get_taiwan_quote_contract_replay,
+    get_taiwan_stock_quote_depth,
+)
 from app.market.market_chips import (
     MarketChipFetchError,
     ensure_market_chip_daily,
@@ -106,6 +112,8 @@ from app.market.schemas import (
     ShareholdingDistributionWeeklyRead,
     StockChipCoverageRead,
     TaiwanStockQuoteDepthRead,
+    TaiwanIndexContractReplayRead,
+    TaiwanQuoteContractReplayRead,
     TaiwanDispositionListRead,
     TaiwanDispositionRefreshRead,
     TaiwanCorporateEventListRead,
@@ -1051,6 +1059,50 @@ def get_stock_quote_depth(
             db=db,
             stock_id=stock_id,
             refresh=refresh,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/quote-depth/{stock_id}/replay",
+    response_model=TaiwanQuoteContractReplayRead,
+)
+def get_stock_quote_depth_replay(
+    stock_id: str,
+    trade_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_taiwan_quote_contract_replay(
+            db=db,
+            stock_id=stock_id,
+            trade_date=trade_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/index/{index_id}/contract-replay",
+    response_model=TaiwanIndexContractReplayRead,
+)
+def get_index_contract_replay(
+    index_id: str,
+    trade_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_taiwan_index_contract_replay(
+            db=db,
+            index_id=index_id,
+            trade_date=trade_date,
         )
     except ValueError as exc:
         raise HTTPException(

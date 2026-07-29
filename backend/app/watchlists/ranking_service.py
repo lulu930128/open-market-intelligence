@@ -461,6 +461,7 @@ def _apply_intraday_overlay_to_row(row: dict, overlay: dict) -> None:
     row["limit_status"] = overlay["limit_status"]
     row["intraday_previous_close"] = overlay["previous_close"]
     row["intraday_points"] = overlay["points"]
+    row["intraday_overlay_applied"] = True
     row["context_snapshot"] = _with_intraday_context(
         context_snapshot=row["context_snapshot"],
         overlay=overlay,
@@ -1035,6 +1036,41 @@ def get_watchlist_group_latest_ranking(
         rows=ranked_results,
         requested_stock_count=len(unique_items),
     )
+    ranked_count = len(sortable_rows)
+    requested_stock_count = len(unique_items)
+    is_live = bool(
+        use_intraday
+        and any(row.get("intraday_overlay_applied") for row in ranked_results)
+    )
+    is_full_requested_universe = bool(
+        ranked_count == requested_stock_count
+        and no_data_count == 0
+        and error_count == 0
+    )
+    ranking_universe_type = (
+        "full_market"
+        if rank_scope == "full_market"
+        else "market_reference"
+        if rank_scope != "watchlist"
+        else "requested_watchlist"
+    )
+    ranking_universe_count = (
+        rank_universe_count
+        if rank_scope != "watchlist" and rank_universe_count > 0
+        else requested_stock_count
+    )
+    ranking_coverage_ratio = (
+        ranked_count / ranking_universe_count
+        if ranking_universe_count
+        else 1.0
+    )
+    is_full_market = bool(
+        rank_scope == "full_market"
+        and ranking_universe_count > 0
+        and ranked_count == ranking_universe_count
+        and no_data_count == 0
+        and error_count == 0
+    )
 
     return {
         "group_id": group_id,
@@ -1044,11 +1080,33 @@ def get_watchlist_group_latest_ranking(
         "rank_scope": rank_scope,
         "rank_trade_date": rank_trade_date,
         "rank_universe_count": rank_universe_count,
-        "requested_stock_count": len(unique_items),
-        "ranked_count": len(sortable_rows),
+        "requested_stock_count": requested_stock_count,
+        "ranked_count": ranked_count,
         "no_data_count": no_data_count,
         "error_count": error_count,
         **freshness,
+        "underlying_trade_date": (
+            rank_trade_date or freshness.get("trade_date")
+        ),
+        "coverage_ratio": (
+            ranked_count / requested_stock_count
+            if requested_stock_count
+            else 1.0
+        ),
+        "is_live": is_live,
+        "is_full": is_full_requested_universe,
+        "is_live_ranking": is_live,
+        "is_full_requested_universe": is_full_requested_universe,
+        "is_full_market": is_full_market,
+        "ranking_universe_type": ranking_universe_type,
+        "ranking_universe_count": ranking_universe_count,
+        "ranking_returned_count": ranked_count,
+        "ranking_coverage_ratio": ranking_coverage_ratio,
+        "ranking_semantics": (
+            "live_overlay_on_finalized_daily_indicators"
+            if is_live
+            else "latest_completed_daily_rows"
+        ),
         "results": ranked_results,
     }
 

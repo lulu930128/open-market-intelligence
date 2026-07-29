@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from typing import Any
 
 from app.ai import (
     capability_contract,
+    contract_manifest,
     data_quality_contract,
     decision_envelope,
+    public_contract,
     realtime_contract,
 )
 
@@ -108,6 +111,7 @@ def _selection(
     if isinstance(existing, dict) and existing.get("version"):
         return deepcopy(existing)
     mode = _dict(canonical.get("mode"))
+    target = _dict(canonical.get("target"))
     intent = str(_dict(canonical.get("decision")).get("intent") or "general")
     return capability_contract.normalize_selection(
         selection=(
@@ -125,6 +129,7 @@ def _selection(
         payload_level=str(mode.get("payload_level") or "compact"),
         scope_type=scope_type,
         question_intent=intent,
+        target_market=str(target.get("market") or "").strip() or None,
         requested_domains=tuple(query_plan.get("requested_domains") or ()),
         excluded_domains=tuple(query_plan.get("excluded_domains") or ()),
     )
@@ -171,13 +176,19 @@ def _project_selected_freshness(
     projected_data: dict[str, Any],
 ) -> None:
     freshness = projected_data.get("data.freshness")
-    if not isinstance(freshness, dict):
-        return
-
     evidence = _dict(canonical.get("evidence"))
+    if not isinstance(freshness, dict) or not freshness:
+        evidence_freshness = evidence.get("freshness")
+        freshness = (
+            deepcopy(evidence_freshness)
+            if isinstance(evidence_freshness, dict)
+            else {}
+        )
     freshness_by_capability = _dict(
         evidence.get("freshness_by_capability")
     )
+    freshness_by_domain = _dict(evidence.get("freshness_by_domain"))
+    slots = _dict(evidence.get("slots"))
     selected_capabilities = [
         str(capability_id)
         for capability_id in [
@@ -191,19 +202,35 @@ def _project_selected_freshness(
         }
         and not str(capability_id).startswith("diagnostics.")
     ]
-    if not selected_capabilities or any(
-        not isinstance(freshness_by_capability.get(capability_id), dict)
-        for capability_id in selected_capabilities
-    ):
-        return
-
-    selected_rows = [
-        (
-            capability_id,
-            _dict(freshness_by_capability.get(capability_id)),
-        )
-        for capability_id in selected_capabilities
-    ]
+    selected_rows: list[tuple[str, dict[str, Any]]] = []
+    for capability_id in selected_capabilities:
+        spec = capability_contract.CAPABILITIES.get(capability_id)
+        row = freshness_by_capability.get(capability_id)
+        if not isinstance(row, dict):
+            domain_row = freshness_by_domain.get(spec.domain) if spec and spec.domain else None
+            slot_row = slots.get(spec.slot) if spec and spec.slot else None
+            if isinstance(domain_row, dict):
+                row = deepcopy(domain_row)
+            elif domain_row is not None:
+                row = {"status": capability_contract.normalize_status(domain_row)}
+            elif isinstance(slot_row, dict):
+                slot_freshness = slot_row.get("freshness")
+                row = (
+                    deepcopy(slot_freshness)
+                    if isinstance(slot_freshness, dict)
+                    else {"status": capability_contract.normalize_status(slot_row.get("status"))}
+                )
+            else:
+                row = {
+                    "status": "missing",
+                    "reason": (
+                        f"No canonical freshness row is available for {capability_id}."
+                    ),
+                }
+            row.setdefault("dataset", capability_id)
+            row.setdefault("capability", capability_id)
+            freshness_by_capability[capability_id] = deepcopy(row)
+        selected_rows.append((capability_id, _dict(row)))
     dependency_datasets = list(
         dict.fromkeys(
             dataset
@@ -305,6 +332,7 @@ def _project_selected_freshness(
     selected_view = deepcopy(freshness)
     selected_view.update(
         {
+            "version": freshness.get("version") or "omi.freshness.selection.v1",
             "scope": "selected_capabilities",
             "status": status,
             "is_current": is_current,
@@ -904,6 +932,10 @@ def _hard_cap_envelope(
         "manifest": {
             "version": manifest.get("version"),
             "capabilities": [],
+            "unsupported_capabilities": deepcopy(
+                _list(manifest.get("unsupported_capabilities"))[:8]
+            ),
+            "unsupported_count": manifest.get("unsupported_count", 0),
             "ready_count": manifest.get("ready_count", 0),
             "limited_count": manifest.get("limited_count", 0),
             "blocked_count": manifest.get("blocked_count", 0),
@@ -937,6 +969,7 @@ def _hard_cap_envelope(
                 "version",
                 "required",
                 "optional",
+                "unsupported_capabilities",
                 "output",
                 "realtime_policy",
                 "max_response_bytes",
@@ -1000,6 +1033,18 @@ def _hard_cap_envelope(
                 char_limit=180,
             ),
             "provider_failures": [],
+            "current_request_failures": deepcopy(
+                _list(limitations.get("current_request_failures"))[:8]
+            ),
+            "background_source_health": deepcopy(
+                _list(limitations.get("background_source_health"))[:8]
+            ),
+            "historical_provider_events": deepcopy(
+                _list(limitations.get("historical_provider_events"))[:8]
+            ),
+            "unsupported_capabilities": deepcopy(
+                _list(limitations.get("unsupported_capabilities"))[:8]
+            ),
         },
         "execution": compact_execution,
         "continuation": compact_continuation,
@@ -1111,22 +1156,91 @@ def _brief_capability_summary(
                     "price",
                     "latest_price",
                     "last_price",
+                    "price_available",
+                    "last_trade_available",
+                    "last_trade_price",
+                    "last_trade_time",
+                    "last_trade_is_current_session",
+                    "last_trade_before_auction",
+                    "facts_usable_for_current_session",
+                    "fallback_quote",
+                    "fallback_used",
+                    "previous_close",
+                    "open_price",
+                    "high_price",
+                    "low_price",
                     "change",
                     "change_pct",
                     "currency",
                     "volume",
                     "volume_unit",
+                    "volume_semantics",
+                    "volume_status",
+                    "canonical_volume_unit",
+                    "provider_volume_unit",
                     "total_volume_lots",
+                    "total_volume_contracts",
+                    "trade_value",
+                    "trade_value_unit",
+                    "trade_value_status",
+                    "trade_value_source",
                     "trade_date",
                     "quote_time",
+                    "quote_time_basis",
+                    "snapshot_time",
+                    "snapshot_time_basis",
+                    "provider_event_time",
                     "event_time",
                     "provider",
                     "source",
                     "market_status",
                     "session_phase",
                     "quote_semantics",
+                    "is_historical",
+                    "requested_trade_date",
+                    "regular_session_close",
+                    "regular_session_close_time",
+                    "regular_session_close_trade_date",
+                    "timezone",
                     "is_live",
                     "is_realtime",
+                    "depth_available",
+                    "depth_status",
+                    "auction_book_available",
+                    "auction_book_status",
+                    "auction_book_time",
+                    "auction_best_bid",
+                    "auction_best_ask",
+                    "top5_bid_volume_lots",
+                    "top5_ask_volume_lots",
+                    "top5_imbalance",
+                    "depth_volume_unit",
+                    "depth_order_count_status",
+                    "auction_indicative_available",
+                    "indicative_match_available",
+                    "indicative_match_price",
+                    "indicative_match_volume_lots",
+                    "indicative_unmatched_buy_volume_lots",
+                    "indicative_unmatched_sell_volume_lots",
+                    "indicative_unmatched_status",
+                    "indicative_price_available",
+                    "indicative_price",
+                    "indicative_bid",
+                    "indicative_ask",
+                    "official_close_available",
+                    "official_close_status",
+                    "official_close_price",
+                    "official_close_trade_date",
+                    "official_close_source",
+                    "official_close_raw",
+                    "official_close_display",
+                    "official_close_precision",
+                    "official_vwap",
+                    "approx_vwap",
+                    "vwap_method",
+                    "vwap_confidence",
+                    "selected_candidate",
+                    "selection_reason",
                 ),
             ),
             "projection_level": "summary",
@@ -1139,12 +1253,44 @@ def _brief_capability_summary(
             if isinstance(value.get("bars"), list)
             else []
         )
+        def point_time(point: dict[str, Any]) -> datetime:
+            for key in ("bar_time", "event_time", "time", "date", "trade_date"):
+                raw_value = point.get(key)
+                if isinstance(raw_value, datetime):
+                    parsed = raw_value
+                else:
+                    text = str(raw_value or "").strip()
+                    if not text:
+                        continue
+                    try:
+                        parsed = datetime.fromisoformat(
+                            text.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        continue
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc)
+            return datetime.min.replace(tzinfo=timezone.utc)
+
         latest_point = (
-            rows[-1]
-            if rows and isinstance(rows[-1], dict)
+            max(
+                (row for row in rows if isinstance(row, dict)),
+                key=point_time,
+                default={},
+            )
+            if rows
             else value.get("latest_point")
             if isinstance(value.get("latest_point"), dict)
             else {}
+        )
+        latest_event_time = next(
+            (
+                latest_point.get(key)
+                for key in ("bar_time", "event_time", "time", "date", "trade_date")
+                if latest_point.get(key) is not None
+            ),
+            None,
         )
         return {
             **_summary_dict(
@@ -1154,22 +1300,41 @@ def _brief_capability_summary(
                     "latest_data_date",
                     "expected_data_date",
                     "interval",
+                    "requested_interval",
                     "source_interval",
                     "effective_interval",
+                    "interval_status",
                     "sampling_mode",
                     "original_point_count",
                     "session",
+                    "session_phase",
+                    "market_status",
+                    "official_close_status",
+                    "delivery_status",
                     "point_count",
                     "returned_point_count",
                     "truncated",
                     "bar_limit",
                     "volume_unit",
+                    "volume_contracts",
+                    "volume_event_time",
+                    "volume_semantics",
+                    "volume_status",
                     "trade_value_unit",
                     "currency",
                     "event_time",
                     "provider",
                     "source",
                     "continuity",
+                    "aggregation_method",
+                    "source_point_count",
+                    "aggregated_point_count",
+                    "partial_bar_count",
+                    "cache_status",
+                    "cache_hit",
+                    "cache_trade_date",
+                    "cache_latest_time",
+                    "fallback_used",
                 ),
             ),
             "latest_point": _summary_dict(
@@ -1177,6 +1342,7 @@ def _brief_capability_summary(
                 fields=(
                     "date",
                     "trade_date",
+                    "time",
                     "bar_time",
                     "event_time",
                     "open",
@@ -1188,9 +1354,16 @@ def _brief_capability_summary(
                     "close",
                     "close_price",
                     "volume",
+                    "volume_contracts",
                     "base_volume",
+                    "quote_volume",
+                    "volume_unit",
+                    "base_volume_unit",
+                    "quote_volume_unit",
+                    "volume_semantics",
                 ),
             ),
+            "event_time": latest_event_time or value.get("event_time"),
             "points_included": 0,
             "projection_level": "summary",
         }
@@ -1506,7 +1679,8 @@ def _fit_budget(
         answer = _dict(envelope.get("answer"))
         if isinstance(answer.get("detail"), str):
             answer["detail"] = answer["detail"][:2_000]
-        answer["summary"] = _list(answer.get("summary"))[:3]
+        if "summary" in answer:
+            answer["summary"] = _list(answer.get("summary"))[:3]
         decision = _dict(envelope.get("decision"))
         for key in (
             "action_plan",
@@ -1515,6 +1689,8 @@ def _fit_budget(
             "risks",
             "data_limits",
         ):
+            if key not in decision:
+                continue
             original_count = len(_list(decision.get(key)))
             decision[key] = _list(decision.get(key))[:3]
             mark_list(
@@ -1955,7 +2131,12 @@ def _rejected_envelope(
     execution = _dict(canonical.get("execution"))
     canonical["execution"] = {
         "selection": deepcopy(selection),
-        "capability_catalog_version": "omi.capability.registry.v1",
+        "capability_catalog_version": (
+            public_contract.CAPABILITY_REGISTRY_VERSION
+        ),
+        "public_contract_digest": (
+            contract_manifest.public_contract_manifest()["digest"]
+        ),
         "tool_runs": [],
     }
     continuation = _dict(canonical.get("continuation"))
@@ -1975,6 +2156,16 @@ def _rejected_envelope(
         },
     }
     limitations = _dict(canonical.get("limitations"))
+    unsupported_capabilities = [
+        deepcopy(item)
+        for item in _list(selection.get("unsupported_capabilities"))
+        if isinstance(item, dict)
+    ]
+    unmet_required_capabilities = [
+        deepcopy(item)
+        for item in _list(selection.get("unmet_required_capabilities"))
+        if isinstance(item, dict)
+    ]
     canonical["limitations"] = {
         "missing": [
             str(value)
@@ -1987,6 +2178,10 @@ def _rejected_envelope(
             if str(value).strip()
         ],
         "provider_failures": [],
+        "current_request_failures": [],
+        "background_source_health": [],
+        "historical_provider_events": [],
+        "unsupported_capabilities": unsupported_capabilities,
     }
     canonical["compatibility"] = {
         "public_contract": CONTRACT_VERSION,
@@ -2007,6 +2202,16 @@ def build(
     canonical = decision_envelope.build(projection_response)
     scope_type = _scope_type(projection_response, canonical)
     selection = _selection(projection_response, canonical, scope_type=scope_type)
+    unsupported_capabilities = [
+        deepcopy(item)
+        for item in _list(selection.get("unsupported_capabilities"))
+        if isinstance(item, dict)
+    ]
+    unmet_required_capabilities = [
+        deepcopy(item)
+        for item in _list(selection.get("unmet_required_capabilities"))
+        if isinstance(item, dict)
+    ]
     if canonical.get("ok") is not True or canonical.get("request_status") != "completed":
         return _rejected_envelope(canonical, selection=selection)
     projected_data, unavailable = capability_contract.project_selected_data(
@@ -2018,6 +2223,11 @@ def build(
         selection=selection,
         projected_data=projected_data,
     )
+    if (
+        isinstance(projected_data.get("data.freshness"), dict)
+        and "data.freshness" in unavailable
+    ):
+        unavailable.remove("data.freshness")
     realtime_assessments = realtime_contract.annotate_selected_data(
         _realtime_observation_data(
             response=projection_response,
@@ -2054,7 +2264,12 @@ def build(
     canonical["evidence"] = evidence
     execution = _dict(canonical.get("execution"))
     execution["selection"] = deepcopy(selection)
-    execution["capability_catalog_version"] = "omi.capability.registry.v1"
+    execution["capability_catalog_version"] = (
+        public_contract.CAPABILITY_REGISTRY_VERSION
+    )
+    execution["public_contract_digest"] = (
+        contract_manifest.public_contract_manifest()["digest"]
+    )
     canonical["execution"] = execution
     canonical["compatibility"] = {
         "public_contract": CONTRACT_VERSION,
@@ -2082,6 +2297,11 @@ def build(
     for capability_id, assessment in realtime_assessments.items():
         if assessment.get("policy_satisfied") is True:
             continue
+        if (
+            selection.get("realtime_policy") == "require_live"
+            and "live_requirement_not_satisfied" not in missing
+        ):
+            missing.append("live_requirement_not_satisfied")
         marker = f"realtime:{capability_id}"
         if marker not in missing:
             missing.append(marker)
@@ -2094,6 +2314,18 @@ def build(
             warnings.append(warning)
     limitations["missing"] = missing
     limitations["warnings"] = warnings
+    limitations["unsupported_capabilities"] = unsupported_capabilities
+    limitations["unmet_required_capabilities"] = unmet_required_capabilities
+    for item in unmet_required_capabilities:
+        capability_id = str(item.get("capability") or "").strip()
+        if not capability_id:
+            continue
+        marker = f"capability:{capability_id}"
+        if marker not in limitations["missing"]:
+            limitations["missing"].append(marker)
+        warning = str(item.get("message") or "").strip()
+        if warning and warning not in limitations["warnings"]:
+            limitations["warnings"].append(warning)
     canonical["limitations"] = limitations
     _separate_supplemental_context_gaps(
         canonical,

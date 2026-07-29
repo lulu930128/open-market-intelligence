@@ -122,6 +122,9 @@ class USOhlcChartRead(BaseModel):
     to_date: date
     point_count: int
     points: list[USOhlcPointRead]
+    volume_unit: str | None = None
+    volume_semantics: str | None = None
+    volume_status: str = "not_provided"
     backfill: dict | None = None
     intraday_overlay: dict | None = None
     latest_data_date: date | None = None

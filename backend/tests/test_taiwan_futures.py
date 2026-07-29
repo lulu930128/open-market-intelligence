@@ -22,6 +22,7 @@ from app.market.tw_futures import (
     get_latest_taiwan_futures_quotes,
     list_taiwan_futures_intraday_bars,
     list_taiwan_futures_daily_bars,
+    normalize_taiwan_futures_symbols,
     parse_taifex_daily_market_html,
     parse_taifex_mis_intraday_payload,
     parse_taifex_mis_quote_payload,
@@ -203,6 +204,12 @@ def sample_daily_html() -> str:
 
 
 class TaiwanFuturesParserTests(unittest.TestCase):
+    def test_normalize_symbols_accepts_common_aliases(self) -> None:
+        self.assertEqual(
+            normalize_taiwan_futures_symbols(["TX", "大台", "小台", "微台"]),
+            ["TXF", "MXF", "TMF"],
+        )
+
     def test_parse_payload_keeps_monthly_contracts_only(self) -> None:
         quotes = parse_taifex_mis_quote_payload(
             symbol="MXF",

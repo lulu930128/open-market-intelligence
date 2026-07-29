@@ -417,6 +417,62 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
         self.assertEqual(listing["result_count"], 2)
         self.assertEqual(listing["sources"]["mops_conference"]["status"], "degraded")
 
+    def test_listing_applies_plural_filters_before_offset_pagination(self) -> None:
+        with _cache_path("plural-filter-pagination") as cache_path:
+            first = self._event("twse_ex_dividend")
+            first["event_id"] = "twse-2330-first"
+            first["stock_id"] = "2330"
+            first["start_date"] = date(2026, 7, 25)
+            first["end_date"] = date(2026, 7, 25)
+            second = {**first}
+            second["event_id"] = "twse-2330-second"
+            second["start_date"] = date(2026, 7, 26)
+            second["end_date"] = date(2026, 7, 26)
+            excluded_stock = {**first}
+            excluded_stock["event_id"] = "twse-2317"
+            excluded_stock["stock_id"] = "2317"
+            excluded_stock["start_date"] = date(2026, 7, 27)
+            excluded_stock["end_date"] = date(2026, 7, 27)
+
+            tw_corporate_events._atomic_write(
+                cache_path,
+                {
+                    "schema_version": tw_corporate_events.CACHE_SCHEMA_VERSION,
+                    "updated_at": datetime(
+                        2026, 7, 20, tzinfo=timezone.utc
+                    ).isoformat(),
+                    "providers": {
+                        "twse_ex_dividend": {
+                            "fetched_at": datetime(
+                                2026, 7, 20, tzinfo=timezone.utc
+                            ).isoformat(),
+                            "entries": [
+                                tw_corporate_events._json_entry(first),
+                                tw_corporate_events._json_entry(excluded_stock),
+                                tw_corporate_events._json_entry(second),
+                            ],
+                        }
+                    }
+                },
+            )
+            tw_corporate_events.invalidate_taiwan_corporate_event_cache()
+            listing = list_taiwan_corporate_events(
+                stock_ids={"2330"},
+                markets={"TWSE"},
+                date_from=date(2026, 7, 20),
+                date_to=date(2026, 7, 31),
+                offset=1,
+                limit=1,
+                now=datetime(2026, 7, 20, tzinfo=timezone.utc),
+                cache_path=cache_path,
+            )
+
+        self.assertEqual(listing["total_count"], 2)
+        self.assertEqual(listing["result_count"], 1)
+        self.assertEqual(listing["results"][0]["event_id"], "twse-2330-second")
+        self.assertEqual(listing["offset"], 1)
+        self.assertEqual(listing["limit"], 1)
+
     def test_partial_mops_refresh_updates_successes_and_preserves_failed_window(self) -> None:
         old_twse = self._event("mops_conference")
         old_twse["event_id"] = "mops-old-twse"

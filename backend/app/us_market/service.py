@@ -1000,6 +1000,8 @@ def list_us_ohlc_chart_data(
         if latest_data_date > resolved_expected_data_date
         else "current"
     )
+    has_volume = any(point.get("volume") is not None for point in points)
+    is_index = normalized_symbol.startswith("^")
 
     return {
         "symbol": normalized_symbol,
@@ -1010,6 +1012,21 @@ def list_us_ohlc_chart_data(
         "to_date": end_date,
         "point_count": len(points),
         "points": points,
+        "volume_unit": "shares" if has_volume and not is_index else None,
+        "volume_semantics": (
+            f"{timeframe}_traded_shares"
+            if has_volume and not is_index
+            else "index_volume_not_equivalent_to_market_volume"
+            if is_index
+            else None
+        ),
+        "volume_status": (
+            "available"
+            if has_volume and not is_index
+            else "not_applicable"
+            if is_index
+            else "not_provided"
+        ),
         "backfill": backfill_result,
         "intraday_overlay": intraday_overlay,
         "latest_data_date": latest_data_date,

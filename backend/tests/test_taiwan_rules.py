@@ -27,7 +27,7 @@ class TaiwanRulesTests(unittest.TestCase):
             taiwan_rules.normalize_refresh_profile("unknown")
 
     def test_expected_dates_follow_dataset_release_times(self) -> None:
-        now = datetime(2026, 6, 5, 16, 0, tzinfo=TAIWAN_TZ)
+        now = datetime(2026, 6, 5, 20, 30, tzinfo=TAIWAN_TZ)
 
         self.assertEqual(
             taiwan_rules.expected_date_for_dataset(
@@ -72,6 +72,55 @@ class TaiwanRulesTests(unittest.TestCase):
             ),
             date(2026, 5, 1),
         )
+
+    def test_institutional_and_margin_windows_use_complete_file_times(self) -> None:
+        before_institutional = datetime(2026, 6, 5, 19, 59, tzinfo=TAIWAN_TZ)
+        after_institutional = datetime(2026, 6, 5, 20, 0, tzinfo=TAIWAN_TZ)
+        before_margin = datetime(2026, 6, 5, 20, 59, tzinfo=TAIWAN_TZ)
+        after_margin = datetime(2026, 6, 5, 21, 0, tzinfo=TAIWAN_TZ)
+
+        self.assertEqual(
+            taiwan_rules.expected_institutional_trade_date(now=before_institutional),
+            date(2026, 6, 4),
+        )
+        self.assertEqual(
+            taiwan_rules.expected_institutional_trade_date(now=after_institutional),
+            date(2026, 6, 5),
+        )
+        self.assertEqual(
+            taiwan_rules.expected_margin_trade_date(now=before_margin),
+            date(2026, 6, 4),
+        )
+        self.assertEqual(
+            taiwan_rules.expected_margin_trade_date(now=after_margin),
+            date(2026, 6, 5),
+        )
+
+    def test_financial_expected_period_advances_after_full_deadline(self) -> None:
+        cases = (
+            (datetime(2026, 3, 31, 23, 59, tzinfo=TAIWAN_TZ), "2025Q3"),
+            (datetime(2026, 4, 1, 0, 0, tzinfo=TAIWAN_TZ), "2025Q4"),
+            (datetime(2026, 5, 15, 23, 59, tzinfo=TAIWAN_TZ), "2025Q4"),
+            (datetime(2026, 5, 16, 0, 0, tzinfo=TAIWAN_TZ), "2026Q1"),
+            (datetime(2026, 8, 15, 0, 0, tzinfo=TAIWAN_TZ), "2026Q2"),
+            (datetime(2026, 11, 15, 0, 0, tzinfo=TAIWAN_TZ), "2026Q3"),
+        )
+        for now, expected in cases:
+            with self.subTest(now=now):
+                self.assertEqual(
+                    taiwan_rules.expected_financial_metrics_period(now=now),
+                    expected,
+                )
+
+    def test_fundamental_release_windows_expose_expected_keys(self) -> None:
+        now = datetime(2026, 7, 26, 12, 30, tzinfo=TAIWAN_TZ)
+        revenue = taiwan_rules.monthly_revenue_release_window(now=now)
+        financial = taiwan_rules.financial_metrics_release_window(now=now)
+
+        self.assertEqual(revenue["expected_data_key"], "2026-06-01")
+        self.assertEqual(revenue["next_release_at"], "2026-08-16T00:00:00+08:00")
+        self.assertEqual(financial["expected_data_key"], "2026Q1")
+        self.assertEqual(financial["next_release_at"], "2026-08-15T00:00:00+08:00")
 
     def test_shareholding_expected_date_advances_only_after_release_window(self) -> None:
         before_release = datetime(2026, 7, 25, 11, 59, tzinfo=TAIWAN_TZ)

@@ -9,6 +9,18 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiDecisionCoreTests(unittest.TestCase):
+    def test_dated_close_question_is_quote_intent(self) -> None:
+        for question in (
+            "AAPL 2026-07-20 收盤價",
+            "查 AAPL 20 號的收盤價",
+            "AAPL closing price on 2026-07-20",
+        ):
+            with self.subTest(question=question):
+                self.assertEqual(
+                    decision_core.infer_question_intent(question),
+                    "quote",
+                )
+
     def test_infer_question_intents_preserves_independent_multi_intents(
         self,
     ) -> None:
@@ -208,6 +220,58 @@ class AiDecisionCoreTests(unittest.TestCase):
         self.assertEqual(ai_ask._infer_question_intent(payload.question), "entry_decision")
         self.assertEqual(ai_ask._infer_analysis_horizon(payload), "intraday")
         self.assertTrue(ai_ask._include_tw_intraday(payload))
+
+    def test_explicit_intraday_capability_enables_tw_reader_for_neutral_question(
+        self,
+    ) -> None:
+        payload = AiAskRequest(
+            question="TAIEX status",
+            contract_version="omi.decision.v4",
+            target={"type": "tw_index", "id": "TAIEX"},
+            mode="data_only",
+            output="evidence_only",
+            realtime_policy="prefer_live",
+            allow_external_fetch=True,
+            selection={"include": ["intraday.bars"]},
+        )
+
+        self.assertTrue(
+            ai_ask._include_tw_intraday(
+                payload,
+                policy={
+                    "can_external_fetch": True,
+                    "query_plan": {
+                        "selected_capabilities": [
+                            "target.identity",
+                            "intraday.bars",
+                        ]
+                    },
+                },
+            )
+        )
+
+    def test_cache_only_intraday_capability_reads_persisted_tw_bars(self) -> None:
+        payload = AiAskRequest(
+            question="TAIEX status",
+            contract_version="omi.decision.v4",
+            target={"type": "tw_index", "id": "TAIEX"},
+            mode="data_only",
+            output="evidence_only",
+            realtime_policy="cache_only",
+            selection={"include": ["intraday.bars"]},
+        )
+
+        self.assertTrue(
+            ai_ask._include_tw_intraday(
+                payload,
+                policy={
+                    "can_external_fetch": False,
+                    "query_plan": {
+                        "selected_capabilities": ["intraday.bars"],
+                    },
+                },
+            )
+        )
 
     def test_ask_response_exposes_question_understanding(self) -> None:
         payload = AiAskRequest(
