@@ -40,6 +40,9 @@ import { useEffect, useRef, useState } from "react";
 const TAIWAN_DATASET_INSTITUTIONAL_TRADE = "institutional_trade_daily";
 const TAIWAN_DATASET_MARGIN_TRADING = "margin_trading_daily";
 const TAIWAN_DATASET_BROKER_BRANCH = "broker_branch_trade_daily";
+const TAIWAN_DATASET_SHAREHOLDING = "shareholding_distribution_weekly";
+const TAIWAN_DATASET_MONTHLY_REVENUE = "monthly_revenue";
+const TAIWAN_DATASET_FINANCIAL_METRICS = "financial_metric_quarterly";
 const institutionalLookbackDays = 100;
 const institutionalHistoryLimit = 120;
 const revenueHistoryLimit = 120;
@@ -64,6 +67,15 @@ function isIsoDateOnOrAfter(
   return normalizedValue >= normalizedExpected;
 }
 
+function isDataKeyCurrent(
+  value: string | null | undefined,
+  expected: string | null | undefined
+) {
+  if (!value) return false;
+  if (!expected) return true;
+  return value >= expected;
+}
+
 function maxIsoDate(values: Array<string | null | undefined>) {
   let latest: string | null = null;
   for (const value of values) {
@@ -82,6 +94,14 @@ function expectedTaiwanDatasetDate(
   );
 }
 
+function expectedTaiwanDatasetKey(
+  calendarStatus: MarketCalendarMarketStatus | null,
+  datasetKey: string
+) {
+  const window = calendarStatus?.release_windows?.[datasetKey];
+  return window?.expected_data_key ?? normalizeIsoDate(window?.expected_trade_date);
+}
+
 function taiwanCalendarStatusRefreshKey(
   calendarStatus: MarketCalendarMarketStatus | null
 ) {
@@ -92,6 +112,9 @@ function taiwanCalendarStatusRefreshKey(
     expectedTaiwanDatasetDate(calendarStatus, TAIWAN_DATASET_INSTITUTIONAL_TRADE),
     expectedTaiwanDatasetDate(calendarStatus, TAIWAN_DATASET_MARGIN_TRADING),
     expectedTaiwanDatasetDate(calendarStatus, TAIWAN_DATASET_BROKER_BRANCH),
+    expectedTaiwanDatasetKey(calendarStatus, TAIWAN_DATASET_SHAREHOLDING),
+    expectedTaiwanDatasetKey(calendarStatus, TAIWAN_DATASET_MONTHLY_REVENUE),
+    expectedTaiwanDatasetKey(calendarStatus, TAIWAN_DATASET_FINANCIAL_METRICS),
   ].join("|");
 }
 
@@ -326,6 +349,24 @@ export function useTaiwanDataPanel({
       if (expectedMarginDate && !isIsoDateOnOrAfter(latestMarginDate, expectedMarginDate)) {
         return false;
       }
+      const expectedShareholdingDate = expectedTaiwanDatasetKey(
+        taiwanCalendarStatus,
+        TAIWAN_DATASET_SHAREHOLDING
+      );
+      const latestShareholdingDate =
+        chipCoverage?.stock_id === targetStockId
+          ? chipCoverage.shareholding_latest_date
+          : maxIsoDate(
+              shareholding
+                .filter((row) => row.stock_id === targetStockId)
+                .map((row) => row.data_date)
+            );
+      if (
+        expectedShareholdingDate &&
+        !isIsoDateOnOrAfter(latestShareholdingDate, expectedShareholdingDate)
+      ) {
+        return false;
+      }
       return (
         resolvedKeysRef.current.has(dataPanelCacheKey(targetStockId, "chips")) &&
         (latestMarginDate !== null ||
@@ -365,21 +406,43 @@ export function useTaiwanDataPanel({
     }
 
     if (tab === "revenue") {
+      const rows = monthlyRevenueHistory.filter(
+        (row) => row.stock_id === targetStockId
+      );
+      const expectedPeriod = expectedTaiwanDatasetKey(
+        taiwanCalendarStatus,
+        TAIWAN_DATASET_MONTHLY_REVENUE
+      );
+      const latestPeriod = maxIsoDate(rows.map((row) => row.period));
       return (
-        monthlyRevenueHistory.filter((row) => row.stock_id === targetStockId).length >=
-        minimumUsableRevenueRows
+        rows.length >= minimumUsableRevenueRows &&
+        (!expectedPeriod || isIsoDateOnOrAfter(latestPeriod, expectedPeriod))
       );
     }
 
+    const rows = financialMetricHistory.filter(
+      (row) => row.stock_id === targetStockId
+    );
+    const expectedPeriod = expectedTaiwanDatasetKey(
+      taiwanCalendarStatus,
+      TAIWAN_DATASET_FINANCIAL_METRICS
+    );
+    const latestPeriod = rows.reduce<string | null>(
+      (latest, row) => (!latest || row.period > latest ? row.period : latest),
+      null
+    );
     return (
-      financialMetricHistory.filter((row) => row.stock_id === targetStockId).length >=
-      minimumUsableFinancialRows
+      rows.length >= minimumUsableFinancialRows &&
+      (!expectedPeriod || (latestPeriod !== null && latestPeriod >= expectedPeriod))
     );
   }
 
   async function refreshDataTab(
     tab: DataPanelTab,
-    options?: { allowProviderRefresh?: boolean }
+    options?: {
+      allowProviderRefresh?: boolean;
+      skipProviderWhenCurrent?: boolean;
+    }
   ) {
     if (!stockId) return;
 
@@ -394,6 +457,7 @@ export function useTaiwanDataPanel({
     const panelRefreshProfile = getTaiwanDataPanelRefreshProfile(tab);
     const panelRefreshLabel = t(`stockDetail.tabs.${tab}`);
     const allowProviderRefresh = options?.allowProviderRefresh === true;
+    const skipProviderWhenCurrent = options?.skipProviderWhenCurrent === true;
 
     const runPanelRefresh = async (profile: TaiwanRefreshProfile, label: string) => {
       const job = await requestBackfillJob(
@@ -509,6 +573,11 @@ export function useTaiwanDataPanel({
       return {
         hasShareholding: nextShareholding.length > 0,
         hasMargin: nextMargin !== null,
+        latestShareholdingDate:
+          nextCoverage?.shareholding_latest_date ??
+          maxIsoDate(nextShareholding.map((row) => row.data_date)),
+        latestMarginDate:
+          nextCoverage?.margin_latest_trade_date ?? nextMargin?.trade_date ?? null,
       };
     };
 
@@ -526,6 +595,20 @@ export function useTaiwanDataPanel({
         }
         setBrokerBranchSummary(cachedBranchSummary);
         if (!allowProviderRefresh) {
+          setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
+          return;
+        }
+        if (
+          skipProviderWhenCurrent &&
+          cachedBranchSummary !== null &&
+          isIsoDateOnOrAfter(
+            cachedBranchSummary?.trade_date,
+            expectedTaiwanDatasetDate(
+              taiwanCalendarStatus,
+              TAIWAN_DATASET_BROKER_BRANCH
+            )
+          )
+        ) {
           setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
           return;
         }
@@ -566,6 +649,26 @@ export function useTaiwanDataPanel({
           resolvedKeysRef.current.add(requestKey);
         }
         if (!allowProviderRefresh) {
+          resolvedKeysRef.current.add(requestKey);
+          return;
+        }
+        if (
+          skipProviderWhenCurrent &&
+          isDataKeyCurrent(
+            initialCache.latestShareholdingDate,
+            expectedTaiwanDatasetKey(
+              taiwanCalendarStatus,
+              TAIWAN_DATASET_SHAREHOLDING
+            )
+          ) &&
+          isDataKeyCurrent(
+            initialCache.latestMarginDate,
+            expectedTaiwanDatasetDate(
+              taiwanCalendarStatus,
+              TAIWAN_DATASET_MARGIN_TRADING
+            )
+          )
+        ) {
           resolvedKeysRef.current.add(requestKey);
           return;
         }
@@ -642,6 +745,19 @@ export function useTaiwanDataPanel({
         resolvedKeysRef.current.add(requestKey);
         setInstitutional(cachedRows[cachedRows.length - 1] ?? null);
         setInstitutionalHistory(cachedRows);
+        if (
+          skipProviderWhenCurrent &&
+          isDataKeyCurrent(
+            maxIsoDate(cachedRows.map((row) => row.trade_date)),
+            expectedTaiwanDatasetDate(
+              taiwanCalendarStatus,
+              TAIWAN_DATASET_INSTITUTIONAL_TRADE
+            )
+          )
+        ) {
+          setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
+          return;
+        }
 
         const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
         const [rowsResult, holdingRatioResult] = await Promise.allSettled([
@@ -693,6 +809,19 @@ export function useTaiwanDataPanel({
           setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
           return;
         }
+        if (
+          skipProviderWhenCurrent &&
+          isDataKeyCurrent(
+            maxIsoDate(cachedRows.map((row) => row.period)),
+            expectedTaiwanDatasetKey(
+              taiwanCalendarStatus,
+              TAIWAN_DATASET_MONTHLY_REVENUE
+            )
+          )
+        ) {
+          setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
+          return;
+        }
 
         const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
         const rows = await fetchJson<MonthlyRevenueRead[]>(
@@ -718,6 +847,24 @@ export function useTaiwanDataPanel({
       setFinancialMetric(cachedRows[cachedRows.length - 1] ?? null);
       setFinancialMetricHistory(cachedRows);
       if (!allowProviderRefresh) {
+        setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
+        return;
+      }
+      const latestCachedFinancialPeriod = cachedRows.reduce<string | null>(
+        (latest, row) => (!latest || row.period > latest ? row.period : latest),
+        null
+      );
+      const expectedFinancialPeriod = expectedTaiwanDatasetKey(
+        taiwanCalendarStatus,
+        TAIWAN_DATASET_FINANCIAL_METRICS
+      );
+      if (
+        skipProviderWhenCurrent &&
+        isDataKeyCurrent(
+          latestCachedFinancialPeriod,
+          expectedFinancialPeriod
+        )
+      ) {
         setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
         return;
       }
@@ -795,7 +942,10 @@ export function useTaiwanDataPanel({
     }
 
     const timer = window.setTimeout(() => {
-      void refreshDataTab(activeDataTab);
+      void refreshDataTab(activeDataTab, {
+        allowProviderRefresh: true,
+        skipProviderWhenCurrent: true,
+      });
     }, 0);
     return () => window.clearTimeout(timer);
     // refreshDataTab intentionally captures the current data snapshot for cache validation.

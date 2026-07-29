@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import FinancialMetricQuarterly, RawFetchResult, SourceRegistry, StockMaster
 from app.http_client import new_session
+from app.market.taiwan_rules import expected_financial_metrics_period
 from app.parsers.twse_common import parse_float
 
 
@@ -138,20 +139,14 @@ def _quarter_sequence(
 
 def _latest_reportable_quarter(today: date | None = None) -> tuple[int, int]:
     current = today or datetime.now(TAIWAN_TZ).date()
-    year = current.year
-
-    if current >= date(year, 11, 15):
-        return year, 3
-    if current >= date(year, 8, 15):
-        return year, 2
-    if current >= date(year, 5, 15):
-        return year, 1
-    if current >= date(year, 3, 31):
-        return year - 1, 4
-    return year - 1, 3
+    period = expected_financial_metrics_period(
+        now=datetime.combine(current, datetime.min.time(), tzinfo=TAIWAN_TZ)
+    )
+    return int(period[:4]), int(period[-1])
 
 
 def _latest_known_quarter(db: Session, stock_id: str) -> tuple[int, int]:
+    reportable = _latest_reportable_quarter()
     latest = (
         db.query(FinancialMetricQuarterly.fiscal_year, FinancialMetricQuarterly.quarter)
         .filter(FinancialMetricQuarterly.stock_id == stock_id)
@@ -163,9 +158,11 @@ def _latest_known_quarter(db: Session, stock_id: str) -> tuple[int, int]:
     )
 
     if latest is not None:
-        return latest.fiscal_year, latest.quarter
+        local = (latest.fiscal_year, latest.quarter)
+        if local[0] * 10 + local[1] >= reportable[0] * 10 + reportable[1]:
+            return local
 
-    return _latest_reportable_quarter()
+    return reportable
 
 
 def _target_quarters(

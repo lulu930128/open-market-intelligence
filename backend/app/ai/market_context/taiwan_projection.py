@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_payload_contract import (
@@ -11,6 +12,7 @@ from app.ai.market_payload_contract import (
     intraday_point_limit as _intraday_point_limit,
     payload_level as _payload_level,
     payload_slot_status as _payload_slot_status,
+    requested_intraday_interval as _requested_intraday_interval,
     slot_envelope as _slot_envelope,
 )
 from app.db.models import FinancialMetricQuarterly, StockMaster
@@ -547,6 +549,9 @@ def _compact_latest_daily_quote(
     *,
     quote_error: str | None = None,
     session_phase: str | None = None,
+    current_session_date: str | None = None,
+    is_trading_day: bool | None = None,
+    live_quote_requested: bool = True,
 ) -> dict[str, Any]:
     if latest_daily is None:
         return {
@@ -560,6 +565,37 @@ def _compact_latest_daily_quote(
             "latest_price": None,
             "price": None,
             "last_price": None,
+            "price_available": False,
+            "last_trade_available": False,
+            "last_trade_price": None,
+            "last_trade_time": None,
+            "last_trade_is_current_session": False,
+            "last_trade_before_auction": False,
+            "facts_usable_for_current_session": False,
+            "fallback_quote": None,
+            "depth_available": False,
+            "depth_status": "unavailable",
+            "auction_book_available": False,
+            "auction_book_status": "unavailable",
+            "auction_book_time": None,
+            "auction_best_bid": None,
+            "auction_best_ask": None,
+            "auction_indicative_available": False,
+            "indicative_match_available": False,
+            "indicative_match_price": None,
+            "indicative_match_volume_lots": None,
+            "indicative_price_available": False,
+            "indicative_price": None,
+            "indicative_bid": None,
+            "indicative_ask": None,
+            "official_close_available": False,
+            "official_close_status": "unavailable",
+            "official_close_price": None,
+            "official_close_trade_date": None,
+            "official_close_source": None,
+            "quote_semantics": "unavailable",
+            "delivery_status": "unavailable",
+            "fallback_used": False,
             "is_realtime": False,
             "latency_ms": None,
             "freshness": {
@@ -571,43 +607,196 @@ def _compact_latest_daily_quote(
         }
 
     close_price = _json_value(getattr(latest_daily, "close_price", None))
-    previous_close = (
+    trade_date = _json_value(getattr(latest_daily, "trade_date", None))
+    prior_session_close = (
         close_price - _json_value(getattr(latest_daily, "price_change", 0))
         if close_price is not None and getattr(latest_daily, "price_change", None) is not None
         else None
     )
     change_pct = (
-        (_json_value(getattr(latest_daily, "price_change", None)) / previous_close) * 100
-        if previous_close not in {None, 0}
+        (_json_value(getattr(latest_daily, "price_change", None)) / prior_session_close) * 100
+        if prior_session_close not in {None, 0}
         else None
     )
+    active_session = session_phase in {
+        "preopen_pending",
+        "preopen",
+        "regular",
+        "regular_live",
+        "closing_auction",
+    }
+    post_close = session_phase in {"post_close", "post_close_snapshot"}
+    current_close_available = bool(
+        post_close
+        and current_session_date
+        and str(trade_date) == str(current_session_date)
+    )
+    latest_session_close_available = bool(
+        (
+            not live_quote_requested
+            or (
+                not active_session
+                and not post_close
+                and is_trading_day is False
+            )
+        )
+        and close_price is not None
+    )
+    official_close_available = bool(
+        current_close_available or latest_session_close_available
+    )
+    if not live_quote_requested and latest_session_close_available:
+        official_close_status = "confirmed_latest_session"
+        quote_semantics = "latest_completed_session_close"
+        delivery_status = "latest_completed_session"
+    elif current_close_available:
+        official_close_status = "confirmed"
+        quote_semantics = "official_close"
+        delivery_status = "official_close"
+    elif post_close:
+        official_close_status = "pending"
+        quote_semantics = "official_close_pending"
+        delivery_status = "official_close_pending"
+    elif latest_session_close_available:
+        official_close_status = "confirmed_latest_session"
+        quote_semantics = "latest_completed_session_close"
+        delivery_status = "latest_completed_session"
+    elif session_phase == "closing_auction":
+        official_close_status = "closing_auction_pending"
+        quote_semantics = "previous_close_fallback"
+        delivery_status = "closing_auction"
+    elif session_phase in {"preopen_pending", "preopen"}:
+        official_close_status = "not_available_yet"
+        quote_semantics = "previous_close_fallback"
+        delivery_status = "previous_close"
+    else:
+        official_close_status = "not_available_yet"
+        quote_semantics = "previous_close_fallback"
+        delivery_status = "previous_close"
+    previous_close = (
+        prior_session_close if official_close_available else close_price
+    )
+    public_price = close_price if official_close_available else None
     return {
         "kind": "quote_snapshot",
         "source": "market_daily_price",
         "provider": "local_daily_close",
-        "status": "delayed_daily_close",
+        "status": (
+            "delayed_daily_close"
+            if not live_quote_requested and latest_session_close_available
+            else "official_close"
+            if official_close_available
+            else "official_close_pending"
+            if post_close
+            else "closing_auction_pending"
+            if session_phase == "closing_auction"
+            else "preopen_no_last_trade"
+            if session_phase in {"preopen_pending", "preopen"}
+            else "current_session_quote_unavailable"
+        ),
         "session_phase": session_phase,
-        "trade_date": _json_value(getattr(latest_daily, "trade_date", None)),
+        "trade_date": trade_date,
         "quote_time": None,
-        "latest_price": close_price,
-        "price": close_price,
-        "last_price": close_price,
+        "latest_price": public_price,
+        "price": public_price,
+        "last_price": None,
         "previous_close": previous_close,
-        "open_price": _json_value(getattr(latest_daily, "open_price", None)),
-        "high_price": _json_value(getattr(latest_daily, "high_price", None)),
-        "low_price": _json_value(getattr(latest_daily, "low_price", None)),
-        "change": _json_value(getattr(latest_daily, "price_change", None)),
-        "change_pct": change_pct,
+        "open_price": (
+            _json_value(getattr(latest_daily, "open_price", None))
+            if official_close_available
+            else None
+        ),
+        "high_price": (
+            _json_value(getattr(latest_daily, "high_price", None))
+            if official_close_available
+            else None
+        ),
+        "low_price": (
+            _json_value(getattr(latest_daily, "low_price", None))
+            if official_close_available
+            else None
+        ),
+        "change": (
+            _json_value(getattr(latest_daily, "price_change", None))
+            if official_close_available
+            else None
+        ),
+        "change_pct": change_pct if official_close_available else None,
         "total_volume_lots": (
             int(getattr(latest_daily, "trade_volume", 0) / 1000)
-            if getattr(latest_daily, "trade_volume", None) is not None
+            if (
+                official_close_available
+                and getattr(latest_daily, "trade_volume", None) is not None
+            )
             else None
         ),
         "volume_unit": "lots",
+        "price_available": official_close_available,
+        "last_trade_available": False,
+        "last_trade_price": None,
+        "last_trade_time": None,
+        "last_trade_is_current_session": False,
+        "last_trade_before_auction": False,
+        "facts_usable_for_current_session": bool(
+            official_close_available and current_close_available
+        ),
+        "fallback_quote": (
+            {
+                "price": close_price,
+                "trade_date": trade_date,
+                "source": "market_daily_price",
+                "provider": "local_daily_close",
+                "semantics": "latest_completed_session_reference",
+                "current_session": False,
+            }
+            if live_quote_requested
+            and close_price is not None
+            and not official_close_available
+            else None
+        ),
+        "depth_available": False,
+        "depth_status": "unavailable",
+        "auction_book_available": False,
+        "auction_book_status": "unavailable",
+        "auction_book_time": None,
+        "auction_best_bid": None,
+        "auction_best_ask": None,
+        "auction_indicative_available": False,
+        "indicative_match_available": False,
+        "indicative_match_price": None,
+        "indicative_match_volume_lots": None,
+        "indicative_price_available": False,
+        "indicative_price": None,
+        "indicative_bid": None,
+        "indicative_ask": None,
+        "official_close_available": official_close_available,
+        "official_close_status": official_close_status,
+        "official_close_price": (
+            close_price if official_close_available else None
+        ),
+        "official_close_trade_date": (
+            trade_date if official_close_available else None
+        ),
+        "official_close_source": (
+            "market_daily_price.close_price"
+            if official_close_available
+            else None
+        ),
+        "quote_semantics": quote_semantics,
+        "delivery_status": delivery_status,
+        "fallback_used": live_quote_requested,
         "is_realtime": False,
         "latency_ms": None,
         "freshness": {
-            "status": "daily_close",
+            "status": (
+                "latest_completed_session"
+                if not live_quote_requested and latest_session_close_available
+                else "official_close"
+                if official_close_available
+                else "official_close_pending"
+                if post_close
+                else "latest_completed_session"
+            ),
             "is_live": False,
             "is_stale": False,
             "message": quote_error
@@ -622,19 +811,38 @@ def _compact_quote_snapshot(
     quote_depth: dict[str, Any] | None,
     quote_error: str | None,
     session_phase: str | None = None,
+    current_session_date: str | None = None,
+    is_trading_day: bool | None = None,
+    live_quote_requested: bool = True,
 ) -> dict[str, Any]:
     if not quote_depth:
         return _compact_latest_daily_quote(
             latest_daily,
             quote_error=quote_error,
             session_phase=session_phase,
+            current_session_date=current_session_date,
+            is_trading_day=is_trading_day,
+            live_quote_requested=live_quote_requested,
         )
 
     freshness = quote_depth.get("freshness") if isinstance(quote_depth.get("freshness"), dict) else {}
     age_seconds = freshness.get("age_seconds")
     latency_ms = int(age_seconds * 1000) if isinstance(age_seconds, (int, float)) else None
     is_realtime = bool(freshness.get("is_live")) and not bool(freshness.get("is_stale"))
-    latest_price = quote_depth.get("last_price")
+    last_trade_price = quote_depth.get(
+        "last_trade_price",
+        quote_depth.get("last_price"),
+    )
+    last_trade_available = bool(
+        quote_depth.get(
+            "last_trade_available",
+            last_trade_price is not None,
+        )
+    )
+    price_available = quote_depth.get("price_available")
+    if not isinstance(price_available, bool):
+        price_available = last_trade_price is not None
+    latest_price = last_trade_price if price_available else None
     depth_available = bool(quote_depth.get("depth_available"))
     return {
         "kind": "quote_snapshot",
@@ -646,11 +854,37 @@ def _compact_quote_snapshot(
         "phase_label": quote_depth.get("phase_label"),
         "trade_date": _json_value(quote_depth.get("trade_date")),
         "quote_time": _json_value(quote_depth.get("quote_time")),
+        "snapshot_time": _json_value(
+            quote_depth.get("snapshot_time") or quote_depth.get("quote_time")
+        ),
+        "snapshot_time_basis": quote_depth.get("snapshot_time_basis"),
+        "provider_event_time": _json_value(
+            quote_depth.get("provider_event_time")
+        ),
         "fetched_at": _json_value(quote_depth.get("fetched_at")),
         "refresh_outcome": quote_depth.get("refresh_outcome"),
         "latest_price": latest_price,
         "price": latest_price,
         "last_price": latest_price,
+        "price_available": price_available,
+        "last_trade_available": last_trade_available,
+        "last_trade_price": (
+            quote_depth.get("last_trade_price", last_trade_price)
+            if last_trade_available
+            else None
+        ),
+        "last_trade_time": _json_value(quote_depth.get("last_trade_time")),
+        "last_trade_is_current_session": bool(
+            quote_depth.get("last_trade_is_current_session")
+        ),
+        "last_trade_before_auction": bool(
+            quote_depth.get("last_trade_before_auction")
+        ),
+        "facts_usable_for_current_session": bool(
+            last_trade_available
+            and quote_depth.get("last_trade_is_current_session")
+        ),
+        "fallback_quote": quote_depth.get("fallback_quote"),
         "previous_close": quote_depth.get("previous_close"),
         "open_price": quote_depth.get("open_price"),
         "high_price": quote_depth.get("high_price"),
@@ -675,8 +909,110 @@ def _compact_quote_snapshot(
         "spread_pct": (
             quote_depth.get("spread_pct") if depth_available else None
         ),
+        "bid_levels": (
+            quote_depth.get("bid_levels") or []
+            if depth_available
+            else []
+        ),
+        "ask_levels": (
+            quote_depth.get("ask_levels") or []
+            if depth_available
+            else []
+        ),
+        "bid_depth": (
+            quote_depth.get("bid_depth")
+            or quote_depth.get("bid_levels")
+            or []
+            if depth_available
+            else []
+        ),
+        "ask_depth": (
+            quote_depth.get("ask_depth")
+            or quote_depth.get("ask_levels")
+            or []
+            if depth_available
+            else []
+        ),
+        "top5_bid_volume_lots": (
+            quote_depth.get("top5_bid_volume_lots")
+            if depth_available
+            else None
+        ),
+        "top5_ask_volume_lots": (
+            quote_depth.get("top5_ask_volume_lots")
+            if depth_available
+            else None
+        ),
+        "top5_imbalance": (
+            quote_depth.get("top5_imbalance")
+            if depth_available
+            else None
+        ),
+        "depth_volume_unit": quote_depth.get("depth_volume_unit"),
+        "depth_order_count_status": quote_depth.get(
+            "depth_order_count_status",
+            "not_provided",
+        ),
         "depth_available": depth_available,
         "depth_status": "available" if depth_available else "unavailable",
+        "auction_book_available": bool(
+            quote_depth.get("auction_book_available")
+        ),
+        "auction_book_status": quote_depth.get(
+            "auction_book_status",
+            "unavailable",
+        ),
+        "auction_book_time": _json_value(
+            quote_depth.get("auction_book_time")
+        ),
+        "auction_best_bid": quote_depth.get("auction_best_bid"),
+        "auction_best_ask": quote_depth.get("auction_best_ask"),
+        "auction_indicative_available": bool(
+            quote_depth.get("auction_indicative_available")
+        ),
+        "indicative_match_available": bool(
+            quote_depth.get("indicative_match_available")
+        ),
+        "indicative_match_price": quote_depth.get(
+            "indicative_match_price"
+        ),
+        "indicative_match_volume_lots": quote_depth.get(
+            "indicative_match_volume_lots"
+        ),
+        "indicative_unmatched_buy_volume_lots": quote_depth.get(
+            "indicative_unmatched_buy_volume_lots"
+        ),
+        "indicative_unmatched_sell_volume_lots": quote_depth.get(
+            "indicative_unmatched_sell_volume_lots"
+        ),
+        "indicative_unmatched_status": quote_depth.get(
+            "indicative_unmatched_status",
+            "not_provided",
+        ),
+        "indicative_price_available": bool(
+            quote_depth.get("indicative_price_available")
+        ),
+        "indicative_price": quote_depth.get("indicative_price"),
+        "indicative_bid": quote_depth.get("indicative_bid"),
+        "indicative_ask": quote_depth.get("indicative_ask"),
+        "official_close_available": bool(
+            quote_depth.get("official_close_available")
+        ),
+        "official_close_status": quote_depth.get(
+            "official_close_status",
+            "unavailable",
+        ),
+        "official_close_price": quote_depth.get("official_close_price"),
+        "official_close_trade_date": _json_value(
+            quote_depth.get("official_close_trade_date")
+        ),
+        "official_close_source": quote_depth.get("official_close_source"),
+        "quote_semantics": quote_depth.get("quote_semantics"),
+        "delivery_status": quote_depth.get(
+            "delivery_status",
+            freshness.get("status"),
+        ),
+        "fallback_used": bool(quote_depth.get("fallback_used")),
         "is_realtime": is_realtime,
         "latency_ms": latency_ms,
         "freshness": {
@@ -702,8 +1038,19 @@ def _compact_intraday_point(point: dict[str, Any]) -> dict[str, Any]:
         "low": point.get("low"),
         "close": point.get("close"),
         "volume": point.get("volume"),
+        "volume_shares": point.get("volume_shares"),
+        "volume_lots": point.get("volume_lots"),
+        "canonical_volume_unit": point.get("canonical_volume_unit"),
+        "provider_volume_unit": point.get("provider_volume_unit"),
+        "volume_status": point.get("volume_status"),
         "trade_value": point.get("trade_value"),
+        "approx_trade_value": point.get("approx_trade_value"),
+        "trade_value_status": point.get("trade_value_status"),
         "transaction_count": point.get("transaction_count"),
+        "bar_close_time": _json_value(point.get("bar_close_time")),
+        "elapsed_seconds": point.get("elapsed_seconds"),
+        "is_partial": point.get("is_partial"),
+        "finalized": point.get("finalized"),
     }
 
 
@@ -723,6 +1070,19 @@ def _compact_intraday_history(
         if refreshed_count and not compact_points
         else None
     )
+    effective_interval = str(
+        history.get("effective_interval")
+        or history.get("interval")
+        or "1m"
+    )
+    source_interval = str(
+        history.get("source_interval")
+        or effective_interval
+    )
+    requested_interval = str(
+        history.get("requested_interval")
+        or effective_interval
+    )
     return {
         "status": (
             "partial"
@@ -731,7 +1091,17 @@ def _compact_intraday_history(
             if compact_points
             else "empty"
         ),
-        "interval": history.get("interval"),
+        "interval": effective_interval,
+        "requested_interval": requested_interval,
+        "source_interval": source_interval,
+        "effective_interval": effective_interval,
+        "interval_status": (
+            str(history.get("interval_status"))
+            if history.get("interval_status")
+            else "ready"
+            if requested_interval == effective_interval
+            else "unsupported"
+        ),
         "range": history.get("range"),
         "provider": history.get("provider"),
         "source": history.get("source"),
@@ -745,9 +1115,51 @@ def _compact_intraday_history(
         "is_partial": bool(history.get("is_partial")),
         "trade_date": _json_value(history.get("trade_date")),
         "volume_unit": history.get("volume_unit"),
+        "volume_status": history.get("volume_status"),
         "volume_semantics": history.get("volume_semantics"),
+        "canonical_volume_unit": history.get("canonical_volume_unit"),
+        "provider_volume_unit": history.get("provider_volume_unit"),
+        "volume_conversion": history.get("volume_conversion"),
+        "cumulative_volume_shares": history.get("cumulative_volume_shares"),
+        "cumulative_volume_lots": history.get("cumulative_volume_lots"),
+        "cumulative_trade_value": history.get("cumulative_trade_value"),
+        "available_cumulative_trade_value": history.get(
+            "available_cumulative_trade_value"
+        ),
+        "estimated_cumulative_trade_value": history.get(
+            "estimated_cumulative_trade_value"
+        ),
+        "trade_value_unit": history.get("trade_value_unit"),
+        "trade_value_status": history.get("trade_value_status"),
+        "official_vwap": history.get("official_vwap"),
+        "approx_vwap": history.get("approx_vwap"),
+        "vwap_method": history.get("vwap_method"),
+        "vwap_confidence": history.get("vwap_confidence"),
+        "partial_bar_count": history.get("partial_bar_count"),
+        "indicator_eligible_point_count": history.get(
+            "indicator_eligible_point_count"
+        ),
+        "partial_bar_policy": history.get("partial_bar_policy"),
         "cached_count": history.get("cached_count"),
         "refreshed_count": refreshed_count,
+        "cache_status": history.get("cache_status") or (
+            "persisted_hit"
+            if history.get("cached_count")
+            else "persisted_miss"
+        ),
+        "cache_hit": (
+            history.get("cache_hit")
+            if isinstance(history.get("cache_hit"), bool)
+            else bool(history.get("cached_count"))
+        ),
+        "cache_trade_date": history.get("cache_trade_date") or (
+            str(history.get("to_time"))[:10]
+            if history.get("to_time")
+            else None
+        ),
+        "cache_latest_time": history.get("cache_latest_time")
+        or _json_value(history.get("to_time")),
+        "fallback_used": bool(history.get("fallback_used")),
         "latest": latest_point,
         "points": compact_points,
         "warnings": [empty_warning] if empty_warning else [],
@@ -776,8 +1188,33 @@ def _compact_single_intraday_series(
     payload = raw_payload if isinstance(raw_payload, dict) else {}
     points = payload.get("points") if isinstance(payload.get("points"), list) else []
     resolved_interval = str(payload.get("interval") or interval)
+    requested_interval = str(
+        payload.get("requested_interval")
+        or _requested_intraday_interval(
+            market_data_params,
+            default=interval,
+        )
+        or interval
+    )
+    source_interval = str(payload.get("source_interval") or resolved_interval)
+    effective_interval = str(
+        payload.get("effective_interval") or resolved_interval
+    )
+    interval_status = str(
+        payload.get("interval_status")
+        or (
+            "ready"
+            if requested_interval == effective_interval
+            else "unsupported"
+        )
+    )
     history = {
         "interval": resolved_interval,
+        "requested_interval": requested_interval,
+        "source_interval": source_interval,
+        "effective_interval": effective_interval,
+        "interval_status": interval_status,
+        "aggregation_method": payload.get("aggregation_method"),
         "range": payload.get("range") or "1d",
         "provider": payload.get("provider"),
         "source": payload.get("source"),
@@ -786,13 +1223,49 @@ def _compact_single_intraday_series(
         "coverage_status": payload.get("coverage_status"),
         "is_partial": payload.get("is_partial"),
         "volume_unit": payload.get("volume_unit"),
+        "volume_status": payload.get("volume_status"),
         "volume_semantics": payload.get("volume_semantics"),
+        "canonical_volume_unit": payload.get("canonical_volume_unit"),
+        "provider_volume_unit": payload.get("provider_volume_unit"),
+        "volume_conversion": payload.get("volume_conversion"),
+        "cumulative_volume_shares": payload.get("cumulative_volume_shares"),
+        "cumulative_volume_lots": payload.get("cumulative_volume_lots"),
+        "cumulative_trade_value": payload.get("cumulative_trade_value"),
+        "available_cumulative_trade_value": payload.get(
+            "available_cumulative_trade_value"
+        ),
+        "estimated_cumulative_trade_value": payload.get(
+            "estimated_cumulative_trade_value"
+        ),
+        "trade_value_unit": payload.get("trade_value_unit"),
+        "trade_value_status": payload.get("trade_value_status"),
+        "official_vwap": payload.get("official_vwap"),
+        "approx_vwap": payload.get("approx_vwap"),
+        "vwap_method": payload.get("vwap_method"),
+        "vwap_confidence": payload.get("vwap_confidence"),
+        "partial_bar_count": payload.get("partial_bar_count"),
+        "indicator_eligible_point_count": payload.get(
+            "indicator_eligible_point_count"
+        ),
+        "partial_bar_policy": payload.get("partial_bar_policy"),
         "points": points,
     }
+    warnings = [
+        (
+            f"Requested Taiwan index intraday interval {requested_interval} "
+            f"is not available; returned {effective_interval} source bars "
+            "without relabeling."
+        )
+    ] if interval_status != "ready" else []
     return {
         "kind": "intraday_bars",
         "enabled": True,
         "intervals": [resolved_interval],
+        "interval": effective_interval,
+        "requested_interval": requested_interval,
+        "source_interval": source_interval,
+        "effective_interval": effective_interval,
+        "interval_status": interval_status,
         "range": "1d",
         "payload_level": payload_level,
         "bar_limit": point_limit,
@@ -802,7 +1275,7 @@ def _compact_single_intraday_series(
                 point_limit=point_limit,
             )
         },
-        "warnings": [],
+        "warnings": warnings,
     }
 
 
@@ -1195,6 +1668,334 @@ def _intraday_source_is_live(source: str | None) -> bool:
     return any(key in source_text for key in ("intraday", "twse_index_5s", "twse_mis", "yahoo_finance_chart"))
 
 
+def _index_candidate_datetime(
+    value: Any,
+    *,
+    timezone_name: str,
+) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text_value = str(value or "").strip()
+        if not text_value or len(text_value) <= 10:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    market_timezone = ZoneInfo(timezone_name)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=market_timezone)
+    return parsed.astimezone(market_timezone)
+
+
+def _index_candidate_date(
+    value: Any,
+    *,
+    timezone_name: str,
+) -> date | None:
+    parsed_at = _index_candidate_datetime(
+        value,
+        timezone_name=timezone_name,
+    )
+    if parsed_at is not None:
+        return parsed_at.date()
+    try:
+        return date.fromisoformat(str(value or "")[:10])
+    except ValueError:
+        return None
+
+
+def resolve_taiwan_index_quote_state(
+    *,
+    intraday: dict[str, Any] | None,
+    index_snapshot: dict[str, Any],
+    calendar_status: dict[str, Any],
+) -> dict[str, Any]:
+    timezone_name = str(calendar_status.get("timezone") or "Asia/Taipei")
+    checked_at = _index_candidate_datetime(
+        calendar_status.get("checked_at"),
+        timezone_name=timezone_name,
+    ) or datetime.now(ZoneInfo(timezone_name))
+    phase = str(calendar_status.get("phase") or "unknown")
+    current_date = _index_candidate_date(
+        calendar_status.get("date"),
+        timezone_name=timezone_name,
+    ) or checked_at.date()
+    previous_trading_day = _index_candidate_date(
+        calendar_status.get("previous_trading_day"),
+        timezone_name=timezone_name,
+    )
+    expected_trade_date = (
+        current_date
+        if calendar_status.get("is_trading_day") is True
+        and phase not in {"preopen_pending", "preopen", "market_closed"}
+        else previous_trading_day
+    )
+
+    latest_point = _latest_intraday_point(intraday)
+    intraday_time = (
+        latest_point.get("event_time")
+        or latest_point.get("bar_time")
+        or latest_point.get("time")
+        if latest_point
+        else None
+    )
+    intraday_date = _index_candidate_date(
+        intraday_time or (intraday or {}).get("trade_date"),
+        timezone_name=timezone_name,
+    )
+    intraday_candidate = {
+        "candidate": "intraday_last_trade",
+        "value": latest_point.get("price") if latest_point else None,
+        "event_time": _json_value(intraday_time),
+        "trade_date": intraday_date.isoformat() if intraday_date else None,
+        "source": (
+            str((intraday or {}).get("source") or "market_index_intraday")
+        ),
+        "eligible": bool(
+            latest_point
+            and latest_point.get("price") is not None
+            and expected_trade_date is not None
+            and intraday_date == expected_trade_date
+        ),
+    }
+
+    summary_time = index_snapshot.get("as_of")
+    summary_date = _index_candidate_date(
+        index_snapshot.get("time") or summary_time,
+        timezone_name=timezone_name,
+    )
+    summary_candidate = {
+        "candidate": "index_summary",
+        "value": index_snapshot.get("close"),
+        "event_time": _json_value(summary_time),
+        "trade_date": summary_date.isoformat() if summary_date else None,
+        "source": str(index_snapshot.get("source") or "market_index_summary"),
+        "eligible": bool(
+            index_snapshot.get("close") is not None
+            and expected_trade_date is not None
+            and summary_date == expected_trade_date
+        ),
+    }
+
+    explicit_official_status = str(
+        index_snapshot.get("official_close_status") or ""
+    ).casefold()
+    official_source = str(
+        index_snapshot.get("official_close_source")
+        or index_snapshot.get("source")
+        or ""
+    )
+    official_source_key = official_source.casefold()
+    source_is_official = any(
+        marker in official_source_key
+        for marker in (
+            "twse_index_5s_snapshot",
+            "twse_openapi",
+            "tpex_openapi",
+            "market_index_daily_stat",
+        )
+    )
+    after_confirmation_deadline = bool(
+        summary_date is not None
+        and (
+            summary_date < current_date
+            or checked_at.time() >= time(13, 33)
+        )
+    )
+    official_price = (
+        index_snapshot.get("official_close_price")
+        if index_snapshot.get("official_close_price") is not None
+        else index_snapshot.get("close")
+    )
+    official_confirmed = bool(
+        official_price is not None
+        and summary_candidate["eligible"]
+        and (
+            explicit_official_status in {"confirmed", "official", "final"}
+            or source_is_official and after_confirmation_deadline
+        )
+    )
+    official_candidate = {
+        "candidate": "official_close",
+        "value": official_price if official_confirmed else None,
+        "raw_value": official_price,
+        "event_time": _json_value(
+            index_snapshot.get("official_close_time") or summary_time
+        ),
+        "trade_date": summary_candidate["trade_date"],
+        "source": official_source or None,
+        "eligible": official_confirmed,
+        "confirmation_evidence": (
+            "explicit_official_status"
+            if explicit_official_status in {"confirmed", "official", "final"}
+            else "official_source_after_confirmation_deadline"
+            if official_confirmed
+            else None
+        ),
+    }
+
+    warnings: list[str] = []
+    candidate_dates = {
+        str(candidate["trade_date"])
+        for candidate in (intraday_candidate, summary_candidate)
+        if candidate.get("value") is not None and candidate.get("trade_date")
+    }
+    if len(candidate_dates) > 1:
+        warnings.append(
+            "Taiwan index intraday and summary candidates belong to different trade dates."
+        )
+
+    selected_candidate: dict[str, Any] | None = None
+    selection_reason = "no_eligible_candidate"
+    if official_confirmed and phase in {
+        "post_close",
+        "post_close_snapshot",
+        "market_closed",
+    }:
+        selected_candidate = official_candidate
+        selection_reason = "confirmed_official_close"
+    elif phase in {"regular", "regular_live", "closing_auction"}:
+        if intraday_candidate["eligible"]:
+            selected_candidate = intraday_candidate
+            selection_reason = "active_session_prefers_intraday_last_trade"
+        elif summary_candidate["eligible"]:
+            selected_candidate = summary_candidate
+            selection_reason = "active_session_intraday_unavailable_summary_fallback"
+    else:
+        eligible = [
+            candidate
+            for candidate in (intraday_candidate, summary_candidate)
+            if candidate["eligible"]
+        ]
+        if eligible:
+            selected_candidate = max(
+                eligible,
+                key=lambda candidate: (
+                    _index_candidate_datetime(
+                        candidate.get("event_time"),
+                        timezone_name=timezone_name,
+                    )
+                    or datetime.min.replace(tzinfo=ZoneInfo(timezone_name))
+                ),
+            )
+            selection_reason = "latest_same_trade_date_candidate_pending_confirmation"
+
+    closing_auction = phase == "closing_auction"
+    post_close_current_day = bool(
+        calendar_status.get("is_trading_day") is True
+        and phase in {"post_close", "post_close_snapshot", "market_closed"}
+    )
+    official_close_status = (
+        "confirmed"
+        if official_confirmed
+        else "closing_auction_pending"
+        if closing_auction
+        else "pending"
+        if post_close_current_day
+        else "confirmed_latest_session"
+        if summary_candidate["eligible"]
+        and summary_date is not None
+        and summary_date < current_date
+        and source_is_official
+        else "not_available_yet"
+    )
+    selected_value = (
+        selected_candidate.get("value")
+        if isinstance(selected_candidate, dict)
+        else None
+    )
+    quote_semantics = (
+        "official_close"
+        if official_close_status == "confirmed"
+        else "closing_auction_last_trade"
+        if closing_auction
+        else "official_close_pending"
+        if official_close_status == "pending"
+        else "current_session_last_trade"
+        if phase in {"regular", "regular_live"}
+        else "latest_completed_session"
+        if official_close_status == "confirmed_latest_session"
+        else "unavailable"
+    )
+    delivery_status = (
+        "official_close"
+        if official_close_status == "confirmed"
+        else "closing_auction"
+        if closing_auction
+        else "official_close_pending"
+        if official_close_status == "pending"
+        else "latest_completed_session"
+        if official_close_status == "confirmed_latest_session"
+        else "unavailable"
+    )
+    return {
+        "selected_candidate": (
+            selected_candidate.get("candidate")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_value": selected_value,
+        "selected_source": (
+            selected_candidate.get("source")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_event_time": (
+            selected_candidate.get("event_time")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_trade_date": (
+            selected_candidate.get("trade_date")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selection_reason": selection_reason,
+        "expected_trade_date": (
+            expected_trade_date.isoformat() if expected_trade_date else None
+        ),
+        "last_trade_available": intraday_candidate["eligible"],
+        "last_trade_price": (
+            intraday_candidate["value"]
+            if intraday_candidate["eligible"]
+            else None
+        ),
+        "last_trade_time": intraday_candidate["event_time"],
+        "last_trade_is_current_session": intraday_candidate["eligible"],
+        "official_close_available": official_confirmed,
+        "official_close_status": official_close_status,
+        "official_close_price": (
+            official_candidate["value"] if official_confirmed else None
+        ),
+        "official_close_trade_date": (
+            official_candidate["trade_date"] if official_confirmed else None
+        ),
+        "official_close_source": (
+            official_candidate["source"] if official_confirmed else None
+        ),
+        "official_close_raw": (
+            official_candidate["raw_value"] if official_confirmed else None
+        ),
+        "official_close_display": (
+            f"{float(official_candidate['value']):,.2f}"
+            if official_confirmed
+            and isinstance(official_candidate["value"], (int, float))
+            else None
+        ),
+        "official_close_precision": 2 if official_confirmed else None,
+        "quote_semantics": quote_semantics,
+        "delivery_status": delivery_status,
+        "candidates": [
+            intraday_candidate,
+            summary_candidate,
+            official_candidate,
+        ],
+        "warnings": warnings,
+    }
+
+
 def _compact_index_quote(
     *,
     index_id: str,
@@ -1209,16 +2010,18 @@ def _compact_index_quote(
         if isinstance(intraday, dict)
         else []
     )
-    source = (
-        str(intraday.get("source"))
-        if isinstance(intraday, dict) and intraday.get("source")
-        else str(snapshot.get("source") or "market_index_summary")
+    effective_calendar = calendar_status or build_taiwan_calendar_status()
+    resolution = resolve_taiwan_index_quote_state(
+        intraday=intraday,
+        index_snapshot=snapshot,
+        calendar_status=effective_calendar,
     )
-    latest_price = (
-        latest_point.get("price")
-        if latest_point and latest_point.get("price") is not None
-        else snapshot.get("close")
+    source = str(
+        resolution.get("selected_source")
+        or snapshot.get("source")
+        or "market_index_summary"
     )
+    latest_price = resolution.get("selected_value")
     previous_close = (
         intraday.get("previous_close")
         if isinstance(intraday, dict) and intraday.get("previous_close") is not None
@@ -1234,9 +2037,9 @@ def _compact_index_quote(
         if isinstance(change, (int, float)) and isinstance(previous_close, (int, float)) and previous_close != 0
         else snapshot.get("change_pct")
     )
-    quote_time = latest_point.get("time") if latest_point else snapshot.get("as_of") or snapshot.get("time")
+    quote_time = resolution.get("selected_event_time")
     freshness = classify_market_snapshot(
-        calendar_status=calendar_status or build_taiwan_calendar_status(),
+        calendar_status=effective_calendar,
         quote_time=quote_time,
     )
     source_supports_intraday = bool(latest_point) and _intraday_source_is_live(source)
@@ -1259,12 +2062,16 @@ def _compact_index_quote(
         for value in [point.get("high") if point.get("high") is not None else point.get("price")]
         if isinstance(value, (int, float))
     ]
+    if isinstance(snapshot.get("high"), (int, float)):
+        high_values.append(snapshot["high"])
     low_values = [
         value
         for point in intraday_points
         for value in [point.get("low") if point.get("low") is not None else point.get("price")]
         if isinstance(value, (int, float))
     ]
+    if isinstance(snapshot.get("low"), (int, float)):
+        low_values.append(snapshot["low"])
     volume_values = [
         int(point["volume"])
         for point in intraday_points
@@ -1278,18 +2085,94 @@ def _compact_index_quote(
         if isinstance(snapshot_volume, (int, float)) and snapshot_volume > 0
         else None
     )
+    intraday_volume_semantics = (
+        intraday.get("volume_semantics")
+        if isinstance(intraday, dict)
+        else None
+    )
+    canonical_volume_unit = (
+        intraday.get("canonical_volume_unit")
+        if isinstance(intraday, dict) and intraday.get("canonical_volume_unit")
+        else snapshot.get("canonical_volume_unit")
+    )
+    provider_volume_unit = (
+        intraday.get("provider_volume_unit")
+        if isinstance(intraday, dict) and intraday.get("provider_volume_unit")
+        else snapshot.get("provider_volume_unit")
+    )
+    if (
+        provider_volume_unit is None
+        and isinstance(intraday, dict)
+        and intraday.get("volume_unit")
+        and not canonical_volume_unit
+    ):
+        provider_volume_unit = intraday.get("volume_unit")
+    volume_unit = (
+        canonical_volume_unit
+        or provider_volume_unit
+        or snapshot.get("volume_unit")
+    )
+    volume_status = (
+        "not_provided"
+        if volume is None
+        else "provider_specific"
+        if not volume_unit
+        or not canonical_volume_unit
+        or "provider" in str(intraday_volume_semantics or "")
+        else "available"
+    )
+    trade_value = (
+        snapshot.get("trade_value")
+        if snapshot.get("trade_value") is not None
+        else snapshot.get("estimated_trade_value")
+    )
+    trade_value_status = (
+        "official"
+        if snapshot.get("trade_value") is not None
+        else "estimated"
+        if snapshot.get("estimated_trade_value") is not None
+        else "not_provided"
+    )
 
     return {
         "kind": "quote_snapshot",
         "source": source,
         "provider": source,
-        "status": freshness["status"],
+        "status": (
+            "official_close"
+            if resolution["official_close_status"] == "confirmed"
+            else "official_close_pending"
+            if resolution["official_close_status"] == "pending"
+            else "closing_auction"
+            if resolution["official_close_status"] == "closing_auction_pending"
+            else freshness["status"]
+        ),
         "index_id": index_id,
-        "trade_date": snapshot.get("time"),
+        "trade_date": resolution.get("selected_trade_date"),
         "quote_time": _json_value(quote_time),
         "latest_price": latest_price,
         "price": latest_price,
         "last_price": latest_price,
+        "price_available": latest_price is not None,
+        "last_trade_available": resolution["last_trade_available"],
+        "last_trade_price": resolution["last_trade_price"],
+        "last_trade_time": resolution["last_trade_time"],
+        "last_trade_is_current_session": resolution[
+            "last_trade_is_current_session"
+        ],
+        "official_close_available": resolution["official_close_available"],
+        "official_close_status": resolution["official_close_status"],
+        "official_close_price": resolution["official_close_price"],
+        "official_close_trade_date": resolution[
+            "official_close_trade_date"
+        ],
+        "official_close_source": resolution["official_close_source"],
+        "official_close_raw": resolution["official_close_raw"],
+        "official_close_display": resolution["official_close_display"],
+        "official_close_precision": resolution["official_close_precision"],
+        "selected_candidate": resolution["selected_candidate"],
+        "selection_reason": resolution["selection_reason"],
+        "quote_candidates": resolution["candidates"],
         "previous_close": previous_close,
         "open_price": open_values[0] if open_values else snapshot.get("open"),
         "high_price": max(high_values) if high_values else snapshot.get("high"),
@@ -1297,18 +2180,68 @@ def _compact_index_quote(
         "change": change,
         "change_pct": change_pct,
         "volume": volume,
-        "volume_status": "available" if volume is not None else "missing",
-        "trade_value": snapshot.get("trade_value") or snapshot.get("estimated_trade_value"),
+        "volume_unit": volume_unit or (
+            "provider_units" if volume is not None else None
+        ),
+        "canonical_volume_unit": canonical_volume_unit,
+        "provider_volume_unit": provider_volume_unit or (
+            "provider_units" if volume is not None and not canonical_volume_unit else None
+        ),
+        "volume_status": volume_status,
+        "volume_semantics": (
+            intraday_volume_semantics
+            or "provider_index_volume_not_market_trade_value"
+            if volume is not None
+            else "not_available"
+        ),
+        "trade_value": trade_value,
+        "trade_value_unit": "TWD" if trade_value is not None else None,
+        "trade_value_status": trade_value_status,
+        "trade_value_source": (
+            snapshot.get("source") if trade_value is not None else None
+        ),
+        "official_vwap": (
+            intraday.get("official_vwap")
+            if isinstance(intraday, dict)
+            else None
+        ),
+        "approx_vwap": (
+            intraday.get("approx_vwap")
+            if isinstance(intraday, dict)
+            else None
+        ),
+        "vwap_method": (
+            intraday.get("vwap_method")
+            if isinstance(intraday, dict)
+            else None
+        ),
+        "vwap_confidence": (
+            intraday.get("vwap_confidence")
+            if isinstance(intraday, dict)
+            else None
+        ),
         "is_realtime": freshness["is_realtime"],
         "is_live": freshness["is_live"],
         "is_latest_session_quote": freshness["is_latest_session_quote"],
         "market_status": freshness["market_status"],
         "current_session_phase": freshness["current_session_phase"],
         "last_quote_session": freshness["last_quote_session"],
-        "quote_semantics": freshness["quote_semantics"],
+        "quote_semantics": resolution["quote_semantics"],
+        "delivery_status": resolution["delivery_status"],
+        "warnings": resolution["warnings"],
         "latency_ms": None,
         "freshness": {
             **freshness,
+            "status": (
+                "latest_completed_session"
+                if resolution["official_close_status"]
+                in {"confirmed", "confirmed_latest_session"}
+                else freshness["status"]
+            ),
+            "quote_semantics": resolution["quote_semantics"],
+            "delivery_status": resolution["delivery_status"],
+            "expected_trade_date": resolution["expected_trade_date"],
+            "warnings": resolution["warnings"],
             "message": (
                 "Index intraday freshness is derived from quote time and the Taiwan trading calendar."
                 if latest_point
@@ -1368,18 +2301,35 @@ def _build_tw_index_compact_evidence(
     missing: list[str],
     warnings: list[str],
     source_refs: list[dict[str, Any]],
+    calendar_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    quote = _compact_index_quote(
+        index_id=index_id,
+        index_snapshot=index_snapshot,
+        intraday=intraday if include_intraday else None,
+        calendar_status=calendar_status,
+    )
     intraday_bars = _compact_single_intraday_series(
         raw_payload=intraday,
         interval="1m",
         include_intraday=include_intraday,
         market_data_params=market_data_params,
     )
-    quote = _compact_index_quote(
-        index_id=index_id,
-        index_snapshot=index_snapshot,
-        intraday=intraday if include_intraday else None,
-    )
+    for series in intraday_bars.get("series", {}).values():
+        if not isinstance(series, dict):
+            continue
+        series["session_phase"] = quote.get("current_session_phase")
+        series["market_status"] = quote.get("market_status")
+        series["official_close_status"] = quote.get("official_close_status")
+        series["delivery_status"] = quote.get("delivery_status")
+    warnings = [
+        *warnings,
+        *[
+            str(item)
+            for item in quote.get("warnings") or []
+            if str(item).strip()
+        ],
+    ]
     payload_level = _payload_level(market_data_params)
     target = {
         "type": "tw_index",

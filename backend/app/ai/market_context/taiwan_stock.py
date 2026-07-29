@@ -25,6 +25,7 @@ from app.ai.market_context.taiwan_projection import (
 from app.ai.market_payload_contract import (
     intraday_point_limit as _intraday_point_limit,
     payload_level as _payload_level,
+    requested_intraday_interval as _requested_intraday_interval,
     slot_envelope as _slot_envelope,
 )
 from app.market.live_snapshot import classify_market_snapshot, market_status_from_session
@@ -118,11 +119,28 @@ def _compact_intraday_bars(
 ) -> dict[str, Any]:
     payload_level = _payload_level(market_data_params)
     point_limit = _intraday_point_limit(market_data_params)
+    requested_interval = _requested_intraday_interval(market_data_params)
+    params = (
+        market_data_params
+        if isinstance(market_data_params, dict)
+        else {}
+    )
+    realtime_policy = str(params.get("realtime_policy") or "prefer_live")
+    refresh_allowed = (
+        realtime_policy != "cache_only"
+        and params.get("external_fetch_allowed") is not False
+    )
+    intervals = (
+        (requested_interval,)
+        if requested_interval is not None
+        else COMPACT_INTRADAY_INTERVALS
+    )
     if not include_intraday:
         return {
             "kind": "intraday_bars",
             "enabled": False,
-            "intervals": list(COMPACT_INTRADAY_INTERVALS),
+            "intervals": list(intervals),
+            "requested_interval": requested_interval,
             "payload_level": payload_level,
             "bar_limit": point_limit,
             "series": {},
@@ -131,14 +149,14 @@ def _compact_intraday_bars(
 
     series: dict[str, Any] = {}
     warnings: list[str] = []
-    for interval in COMPACT_INTRADAY_INTERVALS:
+    for interval in intervals:
         try:
             history = dependencies.get_market_intraday_history(
                 db=db,
                 stock_id=stock_id,
                 interval=interval,
                 range_value="1d",
-                refresh=True,
+                refresh=refresh_allowed,
             )
             compact_history = _compact_intraday_history(history, point_limit=point_limit)
             series[interval] = compact_history
@@ -147,6 +165,9 @@ def _compact_intraday_bars(
             warnings.append(f"{interval} intraday bars unavailable: {exc}")
             series[interval] = {
                 "interval": interval,
+                "requested_interval": interval,
+                "source_interval": None,
+                "effective_interval": None,
                 "range": "1d",
                 "point_count": 0,
                 "returned_point_count": 0,
@@ -188,7 +209,8 @@ def _compact_intraday_bars(
     return {
         "kind": "intraday_bars",
         "enabled": True,
-        "intervals": list(COMPACT_INTRADAY_INTERVALS),
+        "intervals": list(intervals),
+        "requested_interval": requested_interval,
         "range": "1d",
         "payload_level": payload_level,
         "bar_limit": point_limit,
@@ -329,7 +351,7 @@ def read_stock_quote_context(
     ).strip().lower() or "auto"
     strict_provider = params.get("strict_provider") is True
     live_quote_requested = external_fetch_allowed and "quote" in requested_domains
-    intraday_requested = external_fetch_allowed and "intraday" in requested_domains
+    intraday_requested = "intraday" in requested_domains
     quote_depth: dict[str, Any] | None = None
     quote_error: str | None = None
     if live_quote_requested:
@@ -349,6 +371,9 @@ def read_stock_quote_context(
         quote_depth=quote_depth,
         quote_error=quote_error,
         session_phase=calendar_status.get("phase"),
+        current_session_date=calendar_status.get("date"),
+        is_trading_day=calendar_status.get("is_trading_day"),
+        live_quote_requested=live_quote_requested,
     )
     quote_freshness = quote.get("freshness") if isinstance(quote.get("freshness"), dict) else {}
     if strict_provider and quote_freshness.get("source_error"):
@@ -1055,6 +1080,9 @@ def read_stock_context(
         quote_depth=quote_depth,
         quote_error=quote_error,
         session_phase=market_calendar_status.get("phase"),
+        current_session_date=market_calendar_status.get("date"),
+        is_trading_day=market_calendar_status.get("is_trading_day"),
+        live_quote_requested=include_intraday,
     )
     quote["market_status"] = market_status_from_session(market_calendar_status)
     quote["timezone"] = market_calendar_status.get("timezone") or "Asia/Taipei"

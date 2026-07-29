@@ -1,3 +1,4 @@
+from datetime import date
 from secrets import compare_digest
 from typing import Literal
 
@@ -94,7 +95,9 @@ def _market_data_params_from_query(
     include_intraday: bool | None = None,
     payload_level: str | None = None,
     intraday_limit: int | None = None,
+    intraday_interval: str | None = None,
     session_scope: str | None = None,
+    trade_date: date | None = None,
     daily_limit: int | None = None,
     timeframe: str | None = None,
     bars: int | None = None,
@@ -107,8 +110,12 @@ def _market_data_params_from_query(
         params["payload_level"] = payload_level
     if intraday_limit is not None:
         params["intraday_limit"] = intraday_limit
+    if intraday_interval:
+        params["intraday_interval"] = intraday_interval
     if session_scope:
         params["session_scope"] = session_scope
+    if trade_date is not None:
+        params["trade_date"] = trade_date.isoformat()
     if daily_limit is not None:
         params["daily_limit"] = daily_limit
     if timeframe:
@@ -367,6 +374,10 @@ def read_stock_context(
     include_intraday: bool = Query(default=False),
     payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
     intraday_limit: int | None = Query(default=None, ge=1, le=500),
+    intraday_interval: str | None = Query(
+        default=None,
+        pattern="^(1m|5m|15m|30m|1h|4h)$",
+    ),
     analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
@@ -383,6 +394,7 @@ def read_stock_context(
             include_intraday=include_intraday,
             payload_level=payload_level,
             intraday_limit=intraday_limit,
+            intraday_interval=intraday_interval,
         ),
     )
 
@@ -426,6 +438,10 @@ def build_stock_brief(
     include_intraday: bool = Query(default=False),
     payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
     intraday_limit: int | None = Query(default=None, ge=1, le=500),
+    intraday_interval: str | None = Query(
+        default=None,
+        pattern="^(1m|5m|15m|30m|1h|4h)$",
+    ),
     analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
@@ -440,6 +456,7 @@ def build_stock_brief(
             include_intraday=include_intraday,
             payload_level=payload_level,
             intraday_limit=intraday_limit,
+            intraday_interval=intraday_interval,
         ),
     )
 
@@ -513,6 +530,10 @@ def read_us_stock_context(
     payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
     intraday_limit: int | None = Query(default=None, ge=1, le=500),
     session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
+    trade_date: date | None = Query(
+        default=None,
+        description="US exchange trade date in America/New_York (YYYY-MM-DD).",
+    ),
     daily_limit: int = Query(default=10, ge=1, le=200),
     timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     bars: int = Query(default=90, ge=1, le=5000),
@@ -528,6 +549,7 @@ def read_us_stock_context(
             payload_level=payload_level,
             intraday_limit=intraday_limit,
             session_scope=session_scope,
+            trade_date=trade_date,
             daily_limit=daily_limit,
             timeframe=timeframe,
             bars=bars,
@@ -544,6 +566,10 @@ def build_us_stock_brief(
     payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
     intraday_limit: int | None = Query(default=None, ge=1, le=500),
     session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
+    trade_date: date | None = Query(
+        default=None,
+        description="US exchange trade date in America/New_York (YYYY-MM-DD).",
+    ),
     analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
@@ -557,6 +583,7 @@ def build_us_stock_brief(
             payload_level=payload_level,
             intraday_limit=intraday_limit,
             session_scope=session_scope,
+            trade_date=trade_date,
         ),
     )
 

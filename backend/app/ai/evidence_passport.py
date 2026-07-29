@@ -49,6 +49,25 @@ TABLE_SOURCE_GRADES = {
     "jp_company_fundamental": "third_party",
     "jp_margin_interest": "third_party",
     "jp_investor_type": "third_party",
+    "kr_stock_master": "official",
+    "kr_daily_price": "local_database",
+    "kr_market_index": "official",
+    "kr_index_daily_price": "local_database",
+    "kr_company_fundamental": "local_database",
+    "kr_investor_trade_daily": "official",
+}
+PROVIDER_SOURCE_GRADES = {
+    "krx": "official",
+    "krx_data": "official",
+    "krx_openapi": "official",
+    "opendart": "official",
+    "opendart_api": "official",
+    "naver": "third_party",
+    "naver_finance": "third_party",
+    "naver_index_time": "third_party",
+    "yahoo": "third_party",
+    "yahoo_chart": "third_party",
+    "yahoo_finance_chart": "third_party",
 }
 CRITICAL_MISSING_KEYS = {
     "stock_master",
@@ -105,7 +124,16 @@ def _source_grade(ref: dict[str, Any]) -> str:
     ref_type = str(ref.get("type") or "").strip().lower()
     ref_kind = str(ref.get("kind") or "").strip().lower()
     name = str(ref.get("name") or "").strip()
+    provider = str(ref.get("provider") or "").strip().lower()
 
+    if provider in PROVIDER_SOURCE_GRADES:
+        return PROVIDER_SOURCE_GRADES[provider]
+    if provider.startswith("krx"):
+        return "official"
+    if provider.startswith("opendart"):
+        return "official"
+    if provider.startswith("naver") or provider.startswith("yahoo"):
+        return "third_party"
     if name in TABLE_SOURCE_GRADES:
         return TABLE_SOURCE_GRADES[name]
     if ref_kind in TABLE_SOURCE_GRADES:

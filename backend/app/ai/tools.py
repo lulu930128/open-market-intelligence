@@ -295,6 +295,7 @@ def read_market_overview(
             read_cross_market_context=tw_cross_market.read_tw_cross_market_context,
             read_market_chips_context=tw_market_chips.read_tw_market_chips_context,
             read_market_volume_state=read_taiwan_market_volume_state,
+            build_taiwan_source_health=build_taiwan_source_health,
             now=_now,
         ),
     )

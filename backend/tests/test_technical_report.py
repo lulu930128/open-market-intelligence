@@ -578,7 +578,8 @@ class TechnicalReportTests(unittest.TestCase):
         ]
         intraday_points = [
             {
-                "time": datetime(2026, 3, 21, 9, 0) + timedelta(minutes=index),
+                "time": datetime(2026, 3, 20, 9, 0, tzinfo=TAIPEI_TZ)
+                + timedelta(minutes=index),
                 "price": 18100.0 + index,
                 "open": 18100.0 + index,
                 "high": 18110.0 + index,
@@ -620,11 +621,15 @@ class TechnicalReportTests(unittest.TestCase):
                             "label": "加權指數",
                             "market": "TWSE",
                             "source": "test",
-                            "time": date(2026, 3, 21),
+                            "time": date(2026, 3, 20),
                             "close": 18111.0,
                         }
                     ]
                 },
+            ),
+            patch(
+                "app.ai.tools._now",
+                return_value=datetime(2026, 3, 20, 13, 20, tzinfo=TAIPEI_TZ),
             ),
             patch("app.ai.tools.get_latest_market_chip_daily", return_value=None),
             patch(

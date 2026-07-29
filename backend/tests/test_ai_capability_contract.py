@@ -8,6 +8,116 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def test_quote_capability_projects_session_close_identity_fields(self) -> None:
+        spec = capability_contract.CAPABILITIES["quote.snapshot"]
+
+        for field in (
+            "is_historical",
+            "requested_trade_date",
+            "regular_session_close",
+            "regular_session_close_time",
+            "regular_session_close_trade_date",
+            "timezone",
+        ):
+            self.assertIn(field, spec.fields)
+            self.assertIn(field, spec.default_fields)
+
+    def test_volume_contract_fields_survive_capability_projection(self) -> None:
+        intraday = capability_contract.CAPABILITIES["intraday.bars"]
+        daily = capability_contract.CAPABILITIES["daily.ohlcv"]
+
+        for field in (
+            "base_volume_unit",
+            "quote_volume_unit",
+            "volume_contracts",
+            "volume_event_time",
+            "volume_semantics",
+            "volume_status",
+            "market_events",
+            "sort_order",
+        ):
+            self.assertIn(field, intraday.fields)
+            self.assertIn(field, intraday.default_fields)
+        for field in (
+            "base_volume_unit",
+            "quote_volume_unit",
+            "volume_semantics",
+            "volume_status",
+        ):
+            self.assertIn(field, daily.fields)
+            self.assertIn(field, daily.default_fields)
+
+    def test_tw_futures_intraday_projection_prefers_contract_volume_chart(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["intraday.bars"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="full",
+            scope_type="tw_futures",
+            question_intent="quote",
+        )
+        response = {
+            "target": {"type": "tw_futures", "id": "TXF", "market": "TW"},
+            "result": {
+                "data": {
+                    "compact": {
+                        "intraday_chart": {
+                            "timeframe": "today",
+                            "interval": "1m",
+                            "point_count": 1,
+                            "returned_point_count": 1,
+                            "volume_unit": "contracts",
+                            "volume_contracts": 82,
+                            "volume_event_time": "2026-07-28T21:23:00+08:00",
+                            "volume_semantics": "interval_contracts",
+                            "volume_status": "available",
+                            "session": "after_hours",
+                            "sessions": ["after_hours"],
+                            "source": "TAIFEX MIS 1-minute chart",
+                            "provider": "taifex_mis",
+                            "points": [
+                                {
+                                    "time": "2026-07-28T21:23:00+08:00",
+                                    "close": 41_671,
+                                    "volume_contracts": 82,
+                                    "volume_unit": "contracts",
+                                    "volume_semantics": "interval_contracts",
+                                    "volume_status": "available",
+                                    "session": "after_hours",
+                                }
+                            ],
+                        }
+                    },
+                    "intraday_bars": [
+                        {
+                            "bar_time": "2026-07-28T21:23:00+08:00",
+                            "close_price": 41_671,
+                            "total_volume": 82,
+                        }
+                    ],
+                }
+            },
+        }
+
+        projected, unavailable = capability_contract.project_selected_data(
+            response=response,
+            selection=selection,
+        )
+
+        intraday = projected["intraday.bars"]
+        self.assertNotIn("intraday.bars", unavailable)
+        self.assertEqual(intraday["volume_unit"], "contracts")
+        self.assertEqual(intraday["volume_semantics"], "interval_contracts")
+        self.assertEqual(intraday["volume_status"], "available")
+        self.assertEqual(
+            intraday["volume_event_time"],
+            "2026-07-28T21:23:00+08:00",
+        )
+        self.assertEqual(intraday["session"], "after_hours")
+        self.assertEqual(intraday["source"], "TAIFEX MIS 1-minute chart")
+        self.assertEqual(intraday["provider"], "taifex_mis")
+        self.assertEqual(intraday["points"][0]["volume_contracts"], 82)
+
     def test_selection_keeps_mandatory_truth_and_bounded_fields(self) -> None:
         selection = capability_contract.normalize_selection(
             selection={
@@ -242,6 +352,64 @@ class AiCapabilityContractTests(unittest.TestCase):
             [action["capability"] for action in fill_plan["actions"]],
             ["ownership.distribution"],
         )
+        self.assertEqual(
+            fill_plan["actions"][0]["produced_capabilities"],
+            ["ownership.distribution"],
+        )
+
+    def test_fill_plan_defers_operation_that_cannot_produce_capability(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["quote.snapshot"]},
+            output="evidence_only",
+            realtime_policy="prefer_live",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="quote",
+        )
+        canonical = {
+            "ok": True,
+            "request_status": "completed",
+            "target": {"type": "tw_stock", "id": "2330", "market": "TW"},
+            "evidence": {
+                "freshness": {"status": "missing"},
+                "freshness_by_capability": {
+                    "quote.snapshot": {
+                        "status": "empty",
+                        "refresh_recommended": True,
+                    }
+                },
+                "slots": {},
+            },
+        }
+        projected = {
+            "target.identity": canonical["target"],
+            "data.freshness": {"status": "missing"},
+        }
+        manifest = capability_contract.build_manifest(
+            canonical=canonical,
+            selection=selection,
+            projected_data=projected,
+        )
+
+        with patch.dict(
+            capability_contract.FILL_OPERATION_PRODUCED_CAPABILITIES,
+            {"tw.refresh_quote": ("intraday.bars",)},
+        ):
+            fill_plan = capability_contract.build_fill_plan(
+                canonical=canonical,
+                selection=selection,
+                manifest=manifest,
+                scope_type="stock",
+            )
+
+        self.assertEqual(fill_plan["actions"], [])
+        deferred = fill_plan["deferred_actions"][0]
+        self.assertEqual(
+            deferred["reason"],
+            "operation_does_not_produce_capability",
+        )
+        self.assertEqual(deferred["operation"], "tw.refresh_quote")
+        self.assertEqual(deferred["produced_capabilities"], ["intraday.bars"])
 
     def test_fill_plan_defers_stale_capability_during_refresh_cooldown(self) -> None:
         selection = capability_contract.normalize_selection(
@@ -361,6 +529,8 @@ class AiCapabilityContractTests(unittest.TestCase):
                             "unchanged_count": 20,
                             "total_count": 1220,
                             "scope": "full_market",
+                            "direct_market_breadth": True,
+                            "proxy_used": False,
                             "included_markets": ["TWSE", "TPEX"],
                         },
                         "index_intraday": {
@@ -413,6 +583,10 @@ class AiCapabilityContractTests(unittest.TestCase):
             projected["market.breadth"]["included_markets"],
             ["TWSE", "TPEX"],
         )
+        self.assertTrue(
+            projected["market.breadth"]["direct_market_breadth"]
+        )
+        self.assertFalse(projected["market.breadth"]["proxy_used"])
         self.assertEqual(
             projected["intraday.bars"]["index_ids"],
             ["TAIEX", "TPEX"],
@@ -567,6 +741,71 @@ class AiCapabilityContractTests(unittest.TestCase):
                 question_intent="quote",
             )
 
+    def test_selection_reports_known_capability_unsupported_for_scope(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["market.breadth"],
+                "fields": {"market.breadth": ["advance_count"]},
+                "limits": {"market.breadth": 10},
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="market_breadth",
+        )
+
+        self.assertNotIn("market.breadth", selection["required"])
+        self.assertIn("target.identity", selection["required"])
+        self.assertIn("data.freshness", selection["required"])
+        self.assertNotIn("market.breadth", selection["fields"])
+        self.assertNotIn("market.breadth", selection["limits"])
+        self.assertEqual(
+            selection["unsupported_capabilities"],
+            [
+                {
+                    "capability": "market.breadth",
+                    "status": "unsupported",
+                    "reason_code": "unsupported_target_scope",
+                    "requested_as": "required",
+                    "request_source": "explicit_selection",
+                    "target_scope": "stock",
+                    "supported_scopes": [
+                        "market",
+                        "tw_index",
+                        "tw_futures",
+                        "us_stock",
+                        "jp_index",
+                        "kr_index",
+                        "crypto_market",
+                    ],
+                    "message": (
+                        "market.breadth is not supported for target scope stock."
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(
+            selection["unmet_required_capabilities"],
+            selection["unsupported_capabilities"],
+        )
+
+    def test_optional_unsupported_capability_is_not_unmet_required(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"optional": ["market.breadth"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="quote",
+        )
+
+        self.assertEqual(
+            selection["unsupported_capabilities"][0]["requested_as"],
+            "optional",
+        )
+        self.assertEqual(selection["unmet_required_capabilities"], [])
+
     def test_query_plan_maps_v4_selection_to_existing_reader_domains(self) -> None:
         payload = AiAskRequest(
             question="只要 2330 最新價與三筆盤中資料",
@@ -696,6 +935,29 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertIn("volume", plan.requested_domains)
         self.assertIn("market.volume_state", plan.selected_capabilities)
         self.assertIn("market.breadth", plan.selected_capabilities)
+
+    def test_tw_futures_night_volume_selects_contract_quote_and_intraday(self) -> None:
+        payload = AiAskRequest(
+            question="TXF 夜盤目前成交量",
+            contract_version="omi.decision.v4",
+            target={"type": "tw_futures", "id": "TXF", "market": "TW"},
+            mode="data_only",
+            output="evidence_only",
+        )
+
+        plan = query_plan.build_query_plan(
+            payload=payload,
+            scope_type="tw_futures",
+            question_intent="general",
+            effective_mode="data_only",
+        )
+
+        self.assertIn("volume", plan.requested_domains)
+        self.assertIn("intraday", plan.requested_domains)
+        self.assertIn("quote.snapshot", plan.selected_capabilities)
+        self.assertIn("intraday.bars", plan.selected_capabilities)
+        self.assertNotIn("market.volume_state", plan.selected_capabilities)
+        self.assertEqual(plan.selection["unsupported_capabilities"], [])
 
     def test_requested_domain_augments_instead_of_replacing_default_capabilities(self) -> None:
         selection = capability_contract.normalize_selection(
@@ -975,6 +1237,64 @@ class AiCapabilityContractTests(unittest.TestCase):
                     "fetched_at": "2026-07-24T01:00:01+00:00",
                 }
             ],
+        )
+
+    def test_market_freshness_and_source_health_project_from_result_payload(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": [
+                    "target.identity",
+                    "data.freshness",
+                    "source.health",
+                ]
+            },
+            output="evidence_only",
+            realtime_policy="prefer_live",
+            payload_level="compact",
+            scope_type="market",
+            question_intent="overview",
+        )
+        response = {
+            "target": {"type": "market", "id": "TW", "market": "TW"},
+            "result": {
+                "as_of": "2026-07-27T13:30:00+08:00",
+                "freshness": {
+                    "is_current": False,
+                    "missing": ["market_breadth.tpex"],
+                    "warnings": ["TPEX breadth is partial."],
+                },
+                "data": {
+                    "compact": {
+                        "source_health": {
+                            "status": "partial",
+                            "as_of": "2026-07-27T05:30:00+00:00",
+                            "summary": {
+                                "entry_count": 4,
+                                "ok_count": 3,
+                                "stale_count": 1,
+                            },
+                            "warnings": [],
+                        }
+                    }
+                },
+            },
+        }
+
+        projected, unavailable = capability_contract.project_selected_data(
+            response=response,
+            selection=selection,
+        )
+
+        self.assertEqual(unavailable, [])
+        self.assertEqual(projected["data.freshness"]["status"], "missing")
+        self.assertEqual(
+            projected["data.freshness"]["as_of"],
+            "2026-07-27T13:30:00+08:00",
+        )
+        self.assertEqual(projected["source.health"]["status"], "partial")
+        self.assertEqual(
+            projected["source.health"]["summary"]["stale_count"],
+            1,
         )
 
     def test_tw_capability_plan_refreshes_only_selected_missing_dataset(self) -> None:

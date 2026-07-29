@@ -13,6 +13,17 @@ from app.jobs.job_types import (
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
 )
+from app.jobs.taiwan_fundamental_scheduler import (
+    add_taiwan_fundamental_refresh_jobs,
+)
+from app.jobs.taiwan_index_contract_scheduler import (
+    TAIWAN_INDEX_CONTRACT_SLOTS,
+    add_taiwan_index_contract_snapshot_jobs,
+)
+from app.jobs.taiwan_quote_contract_scheduler import (
+    TAIWAN_QUOTE_CONTRACT_SLOTS,
+    add_taiwan_quote_contract_snapshot_jobs,
+)
 from app.market.calendar_status import (
     build_jp_calendar_status,
     build_taiwan_calendar_status,
@@ -212,12 +223,12 @@ def _record_taiwan_futures_provider_event(
         logger.warning("Failed to record Taiwan futures provider event.", exc_info=True)
 
 
-def enqueue_market_daily_refresh() -> None:
+def enqueue_market_daily_refresh(*, allow_non_trading_day: bool = False) -> None:
     categories = [TAIWAN_REFRESH_INSTITUTIONAL_TRADE]
     now = datetime.now(_timezone())
     calendar_status = build_taiwan_calendar_status(now=now)
 
-    if not calendar_status.get("is_trading_day"):
+    if not calendar_status.get("is_trading_day") and not allow_non_trading_day:
         logger.info(
             "Skipped scheduled market daily refresh because %s is not a trading day phase=%s reason=%s.",
             calendar_status.get("date"),
@@ -234,6 +245,11 @@ def enqueue_market_daily_refresh() -> None:
             key=TAIWAN_REFRESH_CATEGORY_DATASET_KEYS[category],
         )
         for category in categories
+    )
+    expected_trade_date = expected_trade_date_from_calendar(
+        calendar_status,
+        market="tw",
+        key=TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     )
 
     request = {
@@ -256,7 +272,11 @@ def enqueue_market_daily_refresh() -> None:
         job, created = job_service.enqueue_job(
             db=db,
             job_type="scheduler.market_daily_refresh",
-            target="market",
+            target=(
+                expected_trade_date.isoformat()
+                if expected_trade_date is not None
+                else "market"
+            ),
             request=request,
             progress_total=1,
             message="Queued by scheduler.",
@@ -280,12 +300,15 @@ def enqueue_market_daily_refresh() -> None:
         db.close()
 
 
-def enqueue_market_margin_daily_refresh() -> None:
+def enqueue_market_margin_daily_refresh(
+    *,
+    allow_non_trading_day: bool = False,
+) -> None:
     categories = [TAIWAN_REFRESH_MARGIN_TRADING]
     now = datetime.now(_timezone())
     calendar_status = build_taiwan_calendar_status(now=now)
 
-    if not calendar_status.get("is_trading_day"):
+    if not calendar_status.get("is_trading_day") and not allow_non_trading_day:
         logger.info(
             "Skipped scheduled market margin daily refresh because %s is not a trading day phase=%s reason=%s.",
             calendar_status.get("date"),
@@ -302,6 +325,11 @@ def enqueue_market_margin_daily_refresh() -> None:
             key=TAIWAN_REFRESH_CATEGORY_DATASET_KEYS[category],
         )
         for category in categories
+    )
+    expected_trade_date = expected_trade_date_from_calendar(
+        calendar_status,
+        market="tw",
+        key=TAIWAN_DATASET_MARGIN_TRADING,
     )
 
     request = {
@@ -324,7 +352,11 @@ def enqueue_market_margin_daily_refresh() -> None:
         job, created = job_service.enqueue_job(
             db=db,
             job_type="scheduler.market_margin_daily_refresh",
-            target="market",
+            target=(
+                expected_trade_date.isoformat()
+                if expected_trade_date is not None
+                else "market"
+            ),
             request=request,
             progress_total=1,
             message="Queued by scheduler.",
@@ -968,6 +1000,8 @@ def enqueue_taiwan_broker_branch_market_refresh() -> None:
 
 def reconcile_taiwan_broker_branch_market_refresh() -> None:
     now = datetime.now(_timezone())
+    if now.weekday() >= 5:
+        return
     hour, minute = _parse_hour_minute(
         settings.scheduler_tw_broker_branch_refresh_time
     )
@@ -1018,6 +1052,55 @@ def _add_taiwan_broker_branch_market_refresh_job(scheduler: Any) -> bool:
         trigger="date",
         run_date=datetime.now(_timezone()),
         id="tw_broker_branch_market_refresh_startup_catchup",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    return True
+
+
+def enqueue_taiwan_stock_detail_daily_startup_catchup() -> None:
+    enqueue_market_daily_refresh(allow_non_trading_day=True)
+    enqueue_market_margin_daily_refresh(allow_non_trading_day=True)
+
+
+def _add_taiwan_stock_detail_daily_refresh_jobs(scheduler: Any) -> bool:
+    if not settings.enable_tw_stock_detail_scheduler:
+        return False
+
+    institutional_hour, institutional_minute = _parse_hour_minute(
+        settings.scheduler_tw_institutional_refresh_time
+    )
+    margin_hour, margin_minute = _parse_hour_minute(
+        settings.scheduler_tw_margin_refresh_time
+    )
+    scheduler.add_job(
+        enqueue_market_daily_refresh,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=institutional_hour,
+        minute=institutional_minute,
+        id="tw_stock_detail_institutional_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        enqueue_market_margin_daily_refresh,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=margin_hour,
+        minute=margin_minute,
+        id="tw_stock_detail_margin_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        enqueue_taiwan_stock_detail_daily_startup_catchup,
+        trigger="date",
+        run_date=datetime.now(_timezone()) + timedelta(seconds=3),
+        id="tw_stock_detail_daily_startup_catchup",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
@@ -1571,12 +1654,14 @@ def _add_market_chip_margin_refresh_job(scheduler: Any) -> bool:
 def start_scheduler() -> Any | None:
     if (
         not settings.enable_scheduler
+        and not settings.enable_tw_stock_detail_scheduler
         and not settings.enable_market_chip_margin_scheduler
         and not settings.enable_market_calendar_scheduler
         and not settings.enable_tw_disposition_scheduler
         and not settings.enable_tw_corporate_event_scheduler
         and not settings.enable_tw_broker_branch_scheduler
         and not settings.enable_taiwan_market_index_scheduler
+        and not settings.enable_taiwan_quote_contract_scheduler
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
@@ -1601,28 +1686,29 @@ def start_scheduler() -> Any | None:
         chip_hour, chip_minute = _parse_hour_minute(
             settings.scheduler_market_chip_refresh_time
         )
-        scheduler.add_job(
-            enqueue_market_daily_refresh,
-            trigger="cron",
-            day_of_week="mon-fri",
-            hour=hour,
-            minute=minute,
-            id="market_daily_refresh",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
-        scheduler.add_job(
-            enqueue_market_margin_daily_refresh,
-            trigger="cron",
-            day_of_week="mon-fri",
-            hour=margin_hour,
-            minute=margin_minute,
-            id="market_margin_daily_refresh",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
+        if not settings.enable_tw_stock_detail_scheduler:
+            scheduler.add_job(
+                enqueue_market_daily_refresh,
+                trigger="cron",
+                day_of_week="mon-fri",
+                hour=hour,
+                minute=minute,
+                id="market_daily_refresh",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+            )
+            scheduler.add_job(
+                enqueue_market_margin_daily_refresh,
+                trigger="cron",
+                day_of_week="mon-fri",
+                hour=margin_hour,
+                minute=margin_minute,
+                id="market_margin_daily_refresh",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+            )
         scheduler.add_job(
             enqueue_market_chip_daily_refresh,
             trigger="cron",
@@ -1666,10 +1752,22 @@ def start_scheduler() -> Any | None:
     taiwan_market_index_collector_enabled = _add_taiwan_market_index_collector_job(
         scheduler
     )
+    taiwan_quote_contract_snapshot_enabled = (
+        add_taiwan_quote_contract_snapshot_jobs(scheduler)
+    )
+    taiwan_index_contract_snapshot_enabled = (
+        add_taiwan_index_contract_snapshot_jobs(scheduler)
+    )
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
     taiwan_derivatives_refresh_enabled = _add_taiwan_derivatives_refresh_job(scheduler)
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
     market_chip_margin_refresh_enabled = _add_market_chip_margin_refresh_job(
+        scheduler
+    )
+    taiwan_stock_detail_daily_refresh_enabled = (
+        _add_taiwan_stock_detail_daily_refresh_jobs(scheduler)
+    )
+    taiwan_fundamental_refresh_enabled = add_taiwan_fundamental_refresh_jobs(
         scheduler
     )
     scheduler.start()
@@ -1680,6 +1778,20 @@ def start_scheduler() -> Any | None:
         max(TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS // 60, 5),
         TAIWAN_INDEX_RECONCILIATION_END_TIME.strftime("%H:%M"),
         taiwan_market_index_collector_enabled,
+    )
+    logger.info(
+        "Taiwan quote contract fixed-slot snapshots=%s symbols=%s max_symbols=%s "
+        "enabled=%s.",
+        ",".join(TAIWAN_QUOTE_CONTRACT_SLOTS),
+        settings.scheduler_taiwan_quote_contract_symbols or "<watchlist>",
+        settings.scheduler_taiwan_quote_contract_max_symbols,
+        taiwan_quote_contract_snapshot_enabled,
+    )
+    logger.info(
+        "Taiwan index contract fixed-slot snapshots=%s indices=TAIEX,TPEX "
+        "enabled=%s.",
+        ",".join(TAIWAN_INDEX_CONTRACT_SLOTS),
+        taiwan_index_contract_snapshot_enabled,
     )
     logger.info(
         "Exchange-calendar refresh=%s %s enabled=%s.",
@@ -1717,6 +1829,22 @@ def start_scheduler() -> Any | None:
         max(int(settings.scheduler_tw_broker_branch_max_stocks), 1),
         max(float(settings.scheduler_tw_broker_branch_sleep_seconds), 0.0),
         taiwan_broker_branch_refresh_enabled,
+    )
+    logger.info(
+        "Taiwan stock-detail daily refresh institutional=%s margin=%s %s; "
+        "enabled=%s.",
+        settings.scheduler_tw_institutional_refresh_time,
+        settings.scheduler_tw_margin_refresh_time,
+        settings.timezone,
+        taiwan_stock_detail_daily_refresh_enabled,
+    )
+    logger.info(
+        "Taiwan stock-detail fundamental refresh shareholding=%s Saturday; "
+        "revenue=%s day 11/16; financial=%s statutory deadlines; enabled=%s.",
+        settings.scheduler_tw_shareholding_refresh_time,
+        settings.scheduler_tw_revenue_refresh_time,
+        settings.scheduler_tw_financial_refresh_time,
+        taiwan_fundamental_refresh_enabled,
     )
     logger.info(
         "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays enabled=%s; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; taiwan_derivatives_refresh=%s %s %s enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",

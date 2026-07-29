@@ -3126,7 +3126,11 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
 
             planner.assert_called_once()
-            intraday.assert_called_once_with(symbol="TSM", db=db)
+            intraday.assert_called_once_with(
+                symbol="TSM",
+                session_scope="regular",
+                db=db,
+            )
             refresh_daily.assert_called_once()
             self.assertEqual(response["target"]["type"], "us_stock")
             self.assertEqual(response["tool_plan"]["provider"], "openai")

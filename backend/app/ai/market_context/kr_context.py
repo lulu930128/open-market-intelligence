@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
@@ -14,12 +14,17 @@ from app.ai.market_context.common import (
 )
 from app.ai.market_context.regional_params import _market_data_bool, _market_data_int, _market_data_str
 from app.ai.market_payload_contract import (
+    annotate_intraday_bar_contract as _annotate_intraday_bar_contract,
     intraday_point_limit as _market_intraday_point_limit,
     payload_level as _market_payload_level,
+    requested_intraday_interval as _requested_intraday_interval,
 )
 from app.db.models import KRStockMaster
 from app.market.calendar_status import build_kr_calendar_status
+from app.market.intraday_aggregation import aggregate_regular_session_ohlcv
 from app.market.live_snapshot import classify_market_snapshot
+from app.market.session_events import events_for_observations
+from app.kr_market.trading_calendar import KR_MARKET_TIMEZONE
 from app.kr_market.sources import (
     KR_INDEX_CONFIG_BY_ID,
     normalize_kr_index_id,
@@ -79,10 +84,39 @@ def _kr_intraday_quote(
         calendar_status=calendar_status or build_kr_calendar_status(),
         quote_time=latest.get("time"),
     )
+    last_trade_available = isinstance(price, (int, float))
+    quote_semantics = (
+        "live_trade_only"
+        if last_trade_available and freshness["is_live"]
+        else "delayed_current_session_trade"
+        if last_trade_available and freshness["is_current_session_quote"]
+        else "latest_completed_session_trade"
+        if last_trade_available and freshness["is_latest_session_quote"]
+        else "unavailable"
+    )
     return {
         "source": intraday_summary.get("source") or "unavailable",
         "provider": intraday_summary.get("provider") or intraday_summary.get("source"),
         "price": price,
+        "latest_price": price,
+        "last_price": price,
+        "price_available": last_trade_available,
+        "last_trade_available": last_trade_available,
+        "last_trade_price": price if last_trade_available else None,
+        "last_trade_time": latest.get("time") if last_trade_available else None,
+        "last_trade_is_current_session": bool(
+            freshness["is_current_session_quote"]
+        ),
+        "depth_available": False,
+        "depth_status": "unavailable",
+        "indicative_match_available": False,
+        "indicative_match_price": None,
+        "indicative_match_volume_lots": None,
+        "auction_indicative_available": False,
+        "official_close_available": False,
+        "official_close_status": "not_requested",
+        "official_close_price": None,
+        "fallback_used": False,
         "change": change,
         "change_pct": change_pct,
         "volume": latest.get("cumulative_volume", latest.get("volume")),
@@ -93,7 +127,7 @@ def _kr_intraday_quote(
         "session_phase": freshness["current_session_phase"],
         "current_session_phase": freshness["current_session_phase"],
         "market_status": freshness["market_status"],
-        "quote_semantics": freshness["quote_semantics"],
+        "quote_semantics": quote_semantics,
         "delivery_status": freshness["delivery_status"],
         "is_current_session_quote": freshness["is_current_session_quote"],
         "freshness": freshness,
@@ -115,6 +149,10 @@ def _kr_intraday_compact(
 ) -> dict[str, Any]:
     payload_level = _market_payload_level(market_data_params)
     point_limit = _market_intraday_point_limit(market_data_params)
+    requested_interval = (
+        _requested_intraday_interval(market_data_params, default="1m")
+        or "1m"
+    )
     raw_points = (
         intraday_summary.get("points")
         if isinstance(intraday_summary, dict) and isinstance(intraday_summary.get("points"), list)
@@ -123,27 +161,105 @@ def _kr_intraday_compact(
     points = [point for point in raw_points if isinstance(point, dict)]
     latest = _kr_intraday_latest(intraday_summary)
     if not isinstance(intraday_summary, dict) or not intraday_summary:
+        interval_status = (
+            "unavailable"
+            if requested_interval in {"1m", "5m"}
+            else "unsupported"
+        )
         return {
             "enabled": False,
+            "requested_interval": requested_interval,
+            "source_interval": "1m",
+            "effective_interval": None,
+            "interval_status": interval_status,
+            "sampling_mode": "not_available",
             "payload_level": payload_level,
             "bar_limit": point_limit,
             "series": {},
-            "warnings": ["KR intraday trend was not requested or did not return data."],
+            "warnings": [
+                (
+                    "KR intraday trend was not requested or did not return data."
+                    if interval_status == "unavailable"
+                    else (
+                        f"Requested KR intraday interval {requested_interval} is "
+                        "unsupported; the provider contract only exposes 1m bars."
+                    )
+                )
+            ],
         }
-    compact_points = points[-point_limit:]
-    point_count = _safe_int(
-        intraday_summary.get("point_count"),
-        len(points),
-        minimum=0,
-        maximum=100000,
+    source_interval = str(
+        intraday_summary.get("source_interval")
+        or intraday_summary.get("interval")
+        or "1m"
     )
+    effective_interval = str(
+        intraday_summary.get("effective_interval")
+        or source_interval
+    )
+    aggregation_metadata: dict[str, Any] = {}
+    if requested_interval == "5m" and source_interval == "1m":
+        volume_semantics = str(
+            intraday_summary.get("volume_semantics") or "interval_volume"
+        )
+        points, aggregation_metadata = aggregate_regular_session_ohlcv(
+            points,
+            interval_minutes=5,
+            market_timezone=KR_MARKET_TIMEZONE,
+            session_segments=((time(9, 0), time(15, 30), "regular"),),
+            volume_additive=(
+                "interval" in volume_semantics
+                or volume_semantics in {"", "shares", "not_provided"}
+            ),
+        )
+        effective_interval = "5m"
+    point_count = len(points)
+    points, bar_metadata = _annotate_intraday_bar_contract(
+        points,
+        interval=effective_interval,
+        default_ohlc_semantics=(
+            intraday_summary.get("ohlc_semantics")
+            or (
+                "snapshot_price_only"
+                if str(intraday_summary.get("source") or "").startswith(
+                    "naver_index"
+                )
+                else "interval_ohlc"
+            )
+        ),
+        default_volume_status=intraday_summary.get("volume_status"),
+    )
+    compact_points = points[-point_limit:]
+    latest = compact_points[-1] if compact_points else latest
+    market_events = events_for_observations(
+        market="KR",
+        observation_times=[
+            point.get("time")
+            for point in compact_points
+            if isinstance(point, dict)
+        ],
+    )
+    warnings = list(intraday_summary.get("warnings") or [])
+    if requested_interval != effective_interval:
+        warnings.append(
+            f"Requested KR intraday interval {requested_interval} is not available; "
+            f"returned {effective_interval} source bars without relabeling."
+        )
     return {
         "enabled": True,
+        "requested_interval": requested_interval,
         "payload_level": payload_level,
         "bar_limit": point_limit,
         "series": {
-            "1m": {
-                "interval": "1m",
+            effective_interval: {
+                "interval": effective_interval,
+                "requested_interval": requested_interval,
+                "source_interval": source_interval,
+                "effective_interval": effective_interval,
+                "interval_status": (
+                    "ready"
+                    if requested_interval == effective_interval
+                    else "unsupported"
+                ),
                 "source": intraday_summary.get("source") or "unavailable",
                 "session_scope": intraday_summary.get("session_scope") or "regular",
                 "session_phase": intraday_summary.get("session_phase"),
@@ -161,9 +277,20 @@ def _kr_intraday_compact(
                 "volume_unit": intraday_summary.get("volume_unit"),
                 "volume_semantics": intraday_summary.get("volume_semantics"),
                 "trade_value_unit": intraday_summary.get("trade_value_unit"),
+                **bar_metadata,
+                **aggregation_metadata,
+                "cache_status": intraday_summary.get("cache_status"),
+                "cache_hit": intraday_summary.get("cache_hit"),
+                "cache_trade_date": intraday_summary.get("cache_trade_date"),
+                "cache_latest_time": intraday_summary.get("cache_latest_time"),
+                "cached_count": intraday_summary.get("cached_count"),
+                "refreshed_count": intraday_summary.get("refreshed_count"),
+                "fallback_used": bool(intraday_summary.get("fallback_used")),
+                "market_events": market_events,
             }
         },
-        "warnings": list(intraday_summary.get("warnings") or []),
+        "market_events": market_events,
+        "warnings": warnings,
     }
 
 
@@ -189,6 +316,11 @@ def read_kr_stock_context(
     bars = _market_data_int(market_data_params, "bars", 90, minimum=1, maximum=5000)
     provider = _market_data_str(market_data_params, "provider", "auto") or "auto"
     include_intraday = _market_data_bool(market_data_params, "include_intraday", False)
+    params = market_data_params if isinstance(market_data_params, dict) else {}
+    refresh_intraday = bool(
+        str(params.get("realtime_policy") or "prefer_live") != "cache_only"
+        and params.get("external_fetch_allowed") is not False
+    )
     payload_level = _market_payload_level(market_data_params)
     intraday_summary = _latest_tool_result(tool_runs, "kr.read_intraday_trend")
     calendar_status = build_kr_calendar_status(now=dependencies.now())
@@ -204,6 +336,7 @@ def read_kr_stock_context(
     investor_rows: list[Any] = []
     resource_summary: dict[str, Any] | None = None
     source_health: dict[str, Any] = {}
+    market_breadth: dict[str, Any] = {}
     normalized_id = ""
 
     if is_index:
@@ -246,6 +379,20 @@ def read_kr_stock_context(
             )
         except Exception as exc:
             warnings.append(f"KR index source health unavailable: {exc}")
+        try:
+            market_breadth = _json_ready(
+                dependencies.kr_market_service.get_kr_market_breadth(
+                    db=db,
+                    index_id=normalized_id,
+                )
+            )
+        except Exception as exc:
+            warnings.append(f"KR direct market breadth unavailable: {exc}")
+        if (
+            not market_breadth
+            or market_breadth.get("status") in {"empty", "unsupported"}
+        ):
+            missing.append("kr_market_breadth")
         _append_source_ref_once(source_refs, {"type": "table", "name": "kr_market_index"})
         _append_source_ref_once(source_refs, {"type": "table", "name": "kr_index_daily_price"})
         _append_source_ref_once(source_refs, {"type": "derived", "name": "app.kr_market.source_health"})
@@ -257,6 +404,7 @@ def read_kr_stock_context(
             "investor_trading": [],
             "resource_summary": None,
             "source_health": _json_ready(source_health),
+            "breadth": market_breadth,
             "tool_runs": tool_runs,
         }
     else:
@@ -470,11 +618,15 @@ def read_kr_stock_context(
                 intraday_summary = dependencies.kr_market_service.get_kr_index_intraday_trend(
                     db=db,
                     index_id=normalized_id,
+                    refresh=refresh_intraday,
+                    external_fetch_allowed=refresh_intraday,
                 )
             else:
                 intraday_summary = dependencies.kr_market_service.get_kr_stock_intraday_trend(
                     db=db,
                     symbol=normalized_id,
+                    refresh=refresh_intraday,
+                    external_fetch_allowed=refresh_intraday,
                 )
         except Exception as exc:
             missing.append("kr_intraday_trend")
@@ -503,6 +655,29 @@ def read_kr_stock_context(
     intraday_is_current = intraday_freshness_status in {
         "live",
         "latest_completed_session",
+    }
+    intraday_readiness = {
+        "requested": intraday_requested,
+        "available": bool(intraday_quote),
+        "status": (
+            "ready"
+            if intraday_requested and intraday_quote and intraday_is_current
+            else "limited"
+            if intraday_requested and intraday_quote
+            else "missing"
+            if intraday_requested
+            else "not_requested"
+        ),
+        "freshness_status": (
+            intraday_freshness_status
+            if intraday_requested
+            else "not_requested"
+        ),
+        "usable_for_intraday": bool(
+            intraday_requested and intraday_quote and intraday_is_current
+        ),
+        "independent_of_daily": True,
+        "daily_dependency": "none",
     }
     if intraday_requested and not intraday_quote:
         if "kr_intraday_trend" not in missing:
@@ -562,6 +737,7 @@ def read_kr_stock_context(
             "source_health": (source_health.get("summary") if isinstance(source_health, dict) else {}),
             "include_intraday": intraday_requested,
             "intraday_available": bool(intraday_quote),
+            "intraday_readiness": intraday_readiness,
         },
         freshness={
             "price": (
@@ -589,6 +765,9 @@ def read_kr_stock_context(
         payload_level=payload_level,
     )
     data["compact"]["intraday_bars"] = intraday_bars
+    data["compact"]["intraday_readiness"] = intraday_readiness
+    if is_index:
+        data["compact"]["breadth"] = market_breadth
     envelope = {
         "kind": "kr_index_context" if is_index else "kr_stock_context",
         "generated_at": dependencies.now().isoformat(),
@@ -608,6 +787,7 @@ def read_kr_stock_context(
                 "source": (intraday_summary or {}).get("source"),
             },
             "source_health": source_health.get("summary") if isinstance(source_health, dict) else {},
+            "intraday_readiness": intraday_readiness,
         },
         "data": data,
         "data_limitations": [
@@ -659,6 +839,7 @@ def read_kr_stock_context(
             ),
             "latest_trade_date": intraday_trade_date,
             "expected_trade_date": expected_intraday_date,
+            "readiness": intraday_readiness,
         },
     }
     envelope["evidence_passport"] = build_evidence_passport(

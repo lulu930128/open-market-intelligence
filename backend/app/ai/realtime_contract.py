@@ -4,14 +4,39 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.market.calendar_status import build_us_calendar_status
+from app.market.calendar_status import (
+    build_jp_calendar_status,
+    build_kr_calendar_status,
+    build_taiwan_calendar_status,
+    build_us_calendar_status,
+)
 
 
 LIVE_MAX_AGE_SECONDS = 180
 DELAYED_MAX_AGE_SECONDS = 900
+DELAYED_EXCESS_TOLERANCE_SECONDS = 180
+EXPECTED_PROVIDER_DELAY_SECONDS = {
+    "jp": 900,
+    "japan": 900,
+    "kr": 1200,
+    "korea": 1200,
+}
 CONTINUOUS_MARKETS = {"crypto", "cryptocurrency", "24x7", "24/7"}
-OPEN_MARKET_STATUSES = {"open", "regular", "preopen", "pre_market", "after_hours"}
-ACTIVE_SESSION_STATUSES = {"open", "regular", "pre_market", "after_hours"}
+OPEN_MARKET_STATUSES = {
+    "open",
+    "regular",
+    "preopen",
+    "pre_market",
+    "after_hours",
+    "closing_auction",
+}
+ACTIVE_SESSION_STATUSES = {
+    "open",
+    "regular",
+    "pre_market",
+    "after_hours",
+    "closing_auction",
+}
 COMPLETED_SESSION_PHASES = {
     "daily_close",
     "post_close",
@@ -91,12 +116,38 @@ def _first_text(value: Any, *keys: str) -> str | None:
     if not isinstance(value, dict):
         return None
     for key in keys:
-        text = str(value.get(key) or "").strip()
+        raw = value.get(key)
+        if isinstance(raw, (dict, list, tuple, set)):
+            continue
+        text = str(raw or "").strip()
         if text:
             return text
     freshness = value.get("freshness")
     if isinstance(freshness, dict):
         return _first_text(freshness, *keys)
+    return None
+
+
+def _nested_text(
+    value: Any,
+    *,
+    container_key: str,
+    nested_keys: tuple[str, ...],
+) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    nested = value.get(container_key)
+    if isinstance(nested, dict):
+        text = _first_text(nested, *nested_keys)
+        if text:
+            return text
+    freshness = value.get("freshness")
+    if isinstance(freshness, dict):
+        return _nested_text(
+            freshness,
+            container_key=container_key,
+            nested_keys=nested_keys,
+        )
     return None
 
 
@@ -109,6 +160,25 @@ def _first_bool(value: Any, *keys: str) -> bool | None:
     freshness = value.get("freshness")
     if isinstance(freshness, dict):
         return _first_bool(freshness, *keys)
+    return None
+
+
+def _first_int(value: Any, *keys: str) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    for key in keys:
+        raw = value.get(key)
+        if isinstance(raw, bool):
+            continue
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            return parsed
+    freshness = value.get("freshness")
+    if isinstance(freshness, dict):
+        return _first_int(freshness, *keys)
     return None
 
 
@@ -166,36 +236,79 @@ def _age_seconds(now: datetime, observed_at: datetime | None) -> int | None:
     return max(int((now - observed_at).total_seconds()), 0)
 
 
-def _us_calendar_completed_session(
+def _calendar_completed_session(
     *,
     market_key: str,
     event_at: datetime | None,
     checked_at: datetime,
 ) -> bool:
-    if market_key not in {"us", "usa"} or event_at is None:
+    if event_at is None:
         return False
-    calendar = build_us_calendar_status(now=checked_at)
-    if str(calendar.get("phase") or "") in ACTIVE_SESSION_STATUSES:
+
+    aliases = {
+        "tw": "tw",
+        "taiwan": "tw",
+        "tw_stock": "tw",
+        "tw_index": "tw",
+        "us": "us",
+        "usa": "us",
+        "us_stock": "us",
+        "jp": "jp",
+        "japan": "jp",
+        "jp_stock": "jp",
+        "jp_index": "jp",
+        "kr": "kr",
+        "korea": "kr",
+        "kr_stock": "kr",
+        "kr_index": "kr",
+    }
+    normalized_market = aliases.get(market_key)
+    builders = {
+        "tw": build_taiwan_calendar_status,
+        "us": build_us_calendar_status,
+        "jp": build_jp_calendar_status,
+        "kr": build_kr_calendar_status,
+    }
+    builder = builders.get(normalized_market or "")
+    if builder is None:
         return False
-    release_windows = calendar.get("release_windows")
-    release_window = (
-        release_windows.get("us_daily_price", {})
-        if isinstance(release_windows, dict)
+
+    calendar = builder(now=checked_at)
+    phase = str(calendar.get("phase") or "").casefold()
+    release_window_keys = {
+        "tw": "market_daily_price",
+        "us": "us_daily_price",
+        "jp": "jp_daily_price",
+        "kr": "kr_daily_price",
+    }
+    release_windows = (
+        calendar.get("release_windows")
+        if isinstance(calendar.get("release_windows"), dict)
         else {}
     )
-    expected_session_date = str(
-        release_window.get("expected_trade_date")
-        or calendar.get("previous_trading_day")
-        or ""
+    release_window = release_windows.get(
+        release_window_keys.get(normalized_market or "", "")
+    )
+    released_trade_date = (
+        str(release_window.get("expected_trade_date") or "")
+        if isinstance(release_window, dict)
+        else ""
+    )
+    expected_session_date = (
+        str(calendar.get("date") or "")
+        if calendar.get("is_trading_day") is True
+        and phase in {"post_close", "post_close_snapshot", "after_hours"}
+        else released_trade_date
+        or str(calendar.get("previous_trading_day") or "")
     )
     if not expected_session_date:
         return False
     try:
         market_timezone = ZoneInfo(
-            str(calendar.get("timezone") or "America/New_York")
+            str(calendar.get("timezone") or "UTC")
         )
     except (KeyError, ValueError):
-        market_timezone = ZoneInfo("America/New_York")
+        market_timezone = ZoneInfo("UTC")
     return (
         event_at.astimezone(market_timezone).date().isoformat()
         == expected_session_date
@@ -216,14 +329,31 @@ def classify_observation(
     received_at = _latest_time(value, keys=RECEIVED_TIME_KEYS)
     event_age_seconds = _age_seconds(checked_at, event_at)
     received_age_seconds = _age_seconds(checked_at, received_at)
-    market_status = _first_text(
+    market_status = (
+        _nested_text(
+            value,
+            container_key="market_status",
+            nested_keys=("status", "market_status"),
+        )
+        or _first_text(
+            value,
+            "market_status",
+            "current_session_phase",
+            "session_phase",
+            "session",
+        )
+        or ("continuous" if market_key in CONTINUOUS_MARKETS else "unknown")
+    )
+    session_phase = _nested_text(
         value,
-        "market_status",
-        "current_session_phase",
-        "session_phase",
-        "session",
-    ) or ("continuous" if market_key in CONTINUOUS_MARKETS else "unknown")
-    session_phase = _first_text(
+        container_key="market_status",
+        nested_keys=(
+            "phase",
+            "current_session_phase",
+            "session_phase",
+            "session",
+        ),
+    ) or _first_text(
         value,
         "current_session_phase",
         "session_phase",
@@ -235,15 +365,54 @@ def classify_observation(
     explicit_live = _first_bool(value, "is_live", "is_realtime") is True
     explicit_stale = _first_bool(value, "is_stale") is True
     latest_session = _first_bool(value, "is_latest_session_quote") is True
+    historical = (
+        _first_bool(value, "is_historical") is True
+        or str(quote_semantics or "").casefold().startswith("historical_")
+    )
     has_observation = _has_observation(value)
     continuous = market_key in CONTINUOUS_MARKETS
+    expected_provider_delay_seconds = (
+        _first_int(value, "expected_provider_delay_seconds")
+        if isinstance(value, dict)
+        else None
+    )
+    expected_provider_delay_source = (
+        "payload"
+        if expected_provider_delay_seconds is not None
+        else "omi_market_provider_policy"
+        if market_key in EXPECTED_PROVIDER_DELAY_SECONDS
+        else "generic_realtime_policy"
+    )
+    if expected_provider_delay_seconds is None:
+        expected_provider_delay_seconds = EXPECTED_PROVIDER_DELAY_SECONDS.get(
+            market_key,
+            0,
+        )
+    delayed_window_seconds = max(
+        expected_provider_delay_seconds + DELAYED_EXCESS_TOLERANCE_SECONDS,
+        DELAYED_MAX_AGE_SECONDS
+        if expected_provider_delay_seconds == 0
+        else 0,
+    )
+    excess_delay_seconds = (
+        max(event_age_seconds - expected_provider_delay_seconds, 0)
+        if event_age_seconds is not None
+        else None
+    )
 
     state = "unavailable"
     observation_mode = "unavailable"
     reason = "No usable price or bar observation was returned."
 
     if has_observation:
-        if continuous:
+        if historical:
+            state = "historical"
+            observation_mode = "historical_close"
+            reason = (
+                "Value represents the explicitly requested historical completed "
+                "session, not the latest session or a live quote."
+            )
+        elif continuous:
             observation_mode = (
                 "on_demand_snapshot" if received_at is not None else "cached_snapshot"
             )
@@ -278,13 +447,13 @@ def classify_observation(
                 normalized_market_status in ACTIVE_SESSION_STATUSES
                 or normalized_session_phase in ACTIVE_SESSION_STATUSES
             )
-            completed_session = (
+            calendar_completed_session = _calendar_completed_session(
+                market_key=market_key,
+                event_at=event_at,
+                checked_at=checked_at,
+            )
+            explicitly_completed = (
                 latest_session
-                or _us_calendar_completed_session(
-                    market_key=market_key,
-                    event_at=event_at,
-                    checked_at=checked_at,
-                )
                 or _completed_session_label(normalized_semantics)
                 or _completed_session_label(normalized_session_phase)
                 or (
@@ -299,6 +468,15 @@ def classify_observation(
                     in {"closed", "latest_session_close", "closed_holiday"}
                     and _completed_session_label(normalized_session_phase)
                 )
+            )
+            # A completed-session label is not sufficient when the observation
+            # has a timestamp: it must match the calendar's latest completed
+            # trade date. This prevents an older Friday close from being
+            # promoted to Monday's latest session.
+            completed_session = bool(
+                calendar_completed_session
+                or event_at is None
+                and explicitly_completed
             )
             if (
                 active_session
@@ -316,16 +494,22 @@ def classify_observation(
             elif (
                 active_session
                 and event_age_seconds is not None
-                and event_age_seconds <= DELAYED_MAX_AGE_SECONDS
+                and event_age_seconds <= delayed_window_seconds
             ):
                 state = "delayed"
                 observation_mode = "intraday_snapshot"
-                reason = "Active-session observation is outside the live window."
+                reason = (
+                    "Active-session observation is within the declared provider "
+                    "delay window."
+                )
             elif not active_session and completed_session:
                 state = "latest_completed_session"
                 observation_mode = "session_close"
                 reason = "Market is not live; value represents the latest completed session."
-            elif normalized_session_phase == "daily_close":
+            elif (
+                normalized_session_phase == "daily_close"
+                and (calendar_completed_session or event_at is None)
+            ):
                 state = "final_snapshot"
                 observation_mode = "daily_close"
                 reason = "Value is a completed daily close, not a live quote."
@@ -342,6 +526,7 @@ def classify_observation(
         "live",
         "delayed",
         "final_snapshot",
+        "historical",
         "latest_completed_session",
     }
     refresh_possible_now = (
@@ -375,10 +560,15 @@ def classify_observation(
         "market_status": market_status,
         "session_phase": session_phase,
         "quote_semantics": quote_semantics,
+        "is_historical": historical,
         "event_time": event_at.isoformat() if event_at else None,
         "received_at": received_at.isoformat() if received_at else None,
         "checked_at": checked_at.isoformat(),
         "event_age_seconds": event_age_seconds,
+        "expected_provider_delay_seconds": expected_provider_delay_seconds,
+        "expected_provider_delay_source": expected_provider_delay_source,
+        "delay_tolerance_seconds": DELAYED_EXCESS_TOLERANCE_SECONDS,
+        "excess_delay_seconds": excess_delay_seconds,
         "received_age_seconds": received_age_seconds,
         "reason": reason,
     }

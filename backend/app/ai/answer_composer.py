@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.ai import answer_evidence, answer_question, answer_radar, decision_engine
 from app.ai.answer_data_limits import (
@@ -877,6 +879,26 @@ def _quote_price_text(value: Any, *, market: str, english: bool, japanese: bool)
     return f"{rendered} 美元" if market.upper() in {"US", "NYSE", "NASDAQ"} else f"{rendered} 元"
 
 
+def _us_quote_time_text(value: Any, *, english: bool, japanese: bool) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        return value
+    market_time = parsed.astimezone(ZoneInfo("America/New_York"))
+    taipei_time = parsed.astimezone(ZoneInfo("Asia/Taipei"))
+    market_label = market_time.strftime("%Y-%m-%d %H:%M %Z")
+    taipei_label = taipei_time.strftime("%Y-%m-%d %H:%M")
+    if english:
+        return f"{market_label} / {taipei_label} Asia/Taipei"
+    if japanese:
+        return f"{market_label}／台北時間 {taipei_label}"
+    return f"{market_label}／台北時間 {taipei_label}"
+
+
 def build_quote_consumer_answer(
     *,
     target: dict[str, Any],
@@ -898,10 +920,73 @@ def build_quote_consumer_answer(
     trade_date = quote.get("trade_date") or quote.get("quote_time") or analysis_digest.get("as_of")
     freshness = quote.get("freshness") if isinstance(quote.get("freshness"), dict) else {}
     is_realtime = bool(quote.get("is_realtime"))
+    quote_semantics = str(quote.get("quote_semantics") or "").strip().lower()
     english = response_is_english(response_preferences)
     japanese = response_is_japanese(response_preferences)
     price_text = _quote_price_text(price, market=market, english=english, japanese=japanese)
-    if english:
+    us_time_text = (
+        _us_quote_time_text(
+            quote.get("quote_time"),
+            english=english,
+            japanese=japanese,
+        )
+        if market.upper() in {"US", "NYSE", "NASDAQ"}
+        else None
+    )
+    if quote_semantics == "historical_regular_session_close":
+        if english:
+            headline = f"{label} {trade_date or 'requested date'} regular-session close: {price_text}"
+            snapshot = (
+                f"US exchange trade date {trade_date or 'unknown'}"
+                f"{f'; scheduled close time {us_time_text}' if us_time_text else ''}. "
+                "This is a historical close, not an intraday or after-hours quote."
+            )
+        elif japanese:
+            headline = f"{label} {trade_date or '指定日'} 通常取引終値：{price_text}"
+            snapshot = (
+                f"米国市場の取引日 {trade_date or '不明'}"
+                f"{f'、通常取引の予定終了時刻 {us_time_text}' if us_time_text else ''}。"
+                "過去の通常取引終値で、時間外取引価格ではありません。"
+            )
+        else:
+            headline = f"{label} {trade_date or '指定日'} 美股正常盤收盤價為 {price_text}"
+            snapshot = (
+                f"美股交易日 {trade_date or '不明'}"
+                f"{f'；正常盤排定收盤時間 {us_time_text}' if us_time_text else ''}。"
+                "這是歷史正常盤收盤價，不是盤中或盤後成交價。"
+            )
+    elif quote_semantics in {
+        "after_hours_last_trade",
+        "pre_market_last_trade",
+        "regular_session_last_trade",
+        "regular_session_close",
+    }:
+        session_labels = {
+            "after_hours_last_trade": ("after-hours last trade", "時間外取引の直近値", "盤後最近成交價"),
+            "pre_market_last_trade": ("pre-market last trade", "市場前取引の直近値", "盤前最近成交價"),
+            "regular_session_last_trade": ("regular-session last trade", "通常取引の直近値", "正常盤最近成交價"),
+            "regular_session_close": ("latest regular-session close", "直近の通常取引終値", "最近正常盤收盤價"),
+        }
+        session_label = session_labels[quote_semantics][
+            0 if english else 1 if japanese else 2
+        ]
+        headline = f"{label} {session_label}: {price_text}" if english else f"{label} {session_label}：{price_text}"
+        if english:
+            snapshot = (
+                f"US exchange trade date {trade_date or 'unknown'}"
+                f"{f'; quote time {us_time_text}' if us_time_text else ''}."
+            )
+        elif japanese:
+            snapshot = (
+                f"米国市場の取引日 {trade_date or '不明'}"
+                f"{f'、時刻 {us_time_text}' if us_time_text else ''}。"
+            )
+        else:
+            snapshot = (
+                f"美股交易日 {trade_date or '不明'}"
+                f"{f'；報價時間 {us_time_text}' if us_time_text else ''}。"
+            )
+    elif english:
         headline = f"{label} latest quote: {price_text}"
         snapshot = (
             f"As of {trade_date or 'unknown'}; {'real-time quote' if is_realtime else 'market snapshot, not a real-time quote'}."
@@ -912,11 +997,39 @@ def build_quote_consumer_answer(
     else:
         headline = f"{label} 最近價格為 {price_text}"
         snapshot = f"資料時間 {trade_date or '不明'}；目前為{'即時報價' if is_realtime else '市場快照，非即時報價'}。"
+    if (
+        quote_semantics in {"after_hours_last_trade", "pre_market_last_trade"}
+        and quote.get("regular_session_close") is not None
+    ):
+        regular_close_text = _quote_price_text(
+            quote.get("regular_session_close"),
+            market=market,
+            english=english,
+            japanese=japanese,
+        )
+        if english:
+            snapshot += f" The regular-session close was {regular_close_text}."
+        elif japanese:
+            snapshot += f" 通常取引終値は {regular_close_text} です。"
+        else:
+            snapshot += f" 同交易日正常盤收盤價為 {regular_close_text}。"
     data_limits = generic_data_limits(
         missing=missing,
         warnings=warnings,
         response_preferences=response_preferences,
     )
+    if quote.get("quote_time_basis") == "scheduled_regular_session_close":
+        data_limits = [
+            *data_limits,
+            (
+                "Close time uses the regular US 16:00 exchange schedule; special "
+                "early-close sessions are not modeled."
+                if english
+                else "終値時刻は米国市場の通常 16:00 スケジュール換算で、特別短縮取引日は未反映です。"
+                if japanese
+                else "收盤時間依美股正常盤 16:00 排程換算；特殊提早收盤日尚未建模。"
+            ),
+        ]
     if freshness.get("status") == "stale":
         data_limits = [
             *data_limits,

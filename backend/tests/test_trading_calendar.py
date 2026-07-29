@@ -114,6 +114,24 @@ class MarketCalendarStatusTests(unittest.TestCase):
             "2026-06-15",
         )
 
+    def test_taiwan_status_exposes_closing_auction_separately(self) -> None:
+        timezone = ZoneInfo("Asia/Taipei")
+
+        regular = build_taiwan_calendar_status(
+            now=datetime(2026, 6, 15, 13, 24, 59, tzinfo=timezone),
+        )
+        auction = build_taiwan_calendar_status(
+            now=datetime(2026, 6, 15, 13, 25, 0, tzinfo=timezone),
+        )
+        closed = build_taiwan_calendar_status(
+            now=datetime(2026, 6, 15, 13, 30, 0, tzinfo=timezone),
+        )
+
+        self.assertEqual(regular["phase"], "regular")
+        self.assertEqual(auction["phase"], "closing_auction")
+        self.assertTrue(auction["session"]["is_polling_window"])
+        self.assertEqual(closed["phase"], "post_close")
+
     def test_us_status_reports_holiday_and_next_trading_day(self) -> None:
         timezone = ZoneInfo("America/New_York")
 

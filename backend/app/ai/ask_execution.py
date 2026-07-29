@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from app.ai import (
     tools,
 )
 from app.ai import ask_policy
+from app.ai.market_date_request import requested_us_trade_date
 from app.ai.schemas import AiAskRequest
 
 
@@ -22,6 +24,35 @@ _request_target_id = scope_resolution._request_target_id
 _looks_like_stock_id = scope_resolution._looks_like_stock_id
 _require_scope_id = ask_policy._require_scope_id
 _require_group_id = ask_policy._require_group_id
+
+REGIONAL_MARKET_REFERENCES: dict[str, tuple[str, str]] = {
+    "US": ("^GSPC", "S&P 500"),
+    "JP": ("^N225", "Nikkei 225"),
+    "KR": ("KOSPI", "KOSPI"),
+}
+
+
+def _market_data_params(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params = (
+        dict(payload.market_data_params)
+        if isinstance(payload.market_data_params, dict)
+        else {}
+    )
+    realtime_policy = str(payload.realtime_policy or "prefer_live")
+    can_external_fetch = (
+        bool(policy.get("can_external_fetch"))
+        if isinstance(policy, dict)
+        else bool(payload.allow_external_fetch)
+    )
+    params["realtime_policy"] = realtime_policy
+    params["external_fetch_allowed"] = bool(
+        can_external_fetch and realtime_policy != "cache_only"
+    )
+    return params
 
 
 def _include_tw_intraday(payload: AiAskRequest, *, policy: dict[str, Any] | None = None) -> bool:
@@ -31,14 +62,33 @@ def _include_tw_intraday(payload: AiAskRequest, *, policy: dict[str, Any] | None
         else bool(payload.allow_external_fetch)
     )
     market_data_params = payload.market_data_params if isinstance(payload.market_data_params, dict) else {}
+    cache_only = str(payload.realtime_policy or "") == "cache_only"
     if "include_intraday" in market_data_params:
-        return bool(market_data_params.get("include_intraday")) and can_external_fetch
+        return bool(market_data_params.get("include_intraday")) and (
+            can_external_fetch or cache_only
+        )
+
+    query_plan = (
+        policy.get("query_plan")
+        if isinstance(policy, dict) and isinstance(policy.get("query_plan"), dict)
+        else {}
+    )
+    selected_capabilities = {
+        str(value)
+        for value in query_plan.get("selected_capabilities") or []
+        if value
+    }
+    if "intraday.bars" in selected_capabilities:
+        return bool(can_external_fetch or cache_only)
 
     return decision_core.include_tw_intraday(
         question=payload.question,
         requested_horizon=payload.analysis_horizon,
         strategy_profile=payload.strategy_profile,
-        allow_external_fetch=can_external_fetch,
+        allow_external_fetch=(
+            can_external_fetch
+            or cache_only
+        ),
     )
 
 
@@ -47,18 +97,34 @@ def _external_intraday_market_data_params(
     *,
     policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    params = dict(payload.market_data_params) if isinstance(payload.market_data_params, dict) else {}
+    params = _market_data_params(payload, policy=policy)
     has_explicit_intraday = "include_intraday" in params
     requested_intraday = bool(params.get("include_intraday")) if has_explicit_intraday else payload.analysis_horizon == "intraday"
     if not requested_intraday or (has_explicit_intraday and not params.get("include_intraday")):
         return params
 
-    can_external_fetch = (
-        bool(policy.get("can_external_fetch"))
-        if isinstance(policy, dict)
-        else bool(payload.allow_external_fetch)
+    params["include_intraday"] = bool(
+        params.get("external_fetch_allowed")
+        or params.get("realtime_policy") == "cache_only"
     )
-    params["include_intraday"] = can_external_fetch
+    return params
+
+
+def _us_market_data_params(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params = _external_intraday_market_data_params(payload, policy=policy)
+    requested_trade_date = requested_us_trade_date(
+        payload.question,
+        explicit_value=params.get("trade_date"),
+    )
+    if requested_trade_date is not None:
+        params["trade_date"] = requested_trade_date.isoformat()
+        # Exact close requests are daily-session facts. Current intraday or
+        # extended-hours quotes must not replace the requested close.
+        params["include_intraday"] = False
     return params
 
 
@@ -111,6 +177,195 @@ def _uses_reader_profile(
     }.get(expected)
 
 
+def _requested_market(payload: AiAskRequest) -> str:
+    target = payload.target if isinstance(payload.target, dict) else {}
+    return str(target.get("market") or target.get("id") or "TW").strip().upper()
+
+
+def _as_market_scope(
+    result: dict[str, Any],
+    *,
+    market: str,
+    reference_symbol: str,
+    reference_label: str,
+) -> dict[str, Any]:
+    output = deepcopy(result)
+    market_target = {
+        "type": "market",
+        "id": market,
+        "market": market,
+        "label": f"{market} Market",
+    }
+    supplemental_reference = {
+        "type": "supplemental_reference",
+        "role": "representative_index",
+        "market": market,
+        "id": reference_symbol,
+        "label": reference_label,
+        "scope_replacement": False,
+    }
+    output["target"] = market_target
+    output["scope"] = {
+        "type": "market",
+        "market": market,
+        "representative_index_is_supplemental": True,
+    }
+    data = output.get("data")
+    if isinstance(data, dict):
+        data["representative_index"] = supplemental_reference
+        compact = data.get("compact")
+        if isinstance(compact, dict):
+            compact["target"] = market_target
+            compact["representative_index"] = supplemental_reference
+            compact["scope_semantics"] = (
+                "market_scope_with_supplemental_representative_index"
+            )
+    limitations = output.get("data_limitations")
+    if not isinstance(limitations, list):
+        limitations = []
+        output["data_limitations"] = limitations
+    marker = (
+        f"{reference_label} is supplemental market context and does not "
+        f"replace the explicit {market} market scope."
+    )
+    if marker not in limitations:
+        limitations.append(marker)
+    return output
+
+
+def _read_market_context(
+    db: Session,
+    payload: AiAskRequest,
+    *,
+    tool_runs: list[dict[str, Any]] | None,
+    policy: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    market = _requested_market(payload)
+    if market == "TW":
+        return "omi.read_market_overview", tools.read_market_overview(
+            db=db,
+            limit=payload.market_limit,
+            include_intraday=_include_tw_intraday(payload, policy=policy),
+            market_data_params=_market_data_params(payload, policy=policy),
+        )
+    reference = REGIONAL_MARKET_REFERENCES.get(market)
+    if reference is None:
+        raise ValueError(f"Unsupported market scope: {market}")
+    symbol, label = reference
+    if market == "US":
+        result = agentic_tools.read_us_stock_context(
+            db=db,
+            symbol=symbol,
+            tool_runs=tool_runs,
+            market_data_params=_us_market_data_params(
+                payload,
+                policy=policy,
+            ),
+        )
+    elif market == "JP":
+        result = agentic_tools.read_jp_stock_context(
+            db=db,
+            symbol=symbol,
+            is_index=True,
+            tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
+        )
+    else:
+        result = agentic_tools.read_kr_stock_context(
+            db=db,
+            symbol=symbol,
+            is_index=True,
+            tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
+        )
+    return (
+        "omi.read_market_overview",
+        _as_market_scope(
+            result,
+            market=market,
+            reference_symbol=symbol,
+            reference_label=label,
+        ),
+    )
+
+
+def _build_market_context_brief(
+    db: Session,
+    payload: AiAskRequest,
+    *,
+    tool_runs: list[dict[str, Any]] | None,
+    policy: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    market = _requested_market(payload)
+    if market == "TW":
+        return "omi.generate_market_brief", reports.build_market_brief(
+            db=db,
+            limit=payload.market_limit,
+            include_intraday=_include_tw_intraday(payload, policy=policy),
+            analysis_horizon=payload.analysis_horizon,
+            market_data_params=_market_data_params(payload, policy=policy),
+            response_preferences=_response_preferences(payload),
+        )
+    reference = REGIONAL_MARKET_REFERENCES.get(market)
+    if reference is None:
+        raise ValueError(f"Unsupported market scope: {market}")
+    symbol, label = reference
+    if market == "US":
+        result = reports.build_us_stock_brief(
+            db=db,
+            symbol=symbol,
+            strategy_profile=payload.strategy_profile,
+            analysis_horizon=payload.analysis_horizon,
+            tool_runs=tool_runs,
+            market_data_params=_us_market_data_params(
+                payload,
+                policy=policy,
+            ),
+            response_preferences=_response_preferences(payload),
+        )
+    elif market == "JP":
+        result = reports.build_jp_stock_brief(
+            db=db,
+            symbol=symbol,
+            is_index=True,
+            strategy_profile=payload.strategy_profile,
+            tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
+            response_preferences=_response_preferences(payload),
+        )
+    else:
+        result = reports.build_kr_stock_brief(
+            db=db,
+            symbol=symbol,
+            is_index=True,
+            strategy_profile=payload.strategy_profile,
+            tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
+            response_preferences=_response_preferences(payload),
+        )
+    return (
+        "omi.generate_market_brief",
+        _as_market_scope(
+            result,
+            market=market,
+            reference_symbol=symbol,
+            reference_label=label,
+        ),
+    )
+
+
 def _read_data_only(
     db: Session,
     payload: AiAskRequest,
@@ -121,11 +376,11 @@ def _read_data_only(
     policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if scope_type == "market":
-        return "omi.read_market_overview", tools.read_market_overview(
+        return _read_market_context(
             db=db,
-            limit=payload.market_limit,
-            include_intraday=_include_tw_intraday(payload, policy=policy),
-            market_data_params=payload.market_data_params,
+            payload=payload,
+            tool_runs=tool_runs,
+            policy=policy,
         )
 
     if scope_type == "data_freshness":
@@ -149,7 +404,7 @@ def _read_data_only(
             return "omi.read_stock_quote", tools.read_stock_quote_context(
                 db=db,
                 stock_id=stock_id,
-                market_data_params=payload.market_data_params,
+                market_data_params=_market_data_params(payload, policy=policy),
             )
         if _uses_reader_profile(
             payload,
@@ -161,7 +416,7 @@ def _read_data_only(
                 db=db,
                 stock_id=stock_id,
                 branch_days=payload.branch_days,
-                market_data_params=payload.market_data_params,
+                market_data_params=_market_data_params(payload, policy=policy),
             )
         return "omi.read_stock_context", tools.read_stock_context(
             db=db,
@@ -169,7 +424,7 @@ def _read_data_only(
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
-            market_data_params=payload.market_data_params,
+            market_data_params=_market_data_params(payload, policy=policy),
         )
 
     if scope_type == "tw_index":
@@ -179,7 +434,7 @@ def _read_data_only(
             index_id=index_id,
             include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
-            market_data_params=payload.market_data_params,
+            market_data_params=_market_data_params(payload, policy=policy),
         )
 
     if scope_type == "tw_futures":
@@ -189,7 +444,7 @@ def _read_data_only(
             symbol=symbol,
             include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
-            market_data_params=payload.market_data_params,
+            market_data_params=_market_data_params(payload, policy=policy),
         )
 
     if scope_type == "us_stock":
@@ -198,7 +453,7 @@ def _read_data_only(
             db=db,
             symbol=symbol,
             tool_runs=tool_runs,
-            market_data_params=_external_intraday_market_data_params(
+            market_data_params=_us_market_data_params(
                 payload,
                 policy=policy,
             ),
@@ -294,7 +549,7 @@ def _read_data_only(
             raise ValueError(f"target.id must be a positive integer for {scope_type}.") from exc
         market = scope_type.split("_", 1)[0]
         params = (
-            _external_intraday_market_data_params(payload, policy=policy)
+            _us_market_data_params(payload, policy=policy)
             if market == "us"
             else payload.market_data_params
         )
@@ -344,7 +599,7 @@ def _build_brief(
         return "omi.read_stock_quote", tools.read_stock_quote_context(
             db=db,
             stock_id=stock_id,
-            market_data_params=payload.market_data_params,
+            market_data_params=_market_data_params(payload, policy=policy),
         )
 
     if scope_type == "stock" and _uses_reader_profile(
@@ -358,17 +613,15 @@ def _build_brief(
             db=db,
             stock_id=stock_id,
             branch_days=payload.branch_days,
-            market_data_params=payload.market_data_params,
+            market_data_params=_market_data_params(payload, policy=policy),
         )
 
     if scope_type == "market":
-        return "omi.generate_market_brief", reports.build_market_brief(
+        return _build_market_context_brief(
             db=db,
-            limit=payload.market_limit,
-            include_intraday=_include_tw_intraday(payload, policy=policy),
-            analysis_horizon=payload.analysis_horizon,
-            market_data_params=payload.market_data_params,
-            response_preferences=_response_preferences(payload),
+            payload=payload,
+            tool_runs=tool_runs,
+            policy=policy,
         )
 
     if scope_type == "stock":
@@ -380,7 +633,7 @@ def _build_brief(
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
-            market_data_params=payload.market_data_params,
+            market_data_params=_market_data_params(payload, policy=policy),
             response_preferences=_response_preferences(payload),
         )
 
@@ -404,7 +657,7 @@ def _build_brief(
             strategy_profile=payload.strategy_profile,
             analysis_horizon=payload.analysis_horizon,
             tool_runs=tool_runs,
-            market_data_params=_external_intraday_market_data_params(
+            market_data_params=_us_market_data_params(
                 payload,
                 policy=policy,
             ),

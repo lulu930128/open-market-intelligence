@@ -14,11 +14,14 @@ from app.ai.ask_finalizer import (
     _intraday_summary_from_compact,
     _market_live_summary,
 )
+from app.ai import ask_execution
 from app.ai.agentic_execution import _compact_result
+from app.ai.capability_contract import _canonical_capability_value
 from app.ai.data_quality_contract import _continuity_summary
+from app.ai.decision_envelope_v4 import _brief_capability_summary
 from app.ai.decision_core import infer_question_intent
-from app.ai.market_context.jp_context import _jp_intraday_quote
-from app.ai.market_context.kr_context import _kr_intraday_quote
+from app.ai.market_context.jp_context import _jp_intraday_compact, _jp_intraday_quote
+from app.ai.market_context.kr_context import _kr_intraday_compact, _kr_intraday_quote
 from app.ai.market_context.us_context import _us_intraday_compact
 from app.ai.market_context import taiwan_stock
 from app.ai.market_context.taiwan_stock import _apply_disposition_quote_contract
@@ -31,7 +34,14 @@ from app.ai.tools import _health_dimensions
 from app.ai.schemas import AiAskRequest
 from app.ai.query_plan import build_query_plan
 from app.ai.scope_resolution import _resolve_scope
-from app.market.intraday import _dedupe_disposition_points
+from app.ai.market_payload_contract import requested_intraday_interval
+from app.ai.technical_analysis import _normalize_technical_points
+from app.market.intraday import (
+    _dedupe_disposition_points,
+    _enrich_intraday_contract,
+    _intraday_row_to_point,
+)
+from app.market.indices import _merge_index_intraday_snapshot
 from app.market.providers import twse_mis
 from app.market.quote_depth import (
     TaiwanStockQuoteDepthCircuitOpenError,
@@ -49,6 +59,82 @@ from app.observability.provider_http import (
 class IntradayContractRemediationTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_twse_mis_quote_depth_guard()
+
+    def test_legacy_intraday_timeframe_alias_does_not_capture_daily_timeframes(self) -> None:
+        self.assertEqual(
+            requested_intraday_interval({"timeframe": "5m"}),
+            "5m",
+        )
+        self.assertIsNone(
+            requested_intraday_interval({"timeframe": "daily"}),
+        )
+
+    def test_cache_only_keeps_intraday_requested_without_external_fetch(
+        self,
+    ) -> None:
+        payload = AiAskRequest(
+            question="7203 即時走勢",
+            target={"type": "jp_stock", "id": "7203.T"},
+            realtime_policy="cache_only",
+            allow_external_fetch=True,
+            market_data_params={"include_intraday": True},
+        )
+
+        params = ask_execution._external_intraday_market_data_params(
+            payload,
+            policy={"can_external_fetch": True},
+        )
+
+        self.assertTrue(params["include_intraday"])
+        self.assertEqual(params["realtime_policy"], "cache_only")
+        self.assertFalse(params["external_fetch_allowed"])
+
+    def test_taiwan_intraday_contract_exposes_volume_value_vwap_and_partial_bar(self) -> None:
+        points, metadata = _enrich_intraday_contract(
+            [
+                {
+                    "time": "2026-07-27T09:00:00+08:00",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 1_000,
+                    "trade_value": 100_000,
+                },
+                {
+                    "time": "2026-07-27T09:01:00+08:00",
+                    "open": 101.0,
+                    "high": 102.0,
+                    "low": 100.0,
+                    "close": 101.0,
+                    "volume": 500,
+                    "trade_value": None,
+                },
+            ],
+            interval="1m",
+            source="nstock_minute_stock_data_twse_mis_volume",
+            now=datetime.fromisoformat("2026-07-27T09:01:30+08:00"),
+        )
+
+        self.assertEqual(points[0]["volume_shares"], 1_000)
+        self.assertEqual(points[0]["volume_lots"], 1)
+        self.assertEqual(points[0]["provider_volume_unit"], "lots")
+        self.assertEqual(points[0]["trade_value_status"], "official")
+        self.assertEqual(points[1]["trade_value_status"], "estimated")
+        self.assertTrue(points[1]["is_partial"])
+        self.assertFalse(points[1]["finalized"])
+        self.assertEqual(metadata["canonical_volume_unit"], "shares")
+        self.assertEqual(metadata["cumulative_volume_shares"], 1_500)
+        self.assertEqual(metadata["cumulative_volume_lots"], 1.5)
+        self.assertIsNone(metadata["cumulative_trade_value"])
+        self.assertEqual(metadata["available_cumulative_trade_value"], 100_000)
+        self.assertEqual(metadata["trade_value_status"], "partial")
+        self.assertIsNone(metadata["official_vwap"])
+        self.assertIsNotNone(metadata["approx_vwap"])
+        self.assertEqual(
+            metadata["partial_bar_policy"],
+            "exclude_partial_bars_from_indicators",
+        )
 
     def test_index_intraday_projection_preserves_actual_five_second_interval(self) -> None:
         projected = _compact_single_intraday_series(
@@ -70,15 +156,139 @@ class IntradayContractRemediationTests(unittest.TestCase):
             },
             interval="1m",
             include_intraday=True,
-            market_data_params={"intraday_limit": 1},
+            market_data_params={
+                "intraday_interval": "5m",
+                "intraday_limit": 1,
+            },
         )
 
         self.assertEqual(projected["intervals"], ["5s"])
+        self.assertEqual(projected["requested_interval"], "5m")
+        self.assertEqual(projected["source_interval"], "5s")
+        self.assertEqual(projected["effective_interval"], "5s")
+        self.assertEqual(projected["interval_status"], "unsupported")
+        self.assertTrue(
+            any("without relabeling" in item for item in projected["warnings"])
+        )
         series = projected["series"]["5s"]
+        self.assertEqual(series["requested_interval"], "5m")
+        self.assertEqual(series["source_interval"], "5s")
+        self.assertEqual(series["effective_interval"], "5s")
+        self.assertEqual(series["interval_status"], "unsupported")
         self.assertEqual(series["point_count"], 2)
         self.assertEqual(series["returned_point_count"], 1)
         self.assertEqual(series["bar_limit"], 1)
         self.assertTrue(series["truncated"])
+
+    def test_index_session_metadata_survives_intraday_capability_projection(
+        self,
+    ) -> None:
+        canonical = _canonical_capability_value(
+            "intraday.bars",
+            {
+                "series": {
+                    "5s": {
+                        "interval": "5s",
+                        "session_phase": "post_close",
+                        "market_status": "closed",
+                        "official_close_status": "confirmed",
+                        "delivery_status": "official_close",
+                        "points": [
+                            {
+                                "time": "2026-07-27T13:33:00+08:00",
+                                "price": 43_634.19,
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+        summary = _brief_capability_summary("intraday.bars", canonical)
+
+        self.assertEqual(canonical["session_phase"], "post_close")
+        self.assertEqual(canonical["official_close_status"], "confirmed")
+        self.assertEqual(summary["market_status"], "closed")
+        self.assertEqual(summary["delivery_status"], "official_close")
+
+    def test_intraday_summary_uses_max_timestamp_for_latest_point(self) -> None:
+        summary = _brief_capability_summary(
+            "intraday.bars",
+            {
+                "interval": "1m",
+                "event_time": "2026-07-28T02:04:00Z",
+                "bars": [
+                    {
+                        "bar_time": "2026-07-28T02:13:00Z",
+                        "close_price": 101.0,
+                        "base_volume": 2.5,
+                        "base_volume_unit": "BTC",
+                    },
+                    {
+                        "bar_time": "2026-07-28T02:04:00Z",
+                        "close_price": 99.0,
+                        "base_volume": 1.0,
+                        "base_volume_unit": "BTC",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(
+            summary["latest_point"]["bar_time"],
+            "2026-07-28T02:13:00Z",
+        )
+        self.assertEqual(summary["latest_point"]["close_price"], 101.0)
+        self.assertEqual(summary["latest_point"]["base_volume_unit"], "BTC")
+        self.assertEqual(summary["event_time"], "2026-07-28T02:13:00Z")
+
+    def test_intraday_capability_normalizes_descending_rows_before_limiting(
+        self,
+    ) -> None:
+        canonical = _canonical_capability_value(
+            "intraday.bars",
+            {
+                "interval": "1m",
+                "bars": [
+                    {"bar_time": "2026-07-28T02:13:00Z", "close_price": 101},
+                    {"bar_time": "2026-07-28T02:12:00Z", "close_price": 100},
+                    {"bar_time": "2026-07-28T02:11:00Z", "close_price": 99},
+                ],
+            },
+        )
+
+        self.assertEqual(
+            [row["bar_time"] for row in canonical["bars"]],
+            [
+                "2026-07-28T02:11:00Z",
+                "2026-07-28T02:12:00Z",
+                "2026-07-28T02:13:00Z",
+            ],
+        )
+        self.assertEqual(canonical["sort_order"], "asc")
+        self.assertEqual(
+            canonical["latest_point"]["bar_time"],
+            "2026-07-28T02:13:00Z",
+        )
+        self.assertEqual(canonical["event_time"], "2026-07-28T02:13:00Z")
+
+    def test_index_price_points_are_eligible_for_intraday_technical_context(
+        self,
+    ) -> None:
+        points = _normalize_technical_points(
+            [
+                {
+                    "time": "2026-07-27T13:30:00+08:00",
+                    "price": 43_634.19,
+                    "open": 43_585.92,
+                    "high": 43_686.15,
+                    "low": 42_969.48,
+                }
+            ]
+        )
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["close"], 43_634.19)
+        self.assertEqual(points[0]["high"], 43_686.15)
 
     def test_us_latest_n_intraday_keeps_contiguous_source_interval(self) -> None:
         start = datetime(2026, 7, 24, 9, 30)
@@ -96,6 +306,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
                 "status": "ok",
                 "source": "yahoo_finance_chart",
                 "interval": "1m",
+                "requested_interval": "1m",
                 "point_count": len(source_points),
                 "points": source_points,
             }
@@ -110,6 +321,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(tool_summary["sampling_mode"], "latest_n")
         self.assertEqual(tool_summary["original_point_count"], 390)
         self.assertEqual(tool_summary["returned_point_count"], 80)
+        self.assertEqual(tool_summary["requested_interval"], "1m")
         self.assertEqual(tool_summary["points"][0], source_points[-80])
         self.assertEqual(series["source_interval"], "1m")
         self.assertEqual(series["effective_interval"], "1m")
@@ -126,6 +338,358 @@ class IntradayContractRemediationTests(unittest.TestCase):
             60.0,
         )
         self.assertEqual(continuity["status"], "continuous")
+
+    def test_us_intraday_interval_mismatch_is_explicit_not_silently_relabelled(self) -> None:
+        compact = _us_intraday_compact(
+            {
+                "source": "yahoo_finance_chart",
+                "interval": "1m",
+                "point_count": 1,
+                "points": [
+                    {
+                        "time": "2026-07-20T13:15:00-04:00",
+                        "price": 210.0,
+                        "volume": 1000,
+                    }
+                ],
+            },
+            market_data_params={"intraday_interval": "5m"},
+        )
+
+        self.assertEqual(compact["requested_interval"], "5m")
+        series = compact["series"]["1m"]
+        self.assertEqual(series["requested_interval"], "5m")
+        self.assertEqual(series["source_interval"], "1m")
+        self.assertEqual(series["effective_interval"], "1m")
+        self.assertEqual(series["interval_status"], "unsupported")
+        self.assertTrue(any("without relabeling" in item for item in compact["warnings"]))
+
+    def test_taiwan_closing_auction_gap_requires_session_evidence(self) -> None:
+        with_evidence = _continuity_summary(
+            {
+                "interval": "1m",
+                "session_phase": "closing_auction",
+                "points": [
+                    {"time": "2026-07-27T13:24:00+08:00", "price": 100.0},
+                    {"time": "2026-07-27T13:30:00+08:00", "price": 101.0},
+                ],
+            },
+            market="TW",
+        )
+        without_evidence = _continuity_summary(
+            {
+                "interval": "1m",
+                "points": [
+                    {"time": "2026-07-27T13:24:00+08:00", "price": 100.0},
+                    {"time": "2026-07-27T13:30:00+08:00", "price": 101.0},
+                ],
+            },
+            market="TW",
+        )
+
+        self.assertEqual(with_evidence["status"], "continuous")
+        self.assertEqual(with_evidence["gap_count"], 0)
+        self.assertEqual(with_evidence["recognized_session_gap_count"], 1)
+        self.assertEqual(
+            with_evidence["session_gap_evidence"],
+            "closing_auction_or_official_close",
+        )
+        self.assertEqual(without_evidence["status"], "partial")
+        self.assertEqual(without_evidence["gap_count"], 1)
+
+        official_publish_gap = _continuity_summary(
+            {
+                "interval": "5s",
+                "official_close_status": "confirmed",
+                "points": [
+                    {"time": "2026-07-27T13:30:00+08:00", "price": 100.0},
+                    {"time": "2026-07-27T13:33:00+08:00", "price": 101.0},
+                ],
+            },
+            market="TW",
+        )
+        self.assertEqual(official_publish_gap["gap_count"], 0)
+        self.assertEqual(
+            official_publish_gap["recognized_session_gap_count"],
+            1,
+        )
+
+    def test_kr_market_halt_event_reclassifies_gap_without_hiding_provenance(
+        self,
+    ) -> None:
+        continuity = _continuity_summary(
+            {
+                "interval": "1m",
+                "market_events": [
+                    {
+                        "event_id": "KR-KOSPI-20260728-INFERRED-HALT-01",
+                        "market": "KR",
+                        "event_type": "inferred_market_halt",
+                        "halt_start_at": "2026-07-28T10:14:00+09:00",
+                        "halt_end_at": "2026-07-28T10:42:59+09:00",
+                        "continuous_trading_resumed_at": (
+                            "2026-07-28T10:44:00+09:00"
+                        ),
+                        "source": "cross_instrument_intraday_observation",
+                        "source_grade": "inferred",
+                        "confirmed": False,
+                    }
+                ],
+                "points": [
+                    {
+                        "time": "2026-07-28T10:13:00+09:00",
+                        "price": 100.0,
+                    },
+                    {
+                        "time": "2026-07-28T10:44:00+09:00",
+                        "price": 99.0,
+                    },
+                ],
+            },
+            market="KR",
+        )
+
+        self.assertEqual(continuity["status"], "continuous_with_market_halt")
+        self.assertEqual(continuity["gap_count"], 0)
+        self.assertEqual(continuity["recognized_session_gap_count"], 1)
+        self.assertEqual(continuity["market_halt_gap_count"], 1)
+        self.assertEqual(continuity["gap_reason"], "market_halt")
+        self.assertEqual(
+            continuity["market_event_refs"],
+            ["KR-KOSPI-20260728-INFERRED-HALT-01"],
+        )
+        self.assertNotIn("missing_interval", continuity["issues"])
+
+    def test_index_snapshot_volume_keeps_provider_specific_semantics(self) -> None:
+        merged = _merge_index_intraday_snapshot(
+            {
+                "source": "twse_index_5s",
+                "interval": "5s",
+                "volume_unit": None,
+                "volume_semantics": "not_provided_for_cash_index",
+                "points": [
+                    {
+                        "time": "2026-07-27T13:30:00+08:00",
+                        "price": 43_634.19,
+                        "volume": None,
+                    }
+                ],
+            },
+            {
+                "source": "twse_mis_index_snapshot",
+                "points": [
+                    {
+                        "time": "2026-07-27T13:33:00+08:00",
+                        "price": 43_634.19,
+                        "volume": 8_876_197,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(merged["volume_unit"], "provider_units")
+        self.assertEqual(merged["provider_volume_unit"], "provider_units")
+        self.assertIsNone(merged["canonical_volume_unit"])
+        self.assertEqual(merged["volume_status"], "provider_specific")
+        self.assertEqual(
+            merged["volume_semantics"],
+            "snapshot_provider_value_not_market_trade_value",
+        )
+        self.assertEqual(
+            merged["points"][-1]["provider_volume_unit"],
+            "provider_units",
+        )
+
+    def test_taiwan_intraday_reader_honors_explicit_five_minute_interval(self) -> None:
+        get_history = unittest.mock.Mock(
+            return_value={
+                "interval": "5m",
+                "requested_interval": "5m",
+                "source_interval": "1m",
+                "effective_interval": "5m",
+                "interval_status": "ready",
+                "range": "1d",
+                "provider": "local_derived",
+                "source": "local_current_1m_aggregate",
+                "point_count": 1,
+                "cached_count": 1,
+                "refreshed_count": 1,
+                "points": [
+                    {
+                        "time": "2026-07-20T13:15:00+08:00",
+                        "open": 2324.0,
+                        "high": 2326.0,
+                        "low": 2324.0,
+                        "close": 2325.0,
+                        "volume": 1000,
+                    }
+                ],
+            }
+        )
+
+        result = taiwan_stock._compact_intraday_bars(
+            dependencies=SimpleNamespace(
+                get_market_intraday_history=get_history,
+                build_taiwan_calendar_status=lambda: {
+                    "market": "tw",
+                    "timezone": "Asia/Taipei",
+                    "checked_at": "2026-07-20T13:17:00+08:00",
+                    "date": "2026-07-20",
+                    "is_trading_day": True,
+                    "phase": "regular",
+                    "previous_trading_day": "2026-07-17",
+                    "session": {"open_time": "09:00", "close_time": "13:30"},
+                },
+            ),
+            db=SimpleNamespace(),
+            stock_id="2330",
+            include_intraday=True,
+            market_data_params={"intraday_interval": "5m"},
+        )
+
+        get_history.assert_called_once()
+        self.assertEqual(get_history.call_args.kwargs["interval"], "5m")
+        self.assertEqual(result["intervals"], ["5m"])
+        self.assertEqual(result["requested_interval"], "5m")
+        series = result["series"]["5m"]
+        self.assertEqual(series["requested_interval"], "5m")
+        self.assertEqual(series["source_interval"], "1m")
+        self.assertEqual(series["effective_interval"], "5m")
+        self.assertEqual(series["interval_status"], "ready")
+
+    def test_cached_taiwan_intraday_row_restores_taipei_timezone_at_reader_exit(self) -> None:
+        point = _intraday_row_to_point(
+            SimpleNamespace(
+                bar_time=datetime(2026, 7, 20, 13, 15),
+                open_price=2324.0,
+                high_price=2326.0,
+                low_price=2324.0,
+                close_price=2325.0,
+                trade_volume=1000,
+                trade_value=2_325_000,
+            )
+        )
+
+        self.assertEqual(point["time"].utcoffset(), timedelta(hours=8))
+        self.assertEqual(point["time"].isoformat(), "2026-07-20T13:15:00+08:00")
+
+    def test_jp_intraday_five_minute_aggregation_respects_lunch_boundary(self) -> None:
+        compact = _jp_intraday_compact(
+            {
+                "source": "yahoo_finance_chart",
+                "interval": "1m",
+                "volume_unit": "shares",
+                "volume_semantics": "interval_volume",
+                "point_count": 4,
+                "points": [
+                    {
+                        "time": "2026-07-20T09:00:00+09:00",
+                        "price": 3200.0,
+                        "volume": 100,
+                    },
+                    {
+                        "time": "2026-07-20T09:01:00+09:00",
+                        "price": 3210.0,
+                        "volume": 200,
+                    },
+                    {
+                        "time": "2026-07-20T09:04:00+09:00",
+                        "price": 3190.0,
+                        "volume": 300,
+                    },
+                    {
+                        "time": "2026-07-20T12:30:00+09:00",
+                        "price": 3220.0,
+                        "volume": 400,
+                    },
+                ],
+            },
+            market_data_params={"intraday_interval": "5m"},
+        )
+
+        self.assertEqual(compact["requested_interval"], "5m")
+        series = compact["series"]["5m"]
+        self.assertEqual(series["requested_interval"], "5m")
+        self.assertEqual(series["source_interval"], "1m")
+        self.assertEqual(series["effective_interval"], "5m")
+        self.assertEqual(series["interval_status"], "ready")
+        self.assertEqual(
+            series["aggregation_method"],
+            "local_ohlcv_1m_to_5m",
+        )
+        self.assertEqual(series["points"][0]["open"], 3200.0)
+        self.assertEqual(series["points"][0]["high"], 3210.0)
+        self.assertEqual(series["points"][0]["low"], 3190.0)
+        self.assertEqual(series["points"][0]["close"], 3190.0)
+        self.assertEqual(series["points"][0]["volume"], 600)
+        self.assertEqual(len(series["points"]), 2)
+        self.assertEqual(series["points"][1]["session"], "regular_pm")
+
+    def test_kr_intraday_five_minute_aggregation_returns_real_ohlcv(self) -> None:
+        compact = _kr_intraday_compact(
+            {
+                "source": "yahoo_finance_chart",
+                "interval": "1m",
+                "volume_unit": "shares",
+                "volume_semantics": "interval_volume",
+                "point_count": 3,
+                "points": [
+                    {
+                        "time": "2026-07-20T09:00:00+09:00",
+                        "price": 85_000.0,
+                        "volume": 1000,
+                    },
+                    {
+                        "time": "2026-07-20T09:01:00+09:00",
+                        "price": 85_500.0,
+                        "volume": 2000,
+                    },
+                    {
+                        "time": "2026-07-20T09:04:00+09:00",
+                        "price": 84_500.0,
+                        "volume": 3000,
+                    },
+                ],
+            },
+            market_data_params={"intraday_interval": "5m"},
+        )
+
+        self.assertEqual(compact["requested_interval"], "5m")
+        series = compact["series"]["5m"]
+        self.assertEqual(series["requested_interval"], "5m")
+        self.assertEqual(series["source_interval"], "1m")
+        self.assertEqual(series["effective_interval"], "5m")
+        self.assertEqual(series["interval_status"], "ready")
+        self.assertEqual(series["points"][0]["open"], 85_000.0)
+        self.assertEqual(series["points"][0]["high"], 85_500.0)
+        self.assertEqual(series["points"][0]["low"], 84_500.0)
+        self.assertEqual(series["points"][0]["close"], 84_500.0)
+        self.assertEqual(series["points"][0]["volume"], 6000)
+
+    def test_empty_regional_five_minute_request_reports_support_or_availability(self) -> None:
+        projectors = (
+            ("JP", _jp_intraday_compact, "unavailable"),
+            ("KR", _kr_intraday_compact, "unavailable"),
+            ("US", _us_intraday_compact, "unsupported"),
+        )
+
+        for market, projector, expected_status in projectors:
+            with self.subTest(market=market):
+                compact = projector(
+                    None,
+                    market_data_params={"intraday_interval": "5m"},
+                )
+
+                self.assertFalse(compact["enabled"])
+                self.assertEqual(compact["requested_interval"], "5m")
+                self.assertEqual(compact["source_interval"], "1m")
+                self.assertIsNone(compact["effective_interval"])
+                self.assertEqual(compact["interval_status"], expected_status)
+                warning_text = " ".join(compact["warnings"])
+                if expected_status == "unsupported":
+                    self.assertIn("unsupported", warning_text)
+                else:
+                    self.assertIn("did not return data", warning_text)
 
     def test_unavailable_depth_does_not_expose_stale_bid_ask(self) -> None:
         quote = _compact_quote_snapshot(
@@ -155,6 +719,147 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertIsNone(quote["best_bid_price"])
         self.assertIsNone(quote["best_ask_price"])
         self.assertIsNone(quote["spread"])
+
+    def test_preopen_daily_fallback_exposes_previous_close_not_latest_price(
+        self,
+    ) -> None:
+        quote = _compact_quote_snapshot(
+            latest_daily=SimpleNamespace(
+                trade_date="2026-07-24",
+                close_price=2350.0,
+                price_change=25.0,
+                open_price=2310.0,
+                high_price=2360.0,
+                low_price=2300.0,
+                trade_volume=25_000_000,
+            ),
+            quote_depth=None,
+            quote_error="TWSE MIS unavailable",
+            session_phase="preopen",
+            current_session_date="2026-07-27",
+            is_trading_day=True,
+        )
+
+        self.assertEqual(quote["status"], "preopen_no_last_trade")
+        self.assertEqual(quote["quote_semantics"], "previous_close_fallback")
+        self.assertEqual(quote["delivery_status"], "previous_close")
+        self.assertTrue(quote["fallback_used"])
+        self.assertFalse(quote["price_available"])
+        self.assertIsNone(quote["latest_price"])
+        self.assertIsNone(quote["price"])
+        self.assertIsNone(quote["last_price"])
+        self.assertEqual(quote["previous_close"], 2350.0)
+        self.assertEqual(
+            quote["fallback_quote"],
+            {
+                "price": 2350.0,
+                "trade_date": "2026-07-24",
+                "source": "market_daily_price",
+                "provider": "local_daily_close",
+                "semantics": "latest_completed_session_reference",
+                "current_session": False,
+            },
+        )
+        self.assertFalse(quote["facts_usable_for_current_session"])
+        self.assertFalse(quote["last_trade_available"])
+        self.assertFalse(quote["official_close_available"])
+        self.assertEqual(
+            quote["official_close_status"],
+            "not_available_yet",
+        )
+        self.assertIsNone(quote["open_price"])
+        self.assertIsNone(quote["total_volume_lots"])
+
+    def test_post_close_daily_fallback_stays_pending_until_current_row_arrives(
+        self,
+    ) -> None:
+        quote = _compact_quote_snapshot(
+            latest_daily=SimpleNamespace(
+                trade_date="2026-07-24",
+                close_price=2350.0,
+                price_change=25.0,
+                open_price=2310.0,
+                high_price=2360.0,
+                low_price=2300.0,
+                trade_volume=25_000_000,
+            ),
+            quote_depth=None,
+            quote_error=None,
+            session_phase="post_close",
+            current_session_date="2026-07-27",
+            is_trading_day=True,
+        )
+
+        self.assertEqual(quote["status"], "official_close_pending")
+        self.assertEqual(quote["quote_semantics"], "official_close_pending")
+        self.assertFalse(quote["price_available"])
+        self.assertIsNone(quote["latest_price"])
+        self.assertEqual(quote["previous_close"], 2350.0)
+        self.assertFalse(quote["official_close_available"])
+        self.assertEqual(quote["official_close_status"], "pending")
+
+    def test_daily_only_quote_does_not_claim_live_close_is_pending(self) -> None:
+        quote = _compact_quote_snapshot(
+            latest_daily=SimpleNamespace(
+                trade_date="2026-07-24",
+                close_price=2350.0,
+                price_change=25.0,
+                open_price=2310.0,
+                high_price=2360.0,
+                low_price=2300.0,
+                trade_volume=25_000_000,
+            ),
+            quote_depth=None,
+            quote_error=None,
+            session_phase="post_close",
+            current_session_date="2026-07-27",
+            is_trading_day=True,
+            live_quote_requested=False,
+        )
+
+        self.assertEqual(quote["status"], "delayed_daily_close")
+        self.assertEqual(
+            quote["quote_semantics"],
+            "latest_completed_session_close",
+        )
+        self.assertEqual(
+            quote["freshness"]["status"],
+            "latest_completed_session",
+        )
+        self.assertFalse(quote["fallback_used"])
+        self.assertTrue(quote["official_close_available"])
+        self.assertEqual(quote["latest_price"], 2350.0)
+
+    def test_current_daily_row_resolves_official_close_explicitly(self) -> None:
+        quote = _compact_quote_snapshot(
+            latest_daily=SimpleNamespace(
+                trade_date="2026-07-27",
+                close_price=2380.0,
+                price_change=30.0,
+                open_price=2360.0,
+                high_price=2390.0,
+                low_price=2345.0,
+                trade_volume=30_000_000,
+            ),
+            quote_depth=None,
+            quote_error=None,
+            session_phase="post_close",
+            current_session_date="2026-07-27",
+            is_trading_day=True,
+        )
+
+        self.assertEqual(quote["status"], "official_close")
+        self.assertEqual(quote["quote_semantics"], "official_close")
+        self.assertTrue(quote["price_available"])
+        self.assertEqual(quote["latest_price"], 2380.0)
+        self.assertEqual(quote["previous_close"], 2350.0)
+        self.assertTrue(quote["official_close_available"])
+        self.assertEqual(quote["official_close_status"], "confirmed")
+        self.assertEqual(quote["official_close_price"], 2380.0)
+        self.assertEqual(
+            quote["official_close_source"],
+            "market_daily_price.close_price",
+        )
 
     def test_stale_taiwan_index_point_is_not_live_during_session(self) -> None:
         calendar_status = {
@@ -233,7 +938,112 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(result["high_price"], 42400.0)
         self.assertEqual(result["low_price"], 42050.0)
         self.assertIsNone(result["volume"])
-        self.assertEqual(result["volume_status"], "missing")
+        self.assertEqual(result["volume_status"], "not_provided")
+
+    def test_taiwan_index_closing_auction_keeps_official_close_pending(self) -> None:
+        result = _compact_index_quote(
+            index_id="TAIEX",
+            index_snapshot={
+                "time": "2026-07-27",
+                "as_of": "2026-07-27T13:28:00+08:00",
+                "close": 43_634.19,
+                "high": 43_686.15,
+                "source": "yahoo_finance_chart",
+            },
+            intraday={
+                "source": "twse_index_5s",
+                "points": [
+                    {
+                        "time": "2026-07-27T13:24:00+08:00",
+                        "price": 43_640.0,
+                    }
+                ],
+            },
+            calendar_status={
+                "market": "tw",
+                "timezone": "Asia/Taipei",
+                "checked_at": "2026-07-27T13:28:00+08:00",
+                "date": "2026-07-27",
+                "is_trading_day": True,
+                "phase": "closing_auction",
+                "previous_trading_day": "2026-07-24",
+                "session": {"open_time": "09:00", "close_time": "13:30"},
+            },
+        )
+
+        self.assertEqual(result["latest_price"], 43_640.0)
+        self.assertEqual(result["selected_candidate"], "intraday_last_trade")
+        self.assertEqual(
+            result["official_close_status"],
+            "closing_auction_pending",
+        )
+        self.assertFalse(result["official_close_available"])
+        self.assertIsNone(result["official_close_price"])
+        self.assertEqual(result["high_price"], 43_686.15)
+
+    def test_taiwan_index_post_close_deadline_controls_confirmation(self) -> None:
+        snapshot = {
+            "time": "2026-07-27",
+            "as_of": "2026-07-27T13:30:05+08:00",
+            "close": 43_634.19,
+            "high": 43_686.15,
+            "source": "yahoo_finance_chart+twse_index_5s_snapshot",
+        }
+        intraday = {
+            "source": "twse_index_5s",
+            "points": [
+                {
+                    "time": "2026-07-27T13:30:00+08:00",
+                    "price": 43_634.19,
+                }
+            ],
+        }
+        calendar = {
+            "market": "tw",
+            "timezone": "Asia/Taipei",
+            "date": "2026-07-27",
+            "is_trading_day": True,
+            "phase": "post_close",
+            "previous_trading_day": "2026-07-24",
+            "session": {"open_time": "09:00", "close_time": "13:30"},
+        }
+
+        pending = _compact_index_quote(
+            index_id="TAIEX",
+            index_snapshot=snapshot,
+            intraday=intraday,
+            calendar_status={
+                **calendar,
+                "checked_at": "2026-07-27T13:32:00+08:00",
+            },
+        )
+        confirmed = _compact_index_quote(
+            index_id="TAIEX",
+            index_snapshot=snapshot,
+            intraday=intraday,
+            calendar_status={
+                **calendar,
+                "checked_at": "2026-07-27T13:34:00+08:00",
+            },
+        )
+
+        self.assertEqual(pending["official_close_status"], "pending")
+        self.assertFalse(pending["official_close_available"])
+        self.assertEqual(pending["latest_price"], 43_634.19)
+        self.assertEqual(pending["high_price"], 43_686.15)
+        self.assertIsNone(pending["official_close_price"])
+        self.assertEqual(confirmed["official_close_status"], "confirmed")
+        self.assertTrue(confirmed["official_close_available"])
+        self.assertEqual(confirmed["official_close_price"], 43_634.19)
+        self.assertEqual(confirmed["official_close_display"], "43,634.19")
+        self.assertEqual(
+            confirmed["selection_reason"],
+            "confirmed_official_close",
+        )
+        self.assertNotEqual(
+            confirmed["official_close_price"],
+            confirmed["high_price"],
+        )
 
     def test_display_price_prefers_current_intraday_over_stale_depth_quote(self) -> None:
         result = _market_live_summary(
@@ -576,7 +1386,13 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertFalse(quote["is_realtime"])
         self.assertFalse(quote["freshness"]["is_stale"])
         self.assertEqual(quote["market_status"], "closed_holiday")
-        self.assertEqual(quote["quote_semantics"], "latest_completed_session")
+        self.assertEqual(
+            quote["quote_semantics"],
+            "latest_completed_session_trade",
+        )
+        self.assertTrue(quote["last_trade_available"])
+        self.assertFalse(quote["depth_available"])
+        self.assertFalse(quote["indicative_match_available"])
         self.assertEqual(quote["session_phase"], "market_closed")
 
     def test_kr_stale_stock_quote_is_not_current_during_session(self) -> None:
@@ -606,6 +1422,13 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertTrue(quote["freshness"]["is_stale"])
         self.assertEqual(quote["freshness"]["age_seconds"], 1163)
         self.assertEqual(quote["market_status"], "open")
+        self.assertEqual(
+            quote["quote_semantics"],
+            "delayed_current_session_trade",
+        )
+        self.assertTrue(quote["last_trade_available"])
+        self.assertFalse(quote["depth_available"])
+        self.assertFalse(quote["indicative_match_available"])
 
     def test_quote_depth_age_uses_exchange_quote_time_not_fetch_time(self) -> None:
         row = SimpleNamespace(

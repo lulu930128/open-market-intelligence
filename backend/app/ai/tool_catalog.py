@@ -298,7 +298,8 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "description": (
                                 "Optional bounded market-data parameters for readers, for example "
                                 "provider, providers, symbols, symbol, instrument_type, interval, timeframe, bars, "
-                                "include_intraday, payload_level, intraday_limit, observations, holding_limit, "
+                                "include_intraday, payload_level, intraday_limit, session_scope, trade_date, "
+                                "observations, holding_limit, "
                                 "health_limit, radar_limit, market, resource, target, or limit."
                             ),
                             "properties": {
@@ -309,6 +310,35 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                     "default": "compact",
                                 },
                                 "intraday_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                                "intraday_interval": {
+                                    "type": "string",
+                                    "enum": ["1m", "5m", "15m", "30m", "1h", "4h"],
+                                    "description": (
+                                        "Requested intraday bar interval. Responses expose "
+                                        "requested_interval, source_interval, and effective_interval."
+                                    ),
+                                },
+                                "interval": {
+                                    "type": "string",
+                                    "enum": ["1m", "5m", "15m", "30m", "1h", "4h"],
+                                    "description": (
+                                        "Compatibility alias for intraday_interval. "
+                                        "Prefer intraday_interval for new callers."
+                                    ),
+                                },
+                                "session_scope": {
+                                    "type": "string",
+                                    "enum": ["regular", "extended", "all"],
+                                    "default": "regular",
+                                },
+                                "trade_date": {
+                                    "type": "string",
+                                    "pattern": r"^\d{4}-\d{2}-\d{2}$",
+                                    "description": (
+                                        "Target-market trade date. US dates use "
+                                        "America/New_York exchange dates."
+                                    ),
+                                },
                                 "observations": {"type": "integer", "minimum": 1, "maximum": 240},
                                 "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
                                 "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
@@ -440,7 +470,26 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string"},
-                        "market_data_params": {"type": "object"},
+                        "market_data_params": {
+                            "type": "object",
+                            "properties": {
+                                "include_intraday": {"type": "boolean", "default": False},
+                                "session_scope": {
+                                    "type": "string",
+                                    "enum": ["regular", "extended", "all"],
+                                    "default": "regular",
+                                },
+                                "trade_date": {
+                                    "type": "string",
+                                    "pattern": r"^\d{4}-\d{2}-\d{2}$",
+                                    "description": (
+                                        "US exchange trade date in America/New_York; "
+                                        "an exact close request never falls back."
+                                    ),
+                                },
+                            },
+                            "additionalProperties": True,
+                        },
                     },
                     "required": ["symbol"],
                 },

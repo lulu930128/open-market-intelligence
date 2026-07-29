@@ -294,6 +294,8 @@ def run_us_stock_tool_session(
     policy: dict[str, Any],
     raw_budget: dict[str, Any] | None,
     requested_capabilities: tuple[str, ...] | None = None,
+    requested_trade_date: str | None = None,
+    session_scope: str = "regular",
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol)
@@ -327,6 +329,8 @@ def run_us_stock_tool_session(
         budget=budget,
         can_call_llm=bool(policy.get("can_plan_tools")),
         requested_capabilities=requested_capabilities,
+        requested_trade_date=requested_trade_date,
+        session_scope=session_scope,
     )
     plan["budget"] = budget
     runs, run_warnings = execute_tool_plan(

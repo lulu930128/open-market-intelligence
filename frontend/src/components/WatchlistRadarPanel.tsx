@@ -878,67 +878,77 @@ export default function WatchlistRadarPanel({
           ) : null}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="mr-1 text-xs font-medium text-omi-text-muted">
-            {radarDateLabel}
-            {radarSnapshotLabel ? ` · ${radarSnapshotLabel}` : ""}
-          </div>
-          <div className="inline-flex border border-omi-border bg-omi-surface">
-            {RADAR_MODE_OPTIONS.map((option) => (
-              <a
-                key={option.value}
-                href={getModeHref?.(option.value) ?? "#"}
-                data-testid={`watchlist-radar-mode-${option.value}`}
-                title={t(option.titleKey)}
-                onClick={(event) => {
-                  if (disabled || mode === option.value) {
-                    event.preventDefault();
-                    return;
-                  }
+        <div
+          className="flex w-full min-w-0 flex-col items-start gap-2 md:w-auto md:items-end"
+          data-testid="watchlist-radar-header-actions"
+        >
+          <div
+            className="flex max-w-full flex-wrap items-center gap-2 md:justify-end"
+            data-testid="watchlist-radar-controls"
+          >
+            <div className="mr-1 text-xs font-medium text-omi-text-muted">
+              {radarDateLabel}
+              {radarSnapshotLabel ? ` · ${radarSnapshotLabel}` : ""}
+            </div>
+            <div className="inline-flex border border-omi-border bg-omi-surface">
+              {RADAR_MODE_OPTIONS.map((option) => (
+                <a
+                  key={option.value}
+                  href={getModeHref?.(option.value) ?? "#"}
+                  data-testid={`watchlist-radar-mode-${option.value}`}
+                  title={t(option.titleKey)}
+                  onClick={(event) => {
+                    if (disabled || mode === option.value) {
+                      event.preventDefault();
+                      return;
+                    }
 
-                  event.preventDefault();
-                  onModeChange(option.value);
-                }}
-                aria-disabled={disabled || mode === option.value}
-                className={[
-                  "inline-flex h-8 items-center px-3 text-xs font-semibold",
-                  mode === option.value
-                    ? "bg-omi-control text-omi-text-inverse"
-                    : "text-omi-text-muted hover:bg-omi-surface-subtle",
-                ].join(" ")}
+                    event.preventDefault();
+                    onModeChange(option.value);
+                  }}
+                  aria-disabled={disabled || mode === option.value}
+                  className={[
+                    "inline-flex h-8 items-center px-3 text-xs font-semibold",
+                    mode === option.value
+                      ? "bg-omi-control text-omi-text-inverse"
+                      : "text-omi-text-muted hover:bg-omi-surface-subtle",
+                  ].join(" ")}
+                >
+                  {t(option.labelKey)}
+                </a>
+              ))}
+            </div>
+            {onOpenOutcomeHistory ? (
+              <button
+                type="button"
+                data-testid="watchlist-radar-history-open"
+                onClick={onOpenOutcomeHistory}
+                disabled={disabled || outcomeHistoryBusy}
+                className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
               >
-                {t(option.labelKey)}
-              </a>
-            ))}
-          </div>
-          {onOpenOutcomeHistory ? (
+                {t("radar.outcome.history")}
+              </button>
+            ) : null}
             <button
               type="button"
-              data-testid="watchlist-radar-history-open"
-              onClick={onOpenOutcomeHistory}
-              disabled={disabled || outcomeHistoryBusy}
+              data-testid="watchlist-radar-reload"
+              onClick={onReload}
+              disabled={disabled || loadState === "loading"}
               className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
             >
-              {t("radar.outcome.history")}
+              {t("radar.reload")}
             </button>
+          </div>
+          {notice ? (
+            <div
+              className="inline-flex max-w-full items-center border border-omi-info-border bg-omi-info-soft px-2 py-1 text-xs leading-5 text-omi-info-strong"
+              data-testid="watchlist-radar-notice"
+            >
+              <span className="min-w-0 break-words">{notice}</span>
+            </div>
           ) : null}
-          <button
-            type="button"
-            data-testid="watchlist-radar-reload"
-            onClick={onReload}
-            disabled={disabled || loadState === "loading"}
-            className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
-          >
-            {t("radar.reload")}
-          </button>
         </div>
       </div>
-
-      {notice ? (
-        <div className="border-b border-omi-info-border bg-omi-info-soft px-5 py-3 text-sm text-omi-info-strong">
-          {notice}
-        </div>
-      ) : null}
 
       {showOutcomeTools ? (
         <div className="border-b border-omi-border-subtle bg-omi-surface px-5 py-3">

@@ -57,6 +57,14 @@ class AiSupplementalContextTests(unittest.TestCase):
     def test_scope_resolution_supports_supplemental_targets(self) -> None:
         cases = (
             ("resource_asset", "twd/usd", "TWD-USD"),
+            ("resource_asset", "GC=F", "GC"),
+            ("resource_asset", "黃金", "GC"),
+            ("resource_asset", "CL=F", "CL"),
+            ("resource_asset", "WTI 原油", "CL"),
+            ("tw_futures", "TX", "TXF"),
+            ("tw_futures", "大台", "TXF"),
+            ("tw_futures", "小台", "MXF"),
+            ("tw_futures", "微台", "TMF"),
             ("us_macro", "dgs10", "DGS10"),
             ("us_watchlist", "3", "3"),
             ("jp_watchlist", "4", "4"),
@@ -766,6 +774,22 @@ class AiSupplementalContextTests(unittest.TestCase):
                 "is_partial": False,
                 "warnings": [],
             },
+            get_kr_market_breadth=lambda *args, **kwargs: {
+                "index_id": "KOSPI",
+                "market": "KR",
+                "status": "current",
+                "advance_count": 500,
+                "decline_count": 300,
+                "unchanged_count": 20,
+                "total_count": 820,
+                "universe_count": 820,
+                "coverage_count": 820,
+                "coverage_ratio": 1.0,
+                "classified_count": 820,
+                "unknown_count": 0,
+                "direct_market_breadth": True,
+                "proxy_used": False,
+            },
         )
 
         result = kr_context.read_kr_stock_context(
@@ -782,6 +806,16 @@ class AiSupplementalContextTests(unittest.TestCase):
         self.assertEqual(result["summary"]["latest_close"], 3210.0)
         self.assertTrue(result["summary"]["intraday"]["available"])
         self.assertTrue(result["summary"]["intraday"]["is_current"])
+        self.assertEqual(
+            result["data"]["compact"]["intraday_readiness"]["status"],
+            "ready",
+        )
+        self.assertTrue(
+            result["data"]["compact"]["intraday_readiness"][
+                "independent_of_daily"
+            ]
+        )
+        self.assertTrue(result["data"]["compact"]["breadth"]["direct_market_breadth"])
         one_minute = result["data"]["compact"]["intraday_bars"]["series"]["1m"]
         self.assertEqual(one_minute["returned_point_count"], 1)
         self.assertEqual(one_minute["latest"]["price"], 3210.0)

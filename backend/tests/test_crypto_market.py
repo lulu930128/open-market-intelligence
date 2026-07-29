@@ -53,6 +53,7 @@ from app.crypto_market.service import (
     list_crypto_liquidity_history,
     list_crypto_long_short_ratio_history,
     list_crypto_ohlcv_coverage,
+    list_latest_crypto_ohlcv_bars,
     list_crypto_spread_history,
     list_crypto_ticker_history,
     persist_crypto_realtime_updates,
@@ -1806,6 +1807,41 @@ class CryptoMarketBackendTests(unittest.TestCase):
             coverage[0]["latest_fetched_at"].replace(tzinfo=None),
             _utc("2026-06-24T00:01:00Z").replace(tzinfo=None),
         )
+
+    def test_latest_ohlcv_query_returns_latest_window_in_ascending_order(self) -> None:
+        self.db.add_all(
+            [
+                CryptoOhlcvBar(
+                    provider=BINANCE_PROVIDER,
+                    exchange="Binance",
+                    symbol="BTC-USDT",
+                    provider_symbol="BTCUSDT",
+                    base_asset="BTC",
+                    quote_asset="USDT",
+                    instrument_type=SPOT,
+                    interval="1m",
+                    bar_time=_utc(f"2026-07-28T00:0{minute}:00Z"),
+                    close_price=100000 + minute,
+                    fetched_at=_utc(f"2026-07-28T00:0{minute}:10Z"),
+                )
+                for minute in range(5)
+            ]
+        )
+        self.db.commit()
+
+        rows = list_latest_crypto_ohlcv_bars(
+            self.db,
+            provider=BINANCE_PROVIDER,
+            symbols="BTC-USDT",
+            interval="1m",
+            limit=3,
+        )
+
+        self.assertEqual(
+            [row.bar_time.minute for row in rows],
+            [2, 3, 4],
+        )
+        self.assertEqual(rows[-1].close_price, 100004)
 
     def test_refresh_bitopro_daily_ohlcv_uses_interval_sized_default_window(self) -> None:
         with patch.object(sources, "fetch_bitopro_ohlcv", return_value=[]) as fetcher:

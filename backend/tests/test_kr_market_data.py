@@ -441,12 +441,36 @@ class KRMarketDataTests(unittest.TestCase):
             "app.kr_market.service.fetch_yahoo_chart_payload",
             side_effect=KRMarketDataFetchError("rate limited"),
         ):
-            unavailable = get_kr_stock_intraday_trend(self.db, symbol="005930")
+            unavailable = get_kr_stock_intraday_trend(
+                self.db,
+                symbol="005930",
+                refresh=True,
+            )
 
-        self.assertEqual(unavailable["source"], "unavailable")
-        self.assertEqual(unavailable["point_count"], 0)
-        self.assertTrue(unavailable["is_partial"])
+        self.assertEqual(unavailable["source"], "yahoo_finance_chart")
+        self.assertEqual(unavailable["point_count"], 2)
+        self.assertEqual(unavailable["cache_status"], "refresh_fallback_hit")
+        self.assertTrue(unavailable["fallback_used"])
         self.assertIn("rate limited", unavailable["warnings"][0])
+
+        kr_market_service._KR_STOCK_INTRADAY_CACHE.clear()
+        with patch(
+            "app.kr_market.service.fetch_yahoo_chart_payload",
+            side_effect=AssertionError(
+                "cache-only replay must not call the provider"
+            ),
+        ) as fetch_again:
+            replay = get_kr_stock_intraday_trend(
+                self.db,
+                symbol="005930",
+                refresh=False,
+                external_fetch_allowed=False,
+            )
+
+        fetch_again.assert_not_called()
+        self.assertEqual(replay["point_count"], 2)
+        self.assertEqual(replay["cache_status"], "persisted_hit")
+        self.assertTrue(replay["cache_hit"])
 
     def test_get_kr_stock_intraday_trend_reconciles_after_close_daily_auction(self) -> None:
         upsert_kr_daily_price_records(
@@ -636,7 +660,47 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(result["points"][-1]["cumulative_volume"], 516366)
         self.assertEqual(result["total_volume"], 516366)
         self.assertEqual(result["volume_unit"], "thousand_shares")
+
+        kr_market_service._KR_INDEX_INTRADAY_CACHE.clear()
+        with (
+            patch(
+                "app.kr_market.service.fetch_naver_index_intraday_page_payload",
+                side_effect=AssertionError(
+                    "cache-only replay must not call the provider"
+                ),
+            ) as history_fetch,
+            patch(
+                "app.kr_market.service.fetch_naver_index_realtime_payload",
+                side_effect=AssertionError(
+                    "cache-only replay must not call the provider"
+                ),
+            ) as realtime_fetch,
+        ):
+            replay = get_kr_index_intraday_trend(
+                self.db,
+                index_id="KOSPI",
+                external_fetch_allowed=False,
+            )
+
+        history_fetch.assert_not_called()
+        realtime_fetch.assert_not_called()
+        self.assertEqual(replay["point_count"], 1)
+        self.assertEqual(replay["cache_status"], "persisted_hit")
+        self.assertTrue(replay["cache_hit"])
         self.assertEqual(result["volume_semantics"], "interval_with_cumulative_total")
+        self.assertEqual(result["ohlc_semantics"], "snapshot_price_only")
+        self.assertEqual(
+            result["ohlc_analysis_policy"],
+            "confirmed_interval_ohlc_only",
+        )
+        self.assertIsNone(result["points"][-1]["open"])
+        self.assertIsNone(result["points"][-1]["high"])
+        self.assertIsNone(result["points"][-1]["low"])
+        self.assertEqual(result["points"][-1]["session_open"], 7919.2)
+        self.assertEqual(
+            result["points"][-1]["bar_ohlc_semantics"],
+            "snapshot_price_only",
+        )
         self.assertTrue(result["is_partial"])
         self.assertEqual(result["previous_close_trade_date"], "2026-07-06")
         self.assertEqual(result["polling_interval_seconds"], 70)
@@ -749,12 +813,37 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(kospi["decline_count"], 1)
         self.assertEqual(kospi["unchanged_count"], 0)
         self.assertEqual(kospi["total_count"], 2)
+        self.assertEqual(kospi["coverage_count"], 2)
+        self.assertIsNone(kospi["coverage_ratio"])
+        self.assertIsNone(kospi["universe_count"])
+        self.assertEqual(kospi["classified_count"], 2)
+        self.assertEqual(kospi["unknown_count"], 0)
+        self.assertEqual(kospi["reconciliation_status"], "balanced")
+        self.assertTrue(kospi["direct_market_breadth"])
+        self.assertFalse(kospi["proxy_used"])
+        self.assertFalse(kospi["is_full_market"])
+        self.assertEqual(
+            kospi["universe_type"],
+            "active_local_stock_master_segment",
+        )
+        self.assertIn(
+            "not_official_full_exchange_breadth",
+            kospi["coverage_limitation"],
+        )
         self.assertEqual(kospi["trade_value"], 2_390_000_000_000)
         self.assertEqual(kospi["positive_ratio"], 0.5)
         self.assertEqual(kosdaq["advance_count"], 0)
         self.assertEqual(kosdaq["decline_count"], 0)
         self.assertEqual(kosdaq["unchanged_count"], 1)
-        self.assertEqual(kospi200["market_segment"], "KOSPI")
+        self.assertEqual(kospi200["market_segment"], "KOSPI200")
+        self.assertEqual(kospi200["status"], "unsupported")
+        self.assertFalse(kospi200["direct_market_breadth"])
+        self.assertFalse(kospi200["proxy_used"])
+        self.assertFalse(kospi200["is_full_market"])
+        self.assertIn(
+            "krx_kospi200_constituent_breadth",
+            kospi200["missing"],
+        )
         self.assertIn("KOSPI 200", kospi200["coverage_note"] or "")
         self.assertEqual(kospi_summary["breadth"]["advance_count"], 1)
         self.assertEqual(KRIndexSummaryRead.model_validate(summary).indices[0].breadth.status, "current")
@@ -798,6 +887,9 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertTrue(summary["slots"][0]["available"])
         self.assertEqual(chart["point_count"], 1)
         self.assertEqual(chart["points"][0]["close"], 73200.0)
+        self.assertEqual(chart["volume_unit"], "shares")
+        self.assertEqual(chart["volume_semantics"], "daily_traded_shares")
+        self.assertEqual(chart["volume_status"], "available")
 
     def test_kr_daily_ohlc_uses_range_provider_when_full_window_is_stale(self) -> None:
         self.db.add_all(
@@ -1089,6 +1181,13 @@ class KRMarketDataTests(unittest.TestCase):
         ranking = get_kr_watchlist_ranking(self.db, group_id=group.id, rank_by="change_pct", sort_order="desc")
 
         self.assertEqual(ranking["ranked_count"], 1)
+        self.assertEqual(ranking["coverage_ratio"], 1.0)
+        self.assertFalse(ranking["is_live"])
+        self.assertTrue(ranking["is_full"])
+        self.assertEqual(
+            ranking["ranking_semantics"],
+            "latest_completed_daily_rows",
+        )
         self.assertEqual(ranking["results"][0]["symbol"], "005930.KS")
         self.assertAlmostEqual(ranking["results"][0]["change_pct"], 0.9655172413793104)
 

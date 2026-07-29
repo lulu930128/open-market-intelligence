@@ -159,6 +159,12 @@ class TaiwanMarketStateTests(unittest.TestCase):
         self.assertEqual(state["status"], "ready")
         self.assertEqual(state["comparison_minute"], "10:30")
         self.assertEqual(state["current_cumulative_trade_value"], 240)
+        self.assertEqual(state["available_cumulative_trade_value"], 240)
+        self.assertTrue(state["trade_value_available"])
+        self.assertTrue(state["trade_value_complete"])
+        self.assertEqual(state["trade_value_status"], "complete")
+        self.assertEqual(state["included_markets"], ["TWSE", "TPEX"])
+        self.assertEqual(state["missing_markets"], [])
         self.assertEqual(state["currency"], "TWD")
         self.assertEqual(state["trade_value_unit"], "TWD")
         self.assertTrue(
@@ -186,6 +192,25 @@ class TaiwanMarketStateTests(unittest.TestCase):
             240 / 156,
         )
         self.assertEqual(state["same_time_baseline_20d"]["sample_days"], 6)
+        self.assertEqual(
+            state["same_time_baseline_5d"]["sample_status"],
+            "complete",
+        )
+        self.assertEqual(
+            len(state["same_time_baseline_5d"]["samples"]),
+            5,
+        )
+        self.assertEqual(
+            state["same_time_baseline_5d"]["samples"][-1],
+            {
+                "trade_date": "2026-07-21",
+                "cumulative_trade_value": 180,
+            },
+        )
+        self.assertEqual(
+            state["same_time_baseline_20d"]["sample_status"],
+            "provisional",
+        )
 
     def test_final_reconciliation_uses_official_close_minute(self) -> None:
         trade_date = date(2026, 7, 22)
@@ -242,6 +267,12 @@ class TaiwanMarketStateTests(unittest.TestCase):
         self.assertEqual(quality_by_market["TPEX"], "ready")
         self.assertEqual(state["status"], "partial")
         self.assertIsNone(state["current_cumulative_trade_value"])
+        self.assertEqual(state["available_cumulative_trade_value"], 55)
+        self.assertTrue(state["trade_value_available"])
+        self.assertFalse(state["trade_value_complete"])
+        self.assertEqual(state["trade_value_status"], "partial")
+        self.assertEqual(state["included_markets"], ["TPEX"])
+        self.assertEqual(state["missing_markets"], ["TWSE"])
         self.assertEqual(
             state["field_status"]["current_cumulative_trade_value"]["status"],
             "missing",

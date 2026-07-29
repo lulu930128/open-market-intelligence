@@ -110,7 +110,7 @@ EXPECTED_FUTURES_PARAMETERS = {
             "provider",
             "trade_date",
         ),
-        {"interval": "1m", "limit": 390, "refresh": True, "session": "auto"},
+        {"interval": "1m", "limit": 390, "refresh": False, "session": "auto"},
     ),
     ("post", "/api/market/tw-futures/{symbol}/daily/refresh"): (
         (
@@ -197,8 +197,8 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 349)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 348)
+        self.assertEqual(len(operations), 351)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 350)
 
     def test_system_health_contracts_are_exposed(self) -> None:
         schema = app.openapi()

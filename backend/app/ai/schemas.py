@@ -129,9 +129,11 @@ class AiAskRequest(BaseModel):
         default_factory=dict,
         description=(
             "Optional bounded data-shape parameters for market-specific readers, "
-            "for example provider, providers, symbols, interval, timeframe, bars, limit, "
-            "include_intraday, payload_level, or intraday_limit. payload_level supports "
-            "summary, compact, standard, and full."
+            "for example provider, providers, symbols, intraday_interval, interval, "
+            "timeframe, bars, limit, "
+            "include_intraday, payload_level, intraday_limit, session_scope, or trade_date. "
+            "trade_date is the target-market exchange date (US: America/New_York). "
+            "payload_level supports summary, compact, standard, and full."
         ),
     )
     position_context: dict[str, Any] = Field(

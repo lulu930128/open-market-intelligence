@@ -246,11 +246,37 @@ INCLUDE_INTRADAY_SCHEMA: dict[str, Any] = {
     "description": "Request bounded intraday evidence when the backend trust policy allows external/cache refresh.",
 }
 
+INTRADAY_INTERVAL_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": ["1m", "5m", "15m", "30m", "1h", "4h"],
+    "description": (
+        "Requested intraday bar interval. OMI responses expose requested_interval, "
+        "source_interval, and effective_interval so provider aggregation or fallback "
+        "is never silently relabeled."
+    ),
+}
+
+INTERVAL_ALIAS_SCHEMA: dict[str, Any] = {
+    **INTRADAY_INTERVAL_SCHEMA,
+    "description": (
+        "Compatibility alias for intraday_interval. Prefer intraday_interval for new callers."
+    ),
+}
+
 SESSION_SCOPE_SCHEMA: dict[str, Any] = {
     "type": "string",
     "enum": ["regular", "extended", "all"],
     "default": "regular",
     "description": "US intraday session scope. Use all to include pre-market and after-hours bars.",
+}
+
+TRADE_DATE_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "pattern": r"^\d{4}-\d{2}-\d{2}$",
+    "description": (
+        "Target-market trade date. For US stocks this is the America/New_York "
+        "exchange date; exact close requests never fall back to another date."
+    ),
 }
 
 ASK_TOOL: dict[str, Any] = {
@@ -420,7 +446,9 @@ ASK_TOOL: dict[str, Any] = {
                 "description": "Independent diagnostic projection; it does not change answer mode.",
             },
             "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+            "intraday_interval": INTRADAY_INTERVAL_SCHEMA,
             "session_scope": SESSION_SCOPE_SCHEMA,
+            "trade_date": TRADE_DATE_SCHEMA,
             "include_children": {"type": "boolean", "default": True},
             "enabled_only": {"type": "boolean", "default": True},
             "conversation_context": {
@@ -439,8 +467,9 @@ ASK_TOOL: dict[str, Any] = {
                 "description": (
                     "Optional bounded market-data parameters forwarded to OMI readers, "
                     "for example provider, providers, symbol, symbols, instrument_type, "
-                    "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
-                    "intraday_limit, session_scope, or limit."
+                    "intraday_interval, interval, timeframe, bars, daily_limit, "
+                    "include_intraday, payload_level, "
+                    "intraday_limit, session_scope, trade_date, or limit."
                 ),
             },
         },
@@ -465,15 +494,19 @@ MARKET_DATA_PARAMS_SCHEMA: dict[str, Any] = {
     "description": (
         "Optional bounded market-data parameters forwarded to OMI readers, "
         "for example provider, providers, symbol, symbols, instrument_type, "
-        "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
-        "intraday_limit, session_scope, observations, holding_limit, health_limit, "
+        "intraday_interval, interval, timeframe, bars, daily_limit, "
+        "include_intraday, payload_level, "
+        "intraday_limit, session_scope, trade_date, observations, holding_limit, health_limit, "
         "radar_limit, market, resource, target, or limit."
     ),
     "properties": {
         "include_intraday": INCLUDE_INTRADAY_SCHEMA,
         "payload_level": PAYLOAD_LEVEL_SCHEMA,
         "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+        "intraday_interval": INTRADAY_INTERVAL_SCHEMA,
+        "interval": INTERVAL_ALIAS_SCHEMA,
         "session_scope": SESSION_SCOPE_SCHEMA,
+        "trade_date": TRADE_DATE_SCHEMA,
         "observations": {"type": "integer", "minimum": 1, "maximum": 240},
         "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
         "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
@@ -516,7 +549,9 @@ MARKET_PAYLOAD_CONTROL_PROPERTIES: dict[str, Any] = {
     "include_intraday": INCLUDE_INTRADAY_SCHEMA,
     "payload_level": PAYLOAD_LEVEL_SCHEMA,
     "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+    "intraday_interval": INTRADAY_INTERVAL_SCHEMA,
     "session_scope": SESSION_SCOPE_SCHEMA,
+    "trade_date": TRADE_DATE_SCHEMA,
     "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
 }
 
@@ -1189,7 +1224,10 @@ def _augment_market_payload_control_schema(tool: dict[str, Any]) -> dict[str, An
                 ("include_intraday", INCLUDE_INTRADAY_SCHEMA),
                 ("payload_level", PAYLOAD_LEVEL_SCHEMA),
                 ("intraday_limit", INTRADAY_LIMIT_SCHEMA),
+                ("intraday_interval", INTRADAY_INTERVAL_SCHEMA),
+                ("interval", INTERVAL_ALIAS_SCHEMA),
                 ("session_scope", SESSION_SCOPE_SCHEMA),
+                ("trade_date", TRADE_DATE_SCHEMA),
             ):
                 market_data_params["properties"].setdefault(key, value)
         market_data_params.setdefault("additionalProperties", True)
@@ -1525,10 +1563,18 @@ def _merge_market_data_params(arguments: dict[str, Any]) -> dict[str, Any]:
             params["intraday_limit"] = max(1, min(500, int(arguments["intraday_limit"])))
         except (TypeError, ValueError):
             pass
+    if "intraday_interval" in arguments and "intraday_interval" not in params:
+        interval = str(arguments.get("intraday_interval") or "").strip().lower()
+        if interval in {"1m", "5m", "15m", "30m", "1h", "4h"}:
+            params["intraday_interval"] = interval
     if "session_scope" in arguments and "session_scope" not in params:
         session_scope = str(arguments.get("session_scope") or "").strip().lower()
         if session_scope in {"regular", "extended", "all"}:
             params["session_scope"] = session_scope
+    if "trade_date" in arguments and "trade_date" not in params:
+        trade_date = str(arguments.get("trade_date") or "").strip()
+        if trade_date:
+            params["trade_date"] = trade_date
     return params
 
 
@@ -1541,6 +1587,8 @@ def _market_query_controls(arguments: dict[str, Any]) -> dict[str, Any]:
         query["payload_level"] = params["payload_level"]
     if "intraday_limit" in params:
         query["intraday_limit"] = params["intraday_limit"]
+    if "intraday_interval" in params:
+        query["intraday_interval"] = params["intraday_interval"]
     return query
 
 

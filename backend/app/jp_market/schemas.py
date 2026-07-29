@@ -222,6 +222,9 @@ class JPOhlcChartRead(BaseModel):
     to_date: date
     point_count: int
     points: list[JPOhlcPointRead]
+    volume_unit: str | None = None
+    volume_semantics: str | None = None
+    volume_status: str = "not_provided"
     backfill: dict | None = None
     latest_data_date: date | None = None
     expected_data_date: date | None = None
@@ -267,6 +270,9 @@ class JPIntradayTrendRead(BaseModel):
 
 class JPMarketCoverageRead(BaseModel):
     scope: str
+    universe_type: str = "active_local_stock_master"
+    is_full_market: bool = False
+    coverage_limitation: str | None = None
     active_stock_count: int
     observed_symbol_count: int
     current_symbol_count: int
@@ -279,6 +285,7 @@ class JPMarketCoverageRead(BaseModel):
 
 
 class JPMarketBreadthRead(BaseModel):
+    market: str = "JP"
     trade_date: date | None = None
     advance_count: int
     decline_count: int
@@ -286,8 +293,21 @@ class JPMarketBreadthRead(BaseModel):
     no_comparison_count: int
     total_count: int
     coverage_count: int
+    universe_count: int
+    coverage_ratio: float | None = None
+    classified_count: int
+    unknown_count: int
+    reconciliation_status: str
+    reconciliation_formula: str
+    scope: str
+    status: str
     source: str
     is_partial: bool
+    direct_market_breadth: bool = True
+    proxy_used: bool = False
+    is_full_market: bool = False
+    universe_type: str = "active_local_stock_master"
+    coverage_limitation: str | None = None
 
 
 class JPMarketSectorBreadthRead(BaseModel):

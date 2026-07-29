@@ -110,6 +110,23 @@ DOMAIN_HINTS = {
         "top losers",
     ),
 }
+SCOPE_DOMAIN_HINTS = {
+    "tw_futures": {
+        "intraday": (
+            "夜盤",
+            "夜間盤",
+            "after hours",
+            "after-hours",
+            "after_hours",
+            "overnight",
+        ),
+        "volume": (
+            "成交量",
+            "交易量",
+            "volume",
+        ),
+    },
+}
 NEGATION_TERMS = ("不查", "不刷新", "不需要", "不要", "排除", "without", "except")
 RESTRICTIVE_CAPABILITY_TERMS = (
     "只查",
@@ -238,7 +255,12 @@ def _list_param(params: dict[str, Any], key: str) -> tuple[str, ...]:
     )
 
 
-def _query_domains(payload: AiAskRequest, question_intent: str) -> tuple[
+def _query_domains(
+    payload: AiAskRequest,
+    question_intent: str,
+    *,
+    scope_type: str,
+) -> tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
@@ -253,7 +275,19 @@ def _query_domains(payload: AiAskRequest, question_intent: str) -> tuple[
     requested: list[str] = list(explicit_requested)
     excluded: list[str] = list(explicit_excluded)
 
-    for domain, hints in DOMAIN_HINTS.items():
+    scoped_domain_hints = SCOPE_DOMAIN_HINTS.get(scope_type, {})
+    domain_hints = {
+        domain: tuple(
+            dict.fromkeys(
+                (
+                    *DOMAIN_HINTS.get(domain, ()),
+                    *scoped_domain_hints.get(domain, ()),
+                )
+            )
+        )
+        for domain in dict.fromkeys((*DOMAIN_HINTS, *scoped_domain_hints))
+    }
+    for domain, hints in domain_hints.items():
         for hint in hints:
             normalized_hint = hint.casefold()
             if normalized_hint not in question:
@@ -363,6 +397,7 @@ def build_query_plan(
     requested_domains, excluded_domains, positive_terms, negative_terms = _query_domains(
         payload,
         question_intent,
+        scope_type=scope_type,
     )
     raw_selection = payload.selection if isinstance(payload.selection, dict) else {}
     has_explicit_capability_selection = any(

@@ -12,6 +12,7 @@ from app.crypto_market.assets import crypto_asset_codes, get_crypto_asset
 from app.db.models import JPStockMaster, KRStockMaster, StockMaster, USStockMaster, WatchlistGroup
 from app.jp_market.sources import normalize_jp_symbol
 from app.kr_market.sources import KR_INDEX_CONFIG_BY_ID, normalize_kr_index_id, normalize_kr_symbol
+from app.market.tw_futures import normalize_taiwan_futures_symbols
 from app.resource_market.contract import list_resource_instruments, normalize_resource_symbol
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
@@ -54,12 +55,19 @@ JP_INDEX_TARGET_ALIASES = {
 }
 KR_INDEX_TARGET_IDS = set(KR_INDEX_CONFIG_BY_ID)
 DEFAULT_MARKET_CONTEXTS = {
-    "TW": ("market", None, "Taiwan Market"),
-    "US": ("us_stock", "^GSPC", "S&P 500"),
-    "JP": ("jp_index", "^N225", "Nikkei 225"),
-    "KR": ("kr_index", "KOSPI", "KOSPI"),
+    "TW": ("market", "TW", "Taiwan Market"),
+    "US": ("market", "US", "United States Market"),
+    "JP": ("market", "JP", "Japan Market"),
+    "KR": ("market", "KR", "Korea Market"),
     "CRYPTO": ("crypto_market", None, "Crypto Market"),
 }
+
+
+def _normalize_taiwan_futures_target(value: Any) -> str | None:
+    try:
+        return normalize_taiwan_futures_symbols([str(value or "").strip()])[0]
+    except (IndexError, ValueError):
+        return None
 JP_MARKET_CONTEXT_HINTS = (
     "\u65e5\u80a1",
     "\u65e5\u672c",
@@ -1460,6 +1468,11 @@ def _clarify_scope(scope_type: str, question: str, reason: str) -> ScopeResoluti
         clarification_question = "你想看哪一個台股指數？目前支援 TAIEX 或 TPEX。"
     elif scope_type == "tw_futures":
         clarification_question = "你想看哪一個台指期商品？目前支援 TXF、MXF 或 TMF。"
+    elif scope_type == "resource_asset":
+        clarification_question = (
+            "你想查哪一個商品或貨幣資產？"
+            "可提供 canonical symbol、Yahoo symbol 或中文名稱，例如 GC、GC=F、黃金。"
+        )
     elif scope_type == "stock":
         clarification_question = "你想看哪一檔股票？請提供股票代號或股票名稱。"
     else:
@@ -1487,7 +1500,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     if requested_target_type != "auto":
         if requested_target_type == "market":
             return _default_market_context_resolution(
-                target_market or "TW",
+                target_market or target_id or "TW",
                 source="explicit_market_context",
                 label=requested_label,
             )
@@ -1565,8 +1578,8 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             target_id = normalized_index_id
 
         if scope_type == "tw_futures":
-            normalized_futures_symbol = str(target_id or "").strip().upper()
-            if normalized_futures_symbol not in TAIWAN_FUTURES_TARGET_IDS:
+            normalized_futures_symbol = _normalize_taiwan_futures_target(target_id)
+            if normalized_futures_symbol is None:
                 return _clarify_scope(
                     scope_type,
                     question,
@@ -1813,7 +1826,9 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 ),
             )
 
-        if normalized_target_id in TAIWAN_FUTURES_TARGET_IDS:
+        normalized_futures_target = _normalize_taiwan_futures_target(target_id)
+        if normalized_futures_target in TAIWAN_FUTURES_TARGET_IDS:
+            normalized_target_id = normalized_futures_target
             label = requested_label or f"{normalized_target_id} 台指期"
             return ScopeResolution(
                 selected_scope_type="tw_futures",

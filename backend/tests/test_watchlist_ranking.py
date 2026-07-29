@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import ANY, patch
 
 from app.watchlists import ranking_service
+from app.watchlists.schemas import WatchlistGroupRankingRead
 
 
 class WatchlistRankingLimitStatusTests(unittest.TestCase):
@@ -508,9 +509,30 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
 
     def test_market_rank_projects_global_positions_into_watchlist(self):
         rows = [
-            {"rank": 0, "stock_id": "2330", "status": "ready", "time": "2026-07-17"},
-            {"rank": 0, "stock_id": "2317", "status": "error", "time": None},
-            {"rank": 0, "stock_id": "2454", "status": "ready", "time": "2026-07-17"},
+            {
+                "rank": 0,
+                "stock_id": "2330",
+                "status": "ready",
+                "time": "2026-07-17",
+                "score": 1,
+                "signal_count": 1,
+            },
+            {
+                "rank": 0,
+                "stock_id": "2317",
+                "status": "error",
+                "time": None,
+                "score": 0,
+                "signal_count": 0,
+            },
+            {
+                "rank": 0,
+                "stock_id": "2454",
+                "status": "ready",
+                "time": "2026-07-17",
+                "score": 1,
+                "signal_count": 1,
+            },
         ]
 
         with (
@@ -563,6 +585,45 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
         self.assertEqual(result["rank_scope"], "tw_market")
         self.assertEqual(result["rank_trade_date"], date(2026, 7, 17))
         self.assertEqual(result["rank_universe_count"], 1_869)
+        self.assertEqual(result["underlying_trade_date"], date(2026, 7, 17))
+        self.assertAlmostEqual(result["coverage_ratio"], 2 / 3)
+        self.assertFalse(result["is_live"])
+        self.assertFalse(result["is_full"])
+        self.assertFalse(result["is_live_ranking"])
+        self.assertFalse(result["is_full_requested_universe"])
+        self.assertFalse(result["is_full_market"])
+        self.assertEqual(
+            result["ranking_universe_type"],
+            "market_reference",
+        )
+        self.assertEqual(result["ranking_universe_count"], 1_869)
+        self.assertEqual(result["ranking_returned_count"], 2)
+        self.assertAlmostEqual(
+            result["ranking_coverage_ratio"],
+            2 / 1_869,
+        )
+        self.assertEqual(
+            result["ranking_semantics"],
+            "latest_completed_daily_rows",
+        )
+        serialized = WatchlistGroupRankingRead.model_validate(result).model_dump()
+        self.assertFalse(serialized["is_live_ranking"])
+        self.assertFalse(serialized["is_full_requested_universe"])
+        self.assertFalse(serialized["is_full_market"])
+        self.assertEqual(
+            serialized["ranking_universe_type"],
+            "market_reference",
+        )
+        self.assertEqual(serialized["ranking_universe_count"], 1_869)
+        self.assertEqual(serialized["ranking_returned_count"], 2)
+        self.assertAlmostEqual(
+            serialized["ranking_coverage_ratio"],
+            2 / 1_869,
+        )
+        self.assertEqual(
+            serialized["ranking_semantics"],
+            "latest_completed_daily_rows",
+        )
         self.assertEqual([row["stock_id"] for row in result["results"]], ["2317", "2330", "2454"])
         self.assertEqual(result["results"][0]["market_rank"], 5)
         self.assertEqual(result["results"][1]["market_rank"], 20)

@@ -39,6 +39,15 @@ TAIFEX_DAILY_PROVIDER = "taifex_daily"
 KGI_PROVIDER = "kgi"
 
 SUPPORTED_TAIWAN_FUTURES_SYMBOLS = {"TXF", "MXF", "TMF"}
+TAIWAN_FUTURES_SYMBOL_ALIASES = {
+    "TX": "TXF",
+    "大台": "TXF",
+    "大臺": "TXF",
+    "小台": "MXF",
+    "小臺": "MXF",
+    "微台": "TMF",
+    "微臺": "TMF",
+}
 SUPPORTED_TAIWAN_FUTURES_SESSIONS = {"auto", "regular", "after_hours"}
 SUPPORTED_TAIWAN_FUTURES_QUOTE_PROVIDERS = {"auto", TAIFEX_PROVIDER, KGI_PROVIDER}
 TAIWAN_FUTURES_SESSION_LABELS = {
@@ -133,7 +142,11 @@ def normalize_taiwan_futures_symbols(symbols: Iterable[str] | str | None = None)
 
     normalized: list[str] = []
     for value in raw_symbols:
-        symbol = str(value).strip().upper()
+        requested_symbol = str(value).strip()
+        symbol = TAIWAN_FUTURES_SYMBOL_ALIASES.get(
+            requested_symbol,
+            requested_symbol.upper(),
+        )
         if not symbol:
             continue
         if symbol not in SUPPORTED_TAIWAN_FUTURES_SYMBOLS:

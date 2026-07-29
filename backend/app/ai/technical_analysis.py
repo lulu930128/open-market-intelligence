@@ -877,7 +877,18 @@ def _normalize_technical_points(rows: list[dict[str, Any]]) -> list[dict[str, An
     for row in rows:
         if not isinstance(row, dict):
             continue
-        close = _finite_number(_first_value(row, ("close", "close_price", "last_price", "settlement_price")))
+        close = _finite_number(
+            _first_value(
+                row,
+                (
+                    "close",
+                    "close_price",
+                    "last_price",
+                    "settlement_price",
+                    "price",
+                ),
+            )
+        )
         if close is None:
             continue
         points.append(
@@ -889,6 +900,7 @@ def _normalize_technical_points(rows: list[dict[str, Any]]) -> list[dict[str, An
                 "close": close,
                 "volume": _finite_number(_first_value(row, ("volume", "trade_volume", "total_volume"))),
                 "trade_value": _finite_number(row.get("trade_value")),
+                "session": _json_value(row.get("session")),
             }
         )
     return points

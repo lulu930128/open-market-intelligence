@@ -12,6 +12,7 @@ _FRESHNESS_POSITIVE_STATUSES = {
     "daily_close",
     "fresh",
     "healthy",
+    "historical",
     "live",
     "ok",
     "ready",

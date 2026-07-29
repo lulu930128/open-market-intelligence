@@ -25,6 +25,9 @@ from app.market.indices import refresh_market_index_summary
 from app.market.taiwan_market_state import persist_taiwan_market_minute_state
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.market.stock_selection_refresh import refresh_selected_stock_data
+from app.market.taiwan_fundamental_snapshot_refresh import (
+    refresh_taiwan_fundamental_snapshot,
+)
 from app.market.tw_derivatives import (
     TaiwanDerivativesFetchError,
     refresh_taiwan_derivatives,
@@ -258,6 +261,31 @@ def run_market_fundamental_metrics_job(
             force=force,
             sleep_seconds=sleep_seconds,
         )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_taiwan_fundamental_snapshot_refresh_job(
+    job_id: int,
+    category: str,
+    dataset: str,
+    expected_key: str,
+    completion_target: str,
+    sleep_seconds: float,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Refreshing Taiwan scheduled fundamental snapshot.")
+        result = refresh_taiwan_fundamental_snapshot(
+            db,
+            category=category,
+            dataset=dataset,
+            expected_key=expected_key,
+            completion_target=completion_target,
+            sleep_seconds=sleep_seconds,
+            job_run_id=job_id,
+        )
+        progress(1, 1, "Taiwan scheduled fundamental snapshot finished.")
+        return result
 
     run_tracked_job(job_id, worker)
 

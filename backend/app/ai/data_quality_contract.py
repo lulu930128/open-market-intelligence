@@ -16,6 +16,7 @@ READY_STATUSES = {
     "final_snapshot",
     "fresh",
     "healthy",
+    "historical",
     "latest_completed_session",
     "latest_session_close",
     "live",
@@ -336,6 +337,137 @@ def _is_known_jp_lunch_gap(
     )
 
 
+def _has_taiwan_auction_close_evidence(value: Any, *, depth: int = 0) -> bool:
+    if depth > 6:
+        return False
+    if isinstance(value, dict):
+        for key in (
+            "session_phase",
+            "market_status",
+            "quote_semantics",
+            "official_close_status",
+            "delivery_status",
+        ):
+            normalized = (
+                str(value.get(key) or "")
+                .strip()
+                .casefold()
+                .replace("-", "_")
+            )
+            if (
+                "closing_auction" in normalized
+                or "official_close" in normalized
+                or (
+                    key == "official_close_status"
+                    and normalized
+                    in {
+                        "confirmed",
+                        "confirmed_latest_session",
+                        "pending",
+                    }
+                )
+                or normalized in {"closed", "post_close", "post_close_snapshot"}
+            ):
+                return True
+        return any(
+            _has_taiwan_auction_close_evidence(child, depth=depth + 1)
+            for child in value.values()
+            if isinstance(child, (dict, list))
+        )
+    if isinstance(value, list):
+        return any(
+            _has_taiwan_auction_close_evidence(child, depth=depth + 1)
+            for child in value[-100:]
+            if isinstance(child, (dict, list))
+        )
+    return False
+
+
+def _is_known_taiwan_closing_auction_gap(
+    previous: datetime,
+    current: datetime,
+    *,
+    market: str,
+    has_auction_close_evidence: bool,
+) -> bool:
+    if (
+        market.upper() not in {"TW", "TAIWAN"}
+        or not has_auction_close_evidence
+        or previous.date() != current.date()
+    ):
+        return False
+    previous_minutes = previous.hour * 60 + previous.minute
+    current_minutes = current.hour * 60 + current.minute
+    return (
+        (
+            13 * 60 + 24 <= previous_minutes <= 13 * 60 + 25
+            and 13 * 60 + 30 <= current_minutes <= 13 * 60 + 31
+        )
+        or (
+            13 * 60 + 30 <= previous_minutes <= 13 * 60 + 31
+            and 13 * 60 + 32 <= current_minutes <= 13 * 60 + 34
+        )
+    )
+
+
+def _market_session_events(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    if depth > 6:
+        return []
+    if isinstance(value, dict):
+        events = value.get("market_events")
+        if isinstance(events, list):
+            return [item for item in events if isinstance(item, dict)]
+        rows: list[dict[str, Any]] = []
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                rows.extend(_market_session_events(child, depth=depth + 1))
+        return rows
+    if isinstance(value, list):
+        rows: list[dict[str, Any]] = []
+        for child in value[-100:]:
+            if isinstance(child, (dict, list)):
+                rows.extend(_market_session_events(child, depth=depth + 1))
+        return rows
+    return []
+
+
+def _market_halt_event_for_gap(
+    previous: datetime,
+    current: datetime,
+    *,
+    market: str,
+    events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    normalized_market = market.strip().upper()
+    for event in events:
+        if str(event.get("market") or "").strip().upper() != normalized_market:
+            continue
+        event_type = str(event.get("event_type") or "").strip().casefold()
+        if event_type not in {
+            "circuit_breaker",
+            "market_halt",
+            "trading_halt",
+            "inferred_market_halt",
+        }:
+            continue
+        halt_start = _parse_datetime(
+            event.get("halt_start_at") or event.get("triggered_at")
+        )
+        resumed_at = _parse_datetime(
+            event.get("continuous_trading_resumed_at")
+            or event.get("halt_end_at")
+        )
+        if halt_start is None or resumed_at is None:
+            continue
+        if (
+            halt_start.date() == previous.date() == current.date()
+            and halt_start <= current
+            and resumed_at >= previous
+        ):
+            return event
+    return None
+
+
 def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
     points = _series_points(value)
     timestamps = [parsed for point in points if (parsed := _point_time(point))]
@@ -344,7 +476,12 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
     gap_count = 0
     duplicate_count = 0
     non_monotonic_count = 0
+    recognized_session_gap_count = 0
+    market_halt_gap_count = 0
+    market_event_refs: list[str] = []
     observed_seconds: list[float] = []
+    has_auction_close_evidence = _has_taiwan_auction_close_evidence(value)
+    market_events = _market_session_events(value)
     for previous, current in zip(timestamps, timestamps[1:]):
         delta = (current - previous).total_seconds()
         if delta == 0:
@@ -353,13 +490,33 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
         if delta < 0:
             non_monotonic_count += 1
             continue
+        if expected_seconds and delta > expected_seconds * 3:
+            if _is_known_jp_lunch_gap(previous, current, market=market):
+                recognized_session_gap_count += 1
+                continue
+            elif _is_known_taiwan_closing_auction_gap(
+                previous,
+                current,
+                market=market,
+                has_auction_close_evidence=has_auction_close_evidence,
+            ):
+                recognized_session_gap_count += 1
+                continue
+            elif halt_event := _market_halt_event_for_gap(
+                previous,
+                current,
+                market=market,
+                events=market_events,
+            ):
+                recognized_session_gap_count += 1
+                market_halt_gap_count += 1
+                event_id = str(halt_event.get("event_id") or "").strip()
+                if event_id and event_id not in market_event_refs:
+                    market_event_refs.append(event_id)
+                continue
+            else:
+                gap_count += 1
         observed_seconds.append(delta)
-        if (
-            expected_seconds
-            and delta > max(expected_seconds * 3, 600)
-            and not _is_known_jp_lunch_gap(previous, current, market=market)
-        ):
-            gap_count += 1
     observed_median = median(observed_seconds) if observed_seconds else None
     interval_mismatch = bool(
         expected_seconds
@@ -384,6 +541,8 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
         if not timestamps
         else "partial"
         if issues
+        else "continuous_with_market_halt"
+        if market_halt_gap_count
         else "continuous"
     )
     return {
@@ -395,6 +554,19 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
         "duplicate_count": duplicate_count,
         "non_monotonic_count": non_monotonic_count,
         "gap_count": gap_count,
+        "recognized_session_gap_count": recognized_session_gap_count,
+        "market_halt_gap_count": market_halt_gap_count,
+        "gap_reason": "market_halt" if market_halt_gap_count else None,
+        "market_event_refs": market_event_refs,
+        "session_gap_evidence": (
+            "market_event"
+            if market_halt_gap_count
+            else
+            "closing_auction_or_official_close"
+            if market.upper() in {"TW", "TAIWAN"}
+            and has_auction_close_evidence
+            else None
+        ),
         "issues": issues,
     }
 
@@ -619,6 +791,15 @@ def _quality_for_capability(
             "status_class": "blocked",
         },
     )
+    realtime_policy_unsatisfied = bool(
+        realtime and realtime.get("policy_satisfied") is False
+    )
+    if realtime_policy_unsatisfied:
+        canonical_candidate = {
+            "source": "realtime_policy",
+            "status": "live_requirement_not_satisfied",
+            "status_class": "blocked",
+        }
     if not payload_included and canonical_candidate["status_class"] != "neutral":
         canonical_candidate = {
             "source": "payload",
@@ -708,6 +889,8 @@ def _quality_for_capability(
     issues.extend(str(value) for value in continuity.get("issues") or [])
     if units["missing_volume_unit"]:
         issues.append("volume_unit_missing")
+    if realtime_policy_unsatisfied:
+        issues.append("live_requirement_not_satisfied")
     return {
         "capability": capability_id,
         "domain": item.get("domain"),
@@ -932,11 +1115,17 @@ def build_quality_contract(
         for item in required_rows
         if item.get("capability") != "target.identity"
     ]
+    unmet_required_capabilities = [
+        str(item.get("capability"))
+        for item in selection.get("unmet_required_capabilities") or []
+        if isinstance(item, dict) and str(item.get("capability") or "").strip()
+    ]
     blocked_required = [
         str(item["capability"])
         for item in required_rows
         if not item.get("facts_usable")
     ]
+    blocked_required.extend(unmet_required_capabilities)
     limited_required = [
         str(item["capability"])
         for item in required_rows
@@ -989,6 +1178,14 @@ def build_quality_contract(
         else "high"
     )
     issues = list(fusion_issues)
+    for capability_id in unmet_required_capabilities:
+        issues.append(
+            {
+                "code": "required_capability_unsupported",
+                "severity": "blocked",
+                "capabilities": [capability_id],
+            }
+        )
     for item in capability_rows.values():
         for code in item.get("issues") or []:
             issues.append(

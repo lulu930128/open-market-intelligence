@@ -240,8 +240,10 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "target_date",
         "lookback_days",
         "interval",
+        "requested_interval",
         "source_interval",
         "effective_interval",
+        "interval_status",
         "sampling_mode",
         "original_point_count",
         "returned_point_count",
@@ -281,6 +283,10 @@ def _compact_result(value: Any) -> dict[str, Any]:
             value.get("source_interval")
             or value.get("interval")
         )
+        requested_interval = (
+            value.get("requested_interval")
+            or value.get("interval")
+        )
         effective_interval = (
             value.get("effective_interval")
             or source_interval
@@ -297,6 +303,8 @@ def _compact_result(value: Any) -> dict[str, Any]:
         )
         if source_interval is not None:
             summary["source_interval"] = source_interval
+        if requested_interval is not None:
+            summary["requested_interval"] = requested_interval
         if effective_interval is not None:
             summary["effective_interval"] = effective_interval
         summary["points"] = points
@@ -433,7 +441,14 @@ def _execute_tool(
         )
 
     if tool_name == "us.read_intraday_trend":
-        return us_market_service.get_us_intraday_trend(symbol=symbol, db=db)
+        session_scope = str(args.get("session_scope") or "regular").strip().lower()
+        if session_scope not in {"regular", "extended", "all"}:
+            session_scope = "regular"
+        return us_market_service.get_us_intraday_trend(
+            symbol=symbol,
+            session_scope=session_scope,
+            db=db,
+        )
 
     if tool_name == "us.refresh_daily_price":
         return us_market_service.refresh_us_daily_prices(

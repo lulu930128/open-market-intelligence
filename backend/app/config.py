@@ -126,17 +126,26 @@ class Settings(BaseSettings):
         DEFAULT_DB_PATH.parent / "tw_corporate_events.json"
     )
     enable_tw_broker_branch_scheduler: bool = True
-    scheduler_tw_broker_branch_refresh_time: str = "16:00"
+    scheduler_tw_broker_branch_refresh_time: str = "16:05"
     scheduler_tw_broker_branch_refresh_day_of_week: str = "mon-fri"
     scheduler_tw_broker_branch_sleep_seconds: float = 0.5
     scheduler_tw_broker_branch_max_stocks: int = 2500
     scheduler_tw_broker_branch_max_runtime_seconds: int = 7200
     scheduler_tw_broker_branch_reconcile_interval_minutes: int = 30
     scheduler_tw_broker_branch_reconcile_until: str = "20:00"
+    enable_tw_stock_detail_scheduler: bool = True
+    scheduler_tw_institutional_refresh_time: str = "20:05"
+    scheduler_tw_margin_refresh_time: str = "21:05"
+    scheduler_tw_shareholding_refresh_time: str = "12:05"
+    scheduler_tw_revenue_refresh_time: str = "00:05"
+    scheduler_tw_financial_refresh_time: str = "00:05"
     scheduler_market_chip_refresh_index_ids: str = "TAIEX,TPEX"
     scheduler_market_chip_refresh_force: bool = False
     enable_taiwan_market_index_scheduler: bool = True
     scheduler_taiwan_market_index_interval_seconds: int = 5
+    enable_taiwan_quote_contract_scheduler: bool = True
+    scheduler_taiwan_quote_contract_symbols: str = "2330"
+    scheduler_taiwan_quote_contract_max_symbols: int = 3
     enable_taiwan_futures_scheduler: bool = True
     taiwan_futures_quote_provider: str = "taifex_mis"
     scheduler_taiwan_futures_symbols: str = "TXF,MXF,TMF"

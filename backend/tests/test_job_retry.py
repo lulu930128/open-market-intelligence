@@ -97,6 +97,93 @@ class JobRetryTests(unittest.TestCase):
         )
         self.assertEqual(request["index_ids"], ["TAIEX", "TPEX"])
 
+    def test_retry_config_recreates_scheduled_margin_refresh_task(self) -> None:
+        job = SimpleNamespace(
+            id=15,
+            job_type="scheduler.market_margin_daily_refresh",
+            status="error",
+            target="2026-07-24",
+            progress_current=0,
+            progress_total=1,
+            message=None,
+            error_message="provider unavailable",
+            request_json=json.dumps(
+                {
+                    "start_date": "2026-07-24",
+                    "end_date": "2026-07-24",
+                    "categories": ["margin_trading"],
+                    "sleep_seconds": 0.2,
+                    "skip_existing": True,
+                }
+            ),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, request = _retry_config(job)
+
+        self.assertIs(task, backfill_tasks.run_market_daily_metrics_job)
+        self.assertEqual(
+            task_args,
+            (
+                date(2026, 7, 24),
+                date(2026, 7, 24),
+                ["margin_trading"],
+                30,
+                False,
+                0.2,
+                True,
+            ),
+        )
+        self.assertEqual(request["categories"], ["margin_trading"])
+
+    def test_retry_config_recreates_fundamental_snapshot_task(self) -> None:
+        job = SimpleNamespace(
+            id=17,
+            job_type="scheduler.tw_stock_detail_financial_metrics_refresh",
+            status="error",
+            target="market:2026Q1",
+            progress_current=0,
+            progress_total=1,
+            message=None,
+            error_message="source still stale",
+            request_json=json.dumps(
+                {
+                    "category": "financial_metrics",
+                    "dataset": "financial_metric_quarterly",
+                    "expected_key": "2026Q1",
+                    "completion_target": "market:2026Q1",
+                    "sleep_seconds": 0.2,
+                }
+            ),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, request = _retry_config(job)
+
+        self.assertIs(
+            task,
+            backfill_tasks.run_taiwan_fundamental_snapshot_refresh_job,
+        )
+        self.assertEqual(
+            task_args,
+            (
+                "financial_metrics",
+                "financial_metric_quarterly",
+                "2026Q1",
+                "market:2026Q1",
+                0.2,
+            ),
+        )
+        self.assertEqual(request["expected_key"], "2026Q1")
+
     def test_retry_config_preserves_basic_selection_refresh_profile(self) -> None:
         job = SimpleNamespace(
             id=13,

@@ -3,6 +3,61 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+if ($null -eq ("OmiTaskbarCreatedListener" -as [type])) {
+    Add-Type -ReferencedAssemblies @("System.Windows.Forms") -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+public sealed class OmiTaskbarCreatedListener : NativeWindow, IDisposable
+{
+    private readonly int taskbarCreatedMessage;
+
+    public event EventHandler TaskbarCreated;
+
+    public OmiTaskbarCreatedListener()
+    {
+        taskbarCreatedMessage = unchecked((int)RegisterWindowMessage("TaskbarCreated"));
+        CreateParams createParams = new CreateParams();
+        createParams.Caption = "Open Market Intelligence Taskbar Listener";
+        CreateHandle(createParams);
+    }
+
+    public int TaskbarCreatedMessage
+    {
+        get { return taskbarCreatedMessage; }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessage(string message);
+
+    protected override void WndProc(ref Message message)
+    {
+        if (message.Msg == taskbarCreatedMessage)
+        {
+            EventHandler handler = TaskbarCreated;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+
+        base.WndProc(ref message);
+    }
+
+    public void Dispose()
+    {
+        if (Handle != IntPtr.Zero)
+        {
+            DestroyHandle();
+        }
+
+        GC.SuppressFinalize(this);
+    }
+}
+"@
+}
+
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $script:RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
@@ -11,6 +66,10 @@ $script:FrontendDir = Join-Path $script:RepoRoot "frontend"
 $script:TrayIconPath = Join-Path $script:RepoRoot "ATRI-MyDearMoments.ico"
 $script:AppDisplayName = "OMI_search"
 $script:TrayIcon = $null
+$script:ActivationEventName = "OpenMarketIntelligenceLauncherActivate"
+$script:ActivationEvent = $null
+$script:ActivationTimer = $null
+$script:TaskbarListener = $null
 $script:IsPackagedRelease = Test-Path -LiteralPath (Join-Path $script:RepoRoot "release-manifest.json")
 $script:AppDataRoot = if ($script:IsPackagedRelease) {
     Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Open Market Intelligence"
@@ -94,11 +153,47 @@ function Show-Message {
 }
 
 $script:Mutex = New-Object System.Threading.Mutex($false, "OpenMarketIntelligenceLauncher")
-if (-not $script:Mutex.WaitOne(0, $false)) {
-    Write-LauncherLog "$($script:AppDisplayName) launcher start requested but an existing tray instance is already running; services were not restarted." "WARN"
-    Show-Message "$($script:AppDisplayName) is already running in the system tray. Use Restart Services from the tray menu to restart backend/frontend services."
+$script:OwnsMutex = $false
+try {
+    $script:OwnsMutex = $script:Mutex.WaitOne(0, $false)
+}
+catch [System.Threading.AbandonedMutexException] {
+    $script:OwnsMutex = $true
+    Write-LauncherLog "Recovered ownership of an abandoned launcher mutex." "WARN"
+}
+
+if (-not $script:OwnsMutex) {
+    $activationSignaled = $false
+    try {
+        $existingActivationEvent = [System.Threading.EventWaitHandle]::OpenExisting($script:ActivationEventName)
+        try {
+            $activationSignaled = $existingActivationEvent.Set()
+        }
+        finally {
+            $existingActivationEvent.Dispose()
+        }
+    }
+    catch {
+        Write-LauncherLog "Existing launcher activation signal failed. error=$($_.Exception.Message)" "WARN"
+    }
+
+    if ($activationSignaled) {
+        Write-LauncherLog "$($script:AppDisplayName) launcher activation requested; the existing tray instance will re-register its icon."
+    }
+    else {
+        Write-LauncherLog "$($script:AppDisplayName) launcher start requested but an existing tray instance is already running and could not be activated; services were not restarted." "WARN"
+        Show-Message "$($script:AppDisplayName) is already running, but its tray icon could not be restored automatically. End the existing launcher process before starting it again."
+    }
+
+    $script:Mutex.Dispose()
     exit 0
 }
+
+$script:ActivationEvent = New-Object System.Threading.EventWaitHandle(
+    $false,
+    [System.Threading.EventResetMode]::AutoReset,
+    $script:ActivationEventName
+)
 
 Write-LauncherLog "Launcher started. repo_root=$($script:RepoRoot)"
 Write-LauncherLog "Logs root: $($script:LogRoot). Daily folders: backend, frontend, launcher."
@@ -1130,6 +1225,36 @@ function Get-TrayIcon {
     return [System.Drawing.SystemIcons]::Application
 }
 
+function Restore-TrayIcon {
+    param([Parameter(Mandatory = $true)][string]$Reason)
+
+    if ($script:IsShuttingDown -or $null -eq $script:NotifyIcon) {
+        return
+    }
+
+    try {
+        $script:NotifyIcon.Visible = $false
+        $script:NotifyIcon.Icon = Get-TrayIcon
+        $script:NotifyIcon.Visible = $true
+        Write-LauncherLog "Tray icon re-registered. reason=$Reason"
+
+        try {
+            $script:NotifyIcon.ShowBalloonTip(
+                3000,
+                $script:AppDisplayName,
+                "$($script:AppDisplayName) tray controls are available again.",
+                [System.Windows.Forms.ToolTipIcon]::Info
+            )
+        }
+        catch {
+            Write-LauncherLog "Tray icon restored but its notification could not be shown. reason=$Reason error=$($_.Exception.Message)" "WARN"
+        }
+    }
+    catch {
+        Write-LauncherLog "Tray icon re-registration failed. reason=$Reason error=$($_.Exception.Message)" "ERROR"
+    }
+}
+
 function Stop-ProcessTree {
     param(
         $Process,
@@ -1400,6 +1525,11 @@ $script:NotifyIcon.Icon = Get-TrayIcon
 $script:NotifyIcon.Text = "$($script:AppDisplayName): starting"
 $script:NotifyIcon.Visible = $true
 
+$script:TaskbarListener = New-Object OmiTaskbarCreatedListener
+$script:TaskbarListener.add_TaskbarCreated({
+    Restore-TrayIcon -Reason "taskbar-created"
+})
+
 # ContextMenuStrip can be pushed behind the Windows 11 hidden-icons flyout
 # because this tray-only process has no foreground top-level window. The
 # native ContextMenu integration keeps the menu in the tray foreground.
@@ -1446,6 +1576,7 @@ $exitItem.add_Click({
     $script:IsShuttingDown = $true
     Write-LauncherLog "Exit requested from tray menu."
     $script:Timer.Stop()
+    $script:ActivationTimer.Stop()
     $script:NotifyIcon.Visible = $false
     try {
         Stop-Services
@@ -1514,6 +1645,14 @@ $script:Timer.add_Tick({
     }
 })
 
+$script:ActivationTimer = New-Object System.Windows.Forms.Timer
+$script:ActivationTimer.Interval = 250
+$script:ActivationTimer.add_Tick({
+    if ($null -ne $script:ActivationEvent -and $script:ActivationEvent.WaitOne(0)) {
+        Restore-TrayIcon -Reason "secondary-launch"
+    }
+})
+
 [System.Windows.Forms.Application]::add_ApplicationExit({
     if (-not $script:IsShuttingDown) {
         Write-LauncherLog "Application exit detected."
@@ -1521,17 +1660,28 @@ $script:Timer.add_Tick({
     }
 
     $script:Timer.Stop()
+    $script:ActivationTimer.Stop()
+    if ($null -ne $script:TaskbarListener) {
+        $script:TaskbarListener.Dispose()
+    }
     $script:NotifyIcon.Dispose()
     if ($null -ne $script:TrayIcon) {
         $script:TrayIcon.Dispose()
     }
-    $script:Mutex.ReleaseMutex()
+    if ($null -ne $script:ActivationEvent) {
+        $script:ActivationEvent.Dispose()
+    }
+    if ($script:OwnsMutex) {
+        $script:Mutex.ReleaseMutex()
+    }
     $script:Mutex.Dispose()
     Write-LauncherLog "Launcher stopped."
 })
 
 Start-Services
 $script:Timer.Start()
+$script:ActivationTimer.Start()
+Write-LauncherLog "Tray recovery initialized. activation_event=$($script:ActivationEventName) taskbar_message=$($script:TaskbarListener.TaskbarCreatedMessage)"
 $script:NotifyIcon.ShowBalloonTip(3000, $script:AppDisplayName, "$($script:AppDisplayName) is running in the system tray.", [System.Windows.Forms.ToolTipIcon]::Info)
 
 [System.Windows.Forms.Application]::Run()

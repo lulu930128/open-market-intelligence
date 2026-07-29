@@ -18,10 +18,14 @@ from app.market.taiwan_rules import (
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_LABELS,
     TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_DATASET_MONTHLY_REVENUE,
+    TAIWAN_DATASET_FINANCIAL_METRICS,
     TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
     TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME,
     TAIWAN_MARGIN_TRADE_RELEASE_TIME,
     expected_date_for_dataset,
+    financial_metrics_release_window,
+    monthly_revenue_release_window,
     shareholding_distribution_release_window,
 )
 from app.market.trading_calendar import (
@@ -77,6 +81,7 @@ MarketCode = Literal["tw", "us", "jp", "kr"]
 
 TAIWAN_PREOPEN_TIME = time(hour=8, minute=30)
 TAIWAN_SESSION_OPEN_TIME = time(hour=9, minute=0)
+TAIWAN_CLOSING_AUCTION_TIME = time(hour=13, minute=25)
 TAIWAN_SESSION_CLOSE_TIME = time(hour=13, minute=30)
 KR_SESSION_OPEN_TIME = time(hour=9, minute=0)
 KR_SESSION_CLOSE_TIME = time(hour=15, minute=30)
@@ -169,6 +174,7 @@ def _session_phase(
     preopen_time: time,
     open_time: time,
     close_time: time,
+    closing_auction_time: time | None = None,
 ) -> str:
     if not is_trading_day:
         return "market_closed"
@@ -178,6 +184,11 @@ def _session_phase(
         return "preopen_pending"
     if current_time < open_time:
         return "preopen"
+    if (
+        closing_auction_time is not None
+        and closing_auction_time <= current_time < close_time
+    ):
+        return "closing_auction"
     if current_time < close_time:
         return "regular"
     return "post_close"
@@ -304,6 +315,7 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         preopen_time=TAIWAN_PREOPEN_TIME,
         open_time=TAIWAN_SESSION_OPEN_TIME,
         close_time=TAIWAN_SESSION_CLOSE_TIME,
+        closing_auction_time=TAIWAN_CLOSING_AUCTION_TIME,
     )
 
     release_windows = {
@@ -327,6 +339,12 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             now=local_now,
         ).isoformat(),
     }
+    release_windows[TAIWAN_DATASET_MONTHLY_REVENUE] = (
+        monthly_revenue_release_window(now=local_now)
+    )
+    release_windows[TAIWAN_DATASET_FINANCIAL_METRICS] = (
+        financial_metrics_release_window(now=local_now)
+    )
     release_windows["market_chip_daily"] = _release_window(
         key="market_chip_daily",
         label="Market chip daily",
@@ -379,7 +397,11 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             "open_time": TAIWAN_SESSION_OPEN_TIME.strftime("%H:%M"),
             "close_time": TAIWAN_SESSION_CLOSE_TIME.strftime("%H:%M"),
             "next_session_start_at": next_session_start_at.isoformat(),
-            "is_polling_window": phase in {"preopen", "regular"},
+            "is_polling_window": phase in {
+                "preopen",
+                "regular",
+                "closing_auction",
+            },
             "is_after_close": phase == "post_close",
         },
         "release_windows": release_windows,

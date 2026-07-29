@@ -5307,6 +5307,17 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByTestId("watchlist-radar-result-AAPL")).toContainText(
       "current-risk-response"
     );
+    const radarHeaderActions = page.getByTestId("watchlist-radar-header-actions");
+    const radarControls = radarHeaderActions.getByTestId("watchlist-radar-controls");
+    const radarNotice = radarHeaderActions.getByTestId("watchlist-radar-notice");
+    await expect(radarNotice).toContainText("此雷達僅使用 OHLCV");
+    const [controlsBox, noticeBox] = await Promise.all([
+      radarControls.boundingBox(),
+      radarNotice.boundingBox(),
+    ]);
+    expect(controlsBox).not.toBeNull();
+    expect(noticeBox).not.toBeNull();
+    expect(noticeBox!.y).toBeGreaterThanOrEqual(controlsBox!.y + controlsBox!.height);
 
     await staleActionResponse;
     await expect(page.getByTestId("watchlist-radar-result-AAPL")).toContainText(

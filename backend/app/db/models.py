@@ -622,6 +622,121 @@ class TaiwanStockQuoteSnapshot(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class TaiwanQuoteContractSnapshot(Base):
+    __tablename__ = "taiwan_quote_contract_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_id",
+            "trade_date",
+            "capture_slot",
+            name="uq_tw_quote_contract_stock_date_slot",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    market: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    capture_slot: Mapped[str] = mapped_column(String(5), index=True)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    quote_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    session_phase: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+        index=True,
+    )
+    capture_status: Mapped[str] = mapped_column(String(30), index=True)
+    refresh_outcome: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    freshness_status: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(
+        String(120),
+        default="twse_mis_quote_depth",
+    )
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+
+class TaiwanIndexContractSnapshot(Base):
+    __tablename__ = "taiwan_index_contract_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "index_id",
+            "trade_date",
+            "capture_slot",
+            name="uq_tw_index_contract_index_date_slot",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    index_id: Mapped[str] = mapped_column(String(20), index=True)
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    capture_slot: Mapped[str] = mapped_column(String(5), index=True)
+    scheduled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+    session_phase: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+        index=True,
+    )
+    capture_status: Mapped[str] = mapped_column(String(30), index=True)
+    selected_candidate: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+    selected_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    selection_reason: Mapped[str | None] = mapped_column(
+        String(160),
+        nullable=True,
+    )
+    official_close_status: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(
+        String(120),
+        default="taiwan_index_contract_capture",
+    )
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+
 class TaiwanFuturesQuoteSnapshot(Base):
     __tablename__ = "taiwan_futures_quote_snapshot"
 

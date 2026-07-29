@@ -115,13 +115,12 @@ def _infer_analysis_horizon(payload: AiAskRequest) -> str:
     return horizon
 
 
-def _include_tw_intraday(payload: AiAskRequest) -> bool:
-    return decision_core.include_tw_intraday(
-        question=payload.question,
-        requested_horizon=payload.analysis_horizon,
-        strategy_profile=payload.strategy_profile,
-        allow_external_fetch=payload.allow_external_fetch,
-    )
+def _include_tw_intraday(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> bool:
+    return ask_execution._include_tw_intraday(payload, policy=policy)
 
 
 _normalize_text = scope_resolution._normalize_text

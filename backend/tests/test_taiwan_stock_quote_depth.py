@@ -7,13 +7,25 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, StockMaster, TaiwanStockQuoteSnapshot
+from app.db.models import (
+    Base,
+    StockMaster,
+    TaiwanQuoteContractSnapshot,
+    TaiwanStockQuoteSnapshot,
+)
+from app.jobs.taiwan_quote_contract_scheduler import (
+    add_taiwan_quote_contract_snapshot_jobs,
+)
 from app.market.quote_depth import (
     _QUOTE_DEPTH_CACHE,
+    TAIWAN_QUOTE_CONTRACT_SLOTS,
+    capture_taiwan_quote_contract_snapshot,
+    get_taiwan_quote_contract_replay,
     get_taiwan_stock_quote_depth,
     reset_twse_mis_quote_depth_guard,
     resolve_taiwan_stock_quote_phase,
 )
+from app.market.schemas import TaiwanStockQuoteDepthRead
 from app.market.trading_calendar import TAIWAN_TZ
 
 
@@ -119,7 +131,13 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertEqual(result["freshness"]["status"], "live")
         self.assertEqual(result["freshness"]["age_seconds"], 30)
         self.assertEqual(result["freshness"]["fetch_age_seconds"], 0)
-        self.assertEqual(result["quote_time"].isoformat(), "2026-06-30T09:05:12+08:00")
+        self.assertEqual(result["quote_time"].isoformat(), "2026-06-30T09:05:42+08:00")
+        self.assertEqual(result["snapshot_time"], result["quote_time"])
+        self.assertEqual(
+            result["provider_event_time"].isoformat(),
+            "2026-06-30T09:05:12+08:00",
+        )
+        self.assertEqual(result["last_trade_time"], result["provider_event_time"])
         self.assertEqual(result["refresh_outcome"], "updated")
         self.assertEqual(cached_result["refresh_outcome"], "cache_hit")
         self.assertTrue(result["depth_available"])
@@ -131,13 +149,355 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertAlmostEqual(result["change_pct"], 40 / 2370 * 100)
         self.assertEqual(len(result["bid_levels"]), 5)
         self.assertEqual(len(result["ask_levels"]), 5)
+        self.assertEqual(result["bid_depth"], result["bid_levels"])
+        self.assertEqual(result["ask_depth"], result["ask_levels"])
+        self.assertEqual(result["bid_depth"][0]["volume_lots"], 978)
+        self.assertIsNone(result["bid_depth"][0]["order_count"])
+        self.assertEqual(
+            result["bid_depth"][0]["order_count_status"],
+            "not_provided",
+        )
         self.assertEqual(result["bid_total_size_lots"], 5050)
         self.assertEqual(result["ask_total_size_lots"], 424)
+        self.assertEqual(result["top5_bid_volume_lots"], 5050)
+        self.assertEqual(result["top5_ask_volume_lots"], 424)
+        self.assertAlmostEqual(
+            result["top5_imbalance"],
+            (5050 - 424) / (5050 + 424),
+        )
+        self.assertEqual(result["depth_volume_unit"], "lots")
+        self.assertEqual(result["depth_order_count_status"], "not_provided")
+        self.assertEqual(
+            result["ohlc_summary"]["semantics"],
+            "current_session_to_date",
+        )
 
         rows = self.db.query(TaiwanStockQuoteSnapshot).all()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].stock_id, "2330")
         self.assertEqual(rows[0].quote_time.isoformat(), "2026-06-30T09:05:12")
+
+    def test_fixed_slot_capture_is_idempotent_and_replay_is_read_only(self) -> None:
+        first_now = datetime(2026, 6, 30, 8, 50, 2, tzinfo=TAIWAN_TZ)
+        second_now = datetime(2026, 6, 30, 8, 55, 3, tzinfo=TAIWAN_TZ)
+
+        def quote_payload(*, now: datetime, **_kwargs) -> dict:
+            return {
+                "stock_id": "2330",
+                "stock_name": "TSMC",
+                "market": "TWSE",
+                "provider": "twse_mis",
+                "source": "twse_mis_quote_depth",
+                "session_phase": "preopen_auction",
+                "quote_time": now,
+                "refresh_outcome": "updated",
+                "last_price": None,
+                "depth_available": True,
+                "best_bid_price": 2410.0,
+                "best_ask_price": 2415.0,
+                "auction_indicative_available": True,
+                "freshness": {
+                    "status": "live",
+                    "is_live": True,
+                    "is_stale": False,
+                },
+            }
+
+        with patch(
+            "app.market.quote_depth.get_taiwan_stock_quote_depth",
+            side_effect=quote_payload,
+        ):
+            first = capture_taiwan_quote_contract_snapshot(
+                db=self.db,
+                stock_id="2330",
+                capture_slot="08:50",
+                now=first_now,
+            )
+            repeated = capture_taiwan_quote_contract_snapshot(
+                db=self.db,
+                stock_id="2330",
+                capture_slot="08:50",
+                now=first_now,
+            )
+            second = capture_taiwan_quote_contract_snapshot(
+                db=self.db,
+                stock_id="2330",
+                capture_slot="08:55",
+                now=second_now,
+            )
+
+        before_replay_count = self.db.query(TaiwanQuoteContractSnapshot).count()
+        replay = get_taiwan_quote_contract_replay(
+            db=self.db,
+            stock_id="2330",
+            trade_date=first_now.date(),
+        )
+        after_replay_count = self.db.query(TaiwanQuoteContractSnapshot).count()
+
+        self.assertEqual(first["capture_status"], "captured")
+        self.assertEqual(repeated["capture_status"], "captured")
+        self.assertEqual(second["capture_status"], "captured")
+        self.assertEqual(before_replay_count, 2)
+        self.assertEqual(after_replay_count, before_replay_count)
+        self.assertEqual(replay["required_slots"], list(TAIWAN_QUOTE_CONTRACT_SLOTS))
+        self.assertEqual(replay["captured_count"], 2)
+        self.assertAlmostEqual(
+            replay["coverage_ratio"],
+            2 / len(TAIWAN_QUOTE_CONTRACT_SLOTS),
+        )
+        self.assertFalse(replay["complete"])
+        self.assertFalse(replay["read_path_side_effects"])
+        captured = {
+            item["capture_slot"]: item
+            for item in replay["snapshots"]
+            if item["status"].startswith("captured")
+        }
+        self.assertEqual(captured["08:50"]["quote"]["provider"], "twse_mis")
+        projected_quote = captured["08:50"]["quote"]
+        self.assertEqual(
+            projected_quote["snapshot_time"],
+            first_now.isoformat(),
+        )
+        self.assertEqual(
+            projected_quote["provider_event_time"],
+            first_now.isoformat(),
+        )
+        self.assertTrue(projected_quote["auction_book_available"])
+        self.assertEqual(projected_quote["auction_book_status"], "depth_only")
+        self.assertEqual(projected_quote["auction_best_bid"], 2410.0)
+        self.assertEqual(projected_quote["auction_best_ask"], 2415.0)
+        self.assertFalse(projected_quote["auction_indicative_available"])
+        self.assertIsNone(projected_quote["indicative_bid"])
+        self.assertIsNone(projected_quote["indicative_ask"])
+        self.assertEqual(
+            projected_quote["replay_projection"],
+            "current_public_contract",
+        )
+        self.assertIn("08:30", replay["missing_slots"])
+
+    def test_fixed_slot_scheduler_registers_every_acceptance_slot(self) -> None:
+        class FakeScheduler:
+            def __init__(self) -> None:
+                self.jobs: list[dict] = []
+
+            def add_job(self, function, **kwargs) -> None:
+                self.jobs.append({"function": function, **kwargs})
+
+        scheduler = FakeScheduler()
+
+        enabled = add_taiwan_quote_contract_snapshot_jobs(scheduler)
+
+        self.assertTrue(enabled)
+        self.assertEqual(len(scheduler.jobs), len(TAIWAN_QUOTE_CONTRACT_SLOTS))
+        self.assertEqual(
+            [job["kwargs"]["capture_slot"] for job in scheduler.jobs],
+            list(TAIWAN_QUOTE_CONTRACT_SLOTS),
+        )
+        self.assertTrue(all(job["max_instances"] == 1 for job in scheduler.jobs))
+
+    def test_preopen_keeps_indicative_book_separate_from_last_trade(self) -> None:
+        now = datetime(2026, 6, 30, 8, 45, 0, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 0, 45, 0, tzinfo=timezone.utc)
+        payload = sample_payload()
+        payload["msgArray"][0].update(
+            {
+                "t": "08:45:00",
+                "z": "-",
+                "o": "-",
+                "h": "-",
+                "l": "-",
+                "v": "0",
+            }
+        )
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertEqual(result["session_phase"], "preopen_auction")
+        self.assertEqual(result["market_status"], "preopen")
+        self.assertEqual(result["quote_semantics"], "preopen_depth_only")
+        self.assertEqual(result["delivery_status"], "live_depth_only")
+        self.assertFalse(result["fallback_used"])
+        self.assertFalse(result["price_available"])
+        self.assertFalse(result["last_trade_available"])
+        self.assertIsNone(result["last_trade_price"])
+        self.assertTrue(result["auction_book_available"])
+        self.assertEqual(result["auction_book_status"], "depth_only")
+        self.assertEqual(
+            result["auction_book_time"].isoformat(),
+            "2026-06-30T08:45:00+08:00",
+        )
+        self.assertFalse(result["auction_indicative_available"])
+        self.assertFalse(result["indicative_match_available"])
+        self.assertEqual(result["indicative_match_status"], "not_provided")
+        self.assertIsNone(result["indicative_unmatched_buy_volume_lots"])
+        self.assertIsNone(result["indicative_unmatched_sell_volume_lots"])
+        self.assertEqual(
+            result["auction_indicative_status"],
+            "not_provided",
+        )
+        self.assertEqual(result["auction_phase"], "preopen_auction")
+        self.assertEqual(
+            result["auction_event_time"].isoformat(),
+            "2026-06-30T08:45:00+08:00",
+        )
+        self.assertEqual(result["auction_best_bid"], 2410.0)
+        self.assertEqual(result["auction_best_ask"], 2415.0)
+        self.assertIsNone(result["indicative_bid"])
+        self.assertIsNone(result["indicative_ask"])
+        self.assertFalse(result["indicative_price_available"])
+        self.assertFalse(result["official_close_available"])
+        self.assertEqual(
+            result["official_close_status"],
+            "not_available_yet",
+        )
+
+    def test_closing_auction_does_not_relabel_last_trade_as_official_close(
+        self,
+    ) -> None:
+        now = datetime(2026, 6, 30, 13, 27, 0, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 5, 27, 0, tzinfo=timezone.utc)
+        payload = sample_payload()
+        payload["msgArray"][0]["t"] = "13:24:59"
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertEqual(result["session_phase"], "closing_auction")
+        self.assertEqual(result["market_status"], "closing_auction")
+        self.assertEqual(
+            result["quote_semantics"],
+            "closing_auction_depth_only",
+        )
+        self.assertEqual(result["delivery_status"], "closing_auction")
+        self.assertTrue(result["last_trade_available"])
+        self.assertEqual(result["last_trade_price"], 2410.0)
+        self.assertTrue(result["auction_book_available"])
+        self.assertFalse(result["auction_indicative_available"])
+        self.assertTrue(result["last_trade_before_auction"])
+        self.assertEqual(
+            result["last_trade_time"].isoformat(),
+            "2026-06-30T13:24:59+08:00",
+        )
+        self.assertEqual(
+            result["auction_book_time"].isoformat(),
+            "2026-06-30T13:27:00+08:00",
+        )
+        self.assertFalse(result["official_close_available"])
+        self.assertEqual(
+            result["official_close_status"],
+            "closing_auction_pending",
+        )
+        public_payload = TaiwanStockQuoteDepthRead.model_validate(
+            result
+        ).model_dump(mode="json")
+        self.assertEqual(
+            public_payload["snapshot_time"],
+            "2026-06-30T13:27:00+08:00",
+        )
+        self.assertEqual(
+            public_payload["provider_event_time"],
+            "2026-06-30T13:24:59+08:00",
+        )
+        self.assertTrue(public_payload["last_trade_before_auction"])
+        self.assertTrue(public_payload["auction_book_available"])
+        self.assertEqual(
+            public_payload["auction_book_time"],
+            "2026-06-30T13:27:00+08:00",
+        )
+
+    def test_post_close_is_pending_until_close_resolution_deadline(self) -> None:
+        now = datetime(2026, 6, 30, 13, 31, 0, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 5, 31, 0, tzinfo=timezone.utc)
+        payload = sample_payload()
+        payload["msgArray"][0]["t"] = "13:30:00"
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertEqual(result["session_phase"], "post_close_snapshot")
+        self.assertEqual(result["market_status"], "closed")
+        self.assertEqual(result["quote_semantics"], "official_close_pending")
+        self.assertFalse(result["price_available"])
+        self.assertFalse(result["official_close_available"])
+        self.assertEqual(result["official_close_status"], "pending")
+        self.assertEqual(
+            result["freshness"]["status"],
+            "official_close_pending",
+        )
+
+    def test_post_close_confirms_official_close_after_resolution_deadline(
+        self,
+    ) -> None:
+        now = datetime(2026, 6, 30, 13, 34, 0, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 5, 34, 0, tzinfo=timezone.utc)
+        payload = sample_payload()
+        payload["msgArray"][0]["t"] = "13:30:00"
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertEqual(result["market_status"], "closed")
+        self.assertEqual(result["quote_semantics"], "official_close")
+        self.assertTrue(result["price_available"])
+        self.assertTrue(result["official_close_available"])
+        self.assertEqual(result["official_close_status"], "confirmed")
+        self.assertEqual(result["official_close_price"], 2410.0)
+        self.assertEqual(result["official_close_raw"], "2410")
+        self.assertEqual(result["official_close_display"], "2410")
+        self.assertEqual(result["official_close_precision"], 0)
+        self.assertEqual(
+            result["official_close_precision_semantics"],
+            "provider_decimal_preserved",
+        )
+        self.assertEqual(
+            result["official_close_trade_date"].isoformat(),
+            "2026-06-30",
+        )
+        self.assertEqual(
+            result["freshness"]["status"],
+            "official_close",
+        )
 
     def test_tpex_stock_uses_otc_exchange_channel(self) -> None:
         self.db.add(

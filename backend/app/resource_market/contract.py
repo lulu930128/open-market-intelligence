@@ -308,9 +308,50 @@ SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
     *SUPPORTED_CURRENCY_INSTRUMENTS,
 )
 
+RESOURCE_SYMBOL_ALIASES = {
+    "黃金": "GC",
+    "黃金期貨": "GC",
+    "白銀": "SI",
+    "白銀期貨": "SI",
+    "銅": "HG",
+    "銅期貨": "HG",
+    "WTI原油": "CL",
+    "WTI 原油": "CL",
+    "WTI原油期貨": "CL",
+    "布蘭特原油": "BZ",
+    "布倫特原油": "BZ",
+    "BRENT原油": "BZ",
+    "天然氣": "NG",
+    "天然氣期貨": "NG",
+}
+
+
+def _resource_alias_key(value: str | None) -> str:
+    return " ".join(
+        (value or "").strip().upper().replace("/", "-").replace("_", "-").split()
+    )
+
 
 def normalize_resource_symbol(value: str | None) -> str:
-    return (value or "").strip().upper().replace("/", "-").replace("_", "-")
+    normalized = _resource_alias_key(value)
+    if not normalized:
+        return ""
+
+    aliases = {
+        _resource_alias_key(alias): symbol
+        for alias, symbol in RESOURCE_SYMBOL_ALIASES.items()
+    }
+    for instrument in SUPPORTED_RESOURCE_INSTRUMENTS:
+        for alias in (
+            instrument.symbol,
+            instrument.provider_symbol,
+            instrument.name,
+            instrument.display_name,
+            instrument.base_asset,
+            instrument.key,
+        ):
+            aliases[_resource_alias_key(alias)] = instrument.symbol
+    return aliases.get(normalized, normalized)
 
 
 def list_resource_instruments(

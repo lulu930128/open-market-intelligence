@@ -427,6 +427,7 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
                 "include_intraday": True,
                 "payload_level": "summary",
                 "intraday_limit": 1,
+                "intraday_interval": "5m",
             }
         )
 
@@ -436,7 +437,14 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
                 "include_intraday": True,
                 "payload_level": "summary",
                 "intraday_limit": 1,
+                "intraday_interval": "5m",
             },
+        )
+        self.assertEqual(
+            self.server._market_query_controls(
+                {"market_data_params": {"intraday_interval": "5m"}}
+            )["intraday_interval"],
+            "5m",
         )
 
     def test_ask_schema_exposes_payload_controls_for_gpt_clients(self) -> None:
@@ -444,10 +452,18 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
 
         self.assertEqual(properties["payload_level"]["enum"], ["summary", "compact", "standard", "full"])
         self.assertEqual(properties["intraday_limit"]["maximum"], 500)
+        self.assertEqual(
+            properties["intraday_interval"]["enum"],
+            ["1m", "5m", "15m", "30m", "1h", "4h"],
+        )
         self.assertEqual(properties["session_scope"]["enum"], ["regular", "extended", "all"])
+        self.assertEqual(properties["trade_date"]["pattern"], r"^\d{4}-\d{2}-\d{2}$")
         self.assertTrue(properties["include_raw"]["default"])
         self.assertIn("payload_level", properties["market_data_params"]["properties"])
+        self.assertIn("intraday_interval", properties["market_data_params"]["properties"])
+        self.assertIn("interval", properties["market_data_params"]["properties"])
         self.assertIn("session_scope", properties["market_data_params"]["properties"])
+        self.assertIn("trade_date", properties["market_data_params"]["properties"])
 
         kr_tool = next(tool for tool in self.server.TOOLS if tool["name"] == "omi.ask")
         self.assertIn("payload_level", kr_tool["inputSchema"]["properties"])
@@ -515,6 +531,24 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         self.assertEqual(payload["target"], {"type": "us_stock", "id": "TSM"})
         self.assertEqual(payload["market_data_params"]["payload_level"], "summary")
         self.assertEqual(payload["market_data_params"]["intraday_limit"], 1)
+
+    def test_us_direct_tool_forwards_exact_trade_date(self) -> None:
+        with patch.object(self.server, "_api_post", return_value={"ok": True}) as api_post:
+            result = self.server._call_tool(
+                "omi.read_us_stock_context",
+                {
+                    "symbol": "AAPL",
+                    "trade_date": "2026-07-20",
+                },
+            )
+
+        self.assertEqual(result, {"ok": True})
+        payload = api_post.call_args.kwargs["payload"]
+        self.assertEqual(payload["target"], {"type": "us_stock", "id": "AAPL"})
+        self.assertEqual(
+            payload["market_data_params"]["trade_date"],
+            "2026-07-20",
+        )
 
     def test_us_direct_tool_uses_ask_when_intraday_horizon_requested(self) -> None:
         with patch.object(self.server, "_api_post", return_value={"ok": True}) as api_post:

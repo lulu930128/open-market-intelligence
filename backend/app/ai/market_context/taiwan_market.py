@@ -42,6 +42,7 @@ class TaiwanMarketDependencies:
     read_cross_market_context: Callable[..., dict[str, Any]]
     read_market_chips_context: Callable[..., dict[str, Any]]
     read_market_volume_state: Callable[..., dict[str, Any]]
+    build_taiwan_source_health: Callable[..., dict[str, Any]]
     now: Callable[[], datetime]
 
 
@@ -53,6 +54,32 @@ def _compact_auxiliary_context(value: dict[str, Any]) -> dict[str, Any]:
         key: value.get(key)
         for key in ("kind", "status", "as_of", "scope", "summary", "missing", "warnings", "slots")
         if key in value
+    }
+
+
+def _compact_source_health(value: dict[str, Any]) -> dict[str, Any]:
+    summary = value.get("summary") if isinstance(value.get("summary"), dict) else {}
+    error_count = int(summary.get("error_count") or 0)
+    stale_count = int(summary.get("stale_count") or 0)
+    empty_count = int(summary.get("empty_count") or 0)
+    entry_count = int(summary.get("entry_count") or 0)
+    ok_count = int(summary.get("ok_count") or 0)
+    explicit_status = str(value.get("status") or "").strip().lower()
+    if explicit_status:
+        status = explicit_status
+    elif error_count:
+        status = "degraded"
+    elif stale_count or empty_count:
+        status = "partial"
+    elif entry_count and ok_count:
+        status = "ready"
+    else:
+        status = "unavailable"
+    return {
+        "status": status,
+        "as_of": value.get("generated_at") or value.get("as_of"),
+        "summary": summary,
+        "warnings": list(value.get("warnings") or []),
     }
 
 
@@ -76,6 +103,7 @@ def _build_tw_market_compact(
     cross_market: dict[str, Any],
     market_chips: dict[str, Any],
     volume_state: dict[str, Any],
+    source_health: dict[str, Any],
     slots: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -105,6 +133,7 @@ def _build_tw_market_compact(
         "cross_market": _compact_auxiliary_context(cross_market),
         "market_chips": _compact_auxiliary_context(market_chips),
         "volume_state": volume_state,
+        "source_health": _compact_source_health(source_health) if source_health else {},
         "freshness_by_domain": {
             "breadth": (slots.get("market_breadth") or {}).get("status"),
             "sample_ranking": (slots.get("sample_distribution") or {}).get("status"),
@@ -217,6 +246,16 @@ def _market_breadth_label(market: str | None, scope: str) -> str:
     return f"{market_label}本機資料集廣度"
 
 
+def _coverage_ratio(
+    coverage_count: int,
+    universe_count: int,
+) -> tuple[float | None, float | None, bool]:
+    if universe_count <= 0:
+        return None, None, False
+    raw_ratio = coverage_count / universe_count
+    return min(max(raw_ratio, 0.0), 1.0), raw_ratio, raw_ratio > 1.0
+
+
 def _industry_strength_label(rows: list[dict[str, Any]]) -> str:
     leading_change = rows[0].get("average_change_pct") if rows else None
     if not isinstance(leading_change, (int, float)):
@@ -235,6 +274,24 @@ def _volume_state_with_breadth_current_value(
 ) -> dict[str, Any]:
     output = dict(volume_state)
     if output.get("current_cumulative_trade_value") is not None:
+        native_markets = [
+            str(item.get("market"))
+            for item in output.get("markets") or []
+            if isinstance(item, dict)
+            and item.get("market")
+            and item.get("cumulative_trade_value") is not None
+        ]
+        output.setdefault(
+            "available_cumulative_trade_value",
+            output.get("current_cumulative_trade_value"),
+        )
+        output.setdefault("trade_value_available", True)
+        output.setdefault("trade_value_complete", True)
+        output.setdefault("trade_value_status", "complete")
+        output.setdefault("included_markets", native_markets or ["TWSE", "TPEX"])
+        output.setdefault("missing_markets", [])
+        output.setdefault("trade_value_estimate", None)
+        output.setdefault("trade_value_estimate_method", "not_estimated")
         return output
     markets = (
         breadth.get("markets")
@@ -256,6 +313,31 @@ def _volume_state_with_breadth_current_value(
         for item in selected
         if isinstance(item.get("trade_value"), (int, float))
     ]
+    available_markets = [
+        str(item.get("market") or item.get("index_id"))
+        for item in selected
+        if isinstance(item.get("trade_value"), (int, float))
+    ]
+    missing_markets = [
+        market for market in ("TWSE", "TPEX") if market not in available_markets
+    ]
+    available_value = int(sum(values)) if values else None
+    output["available_cumulative_trade_value"] = available_value
+    output["trade_value_available"] = available_value is not None
+    output["trade_value_complete"] = (
+        len(selected) == 2 and len(values) == 2 and len(trade_dates) == 1
+    )
+    output["trade_value_status"] = (
+        "complete"
+        if output["trade_value_complete"]
+        else "partial"
+        if available_value is not None
+        else "missing"
+    )
+    output["included_markets"] = available_markets
+    output["missing_markets"] = missing_markets
+    output["trade_value_estimate"] = None
+    output["trade_value_estimate_method"] = "not_estimated"
     field_status = (
         dict(output.get("field_status"))
         if isinstance(output.get("field_status"), dict)
@@ -392,6 +474,53 @@ def _market_breadth_from_index_summary(
         breadth["advance_decline_ratio"] = (
             advance_count / decline_count if decline_count else None
         )
+        total_count = int(breadth.get("total_count") or 0)
+        unchanged_count = int(breadth.get("unchanged_count") or 0)
+        classified_count = advance_count + decline_count + unchanged_count
+        unknown_count = max(total_count - classified_count, 0)
+        universe_count = int(
+            breadth.get("universe_count")
+            or breadth.get("coverage_count")
+            or total_count
+        )
+        breadth["universe_count"] = universe_count
+        breadth["coverage_count"] = total_count
+        (
+            breadth["coverage_ratio"],
+            breadth["coverage_ratio_raw"],
+            coverage_overflow,
+        ) = _coverage_ratio(
+            total_count,
+            universe_count,
+        )
+        breadth["coverage_overflow"] = coverage_overflow
+        if coverage_overflow:
+            breadth["status"] = "partial"
+            breadth["coverage_issue"] = "coverage_count_exceeds_universe"
+            warnings.append(
+                f"{market} breadth coverage count {total_count} exceeds "
+                f"universe count {universe_count}; ratio was bounded to 1.0."
+            )
+        breadth["classified_count"] = classified_count
+        breadth["unknown_count"] = unknown_count
+        breadth["reconciliation_status"] = (
+            "balanced"
+            if (
+                total_count > 0
+                and classified_count == total_count
+                and not coverage_overflow
+            )
+            else "partial"
+            if (
+                total_count > 0
+                and classified_count < total_count
+                and not coverage_overflow
+            )
+            else "inconsistent"
+        )
+        breadth["reconciliation_formula"] = (
+            "advance_count+decline_count+unchanged_count=total_count"
+        )
         breadth_by_market[market] = breadth
 
     if not breadth_by_market:
@@ -418,6 +547,10 @@ def _market_breadth_from_index_summary(
 
     advance_count = _sum_count("advance_count")
     decline_count = _sum_count("decline_count")
+    unchanged_count = _sum_count("unchanged_count")
+    total_count = _sum_count("total_count")
+    classified_count = advance_count + decline_count + unchanged_count
+    unknown_count = max(total_count - classified_count, 0)
     comparison_count = advance_count + decline_count
     trade_dates = {
         str(item.get("trade_date"))
@@ -431,6 +564,24 @@ def _market_breadth_from_index_summary(
         and len(trade_dates) <= 1
         else "partial"
     )
+    trade_value_included_markets = [
+        market
+        for market, item in breadth_by_market.items()
+        if item.get("trade_value") is not None
+    ]
+    trade_value_missing_markets = [
+        market
+        for market in ("TWSE", "TPEX")
+        if market not in trade_value_included_markets
+    ]
+    cumulative_trade_value = _sum_optional("trade_value")
+    market_completion_ratio = len(breadth_by_market) / 2
+    combined_universe_count = _sum_count("universe_count")
+    (
+        combined_coverage_ratio,
+        combined_coverage_ratio_raw,
+        combined_coverage_overflow,
+    ) = _coverage_ratio(total_count, combined_universe_count)
     breadth = {
         "market": "TW",
         "scope": "full_market" if component_scopes == {"full_market"} else "mixed",
@@ -441,11 +592,49 @@ def _market_breadth_from_index_summary(
         "status": status,
         "advance_count": advance_count,
         "decline_count": decline_count,
-        "unchanged_count": _sum_count("unchanged_count"),
-        "total_count": _sum_count("total_count"),
+        "unchanged_count": unchanged_count,
+        "total_count": total_count,
+        "universe_count": combined_universe_count,
+        "coverage_count": total_count,
+        "coverage_ratio": combined_coverage_ratio,
+        "coverage_ratio_raw": combined_coverage_ratio_raw,
+        "coverage_overflow": combined_coverage_overflow,
+        "coverage_issue": (
+            "coverage_count_exceeds_universe"
+            if combined_coverage_overflow
+            else None
+        ),
+        "classified_count": classified_count,
+        "unknown_count": unknown_count,
+        "reconciliation_status": (
+            "balanced"
+            if total_count > 0
+            and classified_count == total_count
+            and all(
+                item.get("reconciliation_status") == "balanced"
+                for item in breadth_by_market.values()
+            )
+            else "partial"
+        ),
+        "reconciliation_formula": (
+            "advance_count+decline_count+unchanged_count=total_count"
+        ),
         "limit_up_count": _sum_optional("limit_up_count"),
         "limit_down_count": _sum_optional("limit_down_count"),
-        "trade_value": _sum_optional("trade_value"),
+        "trade_value": cumulative_trade_value,
+        "trade_value_available": cumulative_trade_value is not None,
+        "trade_value_complete": not trade_value_missing_markets,
+        "trade_value_status": (
+            "complete"
+            if not trade_value_missing_markets
+            else "partial"
+            if cumulative_trade_value is not None
+            else "missing"
+        ),
+        "trade_value_included_markets": trade_value_included_markets,
+        "trade_value_missing_markets": trade_value_missing_markets,
+        "trade_value_estimate": None,
+        "trade_value_estimate_method": "not_estimated",
         "currency": "TWD",
         "trade_value_unit": "TWD",
         "positive_ratio": advance_count / comparison_count if comparison_count else None,
@@ -453,6 +642,24 @@ def _market_breadth_from_index_summary(
         "included_markets": list(breadth_by_market),
         "missing_markets": missing_markets,
         "markets": breadth_by_market,
+        "market_completion_ratio": market_completion_ratio,
+        "close_reconciliation": {
+            "status": (
+                "confirmed"
+                if status == "ready" and market_completion_ratio == 1
+                else "partial"
+            ),
+            "expected_markets": ["TWSE", "TPEX"],
+            "confirmed_markets": list(breadth_by_market),
+            "missing_markets": missing_markets,
+            "completion_ratio": market_completion_ratio,
+            "trade_date_aligned": len(trade_dates) <= 1,
+            "official_sources": [
+                item.get("source")
+                for item in breadth_by_market.values()
+                if item.get("source")
+            ],
+        },
     }
     _append_source_ref_once(
         source_refs,
@@ -545,6 +752,15 @@ def read_market_overview(
         for value in data_params.get("excluded_domains") or []
         if str(value).strip()
     }
+    requested_capabilities = {
+        str(value).strip()
+        for value in data_params.get("requested_capabilities") or []
+        if str(value).strip()
+    }
+    source_health_requested = (
+        "source.health" in requested_capabilities
+        or "source_health" in requested_domains
+    )
     selective_request = bool(requested_domains)
     explicit_domain_selection = data_params.get("explicit_domain_selection") is True
 
@@ -596,6 +812,25 @@ def read_market_overview(
             "source_refs": [],
         }
     )
+    source_health: dict[str, Any] = {}
+    if source_health_requested:
+        try:
+            source_health = dependencies.build_taiwan_source_health(
+                db,
+                now=generated_at,
+                sync_snapshots=False,
+            )
+        except Exception as exc:
+            source_health = {
+                "kind": "taiwan_source_health",
+                "status": "error",
+                "generated_at": generated_at.isoformat(),
+                "summary": {},
+                "entries": [],
+                "warnings": ["Taiwan source health could not be read."],
+                "provider_error": f"{type(exc).__name__}: {exc}",
+            }
+            warnings.extend(source_health["warnings"])
     for source_ref in cross_market.get("source_refs") or []:
         if isinstance(source_ref, dict):
             _append_source_ref_once(source_refs, source_ref)
@@ -696,6 +931,7 @@ def read_market_overview(
             cross_market=cross_market,
             market_chips=market_chips,
             volume_state=volume_state,
+            source_health=source_health,
             slots=slots,
         )
         envelope = {
@@ -715,6 +951,7 @@ def read_market_overview(
                 "cross_market": cross_market,
                 "market_chips": market_chips,
                 "volume_state": volume_state,
+                "source_health": source_health,
                 "slots": slots,
                 "compact": compact,
             },
@@ -959,6 +1196,7 @@ def read_market_overview(
         cross_market=cross_market,
         market_chips=market_chips,
         volume_state=volume_state,
+        source_health=source_health,
         slots=slots,
     )
     envelope = {
@@ -988,6 +1226,7 @@ def read_market_overview(
             "cross_market": cross_market,
             "market_chips": market_chips,
             "volume_state": volume_state,
+            "source_health": source_health,
             "slots": slots,
             "compact": compact,
         },
