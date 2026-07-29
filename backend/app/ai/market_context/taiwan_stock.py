@@ -7,6 +7,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.ai import evidence_builder, technical_analysis
+from app.ai.market_context import taiwan_events
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
 from app.ai.market_context.taiwan_projection import (
     COMPACT_INTRADAY_INTERVALS,
@@ -16,6 +17,9 @@ from app.ai.market_context.taiwan_projection import (
     _build_stock_compact_evidence,
     _compact_intraday_history,
     _compact_quote_snapshot,
+    _quote_component_freshness_rows,
+    _quote_component_slots,
+    _quote_components,
     _json_value,
     _latest_date_string,
     _row_dict,
@@ -54,6 +58,25 @@ class TaiwanStockDependencies:
             "is_disposition": False,
             "is_active": False,
             "status": "none",
+        }
+    )
+    get_taiwan_stock_event_summary: Callable[..., dict[str, Any]] = (
+        lambda stock_id, **_kwargs: {
+            "stock_id": stock_id,
+            "cache_status": "missing",
+            "result_count": 0,
+            "results": [],
+            "warning": "Taiwan corporate-event reader is unavailable.",
+        }
+    )
+    get_taiwan_stock_event_history: Callable[..., dict[str, Any]] = (
+        lambda stock_id, **_kwargs: {
+            "stock_id": stock_id,
+            "cache_status": "missing",
+            "total_count": 0,
+            "result_count": 0,
+            "results": [],
+            "warning": "Taiwan corporate-event history reader is unavailable.",
         }
     )
 
@@ -422,6 +445,24 @@ def read_stock_quote_context(
         now=dependencies.now(),
     )
     _apply_disposition_quote_contract(quote, disposition, now=dependencies.now())
+    quote["components"] = _quote_components(quote)
+    event_context = taiwan_events.build_tw_stock_event_context(
+        stock_id=normalized_stock_id,
+        market=getattr(stock, "market", None),
+        market_data_params=market_data_params,
+        now=dependencies.now(),
+        get_event_summary=dependencies.get_taiwan_stock_event_summary,
+        get_event_history=dependencies.get_taiwan_stock_event_history,
+        get_disposition_status=dependencies.get_taiwan_disposition_status,
+        disposition=disposition,
+    )
+    for item in event_context.get("missing") or []:
+        missing.append(str(item))
+    for item in event_context.get("warnings") or []:
+        warnings.append(str(item))
+    for source_ref in event_context.get("source_refs") or []:
+        if isinstance(source_ref, dict):
+            _append_source_ref_once(source_refs, source_ref)
 
     allow_intraday_fallback = not strict_provider or requested_provider in {
         "auto",
@@ -640,6 +681,12 @@ def read_stock_quote_context(
             priority="core",
             warnings=intraday_bars.get("warnings") or [],
         )
+    slots.update(
+        _quote_component_slots(
+            quote,
+            payload_level=level,
+        )
+    )
 
     source_refs = (
         [{"type": "table", "name": "market_daily_price"}]
@@ -683,6 +730,19 @@ def read_stock_quote_context(
             "quote": quote_freshness.get("status"),
             "intraday": intraday_domain_status,
         },
+        "freshness_by_capability": {
+            "target.identity": {
+                "status": "current",
+                "dataset": "stock_master",
+                "is_current": stock is not None,
+                "refresh_recommended": False,
+            },
+            "quote.snapshot": {
+                **quote_freshness,
+                "dataset": "quote",
+            },
+            **_quote_component_freshness_rows(quote),
+        },
         "slots": slots,
         "missing": missing,
         "warnings": warnings,
@@ -721,6 +781,142 @@ def read_stock_quote_context(
             "latest_trade_date": latest_trade_date,
             "missing": missing,
             "warnings": warnings,
+        },
+    )
+
+
+def read_stock_event_context(
+    db: Session,
+    stock_id: str,
+    *,
+    market_data_params: dict[str, Any] | None = None,
+    dependencies: TaiwanStockDependencies,
+) -> dict[str, Any]:
+    normalized_stock_id = stock_id.strip()
+    missing: list[str] = []
+    warnings: list[str] = []
+    source_refs: list[dict[str, Any]] = []
+    try:
+        stock = dependencies.stock_service.get_stock(
+            db=db,
+            stock_id=normalized_stock_id,
+        )
+    except dependencies.stock_service.StockNotFoundError:
+        stock = None
+        missing.append("stock_master")
+    if stock is not None:
+        source_refs.append({"type": "table", "name": "stock_master"})
+
+    generated_at = dependencies.now()
+    event_context = taiwan_events.build_tw_stock_event_context(
+        stock_id=normalized_stock_id,
+        market=getattr(stock, "market", None),
+        market_data_params=market_data_params,
+        now=generated_at,
+        get_event_summary=dependencies.get_taiwan_stock_event_summary,
+        get_event_history=dependencies.get_taiwan_stock_event_history,
+        get_disposition_status=dependencies.get_taiwan_disposition_status,
+    )
+    missing.extend(
+        str(item) for item in event_context.get("missing") or []
+    )
+    warnings.extend(
+        str(item) for item in event_context.get("warnings") or []
+    )
+    for source_ref in event_context.get("source_refs") or []:
+        if isinstance(source_ref, dict):
+            _append_source_ref_once(source_refs, source_ref)
+
+    capability_data = (
+        event_context.get("data")
+        if isinstance(event_context.get("data"), dict)
+        else {}
+    )
+    events = {
+        key.split(".", 1)[1]: value
+        for key, value in capability_data.items()
+        if str(key).startswith("events.")
+    }
+    regulation = {
+        key.split(".", 1)[1]: value
+        for key, value in capability_data.items()
+        if str(key).startswith("regulation.")
+    }
+    freshness_by_capability = (
+        event_context.get("freshness_by_capability")
+        if isinstance(event_context.get("freshness_by_capability"), dict)
+        else {}
+    )
+    statuses = {
+        str(item.get("status") or "missing")
+        for item in freshness_by_capability.values()
+        if isinstance(item, dict)
+    }
+    is_current = bool(statuses) and statuses <= {"current"}
+    freshness_status = (
+        "current"
+        if is_current
+        else "missing"
+        if statuses and statuses <= {"missing", "unavailable", "error"}
+        else "partial"
+        if statuses
+        else "not_requested"
+    )
+    as_of = _latest_date_string(
+        [
+            value.get("as_of")
+            for value in capability_data.values()
+            if isinstance(value, dict) and value.get("as_of")
+        ]
+    )
+    target = {
+        "type": "tw_stock",
+        "id": normalized_stock_id,
+        "label": getattr(stock, "stock_name", None),
+        "market": getattr(stock, "market", None) or "TW",
+    }
+    compact = {
+        "kind": "tw_stock_event_compact_evidence",
+        "version": "tw_stock_event_compact_evidence.v1",
+        "payload_level": _payload_level(market_data_params),
+        "status": event_context.get("status"),
+        "target": target,
+        "as_of": as_of,
+        "events": events,
+        "regulation": regulation,
+        "freshness_by_capability": freshness_by_capability,
+        "data_quality": {
+            "missing": list(dict.fromkeys(missing)),
+            "warnings": list(dict.fromkeys(warnings)),
+        },
+        "slots": event_context.get("slots") or {},
+        "source_refs": source_refs,
+    }
+    envelope = {
+        "kind": "stock_event_context",
+        "generated_at": generated_at,
+        "as_of": as_of,
+        "scope": {"stock_id": normalized_stock_id},
+        "data": {
+            "stock": _stock_dict(stock),
+            "events": events,
+            "regulation": regulation,
+            "compact": compact,
+        },
+        "missing": list(dict.fromkeys(missing)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "source_refs": source_refs,
+    }
+    return _with_evidence_passport(
+        envelope,
+        freshness={
+            "scope_profile": "event_only",
+            "status": freshness_status,
+            "is_current": is_current,
+            "as_of": as_of,
+            "missing": envelope["missing"],
+            "warnings": envelope["warnings"],
+            "freshness_by_capability": freshness_by_capability,
         },
     )
 
@@ -1100,6 +1296,25 @@ def read_stock_context(
         now=dependencies.now(),
     )
     _apply_disposition_quote_contract(quote, disposition, now=dependencies.now())
+    quote["components"] = _quote_components(quote)
+    event_context = taiwan_events.build_tw_stock_event_context(
+        stock_id=normalized_stock_id,
+        market=getattr(stock, "market", None),
+        market_data_params=market_data_params,
+        now=dependencies.now(),
+        get_event_summary=dependencies.get_taiwan_stock_event_summary,
+        get_event_history=dependencies.get_taiwan_stock_event_history,
+        get_disposition_status=dependencies.get_taiwan_disposition_status,
+        disposition=disposition,
+    )
+    for item in event_context.get("missing") or []:
+        missing.append(str(item))
+    for item in event_context.get("warnings") or []:
+        warnings.append(str(item))
+    for source_ref in event_context.get("source_refs") or []:
+        if isinstance(source_ref, dict):
+            _append_source_ref_once(source_refs, source_ref)
+
     intraday_bars = _compact_intraday_bars(
         dependencies=dependencies,
         db=db,
@@ -1198,12 +1413,23 @@ def read_stock_context(
                 intraday_bars=intraday_bars,
                 source_health=source_health,
                 overnight_impact=overnight_impact,
+                event_context=event_context,
                 missing=missing,
                 warnings=warnings,
                 source_refs=source_refs,
             ),
             "market_calendar_status": market_calendar_status,
             "source_health": source_health,
+            "events": {
+                key.split(".", 1)[1]: value
+                for key, value in (event_context.get("data") or {}).items()
+                if str(key).startswith("events.")
+            },
+            "regulation": {
+                key.split(".", 1)[1]: value
+                for key, value in (event_context.get("data") or {}).items()
+                if str(key).startswith("regulation.")
+            },
             "decision_evidence": decision_evidence,
             "overnight_impact": overnight_impact,
             "latest_institutional": _row_dict(

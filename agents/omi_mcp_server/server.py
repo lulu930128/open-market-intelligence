@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import traceback
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -152,44 +153,59 @@ PAYLOAD_LEVEL_SCHEMA: dict[str, Any] = {
 }
 
 CAPABILITY_IDS = [
-    "broker_branch.summary",
+    "target.identity",
+    "quote.snapshot",
+    "quote.order_book",
+    "quote.auction",
+    "quote.official_close",
+    "intraday.bars",
+    "daily.ohlcv",
+    "technical.structure",
     "chips.institutional",
     "chips.margin",
+    "broker_branch.summary",
+    "ownership.distribution",
+    "fundamentals.revenue",
+    "fundamentals.financials",
+    "cross_market.overnight",
     "company.profile",
     "corporate.actions",
-    "cross_market.overnight",
-    "crypto.derivatives",
-    "crypto.order_book",
-    "daily.ohlcv",
-    "data.freshness",
+    "market.short_volume",
+    "market.breadth",
+    "market.indices",
+    "events.upcoming",
+    "events.calendar",
+    "events.history",
+    "regulation.disposition",
+    "regulation.trading_restrictions",
+    "market.sectors",
+    "market.index_contributions",
+    "market.institutional_flow",
+    "market.margin_short",
+    "market.sample_ranking",
+    "market.cross_market",
+    "market.chips",
+    "screening.ranking",
+    "screening.coverage",
+    "market.volume_state",
     "derivatives.positioning",
     "derivatives.structure",
+    "watchlist.ranking",
+    "watchlist.radar",
+    "watchlist.coverage",
+    "portfolio.summary",
+    "portfolio.holdings",
+    "portfolio.valuation",
+    "macro.series",
+    "macro.observations",
+    "resource.metadata",
+    "crypto.order_book",
+    "crypto.derivatives",
     "diagnostics.capabilities",
     "diagnostics.data_freshness",
     "diagnostics.source_health",
-    "fundamentals.financials",
-    "fundamentals.revenue",
-    "intraday.bars",
-    "macro.observations",
-    "macro.series",
-    "market.breadth",
-    "market.chips",
-    "market.cross_market",
-    "market.sample_ranking",
-    "market.short_volume",
-    "market.volume_state",
-    "ownership.distribution",
-    "portfolio.holdings",
-    "portfolio.summary",
-    "portfolio.valuation",
-    "quote.snapshot",
-    "resource.metadata",
     "source.health",
-    "target.identity",
-    "technical.structure",
-    "watchlist.coverage",
-    "watchlist.radar",
-    "watchlist.ranking",
+    "data.freshness",
 ]
 
 CAPABILITY_ID_SCHEMA: dict[str, Any] = {
@@ -488,6 +504,75 @@ ASK_STREAM_TOOL: dict[str, Any] = {
         "HTTP SSE when the client UI needs live incremental updates."
     ),
 }
+
+
+def _load_public_contract_snapshot() -> dict[str, Any]:
+    snapshot_path = Path(__file__).with_name(
+        "public_contract_snapshot.json"
+    )
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version")
+        != "omi.mcp.public_contract_snapshot.v1"
+        or not isinstance(payload.get("ask_input_schema"), dict)
+    ):
+        return {}
+    return payload
+
+
+def _apply_public_contract_snapshot() -> None:
+    snapshot = _load_public_contract_snapshot()
+    if not snapshot:
+        return
+    target_types = [
+        str(value)
+        for value in snapshot.get("target_types") or []
+        if str(value).strip()
+    ]
+    capability_ids = [
+        str(value)
+        for value in snapshot.get("capability_ids") or []
+        if str(value).strip()
+    ]
+    if target_types:
+        ASK_TARGET_TYPES[:] = target_types
+    if capability_ids:
+        CAPABILITY_IDS[:] = capability_ids
+    schema = json.loads(
+        json.dumps(snapshot["ask_input_schema"], ensure_ascii=False)
+    )
+    properties = schema.setdefault("properties", {})
+    properties.setdefault(
+        "include_raw",
+        {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Deprecated transport flag retained for caller "
+                "compatibility. v4 always returns the canonical backend "
+                "envelope."
+            ),
+        },
+    )
+    ASK_TOOL["inputSchema"] = schema
+    ASK_STREAM_TOOL["inputSchema"] = json.loads(
+        json.dumps(schema, ensure_ascii=False)
+    )
+    selection_schema = properties.get("selection")
+    if isinstance(selection_schema, dict):
+        CAPABILITY_SELECTION_SCHEMA.clear()
+        CAPABILITY_SELECTION_SCHEMA.update(
+            json.loads(
+                json.dumps(selection_schema, ensure_ascii=False)
+            )
+        )
+
+
+_apply_public_contract_snapshot()
 
 MARKET_DATA_PARAMS_SCHEMA: dict[str, Any] = {
     "type": "object",

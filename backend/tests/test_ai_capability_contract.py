@@ -3,11 +3,102 @@ from __future__ import annotations
 import unittest
 from unittest.mock import ANY, patch
 
-from app.ai import agentic_execution, agentic_planning, capability_contract, query_plan
+from app.ai import (
+    agentic_execution,
+    agentic_planning,
+    capability_contract,
+    contract_manifest,
+    public_contract,
+    query_plan,
+)
 from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def test_registry_v2_manifest_is_metadata_complete_and_digest_stable(self) -> None:
+        manifest = contract_manifest.public_contract_manifest()
+
+        self.assertEqual(
+            manifest["capability_registry_version"],
+            "omi.capability.registry.v2",
+        )
+        self.assertEqual(
+            manifest["selection_version"],
+            "omi.capability.selection.v2",
+        )
+        self.assertEqual(
+            manifest["targets"],
+            public_contract.target_catalog(),
+        )
+        self.assertEqual(
+            manifest["capabilities"],
+            capability_contract.capability_catalog(),
+        )
+        self.assertEqual(
+            manifest["digest"],
+            contract_manifest.public_contract_manifest()["digest"],
+        )
+        self.assertEqual(len(manifest["digest"]), 64)
+        self.assertTrue(
+            all(
+                {
+                    "title",
+                    "description",
+                    "markets",
+                    "parameter_schema",
+                    "frequency",
+                    "unit_semantics",
+                    "event_time_basis",
+                    "deprecated",
+                    "replacement_capabilities",
+                    "side_effect_policy",
+                }
+                <= set(item)
+                for item in manifest["capabilities"]
+            )
+        )
+
+    def test_market_applicability_rejects_taiwan_capability_for_us_market(
+        self,
+    ) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["market.volume_state"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="US",
+            question_intent="market_overview",
+        )
+
+        self.assertNotIn("market.volume_state", selection["required"])
+        self.assertEqual(
+            selection["unmet_required_capabilities"][0]["reason_code"],
+            "unsupported_market",
+        )
+        self.assertEqual(
+            selection["unmet_required_capabilities"][0]["supported_markets"],
+            ["TW"],
+        )
+
+    def test_selection_parameters_require_registered_capability_schema(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not accept parameters",
+        ):
+            capability_contract.normalize_selection(
+                selection={
+                    "include": ["quote.snapshot"],
+                    "parameters": {"quote.snapshot": {"unexpected": True}},
+                },
+                output="evidence_only",
+                realtime_policy="cache_only",
+                payload_level="compact",
+                scope_type="stock",
+                target_market="TW",
+                question_intent="quote",
+            )
+
     def test_quote_capability_projects_session_close_identity_fields(self) -> None:
         spec = capability_contract.CAPABILITIES["quote.snapshot"]
 
@@ -770,6 +861,7 @@ class AiCapabilityContractTests(unittest.TestCase):
                     "requested_as": "required",
                     "request_source": "explicit_selection",
                     "target_scope": "stock",
+                    "target_market": "TW",
                     "supported_scopes": [
                         "market",
                         "tw_index",
@@ -779,8 +871,10 @@ class AiCapabilityContractTests(unittest.TestCase):
                         "kr_index",
                         "crypto_market",
                     ],
+                    "supported_markets": [],
                     "message": (
-                        "market.breadth is not supported for target scope stock."
+                        "market.breadth is not supported for target "
+                        "scope=stock, market=TW."
                     ),
                 }
             ],

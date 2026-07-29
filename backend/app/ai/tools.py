@@ -11,6 +11,7 @@ from app.ai.market_context import (
     taiwan_index,
     taiwan_market,
     taiwan_projection,
+    taiwan_screening,
     taiwan_stock,
     taiwan_watchlist,
     tw_cross_market,
@@ -25,6 +26,11 @@ from app.market.live_snapshot import market_status_from_session
 from app.market.intraday import get_market_intraday_history
 from app.market.quote_depth import get_taiwan_stock_quote_depth
 from app.market.tw_disposition import get_taiwan_disposition_status
+from app.market.tw_corporate_events import (
+    get_taiwan_stock_event_history,
+    get_taiwan_stock_event_summary,
+    list_taiwan_corporate_events,
+)
 from app.market.technical_report import build_stock_technical_report
 from app.market.indices import (
     get_market_index_contributions,
@@ -283,11 +289,41 @@ def read_market_overview(
     include_intraday: bool = False,
     market_data_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return taiwan_market.read_market_overview(
+    params = (
+        dict(market_data_params)
+        if isinstance(market_data_params, dict)
+        else {}
+    )
+    requested_capabilities = {
+        str(value).strip()
+        for value in params.get("requested_capabilities") or []
+        if str(value).strip()
+    }
+    screening_requested = bool(
+        requested_capabilities & taiwan_screening.SCREENING_CAPABILITIES
+    )
+    screening_context = (
+        taiwan_screening.read_tw_screening_context(
+            db,
+            market_data_params=params,
+            now=_now,
+        )
+        if screening_requested
+        else None
+    )
+    non_screening_capabilities = requested_capabilities - {
+        "target.identity",
+        "data.freshness",
+        *taiwan_screening.SCREENING_CAPABILITIES,
+    }
+    if screening_context is not None and not non_screening_capabilities:
+        return screening_context
+
+    market_context = taiwan_market.read_market_overview(
         db=db,
         limit=limit,
         include_intraday=include_intraday,
-        market_data_params=market_data_params,
+        market_data_params=params,
         dependencies=taiwan_market.TaiwanMarketDependencies(
             market_service=market_service,
             get_market_index_intraday=get_market_index_intraday,
@@ -297,7 +333,15 @@ def read_market_overview(
             read_market_volume_state=read_taiwan_market_volume_state,
             build_taiwan_source_health=build_taiwan_source_health,
             now=_now,
+            get_market_index_contributions=get_market_index_contributions,
+            list_taiwan_corporate_events=list_taiwan_corporate_events,
         ),
+    )
+    if screening_context is None:
+        return market_context
+    return taiwan_screening.merge_tw_screening_context(
+        market_context,
+        screening_context,
     )
 
 
@@ -389,6 +433,8 @@ def read_stock_context(
             get_market_intraday_history=get_market_intraday_history,
             get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
             get_taiwan_disposition_status=get_taiwan_disposition_status,
+            get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
+            get_taiwan_stock_event_history=get_taiwan_stock_event_history,
             now=_now,
         ),
     )
@@ -415,6 +461,36 @@ def read_stock_quote_context(
             get_market_intraday_history=get_market_intraday_history,
             get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
             get_taiwan_disposition_status=get_taiwan_disposition_status,
+            get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
+            get_taiwan_stock_event_history=get_taiwan_stock_event_history,
+            now=_now,
+        ),
+    )
+
+
+def read_stock_event_context(
+    db: Session,
+    stock_id: str,
+    *,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return taiwan_stock.read_stock_event_context(
+        db=db,
+        stock_id=stock_id,
+        market_data_params=market_data_params,
+        dependencies=taiwan_stock.TaiwanStockDependencies(
+            market_service=market_service,
+            stock_service=stock_service,
+            build_stock_technical_report=build_stock_technical_report,
+            build_taiwan_calendar_status=build_taiwan_calendar_status,
+            build_taiwan_source_health=build_taiwan_source_health,
+            build_us_overnight_impact_report=build_us_overnight_impact_report,
+            get_broker_branch_trade_summary=get_broker_branch_trade_summary,
+            get_market_intraday_history=get_market_intraday_history,
+            get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
+            get_taiwan_disposition_status=get_taiwan_disposition_status,
+            get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
+            get_taiwan_stock_event_history=get_taiwan_stock_event_history,
             now=_now,
         ),
     )
@@ -443,6 +519,8 @@ def read_stock_broker_branch_context(
             get_market_intraday_history=get_market_intraday_history,
             get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
             get_taiwan_disposition_status=get_taiwan_disposition_status,
+            get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
+            get_taiwan_stock_event_history=get_taiwan_stock_event_history,
             now=_now,
         ),
     )

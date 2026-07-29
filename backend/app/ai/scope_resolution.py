@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.ai import decision_core
+from app.ai import decision_core, public_contract
 from app.ai.schemas import AiAskRequest
 from app.crypto_market.assets import crypto_asset_codes, get_crypto_asset
 from app.db.models import JPStockMaster, KRStockMaster, StockMaster, USStockMaster, WatchlistGroup
@@ -18,30 +18,7 @@ from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 
 
-VALID_TARGET_TYPES = {
-    "auto",
-    "market",
-    "data_freshness",
-    "tw_stock",
-    "tw_watchlist",
-    "tw_index",
-    "tw_futures",
-    "us_stock",
-    "jp_stock",
-    "jp_index",
-    "kr_stock",
-    "kr_index",
-    "crypto_market",
-    "crypto_asset",
-    "resource_asset",
-    "portfolio",
-    "us_macro",
-    "us_watchlist",
-    "jp_watchlist",
-    "kr_watchlist",
-    "source_health",
-    "capability_status",
-}
+VALID_TARGET_TYPES = set(public_contract.PUBLIC_TARGET_TYPES)
 TAIWAN_INDEX_TARGET_IDS = {"TAIEX", "TPEX"}
 TAIWAN_FUTURES_TARGET_IDS = {"TXF", "MXF", "TMF"}
 JP_INDEX_TARGET_IDS = {"^N225", "1306.T"}
@@ -162,52 +139,12 @@ US_MACRO_QUESTION_ALIASES = (
     (("cpi", "美國消費者物價", "美國消費者價格"), "CPIAUCSL"),
     (("unrate", "u.s. unemployment", "us unemployment", "美國失業率"), "UNRATE"),
 )
-INTERNAL_SCOPE_TO_TARGET_TYPE = {
-    "market": "market",
-    "data_freshness": "data_freshness",
-    "stock": "tw_stock",
-    "watchlist": "tw_watchlist",
-    "tw_index": "tw_index",
-    "tw_futures": "tw_futures",
-    "us_stock": "us_stock",
-    "jp_stock": "jp_stock",
-    "jp_index": "jp_index",
-    "kr_stock": "kr_stock",
-    "kr_index": "kr_index",
-    "crypto_market": "crypto_market",
-    "crypto_asset": "crypto_asset",
-    "resource_asset": "resource_asset",
-    "portfolio": "portfolio",
-    "us_macro": "us_macro",
-    "us_watchlist": "us_watchlist",
-    "jp_watchlist": "jp_watchlist",
-    "kr_watchlist": "kr_watchlist",
-    "source_health": "source_health",
-    "capability_status": "capability_status",
-}
-TARGET_TYPE_TO_INTERNAL_SCOPE = {
-    "market": "market",
-    "data_freshness": "data_freshness",
-    "tw_stock": "stock",
-    "tw_watchlist": "watchlist",
-    "tw_index": "tw_index",
-    "tw_futures": "tw_futures",
-    "us_stock": "us_stock",
-    "jp_stock": "jp_stock",
-    "jp_index": "jp_index",
-    "kr_stock": "kr_stock",
-    "kr_index": "kr_index",
-    "crypto_market": "crypto_market",
-    "crypto_asset": "crypto_asset",
-    "resource_asset": "resource_asset",
-    "portfolio": "portfolio",
-    "us_macro": "us_macro",
-    "us_watchlist": "us_watchlist",
-    "jp_watchlist": "jp_watchlist",
-    "kr_watchlist": "kr_watchlist",
-    "source_health": "source_health",
-    "capability_status": "capability_status",
-}
+INTERNAL_SCOPE_TO_TARGET_TYPE = dict(
+    public_contract.INTERNAL_SCOPE_TO_TARGET_TYPE
+)
+TARGET_TYPE_TO_INTERNAL_SCOPE = dict(
+    public_contract.TARGET_TYPE_TO_INTERNAL_SCOPE
+)
 REPORT_HINTS = decision_core.REPORT_HINTS
 ANALYSIS_HINTS = decision_core.ANALYSIS_HINTS
 FRESHNESS_HINTS = decision_core.FRESHNESS_HINTS

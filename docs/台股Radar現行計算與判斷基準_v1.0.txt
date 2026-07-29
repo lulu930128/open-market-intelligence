@@ -1,0 +1,1082 @@
+OMI 台股 Radar 現行計算方式與判斷基準
+版本：radar_v1.0
+整理日期：2026-07-29
+適用範圍：目前 Open Market Intelligence 台股 Watchlist Radar 實作
+
+============================================================
+一、先說結論：Radar 現在究竟在判斷什麼
+============================================================
+
+Radar 不是單純預測「明天上漲或下跌」。
+
+它目前分成三個不同層次：
+
+1. 訊號層
+   由價格、均線、MACD、RSI、ADX、MFI、ROC、KD、布林通道、
+   Donchian、支撐壓力、ATR、成交量等資料產生技術訊號與基礎分數。
+
+2. 分類與排序層
+   把每檔股票歸入一個 Radar bucket，例如：
+   急跌風控、支撐跌破、波動風險、突破高點、趨勢收復、量價轉強等，
+   再依急迫度、證據強度、漲跌幅、其他 context 與資料新鮮度排序。
+
+3. T+1 outcome 層
+   在下一個台股交易日，以收盤報酬、盤中最高、盤中最低與日內振幅，
+   判斷該 bucket 的情境是否「命中、未命中、中性、待評估或不可評估」。
+
+因此畫面上的「命中」代表：
+
+「這個 bucket 所定義的 T+1 條件至少有一項成立。」
+
+它不一定代表：
+
+「股價收盤方向和 bucket 名稱直覺一致。」
+
+例如「急跌風控」目前只要 T+1 收盤不漲，或盤中曾跌到 -2%，
+就會判定命中。即使收盤最後大漲，盤中低點觸發 -2% 仍可能顯示命中。
+
+
+============================================================
+二、整體計算流程
+============================================================
+
+每日或盤中 Radar 的處理順序如下：
+
+Watchlist 股票
+  -> 讀取日線與必要的盤中資料
+  -> 計算技術指標
+  -> 產生 signal_keys 與基礎 score
+  -> 依固定優先序歸入單一 bucket
+  -> 計算 technical_evidence_score
+  -> 加入籌碼、營收、財務、盤中 context
+  -> 計算 priority_score
+  -> 依 priority_score 排序並截取結果
+  -> 在該批結果內分配 technical_grade
+  -> 儲存 snapshot
+  -> 下一交易日計算 T+1 outcome
+
+
+============================================================
+三、技術指標參數與計算方式
+============================================================
+
+3.1 目前有效參數
+
+- 價格均線：MA5、MA20、MA60
+- 成交量均線：Volume MA5、Volume MA20
+- MACD：12、26、9
+- RSI：14
+- ATR：14
+- ADX / DMI：14
+- ROC：12
+- MFI：14
+- Donchian Channel：20
+- Bollinger Bands：20，標準差倍數 2.0
+- KD：週期 9，K 平滑 3，D 平滑 3
+- KD 超買：K >= 80 且 D >= 70
+- KD 超賣：K <= 20 且 D <= 30
+- 支撐 / 壓力回看期：20
+- 均線相鄰資料最大容許間隔：10 天
+- 成交量放大門檻：成交量 / Volume MA20 >= 1.5
+- 接近支撐或壓力門檻：距離 <= 2%
+- ADX 趨勢門檻：ADX >= 25
+- RSI 多方區：50 至 70
+- RSI 弱勢：< 40
+- RSI 過熱：>= 80
+- MFI 資金流入區：50 至 80
+- MFI 資金流出：< 35
+- ATR 高波動：ATR / 價格 >= 5%
+- ATR 擴張：ATR >= 前一期 ATR 的 1.2 倍，且 ATR / 價格 >= 2%
+- 布林壓縮：bandwidth <= 8%
+- 大幅漲跌分類門檻：絕對漲跌幅 >= 7%
+- 漲跌停近似判定門檻：絕對漲跌幅 >= 9.5%
+
+3.2 各指標實作
+
+MA / SMA
+- 採簡單移動平均。
+- 若視窗內有缺值，或相鄰已存交易日期相隔超過 10 天，該均線視為無效。
+
+EMA
+- alpha = 2 / (N + 1)。
+- 由第一筆有效收盤價起算，不使用前 N 筆 SMA 作為種子。
+
+MACD
+- MACD line = EMA12 - EMA26。
+- Signal line = MACD line 的 EMA9。
+- Histogram = MACD line - Signal line。
+
+RSI14
+- 對 14 期漲幅與跌幅使用簡單滾動平均。
+- 目前不是 Wilder RSI 平滑版本。
+
+ATR14
+- True Range 取下列三者最大值：
+  1. 當日高點 - 當日低點
+  2. |當日高點 - 前一日收盤|
+  3. |當日低點 - 前一日收盤|
+- ATR 使用 Wilder 平滑。
+
+DMI / ADX14
+- +DM、-DM、TR 與 ADX 使用 Wilder 計算方式。
+- ADX >= 25 才被視為具有較明確趨勢。
+
+ROC12
+- ROC = (目前收盤 / 12 期前收盤 - 1) * 100%。
+
+MFI14
+- Typical Price = (High + Low + Close) / 3。
+- Raw Money Flow = Typical Price * Volume。
+- 依 Typical Price 上升或下降分成正、負 money flow，再計算 14 期 MFI。
+
+Donchian20
+- 上緣為 20 期最高價，下緣為 20 期最低價。
+- 判斷突破或跌破時，使用前一交易日已完成的 Donchian 邊界，
+  避免把當日高低點直接納入後造成自我比較。
+
+Bollinger Bands
+- 中線為 SMA20。
+- 上下緣為 SMA20 +/- 2 倍標準差。
+- 標準差使用母體標準差。
+
+KD
+- RSV 使用 9 期最高與最低。
+- K 為 RSV 的 3 期簡單平均。
+- D 為 K 的 3 期簡單平均。
+- 目前不是常見的遞迴式 1/3 平滑版本。
+
+支撐 / 壓力
+- 使用目前交易日前 20 個交易日的最低價與最高價。
+- 不把當日高低價納入支撐 / 壓力本身。
+
+
+============================================================
+四、基礎 signal score
+============================================================
+
+基礎 score 是有方向性的整數加總。正分偏多，負分偏空。
+
+價格方向
+- price_up：+1
+- price_down：-1
+
+價格相對均線
+- above_ma5：+1
+- below_ma5：-1
+- above_ma20：+1
+- below_ma20：-1
+- above_ma60：+2
+- below_ma60：-2
+
+均線穿越
+- cross_above_ma20：+2
+- cross_below_ma20：-2
+- cross_above_ma60：+3
+- cross_below_ma60：-3
+
+均線排列
+- ma5_above_ma20：+1
+- ma5_below_ma20：-1
+- ma20_above_ma60：+1
+- ma20_below_ma60：-1
+
+EMA
+- ema12_above_ema26：+1
+- ema12_below_ema26：-1
+- ema_bullish_cross：+2
+- ema_bearish_cross：-2
+
+MACD
+- macd_positive：+1
+- macd_negative：-1
+
+ADX / DMI
+- ADX >= 25 且 +DI > -DI：adx_bull_trend，+2
+- ADX >= 25 且 -DI > +DI：adx_bear_trend，-2
+
+Donchian
+- donchian_breakout：+2
+- donchian_breakdown：-2
+
+20 日結構
+- structure_resistance_breakout：+2
+- structure_support_break：-2
+- near_support：0，只作提示
+- near_resistance：0，只作提示
+
+布林通道
+- bollinger_breakout：+2
+- bollinger_breakdown：-2
+- bollinger_squeeze：0，只作壓縮提示
+
+RSI
+- 50 <= RSI <= 70：rsi_bull_zone，+1
+- RSI < 40：rsi_weak，-1
+- RSI >= 80：rsi_overheated，0，只作過熱提示
+
+MFI
+- 50 <= MFI <= 80：mfi_inflow，+1
+- MFI < 35：mfi_outflow，-1
+
+ROC
+- ROC > 0：roc_positive，+1
+- ROC < 0：roc_negative，-1
+
+KD
+- 黃金交叉：kd_bullish_cross，+1
+- 死亡交叉：kd_bearish_cross，-1
+- 超買：kd_overbought，0，只作提示
+- 超賣：kd_oversold，0，只作提示
+
+ATR
+- atr_high_volatility：0，只作高波動提示
+- atr_expanding：0，只作波動擴張提示
+
+成交量
+- 成交量 / Volume MA20 >= 1.5 且價格上漲：
+  volume_price_up，+2
+- 成交量 / Volume MA20 >= 1.5 且價格下跌：
+  volume_price_down，-2
+- 成交量 / Volume MA20 >= 1.5 但方向未確認：
+  volume_expansion，0
+- 成交量 / Volume MA5 >= 1.5：
+  volume_above_ma5，0
+
+基礎狀態
+- score >= 3：strong_bullish
+- score >= 1：bullish
+- score <= -3：strong_bearish
+- score <= -1：bearish
+- 其他：neutral
+
+注意：
+- 同一交易日可能同時計入「價格位於均線上方」與「剛向上穿越均線」。
+- 因此 score 不是互相獨立因子的統計模型，相關訊號可能重複加權。
+
+
+============================================================
+五、Radar bucket 分類規則
+============================================================
+
+每檔股票只會落入一個 bucket。
+分類採「由上到下，第一個符合就停止」的優先序。
+
+1. error
+   上游計算狀態為 error。
+
+2. no_data
+   上游計算狀態為 no_data。
+
+3. 大幅漲跌區塊
+   條件：limit_status 為 limit_up / limit_down，
+   或絕對漲跌幅 >= 7%。
+
+   3.1 limit_down -> limit_down_liquidity
+   3.2 limit_up -> limit_up_lock
+   3.3 非跌停但漲跌幅 < 0 -> selloff_risk
+   3.4 其他大漲 -> surge_up
+
+4. support_break
+   命中支撐跌破類訊號，例如跌破 MA20 / MA60、
+   Donchian 下緣、20 日支撐、布林下緣等。
+
+5. volume_down
+   命中帶量下跌或偏空量價訊號。
+
+6. overheated
+   命中 RSI / KD 過熱類訊號。
+
+7. volatility_risk
+   命中 ATR 高波動或波動擴張類訊號。
+
+8. bearish_momentum
+   命中偏空動能訊號，或基礎 score <= -3。
+
+9. breakout_high
+   命中 Donchian、20 日壓力或布林上緣突破類訊號。
+
+10. trend_reclaim
+    命中向上收復 MA20 / MA60、EMA 多方交叉或 ADX 多方趨勢類訊號。
+
+11. volume_up
+    命中帶量上漲訊號。
+
+12. volume
+    命中量能擴張，但方向尚未明確。
+
+13. compression_watch
+    命中布林壓縮等等待突破訊號。
+
+14. pullback
+    條件同時成立：
+    - score >= 3
+    - 當日漲跌幅 < 0
+    - 仍存在多方趨勢 context
+
+15. momentum
+    命中多方動能訊號，或 score >= 3。
+
+16. watch
+    有 signal_keys 或 score != 0，但不符合前述 bucket。
+
+17. quiet
+    沒有有效訊號且 score = 0。
+
+這個優先序非常重要。例如：
+- 一檔股票同時「急跌 7%」與「跌破支撐」時，會先歸入 selloff_risk。
+- 一檔股票同時「支撐跌破」與「RSI 過熱」時，會先歸入 support_break。
+- bucket 不是所有狀態的完整標籤集合，而是最高優先的一個主分類。
+
+
+============================================================
+六、technical_evidence_score
+============================================================
+
+technical_evidence_score 用來衡量目前技術證據的累積強度。
+它和前面的基礎 score 不同：
+
+- 基礎 score 有正負方向。
+- technical_evidence_score 只表示證據量與重要度，最低為 0。
+
+公式：
+
+technical_evidence_score
+  = 各 signal 權重總和
+  + bucket 確認訊號數 * 1.5
+  + min(不同訊號家族數, 4) * 1.25
+  + 與 bucket 同方向的漲跌幅加分
+  - 矛盾訊號扣分
+
+同方向漲跌幅加分：
+- 風險 bucket 且 change_pct < 0：
+  min(|change_pct|, 10) * 0.35
+- 動能 bucket 且 change_pct > 0：
+  min(|change_pct|, 10) * 0.35
+
+矛盾扣分：
+- 風險 bucket 同時出現強多方 / 帶量上漲訊號：-1.5
+- 動能 bucket 同時出現風險訊號：-1.5
+
+最後結果不低於 0。
+
+6.1 主要 signal 權重
+
+偏空 / 風險
+- cross_below_ma60：4.2
+- structure_support_break：3.6
+- donchian_breakdown：3.5
+- bollinger_breakdown：3.2
+- cross_below_ma20：3.0
+- volume_price_down：2.8
+- ema_bearish_cross：2.6
+- adx_bear_trend：2.5
+- macd_negative：2.3
+- atr_high_volatility：2.2
+- roc_negative：2.2
+- rsi_overheated：2.1
+- kd_bearish_cross：2.1
+- kd_overbought：2.0
+- mfi_outflow：2.0
+- atr_expanding：1.8
+- rsi_weak：1.8
+
+偏多 / 動能
+- cross_above_ma60：3.8
+- structure_resistance_breakout：3.3
+- donchian_breakout：3.2
+- bollinger_breakout：3.0
+- volume_price_up：2.8
+- cross_above_ma20：2.6
+- ema_bullish_cross：2.5
+- adx_bull_trend：2.4
+- macd_positive：2.2
+- roc_positive：2.1
+- kd_bullish_cross：2.0
+- mfi_inflow：2.0
+- rsi_bull_zone：1.8
+
+其他
+- volume_expansion：1.7
+- volume_above_ma5：1.5
+- bollinger_squeeze：1.4
+- above_ma20：1.4
+- below_ma20：1.4
+- ma5_above_ma20：1.2
+- ma5_below_ma20：1.2
+- near_support：1.1
+- near_resistance：1.1
+- ma20_above_ma60：1.0
+- ma20_below_ma60：1.0
+- kd_oversold：1.0
+- above_ma5：0.8
+- below_ma5：0.8
+- above_ma60：1.8
+- below_ma60：2.0
+- 權重表未列出的 signal：預設 1.0
+
+
+============================================================
+七、technical_score 與 technical_grade
+============================================================
+
+7.1 technical_score
+
+technical_score
+  = min(
+      100,
+      technical_evidence_score * 7
+      + |基礎 score| * 4
+      + min(|change_pct| * 2, 16)
+    )
+
+technical_score 是 0 至 100 的顯示分數。
+
+目前 priority_score 並不是直接使用 technical_score，
+而是分別使用基礎 score、technical_evidence_score 與 change_pct。
+因此 technical_score 比較接近 UI 解讀用的綜合技術強度。
+
+7.2 technical_grade
+
+technical_grade 分成 strong、medium、watch。
+它是在 Radar 已排序並截取結果後，再依該批結果相對排名分配。
+
+當結果少於 3 檔：
+- quiet / no_data / error 或 evidence <= 0 -> watch
+- urgency = high 或 evidence >= 10 -> strong
+- urgency = medium 或 evidence >= 5 -> medium
+- 其他 -> watch
+
+當結果為 3 檔以上：
+- strong 區：排序前 25%，且 urgency = high 或 evidence >= 8
+- medium 區：排序前 70%，且 evidence >= 4
+- 排名較後但 evidence >= 10：至少為 medium
+- 其他：watch
+
+注意：
+- technical_grade 是批次相對分級。
+- 同一檔股票在不同 Watchlist、不同 mode 或不同 max_results 下，
+  technical_grade 可能改變，即使它本身的訊號沒有變。
+
+
+============================================================
+八、其他 context 如何加入
+============================================================
+
+Radar 最多選取 4 個 context 訊號，候選順序為：
+
+1. intraday：盤中表現
+2. institution：三大法人
+3. leverage：融資融券
+4. revenue：營收
+5. financial：財務
+
+因最多取 4 個，所以順序靠後的 financial 可能不會進入最終 context。
+
+每個 context 的 stance 分數：
+- confirm：+1
+- contradict：-1
+- risk：-0.5
+- info：0
+
+context_score = 最多 4 個 context stance 分數加總。
+
+8.1 intraday
+
+多方 bucket：
+- change_pct >= +1 且 session_change_pct >= -0.2 -> confirm
+- session_change_pct <= -1 -> contradict
+
+空方 / 風險 bucket：
+- change_pct <= -1 且 session_change_pct <= +0.2 -> confirm
+- session_change_pct >= +1 -> contradict
+
+8.2 institution
+
+- 法人數值非 0 才形成 context。
+- 法人方向與 bucket 一致 -> confirm。
+- 法人方向與 bucket 相反 -> contradict。
+
+8.3 leverage
+
+- 融資或融券變化絕對值需 >= 100 才形成 context。
+- 目前先檢查融資，再檢查融券。
+
+8.4 revenue
+
+- 單月營收 YoY 或累計營收 YoY 絕對值需 >= 10%。
+- 方向與 bucket 一致 -> confirm，反向 -> contradict。
+
+8.5 financial
+
+- EPS <= 0：偏風險。
+- ROE >= 10，且 EPS 為正或缺值：偏正向。
+- ROE < 0：偏風險。
+
+重要邊界：
+- context 會影響 priority_score。
+- context 不會改變已經選定的 bucket。
+
+
+============================================================
+九、urgency 與 priority_score
+============================================================
+
+9.1 urgency
+
+urgency 分為 high、medium、low。
+
+- 漲停、跌停或絕對漲跌幅 >= 7% -> high
+- support_break / bearish_momentum：
+  score <= -4 或有高風險訊號 -> high，否則 medium
+- volume_down：
+  score <= -4 -> high，否則 medium
+- overheated -> medium
+- volatility_risk：
+  有 atr_high_volatility -> high，否則 medium
+- breakout_high / trend_reclaim：
+  score >= 4 或有強動能訊號 -> high，否則 medium
+- volume_up / volume -> medium
+- compression_watch -> low
+- pullback / momentum：
+  |score| >= 3 -> medium，否則 low
+- quiet / no_data / error -> low
+
+若資料 stale：
+- 原本 high 會降為 medium。
+
+9.2 priority_score
+
+priority_score
+  = bucket_base
+  + urgency_bonus
+  + |基礎 score| * 3
+  + signal_count
+  + |change_pct| * 2
+  + technical_evidence_score * 1.8
+  + context_score * 2
+  - stale_penalty
+
+urgency_bonus：
+- high：20
+- medium：10
+- low：0
+
+stale_penalty：
+- stale：15
+- 非 stale：0
+
+bucket_base：
+- limit_down_liquidity：105
+- selloff_risk：102
+- limit_up_lock：100
+- surge_up：96
+- support_break：94
+- volume_down：90
+- volatility_risk：88
+- bearish_momentum：86
+- overheated：84
+- breakout_high：82
+- trend_reclaim：78
+- volume_up：72
+- volume：70
+- compression_watch：68
+- pullback：65
+- momentum：60
+- watch：40
+- quiet：10
+- no_data：0
+- error：0
+
+相容舊 bucket：
+- limit_move / limit_up_move / limit_down_move：100
+- risk：90
+- breakout：80
+
+最終排序：
+1. priority_score 由高到低
+2. bucket 固定順序
+3. stock_id
+
+
+============================================================
+十、Radar mode
+============================================================
+
+Backend 支援：
+- action
+- surge
+- breakout
+- volume
+- overheat
+- weakness
+- risk
+- momentum
+- all
+
+各 mode 包含：
+
+surge
+- limit_up_lock、surge_up，以及舊版大漲 bucket
+
+breakout
+- breakout_high、trend_reclaim、compression_watch、breakout
+
+volume
+- volume_up、volume、volume_down
+
+overheat
+- overheated、volatility_risk
+
+weakness
+- limit_down_liquidity、selloff_risk、support_break、
+  volume_down、bearish_momentum，以及舊版風險 bucket
+
+risk
+- weakness 類 bucket
+- 另包含 overheated、volatility_risk
+
+momentum
+- limit_up_lock、surge_up、breakout_high、trend_reclaim、
+  volume_up、volume、compression_watch、pullback、momentum，
+  以及舊版多方 bucket
+
+action
+- 集中收錄較急迫的風險與機會 bucket。
+- 不包含 pullback、momentum、watch、quiet、no_data、error。
+
+all
+- 不篩 bucket。
+
+目前前端主要呈現：
+- action
+- surge
+- breakout
+- overheat
+- risk
+- momentum
+
+前端目前常用參數：
+- include_children = true
+- enabled_only = true
+- MA = 5 / 20 / 60
+- Volume MA = 5 / 20
+- volume_ratio_threshold = 1.5
+- max_results = 20
+- calculation_limit = 100
+- intraday_limit = 30
+
+
+============================================================
+十一、盤中 overlay
+============================================================
+
+盤中 Radar 並不是把所有日線指標完整重算成盤中版。
+
+處理方式：
+
+1. 先從日線 ranking 選最多 30 檔候選。
+2. 候選排序優先考慮：
+   - 漲跌停狀態
+   - 結構性主要訊號
+   - |基礎 score|
+   - signal_count
+   - |change_pct|
+   - 原始排序
+3. 用目前盤中成交價、漲跌幅與成交量覆蓋價格 context。
+4. 只重新判斷「目前價格相對均線」與「價格區間」類訊號。
+5. MACD、RSI、ADX、MFI、ROC、KD、日線量價等仍沿用已完成日線指標。
+
+盤中 overlay 的語意：
+- basis = current intraday price vs finalized daily indicators
+- is_provisional = true
+
+因此盤中 Radar 必須解讀為：
+
+「目前盤中價格，相對最近完成的日線技術結構，暫時形成的訊號。」
+
+它不是一套完全以盤中 bar 重算的即時技術指標系統。
+
+
+============================================================
+十二、資料日期與 stale 判定
+============================================================
+
+Radar 會先由台股交易日曆契約取得 target_trade_date。
+
+單檔資料視為 stale 的條件：
+- row 的交易日期缺失；或
+- row 的交易日期早於 target_trade_date。
+
+stale 的影響：
+- urgency 若原為 high，降為 medium。
+- priority_score 扣 15 分。
+- action / reason 會提示資料日期落後。
+
+整體 is_current：
+- 只有此次要求的股票全部符合目標交易日，才會視為 current。
+
+已收盤 session：
+- 優先顯示已儲存的正式 snapshot。
+
+盤中或收盤後、日線尚未正式發布：
+- 前端可能採用 provisional intraday overlay。
+
+
+============================================================
+十三、每日 snapshot 與自動化
+============================================================
+
+目前預設排程：
+- 啟用：是
+- 執行日：週一至週五
+- 建立 snapshot 時間：15:45
+- 預設處理所有 active watchlist groups
+- 預設 mode：action
+- include_children = true
+- enabled_only = true
+- max_results = 30
+- calculation_limit = 100
+- use_intraday = true
+- intraday_limit = 30
+- outcome 回看：最近 10 天
+- 建立 snapshot 前要求當日日線已發布
+- 每 30 分鐘 reconciliation
+- reconciliation 截止時間：18:15
+
+snapshot 的冪等範圍：
+- group
+- mode
+- snapshot_date
+- rule_version
+- include_children
+- enabled_only
+
+同一範圍若 snapshot 已存在：
+- 直接回傳既有 snapshot。
+- 不覆寫既有內容。
+
+snapshot_date 來源優先序：
+1. trade_date
+2. target_trade_date
+3. 系統當日日期
+
+
+============================================================
+十四、T+1 outcome 資料與報酬公式
+============================================================
+
+14.1 評估日期
+
+- 以 signal_trade_date / snapshot trade_date 為基準。
+- 使用台股交易日曆找下一個交易日。
+- 不是單純加一個日曆日。
+
+14.2 outcome bar 來源
+
+1. 優先使用正式日線 OHLC。
+2. 若正式日線不存在，才退回 1 分鐘資料。
+3. 1 分鐘 fallback 必須至少有 13:25 以後的 bar，
+   才視為足以代表該交易日 outcome。
+
+14.3 計算公式
+
+以下全部以 snapshot 當下的 signal_close_price 為分母。
+
+open_gap_pct
+  = (T+1 open / signal_close - 1) * 100%
+
+close_return_pct
+  = (T+1 close / signal_close - 1) * 100%
+
+max_favorable_pct
+  = (T+1 high / signal_close - 1) * 100%
+
+max_adverse_pct
+  = (T+1 low / signal_close - 1) * 100%
+
+intraday_range_pct
+  = (T+1 high - T+1 low) / signal_close * 100%
+
+
+============================================================
+十五、T+1 命中、未命中與中性判定
+============================================================
+
+15.1 動能類 bucket
+
+適用：
+- limit_up_lock
+- surge_up
+- breakout_high
+- trend_reclaim
+- volume_up
+- momentum
+- pullback
+- breakout
+- limit_up_move
+
+判斷順序：
+
+1. 命中 hit
+   - close_return_pct >= 0
+   或
+   - max_favorable_pct >= +2%
+
+2. 未命中 miss
+   - close_return_pct <= -2%
+   或
+   - max_adverse_pct <= -4%
+
+3. 其他
+   - neutral
+
+重要：
+- hit 先判斷。
+- 若同一天盤中先漲超過 +2%，後來又大跌，
+  只要先符合 hit，仍會回傳 hit。
+
+15.2 風險類 bucket
+
+適用：
+- limit_down_liquidity
+- selloff_risk
+- support_break
+- volume_down
+- bearish_momentum
+- risk
+- limit_down_move
+
+判斷順序：
+
+1. 命中 hit
+   - close_return_pct <= 0
+   或
+   - max_adverse_pct <= -2%
+
+2. 未命中 miss
+   - close_return_pct >= +2%
+   且
+   - max_adverse_pct > -1%
+
+3. 其他
+   - neutral
+
+重要：
+- 只要盤中低點曾達 -2%，即使命中後收盤大漲，仍是 hit。
+- miss 的條件很嚴格，除了收盤至少 +2%，盤中回落還必須小於 1%。
+
+15.3 過熱 / 波動類 bucket
+
+適用：
+- overheated
+- volatility_risk
+
+判斷順序：
+
+1. 命中 hit
+   - close_return_pct < 0
+   或
+   - max_adverse_pct <= -2%
+
+2. 未命中 miss
+   - close_return_pct >= +2%
+   且
+   - max_adverse_pct > -1%
+
+3. 其他
+   - neutral
+
+和一般風險類的差異：
+- 一般風險類收盤 0% 也算 hit。
+- 過熱 / 波動類必須收盤 < 0，或盤中低點 <= -2%。
+
+15.4 結構觀察類 bucket
+
+適用：
+- compression_watch
+- volume
+- watch
+
+命中 hit：
+- |close_return_pct| >= 2%
+  或
+- intraday_range_pct >= 3%
+
+其他：
+- neutral
+
+這一類的 hit 只表示 T+1 有明顯位移或波動，
+不區分向上或向下。
+
+15.5 不計分類
+
+適用：
+- quiet
+- no_data
+- error
+
+結果：
+- unevaluable
+
+15.6 尚無下一交易日資料
+
+結果：
+- pending
+
+
+============================================================
+十六、統計口徑
+============================================================
+
+outcome summary 目前會對 snapshot outcome 做簡單彙總，例如：
+- hit 數
+- miss 數
+- neutral 數
+- pending 數
+- 平均收盤報酬
+- 平均最大有利幅度
+- 平均最大不利幅度
+
+注意：
+- 同一檔股票可能同時存在於不同 watchlist group。
+- 不同 group 的 snapshot 會各自保存 outcome。
+- 若直接把所有資料列加總，同一 stock / bucket / date 可能重複計入。
+- 要估計全系統準確率時，應先明確決定是否按
+  stock_id + bucket + snapshot_date 去重。
+
+
+============================================================
+十七、目前判斷精確度的主要限制
+============================================================
+
+1. 「命中」語意過寬
+   動能與風險類都採 OR 條件，只要收盤或盤中極值其中一項成立就命中。
+
+2. 盤中極值與收盤確認混為同一狀態
+   盤中短暫觸發與收盤真正延續都顯示為 hit，資訊量不同但 UI 沒有區分。
+
+3. 命中優先於未命中
+   同一天可能同時出現有利與不利的大幅波動。
+   目前先判 hit，符合後就不再檢查 miss。
+
+4. bucket 是狀態分類，不是純方向預測
+   selloff_risk 比較接近「風險曾經被驗證」，
+   不能直接讀成「隔日一定收跌」。
+
+5. 基礎 score 有相關訊號重複加權
+   價格位階、均線穿越、均線排列可能同時反映同一段行情。
+
+6. technical_grade 是批次相對值
+   它會隨 watchlist、mode、結果數量改變，不是固定絕對評等。
+
+7. context 只影響排序，不會改 bucket
+   即使法人、營收或盤中 context 明顯反向，主分類仍維持技術 bucket。
+
+8. 盤中 overlay 是混合時間框架
+   現價是盤中的，但多數指標仍是最近完成的日線值。
+
+9. 跨 group 統計可能重複
+   未去重的整體命中率可能被重複 snapshot 放大。
+
+
+============================================================
+十八、3260 威剛案例如何解讀
+============================================================
+
+畫面案例：
+- bucket：selloff_risk（急跌風控）
+- signal close：369
+- T+1 open：367
+- T+1 high：405
+- T+1 low：350
+- T+1 close：394
+- close_return_pct：約 +6.78%
+- max_favorable_pct：約 +9.76%
+- max_adverse_pct：約 -5.15%
+- intraday_range_pct：約 14.91%
+
+依目前風險類規則：
+
+- close_return_pct <= 0：不成立
+- max_adverse_pct <= -2%：成立
+
+所以結果是 hit。
+
+這個 hit 的正確文字解讀應該是：
+
+「T+1 盤中風險曾經擴大，低點相對訊號收盤價下跌約 5.15%。」
+
+它不應被解讀成：
+
+「急跌方向延續到收盤。」
+
+因為收盤實際上漲約 6.78%。
+
+
+============================================================
+十九、閱讀 Radar 結果的建議
+============================================================
+
+目前使用時，建議把結果拆成三件事閱讀：
+
+1. bucket
+   代表 snapshot 當下被偵測到的主要技術情境。
+
+2. T+1 path
+   分別看 close_return、max_favorable、max_adverse、intraday_range，
+   不只看 hit / miss。
+
+3. confirmation type
+   判斷是「盤中曾觸發」還是「收盤確認」。
+   目前系統尚未把兩者拆成不同 outcome 狀態，需由數值自行判讀。
+
+若未來調整 outcome contract，較合理的方向是將結果拆成：
+- intraday_triggered：盤中曾觸發
+- close_confirmed：收盤方向確認
+- reversed：盤中觸發後收盤反轉
+- invalidated：主要情境被明確推翻
+- neutral：沒有足夠位移
+
+這會比單一 hit / miss 更符合 Radar 作為研究與風險輔助工具的定位。
+
+
+============================================================
+二十、主要程式真相來源
+============================================================
+
+技術指標計算
+- backend/app/market/indicator_service.py
+- backend/app/market/technical_parameters.py
+
+基礎訊號與 score
+- backend/app/market/signal_service.py
+- backend/app/market/technical_structure.py
+
+Watchlist ranking
+- backend/app/watchlists/ranking_service.py
+
+Radar bucket、evidence、priority、grade
+- backend/app/watchlists/radar_service.py
+
+snapshot 與 T+1 outcome
+- backend/app/watchlists/radar_outcome_service.py
+
+每日自動化
+- backend/app/watchlists/radar_automation.py
+
+API
+- backend/app/routers/watchlists.py
+
+前端狀態與查詢參數
+- frontend/src/components/market-dashboard/radar/useTaiwanRadarState.ts
+
+Radar 顯示
+- frontend/src/components/WatchlistRadarPanel.tsx
+
+繁體中文顯示文字
+- frontend/src/i18n/messages/zh-TW.ts
+
+
+============================================================
+文件結束
+============================================================

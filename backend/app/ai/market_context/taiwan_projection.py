@@ -677,7 +677,7 @@ def _compact_latest_daily_quote(
         prior_session_close if official_close_available else close_price
     )
     public_price = close_price if official_close_available else None
-    return {
+    quote = {
         "kind": "quote_snapshot",
         "source": "market_daily_price",
         "provider": "local_daily_close",
@@ -803,6 +803,303 @@ def _compact_latest_daily_quote(
             or "No live quote was available for this response; using the latest local daily close.",
         },
     }
+    return quote
+
+
+def _component_freshness(
+    quote: dict[str, Any],
+    *,
+    dataset: str,
+    status: str,
+    available: bool,
+    event_time: Any,
+) -> dict[str, Any]:
+    quote_freshness = (
+        quote.get("freshness")
+        if isinstance(quote.get("freshness"), dict)
+        else {}
+    )
+    normalized_status = str(status or "unavailable")
+    is_stale = bool(quote_freshness.get("is_stale"))
+    is_current = bool(
+        available
+        and not is_stale
+        and normalized_status
+        not in {"missing", "stale", "unavailable", "pending"}
+    )
+    return {
+        "status": normalized_status,
+        "dataset": dataset,
+        "is_current": is_current,
+        "latest": _json_value(event_time),
+        "expected": _json_value(
+            quote_freshness.get("expected_trade_date")
+        ),
+        "event_time_basis": (
+            "provider_event_time"
+            if event_time
+            else "taiwan_completed_trade_date"
+        ),
+        "age_seconds": quote_freshness.get("age_seconds"),
+        "latency_ms": quote.get("latency_ms"),
+        "provider": quote.get("provider"),
+        "source": quote.get("source"),
+        "refresh_recommended": normalized_status
+        in {"missing", "stale", "unavailable"},
+        "reason": quote_freshness.get("message"),
+    }
+
+
+def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
+    depth_available = bool(quote.get("depth_available"))
+    depth_status = (
+        "current"
+        if depth_available
+        and not bool((quote.get("freshness") or {}).get("is_stale"))
+        else str(quote.get("depth_status") or "unavailable")
+    )
+    snapshot_time = (
+        quote.get("snapshot_time")
+        or quote.get("provider_event_time")
+        or quote.get("quote_time")
+    )
+    order_book_freshness = _component_freshness(
+        quote,
+        dataset="taiwan_quote_order_book",
+        status=depth_status,
+        available=depth_available,
+        event_time=snapshot_time,
+    )
+    order_book = {
+        "kind": "quote_order_book",
+        "status": depth_status,
+        "available": depth_available,
+        "best_bid_price": quote.get("best_bid_price"),
+        "best_bid_size_lots": quote.get("best_bid_size_lots"),
+        "best_ask_price": quote.get("best_ask_price"),
+        "best_ask_size_lots": quote.get("best_ask_size_lots"),
+        "spread": quote.get("spread"),
+        "spread_pct": quote.get("spread_pct"),
+        "bid_levels": list(quote.get("bid_levels") or []),
+        "ask_levels": list(quote.get("ask_levels") or []),
+        "top5_bid_volume_lots": quote.get("top5_bid_volume_lots"),
+        "top5_ask_volume_lots": quote.get("top5_ask_volume_lots"),
+        "top5_imbalance": quote.get("top5_imbalance"),
+        "volume_unit": quote.get("depth_volume_unit") or "lots",
+        "order_count_status": quote.get(
+            "depth_order_count_status",
+            "not_provided",
+        ),
+        "snapshot_time": _json_value(snapshot_time),
+        "snapshot_time_basis": quote.get("snapshot_time_basis"),
+        "provider_event_time": _json_value(
+            quote.get("provider_event_time")
+        ),
+        "fetched_at": _json_value(quote.get("fetched_at")),
+        "latency_ms": quote.get("latency_ms"),
+        "provider": quote.get("provider"),
+        "source": quote.get("source"),
+        "freshness": order_book_freshness,
+    }
+
+    session_phase = str(
+        quote.get("session_phase")
+        or quote.get("current_session_phase")
+        or ""
+    )
+    auction_relevant = session_phase in {
+        "preopen",
+        "preopen_pending",
+        "closing_auction",
+        "disposition_batch_auction",
+        "batch_auction",
+    } or str(quote.get("trading_mode") or "") == "disposition_batch_auction"
+    auction_available = bool(
+        quote.get("auction_book_available")
+        or quote.get("auction_indicative_available")
+        or quote.get("indicative_match_available")
+    )
+    raw_auction_status = str(
+        quote.get("auction_book_status") or "unavailable"
+    )
+    auction_status = (
+        "current"
+        if auction_available
+        and not bool((quote.get("freshness") or {}).get("is_stale"))
+        else raw_auction_status
+        if auction_relevant
+        else "not_applicable"
+    )
+    auction_time = quote.get("auction_book_time") or snapshot_time
+    auction_freshness = _component_freshness(
+        quote,
+        dataset="taiwan_quote_auction",
+        status=auction_status,
+        available=auction_available,
+        event_time=auction_time,
+    )
+    if auction_status == "not_applicable":
+        auction_freshness["is_current"] = True
+        auction_freshness["refresh_recommended"] = False
+    auction = {
+        "kind": "quote_auction",
+        "status": auction_status,
+        "available": auction_available,
+        "session_phase": session_phase or None,
+        "auction_time": _json_value(auction_time),
+        "best_bid": quote.get("auction_best_bid"),
+        "best_ask": quote.get("auction_best_ask"),
+        "indicative_available": bool(
+            quote.get("auction_indicative_available")
+        ),
+        "indicative_match_available": bool(
+            quote.get("indicative_match_available")
+        ),
+        "indicative_match_price": quote.get("indicative_match_price"),
+        "indicative_match_volume_lots": quote.get(
+            "indicative_match_volume_lots"
+        ),
+        "unmatched_buy_volume_lots": quote.get(
+            "indicative_unmatched_buy_volume_lots"
+        ),
+        "unmatched_sell_volume_lots": quote.get(
+            "indicative_unmatched_sell_volume_lots"
+        ),
+        "unmatched_status": quote.get(
+            "indicative_unmatched_status",
+            "not_provided",
+        ),
+        "trading_mode": quote.get("trading_mode") or "continuous",
+        "analysis_basis": quote.get("analysis_basis"),
+        "batch_interval_minutes": quote.get("batch_interval_minutes"),
+        "next_batch_time": _json_value(quote.get("next_batch_time")),
+        "provider_event_time": _json_value(
+            quote.get("provider_event_time")
+        ),
+        "latency_ms": quote.get("latency_ms"),
+        "provider": quote.get("provider"),
+        "source": quote.get("source"),
+        "freshness": auction_freshness,
+    }
+
+    close_available = bool(quote.get("official_close_available"))
+    raw_close_status = str(
+        quote.get("official_close_status") or "unavailable"
+    )
+    close_status = (
+        "latest_completed_session"
+        if close_available
+        and raw_close_status in {"confirmed", "confirmed_latest_session"}
+        else "pending"
+        if raw_close_status
+        in {"pending", "closing_auction_pending", "not_available_yet"}
+        else raw_close_status
+    )
+    close_time = quote.get("official_close_trade_date")
+    close_freshness = _component_freshness(
+        quote,
+        dataset="market_daily_price",
+        status=close_status,
+        available=close_available,
+        event_time=close_time,
+    )
+    official_close = {
+        "kind": "quote_official_close",
+        "status": close_status,
+        "available": close_available,
+        "price": quote.get("official_close_price"),
+        "trade_date": _json_value(
+            quote.get("official_close_trade_date")
+        ),
+        "source": quote.get("official_close_source"),
+        "raw": quote.get("official_close_raw"),
+        "display": quote.get("official_close_display"),
+        "precision": quote.get("official_close_precision"),
+        "quote_semantics": quote.get("quote_semantics"),
+        "delivery_status": quote.get("delivery_status"),
+        "freshness": close_freshness,
+    }
+    return {
+        "order_book": order_book,
+        "auction": auction,
+        "official_close": official_close,
+    }
+
+
+def _quote_component_freshness_rows(
+    quote: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    components = (
+        quote.get("components")
+        if isinstance(quote.get("components"), dict)
+        else _quote_components(quote)
+    )
+    output: dict[str, dict[str, Any]] = {}
+    for capability_id, key in (
+        ("quote.order_book", "order_book"),
+        ("quote.auction", "auction"),
+        ("quote.official_close", "official_close"),
+    ):
+        component = (
+            components.get(key)
+            if isinstance(components.get(key), dict)
+            else {}
+        )
+        freshness = (
+            component.get("freshness")
+            if isinstance(component.get("freshness"), dict)
+            else {}
+        )
+        output[capability_id] = dict(freshness)
+    return output
+
+
+def _quote_component_slots(
+    quote: dict[str, Any],
+    *,
+    payload_level: str,
+) -> dict[str, dict[str, Any]]:
+    components = (
+        quote.get("components")
+        if isinstance(quote.get("components"), dict)
+        else _quote_components(quote)
+    )
+    freshness_rows = _quote_component_freshness_rows(quote)
+    output: dict[str, dict[str, Any]] = {}
+    for slot_name, capability_id, key in (
+        ("quote_order_book", "quote.order_book", "order_book"),
+        ("quote_auction", "quote.auction", "auction"),
+        (
+            "quote_official_close",
+            "quote.official_close",
+            "official_close",
+        ),
+    ):
+        component = (
+            components.get(key)
+            if isinstance(components.get(key), dict)
+            else {}
+        )
+        freshness = freshness_rows[capability_id]
+        output[slot_name] = _slot_envelope(
+            status=str(component.get("status") or "missing"),
+            capability=capability_id,
+            payload_ref=f"quote.components.{key}",
+            payload_level=payload_level,
+            priority="core",
+            as_of=freshness.get("latest"),
+            freshness_status=str(
+                freshness.get("status") or "missing"
+            ),
+            warnings=(
+                [str(freshness.get("reason"))]
+                if freshness.get("reason")
+                and str(component.get("status"))
+                in {"missing", "stale", "unavailable"}
+                else []
+            ),
+        )
+    return output
 
 
 def _compact_quote_snapshot(
@@ -816,7 +1113,7 @@ def _compact_quote_snapshot(
     live_quote_requested: bool = True,
 ) -> dict[str, Any]:
     if not quote_depth:
-        return _compact_latest_daily_quote(
+        quote = _compact_latest_daily_quote(
             latest_daily,
             quote_error=quote_error,
             session_phase=session_phase,
@@ -824,6 +1121,8 @@ def _compact_quote_snapshot(
             is_trading_day=is_trading_day,
             live_quote_requested=live_quote_requested,
         )
+        quote["components"] = _quote_components(quote)
+        return quote
 
     freshness = quote_depth.get("freshness") if isinstance(quote_depth.get("freshness"), dict) else {}
     age_seconds = freshness.get("age_seconds")
@@ -844,7 +1143,7 @@ def _compact_quote_snapshot(
         price_available = last_trade_price is not None
     latest_price = last_trade_price if price_available else None
     depth_available = bool(quote_depth.get("depth_available"))
-    return {
+    quote = {
         "kind": "quote_snapshot",
         "source": quote_depth.get("source"),
         "provider": quote_depth.get("provider"),
@@ -1027,6 +1326,8 @@ def _compact_quote_snapshot(
             "fetch_age_seconds": freshness.get("fetch_age_seconds"),
         },
     }
+    quote["components"] = _quote_components(quote)
+    return quote
 
 
 def _compact_intraday_point(point: dict[str, Any]) -> dict[str, Any]:
@@ -1490,6 +1791,7 @@ def _build_freshness_by_capability(
             "refresh_recommended": quote_freshness.get("status")
             in {"missing", "stale", "unavailable"},
         },
+        **_quote_component_freshness_rows(quote),
         "intraday.bars": {
             "status": intraday_resource.get("status"),
             "dataset": "intraday_bars",
@@ -2134,7 +2436,7 @@ def _compact_index_quote(
         else "not_provided"
     )
 
-    return {
+    quote = {
         "kind": "quote_snapshot",
         "source": source,
         "provider": source,
@@ -2249,6 +2551,8 @@ def _compact_index_quote(
             ),
         },
     }
+    quote["components"] = _quote_components(quote)
+    return quote
 
 
 def _index_freshness_by_domain(
@@ -2347,6 +2651,47 @@ def _build_tw_index_compact_evidence(
         "missing": list(dict.fromkeys(missing)),
         "warnings": list(dict.fromkeys(warnings)),
     }
+    freshness_by_domain = _index_freshness_by_domain(
+        quote=quote,
+        intraday_bars=intraday_bars,
+        market_chip=market_chip,
+        missing=missing,
+    )
+    freshness_by_capability = {
+        "target.identity": {
+            "status": "current",
+            "dataset": "market_index_identity",
+            "is_current": True,
+            "refresh_recommended": False,
+        },
+        "quote.snapshot": {
+            **_quote_freshness_domain(quote),
+            "dataset": "market_index_quote",
+        },
+        **_quote_component_freshness_rows(quote),
+        "intraday.bars": {
+            **_intraday_bar_freshness_resource(intraday_bars),
+            "dataset": "market_index_intraday",
+        },
+    }
+    slots = _build_tw_index_slots(
+        target=target,
+        as_of=as_of,
+        payload_level=payload_level,
+        quote=quote,
+        intraday_bars=intraday_bars,
+        technical=technical,
+        market_chip=market_chip,
+        contributions=contributions,
+        missing=data_quality["missing"],
+        warnings=data_quality["warnings"],
+    )
+    slots.update(
+        _quote_component_slots(
+            quote,
+            payload_level=payload_level,
+        )
+    )
     return {
         "kind": "tw_index_compact_evidence",
         "version": "tw_index_compact_evidence.v1",
@@ -2358,25 +2703,10 @@ def _build_tw_index_compact_evidence(
         "technical": technical,
         "chips": chips,
         "contributions": contributions,
-        "freshness_by_domain": _index_freshness_by_domain(
-            quote=quote,
-            intraday_bars=intraday_bars,
-            market_chip=market_chip,
-            missing=missing,
-        ),
+        "freshness_by_domain": freshness_by_domain,
+        "freshness_by_capability": freshness_by_capability,
         "data_quality": data_quality,
-        "slots": _build_tw_index_slots(
-            target=target,
-            as_of=as_of,
-            payload_level=payload_level,
-            quote=quote,
-            intraday_bars=intraday_bars,
-            technical=technical,
-            market_chip=market_chip,
-            contributions=contributions,
-            missing=data_quality["missing"],
-            warnings=data_quality["warnings"],
-        ),
+        "slots": slots,
         "source_refs": source_refs,
     }
 
@@ -2402,6 +2732,7 @@ def _build_stock_compact_evidence(
     intraday_bars: dict[str, Any],
     source_health: dict[str, Any],
     overnight_impact: dict[str, Any] | None,
+    event_context: dict[str, Any] | None,
     missing: list[str],
     warnings: list[str],
     source_refs: list[dict[str, Any]],
@@ -2543,8 +2874,60 @@ def _build_stock_compact_evidence(
         "missing": list(dict.fromkeys(missing)),
         "warnings": list(dict.fromkeys(warnings)),
     }
+    event_context = event_context if isinstance(event_context, dict) else {}
+    event_data = (
+        event_context.get("data")
+        if isinstance(event_context.get("data"), dict)
+        else {}
+    )
+    events = {
+        key.split(".", 1)[1]: value
+        for key, value in event_data.items()
+        if str(key).startswith("events.")
+    }
+    regulation = {
+        key.split(".", 1)[1]: value
+        for key, value in event_data.items()
+        if str(key).startswith("regulation.")
+    }
     raw_payload_level = intraday_bars.get("payload_level") if isinstance(intraday_bars, dict) else None
     payload_level = str(raw_payload_level) if raw_payload_level in PAYLOAD_LEVELS else "compact"
+    freshness_by_capability = _build_freshness_by_capability(
+        quote=quote,
+        intraday_bars=intraday_bars,
+        source_health=source_health,
+        overnight_impact=overnight_impact,
+        missing=missing,
+    )
+    freshness_by_capability.update(
+        event_context.get("freshness_by_capability")
+        if isinstance(event_context.get("freshness_by_capability"), dict)
+        else {}
+    )
+    slots = _build_tw_stock_slots(
+        target=target,
+        as_of=as_of,
+        payload_level=payload_level,
+        quote=quote,
+        intraday_bars=intraday_bars,
+        technical=technical,
+        chips=chips,
+        fundamentals=fundamentals,
+        cross_market=overnight_impact,
+        missing=data_quality["missing"],
+        warnings=data_quality["warnings"],
+    )
+    slots.update(
+        _quote_component_slots(
+            quote,
+            payload_level=payload_level,
+        )
+    )
+    slots.update(
+        event_context.get("slots")
+        if isinstance(event_context.get("slots"), dict)
+        else {}
+    )
     return {
         "kind": "stock_compact_evidence",
         "version": "stock_compact_evidence.v1",
@@ -2556,6 +2939,8 @@ def _build_stock_compact_evidence(
         "technical": technical,
         "chips": chips,
         "fundamentals": fundamentals,
+        "events": events,
+        "regulation": regulation,
         "cross_market": overnight_impact,
         "freshness_by_domain": _build_freshness_by_domain(
             quote=quote,
@@ -2564,27 +2949,9 @@ def _build_stock_compact_evidence(
             overnight_impact=overnight_impact,
             missing=missing,
         ),
-        "freshness_by_capability": _build_freshness_by_capability(
-            quote=quote,
-            intraday_bars=intraday_bars,
-            source_health=source_health,
-            overnight_impact=overnight_impact,
-            missing=missing,
-        ),
+        "freshness_by_capability": freshness_by_capability,
         "data_quality": data_quality,
-        "slots": _build_tw_stock_slots(
-            target=target,
-            as_of=as_of,
-            payload_level=payload_level,
-            quote=quote,
-            intraday_bars=intraday_bars,
-            technical=technical,
-            chips=chips,
-            fundamentals=fundamentals,
-            cross_market=overnight_impact,
-            missing=data_quality["missing"],
-            warnings=data_quality["warnings"],
-        ),
+        "slots": slots,
         "source_refs": source_refs,
     }
 

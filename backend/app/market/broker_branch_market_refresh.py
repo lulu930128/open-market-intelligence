@@ -5,15 +5,19 @@ import logging
 from time import monotonic, sleep
 from typing import Callable
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import BrokerBranchTradeDaily, StockMaster
+from app.db.models import BrokerBranchTradeDaily
 from app.market.broker_branch import (
     NSTOCK_BRANCH_SOURCE_NAME,
     NSTOCK_BRANCH_TOP15_URL,
     ensure_broker_branch_daily,
     probe_broker_branch_release,
+)
+from app.market.tw_universe import (
+    TAIWAN_STOCK_INSTRUMENT_TYPE,
+    TAIWAN_STOCK_MARKETS,
+    list_taiwan_stock_ids,
 )
 from app.observability.provider_health import record_provider_event
 
@@ -21,26 +25,11 @@ from app.observability.provider_health import record_provider_event
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
-TAIWAN_STOCK_MARKETS = ("TWSE", "TPEX")
-TAIWAN_STOCK_INSTRUMENT_TYPE = "stock"
 
 
 def list_taiwan_broker_branch_stock_ids(db: Session) -> list[str]:
     """Return the active TWSE/TPEx ordinary-stock universe in stable order."""
-    return [
-        row[0]
-        for row in (
-            db.query(StockMaster.stock_id)
-            .filter(StockMaster.is_active.is_(True))
-            .filter(func.upper(StockMaster.market).in_(TAIWAN_STOCK_MARKETS))
-            .filter(
-                func.lower(StockMaster.instrument_type)
-                == TAIWAN_STOCK_INSTRUMENT_TYPE
-            )
-            .order_by(StockMaster.stock_id.asc())
-            .all()
-        )
-    ]
+    return list_taiwan_stock_ids(db)
 
 
 def _covered_stock_ids(

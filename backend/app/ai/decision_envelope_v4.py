@@ -7,8 +7,10 @@ from typing import Any
 
 from app.ai import (
     capability_contract,
+    contract_manifest,
     data_quality_contract,
     decision_envelope,
+    public_contract,
     realtime_contract,
 )
 
@@ -109,6 +111,7 @@ def _selection(
     if isinstance(existing, dict) and existing.get("version"):
         return deepcopy(existing)
     mode = _dict(canonical.get("mode"))
+    target = _dict(canonical.get("target"))
     intent = str(_dict(canonical.get("decision")).get("intent") or "general")
     return capability_contract.normalize_selection(
         selection=(
@@ -126,6 +129,7 @@ def _selection(
         payload_level=str(mode.get("payload_level") or "compact"),
         scope_type=scope_type,
         question_intent=intent,
+        target_market=str(target.get("market") or "").strip() or None,
         requested_domains=tuple(query_plan.get("requested_domains") or ()),
         excluded_domains=tuple(query_plan.get("excluded_domains") or ()),
     )
@@ -1675,7 +1679,8 @@ def _fit_budget(
         answer = _dict(envelope.get("answer"))
         if isinstance(answer.get("detail"), str):
             answer["detail"] = answer["detail"][:2_000]
-        answer["summary"] = _list(answer.get("summary"))[:3]
+        if "summary" in answer:
+            answer["summary"] = _list(answer.get("summary"))[:3]
         decision = _dict(envelope.get("decision"))
         for key in (
             "action_plan",
@@ -1684,6 +1689,8 @@ def _fit_budget(
             "risks",
             "data_limits",
         ):
+            if key not in decision:
+                continue
             original_count = len(_list(decision.get(key)))
             decision[key] = _list(decision.get(key))[:3]
             mark_list(
@@ -2124,7 +2131,12 @@ def _rejected_envelope(
     execution = _dict(canonical.get("execution"))
     canonical["execution"] = {
         "selection": deepcopy(selection),
-        "capability_catalog_version": "omi.capability.registry.v1",
+        "capability_catalog_version": (
+            public_contract.CAPABILITY_REGISTRY_VERSION
+        ),
+        "public_contract_digest": (
+            contract_manifest.public_contract_manifest()["digest"]
+        ),
         "tool_runs": [],
     }
     continuation = _dict(canonical.get("continuation"))
@@ -2252,7 +2264,12 @@ def build(
     canonical["evidence"] = evidence
     execution = _dict(canonical.get("execution"))
     execution["selection"] = deepcopy(selection)
-    execution["capability_catalog_version"] = "omi.capability.registry.v1"
+    execution["capability_catalog_version"] = (
+        public_contract.CAPABILITY_REGISTRY_VERSION
+    )
+    execution["public_contract_digest"] = (
+        contract_manifest.public_contract_manifest()["digest"]
+    )
     canonical["execution"] = execution
     canonical["compatibility"] = {
         "public_contract": CONTRACT_VERSION,

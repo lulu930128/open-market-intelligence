@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
 from sqlalchemy.orm import Session
@@ -44,6 +44,8 @@ class TaiwanMarketDependencies:
     read_market_volume_state: Callable[..., dict[str, Any]]
     build_taiwan_source_health: Callable[..., dict[str, Any]]
     now: Callable[[], datetime]
+    get_market_index_contributions: Callable[..., dict[str, Any]] | None = None
+    list_taiwan_corporate_events: Callable[..., dict[str, Any]] | None = None
 
 
 def _compact_auxiliary_context(value: dict[str, Any]) -> dict[str, Any]:
@@ -104,6 +106,7 @@ def _build_tw_market_compact(
     market_chips: dict[str, Any],
     volume_state: dict[str, Any],
     source_health: dict[str, Any],
+    market_aggregates: dict[str, Any],
     slots: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -134,6 +137,12 @@ def _build_tw_market_compact(
         "market_chips": _compact_auxiliary_context(market_chips),
         "volume_state": volume_state,
         "source_health": _compact_source_health(source_health) if source_health else {},
+        "market": market_aggregates,
+        "events": {
+            "calendar": market_aggregates.get("events_calendar")
+        }
+        if isinstance(market_aggregates.get("events_calendar"), dict)
+        else {},
         "freshness_by_domain": {
             "breadth": (slots.get("market_breadth") or {}).get("status"),
             "sample_ranking": (slots.get("sample_distribution") or {}).get("status"),
@@ -141,7 +150,22 @@ def _build_tw_market_compact(
             "cross_market": (slots.get("cross_market") or {}).get("status"),
             "market_chips": (slots.get("market_chips") or {}).get("status"),
             "volume": (slots.get("market_volume") or {}).get("status"),
+            "indices": (slots.get("market_indices") or {}).get("status"),
+            "sectors": (slots.get("market_sectors") or {}).get("status"),
+            "index_contributions": (
+                slots.get("market_index_contributions") or {}
+            ).get("status"),
+            "institutional_flow": (
+                slots.get("market_institutional_flow") or {}
+            ).get("status"),
+            "margin_short": (
+                slots.get("market_margin_short") or {}
+            ).get("status"),
         },
+        "freshness_by_capability": market_aggregates.get(
+            "freshness_by_capability",
+            {},
+        ),
         "slots": slots,
     }
 
@@ -232,6 +256,19 @@ def _market_index_intraday_pack(
 def _json_scalar(value: Any) -> Any:
     isoformat = getattr(value, "isoformat", None)
     return isoformat() if callable(isoformat) else value
+
+
+def _json_event_value(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {
+            str(key): _json_event_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_event_value(item) for item in value]
+    return value
 
 
 def _market_breadth_label(market: str | None, scope: str) -> str:
@@ -727,6 +764,597 @@ def _daily_sample_coverage(
     }
 
 
+def _capability_parameters(
+    data_params: dict[str, Any],
+    capability_id: str,
+) -> dict[str, Any]:
+    values = data_params.get("capability_parameters")
+    if not isinstance(values, dict):
+        return {}
+    selected = values.get(capability_id)
+    return dict(selected) if isinstance(selected, dict) else {}
+
+
+def _market_indices_capability(
+    *,
+    db: Session,
+    dependencies: TaiwanMarketDependencies,
+) -> dict[str, Any]:
+    try:
+        summary = dependencies.get_market_index_summary(
+            db,
+            force_refresh=False,
+        )
+    except Exception as exc:
+        return {
+            "kind": "tw_market_indices",
+            "status": "unavailable",
+            "as_of": None,
+            "items": [],
+            "source": "market_index_summary",
+            "missing": ["market_index_summary"],
+            "warnings": [f"Taiwan market indices unavailable: {exc}"],
+        }
+    raw_items = (
+        summary.get("indices")
+        if isinstance(summary, dict)
+        and isinstance(summary.get("indices"), list)
+        else []
+    )
+    items: list[dict[str, Any]] = []
+    for index_id, market, label in (
+        ("TAIEX", "TWSE", "臺灣加權股價指數"),
+        ("TPEX", "TPEX", "櫃買指數"),
+    ):
+        item = next(
+            (
+                row
+                for row in raw_items
+                if isinstance(row, dict)
+                and str(row.get("index_id") or "").upper() == index_id
+            ),
+            None,
+        )
+        if item is None:
+            continue
+        close = (
+            item.get("close")
+            if item.get("close") is not None
+            else item.get("value")
+        )
+        change = item.get("change")
+        change_pct = item.get("change_pct")
+        if (
+            change_pct is None
+            and isinstance(close, (int, float))
+            and isinstance(change, (int, float))
+            and close != change
+        ):
+            change_pct = change / (close - change) * 100
+        items.append(
+            {
+                "index_id": index_id,
+                "name": item.get("name") or item.get("label") or label,
+                "market": str(item.get("market") or market).upper(),
+                "close": close,
+                "change": change,
+                "change_pct": change_pct,
+                "trade_date": _json_scalar(
+                    item.get("trade_date")
+                    or item.get("date")
+                    or item.get("as_of")
+                ),
+                "source": item.get("source")
+                or summary.get("source")
+                or "market_index_summary",
+                "freshness": item.get("freshness")
+                or item.get("quote_status")
+                or {},
+            }
+        )
+    as_of = _latest_timestamp(
+        [
+            str(item.get("trade_date"))
+            for item in items
+            if item.get("trade_date")
+        ]
+    )
+    status = "ready" if len(items) == 2 else "partial" if items else "missing"
+    return {
+        "kind": "tw_market_indices",
+        "status": status,
+        "as_of": as_of,
+        "count": len(items),
+        "items": items,
+        "source": "market_index_summary",
+        "missing": (
+            []
+            if len(items) == 2
+            else [
+                f"market_index_summary.{index_id}"
+                for index_id in ("TAIEX", "TPEX")
+                if not any(
+                    row.get("index_id") == index_id for row in items
+                )
+            ]
+        ),
+        "warnings": [],
+    }
+
+
+def _market_index_contributions_capability(
+    *,
+    db: Session,
+    dependencies: TaiwanMarketDependencies,
+    data_params: dict[str, Any],
+) -> dict[str, Any]:
+    parameters = _capability_parameters(
+        data_params,
+        "market.index_contributions",
+    )
+    index_ids = [
+        str(value).strip().upper()
+        for value in parameters.get("index_ids") or ["TAIEX", "TPEX"]
+        if str(value).strip()
+    ]
+    limit = int(parameters.get("limit") or 10)
+    if dependencies.get_market_index_contributions is None:
+        return {
+            "kind": "tw_market_index_contributions",
+            "status": "unavailable",
+            "as_of": None,
+            "indices": {},
+            "missing": ["market_index_contributions"],
+            "warnings": ["Market index contribution reader is not configured."],
+        }
+    if data_params.get("external_fetch_allowed") is not True:
+        return {
+            "kind": "tw_market_index_contributions",
+            "status": "not_requested",
+            "as_of": None,
+            "indices": {},
+            "cache_policy": "external_fetch_required_bounded",
+            "missing": [],
+            "warnings": [
+                "Index contributions were not read because bounded external "
+                "fetch is disabled for this request."
+            ],
+        }
+
+    rows: dict[str, Any] = {}
+    warnings: list[str] = []
+    for index_id in index_ids:
+        try:
+            rows[index_id] = dependencies.get_market_index_contributions(
+                index_id=index_id,
+                limit=limit,
+                db=db,
+            )
+        except Exception as exc:
+            warnings.append(f"{index_id} contributions unavailable: {exc}")
+    trade_dates = [
+        str(item.get("trade_date"))
+        for item in rows.values()
+        if isinstance(item, dict) and item.get("trade_date")
+    ]
+    return {
+        "kind": "tw_market_index_contributions",
+        "status": (
+            "ready"
+            if len(rows) == len(index_ids)
+            else "partial"
+            if rows
+            else "unavailable"
+        ),
+        "as_of": max(trade_dates) if trade_dates else None,
+        "index_ids": index_ids,
+        "indices": rows,
+        "method": "estimated_market_cap_weight",
+        "cache_policy": "bounded_external_fetch",
+        "missing": [
+            f"market_index_contributions.{index_id}"
+            for index_id in index_ids
+            if index_id not in rows
+        ],
+        "warnings": warnings,
+    }
+
+
+def _official_market_flow_capabilities(
+    market_chips: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    official = (
+        market_chips.get("official_market_aggregate")
+        if isinstance(market_chips.get("official_market_aggregate"), dict)
+        else {}
+    )
+    rows = [
+        row
+        for row in official.get("rows") or []
+        if isinstance(row, dict)
+    ]
+    same_trade_date = official.get("same_trade_date") is True
+    trade_dates = [
+        str(value)
+        for value in official.get("trade_dates") or []
+        if value
+    ]
+    status = (
+        "ready"
+        if rows and same_trade_date
+        else "partial"
+        if rows
+        else "missing"
+    )
+
+    def sum_field(field: str) -> int | float | None:
+        values = [
+            row.get(field)
+            for row in rows
+            if row.get(field) is not None
+        ]
+        return sum(values) if values and same_trade_date else None
+
+    common = {
+        "status": status,
+        "trade_date": trade_dates[0]
+        if len(trade_dates) == 1
+        else None,
+        "trade_dates": trade_dates,
+        "same_trade_date": same_trade_date,
+        "markets": list(official.get("markets") or []),
+        "rows": rows,
+        "source_grade": (
+            "official"
+            if rows
+            and all(str(row.get("source_grade") or "") == "official" for row in rows)
+            else "mixed"
+            if rows
+            else "missing"
+        ),
+        "freshness": {
+            "status": status,
+            "as_of": trade_dates[0] if len(trade_dates) == 1 else None,
+            "event_time_basis": "taiwan_completed_trade_date",
+        },
+        "missing": [] if rows else ["market_chip_daily"],
+        "warnings": (
+            []
+            if same_trade_date or not rows
+            else [
+                "TWSE and TPEx official market-chip rows have different "
+                "trade dates; combined totals are withheld."
+            ]
+        ),
+    }
+    institutional = {
+        "kind": "tw_market_institutional_flow",
+        **common,
+        "unit": "TWD",
+        "aggregate": {
+            "total_institutional_net_value": sum_field(
+                "total_institutional_net_value"
+            ),
+            "foreign_investor_net_value": sum_field(
+                "foreign_investor_net_value"
+            ),
+            "investment_trust_net_value": sum_field(
+                "investment_trust_net_value"
+            ),
+            "dealer_net_value": sum_field("dealer_net_value"),
+        },
+    }
+    margin_short = {
+        "kind": "tw_market_margin_short",
+        **common,
+        "unit_semantics": {
+            "margin_balance_change_value": "TWD",
+            "margin_balance_change_shares": "shares",
+            "short_balance_change_shares": "shares",
+        },
+        "aggregate": {
+            "margin_balance_change_value": sum_field(
+                "margin_balance_change_value"
+            ),
+            "margin_balance_change_shares": sum_field(
+                "margin_balance_change_shares"
+            ),
+            "short_balance_change_shares": sum_field(
+                "short_balance_change_shares"
+            ),
+        },
+        "margin_status": [
+            {
+                "index_id": row.get("index_id"),
+                "market": row.get("market"),
+                "status": (
+                    "ready"
+                    if row.get("margin_balance_change_value") is not None
+                    or row.get("margin_balance_change_shares") is not None
+                    else "missing"
+                ),
+            }
+            for row in rows
+        ],
+    }
+    return institutional, margin_short
+
+
+def _events_calendar_capability(
+    *,
+    dependencies: TaiwanMarketDependencies,
+    data_params: dict[str, Any],
+    generated_at: datetime,
+) -> dict[str, Any]:
+    parameters = _capability_parameters(data_params, "events.calendar")
+    if dependencies.list_taiwan_corporate_events is None:
+        return {
+            "kind": "tw_market_event_calendar",
+            "status": "unavailable",
+            "as_of": None,
+            "events": [],
+            "cache_policy": "cache_only",
+            "missing": ["taiwan_corporate_events"],
+            "warnings": [
+                "Taiwan corporate-event calendar reader is not configured."
+            ],
+        }
+
+    try:
+        date_from = (
+            date.fromisoformat(str(parameters["date_from"]))
+            if parameters.get("date_from")
+            else None
+        )
+        date_to = (
+            date.fromisoformat(str(parameters["date_to"]))
+            if parameters.get("date_to")
+            else None
+        )
+    except ValueError:
+        return {
+            "kind": "tw_market_event_calendar",
+            "status": "invalid",
+            "as_of": generated_at.isoformat(),
+            "events": [],
+            "cache_policy": "cache_only",
+            "missing": [],
+            "warnings": [
+                "events.calendar date_from and date_to must use YYYY-MM-DD."
+            ],
+        }
+    if date_from and date_to and date_to < date_from:
+        return {
+            "kind": "tw_market_event_calendar",
+            "status": "invalid",
+            "as_of": generated_at.isoformat(),
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "events": [],
+            "cache_policy": "cache_only",
+            "missing": [],
+            "warnings": ["events.calendar date_to must not precede date_from."],
+        }
+    if (
+        date_from
+        and date_to
+        and date_to - date_from > timedelta(days=366)
+    ):
+        return {
+            "kind": "tw_market_event_calendar",
+            "status": "invalid",
+            "as_of": generated_at.isoformat(),
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "events": [],
+            "cache_policy": "cache_only",
+            "missing": [],
+            "warnings": [
+                "events.calendar date range must not exceed 366 days."
+            ],
+        }
+
+    event_types = {
+        str(value).strip().lower()
+        for value in parameters.get("event_types") or []
+        if str(value).strip()
+    }
+    markets = {
+        str(value).strip().upper()
+        for value in parameters.get("markets") or ["TWSE", "TPEX"]
+        if str(value).strip()
+    }
+    stock_ids = {
+        str(value).strip()
+        for value in parameters.get("stock_ids") or []
+        if str(value).strip()
+    }
+    limit = max(1, min(int(parameters.get("limit") or 300), 500))
+    offset = max(0, min(int(parameters.get("offset") or 0), 5000))
+    listing = dependencies.list_taiwan_corporate_events(
+        event_types=event_types or None,
+        markets=markets or None,
+        stock_ids=stock_ids or None,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+        now=generated_at,
+    )
+    rows = [
+        _json_event_value(row)
+        for row in listing.get("results") or []
+        if isinstance(row, dict)
+    ]
+    total_count = int(listing.get("total_count") or len(rows))
+    sources = (
+        listing.get("sources")
+        if isinstance(listing.get("sources"), dict)
+        else {}
+    )
+    source_statuses = {
+        str(item.get("status") or "missing").lower()
+        for item in sources.values()
+        if isinstance(item, dict)
+    }
+    if source_statuses and source_statuses <= {"current"}:
+        status = "ready"
+    elif not source_statuses or source_statuses <= {"missing"}:
+        status = "missing"
+    else:
+        status = "partial"
+    warning = str(listing.get("warning") or "").strip() or None
+    return {
+        "kind": "tw_market_event_calendar",
+        "status": status,
+        "as_of": _json_scalar(listing.get("as_of")),
+        "date_from": _json_scalar(listing.get("date_from")),
+        "date_to": _json_scalar(listing.get("date_to")),
+        "event_types": sorted(event_types),
+        "markets": sorted(markets),
+        "stock_ids": sorted(stock_ids),
+        "pagination": {
+            "offset": offset,
+            "limit": limit,
+            "available_count": total_count,
+            "returned_count": len(rows),
+            "has_more": offset + len(rows) < total_count,
+        },
+        "result_count": len(rows),
+        "events": rows,
+        "source": "taiwan_corporate_event_cache",
+        "sources": _json_event_value(sources),
+        "cache_policy": "cache_only",
+        "empty_result_is_valid": status == "ready" and not rows,
+        "missing": (
+            ["taiwan_corporate_events"] if status == "missing" else []
+        ),
+        "warnings": [warning] if warning else [],
+    }
+
+
+def _sample_sector_capability(
+    *,
+    industry_summary: list[dict[str, Any]],
+    sample_coverage: dict[str, Any],
+    as_of: str | None,
+) -> dict[str, Any]:
+    rows = [
+        {
+            "sector_id": str(item.get("industry") or ""),
+            "name": item.get("industry"),
+            "trade_date": as_of,
+            "change_pct": item.get("average_change_pct"),
+            "advance_count": item.get("advance_count"),
+            "decline_count": item.get("decline_count"),
+            "trade_value": item.get("trade_value"),
+            "universe_count": item.get("count"),
+            "coverage_count": item.get("count"),
+            "coverage_ratio": 1.0 if item.get("count") else None,
+            "ranking_basis": "omi_local_daily_sample_stock_aggregation",
+        }
+        for item in sorted(
+            industry_summary,
+            key=lambda item: (
+                -(item.get("average_change_pct") or 0),
+                str(item.get("industry") or ""),
+            ),
+        )
+    ]
+    return {
+        "kind": "tw_market_sectors",
+        "status": "partial" if rows else "missing",
+        "as_of": as_of,
+        "ranking_basis": "omi_local_daily_sample_stock_aggregation",
+        "is_full_market": False,
+        "coverage": sample_coverage,
+        "count": len(rows),
+        "items": rows,
+        "missing": (
+            ["market_daily_price.full_market_sector_index"]
+            if rows
+            else ["market_daily_price.sector_sample"]
+        ),
+        "warnings": [
+            "Sector rows are derived from the latest OMI local stock sample and "
+            "must not be treated as official full-market sector-index rankings."
+        ],
+    }
+
+
+def _aggregate_freshness(
+    capability_id: str,
+    payload: dict[str, Any],
+    *,
+    dataset: str,
+) -> dict[str, Any]:
+    status = str(payload.get("status") or "missing")
+    return {
+        "capability": capability_id,
+        "dataset": dataset,
+        "status": status,
+        "is_current": status == "ready",
+        "latest": payload.get("as_of") or payload.get("trade_date"),
+        "event_time_basis": "taiwan_completed_trade_date",
+        "refresh_recommended": status
+        in {"missing", "stale", "unavailable"},
+        "missing": list(payload.get("missing") or []),
+        "warnings": list(payload.get("warnings") or []),
+    }
+
+
+def _market_aggregate_slots(
+    *,
+    market_aggregates: dict[str, Any],
+    payload_level: str,
+) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for slot_name, capability_id, key in (
+        ("market_indices", "market.indices", "indices"),
+        ("market_sectors", "market.sectors", "sectors"),
+        (
+            "market_index_contributions",
+            "market.index_contributions",
+            "index_contributions",
+        ),
+        (
+            "market_institutional_flow",
+            "market.institutional_flow",
+            "institutional_flow",
+        ),
+        (
+            "market_margin_short",
+            "market.margin_short",
+            "margin_short",
+        ),
+        (
+            "events_calendar",
+            "events.calendar",
+            "events_calendar",
+        ),
+    ):
+        payload = market_aggregates.get(key)
+        if not isinstance(payload, dict):
+            continue
+        output[slot_name] = {
+            "status": str(payload.get("status") or "missing"),
+            "capability": capability_id,
+            "payload_ref": f"market.{key}",
+            "payload_level": payload_level,
+            "priority": "core",
+            "as_of": payload.get("as_of") or payload.get("trade_date"),
+            "freshness": (
+                market_aggregates.get("freshness_by_capability", {}).get(
+                    capability_id,
+                    {},
+                )
+            ),
+            "missing": list(payload.get("missing") or []),
+            "warnings": list(payload.get("warnings") or []),
+        }
+    return output
+
+
 def read_market_overview(
     db: Session,
     limit: int = 10,
@@ -802,6 +1430,80 @@ def read_market_overview(
             "source_refs": [],
         }
     )
+    market_aggregates: dict[str, Any] = {
+        "freshness_by_capability": {}
+    }
+    if "events.calendar" in requested_capabilities:
+        market_aggregates["events_calendar"] = (
+            _events_calendar_capability(
+                dependencies=dependencies,
+                data_params=data_params,
+                generated_at=generated_at,
+            )
+        )
+        calendar_payload = market_aggregates["events_calendar"]
+        market_aggregates["freshness_by_capability"][
+            "events.calendar"
+        ] = {
+            "capability": "events.calendar",
+            "dataset": "taiwan_corporate_events",
+            "status": calendar_payload.get("status"),
+            "is_current": calendar_payload.get("status") == "ready",
+            "latest": calendar_payload.get("as_of"),
+            "event_time_basis": "official_event_date",
+            "refresh_recommended": calendar_payload.get("status")
+            in {"missing", "stale", "unavailable"},
+            "missing": list(calendar_payload.get("missing") or []),
+            "warnings": list(calendar_payload.get("warnings") or []),
+        }
+    if "market.indices" in requested_capabilities:
+        market_aggregates["indices"] = _market_indices_capability(
+            db=db,
+            dependencies=dependencies,
+        )
+        market_aggregates["freshness_by_capability"][
+            "market.indices"
+        ] = _aggregate_freshness(
+            "market.indices",
+            market_aggregates["indices"],
+            dataset="market_index_summary",
+        )
+    if "market.index_contributions" in requested_capabilities:
+        market_aggregates[
+            "index_contributions"
+        ] = _market_index_contributions_capability(
+            db=db,
+            dependencies=dependencies,
+            data_params=data_params,
+        )
+        market_aggregates["freshness_by_capability"][
+            "market.index_contributions"
+        ] = _aggregate_freshness(
+            "market.index_contributions",
+            market_aggregates["index_contributions"],
+            dataset="market_index_contributions",
+        )
+    institutional_flow, margin_short = (
+        _official_market_flow_capabilities(market_chips)
+    )
+    if "market.institutional_flow" in requested_capabilities:
+        market_aggregates["institutional_flow"] = institutional_flow
+        market_aggregates["freshness_by_capability"][
+            "market.institutional_flow"
+        ] = _aggregate_freshness(
+            "market.institutional_flow",
+            institutional_flow,
+            dataset="market_chip_daily",
+        )
+    if "market.margin_short" in requested_capabilities:
+        market_aggregates["margin_short"] = margin_short
+        market_aggregates["freshness_by_capability"][
+            "market.margin_short"
+        ] = _aggregate_freshness(
+            "market.margin_short",
+            margin_short,
+            dataset="market_chip_daily",
+        )
     volume_state = (
         dependencies.read_market_volume_state(db=db)
         if wants("volume")
@@ -912,6 +1614,25 @@ def read_market_overview(
             missing=list(dict.fromkeys(["market_daily_price", *missing])),
             warnings=no_daily_warnings,
         )
+        if "market.sectors" in requested_capabilities:
+            market_aggregates["sectors"] = _sample_sector_capability(
+                industry_summary=[],
+                sample_coverage=sample_coverage,
+                as_of=evidence_as_of,
+            )
+            market_aggregates["freshness_by_capability"][
+                "market.sectors"
+            ] = _aggregate_freshness(
+                "market.sectors",
+                market_aggregates["sectors"],
+                dataset="market_daily_price",
+            )
+        slots.update(
+            _market_aggregate_slots(
+                market_aggregates=market_aggregates,
+                payload_level=payload_level,
+            )
+        )
         compact = _build_tw_market_compact(
             as_of=evidence_as_of,
             latest_trade_date=None,
@@ -932,6 +1653,7 @@ def read_market_overview(
             market_chips=market_chips,
             volume_state=volume_state,
             source_health=source_health,
+            market_aggregates=market_aggregates,
             slots=slots,
         )
         envelope = {
@@ -952,6 +1674,11 @@ def read_market_overview(
                 "market_chips": market_chips,
                 "volume_state": volume_state,
                 "source_health": source_health,
+                "market": market_aggregates,
+                "freshness_by_capability": market_aggregates.get(
+                    "freshness_by_capability",
+                    {},
+                ),
                 "slots": slots,
                 "compact": compact,
             },
@@ -1109,6 +1836,19 @@ def read_market_overview(
                 "top_stock_name": top_row.get("stock_name"),
             }
         )
+    if "market.sectors" in requested_capabilities:
+        market_aggregates["sectors"] = _sample_sector_capability(
+            industry_summary=industry_summary,
+            sample_coverage=sample_coverage,
+            as_of=evidence_as_of,
+        )
+        market_aggregates["freshness_by_capability"][
+            "market.sectors"
+        ] = _aggregate_freshness(
+            "market.sectors",
+            market_aggregates["sectors"],
+            dataset="market_daily_price",
+        )
     top_industries = sorted(
         [row for row in industry_summary if row["industry"] != "未分類" and row["count"] >= 2],
         key=lambda row: (
@@ -1177,6 +1917,12 @@ def read_market_overview(
         missing=missing,
         warnings=warnings,
     )
+    slots.update(
+        _market_aggregate_slots(
+            market_aggregates=market_aggregates,
+            payload_level=payload_level,
+        )
+    )
     compact = _build_tw_market_compact(
         as_of=evidence_as_of,
         latest_trade_date=latest_trade_date.isoformat(),
@@ -1197,6 +1943,7 @@ def read_market_overview(
         market_chips=market_chips,
         volume_state=volume_state,
         source_health=source_health,
+        market_aggregates=market_aggregates,
         slots=slots,
     )
     envelope = {
@@ -1227,6 +1974,11 @@ def read_market_overview(
             "market_chips": market_chips,
             "volume_state": volume_state,
             "source_health": source_health,
+            "market": market_aggregates,
+            "freshness_by_capability": market_aggregates.get(
+                "freshness_by_capability",
+                {},
+            ),
             "slots": slots,
             "compact": compact,
         },

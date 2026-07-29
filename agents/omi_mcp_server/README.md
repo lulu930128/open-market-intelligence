@@ -69,8 +69,29 @@ field、limit、output 與 realtime policy：
 
 完整 schema 與 capability catalog 由 backend `/api/ai/tools` 擁有。MCP
 `tools/list` 會讀取這份 schema，確保 HTTP 與 MCP 不維護兩套欄位；backend
-暫時無法連線時才退回 adapter 內的相容 fallback schema。Adapter 只添加
-transport-local `include_raw`。
+暫時無法連線時才退回
+`agents/omi_mcp_server/public_contract_snapshot.json`。這份 fallback 是由
+backend registry 產生的 artifact，不是 adapter 手工維護的第二份市場契約；
+adapter 只添加 transport-local `include_raw`。
+
+Registry、target、capability 或 `selection.parameters` schema 有變更時，從 repo
+root 重新產生 snapshot：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\generate-ai-public-contract-snapshot.py
+```
+
+需要同步 standalone `OMI_search` 時，可在同一次產生兩份完全相同 digest 的
+snapshot：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\generate-ai-public-contract-snapshot.py `
+  --output .\agents\omi_mcp_server\public_contract_snapshot.json `
+  --output C:\GPT_MCPtool\OMI_search\public_contract_snapshot.json
+```
+
+正常連線時仍以 backend `/api/ai/tools` 為即時權威；snapshot 只負責離線
+`tools/list` 相容，不能讓 adapter 自行判斷 market semantics 或 freshness。
 
 Consumer 應直接讀：
 

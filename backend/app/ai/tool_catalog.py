@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.ai import capability_contract
+from app.ai import capability_contract, contract_manifest, public_contract
 
 
 CAPABILITY_ID_SCHEMA: dict[str, Any] = {
@@ -60,6 +60,19 @@ CAPABILITY_SELECTION_SCHEMA: dict[str, Any] = {
                 "minimum": 1,
                 "maximum": 500,
             },
+        },
+        "parameters": {
+            "type": "object",
+            "description": (
+                "Capability-keyed typed query parameters. Only capabilities with a "
+                "registered parameter schema accept entries here."
+            ),
+            "properties": {
+                spec.capability_id: spec.parameter_schema
+                for spec in capability_contract.CAPABILITY_SPECS
+                if spec.parameter_schema
+            },
+            "additionalProperties": False,
         },
         "max_response_bytes": {
             "type": "integer",
@@ -143,30 +156,9 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "properties": {
                                 "type": {
                                     "type": "string",
-                                    "enum": [
-                                        "auto",
-                                        "market",
-                                        "data_freshness",
-                                        "tw_stock",
-                                        "tw_watchlist",
-                                        "tw_index",
-                                        "tw_futures",
-                                        "us_stock",
-                                        "jp_stock",
-                                        "jp_index",
-                                        "kr_stock",
-                                        "kr_index",
-                                        "crypto_market",
-                                        "crypto_asset",
-                                        "resource_asset",
-                                        "portfolio",
-                                        "us_macro",
-                                        "us_watchlist",
-                                        "jp_watchlist",
-                                        "kr_watchlist",
-                                        "source_health",
-                                        "capability_status",
-                                    ],
+                                    "enum": list(
+                                        public_contract.PUBLIC_TARGET_TYPES
+                                    ),
                                     "default": "auto",
                                 },
                                 "id": {"type": "string"},
@@ -377,8 +369,22 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     },
                     "required": ["question"],
                     "additionalProperties": False,
-                    "x-omi-capability-registry-version": "omi.capability.registry.v1",
-                    "x-omi-capabilities": capability_contract.capability_catalog(),
+                    "x-omi-capability-registry-version": (
+                        public_contract.CAPABILITY_REGISTRY_VERSION
+                    ),
+                    "x-omi-capability-selection-version": (
+                        public_contract.CAPABILITY_SELECTION_VERSION
+                    ),
+                    "x-omi-capability-registry-digest": (
+                        contract_manifest.public_contract_manifest()["digest"]
+                    ),
+                    "x-omi-public-contract-digest": (
+                        contract_manifest.public_contract_manifest()["digest"]
+                    ),
+                    "x-omi-targets": public_contract.target_catalog(),
+                    "x-omi-capabilities": (
+                        capability_contract.capability_catalog()
+                    ),
                 },
             },
             {

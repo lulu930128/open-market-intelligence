@@ -397,6 +397,23 @@ def _read_data_only(
         stock_id = _require_scope_id(payload, "stock")
         if _uses_reader_profile(
             payload,
+            expected="event_only",
+            question_intent=question_intent,
+            policy=policy,
+        ):
+            return (
+                "omi.read_stock_events",
+                tools.read_stock_event_context(
+                    db=db,
+                    stock_id=stock_id,
+                    market_data_params=_market_data_params(
+                        payload,
+                        policy=policy,
+                    ),
+                ),
+            )
+        if _uses_reader_profile(
+            payload,
             expected="quote_only",
             question_intent=question_intent,
             policy=policy,
@@ -591,6 +608,22 @@ def _build_brief(
 ) -> tuple[str, dict[str, Any]]:
     if scope_type == "stock" and _uses_reader_profile(
         payload,
+        expected="event_only",
+        question_intent=question_intent,
+        policy=policy,
+    ):
+        stock_id = _require_scope_id(payload, "stock")
+        return "omi.read_stock_events", tools.read_stock_event_context(
+            db=db,
+            stock_id=stock_id,
+            market_data_params=_market_data_params(
+                payload,
+                policy=policy,
+            ),
+        )
+
+    if scope_type == "stock" and _uses_reader_profile(
+        payload,
         expected="quote_only",
         question_intent=question_intent,
         policy=policy,
@@ -737,6 +770,12 @@ def _generate_report(
             question_intent=question_intent,
             policy=policy,
         )
+        or _uses_reader_profile(
+            payload,
+            expected="event_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
     ):
         return _read_data_only(
             db,
@@ -807,6 +846,12 @@ def _generate_analysis(
             question_intent=question_intent,
             policy=policy,
         )
+        or _uses_reader_profile(
+            payload,
+            expected="event_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
     ):
         return _read_data_only(
             db,
@@ -864,6 +909,28 @@ def _check_freshness(
 ) -> dict[str, Any]:
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
+        if _uses_reader_profile(
+            payload,
+            expected="event_only",
+            question_intent=question_intent,
+        ):
+            result = tools.read_stock_event_context(
+                db=db,
+                stock_id=stock_id,
+                market_data_params=payload.market_data_params,
+            )
+            freshness_result = result.get("freshness")
+            return (
+                dict(freshness_result)
+                if isinstance(freshness_result, dict)
+                else {
+                    "scope_profile": "event_only",
+                    "status": "unknown",
+                    "is_current": False,
+                    "missing": list(result.get("missing") or []),
+                    "warnings": list(result.get("warnings") or []),
+                }
+            )
         if _uses_reader_profile(
             payload,
             expected="quote_only",

@@ -6,6 +6,8 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from app.ai import contract_manifest
+
 
 def load_server_module():
     repo_root = Path(__file__).resolve().parents[2]
@@ -248,6 +250,46 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
             tools = self.server._tools_for_client()
 
         self.assertEqual(tools, self.server.TOOLS)
+        ask_schema = next(
+            tool["inputSchema"]
+            for tool in tools
+            if tool["name"] == "omi.ask"
+        )
+        selection = ask_schema["properties"]["selection"]["properties"]
+        self.assertIn("parameters", selection)
+        self.assertIn(
+            "screening.ranking",
+            selection["parameters"]["properties"],
+        )
+        self.assertIn(
+            "events.calendar",
+            selection["parameters"]["properties"],
+        )
+        self.assertEqual(
+            ask_schema["x-omi-public-contract-digest"],
+            contract_manifest.public_contract_manifest()["digest"],
+        )
+
+    def test_offline_snapshot_matches_backend_public_contract(self) -> None:
+        snapshot = self.server._load_public_contract_snapshot()
+        manifest = contract_manifest.public_contract_manifest()
+
+        self.assertEqual(snapshot["digest"], manifest["digest"])
+        self.assertEqual(
+            snapshot["capability_registry_version"],
+            manifest["capability_registry_version"],
+        )
+        self.assertEqual(
+            set(snapshot["capability_ids"]),
+            {
+                item["capability_id"]
+                for item in manifest["capabilities"]
+            },
+        )
+        self.assertEqual(
+            set(snapshot["target_types"]),
+            {item["target_type"] for item in manifest["targets"]},
+        )
 
     def test_ask_include_raw_false_keeps_canonical_v4_envelope(self) -> None:
         raw_response = {

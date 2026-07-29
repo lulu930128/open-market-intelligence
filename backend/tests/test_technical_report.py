@@ -387,6 +387,8 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertIn("technical", compact)
         self.assertIn("chips", compact)
         self.assertIn("fundamentals", compact)
+        self.assertEqual(compact["events"], {})
+        self.assertEqual(compact["regulation"], {})
         self.assertIn("quote", compact["freshness_by_domain"])
         self.assertIn("technical", compact["freshness_by_domain"])
         self.assertIn("chips", compact["freshness_by_domain"])

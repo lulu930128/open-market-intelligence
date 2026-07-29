@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.ai import agentic_tools, ask_execution, llm, tools
+from app.ai import agentic_tools, ask_execution, contract_manifest, llm, tools
 from app.ai.schemas import AiAskRequest
 from app.ai.market_context import common as market_context_common
 from app.ai.market_context import taiwan_market
@@ -52,7 +52,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "91df02aa17cd68e0b4cb318fe7ef3cfc99f3f7da416ac5a61cdd0b3c366e92d9"
+    "57349622b99583195851fdc44678cd0d80cbadb308e333f33a144365eaa4e261"
 )
 
 
@@ -187,7 +187,23 @@ class AIToolBoundaryTests(unittest.TestCase):
         schema = catalog["tools"][0]["input_schema"]
         self.assertEqual(
             schema["x-omi-capability-registry-version"],
-            "omi.capability.registry.v1",
+            "omi.capability.registry.v2",
+        )
+        self.assertEqual(
+            schema["x-omi-capability-selection-version"],
+            "omi.capability.selection.v2",
+        )
+        self.assertEqual(
+            schema["x-omi-public-contract-digest"],
+            contract_manifest.public_contract_manifest()["digest"],
+        )
+        self.assertEqual(
+            schema["x-omi-targets"],
+            contract_manifest.public_contract_manifest()["targets"],
+        )
+        self.assertIn(
+            "parameters",
+            schema["properties"]["selection"]["properties"],
         )
         quote = next(
             item
