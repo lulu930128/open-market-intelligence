@@ -51,10 +51,13 @@ from app.us_market.trading_calendar import (
     us_market_holiday_name,
 )
 from app.kr_market.trading_calendar import (
+    KRX_CALENDAR_SOURCE,
+    KRX_VERIFIED_CALENDAR_YEARS,
     KR_DAILY_PRICE_RELEASE_TIME,
     KR_MARKET_TIMEZONE,
     expected_kr_daily_price_date,
     is_kr_trading_day,
+    kr_calendar_limit,
     kr_market_holiday_name,
     next_kr_trading_day,
     previous_kr_trading_day,
@@ -94,7 +97,7 @@ TAIWAN_RELEASE_DATASETS = (
 
 TAIWAN_CALENDAR_FALLBACK_SOURCE = "TWSE verified holiday snapshot with weekday fallback"
 US_CALENDAR_FALLBACK_SOURCE = "NYSE holiday rules with weekday fallback"
-KR_CALENDAR_FALLBACK_SOURCE = "KRX fixed-holiday rules with weekday fallback"
+KR_CALENDAR_FALLBACK_SOURCE = KRX_CALENDAR_SOURCE
 
 
 def _json_value(value: Any) -> Any:
@@ -560,8 +563,8 @@ def build_kr_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             year=current_date.year,
             now=local_now,
             fallback_source=KR_CALENDAR_FALLBACK_SOURCE,
-            fallback_verified_years=set(),
-            fallback_limit="Fixed-date holidays and weekends only; lunar and ad hoc KRX holidays require a successful official calendar refresh.",
+            fallback_verified_years=KRX_VERIFIED_CALENDAR_YEARS,
+            fallback_limit=kr_calendar_limit(current_date.year),
         ),
     }
 

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from app.kr_market import trading_calendar as kr_trading_calendar
 from app.market.calendar_status import (
     build_jp_calendar_status,
     build_kr_calendar_status,
@@ -219,6 +222,22 @@ class MarketCalendarStatusTests(unittest.TestCase):
             after_release["release_windows"]["kr_daily_price"]["expected_trade_date"],
             "2026-06-15",
         )
+
+    def test_kr_verified_2026_fallback_skips_official_closures(self) -> None:
+        no_cache = SimpleNamespace(covered=False, name=None)
+        with patch.object(
+            kr_trading_calendar,
+            "cached_market_holiday",
+            return_value=no_cache,
+        ):
+            self.assertFalse(is_kr_trading_day(date(2026, 7, 17)))
+            self.assertEqual(
+                previous_kr_trading_day(
+                    date(2026, 7, 18),
+                    include_value=True,
+                ),
+                date(2026, 7, 16),
+            )
 
     def test_jp_calendar_models_jpx_holidays_and_observed_days(self) -> None:
         self.assertFalse(is_jp_trading_day(date(2026, 5, 6)))
