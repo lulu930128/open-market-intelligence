@@ -9,6 +9,10 @@ updates:
       time: "04:00"
       timezone: Asia/Taipei
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
     groups:
       npm-compatible-updates:
         patterns:
@@ -25,6 +29,10 @@ updates:
       time: "04:20"
       timezone: Asia/Taipei
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
     groups:
       python-compatible-updates:
         patterns:
@@ -41,6 +49,8 @@ updates:
       time: "04:40"
       timezone: Asia/Taipei
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: github/codeql-action
     groups:
       actions-compatible-updates:
         patterns:

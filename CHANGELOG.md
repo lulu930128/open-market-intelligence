@@ -8,6 +8,17 @@
 
 - 後續變更將從 OMI 4.0 產品基線延伸。
 
+## [4.0.1] - 2026-08-01
+
+### Security
+
+- 升級 `pydantic-settings` 至 `2.14.2`，修補 secrets directory symlink 越界讀取風險。
+- 將 frontend lockfile 的 `@babel/core` 更新至已修補的 `7.29.7`。
+
+### Changed
+
+- Dependabot 只自動提出同 major 的相容更新，避免把 TypeScript、ESLint 或 Node types 的 breaking major 混入維護 PR。
+
 ## [4.0.0] - 2026-08-01
 
 ### Added
@@ -28,5 +39,6 @@
 - 修正 production SSR 暫時無法連到 backend 時，URL 分組選擇與區域市場 watchlist 無法在 hydration 後恢復的問題。
 - 修正 Windows release 封裝使用不同 Python ABI 與硬編碼 stdlib 路徑時，安裝包無法啟動的問題，並排除本機 Python bytecode cache。
 
-[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.0.0...HEAD
+[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.0.1...HEAD
+[4.0.1]: https://github.com/lulu930128/open-market-intelligence/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lulu930128/open-market-intelligence/compare/v1.0.0...v4.0.0
