@@ -44,6 +44,11 @@ The default version comes from the repository root `VERSION` file. To build a
 prerelease or test package without changing that file, pass an explicit
 `-Version` value.
 
+The bundled Python runtime currently targets Python 3.13.9. Because the package
+copies native backend wheels from `.venv`, that virtual environment must use the
+same Python 3.13 ABI. The script checks this before copying dependencies and
+fails with an actionable message instead of producing an unusable archive.
+
 By default the package creates a lightweight seed database from the local
 `data/open_market_intelligence.db`. The seed only includes `source_registry` and
 `stock_master`, so first-run stock search and watchlist add flows can resolve

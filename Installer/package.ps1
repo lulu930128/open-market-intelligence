@@ -1,6 +1,6 @@
 param(
     [string]$Version = "",
-    [string]$PythonVersion = "3.12.3",
+    [string]$PythonVersion = "3.13.9",
     [switch]$IncludeSeedData,
     [switch]$SkipStockMasterSeed,
     [switch]$SkipFrontendBuild
@@ -22,6 +22,10 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
     throw "Invalid semantic release version: $Version"
+}
+
+if ($PythonVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Invalid Python runtime version: $PythonVersion"
 }
 
 $cacheRoot = Join-Path $installerRoot "cache"
@@ -128,6 +132,22 @@ function Ensure-PythonRuntime {
         throw "Missing backend dependency cache: $sitePackagesSource. Recreate the repo .venv before packaging."
     }
 
+    $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        throw "Missing backend virtual environment interpreter: $venvPython"
+    }
+
+    $venvMajorMinor = (& $venvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect the backend virtual environment Python version: $venvPython"
+    }
+
+    $pythonVersionParts = $PythonVersion.Split(".")
+    $runtimeMajorMinor = "$($pythonVersionParts[0]).$($pythonVersionParts[1])"
+    if ($venvMajorMinor -ne $runtimeMajorMinor) {
+        throw "Python ABI mismatch: the package runtime is $PythonVersion but .venv uses $venvMajorMinor. Recreate .venv with Python $runtimeMajorMinor or pass a matching -PythonVersion before packaging."
+    }
+
     New-Item -ItemType Directory -Force -Path $sitePackagesTarget | Out-Null
     Write-Host "Copying backend Python packages..."
     Get-ChildItem -LiteralPath $sitePackagesSource -Force | ForEach-Object {
@@ -139,8 +159,9 @@ function Ensure-PythonRuntime {
         throw "Python embeddable ._pth file was not found in $pythonTarget"
     }
 
+    $standardLibraryZip = "python$($pythonVersionParts[0])$($pythonVersionParts[1]).zip"
     @(
-        "python312.zip",
+        $standardLibraryZip,
         ".",
         "Lib",
         "Lib\site-packages",
