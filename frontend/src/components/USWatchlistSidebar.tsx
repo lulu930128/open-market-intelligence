@@ -16,7 +16,13 @@ import type {
   USWatchlistGroupRead,
   USWatchlistItemRead,
 } from "@/types/market";
-import { FormEvent, type MouseEvent as ReactMouseEvent, useMemo, useState } from "react";
+import {
+  FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 type Message = { type: "success" | "error"; text: string } | null;
 
@@ -24,6 +30,7 @@ type Props = {
   initialTree: USWatchlistGroupNode[];
   initialItems: USWatchlistItemRead[];
   selectedMarket: MarketRegion;
+  selectedGroupId: number | null;
   selectedSymbol: string | null;
   onMarketChange: (market: MarketRegion) => void;
   onSelectGroup?: (group: USWatchlistGroupNode | null) => void;
@@ -99,6 +106,7 @@ export default function USWatchlistSidebar({
   initialTree,
   initialItems,
   selectedMarket,
+  selectedGroupId: requestedGroupId,
   selectedSymbol,
   onMarketChange,
   onSelectGroup,
@@ -107,12 +115,15 @@ export default function USWatchlistSidebar({
   onChanged,
 }: Props) {
   const t = useT();
-  const initialGroup = flattenGroups(initialTree)[0] ?? null;
+  const initialGroup =
+    flattenGroups(initialTree).find((group) => group.id === requestedGroupId) ??
+    flattenGroups(initialTree)[0] ??
+    null;
   const [tree, setTree] = useState<USWatchlistGroupNode[]>(initialTree);
   const [items, setItems] = useState<USWatchlistItemRead[]>(initialItems);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
-    initialGroup?.id ?? null
+    initialGroup?.id ?? requestedGroupId
   );
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<Message>(null);
@@ -181,6 +192,23 @@ export default function USWatchlistSidebar({
 
     return nextSelected;
   }
+
+  useEffect(() => {
+    if (initialTree.length > 0 && initialItems.length > 0) return;
+
+    const timer = window.setTimeout(() => {
+      reloadData({ keepSelection: true }).catch((error) => {
+        setMessage({
+          type: "error",
+          text: error instanceof Error ? error.message : t("watchlist.messages.readError"),
+        });
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+    // The recovery fetch intentionally runs once for an incomplete SSR bootstrap.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function runAction(
     action: () => Promise<void>,

@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: If you use this software in research, please cite it using this metadata.
+type: software
+title: Open Market Intelligence
+abstract: A local-first, Taiwan-first market intelligence and evidence-driven decision research workbench.
+authors:
+  - name: lulu930128
+version: 4.0.0
+date-released: 2026-08-01
+repository-code: https://github.com/lulu930128/open-market-intelligence
+url: https://github.com/lulu930128/open-market-intelligence
+keywords:
+  - market intelligence
+  - Taiwan stock market
+  - investment research
+  - local-first software

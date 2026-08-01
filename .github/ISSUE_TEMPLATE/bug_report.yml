@@ -1,0 +1,76 @@
+name: Bug report
+description: 回報可重現的錯誤、資料缺口或 runtime 問題
+title: "[Bug]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感謝回報。請勿貼上 token、`.env`、私人 watchlist、完整資料庫或其他敏感資訊。
+
+  - type: input
+    id: version
+    attributes:
+      label: OMI 版本或 commit
+      placeholder: 4.0.0 / git SHA
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 問題區域
+      options:
+        - 台股資料／freshness
+        - 美股／日股／韓股 context
+        - AI decision core／OMI dock
+        - Frontend／圖表／互動
+        - Launcher／Windows runtime
+        - Installer／升級
+        - MCP／外部 consumer
+        - CI／開發工具
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 問題描述
+      description: 說明實際結果、預期結果與影響。
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 重現步驟
+      placeholder: |
+        1. 啟動方式與實際 port
+        2. 選擇的市場／分組／標的
+        3. 執行的操作
+        4. 看到的錯誤
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Freshness、來源與錯誤證據
+      description: 若是市場資料問題，請附資料日期、session、source health、provider warning 與經過遮蔽的 log。
+
+  - type: input
+    id: environment
+    attributes:
+      label: 執行環境
+      placeholder: Windows 11, Python 3.13, Node 22, launcher selected ports
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 安全確認
+      options:
+        - label: 我已移除 secrets、私人投資資料與可識別資訊。
+          required: true
+        - label: 這不是需要私下處理的安全漏洞回報。
+          required: true

@@ -1,0 +1,50 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Taipei
+    open-pull-requests-limit: 5
+    groups:
+      npm-compatible-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:20"
+      timezone: Asia/Taipei
+    open-pull-requests-limit: 5
+    groups:
+      python-compatible-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:40"
+      timezone: Asia/Taipei
+    open-pull-requests-limit: 5
+    groups:
+      actions-compatible-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

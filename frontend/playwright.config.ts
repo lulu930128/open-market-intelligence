@@ -17,13 +17,20 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
-  reporter: process.env.CI ? "github" : "list",
+  reporter: process.env.CI
+    ? [
+        ["github"],
+        ["html", { open: "never", outputFolder: "playwright-report" }],
+      ]
+    : "list",
   timeout: 45_000,
   use: {
     ...devices["Desktop Chrome"],
     baseURL,
     ...(process.env.CI ? {} : { channel: "chrome" as const }),
     trace: "on-first-retry",
+    screenshot: "only-on-failure",
+    video: process.env.CI ? "retain-on-failure" : "off",
   },
   webServer: {
     command: serverCommand,

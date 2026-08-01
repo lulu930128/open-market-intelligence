@@ -1700,6 +1700,7 @@ export default function MarketDashboardClient({
               initialTree={usWatchlistTree}
               initialItems={usWatchlistItems}
               selectedMarket={activeMarket}
+              selectedGroupId={selectedUsGroupId}
               selectedSymbol={selectedUsSymbol}
               onMarketChange={handleMarketChange}
               onSelectGroup={onUsGroupChange}

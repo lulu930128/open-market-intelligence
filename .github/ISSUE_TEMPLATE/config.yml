@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/lulu930128/open-market-intelligence/security/advisories/new
+    about: 請使用 private vulnerability report 回報安全問題，不要建立公開 issue。
+  - name: Support guide
+    url: https://github.com/lulu930128/open-market-intelligence/blob/main/SUPPORT.md
+    about: 啟動、資料 freshness 與使用問題請先閱讀支援指南。

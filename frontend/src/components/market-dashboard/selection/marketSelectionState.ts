@@ -93,6 +93,21 @@ export function resolveInitialGroup<T extends GroupNode<T> & { id: number }>(
   return groups.find((group) => group.id === requestedGroupId) ?? groups[0] ?? null;
 }
 
+function initialGroupId<T extends { id: number }>(
+  group: T | null,
+  requestedGroupId: number | null,
+  initialMarket: MarketRegion,
+  market: MarketRegion
+) {
+  if (group) return group.id;
+
+  // Preserve the active route intent while server-rendered bootstrap data is
+  // unavailable. The client-side explorer can then reconcile the requested
+  // group after its recovery fetch succeeds instead of falling back to an
+  // unselected dashboard.
+  return initialMarket === market ? requestedGroupId : null;
+}
+
 function resolveRouteGroup<T extends GroupNode<T> & { id: number }>(
   tree: T[],
   requestedGroupId: number | null,
@@ -196,28 +211,48 @@ export function createInitialMarketSelection(
   return {
     activeMarket: options.initialMarket,
     taiwan: {
-      groupId: taiwanGroup?.id ?? null,
+      groupId: initialGroupId(
+        taiwanGroup,
+        options.initialSelectedGroupId,
+        options.initialMarket,
+        "tw"
+      ),
       group: taiwanGroup,
       stockId: options.initialSelectedStockId,
       stockName: options.initialSelectedStockName,
       futuresSymbol: options.initialSelectedFuturesSymbol,
     },
     us: {
-      groupId: usGroup?.id ?? null,
+      groupId: initialGroupId(
+        usGroup,
+        options.initialSelectedGroupId,
+        options.initialMarket,
+        "us"
+      ),
       group: usGroup,
       groupName: usGroup?.group_name ?? null,
       symbol: options.initialSelectedUsSymbol,
       securityName: options.initialSelectedUsSecurityName,
     },
     jp: {
-      groupId: jpGroup?.id ?? null,
+      groupId: initialGroupId(
+        jpGroup,
+        options.initialSelectedGroupId,
+        options.initialMarket,
+        "jp"
+      ),
       group: jpGroup,
       groupName: jpGroup?.group_name ?? null,
       symbol: options.initialSelectedJpSymbol,
       stock: null,
     },
     kr: {
-      groupId: krGroup?.id ?? null,
+      groupId: initialGroupId(
+        krGroup,
+        options.initialSelectedGroupId,
+        options.initialMarket,
+        "kr"
+      ),
       group: krGroup,
       groupName: krGroup?.group_name ?? null,
       symbol: options.initialSelectedKrSymbol,
@@ -246,7 +281,7 @@ export function applyDashboardRoute(
       ...current,
       activeMarket: "tw",
       taiwan: {
-        groupId: group?.id ?? null,
+        groupId: initialGroupId(group, route.groupId, route.market, "tw"),
         group,
         stockId: route.futuresSymbol ? null : route.stockId,
         stockName:
@@ -272,7 +307,7 @@ export function applyDashboardRoute(
       activeMarket: "us",
       taiwan: { ...current.taiwan, futuresSymbol: null },
       us: {
-        groupId: group?.id ?? null,
+        groupId: initialGroupId(group, route.groupId, route.market, "us"),
         group,
         groupName: group?.group_name ?? null,
         symbol,
@@ -296,7 +331,7 @@ export function applyDashboardRoute(
       activeMarket: "jp",
       taiwan: { ...current.taiwan, futuresSymbol: null },
       jp: {
-        groupId: group?.id ?? null,
+        groupId: initialGroupId(group, route.groupId, route.market, "jp"),
         group,
         groupName: group?.group_name ?? null,
         symbol,
@@ -328,7 +363,7 @@ export function applyDashboardRoute(
       activeMarket: "kr",
       taiwan: { ...current.taiwan, futuresSymbol: null },
       kr: {
-        groupId: group?.id ?? null,
+        groupId: initialGroupId(group, route.groupId, route.market, "kr"),
         group,
         groupName: group?.group_name ?? null,
         symbol: stock?.symbol ?? requestedSymbol,

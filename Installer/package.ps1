@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "",
     [string]$PythonVersion = "3.12.3",
     [switch]$IncludeSeedData,
     [switch]$SkipStockMasterSeed,
@@ -10,6 +10,20 @@ $ErrorActionPreference = "Stop"
 
 $installerRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $installerRoot "..")).Path
+$versionFile = Join-Path $repoRoot "VERSION"
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    if (-not (Test-Path -LiteralPath $versionFile)) {
+        throw "Missing release version file: $versionFile"
+    }
+
+    $Version = (Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8).Trim()
+}
+
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "Invalid semantic release version: $Version"
+}
+
 $cacheRoot = Join-Path $installerRoot "cache"
 $runtimeCacheRoot = Join-Path $installerRoot "runtimes"
 $stagingRoot = Join-Path $installerRoot "staging"
@@ -185,10 +199,6 @@ function Build-FrontendStandalone {
         Copy-Directory -Source $publicSource -Destination $publicTarget
     }
 
-    $envSource = Join-Path $frontendRoot ".env.local"
-    if (Test-Path -LiteralPath $envSource) {
-        Copy-RequiredFile -Source $envSource -Destination (Join-Path $frontendTarget ".env.local")
-    }
 }
 
 function Copy-AppFiles {
@@ -196,6 +206,7 @@ function Copy-AppFiles {
     Copy-Directory -Source (Join-Path $repoRoot "backend\alembic") -Destination (Join-Path $packageRoot "backend\alembic")
     Copy-RequiredFile -Source (Join-Path $repoRoot "backend\requirements.txt") -Destination (Join-Path $packageRoot "backend\requirements.txt")
     Copy-RequiredFile -Source (Join-Path $repoRoot "alembic.ini") -Destination (Join-Path $packageRoot "alembic.ini")
+    Copy-RequiredFile -Source $versionFile -Destination (Join-Path $packageRoot "VERSION")
     Copy-RequiredFile -Source (Join-Path $repoRoot "Start-OMI-Launcher.cmd") -Destination (Join-Path $packageRoot "Start-OMI-Launcher.cmd")
     Copy-RequiredFile -Source (Join-Path $repoRoot "ATRI-MyDearMoments.ico") -Destination (Join-Path $packageRoot "ATRI-MyDearMoments.ico")
 
@@ -221,7 +232,7 @@ function Copy-AppFiles {
     }
 
     @"
-Open Market Intelligence - Taiwan Market Watchstation
+Open Market Intelligence 4.0 - Taiwan-first Research Workbench
 Version: $Version
 
 How to start:
@@ -230,8 +241,8 @@ How to start:
 3. Wait for the tray icon. The dashboard opens automatically after backend and frontend are ready.
 
 Tray menu:
-- Open Dashboard: http://127.0.0.1:3000
-- Open API Health: http://127.0.0.1:8300/api/system/health
+- Open Dashboard: uses the launcher's selected URL (preferred port 3000)
+- Open API Health: uses the launcher's selected URL (preferred port 8400)
 - Open Logs Folder
 - Restart Services
 - Stop Services
@@ -291,7 +302,7 @@ function New-StockMasterSeedData {
 function Write-ReleaseManifest {
     $manifest = [ordered]@{
         app = "Open Market Intelligence"
-        edition = "Taiwan Market Watchstation"
+        edition = "Taiwan-first Research Workbench"
         version = $Version
         build_time = (Get-Date).ToString("o")
         commit = Get-GitCommit
@@ -316,7 +327,7 @@ function Test-PackagedRuntime {
     $backendTarget = Join-Path $packageRoot "backend"
     Invoke-Logged `
         -FilePath $PythonExe `
-        -Arguments @("-c", "import alembic, fastapi, uvicorn, pandas, sqlalchemy; import app.main; from app.db.migrations import get_head_revision; print('python-runtime-ok', get_head_revision())") `
+        -Arguments @("-c", "import alembic, fastapi, uvicorn, pandas, sqlalchemy; import app.main; from app.db.migrations import get_head_revision; from app.version import PROJECT_VERSION; print('python-runtime-ok', PROJECT_VERSION, get_head_revision())") `
         -WorkingDirectory $backendTarget
 }
 

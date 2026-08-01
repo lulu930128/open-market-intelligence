@@ -16,7 +16,13 @@ import type {
   JPWatchlistGroupRead,
   JPWatchlistItemRead,
 } from "@/types/market";
-import { FormEvent, type MouseEvent as ReactMouseEvent, useMemo, useState } from "react";
+import {
+  FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 type Message = { type: "success" | "warning" | "error"; text: string } | null;
 
@@ -117,7 +123,7 @@ export default function JPMarketSidebar({
   const [items, setItems] = useState<JPWatchlistItemRead[]>(initialItems);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [currentGroupId, setCurrentGroupId] = useState<number | null>(
-    initialGroup?.id ?? null
+    initialGroup?.id ?? selectedGroupId
   );
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<Message>(null);
@@ -189,6 +195,26 @@ export default function JPMarketSidebar({
 
     return nextSelected;
   }
+
+  useEffect(() => {
+    if (initialTree.length > 0 && initialItems.length > 0) return;
+
+    const timer = window.setTimeout(() => {
+      reloadData({ keepSelection: true }).catch((error) => {
+        setMessage({
+          type: "error",
+          text:
+            error instanceof Error
+              ? error.message
+              : t("jpMarket.watchlist.messages.reloadError"),
+        });
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+    // The recovery fetch intentionally runs once for an incomplete SSR bootstrap.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function runAction(
     action: () => Promise<void>,

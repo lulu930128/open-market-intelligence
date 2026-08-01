@@ -35,6 +35,7 @@ from app.routers import (
     watchlists,
 )
 from app.runtime import lifespan
+from app.version import PROJECT_VERSION
 
 
 FAVICON_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "favicon.ico"
@@ -44,7 +45,7 @@ request_logger = logging.getLogger("app.requests")
 app = FastAPI(
     title="Open Market Intelligence API",
     description="A public-data-driven market intelligence system.",
-    version="0.1.0",
+    version=PROJECT_VERSION,
     lifespan=lifespan,
 )
 

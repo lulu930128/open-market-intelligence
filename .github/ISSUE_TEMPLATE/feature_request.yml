@@ -1,0 +1,52 @@
+name: Feature request
+description: 提議可驗證、可維護的新能力或改善
+title: "[Feature]: "
+labels: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解決的研究問題
+      description: 請先描述工作流與痛點，不要只列 UI 元件。
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 預期成果
+      description: 說明完成後可被驗證的使用者結果。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: market
+    attributes:
+      label: 市場範圍
+      options:
+        - 台股核心
+        - 美股 context
+        - 日股 context
+        - 韓股 context
+        - Crypto／商品 context
+        - 跨市場共用
+        - 非市場功能
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 資料與 evidence contract
+      description: 說明來源、freshness、partial/missing、provider failure 與驗證方式。
+
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: 邊界與非目標
+      description: OMI 不是自動交易系統；請說明不包含的行為與可能風險。
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已考慮的替代方案

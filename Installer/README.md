@@ -1,7 +1,7 @@
 # Installer workspace
 
-This folder builds the first Windows download package for the Taiwan market
-watchstation edition of Open Market Intelligence.
+This folder builds the Windows download package for the Taiwan-first Open
+Market Intelligence research workbench.
 
 The installer workspace is not the application install directory. It is only a
 build area. Generated runtime files, staging files, and zip outputs are ignored
@@ -37,8 +37,12 @@ http://127.0.0.1:3000
 From the repo root:
 
 ```powershell
-.\Installer\package.ps1 -Version 1.0.0
+.\Installer\package.ps1
 ```
+
+The default version comes from the repository root `VERSION` file. To build a
+prerelease or test package without changing that file, pass an explicit
+`-Version` value.
 
 By default the package creates a lightweight seed database from the local
 `data/open_market_intelligence.db`. The seed only includes `source_registry` and
@@ -48,13 +52,13 @@ symbols such as `2330` without bundling the full local history database.
 To build a package with no stock master seed:
 
 ```powershell
-.\Installer\package.ps1 -Version 1.0.0 -SkipStockMasterSeed
+.\Installer\package.ps1 -SkipStockMasterSeed
 ```
 
 To include the current local SQLite database as a full seed database:
 
 ```powershell
-.\Installer\package.ps1 -Version 1.0.0 -IncludeSeedData
+.\Installer\package.ps1 -IncludeSeedData
 ```
 
 `-IncludeSeedData` can make the zip very large and may include local watchlists.

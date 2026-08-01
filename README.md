@@ -2,6 +2,10 @@
 
 > Local-first · Taiwan-first · Evidence-first
 
+[![CI](https://github.com/lulu930128/open-market-intelligence/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lulu930128/open-market-intelligence/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/lulu930128/open-market-intelligence/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/lulu930128/open-market-intelligence/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/lulu930128/open-market-intelligence?display_name=tag)](https://github.com/lulu930128/open-market-intelligence/releases/latest)
+
 **目前正式版：OMI 4.0。**
 
 Open Market Intelligence（OMI）是一套以台股為核心的市場情報與交易決策研究工作台。它把行情、技術結構、籌碼、基本面、跨市場背景與資料品質整合在同一個研究流程中，讓結論不只回答「偏多或偏空」，還能交代回測區、確認條件、失效條件、主要風險與反證。
@@ -238,6 +242,10 @@ npm run dev
 | Decision v4 contract | [`docs/architecture/OmiDecisionContract.md`](docs/architecture/OmiDecisionContract.md) |
 | HTTP／SSE／MCP | [`docs/ExternalInterfaces.md`](docs/ExternalInterfaces.md) |
 | 環境設定 | [`.env.example`](.env.example)、[`frontend/.env.example`](frontend/.env.example) |
+| 版本變更 | [`CHANGELOG.md`](CHANGELOG.md) |
+| 參與貢獻 | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| 安全回報 | [`SECURITY.md`](SECURITY.md) |
+| 使用支援 | [`SUPPORT.md`](SUPPORT.md) |
 
 ### 安全驗證
 
