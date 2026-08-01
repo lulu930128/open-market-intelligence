@@ -352,6 +352,27 @@ function Test-PackagedRuntime {
         -WorkingDirectory $backendTarget
 }
 
+function Remove-PackageCaches {
+    $cacheDirectories = @(
+        Get-ChildItem -LiteralPath $packageRoot -Directory -Filter "__pycache__" -Recurse -Force
+    )
+    foreach ($cacheDirectory in ($cacheDirectories | Sort-Object { $_.FullName.Length } -Descending)) {
+        if (Test-Path -LiteralPath $cacheDirectory.FullName) {
+            Remove-Item -LiteralPath $cacheDirectory.FullName -Recurse -Force
+        }
+    }
+
+    $bytecodeFiles = @(
+        Get-ChildItem -LiteralPath $packageRoot -File -Recurse -Force |
+            Where-Object { $_.Extension -in @(".pyc", ".pyo") }
+    )
+    foreach ($bytecodeFile in $bytecodeFiles) {
+        Remove-Item -LiteralPath $bytecodeFile.FullName -Force
+    }
+
+    Write-Host "Removed $($cacheDirectories.Count) Python cache directories and $($bytecodeFiles.Count) loose bytecode files from staging."
+}
+
 New-Item -ItemType Directory -Force -Path $runtimeCacheRoot, $outputRoot | Out-Null
 New-CleanDirectory -Path $stagingRoot
 New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
@@ -365,6 +386,7 @@ $nodeExe = Copy-NodeRuntime
 New-StockMasterSeedData -PythonExe $pythonExe
 Write-ReleaseManifest
 Test-PackagedRuntime -PythonExe $pythonExe -NodeExe $nodeExe
+Remove-PackageCaches
 
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force

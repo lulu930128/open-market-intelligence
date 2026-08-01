@@ -48,6 +48,8 @@ The bundled Python runtime currently targets Python 3.13.9. Because the package
 copies native backend wheels from `.venv`, that virtual environment must use the
 same Python 3.13 ABI. The script checks this before copying dependencies and
 fails with an actionable message instead of producing an unusable archive.
+Generated Python bytecode and `__pycache__` directories are removed after the
+packaged-runtime smoke test so stale local ABI artifacts do not enter the zip.
 
 By default the package creates a lightweight seed database from the local
 `data/open_market_intelligence.db`. The seed only includes `source_registry` and
