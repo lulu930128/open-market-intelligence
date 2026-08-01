@@ -268,11 +268,11 @@ class TaiwanScreeningTests(unittest.TestCase):
         self.assertEqual(first["snapshot_id"], second["snapshot_id"])
         self.assertEqual(
             [row["stock_id"] for row in first["ranking"]["rows"]],
-            ["6488", "2330"],
+            ["2330", "1101"],
         )
         self.assertEqual(
             [row["value"] for row in first["ranking"]["rows"]],
-            [500, 400],
+            [400, 150],
         )
         self.assertEqual(first["coverage"]["universe_count"], 3)
         self.assertEqual(first["coverage"]["covered_count"], 3)
@@ -282,9 +282,17 @@ class TaiwanScreeningTests(unittest.TestCase):
         self.assertEqual(first["coverage"]["status"], "partial")
         self.assertEqual(
             first["ranking"]["pagination"]["total_ranked_count"],
-            3,
+            2,
         )
-        self.assertTrue(first["ranking"]["pagination"]["has_more"])
+        self.assertFalse(first["ranking"]["pagination"]["has_more"])
+        self.assertTrue(first["ranking"]["require_complete_window"])
+        self.assertEqual(first["coverage"]["eligible_rank_count"], 2)
+        self.assertEqual(
+            first["coverage"]["excluded_incomplete_count"],
+            1,
+        )
+        self.assertEqual(first["missing"], [])
+        self.assertTrue(first["coverage"]["coverage_gaps"])
         self.assertEqual(
             (
                 self.db.query(InstitutionalTradeDaily).count(),
@@ -319,6 +327,27 @@ class TaiwanScreeningTests(unittest.TestCase):
             snapshot["coverage"]["status"],
             "latest_completed_session",
         )
+
+    def test_incomplete_window_rows_require_explicit_opt_in(self) -> None:
+        snapshot = build_tw_screening_snapshot(
+            self.db,
+            parameters={
+                "metric": "foreign_investor_net_shares",
+                "window": 5,
+                "require_complete_window": False,
+                "incomplete_window_policy": "include_and_flag",
+            },
+        )
+
+        self.assertEqual(
+            [row["stock_id"] for row in snapshot["ranking"]["rows"]],
+            ["6488", "2330", "1101"],
+        )
+        self.assertEqual(
+            snapshot["ranking"]["pagination"]["total_ranked_count"],
+            3,
+        )
+        self.assertFalse(snapshot["ranking"]["rows"][0]["window_complete"])
 
     def test_capability_parameters_reject_invalid_window(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be one of"):

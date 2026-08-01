@@ -5,10 +5,121 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-from app.ai.market_context import taiwan_market
+from app.ai.market_context import taiwan_market, taiwan_screening
 
 
 class TaiwanMarketAggregateTests(unittest.TestCase):
+    def test_intraday_sector_merge_overrides_daily_sample(self) -> None:
+        daily = {
+            "kind": "tw_market_sectors",
+            "data_mode": "previous_completed_session",
+            "is_intraday": False,
+            "items": [{"name": "每日樣本"}],
+        }
+        intraday = {
+            "kind": "tw_market_sectors",
+            "status": "ready",
+            "data_mode": "intraday_rolling_state",
+            "is_intraday": True,
+            "snapshot_id": "tw_intraday_groups:2026-07-31:10:00:2",
+            "items": [{"name": "半導體業"}],
+        }
+        market_context = {
+            "data": {
+                "market": {"sectors": daily},
+                "compact": {"market": {"sectors": daily}},
+                "freshness_by_capability": {
+                    "market.sectors": {"status": "partial"}
+                },
+                "slots": {
+                    "market_sectors": {"status": "partial"}
+                },
+            },
+            "missing": [],
+            "warnings": [],
+            "source_refs": [],
+        }
+        screening_context = {
+            "data": {
+                "screening": {},
+                "market": {"sectors": intraday},
+                "compact": {
+                    "screening": {},
+                    "market": {"sectors": intraday},
+                },
+                "freshness_by_capability": {
+                    "market.sectors": {"status": "ready"}
+                },
+                "slots": {"market_sectors": {"status": "ready"}},
+            },
+            "missing": [],
+            "warnings": [],
+            "source_refs": [],
+        }
+
+        merged = taiwan_screening.merge_tw_screening_context(
+            market_context,
+            screening_context,
+        )
+
+        self.assertEqual(
+            merged["data"]["market"]["sectors"]["data_mode"],
+            "intraday_rolling_state",
+        )
+        self.assertEqual(
+            merged["data"]["compact"]["market"]["sectors"][
+                "snapshot_id"
+            ],
+            intraday["snapshot_id"],
+        )
+        self.assertEqual(
+            merged["data"]["freshness_by_capability"][
+                "market.sectors"
+            ]["status"],
+            "ready",
+        )
+
+    def test_sector_merge_keeps_daily_fallback_when_intraday_missing(self) -> None:
+        daily = {
+            "kind": "tw_market_sectors",
+            "status": "partial",
+            "data_mode": "previous_completed_session",
+            "is_intraday": False,
+            "items": [{"name": "每日樣本"}],
+        }
+        merged = taiwan_screening.merge_tw_screening_context(
+            {
+                "data": {
+                    "market": {"sectors": daily},
+                    "compact": {"market": {"sectors": daily}},
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [],
+            },
+            {
+                "data": {
+                    "screening": {},
+                    "market": {},
+                    "compact": {"screening": {}, "market": {}},
+                },
+                "missing": [],
+                "warnings": [
+                    "Intraday sector state is unavailable; daily fallback retained."
+                ],
+                "source_refs": [],
+            },
+        )
+
+        self.assertEqual(
+            merged["data"]["market"]["sectors"]["data_mode"],
+            "previous_completed_session",
+        )
+        self.assertEqual(
+            merged["data"]["compact"]["market"]["sectors"]["items"],
+            [{"name": "每日樣本"}],
+        )
+
     @staticmethod
     def _dependencies(**overrides):
         values = {
@@ -131,6 +242,16 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             capability["ranking_basis"],
             "omi_local_daily_sample_stock_aggregation",
         )
+        self.assertEqual(
+            capability["aggregation_method"],
+            "equal_weighted_mean_stock_return_pct",
+        )
+        self.assertEqual(capability["items"][0]["trade_value_unit"], "TWD")
+        self.assertEqual(capability["missing"], [])
+        self.assertEqual(
+            capability["coverage_gaps"],
+            ["market_daily_price.full_market_sector_index"],
+        )
         self.assertIn("must not be treated", capability["warnings"][0])
 
     def test_contribution_reader_is_not_called_without_external_authority(
@@ -161,6 +282,57 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             "external_fetch_required_bounded",
         )
         contribution_reader.assert_not_called()
+
+    def test_contribution_reader_records_fetches_and_enforces_budget(
+        self,
+    ) -> None:
+        contribution_reader = Mock(
+            return_value={
+                "trade_date": "2026-07-29",
+                "source": "twse_official",
+                "reconciliation_status": "within_tolerance",
+                "positive": [],
+                "negative": [],
+            }
+        )
+        dependencies = self._dependencies(
+            get_market_index_contributions=contribution_reader,
+        )
+
+        capability = taiwan_market._market_index_contributions_capability(
+            db=SimpleNamespace(),
+            dependencies=dependencies,
+            data_params={
+                "external_fetch_allowed": True,
+                "tool_budget": {"max_external_fetches": 1},
+                "capability_parameters": {
+                    "market.index_contributions": {
+                        "index_ids": ["TAIEX", "TPEX"],
+                        "limit": 5,
+                    }
+                },
+            },
+        )
+
+        self.assertEqual(contribution_reader.call_count, 1)
+        self.assertEqual(
+            [run["status"] for run in capability["tool_runs"]],
+            ["success", "skipped_budget"],
+        )
+        self.assertTrue(
+            all(run["external_fetch"] for run in capability["tool_runs"])
+        )
+        self.assertFalse(
+            any(run["writes_cache"] for run in capability["tool_runs"])
+        )
+        self.assertEqual(
+            capability["tool_runs"][0]["requested_capabilities"],
+            ["market.index_contributions"],
+        )
+        self.assertEqual(
+            capability["missing"],
+            ["market_index_contributions.TPEX"],
+        )
 
     def test_current_empty_event_calendar_is_valid(self) -> None:
         listing = Mock(

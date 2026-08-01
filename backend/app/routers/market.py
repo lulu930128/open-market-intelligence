@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -9,6 +10,7 @@ from app.market.daily_metrics_backfill import (
 from app.market.fundamental_metrics_backfill import (
     ensure_stock_fundamental_metrics,
 )
+from app.market.financial_contract import build_database_financial_contract
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
@@ -118,6 +120,7 @@ from app.market.schemas import (
     TaiwanDispositionRefreshRead,
     TaiwanCorporateEventListRead,
     TaiwanCorporateEventRefreshRead,
+    TaiwanFinancialContractRead,
     TaiwanStockEventHistoryRead,
     TaiwanSourceHealthRead,
     TechnicalReportRead,
@@ -1676,6 +1679,59 @@ def get_stock_financial_metric_history_api(
         stock_id=stock_id,
         limit=limit,
         ascending=True,
+    )
+
+
+@router.get(
+    "/financials/{stock_id}/contract",
+    response_model=TaiwanFinancialContractRead,
+)
+def get_stock_financial_contract_api(
+    stock_id: str,
+    mode: str = Query(
+        default="current_comparable",
+        pattern="^(current_comparable|as_reported_as_of)$",
+    ),
+    as_of: datetime | None = None,
+    financial_limit: int = Query(default=8, ge=1, le=40),
+    revenue_limit: int = Query(default=24, ge=1, le=120),
+    price: Decimal | None = Query(default=None, gt=0),
+    price_as_of: datetime | None = None,
+    price_basis: str = Query(
+        default="explicit_input",
+        min_length=1,
+        max_length=80,
+    ),
+    db: Session = Depends(get_db),
+):
+    if (price is None) != (price_as_of is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="price and price_as_of must be provided together",
+        )
+    financial_history = list_stock_financial_metric_history(
+        db=db,
+        stock_id=stock_id,
+        limit=financial_limit,
+        ascending=True,
+    )
+    revenue_history = list_stock_monthly_revenue_history(
+        db=db,
+        stock_id=stock_id,
+        limit=revenue_limit,
+        ascending=True,
+    )
+    return build_database_financial_contract(
+        db,
+        stock_id=stock_id,
+        financial_history=financial_history,
+        revenue_history=revenue_history,
+        mode=mode,
+        as_of=as_of,
+        price=price,
+        price_as_of=price_as_of,
+        price_basis=price_basis,
+        normalized_period_limit=min(financial_limit + 1, 41),
     )
 
 

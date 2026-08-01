@@ -19,8 +19,14 @@ from app.market.index_parsers import as_float as _as_float
 from app.market.index_parsers import as_int as _as_int
 from app.market.index_parsers import count_with_limit as _count_with_limit
 from app.market.index_parsers import list_value as _list_value
+from app.market.index_parsers import (
+    parse_tpex_market_highlight_rows as _parse_tpex_market_highlight_rows,
+)
 from app.market.index_parsers import parse_tpex_market_daily_rows as _parse_tpex_market_daily_rows
 from app.market.index_parsers import parse_trade_date as _parse_trade_date
+from app.market.index_parsers import (
+    parse_twse_index_daily_ohlc_rows as _parse_twse_index_daily_ohlc_rows,
+)
 from app.market.index_parsers import (
     parse_twse_market_daily_history_rows as _parse_twse_market_daily_history_rows,
 )
@@ -46,11 +52,14 @@ TWSE_INDEX_LIST_URL = twse.INDEX_LIST_URL
 TWSE_DAILY_QUOTES_URL = twse.DAILY_QUOTES_URL
 TWSE_RWD_MI_INDEX_URL = twse.RWD_MI_INDEX_URL
 TWSE_INDEX_5S_URL = twse.INDEX_5S_URL
+TWSE_INDEX_DAILY_OHLC_URL = twse.INDEX_DAILY_OHLC_URL
 TWSE_MARKET_DAILY_URL = twse.MARKET_DAILY_URL
 TWSE_MARKET_DAILY_HISTORY_URL = twse.MARKET_DAILY_HISTORY_URL
 TWSE_COMPANY_BASIC_URL = twse.COMPANY_BASIC_URL
 TPEX_DAILY_INDEX_URL = tpex.DAILY_INDEX_URL
 TPEX_DAILY_QUOTES_URL = tpex.DAILY_QUOTES_URL
+TPEX_INDEX_5S_URL = tpex.INDEX_5S_URL
+TPEX_MARKET_HIGHLIGHT_URL = tpex.MARKET_HIGHLIGHT_URL
 TAIPEI_TZ = timezone(timedelta(hours=8))
 CACHE_TTL_SECONDS = 45
 TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS = 30
@@ -58,6 +67,10 @@ TWSE_MIS_LIVE_BREADTH_BATCH_SIZE = 100
 TWSE_MIS_LIVE_BREADTH_MIN_CODES = 500
 INDEX_LIST_CACHE_TTL_SECONDS = 300
 MAX_INDEX_STAT_FETCH_WORKERS = 4
+MAX_TWSE_INDEX_DAILY_OHLC_OVERLAY_MONTHS = 3
+MAX_TPEX_HISTORY_FETCH_DATES = 3_000
+TPEX_HISTORY_PERSIST_BATCH_SIZE = 50
+TPEX_MARKET_HIGHLIGHT_START_DATE = date(2007, 1, 1)
 MAX_TWSE_MIS_BREADTH_FETCH_WORKERS = 2
 TWSE_MIS_BREADTH_CIRCUIT_FAILURE_THRESHOLD = 3
 TWSE_MIS_BREADTH_CIRCUIT_COOLDOWN_SECONDS = 90
@@ -103,14 +116,17 @@ _INDEX_LIST_CACHE: dict[str, dict[str, object]] = {}
 _SHARES_CACHE: dict[str, dict[str, object]] = {}
 _CONTRIBUTION_CACHE: dict[str, dict[str, object]] = {}
 _TWSE_INDEX_5S_CACHE: dict[str, dict[str, object]] = {}
+_TWSE_INDEX_DAILY_OHLC_CACHE: dict[str, dict[str, object]] = {}
 _TWSE_MIS_LIVE_BREADTH_CACHE: dict[str, dict[str, object]] = {}
 _TWSE_MIS_LIVE_BREADTH_LAST_GOOD: dict[str, dict] = {}
+_TWSE_MIS_LIVE_STOCK_ROWS: dict[str, list[dict[str, object]]] = {}
 _TWSE_MIS_BREADTH_REFRESH_LOCK = Lock()
 _TWSE_MIS_BREADTH_CIRCUIT_FAILURES = 0
 _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = 0.0
 _TWSE_MIS_STOCK_STATE: dict[str, dict[str, object]] = {}
 TWSE_INDEX_5S_FIELD_BY_INDEX_ID = {
     "TAIEX": "發行量加權股價指數",
+    "TPEX": "櫃買指數",
 }
 
 
@@ -263,20 +279,65 @@ def market_index_summary_needs_reconciliation(
     return False
 
 
+def _stale_market_index_ids(
+    payload: dict,
+    *,
+    expected_date: date,
+) -> list[str]:
+    items_by_id = {
+        str(item.get("index_id") or "").upper(): item
+        for item in payload.get("indices") or []
+        if isinstance(item, dict)
+    }
+    return [
+        index_id
+        for config in INDEX_CONFIGS
+        for index_id in [str(config["index_id"]).upper()]
+        for item in [items_by_id.get(index_id)]
+        if (
+            not isinstance(item, dict)
+            or (_parse_trade_date(item.get("time")) or date.min) < expected_date
+        )
+    ]
+
+
+def _stale_live_market_index_ids(
+    payload: dict,
+    *,
+    now: datetime,
+    stale_after_seconds: int,
+) -> list[str]:
+    if not is_taiwan_index_live_refresh_window(now):
+        return []
+
+    items_by_id = {
+        str(item.get("index_id") or "").upper(): item
+        for item in payload.get("indices") or []
+        if isinstance(item, dict)
+    }
+    stale_ids: list[str] = []
+    for config in INDEX_CONFIGS:
+        index_id = str(config["index_id"]).upper()
+        item = items_by_id.get(index_id)
+        item_as_of = _summary_payload_as_of(item) if isinstance(item, dict) else None
+        if item_as_of is None:
+            stale_ids.append(index_id)
+            continue
+        age_seconds = max(
+            (now - item_as_of.astimezone(TAIPEI_TZ)).total_seconds(),
+            0,
+        )
+        if age_seconds > stale_after_seconds:
+            stale_ids.append(index_id)
+    return stale_ids
+
+
 def _summary_cache_view(
     payload: dict,
     *,
     origin: str,
     now: datetime | None = None,
 ) -> dict:
-    trade_dates = [
-        parsed
-        for item in payload.get("indices") or []
-        if isinstance(item, dict)
-        for parsed in [_parse_trade_date(item.get("time"))]
-        if parsed is not None
-    ]
-    latest_trade_date = max(trade_dates, default=None)
     now = now or datetime.now(TAIPEI_TZ)
     if now.tzinfo is None:
         now = now.replace(tzinfo=TAIPEI_TZ)
@@ -293,11 +354,17 @@ def _summary_cache_view(
         int(settings.scheduler_taiwan_market_index_interval_seconds) * 3,
         15,
     )
-    date_is_stale = latest_trade_date is None or latest_trade_date < expected_date
-    live_is_stale = (
-        is_taiwan_index_live_refresh_window(now)
-        and (live_age_seconds is None or live_age_seconds > live_stale_after)
+    stale_index_ids = _stale_market_index_ids(
+        payload,
+        expected_date=expected_date,
     )
+    stale_live_index_ids = _stale_live_market_index_ids(
+        payload,
+        now=now,
+        stale_after_seconds=live_stale_after,
+    )
+    date_is_stale = bool(stale_index_ids)
+    live_is_stale = bool(stale_live_index_ids)
     reconciliation_is_needed = market_index_summary_needs_reconciliation(
         payload,
         now=now,
@@ -310,11 +377,13 @@ def _summary_cache_view(
     warnings = list(payload.get("warnings") or [])
     if date_is_stale:
         warnings.append(
-            "Index summary cache is missing or older than the expected Taiwan trading date."
+            "Index summary cache is missing or older than the expected Taiwan "
+            f"trading date for: {', '.join(stale_index_ids)}."
         )
     if live_is_stale:
         warnings.append(
-            "Index summary shared cache is stale during the Taiwan live polling window."
+            "Index summary shared cache is stale during the Taiwan live polling "
+            f"window for: {', '.join(stale_live_index_ids)}."
         )
     if reconciliation_is_needed:
         warnings.append(
@@ -362,13 +431,17 @@ def _market_breadth_label(market: str, scope: str | None) -> str:
     return f"{market_label}本機資料集廣度"
 
 
-def _market_breadth_universe_definition(scope: str | None) -> dict[str, object]:
+def _market_breadth_universe_definition(
+    scope: str | None,
+    market: str | None = None,
+) -> dict[str, object]:
     normalized_scope = str(scope or "local_dataset")
+    normalized_market = str(market or "TWSE").upper()
     if normalized_scope == "registered_universe":
         return {
             "authority": "omi_stock_master",
             "inclusion_rule": (
-                "market=TWSE, is_active=true, instrument_type=stock, "
+                f"market={normalized_market}, is_active=true, instrument_type=stock, "
                 "four_digit_numeric_security_code"
             ),
             "instrument_type_policy": (
@@ -454,7 +527,8 @@ def _with_breadth_status_contract(payload: dict) -> dict:
                     "universe_definition"
                 )
                 or _market_breadth_universe_definition(
-                    item["breadth"].get("scope")
+                    item["breadth"].get("scope"),
+                    item["breadth"].get("market") or item.get("market"),
                 ),
             }
         breadth_status = _breadth_status_contract(item)
@@ -499,7 +573,8 @@ def _latest_market_breadth(db: Session, market: str) -> dict | None:
         "market": market,
         "scope": "local_dataset",
         "universe_definition": _market_breadth_universe_definition(
-            "local_dataset"
+            "local_dataset",
+            market,
         ),
         "label": _market_breadth_label(market, "local_dataset"),
         "trade_date": latest_trade_date,
@@ -541,10 +616,14 @@ def _prices_equal(left: float | None, right: float | None) -> bool:
     return abs(left - right) < 0.000001
 
 
-def _twse_mis_live_breadth_stock_codes(db: Session) -> list[str]:
+def _twse_mis_live_breadth_stock_codes(
+    db: Session,
+    market: str = "TWSE",
+) -> list[str]:
+    normalized_market = str(market or "").strip().upper()
     rows = (
         db.query(StockMaster.stock_id)
-        .filter(StockMaster.market == "TWSE")
+        .filter(func.upper(StockMaster.market) == normalized_market)
         .filter(StockMaster.instrument_type == "stock")
         .filter(StockMaster.is_active.is_(True))
         .order_by(StockMaster.stock_id.asc())
@@ -564,15 +643,22 @@ def _chunked(values: list[str], size: int) -> Iterable[list[str]]:
         yield values[index : index + size]
 
 
-def _fetch_twse_mis_stock_message_batch(codes: list[str]) -> list[dict]:
+def _fetch_twse_mis_stock_message_batch(
+    codes: list[str],
+    market: str = "TWSE",
+) -> list[dict]:
     return twse_mis.fetch_stock_messages(
         codes,
+        exchange="otc" if str(market).upper() == "TPEX" else "tse",
         timeout_seconds=20,
         request=http_get,
     )
 
 
-def _fetch_twse_mis_stock_messages(codes: list[str]) -> tuple[list[dict], int]:
+def _fetch_twse_mis_stock_messages(
+    codes: list[str],
+    market: str = "TWSE",
+) -> tuple[list[dict], int]:
     batches = list(_chunked(codes, TWSE_MIS_LIVE_BREADTH_BATCH_SIZE))
 
     if not batches:
@@ -584,7 +670,11 @@ def _fetch_twse_mis_stock_messages(codes: list[str]) -> tuple[list[dict], int]:
 
     with ThreadPoolExecutor(max_workers=MAX_TWSE_MIS_BREADTH_FETCH_WORKERS) as executor:
         futures = [
-            executor.submit(_fetch_twse_mis_stock_message_batch, batch)
+            executor.submit(
+                _fetch_twse_mis_stock_message_batch,
+                batch,
+                market,
+            )
             for batch in batches
         ]
 
@@ -630,7 +720,10 @@ def _twse_mis_message_datetime(message: dict) -> datetime | None:
         return None
 
 
-def _classify_twse_mis_live_breadth_message(message: dict) -> dict | None:
+def _classify_twse_mis_live_breadth_message(
+    message: dict,
+    market: str = "TWSE",
+) -> dict | None:
     code = _regular_stock_code(message.get("c"))
 
     if code is None:
@@ -639,7 +732,9 @@ def _classify_twse_mis_live_breadth_message(message: dict) -> dict | None:
     trade_date = _parse_trade_date(message.get("d") or message.get("^"))
     previous_close = _as_float(message.get("y"))
     latest_price = _as_float(message.get("z")) or _as_float(message.get("pz"))
-    cached_state = _TWSE_MIS_STOCK_STATE.get(code)
+    normalized_market = str(market or "TWSE").strip().upper()
+    state_key = f"{normalized_market}:{code}"
+    cached_state = _TWSE_MIS_STOCK_STATE.get(state_key)
 
     if (
         latest_price is None
@@ -649,7 +744,7 @@ def _classify_twse_mis_live_breadth_message(message: dict) -> dict | None:
         latest_price = _as_float(cached_state.get("price"))
 
     if latest_price is not None:
-        _TWSE_MIS_STOCK_STATE[code] = {
+        _TWSE_MIS_STOCK_STATE[state_key] = {
             "trade_date": trade_date,
             "price": latest_price,
             "as_of": _twse_mis_message_datetime(message),
@@ -692,11 +787,27 @@ def _classify_twse_mis_live_breadth_message(message: dict) -> dict | None:
         and limit_down_price is not None
         and latest_price <= limit_down_price
     )
+    cumulative_volume_lots = _as_int(message.get("v"))
+    estimated_trade_value = (
+        int(latest_price * cumulative_volume_lots * 1000)
+        if latest_price is not None
+        and cumulative_volume_lots is not None
+        and cumulative_volume_lots >= 0
+        else None
+    )
 
     return {
         "code": code,
+        "market": normalized_market,
         "trade_date": trade_date,
         "as_of": _twse_mis_message_datetime(message),
+        "current_price": latest_price,
+        "previous_close": previous_close,
+        "open_price": _as_float(message.get("o")),
+        "high_price": _as_float(message.get("h")),
+        "low_price": _as_float(message.get("l")),
+        "cumulative_volume_lots": cumulative_volume_lots,
+        "estimated_trade_value": estimated_trade_value,
         "direction": direction,
         "is_limit_up": is_limit_up,
         "is_limit_down": is_limit_down,
@@ -704,10 +815,11 @@ def _classify_twse_mis_live_breadth_message(message: dict) -> dict | None:
 
 
 def _fetch_twse_mis_live_market_breadth_unguarded(db: Session, market: str) -> dict | None:
-    if market != "TWSE":
+    normalized_market = str(market or "").strip().upper()
+    if normalized_market not in {"TWSE", "TPEX"}:
         return None
 
-    cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(market)
+    cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(normalized_market)
 
     if cached and monotonic() < float(cached["expires_at"]):
         payload = cached.get("payload")
@@ -717,26 +829,45 @@ def _fetch_twse_mis_live_market_breadth_unguarded(db: Session, market: str) -> d
 
         return None
 
-    codes = _twse_mis_live_breadth_stock_codes(db)
+    codes = _twse_mis_live_breadth_stock_codes(
+        db,
+        normalized_market,
+    )
 
-    if len(codes) < TWSE_MIS_LIVE_BREADTH_MIN_CODES:
-        return _cache_twse_mis_live_breadth(market, None)
+    minimum_codes = (
+        TWSE_MIS_LIVE_BREADTH_MIN_CODES
+        if normalized_market == "TWSE"
+        else 250
+    )
+    if len(codes) < minimum_codes:
+        return _cache_twse_mis_live_breadth(normalized_market, None)
 
-    messages, failed_batches = _fetch_twse_mis_stock_messages(codes)
+    messages, failed_batches = _fetch_twse_mis_stock_messages(
+        codes,
+        normalized_market,
+    )
 
     if not messages:
-        return _cache_twse_mis_live_breadth(market, None)
+        return _cache_twse_mis_live_breadth(normalized_market, None)
 
     code_set = set(codes)
     classified_rows = [
         row
         for message in messages
-        for row in [_classify_twse_mis_live_breadth_message(message)]
+        for row in [
+            _classify_twse_mis_live_breadth_message(
+                message,
+                normalized_market,
+            )
+        ]
         if row is not None and row["code"] in code_set
     ]
 
     if not classified_rows:
-        return _cache_twse_mis_live_breadth(market, None)
+        return _cache_twse_mis_live_breadth(normalized_market, None)
+    _TWSE_MIS_LIVE_STOCK_ROWS[normalized_market] = [
+        dict(row) for row in classified_rows
+    ]
 
     received_codes = {str(row["code"]) for row in classified_rows}
     advance_count = sum(1 for row in classified_rows if row.get("direction") == "advance")
@@ -752,26 +883,50 @@ def _fetch_twse_mis_live_market_breadth_unguarded(db: Session, market: str) -> d
         for row in classified_rows
         if isinstance(row.get("trade_date"), date)
     ]
+    source_prefix = (
+        "twse_mis_tpex_live_breadth"
+        if normalized_market == "TPEX"
+        else "twse_mis_live_breadth"
+    )
     source = (
-        "twse_mis_live_breadth"
+        source_prefix
         if unknown_count == 0 and failed_batches == 0
-        else "twse_mis_live_breadth_partial"
+        else f"{source_prefix}_partial"
     )
     warnings: list[str] = []
 
     if unknown_count > 0:
-        warnings.append("Some TWSE MIS quotes did not expose a current or inferable price.")
+        warnings.append(
+            f"Some {normalized_market} MIS quotes did not expose a current "
+            "or inferable price."
+        )
 
     if failed_batches > 0:
-        warnings.append(f"{failed_batches} TWSE MIS quote batch(es) failed.")
+        warnings.append(
+            f"{failed_batches} {normalized_market} MIS quote batch(es) failed."
+        )
+    estimated_trade_values = [
+        int(row["estimated_trade_value"])
+        for row in classified_rows
+        if row.get("estimated_trade_value") is not None
+    ]
+    estimated_trade_value = (
+        sum(estimated_trade_values)
+        if estimated_trade_values
+        else None
+    )
 
     payload = {
-        "market": "TWSE",
+        "market": normalized_market,
         "scope": "registered_universe",
         "universe_definition": _market_breadth_universe_definition(
-            "registered_universe"
+            "registered_universe",
+            normalized_market,
         ),
-        "label": _market_breadth_label("TWSE", "registered_universe"),
+        "label": _market_breadth_label(
+            normalized_market,
+            "registered_universe",
+        ),
         "trade_date": max(trade_dates) if trade_dates else None,
         "advance_count": advance_count,
         "decline_count": decline_count,
@@ -779,7 +934,16 @@ def _fetch_twse_mis_live_market_breadth_unguarded(db: Session, market: str) -> d
         "total_count": total_count,
         "limit_up_count": sum(1 for row in classified_rows if row.get("is_limit_up")),
         "limit_down_count": sum(1 for row in classified_rows if row.get("is_limit_down")),
-        "trade_value": None,
+        "trade_value": estimated_trade_value,
+        "trade_value_is_estimate": estimated_trade_value is not None,
+        "trade_value_semantics": (
+            "estimated_latest_price_x_cumulative_volume_lots"
+            if estimated_trade_value is not None
+            else "unavailable"
+        ),
+        "trade_value_confidence": (
+            "medium" if estimated_trade_value is not None else None
+        ),
         "source": source,
         "as_of": max(as_of_values) if as_of_values else datetime.now(TAIPEI_TZ),
         "coverage_count": coverage_count,
@@ -789,7 +953,7 @@ def _fetch_twse_mis_live_market_breadth_unguarded(db: Session, market: str) -> d
         "failed_batch_count": failed_batches,
         "warnings": warnings,
     }
-    return _cache_twse_mis_live_breadth(market, payload)
+    return _cache_twse_mis_live_breadth(normalized_market, payload)
 
 
 def reset_twse_mis_breadth_guard() -> None:
@@ -797,8 +961,27 @@ def reset_twse_mis_breadth_guard() -> None:
     global _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL
     _TWSE_MIS_LIVE_BREADTH_CACHE.clear()
     _TWSE_MIS_LIVE_BREADTH_LAST_GOOD.clear()
+    _TWSE_MIS_LIVE_STOCK_ROWS.clear()
     _TWSE_MIS_BREADTH_CIRCUIT_FAILURES = 0
     _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = 0.0
+
+
+def get_cached_taiwan_intraday_stock_rows(
+    market: str | None = None,
+) -> list[dict[str, object]]:
+    markets = (
+        [str(market).strip().upper()]
+        if market is not None
+        else ["TWSE", "TPEX"]
+    )
+    return [
+        dict(row)
+        for normalized_market in markets
+        for row in _TWSE_MIS_LIVE_STOCK_ROWS.get(
+            normalized_market,
+            [],
+        )
+    ]
 
 
 def _stale_twse_mis_breadth(market: str, *, circuit_open: bool) -> dict | None:
@@ -830,22 +1013,29 @@ def _fetch_twse_mis_live_market_breadth(db: Session, market: str) -> dict | None
     global _TWSE_MIS_BREADTH_CIRCUIT_FAILURES
     global _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL
 
-    if market != "TWSE":
+    normalized_market = str(market or "").strip().upper()
+    if normalized_market not in {"TWSE", "TPEX"}:
         return None
-    cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(market)
+    cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(normalized_market)
     if cached and monotonic() < float(cached["expires_at"]):
         payload = cached.get("payload")
         return payload if isinstance(payload, dict) else None
 
     with _TWSE_MIS_BREADTH_REFRESH_LOCK:
-        cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(market)
+        cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(normalized_market)
         if cached and monotonic() < float(cached["expires_at"]):
             payload = cached.get("payload")
             return payload if isinstance(payload, dict) else None
         if monotonic() < _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL:
-            return _stale_twse_mis_breadth(market, circuit_open=True)
+            return _stale_twse_mis_breadth(
+                normalized_market,
+                circuit_open=True,
+            )
 
-        payload = _fetch_twse_mis_live_market_breadth_unguarded(db, market)
+        payload = _fetch_twse_mis_live_market_breadth_unguarded(
+            db,
+            normalized_market,
+        )
         failed_batch_count = (
             int(payload.get("failed_batch_count") or 0)
             if isinstance(payload, dict)
@@ -859,7 +1049,7 @@ def _fetch_twse_mis_live_market_breadth(db: Session, market: str) -> dict | None
                 )
             if payload is None:
                 return _stale_twse_mis_breadth(
-                    market,
+                    normalized_market,
                     circuit_open=monotonic() < _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL,
                 )
         else:
@@ -877,7 +1067,7 @@ def _market_index_summary_cache_ttl(indices: list[dict]) -> int:
 
         source = str(breadth.get("source") or "")
 
-        if source.startswith("twse_mis_live_breadth"):
+        if source.startswith("twse_mis"):
             return TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS
 
     return CACHE_TTL_SECONDS
@@ -939,7 +1129,8 @@ def _market_quote_breadth_from_rows(
         "market": market,
         "scope": "full_market",
         "universe_definition": _market_breadth_universe_definition(
-            "full_market"
+            "full_market",
+            market,
         ),
         "label": _market_breadth_label(market, "full_market"),
         "trade_date": trade_date,
@@ -1031,7 +1222,8 @@ def _fetch_twse_rwd_market_quote_breadth(trade_date: date | None = None) -> dict
         "market": "TWSE",
         "scope": "full_market",
         "universe_definition": _market_breadth_universe_definition(
-            "full_market"
+            "full_market",
+            "TWSE",
         ),
         "label": _market_breadth_label("TWSE", "full_market"),
         "trade_date": payload_date,
@@ -1211,6 +1403,29 @@ def _fetch_twse_market_daily_stats_for_month(month_start: date) -> tuple[list[di
     return _parse_twse_market_daily_history_rows(payload), url
 
 
+def _tpex_market_highlight_url(trade_date: date) -> str:
+    return (
+        f"{TPEX_MARKET_HIGHLIGHT_URL}"
+        f"?date={trade_date:%Y/%m/%d}&response=json"
+    )
+
+
+def _fetch_tpex_market_daily_stat_for_date(
+    trade_date: date,
+) -> tuple[list[dict], str]:
+    payload = tpex.fetch_market_highlight_payload(
+        trade_date,
+        timeout_seconds=20,
+    )
+    return (
+        _parse_tpex_market_highlight_rows(
+            payload,
+            expected_trade_date=trade_date,
+        ),
+        _tpex_market_highlight_url(trade_date),
+    )
+
+
 def _fetch_recent_market_index_daily_stats(index_id: str, market: str) -> list[dict]:
     if market == "TPEX":
         payload = _fetch_json(TPEX_DAILY_INDEX_URL)
@@ -1222,6 +1437,48 @@ def _fetch_recent_market_index_daily_stats(index_id: str, market: str) -> list[d
 
 def _month_start(value: date) -> date:
     return date(value.year, value.month, 1)
+
+
+def _fetch_twse_index_daily_ohlc_for_month(
+    month_start: date,
+) -> dict[date, dict]:
+    normalized_month = _month_start(month_start)
+    cache_key = normalized_month.isoformat()
+    cached = _TWSE_INDEX_DAILY_OHLC_CACHE.get(cache_key)
+
+    if cached and monotonic() < float(cached["expires_at"]):
+        cached_rows = cached.get("rows")
+        if isinstance(cached_rows, dict):
+            return {
+                trade_date: dict(values)
+                for trade_date, values in cached_rows.items()
+                if isinstance(trade_date, date) and isinstance(values, dict)
+            }
+
+    payload = twse.fetch_index_daily_ohlc_payload(
+        normalized_month,
+        timeout_seconds=20,
+        request=http_get,
+    )
+    rows = {
+        row["trade_date"]: row
+        for row in _parse_twse_index_daily_ohlc_rows(payload)
+        if (
+            isinstance(row.get("trade_date"), date)
+            and _month_start(row["trade_date"]) == normalized_month
+        )
+    }
+    if not rows:
+        raise ValueError(
+            "TWSE official daily index OHLC payload has no rows for "
+            f"{normalized_month:%Y-%m}."
+        )
+
+    _TWSE_INDEX_DAILY_OHLC_CACHE[cache_key] = {
+        "expires_at": monotonic() + INDEX_LIST_CACHE_TTL_SECONDS,
+        "rows": rows,
+    }
+    return {trade_date: dict(values) for trade_date, values in rows.items()}
 
 
 def _month_starts_between(from_date: date, to_date: date) -> list[date]:
@@ -1322,6 +1579,142 @@ def _existing_index_stat_months(
     return {_month_start(row.trade_date) for row in rows}
 
 
+def _existing_index_stat_dates(
+    db: Session,
+    *,
+    index_id: str,
+    from_date: date,
+    to_date: date,
+) -> set[date]:
+    rows = (
+        db.query(MarketIndexDailyStat.trade_date)
+        .filter(MarketIndexDailyStat.index_id == index_id)
+        .filter(MarketIndexDailyStat.trade_date >= from_date)
+        .filter(MarketIndexDailyStat.trade_date <= to_date)
+        .all()
+    )
+    return {row.trade_date for row in rows}
+
+
+def _tpex_market_highlight_candidate_dates(
+    *,
+    from_date: date,
+    to_date: date,
+) -> list[date]:
+    current = max(from_date, TPEX_MARKET_HIGHLIGHT_START_DATE)
+    dates: list[date] = []
+    while current <= to_date:
+        if is_taiwan_trading_day(current):
+            dates.append(current)
+        current += timedelta(days=1)
+    return dates
+
+
+def _fetch_and_persist_tpex_market_daily_history(
+    db: Session,
+    *,
+    index_id: str,
+    market: str,
+    from_date: date,
+    to_date: date,
+) -> dict:
+    candidates = _tpex_market_highlight_candidate_dates(
+        from_date=from_date,
+        to_date=to_date,
+    )
+    if len(candidates) > MAX_TPEX_HISTORY_FETCH_DATES:
+        raise ValueError(
+            "TPEX historical daily-stat refresh exceeds the bounded limit of "
+            f"{MAX_TPEX_HISTORY_FETCH_DATES} candidate trading dates."
+        )
+
+    existing_dates = _existing_index_stat_dates(
+        db=db,
+        index_id=index_id,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    fetch_dates = [value for value in candidates if value not in existing_dates]
+    pending_rows: list[dict] = []
+    errors: list[dict] = []
+    successful_months: set[date] = set()
+    inserted_count = 0
+    updated_count = 0
+    completed_count = 0
+
+    with ThreadPoolExecutor(max_workers=MAX_INDEX_STAT_FETCH_WORKERS) as executor:
+        futures = {
+            executor.submit(_fetch_tpex_market_daily_stat_for_date, value): value
+            for value in fetch_dates
+        }
+        for future in as_completed(futures):
+            trade_date = futures[future]
+            try:
+                rows, _source_url = future.result()
+                successful_months.add(_month_start(trade_date))
+                if rows:
+                    pending_rows.extend(rows)
+                    if len(pending_rows) >= TPEX_HISTORY_PERSIST_BATCH_SIZE:
+                        counts = _persist_market_index_daily_stats(
+                            db=db,
+                            index_id=index_id,
+                            market=market,
+                            rows=pending_rows,
+                            source="tpex_after_trading_highlight",
+                            source_url=TPEX_MARKET_HIGHLIGHT_URL,
+                        )
+                        inserted_count += counts["inserted_count"]
+                        updated_count += counts["updated_count"]
+                        pending_rows = []
+            except Exception as exc:
+                errors.append(
+                    {
+                        "date": trade_date.isoformat(),
+                        "error_message": str(exc),
+                    }
+                )
+            finally:
+                completed_count += 1
+                if (
+                    completed_count % TPEX_HISTORY_PERSIST_BATCH_SIZE == 0
+                    or completed_count == len(fetch_dates)
+                ):
+                    logger.info(
+                        "TPEX daily-stat backfill progress completed=%s/%s "
+                        "inserted=%s updated=%s errors=%s",
+                        completed_count,
+                        len(fetch_dates),
+                        inserted_count,
+                        updated_count,
+                        len(errors),
+                    )
+
+    if pending_rows:
+        counts = _persist_market_index_daily_stats(
+            db=db,
+            index_id=index_id,
+            market=market,
+            rows=pending_rows,
+            source="tpex_after_trading_highlight",
+            source_url=TPEX_MARKET_HIGHLIGHT_URL,
+        )
+        inserted_count += counts["inserted_count"]
+        updated_count += counts["updated_count"]
+
+    requested_months = set(
+        _month_starts_between(from_date=from_date, to_date=to_date)
+    )
+    fetch_months = {_month_start(value) for value in fetch_dates}
+    return {
+        "source": "tpex_after_trading_highlight",
+        "fetched_month_count": len(successful_months),
+        "skipped_existing_month_count": len(requested_months - fetch_months),
+        "inserted_count": inserted_count,
+        "updated_count": updated_count,
+        "errors": errors,
+    }
+
+
 def _ensure_market_index_daily_stat_coverage(
     db: Session,
     *,
@@ -1361,6 +1754,23 @@ def _ensure_market_index_daily_stat_coverage(
         "updated_count": 0,
         "errors": [],
     }
+
+    if index_id == "TPEX":
+        history = _fetch_and_persist_tpex_market_daily_history(
+            db=db,
+            index_id=index_id,
+            market=market,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        result["source"] = history["source"]
+        result["fetched_month_count"] += history["fetched_month_count"]
+        result["skipped_existing_month_count"] = history[
+            "skipped_existing_month_count"
+        ]
+        result["inserted_count"] += history["inserted_count"]
+        result["updated_count"] += history["updated_count"]
+        result["errors"].extend(history["errors"])
 
     if index_id == "TAIEX" and fetch_months:
         result["source"] = "twse_rwd_fmtqik"
@@ -1616,13 +2026,45 @@ def _market_index_point_from_daily_stat(
     }
 
 
+def _market_index_point_from_daily_ohlc(
+    row: MarketIndexDailyStat,
+    ohlc: dict,
+) -> dict | None:
+    open_value = _as_float(ohlc.get("open"))
+    high_value = _as_float(ohlc.get("high"))
+    low_value = _as_float(ohlc.get("low"))
+    close_value = _as_float(ohlc.get("close"))
+    if (
+        open_value is None
+        or high_value is None
+        or low_value is None
+        or close_value is None
+    ):
+        return None
+    if high_value < max(open_value, close_value):
+        return None
+    if low_value > min(open_value, close_value):
+        return None
+
+    return {
+        "time": row.trade_date,
+        "open": open_value,
+        "high": high_value,
+        "low": low_value,
+        "close": close_value,
+        "volume": row.trade_volume,
+        "trade_value": row.trade_value,
+        "transaction_count": row.transaction_count,
+    }
+
+
 def _append_official_market_index_daily_points(
     db: Session,
     points: list[dict],
     *,
     index_id: str,
     to_date: date,
-) -> None:
+) -> dict | None:
     latest_point_date = points[-1].get("time") if points else None
     latest_point_date = latest_point_date if isinstance(latest_point_date, date) else None
     previous_close = _as_float(points[-1].get("close")) if points else None
@@ -1632,22 +2074,83 @@ def _append_official_market_index_daily_points(
         if isinstance(point.get("time"), date)
     }
 
-    for row in _market_index_daily_stats_after(
+    rows = _market_index_daily_stats_after(
         db=db,
         index_id=index_id,
         after_date=latest_point_date,
         to_date=to_date,
-    ):
+    )
+    if not rows:
+        return None
+
+    official_ohlc_by_date: dict[date, dict] = {}
+    overlay_errors: list[str] = []
+    bounded_months: set[date] = set()
+    if index_id == "TAIEX":
+        requested_months = sorted({_month_start(row.trade_date) for row in rows})
+        bounded_months = set(
+            requested_months[-MAX_TWSE_INDEX_DAILY_OHLC_OVERLAY_MONTHS:]
+        )
+        for month in sorted(bounded_months):
+            try:
+                official_ohlc_by_date.update(
+                    _fetch_twse_index_daily_ohlc_for_month(month)
+                )
+            except Exception as exc:
+                observe_provider_fallback(
+                    exc,
+                    operation="indices.official_daily_ohlc_overlay",
+                )
+                overlay_errors.append(f"{month:%Y-%m}: {exc}")
+
+    merged_dates: list[date] = []
+    missing_dates: list[date] = []
+    for row in rows:
         if row.trade_date in existing_dates:
             continue
 
-        point = _market_index_point_from_daily_stat(row, previous_close=previous_close)
+        if index_id == "TAIEX":
+            point = _market_index_point_from_daily_ohlc(
+                row,
+                official_ohlc_by_date.get(row.trade_date) or {},
+            )
+        else:
+            point = _market_index_point_from_daily_stat(
+                row,
+                previous_close=previous_close,
+            )
         if point is None:
+            missing_dates.append(row.trade_date)
             continue
 
         points.append(point)
         previous_close = point["close"]
         existing_dates.add(row.trade_date)
+        merged_dates.append(row.trade_date)
+
+    if index_id != "TAIEX":
+        return None
+
+    requested_dates = [row.trade_date for row in rows]
+    status = (
+        "success"
+        if len(merged_dates) == len(requested_dates)
+        else "partial"
+        if merged_dates
+        else "unavailable"
+    )
+    return {
+        "status": status,
+        "provider": twse.INDEX_DAILY_OHLC_PROVIDER,
+        "source": "twse_indices_report_mi_5mins_hist",
+        "source_url": TWSE_INDEX_DAILY_OHLC_URL,
+        "requested_date_count": len(requested_dates),
+        "merged_date_count": len(merged_dates),
+        "merged_dates": [value.isoformat() for value in merged_dates],
+        "missing_dates": [value.isoformat() for value in missing_dates],
+        "bounded_months": [value.isoformat() for value in sorted(bounded_months)],
+        "errors": overlay_errors,
+    }
 
 
 def _apply_latest_official_market_index_stat(
@@ -2095,7 +2598,7 @@ def _fetch_twse_index_5s_intraday(
     field_name = TWSE_INDEX_5S_FIELD_BY_INDEX_ID.get(index_id)
 
     if not field_name:
-        raise ValueError(f"TWSE 5-second index series is not configured for {index_id}.")
+        raise ValueError(f"Official 5-second index series is not configured for {index_id}.")
 
     requested_date = trade_date or datetime.now(TAIPEI_TZ).date()
     cache_key = f"{index_id}:{requested_date.isoformat()}"
@@ -2107,30 +2610,73 @@ def _fetch_twse_index_5s_intraday(
         if isinstance(payload, dict):
             return payload
 
-    raw_payload = twse.fetch_index_5s_payload(
-        requested_date,
-        timeout_seconds=20,
-        request=http_get,
-    )
-
-    if not isinstance(raw_payload, dict) or raw_payload.get("stat") != "OK":
-        raise ValueError("TWSE 5-second index payload is unavailable.")
-
-    fields = raw_payload.get("fields") or []
-    rows = raw_payload.get("data") or []
+    if index_id == "TAIEX":
+        raw_payload = twse.fetch_index_5s_payload(
+            requested_date,
+            timeout_seconds=20,
+            request=http_get,
+        )
+        if not isinstance(raw_payload, dict) or raw_payload.get("stat") != "OK":
+            raise ValueError("TWSE 5-second index payload is unavailable.")
+        fields = raw_payload.get("fields") or []
+        rows = raw_payload.get("data") or []
+        source = "twse_index_5s"
+        provider = twse.INDEX_5S_PROVIDER
+        release_timing = "session"
+    else:
+        raw_payload = tpex.fetch_index_5s_payload(
+            requested_date,
+            timeout_seconds=20,
+            request=http_get,
+        )
+        if (
+            not isinstance(raw_payload, dict)
+            or str(raw_payload.get("stat") or "").lower() != "ok"
+        ):
+            raise ValueError("TPEX 5-second post-close index payload is unavailable.")
+        table = next(
+            (
+                item
+                for item in raw_payload.get("tables") or []
+                if isinstance(item, dict)
+                and field_name in (item.get("fields") or [])
+                and isinstance(item.get("data"), list)
+            ),
+            None,
+        )
+        if table is None:
+            raise ValueError("TPEX 5-second post-close index table is unavailable.")
+        fields = table.get("fields") or []
+        rows = table.get("data") or []
+        source = "tpex_index_5s"
+        provider = tpex.INDEX_5S_PROVIDER
+        release_timing = "post_close"
 
     if field_name not in fields:
-        raise ValueError(f"TWSE 5-second index field '{field_name}' not found.")
+        raise ValueError(f"Official 5-second index field '{field_name}' not found.")
 
     value_index = fields.index(field_name)
-    payload_date = _parse_trade_date(raw_payload.get("date")) or requested_date
+    parsed_payload_date = _parse_trade_date(raw_payload.get("date"))
+    if parsed_payload_date is not None and parsed_payload_date != requested_date:
+        raise ValueError(
+            "Official 5-second index payload returned "
+            f"{parsed_payload_date.isoformat()} for requested "
+            f"{requested_date.isoformat()}."
+        )
+    payload_date = parsed_payload_date or requested_date
     points: list[dict] = []
+    closing_summary_value: float | None = None
 
     for row in rows:
         if not isinstance(row, list) or len(row) <= value_index:
             continue
 
-        parts = str(row[0]).split(":")
+        raw_time = str(row[0]).strip()
+        if raw_time == "99:99:99":
+            closing_summary_value = _as_float(row[value_index])
+            continue
+
+        parts = raw_time.split(":")
         if len(parts) != 3:
             continue
 
@@ -2159,17 +2705,49 @@ def _fetch_twse_index_5s_intraday(
         )
 
     if not points:
-        raise ValueError("TWSE 5-second index payload has no usable points.")
+        raise ValueError("Official 5-second index payload has no usable points.")
+
+    latest_point_time = _point_datetime(points[-1])
+    session_finalized = (
+        closing_summary_value is not None
+        if index_id == "TPEX"
+        else (
+            latest_point_time is not None
+            and latest_point_time.astimezone(TAIPEI_TZ).time()
+            >= TAIWAN_INDEX_SESSION_CLOSE_TIME
+        )
+    )
 
     payload = {
         "stock_id": config["index_id"],
         "symbol": config["symbol"],
-        "source": "twse_index_5s",
-        "provider": "twse_openapi",
+        "source": source,
+        "source_provenance": {
+            "provider": provider,
+            "resource": "index_intraday",
+            "official": True,
+            "release_timing": release_timing,
+            "trade_date": payload_date.isoformat(),
+            "raw_row_count": len(rows),
+            "usable_point_count": len(points),
+            "closing_summary_value": closing_summary_value,
+            "closing_summary_time": (
+                "provider_sentinel_99:99:99"
+                if closing_summary_value is not None
+                else None
+            ),
+        },
+        "provider": provider,
         "interval": "5s",
         "trade_date": payload_date.isoformat(),
-        "coverage_status": "current_session_series",
-        "is_partial": False,
+        "coverage_status": (
+            "post_close_final_series"
+            if index_id == "TPEX" and session_finalized
+            else "current_session_series"
+            if session_finalized
+            else "current_session_partial"
+        ),
+        "is_partial": not session_finalized,
         "volume_unit": None,
         "volume_semantics": "not_provided_for_cash_index",
         "previous_close": points[0]["price"],
@@ -2385,8 +2963,11 @@ def _apply_latest_official_index_snapshot(
         else None
     )
     source = str(payload.get("source") or "index_chart")
-    if "twse_index_5s_snapshot" not in source:
-        source = f"{source}+twse_index_5s_snapshot"
+    official_snapshot_source = (
+        f"{str(official.get('source') or 'official_index_5s')}_snapshot"
+    )
+    if official_snapshot_source not in source:
+        source = f"{source}+{official_snapshot_source}"
 
     payload.update(
         {
@@ -2770,6 +3351,86 @@ def get_market_index_list(market: str = "TWSE", limit: int = 80) -> dict:
     }
 
 
+def _finalize_index_intraday_contract(payload: dict) -> dict:
+    points = [
+        dict(point)
+        for point in payload.get("points") or []
+        if isinstance(point, dict)
+    ]
+    if not points:
+        return {
+            **payload,
+            "bar_contract_version": "tw.intraday.bars.v2",
+            "point_count": 0,
+            "points": [],
+            "bar_type_counts": {},
+            "partial_bar_count": 0,
+            "finalized_bar_count": 0,
+            "indicator_eligible_count": 0,
+            "post_close_summary_count": 0,
+        }
+
+    # Keep bar classification aligned with stock intraday semantics while
+    # preserving the index provider's explicit no-volume contract.
+    from app.market.intraday import _enrich_intraday_contract
+
+    for point in points:
+        point_time = _point_datetime(point)
+        if point_time is None:
+            continue
+        local_clock = point_time.astimezone(TAIPEI_TZ).time().replace(
+            tzinfo=None
+        )
+        if local_clock > time(13, 30):
+            point["bar_type"] = "post_close_summary"
+            point["source_event_type"] = "post_close_confirmation"
+
+    enriched, _ = _enrich_intraday_contract(
+        points,
+        interval=str(payload.get("interval") or "1m"),
+        source=str(payload.get("source") or "market_index_intraday"),
+    )
+    bar_type_counts: dict[str, int] = {}
+    for raw_point, point in zip(points, enriched, strict=False):
+        bar_type = str(point.get("bar_type") or "provider_irregular")
+        bar_type_counts[bar_type] = bar_type_counts.get(bar_type, 0) + 1
+        if raw_point.get("volume") is None:
+            for key in (
+                "volume_shares",
+                "volume_lots",
+                "canonical_volume_unit",
+                "provider_volume_unit",
+                "approx_trade_value",
+            ):
+                point.pop(key, None)
+            point["volume_status"] = "not_provided"
+            point["trade_value_status"] = "not_provided"
+
+    return {
+        **payload,
+        "bar_contract_version": "tw.intraday.bars.v2",
+        "point_count": len(enriched),
+        "points": enriched,
+        "bar_type_counts": bar_type_counts,
+        "partial_bar_count": sum(
+            1 for point in enriched if point.get("is_partial") is True
+        ),
+        "finalized_bar_count": sum(
+            1 for point in enriched if point.get("finalized") is True
+        ),
+        "indicator_eligible_count": sum(
+            1
+            for point in enriched
+            if point.get("indicator_eligible") is True
+        ),
+        "post_close_summary_count": sum(
+            1
+            for point in enriched
+            if point.get("bar_type") == "post_close_summary"
+        ),
+    }
+
+
 def get_market_index_intraday(index_id: str) -> dict:
     normalized_index_id = index_id.upper()
     config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
@@ -2784,14 +3445,19 @@ def get_market_index_intraday(index_id: str) -> dict:
             try:
                 mis_payload = _fetch_mis_index_intraday(config)
                 if mis_payload["point_count"] > 0:
-                    return _merge_index_intraday_snapshot(official_payload, mis_payload)
+                    return _finalize_index_intraday_contract(
+                        _merge_index_intraday_snapshot(
+                            official_payload,
+                            mis_payload,
+                        )
+                    )
             except Exception as exc:
                 observe_provider_fallback(
                     exc,
                     operation="indices.official_intraday_mis_merge",
                 )
 
-            return official_payload
+            return _finalize_index_intraday_contract(official_payload)
     except Exception as exc:
         observe_provider_fallback(exc, operation="indices.official_intraday")
 
@@ -2808,15 +3474,64 @@ def get_market_index_intraday(index_id: str) -> dict:
         mis_payload = _fetch_mis_index_intraday(config)
         if mis_payload["point_count"] > 0:
             if yahoo_payload is not None and yahoo_payload.get("point_count", 0) > 0:
-                return _merge_index_intraday_snapshot(yahoo_payload, mis_payload)
-            return mis_payload
+                return _finalize_index_intraday_contract(
+                    _merge_index_intraday_snapshot(
+                        yahoo_payload,
+                        mis_payload,
+                    )
+                )
+            if normalized_index_id == "TPEX":
+                try:
+                    from app.market.taiwan_index_minute import (
+                        read_persisted_taiwan_index_minute_series,
+                    )
+
+                    persisted_payload = (
+                        read_persisted_taiwan_index_minute_series(
+                            normalized_index_id
+                        )
+                    )
+                    if persisted_payload.get("point_count", 0) > 0:
+                        return _finalize_index_intraday_contract(
+                            _merge_index_intraday_snapshot(
+                                persisted_payload,
+                                mis_payload,
+                            )
+                        )
+                except Exception as exc:
+                    observe_provider_fallback(
+                        exc,
+                        operation=(
+                            "indices.persisted_synthetic_intraday_merge"
+                        ),
+                    )
+            return _finalize_index_intraday_contract(mis_payload)
     except Exception as exc:
         observe_provider_fallback(exc, operation="indices.mis_intraday")
         if yahoo_error is None:
             yahoo_error = exc
 
     if yahoo_payload is not None and yahoo_payload.get("point_count", 0) > 0:
-        return yahoo_payload
+        return _finalize_index_intraday_contract(yahoo_payload)
+
+    if normalized_index_id == "TPEX":
+        try:
+            from app.market.taiwan_index_minute import (
+                read_persisted_taiwan_index_minute_series,
+            )
+
+            persisted_payload = read_persisted_taiwan_index_minute_series(
+                normalized_index_id
+            )
+            if persisted_payload.get("point_count", 0) > 0:
+                return _finalize_index_intraday_contract(
+                    persisted_payload
+                )
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="indices.persisted_synthetic_intraday",
+            )
 
     try:
         fallback_payload = _index_intraday_fallback_from_list(config)
@@ -2826,12 +3541,12 @@ def get_market_index_intraday(index_id: str) -> dict:
         raise
 
     if fallback_payload is not None:
-        return fallback_payload
+        return _finalize_index_intraday_contract(fallback_payload)
 
     if yahoo_error is not None:
         raise yahoo_error
 
-    return {
+    return _finalize_index_intraday_contract({
         "stock_id": config["index_id"],
         "symbol": config["symbol"],
         "source": "unavailable",
@@ -2845,7 +3560,7 @@ def get_market_index_intraday(index_id: str) -> dict:
         "previous_close": None,
         "point_count": 0,
         "points": [],
-    }
+    })
 
 
 def _fetch_twse_shares_by_code() -> dict[str, int]:
@@ -3105,6 +3820,7 @@ def get_market_index_contributions(
             index_close = latest_stat.close_value
             index_change = latest_stat.price_change
     candidates: list[dict] = []
+    component_universe_count = 0
     total_market_value = 0.0
 
     for row in rows:
@@ -3115,6 +3831,7 @@ def get_market_index_contributions(
 
         if code is None:
             continue
+        component_universe_count += 1
 
         shares = shares_by_code.get(code)
         close = _as_float(row.get(keys["close"]))
@@ -3136,6 +3853,11 @@ def get_market_index_contributions(
                 "market_value": market_value,
                 "market_value_change": market_value_change,
                 "trade_value": _as_int(row.get(keys["trade_value"])),
+                "currency": "TWD",
+                "price_unit": "TWD",
+                "market_value_unit": "TWD",
+                "trade_value_unit": "TWD",
+                "contribution_unit": "index_points",
             }
         )
 
@@ -3155,6 +3877,42 @@ def get_market_index_contributions(
         [item for item in candidates if (item.get("contribution_points") or 0) < 0],
         key=lambda item: item["contribution_points"] or 0,
     )[:normalized_limit]
+    estimated_total_contribution_points = sum(
+        float(item["contribution_points"])
+        for item in candidates
+        if item.get("contribution_points") is not None
+    )
+    residual_points = (
+        float(index_change) - estimated_total_contribution_points
+        if index_change is not None
+        else None
+    )
+    residual_pct = (
+        abs(residual_points) / abs(float(index_change)) * 100
+        if residual_points is not None and float(index_change) != 0
+        else None
+    )
+    coverage_ratio = (
+        len(candidates) / component_universe_count
+        if component_universe_count
+        else None
+    )
+    reconciliation_status = (
+        "unavailable"
+        if residual_pct is None
+        else "within_tolerance"
+        if residual_pct <= 5
+        else "outside_tolerance"
+    )
+    confidence = (
+        "high"
+        if coverage_ratio is not None
+        and coverage_ratio >= 0.95
+        and reconciliation_status == "within_tolerance"
+        else "medium"
+        if coverage_ratio is not None and coverage_ratio >= 0.8
+        else "low"
+    )
 
     def ranked(items: list[dict]) -> list[dict]:
         return [
@@ -3168,6 +3926,11 @@ def get_market_index_contributions(
                 "contribution_points": item["contribution_points"],
                 "market_value_change": item["market_value_change"],
                 "trade_value": item["trade_value"],
+                "currency": item["currency"],
+                "price_unit": item["price_unit"],
+                "market_value_unit": item["market_value_unit"],
+                "trade_value_unit": item["trade_value_unit"],
+                "contribution_unit": item["contribution_unit"],
             }
             for index, item in enumerate(items)
         ]
@@ -3177,11 +3940,33 @@ def get_market_index_contributions(
         "market": market,
         "source": source,
         "method": "estimated_market_cap_weight",
+        "method_version": "v1",
+        "is_official": False,
+        "currency": "TWD",
+        "price_unit": "TWD",
+        "market_value_unit": "TWD",
+        "trade_value_unit": "TWD",
+        "contribution_unit": "index_points",
         "as_of": datetime.now(TAIPEI_TZ),
         "trade_date": trade_date,
         "index_close": index_close,
         "index_change": index_change,
         "total_market_value": total_market_value if total_market_value > 0 else None,
+        "component_universe_count": component_universe_count,
+        "covered_component_count": len(candidates),
+        "coverage_ratio": coverage_ratio,
+        "estimated_total_contribution_points": (
+            estimated_total_contribution_points
+            if candidates and index_close is not None
+            else None
+        ),
+        "actual_index_change_points": index_change,
+        "residual_points": residual_points,
+        "residual_pct": residual_pct,
+        "reconciliation_status": reconciliation_status,
+        "confidence": confidence,
+        "component_policy": "regular_four_digit_cash_equities_only",
+        "corporate_action_adjustment": "not_applied",
         "positive": ranked(positive),
         "negative": ranked(negative),
     }
@@ -3191,6 +3976,42 @@ def get_market_index_contributions(
             "payload": payload,
         }
     return payload
+
+
+def _market_index_chart_freshness(
+    points: list[dict],
+    *,
+    timeframe: str,
+    now: datetime | None = None,
+) -> dict:
+    latest_value = points[-1].get("time") if points else None
+    if isinstance(latest_value, datetime):
+        latest_data_date = latest_value.date()
+    else:
+        latest_data_date = latest_value if isinstance(latest_value, date) else None
+
+    local_now = now or datetime.now(TAIPEI_TZ)
+    expected_data_date = expected_daily_price_date(now=local_now)
+    if latest_data_date is None:
+        return {
+            "latest_data_date": None,
+            "expected_data_date": expected_data_date,
+            "freshness_status": "missing",
+            "is_current": False,
+            "refresh_recommended": True,
+        }
+
+    is_current = (
+        _index_stat_period_key(latest_data_date, timeframe)
+        >= _index_stat_period_key(expected_data_date, timeframe)
+    )
+    return {
+        "latest_data_date": latest_data_date,
+        "expected_data_date": expected_data_date,
+        "freshness_status": "current" if is_current else "stale",
+        "is_current": is_current,
+        "refresh_recommended": not is_current,
+    }
 
 
 def get_market_index_ohlc_chart_data(
@@ -3235,6 +4056,7 @@ def get_market_index_ohlc_chart_data(
     )
     coverage_to_date = max(stat_to_date, datetime.now(TAIPEI_TZ).date())
     backfill_result = None
+    official_ohlc_overlay = None
 
     if db is not None and selected_points:
         backfill_result = {
@@ -3256,7 +4078,7 @@ def get_market_index_ohlc_chart_data(
             values_by_period=values_by_period,
         )
         if timeframe == "daily":
-            _append_official_market_index_daily_points(
+            official_ohlc_overlay = _append_official_market_index_daily_points(
                 db=db,
                 points=selected_points,
                 index_id=normalized_index_id,
@@ -3276,6 +4098,13 @@ def get_market_index_ohlc_chart_data(
         from_date = selected_points[0]["time"]
         to_date = selected_points[-1]["time"]
 
+    if backfill_result is not None and official_ohlc_overlay is not None:
+        backfill_result["official_ohlc_overlay"] = official_ohlc_overlay
+
+    freshness = _market_index_chart_freshness(
+        selected_points,
+        timeframe=timeframe,
+    )
     return {
         "stock_id": normalized_index_id,
         "timeframe": timeframe,
@@ -3286,6 +4115,7 @@ def get_market_index_ohlc_chart_data(
         "point_count": len(selected_points),
         "points": selected_points,
         "backfill": backfill_result,
+        **freshness,
     }
 
 
@@ -3318,7 +4148,6 @@ def _market_index_summary(
 
         expected_date = expected_daily_price_date()
         local_indices: list[dict] = []
-        local_dates: list[date] = []
         local_updated_at: list[datetime] = []
 
         for config in INDEX_CONFIGS:
@@ -3372,7 +4201,6 @@ def _market_index_summary(
             if _breadth_trade_date(breadth) != latest_row.trade_date:
                 breadth = None
 
-            local_dates.append(latest_row.trade_date)
             aware_updated_at = _sqlite_utc_datetime(latest_row.updated_at)
             if aware_updated_at is not None:
                 local_updated_at.append(aware_updated_at)
@@ -3406,12 +4234,17 @@ def _market_index_summary(
                 }
             )
 
-        latest_local_date = max(local_dates, default=None)
-        refresh_recommended = latest_local_date is None or latest_local_date < expected_date
+        local_payload = {"indices": local_indices}
+        stale_index_ids = _stale_market_index_ids(
+            local_payload,
+            expected_date=expected_date,
+        )
+        refresh_recommended = bool(stale_index_ids)
         warnings = [shared_cache_error] if shared_cache_error else []
         if refresh_recommended:
             warnings.append(
-                "Local index cache is missing or older than the expected Taiwan trading date."
+                "Local index cache is missing or older than the expected Taiwan "
+                f"trading date for: {', '.join(stale_index_ids)}."
             )
         return _with_breadth_status_contract({
             "as_of": max(local_updated_at, default=datetime.now(TAIPEI_TZ)),
@@ -3503,13 +4336,26 @@ def _market_index_summary(
         )
         indices.append(index_payload)
 
+    expected_date = expected_daily_price_date()
+    stale_index_ids = _stale_market_index_ids(
+        {"indices": indices},
+        expected_date=expected_date,
+    )
+    warnings = (
+        [
+            "Refreshed index summary is still missing or older than the expected "
+            f"Taiwan trading date for: {', '.join(stale_index_ids)}."
+        ]
+        if stale_index_ids
+        else []
+    )
     payload = _with_breadth_status_contract({
         "as_of": datetime.now(TAIPEI_TZ),
         "source": "yahoo_finance_chart",
         "indices": indices,
         "cache_status": "live",
-        "refresh_recommended": False,
-        "warnings": [],
+        "refresh_recommended": bool(stale_index_ids),
+        "warnings": warnings,
     })
     _CACHE["payload"] = payload
     _CACHE["expires_at"] = monotonic() + _market_index_summary_cache_ttl(indices)

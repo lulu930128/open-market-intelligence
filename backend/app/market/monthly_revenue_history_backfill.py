@@ -23,6 +23,8 @@ MARKET_PATHS = {
     "TWSE": "sii",
     "TPEX": "otc",
 }
+MAX_CACHED_PERIOD_ROWS = 5_000
+STOCK_LOOKUP_BATCH_SIZE = 500
 
 
 class _TableRowParser(HTMLParser):
@@ -145,12 +147,14 @@ def _target_months(
     return months
 
 
-def _history_url(market: str, period: date) -> str:
+def _history_url(market: str, period: date, company_type: int = 0) -> str:
+    if company_type not in {0, 1}:
+        raise ValueError("MOPS monthly-revenue company_type must be 0 or 1.")
     roc_year = period.year - 1911
     market_path = MARKET_PATHS[market]
     return (
         f"{MOPS_REVENUE_HISTORY_BASE_URL}/{market_path}/"
-        f"t21sc03_{roc_year}_{period.month}_0.html"
+        f"t21sc03_{roc_year}_{period.month}_{company_type}.html"
     )
 
 
@@ -211,6 +215,42 @@ def _stock_row_from_html(raw_text: str, stock_id: str) -> list[str] | None:
     return None
 
 
+def _stock_rows_from_html(raw_text: str) -> tuple[dict[str, list[str]], int, int]:
+    parser = _TableRowParser()
+    parser.feed(raw_text)
+
+    rows_by_stock_id: dict[str, list[str]] = {}
+    malformed_count = 0
+    duplicate_count = 0
+    for cells in parser.rows:
+        if len(cells) < 10:
+            malformed_count += 1
+            continue
+        stock_id = cells[0].strip()
+        if not stock_id:
+            malformed_count += 1
+            continue
+        if stock_id in rows_by_stock_id:
+            duplicate_count += 1
+            continue
+        rows_by_stock_id[stock_id] = cells
+    return rows_by_stock_id, malformed_count, duplicate_count
+
+
+def _stocks_by_id(db: Session, stock_ids: set[str]) -> dict[str, StockMaster]:
+    result: dict[str, StockMaster] = {}
+    ordered_ids = sorted(stock_ids)
+    for offset in range(0, len(ordered_ids), STOCK_LOOKUP_BATCH_SIZE):
+        batch = ordered_ids[offset : offset + STOCK_LOOKUP_BATCH_SIZE]
+        for stock in (
+            db.query(StockMaster)
+            .filter(StockMaster.stock_id.in_(batch))
+            .all()
+        ):
+            result[stock.stock_id] = stock
+    return result
+
+
 def _monthly_revenue_payload(
     source_id: int,
     raw_result_id: int,
@@ -257,6 +297,37 @@ def _upsert_monthly_revenue(db: Session, payload: dict) -> str:
     for key, value in payload.items():
         setattr(existing, key, value)
     return "updated"
+
+
+def _monthly_revenue_payload_diff(
+    existing: MonthlyRevenue,
+    payload: dict,
+) -> dict[str, dict[str, object]]:
+    comparable_keys = (
+        "report_date",
+        "period",
+        "stock_id",
+        "stock_name",
+        "market",
+        "industry",
+        "monthly_revenue",
+        "previous_month_revenue",
+        "previous_year_month_revenue",
+        "month_over_month_pct",
+        "year_over_year_pct",
+        "cumulative_revenue",
+        "previous_year_cumulative_revenue",
+        "cumulative_year_over_year_pct",
+        "note",
+    )
+    return {
+        key: {
+            "old": getattr(existing, key),
+            "new": payload[key],
+        }
+        for key in comparable_keys
+        if getattr(existing, key) != payload[key]
+    }
 
 
 def ensure_stock_monthly_revenue_history(
@@ -310,32 +381,53 @@ def ensure_stock_monthly_revenue_history(
             )
             continue
 
-        url = _history_url(market=market, period=period)
-
         try:
-            raw_result = _get_cached_raw_result(db=db, source_id=source.id, url=url)
-            if raw_result is not None:
-                cached_count += 1
-            else:
-                raw_text, status_code, content_type = _fetch_month_html(session=session, url=url)
-                fetched_count += 1
-                raw_result = _create_raw_result(
+            raw_result = None
+            cells = None
+            for company_type in (0, 1):
+                url = _history_url(
+                    market=market,
+                    period=period,
+                    company_type=company_type,
+                )
+                candidate_raw_result = _get_cached_raw_result(
                     db=db,
                     source_id=source.id,
                     url=url,
-                    raw_text=raw_text,
-                    status_code=status_code,
-                    content_type=content_type,
                 )
+                if candidate_raw_result is not None:
+                    cached_count += 1
+                else:
+                    raw_text, status_code, content_type = _fetch_month_html(
+                        session=session,
+                        url=url,
+                    )
+                    fetched_count += 1
+                    candidate_raw_result = _create_raw_result(
+                        db=db,
+                        source_id=source.id,
+                        url=url,
+                        raw_text=raw_text,
+                        status_code=status_code,
+                        content_type=content_type,
+                    )
 
-            cells = _stock_row_from_html(raw_result.raw_text or "", stock_id=stock_id)
+                candidate_cells = _stock_row_from_html(
+                    candidate_raw_result.raw_text or "",
+                    stock_id=stock_id,
+                )
+                if candidate_cells is not None:
+                    raw_result = candidate_raw_result
+                    cells = candidate_cells
+                    break
+
             if cells is None:
                 db.commit()
                 results.append(
                     {
                         "period": period.isoformat(),
                         "status": "no_data",
-                        "raw_result_id": raw_result.id,
+                        "raw_result_id": raw_result.id if raw_result is not None else None,
                         "message": "Stock row was not found in MOPS monthly revenue page.",
                         "error_message": None,
                     }
@@ -404,4 +496,334 @@ def ensure_stock_monthly_revenue_history(
     }
 
 
-__all__ = ["ensure_stock_monthly_revenue_history"]
+def backfill_monthly_revenue_period_from_cached_raw(
+    db: Session,
+    *,
+    period: date,
+    markets: tuple[str, ...] = ("TWSE", "TPEX"),
+    company_types: tuple[int, ...] = (0, 1),
+    stock_ids: tuple[str, ...] = (),
+    apply: bool = False,
+    max_candidates: int = MAX_CACHED_PERIOD_ROWS,
+    fetch_missing: bool = False,
+    refresh_documents: bool = False,
+    max_fetches: int = 4,
+) -> dict:
+    """Fill one monthly-revenue period from already persisted MOPS HTML.
+
+    This maintenance path is intentionally cache-only. It parses each market
+    document once, inserts only missing rows, and leaves commit/rollback
+    ownership with the caller.
+    """
+
+    target_period = _month_floor(period)
+    if max_candidates < 1 or max_candidates > MAX_CACHED_PERIOD_ROWS:
+        raise ValueError(
+            f"max_candidates must be between 1 and {MAX_CACHED_PERIOD_ROWS}."
+        )
+
+    normalized_markets = tuple(
+        dict.fromkeys(_normalize_market(market) for market in markets)
+    )
+    normalized_company_types = tuple(dict.fromkeys(int(value) for value in company_types))
+    if not normalized_company_types or any(
+        value not in {0, 1} for value in normalized_company_types
+    ):
+        raise ValueError("company_types must contain only 0 and/or 1.")
+    if max_fetches < 0 or max_fetches > 4:
+        raise ValueError("max_fetches must be between 0 and 4.")
+
+    requested_stock_ids = {
+        str(stock_id).strip()
+        for stock_id in stock_ids
+        if str(stock_id).strip()
+    }
+    planned_inserts: list[dict] = []
+    planned_updates: list[
+        tuple[MonthlyRevenue, dict, dict[str, dict[str, object]]]
+    ] = []
+    market_results: list[dict] = []
+    cache_missing_markets: list[str] = []
+    cache_missing_documents: list[str] = []
+    fetch_errors: list[dict] = []
+    fetched_count = 0
+    fetch_attempt_count = 0
+    session = new_session()
+
+    for market in normalized_markets:
+        source = _get_monthly_revenue_source(db=db, market=market)
+        rows_by_stock_id: dict[str, tuple[list[str], RawFetchResult]] = {}
+        document_results: list[dict] = []
+        malformed_count = 0
+        duplicate_count = 0
+        for company_type in normalized_company_types:
+            url = _history_url(
+                market=market,
+                period=target_period,
+                company_type=company_type,
+            )
+            document_key = f"{market}:{company_type}"
+            raw_result = _get_cached_raw_result(
+                db=db,
+                source_id=source.id,
+                url=url,
+            )
+            document_status = "cached"
+            should_fetch = refresh_documents or (
+                raw_result is None and fetch_missing
+            )
+            if should_fetch:
+                if fetch_attempt_count >= max_fetches:
+                    raise ValueError(
+                        f"Missing-document fetch limit exceeded ({max_fetches})."
+                    )
+                fetch_attempt_count += 1
+                try:
+                    raw_text, status_code, content_type = _fetch_month_html(
+                        session=session,
+                        url=url,
+                    )
+                    fetched_count += 1
+                    fetched_hash = hashlib.sha256(
+                        raw_text.encode("utf-8", errors="ignore")
+                    ).hexdigest()
+                    if (
+                        raw_result is not None
+                        and raw_result.content_hash == fetched_hash
+                    ):
+                        document_status = "unchanged"
+                    elif apply:
+                        raw_result = _create_raw_result(
+                            db=db,
+                            source_id=source.id,
+                            url=url,
+                            raw_text=raw_text,
+                            status_code=status_code,
+                            content_type=content_type,
+                        )
+                        document_status = (
+                            "refreshed" if refresh_documents else "fetched"
+                        )
+                    else:
+                        raw_result = RawFetchResult(
+                            source_id=source.id,
+                            url=url,
+                            method="GET",
+                            status_code=status_code,
+                            content_type=(content_type or "text/html")[:120],
+                            content_hash=fetched_hash,
+                            raw_text=raw_text,
+                            parser_version="mops-monthly-revenue-history-v1",
+                        )
+                        document_status = (
+                            "refresh_dry_run"
+                            if refresh_documents
+                            else "fetch_dry_run"
+                        )
+                except Exception as exc:
+                    fetch_errors.append(
+                        {
+                            "document": document_key,
+                            "source_url": url,
+                            "error_message": str(exc),
+                        }
+                    )
+                    document_status = (
+                        "refresh_error_cached"
+                        if raw_result is not None
+                        else "fetch_error"
+                    )
+
+            if raw_result is None:
+                cache_missing_documents.append(document_key)
+                document_results.append(
+                    {
+                        "company_type": company_type,
+                        "status": document_status
+                        if document_status == "fetch_error"
+                        else "cache_missing",
+                        "raw_result_id": None,
+                        "source_url": url,
+                        "parsed_stock_count": 0,
+                    }
+                )
+                continue
+
+            document_rows, document_malformed, document_duplicates = (
+                _stock_rows_from_html(raw_result.raw_text or "")
+            )
+            malformed_count += document_malformed
+            duplicate_count += document_duplicates
+            for stock_id, cells in document_rows.items():
+                if requested_stock_ids and stock_id not in requested_stock_ids:
+                    continue
+                if stock_id in rows_by_stock_id:
+                    duplicate_count += 1
+                    continue
+                rows_by_stock_id[stock_id] = (cells, raw_result)
+            document_results.append(
+                {
+                    "company_type": company_type,
+                    "status": document_status,
+                        "raw_result_id": raw_result.id,
+                    "source_url": url,
+                    "parsed_stock_count": len(document_rows),
+                }
+            )
+
+        if not rows_by_stock_id:
+            cache_missing_markets.append(market)
+            market_results.append(
+                {
+                    "market": market,
+                    "status": "cache_missing",
+                    "source_id": source.id,
+                    "documents": document_results,
+                    "raw_result_ids": [],
+                    "parsed_stock_count": 0,
+                    "existing_count": 0,
+                    "candidate_count": 0,
+                    "unconfigured_stock_count": 0,
+                    "market_mismatch_count": 0,
+                    "malformed_row_count": 0,
+                    "duplicate_source_row_count": 0,
+                }
+            )
+            continue
+
+        stocks_by_id = _stocks_by_id(db=db, stock_ids=set(rows_by_stock_id))
+        existing_rows_by_stock_id = {
+            row.stock_id: row
+            for row in (
+                db.query(MonthlyRevenue)
+                .filter(MonthlyRevenue.source_id == source.id)
+                .filter(MonthlyRevenue.period == target_period)
+                .all()
+            )
+        }
+        candidate_count = 0
+        insert_candidate_count = 0
+        update_candidate_count = 0
+        insert_stock_ids: list[str] = []
+        update_samples: list[dict] = []
+        unconfigured_stock_count = 0
+        market_mismatch_count = 0
+        for stock_id, (cells, raw_result) in sorted(rows_by_stock_id.items()):
+            stock = stocks_by_id.get(stock_id)
+            if stock is None:
+                unconfigured_stock_count += 1
+                continue
+            stock_market = _normalize_market(stock.market)
+            if stock_market != market:
+                market_mismatch_count += 1
+            payload = _monthly_revenue_payload(
+                source_id=source.id,
+                raw_result_id=raw_result.id,
+                period=target_period,
+                stock_id=stock_id,
+                stock=stock,
+                market=stock_market,
+                cells=cells,
+            )
+            existing = existing_rows_by_stock_id.get(stock_id)
+            if existing is None:
+                planned_inserts.append(payload)
+                candidate_count += 1
+                insert_candidate_count += 1
+                if len(insert_stock_ids) < 50:
+                    insert_stock_ids.append(stock_id)
+            elif refresh_documents:
+                changed_fields = _monthly_revenue_payload_diff(existing, payload)
+                if changed_fields:
+                    planned_updates.append((existing, payload, changed_fields))
+                    candidate_count += 1
+                    update_candidate_count += 1
+                    if len(update_samples) < 50:
+                        update_samples.append(
+                            {
+                                "stock_id": stock_id,
+                                "changed_fields": changed_fields,
+                            }
+                        )
+
+        market_results.append(
+            {
+                "market": market,
+                "status": "ready",
+                "source_id": source.id,
+                "documents": document_results,
+                "raw_result_ids": sorted(
+                    {
+                        raw_result.id
+                        for _, raw_result in rows_by_stock_id.values()
+                        if raw_result.id is not None
+                    }
+                ),
+                "parsed_stock_count": len(rows_by_stock_id),
+                "existing_count": len(existing_rows_by_stock_id),
+                "candidate_count": candidate_count,
+                "insert_candidate_count": insert_candidate_count,
+                "update_candidate_count": update_candidate_count,
+                "insert_stock_ids": insert_stock_ids,
+                "update_samples": update_samples,
+                "unconfigured_stock_count": unconfigured_stock_count,
+                "market_mismatch_count": market_mismatch_count,
+                "malformed_row_count": malformed_count,
+                "duplicate_source_row_count": duplicate_count,
+            }
+        )
+
+    total_candidates = len(planned_inserts) + len(planned_updates)
+    if total_candidates > max_candidates:
+        raise ValueError(
+            "Cached monthly-revenue candidate count "
+            f"{total_candidates} exceeds max_candidates={max_candidates}."
+        )
+
+    if apply and planned_inserts:
+        db.add_all(MonthlyRevenue(**payload) for payload in planned_inserts)
+    if apply and planned_updates:
+        for existing, payload, _ in planned_updates:
+            for key, value in payload.items():
+                setattr(existing, key, value)
+    if apply and (planned_inserts or planned_updates):
+        db.flush()
+
+    if cache_missing_markets or cache_missing_documents or fetch_errors:
+        status = (
+            "blocked"
+            if len(cache_missing_markets) == len(normalized_markets)
+            else "partial"
+        )
+    else:
+        status = "applied" if apply else "dry_run_ready"
+
+    return {
+        "status": status,
+        "mode": "apply" if apply else "dry_run",
+        "cache_only": not fetch_missing and not refresh_documents,
+        "refresh_documents": refresh_documents,
+        "period": target_period.isoformat(),
+        "markets": list(normalized_markets),
+        "company_types": list(normalized_company_types),
+        "requested_stock_ids": sorted(requested_stock_ids),
+        "market_results": market_results,
+        "cache_missing_markets": cache_missing_markets,
+        "cache_missing_documents": cache_missing_documents,
+        "fetch_errors": fetch_errors,
+        "fetch_attempt_count": fetch_attempt_count,
+        "fetched_count": fetched_count,
+        "candidate_count": total_candidates,
+        "insert_candidate_count": len(planned_inserts),
+        "update_candidate_count": len(planned_updates),
+        "inserted_count": len(planned_inserts) if apply else 0,
+        "updated_count": len(planned_updates) if apply else 0,
+        "max_candidates": max_candidates,
+    }
+
+
+__all__ = [
+    "MAX_CACHED_PERIOD_ROWS",
+    "backfill_monthly_revenue_period_from_cached_raw",
+    "ensure_stock_monthly_revenue_history",
+]

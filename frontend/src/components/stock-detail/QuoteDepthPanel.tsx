@@ -173,6 +173,21 @@ function applyQuoteDepthPreview(
     change,
     change_pct: changePct,
     total_volume_lots: quoteDepth?.total_volume_lots ?? (mode === "preopen" ? 12_480 : 28_640),
+    auction_book_available: mode === "preopen",
+    auction_book_status: mode === "preopen" ? "depth_and_indicative_match" : "unavailable",
+    auction_book_time: quoteDepth?.quote_time ?? null,
+    auction_best_bid: mode === "preopen" ? bestBidPrice : null,
+    auction_best_ask: mode === "preopen" ? bestAskPrice : null,
+    auction_indicative_available: mode === "preopen",
+    auction_indicative_status: mode === "preopen" ? "available" : "not_provided",
+    auction_phase: mode === "preopen" ? "preopen_auction" : null,
+    auction_event_time: quoteDepth?.quote_time ?? null,
+    indicative_match_available: mode === "preopen",
+    indicative_match_price: mode === "preopen" ? basePrice : null,
+    indicative_match_volume_lots: mode === "preopen" ? 2_046 : null,
+    indicative_match_price_source_field: mode === "preopen" ? "pz" : null,
+    indicative_match_volume_source_field: mode === "preopen" ? "ps" : null,
+    indicative_match_status_source_field: mode === "preopen" ? "ts" : null,
     best_bid_price: bestBidPrice,
     best_bid_size_lots: bidLevels[0]?.size_lots ?? null,
     best_ask_price: bestAskPrice,
@@ -209,8 +224,311 @@ function sideTotal(levels: TaiwanStockQuoteDepthLevel[]) {
   return total > 0 ? total : null;
 }
 
+function formatVolumeValue(value: number | null | undefined, unit: "張" | "股") {
+  if (!isFiniteNumber(value)) return "-";
+
+  return `${new Intl.NumberFormat("zh-TW").format(Math.round(value))} ${unit}`;
+}
+
+function formatVolumeDifference(value: number | null | undefined) {
+  if (!isFiniteNumber(value)) return null;
+
+  const absoluteShares = Math.round(Math.abs(value));
+  if (absoluteShares % 1_000 === 0) {
+    return `${new Intl.NumberFormat("zh-TW").format(absoluteShares / 1_000)} 張`;
+  }
+
+  return `${new Intl.NumberFormat("zh-TW").format(absoluteShares)} 股`;
+}
+
+function formatOfficialVolumeValue(value: number | null | undefined) {
+  if (!isFiniteNumber(value)) return "-";
+
+  const shares = Math.round(value);
+  return shares % 1_000 === 0
+    ? formatVolumeValue(shares / 1_000, "張")
+    : formatVolumeValue(shares, "股");
+}
+
 function isFiniteNumber(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+type VolumeSummaryStatus = {
+  label: string;
+  message: string;
+  toneClass: string;
+};
+
+function volumeSummaryStatus(
+  quoteDepth: TaiwanStockQuoteDepthRead,
+  isPreview: boolean
+): VolumeSummaryStatus {
+  if (isPreview) {
+    return {
+      label: "預覽量能",
+      message: "量能數字僅供版型預覽，不供研究判斷。",
+      toneClass: "border-omi-info bg-omi-info-soft text-omi-info-strong",
+    };
+  }
+
+  const reconciliation = quoteDepth.volume_reconciliation;
+
+  if (reconciliation?.status === "scope_different") {
+    const differenceShares = formatVolumeDifference(reconciliation.difference_shares);
+    const differenceText = differenceShares ? `；目前差額 ${differenceShares}` : "";
+
+    return {
+      label: "口徑不同",
+      message: `MIS v 是正規盤整張累計，官方日量是較廣的日彙總${differenceText}。兩者都保留，但不可直接對帳。`,
+      toneClass: "border-omi-info bg-omi-info-soft text-omi-info-strong",
+    };
+  }
+
+  if (reconciliation?.status === "reconciled") {
+    return {
+      label: "已對帳",
+      message: "MIS 累計量與正式日量在容許範圍內，可供量能判斷。",
+      toneClass: "border-omi-success bg-omi-success-soft text-omi-success-strong",
+    };
+  }
+
+  if (reconciliation?.status === "mismatch") {
+    const differenceShares = formatVolumeDifference(reconciliation.difference_shares);
+    const differencePct = isFiniteNumber(reconciliation.difference_pct)
+      ? `${Math.abs(reconciliation.difference_pct).toFixed(2)}%`
+      : null;
+    const differenceText =
+      differenceShares && differencePct
+        ? `相差 ${differenceShares}（${differencePct}）`
+        : "數值未對齊";
+
+    return {
+      label: "資料異常",
+      message: `同口徑成交量${differenceText}，量能判斷暫不採用。`,
+      toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
+    };
+  }
+
+  if (reconciliation?.reason === "official_daily_volume_not_available") {
+    return {
+      label: "待正式量",
+      message: "盤中先顯示 MIS 成交量，正式日量待收盤資料。",
+      toneClass: "border-omi-border-strong bg-omi-surface text-omi-text-muted",
+    };
+  }
+
+  if (reconciliation?.reason === "trade_dates_do_not_match") {
+    return {
+      label: "日期不同",
+      message: "MIS 快照與正式日量的交易日期不同，暫不對帳。",
+      toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
+    };
+  }
+
+  if (reconciliation?.reason === "trade_date_not_available") {
+    return {
+      label: "未對帳",
+      message: "交易日期資訊不足，量能暫不供研究判斷。",
+      toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
+    };
+  }
+
+  if (reconciliation?.reason === "official_daily_volume_not_positive") {
+    return {
+      label: "正式量異常",
+      message: "正式日量不是有效正值，量能暫不供研究判斷。",
+      toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
+    };
+  }
+
+  const providerVolumeAvailable =
+    quoteDepth.provider_volume_available ??
+    isFiniteNumber(quoteDepth.cumulative_volume_lots ?? quoteDepth.total_volume_lots);
+
+  return providerVolumeAvailable
+    ? {
+        label: "未對帳",
+        message: "目前僅有 MIS 成交量，尚無可比較的正式日量。",
+        toneClass: "border-omi-border-strong bg-omi-surface text-omi-text-muted",
+      }
+    : {
+        label: "量能缺資料",
+        message: "TWSE MIS 未提供可用的累計成交量。",
+        toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
+      };
+}
+
+function VolumeMetric({
+  label,
+  sourceField,
+  value,
+  testId,
+  className = "",
+}: {
+  label: string;
+  sourceField?: string;
+  value: string;
+  testId: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`min-w-0 px-2.5 py-2 sm:px-3 ${className}`}
+      data-testid={testId}
+    >
+      <dt className="flex items-baseline gap-1 text-[10px] font-bold tracking-[0.08em] text-omi-text-muted">
+        <span>{label}</span>
+        {sourceField ? (
+          <span className="font-mono font-medium normal-case tracking-normal text-omi-text-muted/70">
+            {sourceField}
+          </span>
+        ) : null}
+      </dt>
+      <dd className="mt-0.5 truncate text-sm font-bold tabular-nums text-omi-text-strong">
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+function QuoteVolumeSummary({
+  quoteDepth,
+  isPreview,
+}: {
+  quoteDepth: TaiwanStockQuoteDepthRead;
+  isPreview: boolean;
+}) {
+  if (quoteDepth.session_phase === "preopen_auction") return null;
+
+  const cumulativeLots = quoteDepth.cumulative_volume_lots ?? quoteDepth.total_volume_lots;
+  const hasVolumeContract =
+    isFiniteNumber(cumulativeLots) ||
+    isFiniteNumber(quoteDepth.last_trade_volume_lots) ||
+    isFiniteNumber(quoteDepth.official_daily_volume_shares) ||
+    quoteDepth.volume_status !== undefined ||
+    quoteDepth.volume_reconciliation !== undefined;
+
+  if (!hasVolumeContract) return null;
+
+  const status = volumeSummaryStatus(quoteDepth, isPreview);
+
+  return (
+    <section
+      aria-label="成交量摘要"
+      className="mt-3 overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
+      data-testid="quote-volume-summary"
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-omi-border-subtle px-2.5 py-1.5 sm:px-3">
+        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-omi-text-muted">
+          成交量
+        </div>
+        <span
+          className={`inline-flex shrink-0 items-center border px-1.5 py-0.5 text-[10px] font-bold ${status.toneClass}`}
+          data-testid="quote-volume-status"
+        >
+          {status.label}
+        </span>
+      </div>
+      <dl className="grid grid-cols-2 sm:grid-cols-3">
+        <VolumeMetric
+          label="最近一筆"
+          sourceField={quoteDepth.last_trade_volume_source_field ?? "tv"}
+          value={formatVolumeValue(quoteDepth.last_trade_volume_lots, "張")}
+          testId="quote-volume-last-trade"
+          className="border-r border-omi-border-subtle"
+        />
+        <VolumeMetric
+          label="正規盤累計"
+          sourceField={quoteDepth.volume_source_field ?? "v"}
+          value={formatVolumeValue(cumulativeLots, "張")}
+          testId="quote-volume-cumulative"
+          className="sm:border-r sm:border-omi-border-subtle"
+        />
+        <VolumeMetric
+          label="正式日量"
+          value={formatOfficialVolumeValue(quoteDepth.official_daily_volume_shares)}
+          testId="quote-volume-official"
+          className="col-span-2 border-t border-omi-border-subtle sm:col-span-1 sm:border-t-0"
+        />
+      </dl>
+      <div
+        className="border-t border-omi-border-subtle px-2.5 py-1.5 text-[11px] leading-4 text-omi-text-muted sm:px-3"
+        data-testid="quote-volume-message"
+      >
+        {status.message}
+      </div>
+    </section>
+  );
+}
+
+function QuoteAuctionSummary({
+  quoteDepth,
+  isPreview,
+}: {
+  quoteDepth: TaiwanStockQuoteDepthRead;
+  isPreview: boolean;
+}) {
+  const isAuction =
+    quoteDepth.session_phase === "preopen_auction" ||
+    quoteDepth.session_phase === "closing_auction";
+  if (!isAuction) return null;
+
+  const available =
+    quoteDepth.indicative_match_available === true &&
+    isFiniteNumber(quoteDepth.indicative_match_price) &&
+    isFiniteNumber(quoteDepth.indicative_match_volume_lots);
+  const phaseLabel =
+    quoteDepth.session_phase === "closing_auction" ? "收盤試撮" : "開盤試撮";
+  const statusLabel = isPreview ? "預覽" : available ? "試算揭露" : "來源未提供";
+  const statusClassName = isPreview
+    ? "border-omi-info bg-omi-info-soft text-omi-info-strong"
+    : available
+      ? "border-omi-success bg-omi-success-soft text-omi-success-strong"
+      : "border-omi-warning bg-omi-warning-soft text-omi-warning-strong";
+
+  return (
+    <section
+      aria-label={`${phaseLabel}摘要`}
+      className="mt-3 overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
+      data-testid="quote-auction-summary"
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-omi-border-subtle px-2.5 py-1.5 sm:px-3">
+        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-omi-text-muted">
+          {phaseLabel}
+        </div>
+        <span
+          className={`inline-flex shrink-0 items-center border px-1.5 py-0.5 text-[10px] font-bold ${statusClassName}`}
+          data-testid="quote-auction-status"
+        >
+          {statusLabel}
+        </span>
+      </div>
+      <dl className="grid grid-cols-2">
+        <VolumeMetric
+          label="試算參考價"
+          sourceField={quoteDepth.indicative_match_price_source_field ?? "pz"}
+          value={formatPrice(quoteDepth.indicative_match_price)}
+          testId="quote-auction-price"
+          className="border-r border-omi-border-subtle"
+        />
+        <VolumeMetric
+          label="試算參考量"
+          sourceField={quoteDepth.indicative_match_volume_source_field ?? "ps"}
+          value={formatVolumeValue(quoteDepth.indicative_match_volume_lots, "張")}
+          testId="quote-auction-volume"
+        />
+      </dl>
+      <div
+        className="border-t border-omi-border-subtle px-2.5 py-1.5 text-[11px] leading-4 text-omi-text-muted sm:px-3"
+        data-testid="quote-auction-message"
+      >
+        {available || isPreview
+          ? "試算價量是模擬撮合結果，尚非實際成交；上下五檔張數是未成交委託量。"
+          : "TWSE MIS 本次快照未提供有效試算價量；仍可查看已揭露的五檔委託張數。"}
+      </div>
+    </section>
+  );
 }
 
 function depthPriceTone(
@@ -323,15 +641,33 @@ function DepthSide({
           </>
         )}
       </div>
-      {levels.map((level) => (
-        <DepthSideRow
-          key={`${side}-${level.level}`}
-          level={level}
-          maxSize={maxSize}
-          previousClose={previousClose}
-          side={side}
-        />
-      ))}
+      <div className="min-h-[140px]">
+        {levels.length > 0 ? (
+          levels.map((level) => (
+            <DepthSideRow
+              key={`${side}-${level.level}`}
+              level={level}
+              maxSize={maxSize}
+              previousClose={previousClose}
+              side={side}
+            />
+          ))
+        ) : (
+          <div
+            className="flex min-h-[140px] items-center justify-center border-t border-omi-border-subtle px-3 text-center"
+            data-testid={`quote-depth-${side}-empty`}
+          >
+            <div>
+              <div className="text-xs font-semibold text-omi-text-strong">
+                {side === "bid" ? "目前無有效買價" : "目前無有效賣價"}
+              </div>
+              <div className="mt-1 text-[10px] leading-4 text-omi-text-muted">
+                來源未提供此側五檔
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
       <div className="grid min-h-8 grid-cols-2 items-center gap-3 border-t border-omi-border-subtle bg-black/10 px-2 text-sm font-bold tabular-nums text-omi-text-strong">
         {side === "bid" ? (
           <>
@@ -384,6 +720,22 @@ export default function QuoteDepthPanel({
   const askLevels = displayQuoteDepth?.ask_levels ?? [];
   const showDepth = bidLevels.length > 0 || askLevels.length > 0;
   const maxSize = depthMaxSize(displayQuoteDepth);
+  const indicativePrice =
+    displayQuoteDepth?.indicative_match_available &&
+    isFiniteNumber(displayQuoteDepth.indicative_match_price)
+      ? displayQuoteDepth.indicative_match_price
+      : null;
+  const headlinePrice = indicativePrice ?? displayQuoteDepth?.last_price;
+  const headlineChange =
+    indicativePrice !== null && isFiniteNumber(displayQuoteDepth?.previous_close)
+      ? indicativePrice - displayQuoteDepth.previous_close
+      : displayQuoteDepth?.change;
+  const headlineChangePct =
+    indicativePrice !== null &&
+    isFiniteNumber(displayQuoteDepth?.previous_close) &&
+    displayQuoteDepth.previous_close !== 0
+      ? (headlineChange! / displayQuoteDepth.previous_close) * 100
+      : displayQuoteDepth?.change_pct;
   const message =
     displayQuoteDepth?.freshness.message ??
     (loadState === "loading"
@@ -418,17 +770,17 @@ export default function QuoteDepthPanel({
           </div>
         </div>
         <div className="shrink-0 text-right">
-          <div className={`text-lg font-bold tabular-nums ${valueTone(displayQuoteDepth?.change)}`}>
-            {formatPrice(displayQuoteDepth?.last_price)}
+          <div className={`text-lg font-bold tabular-nums ${valueTone(headlineChange)}`}>
+            {formatPrice(headlinePrice)}
           </div>
-          <div className={`text-[11px] font-semibold tabular-nums ${valueTone(displayQuoteDepth?.change_pct)}`}>
-            {formatPrice(displayQuoteDepth?.change)} / {formatPct(displayQuoteDepth?.change_pct)}
+          <div className={`text-[11px] font-semibold tabular-nums ${valueTone(headlineChangePct)}`}>
+            {formatPrice(headlineChange)} / {formatPct(headlineChangePct)}
           </div>
         </div>
       </div>
 
       {showDepth ? (
-        <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="mt-3 grid grid-cols-2 gap-2" data-testid="quote-depth-book">
           <DepthSide
             levels={bidLevels}
             maxSize={maxSize}
@@ -459,6 +811,14 @@ export default function QuoteDepthPanel({
           compact
           className="mt-3"
         />
+      ) : null}
+
+      {displayQuoteDepth ? (
+        <QuoteAuctionSummary quoteDepth={displayQuoteDepth} isPreview={isPreview} />
+      ) : null}
+
+      {displayQuoteDepth ? (
+        <QuoteVolumeSummary quoteDepth={displayQuoteDepth} isPreview={isPreview} />
       ) : null}
 
       {displayQuoteDepth ? (

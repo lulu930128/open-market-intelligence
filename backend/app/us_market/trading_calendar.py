@@ -9,7 +9,10 @@ US_PRE_MARKET_OPEN_TIME = time(hour=4, minute=0)
 US_SESSION_OPEN_TIME = time(hour=9, minute=30)
 US_SESSION_CLOSE_TIME = time(hour=16, minute=0)
 US_POST_MARKET_CLOSE_TIME = time(hour=20, minute=0)
-US_DAILY_PRICE_RELEASE_TIME = US_SESSION_CLOSE_TIME
+# Daily chart providers can still expose a mutating current-session candle at
+# the exact closing boundary. Keep the daily release target behind a small,
+# explicit settlement buffer so refresh/read paths only promote completed bars.
+US_DAILY_PRICE_RELEASE_TIME = time(hour=16, minute=5)
 
 
 def _observed_fixed_holiday(year: int, month: int, day: int) -> date:
@@ -126,6 +129,31 @@ def _as_new_york_datetime(value: datetime | None = None) -> datetime:
     return value.astimezone(US_MARKET_TIMEZONE)
 
 
+def us_daily_price_finalization_time(trade_date: date) -> datetime:
+    return datetime.combine(
+        trade_date,
+        US_DAILY_PRICE_RELEASE_TIME,
+        tzinfo=US_MARKET_TIMEZONE,
+    ).astimezone(timezone.utc)
+
+
+def is_us_daily_price_finalized(
+    *,
+    trade_date: date,
+    fetched_at: datetime | None,
+) -> bool:
+    if fetched_at is None:
+        return False
+
+    normalized_fetched_at = fetched_at
+    if normalized_fetched_at.tzinfo is None:
+        normalized_fetched_at = normalized_fetched_at.replace(tzinfo=timezone.utc)
+
+    return normalized_fetched_at.astimezone(
+        timezone.utc
+    ) >= us_daily_price_finalization_time(trade_date)
+
+
 def expected_us_daily_price_date(
     *,
     include_today: bool | None = None,
@@ -155,9 +183,11 @@ __all__ = [
     "US_SESSION_CLOSE_TIME",
     "US_SESSION_OPEN_TIME",
     "expected_us_daily_price_date",
+    "is_us_daily_price_finalized",
     "is_us_trading_day",
     "next_us_trading_day",
     "previous_us_trading_day",
+    "us_daily_price_finalization_time",
     "us_market_holiday_name",
     "us_market_holiday_names",
     "us_market_holidays",

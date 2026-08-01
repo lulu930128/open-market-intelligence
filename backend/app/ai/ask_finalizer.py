@@ -30,14 +30,20 @@ _COMPACT_ANALYSIS_KEYS = (
     "kind",
     "as_of",
     "requested_horizon",
+    "effective_horizon",
     "selected_horizon",
     "horizon_label",
     "selected_timeframe",
     "selected_score",
     "score_display",
     "selected_title",
+    "composite_score_title",
     "selected_summary",
     "selected_confidence",
+    "today_state",
+    "historical_structure",
+    "composite_state",
+    "fallback_reason",
     "display",
     "stance",
     "confidence",
@@ -378,6 +384,12 @@ def _market_live_summary(
         else {}
     )
     latest_point = intraday.get("latest_point") if isinstance(intraday.get("latest_point"), dict) else {}
+    current_price = (
+        quote.get("current_price")
+        if isinstance(quote.get("current_price"), dict)
+        else {}
+    )
+    resolved_current_price = current_price.get("value")
     quote_price = _first_present(
         quote,
         "price",
@@ -456,7 +468,19 @@ def _market_live_summary(
         and intraday_latest_price is not None
         and intraday_freshness not in {"stale", "missing", "unavailable"}
     )
-    if intraday_is_usable:
+    if resolved_current_price is not None:
+        display_price = resolved_current_price
+        display_price_source = (
+            current_price.get("source_kind") or "resolved_current_price"
+        )
+        display_price_time = (
+            current_price.get("event_time")
+            or current_price.get("trade_date")
+        )
+        display_price_freshness = (
+            current_price.get("freshness_state") or "unknown"
+        )
+    elif intraday_is_usable:
         display_price = intraday_latest_price
         display_price_source = "intraday"
         display_price_time = intraday_time
@@ -473,7 +497,9 @@ def _market_live_summary(
         display_price_freshness = "missing"
     quote_depth_available = bool(quote.get("depth_available")) and not quote_is_stale
     display_is_live = bool(
-        quote_is_live
+        current_price.get("is_realtime")
+        if resolved_current_price is not None
+        else quote_is_live
         if display_price_source == "quote"
         else intraday.get("is_realtime")
         if display_price_source == "intraday"
@@ -489,6 +515,7 @@ def _market_live_summary(
         "quote_time": quote_time,
         "quote_source": quote.get("source"),
         "quote_provider": quote.get("provider"),
+        "current_price": current_price or None,
         "source_is_intraday": bool(quote.get("source_is_intraday") or intraday_available),
         "is_realtime": display_is_live
         or display_price_freshness in {"live", "current"},

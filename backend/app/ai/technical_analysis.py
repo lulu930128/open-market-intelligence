@@ -427,15 +427,69 @@ def _technical_analysis_summary(
         if isinstance(score_model.get("base_scores"), dict):
             score_model["base_scores"]["intraday"] = None
 
+    composite_score_title = _selected_score_title(
+        selected_score,
+        intraday=selected_horizon == "intraday",
+    )
+    today_report = (
+        technical_reports.get("today")
+        if isinstance(technical_reports.get("today"), dict)
+        else {}
+    )
+    daily_report = (
+        technical_reports.get("daily")
+        if isinstance(technical_reports.get("daily"), dict)
+        else {}
+    )
+    today_state = {
+        "status": "ready" if intraday_scoreable else "unavailable",
+        "timeframe": "today",
+        "phase": today_report.get("phase"),
+        "score": _report_score(today_report),
+        "title": today_report.get("title"),
+        "summary": today_report.get("summary"),
+        "confidence": today_report.get("confidence"),
+    }
+    historical_structure = {
+        "status": "ready" if _report_score(daily_report) is not None else "unavailable",
+        "timeframe": "daily",
+        "score": _report_score(daily_report),
+        "title": daily_report.get("title"),
+        "summary": daily_report.get("summary"),
+        "confidence": daily_report.get("confidence"),
+    }
+    fallback_reason = (
+        "intraday_evidence_unavailable"
+        if requested_selected_horizon == "intraday" and selected_horizon == "short"
+        else None
+    )
+    if requested_selected_horizon == "intraday":
+        today_title = (
+            str(today_state.get("title"))
+            if intraday_scoreable and today_state.get("title")
+            else "盤中證據不足"
+        )
+        history_title = str(
+            historical_structure.get("title") or composite_score_title
+        )
+        selected_title = f"今日：{today_title}｜歷史結構：{history_title}"
+        composite_state = (
+            f"{today_title}；歷史結構為{history_title}。"
+            if intraday_scoreable
+            else f"盤中證據不足；目前僅能引用歷史結構：{history_title}。"
+        )
+    else:
+        selected_title = composite_score_title
+        composite_state = f"{composite_score_title}（{selected_horizon} 視角）"
+
     return {
         "requested_horizon": requested_horizon,
+        "effective_horizon": selected_horizon,
         "selected_horizon": selected_horizon,
         "selected_timeframe": selected_report.get("timeframe") or preferred_timeframe,
         "selected_score": selected_score,
-        "selected_title": _selected_score_title(
-            selected_score,
-            intraday=selected_horizon == "intraday",
-        ),
+        "selected_title": selected_title,
+        "composite_score_title": composite_score_title,
         "selected_summary": _selected_score_summary(
             selected_score,
             selected_horizon=selected_horizon,
@@ -446,11 +500,11 @@ def _technical_analysis_summary(
         "selected_confidence": selected_report.get("confidence"),
         "scores": scores_by_horizon,
         "intraday_score": scores_by_horizon.get("intraday"),
-        "horizon_fallback_reason": (
-            "intraday_evidence_unavailable"
-            if requested_selected_horizon == "intraday" and selected_horizon == "short"
-            else None
-        ),
+        "today_state": today_state,
+        "historical_structure": historical_structure,
+        "composite_state": composite_state,
+        "fallback_reason": fallback_reason,
+        "horizon_fallback_reason": fallback_reason,
         "base_selected_score": base_selected_score,
         "base_scores": base_scores_by_horizon,
         "score_model": score_model,
@@ -557,6 +611,9 @@ def _validate_long_price_levels(levels: dict[str, Any]) -> dict[str, Any]:
 
     entry = dict(levels.get("entry") or {})
     risk = dict(levels.get("risk") or {})
+    legacy_short_stop = risk.pop("short_stop", None)
+    if "short_term_stop" not in risk and isinstance(legacy_short_stop, dict):
+        risk["short_term_stop"] = legacy_short_stop
     resistance: dict[str, Any] = {}
     violations: list[dict[str, str]] = []
     reclassified_fields: list[str] = []
@@ -627,7 +684,7 @@ def _validate_long_price_levels(levels: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-    for field in ("short_stop", "technical_invalidation"):
+    for field in ("short_term_stop", "technical_invalidation"):
         level = risk.get(field)
         if not isinstance(level, dict):
             continue
@@ -651,7 +708,9 @@ def _validate_long_price_levels(levels: dict[str, Any]) -> dict[str, Any]:
             "breakout_confirm_above",
         )
     )
-    has_risk_guardrail = any(field in risk for field in ("short_stop", "technical_invalidation"))
+    has_risk_guardrail = any(
+        field in risk for field in ("short_term_stop", "technical_invalidation")
+    )
     decision_ready = has_actionable_entry and has_risk_guardrail
     if not has_actionable_entry:
         violations.append(
@@ -688,6 +747,12 @@ def _validate_long_price_levels(levels: dict[str, Any]) -> dict[str, Any]:
     }
     if resistance:
         validated["resistance"] = resistance
+    canonical_stop = validated["risk"].get("short_term_stop")
+    if isinstance(canonical_stop, dict):
+        validated["risk"]["short_stop"] = {
+            **canonical_stop,
+            "deprecated_alias_for": "short_term_stop",
+        }
     if not decision_ready:
         validated["summary"] = list(levels.get("summary") or []) + [
             "部分價位未通過多方不變量檢查；在有效進場與風控線同時可用前，不形成可執行交易建議。"
@@ -735,19 +800,49 @@ def _technical_price_levels(
     *,
     technical_reports: dict[str, Any],
     latest_daily: Any,
+    resolved_current_price: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     technical_parameters = get_technical_analysis_parameters()
     daily_report = technical_reports.get("daily") if isinstance(technical_reports, dict) else {}
     daily_indicator = _indicator_from_report(daily_report)
     daily_values = _indicator_level_values(daily_indicator)
 
-    latest_price = (
+    daily_basis_price = (
         _finite_number(_source_value(latest_daily, "close_price"))
         or _finite_number(_source_value(latest_daily, "close"))
         or daily_values.get("close")
     )
+    resolved = (
+        resolved_current_price
+        if isinstance(resolved_current_price, dict)
+        else {}
+    )
+    resolved_price = (
+        _finite_number(resolved.get("value"))
+        if resolved.get("is_estimate") is not True
+        else None
+    )
+    latest_price = resolved_price or daily_basis_price
     if latest_price is None or latest_price <= 0:
         return {}
+    daily_basis_date = (
+        _json_value(_source_value(latest_daily, "trade_date"))
+        or daily_indicator.get("time")
+    )
+    current_price_time = (
+        _json_value(resolved.get("event_time"))
+        if resolved_price is not None
+        else None
+    )
+    price_basis_date = (
+        _json_value(resolved.get("trade_date"))
+        or (
+            str(current_price_time)[:10]
+            if current_price_time
+            else None
+        )
+        or daily_basis_date
+    )
 
     ma5 = daily_values.get("ma5")
     ma20 = daily_values.get("ma20")
@@ -796,9 +891,12 @@ def _technical_price_levels(
     breakout_price = upper20 if upper20 is not None and upper20 > latest_price else latest_price + atr_buffer * 0.5
     do_not_chase_price = latest_price + (atr_buffer * 0.25 if extended else atr_buffer * 0.5)
     preferred_low = preferred_zone.get("low") if isinstance(preferred_zone, dict) else None
-    short_stop_anchor = ma5 - atr_buffer * 0.75 if ma5 is not None else latest_price - atr_buffer
+    short_term_stop_anchor = ma5 - atr_buffer * 0.75 if ma5 is not None else latest_price - atr_buffer
     if preferred_low is not None:
-        short_stop_anchor = min(short_stop_anchor, preferred_low - atr_buffer * 0.5)
+        short_term_stop_anchor = min(
+            short_term_stop_anchor,
+            preferred_low - atr_buffer * 0.5,
+        )
     invalidation_anchor = ma20 if ma20 is not None and latest_price >= ma20 else lower20 or ma60
 
     entry = {
@@ -817,8 +915,8 @@ def _technical_price_levels(
         ),
     }
     risk = {
-        "short_stop": _price_level(
-            short_stop_anchor,
+        "short_term_stop": _price_level(
+            short_term_stop_anchor,
             label="短線停損",
             basis="MA5 - 0.75 ATR and preferred-zone lower bound - 0.5 ATR, choose the lower guardrail",
         ),
@@ -844,9 +942,30 @@ def _technical_price_levels(
     levels = {
         "kind": "technical_price_levels",
         "version": "price_levels_v1",
-        "as_of": _json_value(_source_value(latest_daily, "trade_date")) or daily_indicator.get("time"),
+        "as_of": current_price_time or daily_basis_date,
         "latest_price": _round_price(latest_price),
-        "basis_timeframe": "daily",
+        "basis_timeframe": (
+            "intraday_with_daily_structure"
+            if resolved_price is not None
+            else "daily"
+        ),
+        "price_basis_date": price_basis_date,
+        "current_price_time": current_price_time,
+        "current_price_source": (
+            resolved.get("source_kind")
+            if resolved_price is not None
+            else "completed_daily_close"
+        ),
+        "technical_price_basis": (
+            resolved.get("semantics")
+            or resolved.get("source_kind")
+            or "resolved_current_price"
+        )
+        if resolved_price is not None
+        else "official_completed_daily_close",
+        "bid_ask_price_used": False,
+        "daily_basis_date": daily_basis_date,
+        "daily_basis_price": _round_price(daily_basis_price),
         "context": {
             "trend_state": (daily_report or {}).get("title") if isinstance(daily_report, dict) else None,
             "extended": extended,

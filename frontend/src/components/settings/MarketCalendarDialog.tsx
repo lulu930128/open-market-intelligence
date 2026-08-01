@@ -4,6 +4,10 @@ import { useI18n, useT } from "@/i18n";
 import { fetchJson } from "@/lib/api";
 import { emitDataStatusEvent, type DataStatusLevel } from "@/lib/dataStatusEvents";
 import type {
+  USCorporateEventListRead,
+  USCorporateEventRead,
+} from "@/types/corporateEvents";
+import type {
   TaiwanCorporateEventListRead,
   TaiwanCorporateEventRead,
 } from "@/types/market";
@@ -15,29 +19,206 @@ type MarketCalendarDialogProps = {
   onClose: () => void;
 };
 
-type EventFilter = "all" | "ex_dividend" | "financial_report" | "investor_conference";
+type CalendarMarket = "tw" | "us" | "jp" | "kr";
+type EventFilter =
+  | "all"
+  | "ex_dividend"
+  | "financial_report"
+  | "investor_conference"
+  | "earnings"
+  | "dividend"
+  | "split";
 
-const eventFilters: EventFilter[] = [
-  "all",
-  "ex_dividend",
-  "financial_report",
-  "investor_conference",
+type CalendarSource = {
+  source: string;
+  status: string;
+  freshness: string | null;
+  coverage: string | null;
+  warning: string | null;
+};
+
+type CalendarEvent = {
+  eventId: string;
+  eventType: string;
+  symbol: string;
+  companyName: string | null;
+  eventDate: string;
+  endDate: string;
+  eventTime: string | null;
+  title: string;
+  summary: string | null;
+  location: string | null;
+  status: string;
+  sourceName: string;
+  sourceUrl: string | null;
+  companyUrl: string | null;
+  videoUrl: string | null;
+  cashDividend: number | null;
+  stockDividendRatio: number | null;
+  dividendAmount: number | null;
+  dividendCurrency: string | null;
+  splitRatio: number | null;
+  estimatedEps: number | null;
+  fiscalPeriodEnd: string | null;
+  warnings: string[];
+};
+
+type CalendarPayload = {
+  market: "tw" | "us";
+  generatedAt: string;
+  dateFrom: string;
+  dateTo: string;
+  resultCount: number;
+  warning: string | null;
+  sources: Record<string, CalendarSource>;
+  results: CalendarEvent[];
+};
+
+const marketOptions: Array<{ key: CalendarMarket; enabled: boolean }> = [
+  { key: "tw", enabled: true },
+  { key: "us", enabled: true },
+  { key: "jp", enabled: false },
+  { key: "kr", enabled: false },
 ];
 
+const filtersByMarket: Record<"tw" | "us", EventFilter[]> = {
+  tw: ["all", "ex_dividend", "financial_report", "investor_conference"],
+  us: ["all", "earnings", "dividend", "split"],
+};
+
+const marketTimezones: Record<"tw" | "us", string> = {
+  tw: "Asia/Taipei",
+  us: "America/New_York",
+};
+
 function eventTone(eventType: string) {
-  if (eventType === "ex_dividend") {
+  if (eventType === "ex_dividend" || eventType === "dividend") {
     return "border-omi-success bg-omi-success-soft text-omi-success-strong";
   }
-  if (eventType === "financial_report") {
+  if (eventType === "financial_report" || eventType === "earnings") {
     return "border-omi-warning bg-omi-warning-soft text-omi-warning-strong";
+  }
+  if (eventType === "split") {
+    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
   }
   return "border-omi-info bg-omi-info-soft text-omi-info-strong";
 }
 
-function sourceTone(status: string) {
-  if (status === "current") return "text-omi-market-up";
-  if (status === "stale" || status === "degraded") return "text-omi-warning";
+function sourceTone(status: string, freshness: string | null) {
+  if (status === "current" && freshness !== "stale") return "text-omi-market-up";
+  if (
+    status === "stale" ||
+    status === "degraded" ||
+    status === "watchlist_only" ||
+    freshness === "stale"
+  ) {
+    return "text-omi-warning";
+  }
   return "text-omi-danger";
+}
+
+function normalizeTaiwanEvent(event: TaiwanCorporateEventRead): CalendarEvent {
+  return {
+    eventId: event.event_id,
+    eventType: event.event_type,
+    symbol: event.stock_id,
+    companyName: event.stock_name,
+    eventDate: event.start_date,
+    endDate: event.end_date,
+    eventTime: event.start_time,
+    title: event.title,
+    summary: event.summary,
+    location: event.location,
+    status: event.status,
+    sourceName: event.source_name,
+    sourceUrl: event.source_url,
+    companyUrl: event.company_url,
+    videoUrl: event.video_url,
+    cashDividend: event.cash_dividend,
+    stockDividendRatio: event.stock_dividend_ratio,
+    dividendAmount: null,
+    dividendCurrency: null,
+    splitRatio: null,
+    estimatedEps: null,
+    fiscalPeriodEnd: null,
+    warnings: [],
+  };
+}
+
+function normalizeUsEvent(event: USCorporateEventRead): CalendarEvent {
+  return {
+    eventId: event.event_id,
+    eventType: event.event_type,
+    symbol: event.symbol,
+    companyName: event.company_name,
+    eventDate: event.event_date,
+    endDate: event.event_date,
+    eventTime: event.event_time,
+    title: event.title,
+    summary: event.description,
+    location: null,
+    status: event.event_status,
+    sourceName: event.source,
+    sourceUrl: event.source_url,
+    companyUrl: null,
+    videoUrl: null,
+    cashDividend: null,
+    stockDividendRatio: null,
+    dividendAmount: event.dividend_amount,
+    dividendCurrency: event.dividend_currency,
+    splitRatio: event.split_ratio,
+    estimatedEps: event.estimated_eps,
+    fiscalPeriodEnd: event.fiscal_period_end,
+    warnings: event.warnings,
+  };
+}
+
+function normalizeTaiwanPayload(payload: TaiwanCorporateEventListRead): CalendarPayload {
+  return {
+    market: "tw",
+    generatedAt: payload.generated_at,
+    dateFrom: payload.date_from,
+    dateTo: payload.date_to,
+    resultCount: payload.result_count,
+    warning: payload.warning,
+    sources: Object.fromEntries(
+      Object.entries(payload.sources).map(([key, source]) => [
+        key,
+        {
+          source: source.source,
+          status: source.status,
+          freshness: source.status,
+          coverage: null,
+          warning: source.warning,
+        },
+      ])
+    ),
+    results: payload.results.map(normalizeTaiwanEvent),
+  };
+}
+
+function normalizeUsPayload(payload: USCorporateEventListRead): CalendarPayload {
+  return {
+    market: "us",
+    generatedAt: payload.generated_at,
+    dateFrom: payload.date_from,
+    dateTo: payload.date_to,
+    resultCount: payload.result_count,
+    warning: payload.warning,
+    sources: Object.fromEntries(
+      Object.entries(payload.sources).map(([key, source]) => [
+        key,
+        {
+          source: source.source,
+          status: source.status,
+          freshness: source.freshness,
+          coverage: source.coverage,
+          warning: source.warning,
+        },
+      ])
+    ),
+    results: payload.results.map(normalizeUsEvent),
+  };
 }
 
 export default function MarketCalendarDialog({
@@ -46,7 +227,8 @@ export default function MarketCalendarDialog({
 }: MarketCalendarDialogProps) {
   const t = useT();
   const { locale } = useI18n();
-  const [payload, setPayload] = useState<TaiwanCorporateEventListRead | null>(null);
+  const [activeMarket, setActiveMarket] = useState<CalendarMarket>("tw");
+  const [payload, setPayload] = useState<CalendarPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [filter, setFilter] = useState<EventFilter>("all");
@@ -56,53 +238,76 @@ export default function MarketCalendarDialog({
     level,
     title,
     message,
+    market,
   }: {
     level: DataStatusLevel;
     title: string;
     message: string;
+    market: "tw" | "us";
   }) => {
     emitDataStatusEvent({
-      market: "tw",
+      market,
       level,
       title,
       message,
-      source: t("settings.calendar.status.source"),
-      contextKey: "tw:corporate-events",
+      source: t(
+        market === "tw"
+          ? "settings.calendar.status.source"
+          : "settings.calendar.status.usSource"
+      ),
+      contextKey: `${market}:corporate-events`,
       contextLabel: t("settings.calendar.title"),
-      dedupeKey: "tw:corporate-events:calendar-load",
+      dedupeKey: `${market}:corporate-events:calendar-load`,
     });
   }, [t]);
 
   const loadCalendar = useCallback(async (signal?: AbortSignal) => {
+    if (activeMarket !== "tw" && activeMarket !== "us") return;
+
+    const market = activeMarket;
     setLoading(true);
     setErrorMessage(null);
     try {
-      const nextPayload = await fetchJson<TaiwanCorporateEventListRead>(
-        "/api/market/tw-corporate-events",
-        { limit: 1000 },
-        { signal }
-      );
+      const nextPayload = market === "tw"
+        ? normalizeTaiwanPayload(
+            await fetchJson<TaiwanCorporateEventListRead>(
+              "/api/market/tw-corporate-events",
+              { limit: 1000 },
+              { signal }
+            )
+          )
+        : normalizeUsPayload(
+            await fetchJson<USCorporateEventListRead>(
+              "/api/us-market/corporate-events",
+              { limit: 1000 },
+              { signal }
+            )
+          );
       setPayload(nextPayload);
       if (nextPayload.warning) {
         publishCalendarStatus({
+          market,
           level: "warning",
           title: t("settings.calendar.status.warningTitle"),
           message: nextPayload.warning,
         });
       } else {
         publishCalendarStatus({
+          market,
           level: "success",
           title: t("settings.calendar.status.successTitle"),
           message: t("settings.calendar.status.successMessage", {
-            count: nextPayload.result_count,
+            count: nextPayload.resultCount,
           }),
         });
       }
     } catch (error) {
       if (signal?.aborted) return;
-      const message = error instanceof Error ? error.message : t("settings.calendar.loadError");
+      const message =
+        error instanceof Error ? error.message : t("settings.calendar.loadError");
       setErrorMessage(message);
       publishCalendarStatus({
+        market,
         level: "error",
         title: t("settings.calendar.loadError"),
         message,
@@ -110,10 +315,10 @@ export default function MarketCalendarDialog({
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, [publishCalendarStatus, t]);
+  }, [activeMarket, publishCalendarStatus, t]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || (activeMarket !== "tw" && activeMarket !== "us")) return;
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => {
       void loadCalendar(controller.signal);
@@ -122,16 +327,27 @@ export default function MarketCalendarDialog({
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [loadCalendar, open]);
+  }, [activeMarket, loadCalendar, open]);
 
+  const handleMarketChange = (market: CalendarMarket) => {
+    const option = marketOptions.find((item) => item.key === market);
+    if (!option?.enabled || market === activeMarket) return;
+    setActiveMarket(market);
+    setPayload(null);
+    setErrorMessage(null);
+    setFilter("all");
+  };
+
+  const enabledMarket = activeMarket === "us" ? "us" : "tw";
+  const eventFilters = filtersByMarket[enabledMarket];
   const filteredEvents = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase(locale);
     return (payload?.results ?? []).filter((event) => {
-      if (filter !== "all" && event.event_type !== filter) return false;
+      if (filter !== "all" && event.eventType !== filter) return false;
       if (!normalizedQuery) return true;
       return [
-        event.stock_id,
-        event.stock_name,
+        event.symbol,
+        event.companyName,
         event.title,
         event.summary,
         event.location,
@@ -140,11 +356,11 @@ export default function MarketCalendarDialog({
   }, [filter, locale, payload?.results, query]);
 
   const groupedEvents = useMemo(() => {
-    const groups = new Map<string, TaiwanCorporateEventRead[]>();
+    const groups = new Map<string, CalendarEvent[]>();
     filteredEvents.forEach((event) => {
-      const current = groups.get(event.start_date) ?? [];
+      const current = groups.get(event.eventDate) ?? [];
       current.push(event);
-      groups.set(event.start_date, current);
+      groups.set(event.eventDate, current);
     });
     return Array.from(groups.entries());
   }, [filteredEvents]);
@@ -155,6 +371,7 @@ export default function MarketCalendarDialog({
     month: "short",
     day: "numeric",
     weekday: "short",
+    timeZone: marketTimezones[enabledMarket],
   });
   const fullDateFormatter = new Intl.DateTimeFormat(locale, {
     year: "numeric",
@@ -196,6 +413,39 @@ export default function MarketCalendarDialog({
 
         <div className="shrink-0 border-b border-omi-border-subtle bg-omi-surface-subtle px-5 py-3">
           <div className="flex flex-wrap items-center gap-2">
+            <span className="mr-1 text-xs font-bold uppercase tracking-[0.16em] text-omi-text-muted">
+              {t("settings.calendar.marketLabel")}
+            </span>
+            {marketOptions.map((market) => (
+              <button
+                key={market.key}
+                type="button"
+                data-testid={`calendar-market-${market.key}`}
+                aria-pressed={activeMarket === market.key}
+                disabled={!market.enabled}
+                title={!market.enabled ? t("settings.calendar.plannedHint") : undefined}
+                className={[
+                  "h-8 border px-3 text-xs font-bold",
+                  activeMarket === market.key
+                    ? "border-omi-accent bg-omi-accent-soft text-omi-accent"
+                    : "border-omi-border bg-omi-surface text-omi-text-muted",
+                  market.enabled
+                    ? "hover:border-omi-control hover:text-omi-text"
+                    : "cursor-not-allowed opacity-55",
+                ].join(" ")}
+                onClick={() => handleMarketChange(market.key)}
+              >
+                {t(`settings.calendar.markets.${market.key}`)}
+                {!market.enabled ? (
+                  <span className="ml-1 font-medium">
+                    · {t("settings.calendar.planned")}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             {eventFilters.map((eventFilter) => (
               <button
                 key={eventFilter}
@@ -231,14 +481,21 @@ export default function MarketCalendarDialog({
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-omi-text-muted">
               <span>
                 {t("settings.calendar.range", {
-                  from: payload.date_from,
-                  to: payload.date_to,
+                  from: payload.dateFrom,
+                  to: payload.dateTo,
                 })}
               </span>
               <span>{t("settings.calendar.count", { count: filteredEvents.length })}</span>
               {Object.entries(payload.sources).map(([key, source]) => (
-                <span key={key} className={sourceTone(source.status)} title={source.warning ?? undefined}>
+                <span
+                  key={key}
+                  className={sourceTone(source.status, source.freshness)}
+                  title={[source.coverage, source.warning].filter(Boolean).join("\n") || undefined}
+                >
                   {source.source} · {t(`settings.calendar.sourceStatus.${source.status}`)}
+                  {source.freshness && source.freshness !== source.status
+                    ? ` / ${t(`settings.calendar.sourceStatus.${source.freshness}`)}`
+                    : ""}
                 </span>
               ))}
             </div>
@@ -274,21 +531,24 @@ export default function MarketCalendarDialog({
                 <section key={eventDate} className="grid gap-3 md:grid-cols-[130px_minmax(0,1fr)]">
                   <div>
                     <div className="text-lg font-black text-omi-text-strong">
-                      {dateFormatter.format(new Date(`${eventDate}T00:00:00+08:00`))}
+                      {dateFormatter.format(new Date(`${eventDate}T12:00:00Z`))}
                     </div>
                     <div className="mt-1 text-xs text-omi-text-muted">{eventDate}</div>
                   </div>
                   <div className="space-y-2">
                     {events.map((event) => (
-                      <article key={event.event_id} className="border border-omi-border-subtle bg-omi-surface-subtle px-4 py-3">
+                      <article
+                        key={event.eventId}
+                        className="border border-omi-border-subtle bg-omi-surface-subtle px-4 py-3"
+                      >
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="font-black text-omi-text-strong">
-                                {event.stock_id} {event.stock_name ?? ""}
+                                {event.symbol} {event.companyName ?? ""}
                               </span>
-                              <span className={`border px-2 py-0.5 text-[11px] font-bold ${eventTone(event.event_type)}`}>
-                                {t(`settings.calendar.eventTypes.${event.event_type}`)}
+                              <span className={`border px-2 py-0.5 text-[11px] font-bold ${eventTone(event.eventType)}`}>
+                                {t(`settings.calendar.eventTypes.${event.eventType}`)}
                               </span>
                               {event.status === "ongoing" ? (
                                 <span className="border border-omi-accent-border bg-omi-accent-soft px-2 py-0.5 text-[11px] font-bold text-omi-accent">
@@ -301,30 +561,51 @@ export default function MarketCalendarDialog({
                               <p className="mt-1 text-sm leading-6 text-omi-text-muted">{event.summary}</p>
                             ) : null}
                             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-omi-text-muted">
-                              {event.start_time ? <span>{event.start_time}</span> : null}
+                              {event.eventTime ? <span>{event.eventTime}</span> : null}
                               {event.location ? <span>{event.location}</span> : null}
-                              {event.cash_dividend !== null ? (
-                                <span>{t("settings.calendar.cashDividend", { amount: event.cash_dividend })}</span>
+                              {event.cashDividend !== null ? (
+                                <span>{t("settings.calendar.cashDividend", { amount: event.cashDividend })}</span>
                               ) : null}
-                              {event.stock_dividend_ratio !== null && event.stock_dividend_ratio !== 0 ? (
-                                <span>{t("settings.calendar.stockDividend", { ratio: event.stock_dividend_ratio })}</span>
+                              {event.stockDividendRatio !== null && event.stockDividendRatio !== 0 ? (
+                                <span>{t("settings.calendar.stockDividend", { ratio: event.stockDividendRatio })}</span>
+                              ) : null}
+                              {event.dividendAmount !== null ? (
+                                <span>
+                                  {t("settings.calendar.usDividend", {
+                                    amount: event.dividendAmount,
+                                    currency: event.dividendCurrency ?? "USD",
+                                  })}
+                                </span>
+                              ) : null}
+                              {event.splitRatio !== null ? (
+                                <span>{t("settings.calendar.splitRatio", { ratio: event.splitRatio })}</span>
+                              ) : null}
+                              {event.estimatedEps !== null ? (
+                                <span>{t("settings.calendar.estimatedEps", { value: event.estimatedEps })}</span>
+                              ) : null}
+                              {event.fiscalPeriodEnd ? (
+                                <span>{t("settings.calendar.fiscalPeriodEnd", { date: event.fiscalPeriodEnd })}</span>
                               ) : null}
                             </div>
                           </div>
                           <div className="flex shrink-0 gap-2 text-xs">
-                            {event.company_url ? (
-                              <a className="text-omi-accent hover:underline" href={event.company_url} target="_blank" rel="noreferrer">
+                            {event.companyUrl ? (
+                              <a className="text-omi-accent hover:underline" href={event.companyUrl} target="_blank" rel="noreferrer">
                                 {t("settings.calendar.companyLink")}
                               </a>
                             ) : null}
-                            {event.video_url ? (
-                              <a className="text-omi-accent hover:underline" href={event.video_url} target="_blank" rel="noreferrer">
+                            {event.videoUrl ? (
+                              <a className="text-omi-accent hover:underline" href={event.videoUrl} target="_blank" rel="noreferrer">
                                 {t("settings.calendar.videoLink")}
                               </a>
                             ) : null}
-                            <a className="text-omi-accent hover:underline" href={event.source_url} target="_blank" rel="noreferrer">
-                              {t("settings.calendar.sourceLink")}
-                            </a>
+                            {event.sourceUrl ? (
+                              <a className="text-omi-accent hover:underline" href={event.sourceUrl} target="_blank" rel="noreferrer">
+                                {t("settings.calendar.sourceLink")}
+                              </a>
+                            ) : (
+                              <span className="text-omi-text-subtle">{event.sourceName}</span>
+                            )}
                           </div>
                         </div>
                       </article>
@@ -337,11 +618,17 @@ export default function MarketCalendarDialog({
         </div>
 
         <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-omi-border-subtle bg-omi-surface-subtle px-5 py-3 text-xs text-omi-text-muted">
-          <span>{t("settings.calendar.footer")}</span>
+          <span>
+            {t(
+              payload?.market === "us"
+                ? "settings.calendar.footerUs"
+                : "settings.calendar.footer"
+            )}
+          </span>
           {payload ? (
             <span>
               {t("settings.calendar.updatedAt", {
-                time: fullDateFormatter.format(new Date(payload.generated_at)),
+                time: fullDateFormatter.format(new Date(payload.generatedAt)),
               })}
             </span>
           ) : null}

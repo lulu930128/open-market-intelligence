@@ -132,7 +132,9 @@ def technical_level_fields(levels: dict[str, Any]) -> dict[str, str]:
             "conservative": zone_text(entry.get("conservative_zone")),
             "chase": level_price_text(entry.get("do_not_chase_above")),
             "breakout": level_price_text(entry.get("breakout_confirm_above")),
-            "stop": level_price_text(risk.get("short_stop")),
+            "stop": level_price_text(
+                risk.get("short_term_stop") or risk.get("short_stop")
+            ),
             "invalidation": level_price_text(risk.get("technical_invalidation")),
         }.items()
         if value and value != "-"
@@ -149,7 +151,7 @@ def technical_level_numbers(levels: dict[str, Any]) -> dict[str, float | None]:
     conservative_low, conservative_high = zone_bounds(entry.get("conservative_zone"))
     chase = _dict_value(entry.get("do_not_chase_above"))
     breakout = _dict_value(entry.get("breakout_confirm_above"))
-    short_stop = _dict_value(risk.get("short_stop"))
+    short_stop = _dict_value(risk.get("short_term_stop") or risk.get("short_stop"))
     invalidation = _dict_value(risk.get("technical_invalidation"))
     return {
         "latest": numeric_data_value(levels.get("latest_price")),
@@ -625,6 +627,24 @@ def latest_price_snapshot(result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(compact.get("quote"), dict)
         else {}
     )
+    current_price = (
+        canonical_quote.get("current_price")
+        if isinstance(canonical_quote.get("current_price"), dict)
+        else {}
+    )
+    value = numeric_data_value(current_price.get("value"))
+    if value is not None:
+        return {
+            "value": value,
+            "source": (
+                "data.compact.quote.current_price."
+                f"{current_price.get('source_kind') or 'resolved'}"
+            ),
+            "as_of": (
+                current_price.get("event_time")
+                or current_price.get("trade_date")
+            ),
+        }
     for key in ("latest_price", "price", "close_price", "last_price"):
         value = numeric_data_value(canonical_quote.get(key))
         if value is not None:
@@ -637,6 +657,42 @@ def latest_price_snapshot(result: dict[str, Any]) -> dict[str, Any]:
                     or canonical_quote.get("as_of")
                 ),
             }
+
+    intraday = (
+        compact.get("intraday_bars")
+        if isinstance(compact.get("intraday_bars"), dict)
+        else {}
+    )
+    intraday_series = (
+        intraday.get("series")
+        if isinstance(intraday.get("series"), dict)
+        else {}
+    )
+    one_minute = (
+        intraday_series.get("1m")
+        if isinstance(intraday_series.get("1m"), dict)
+        else {}
+    )
+    latest_intraday = (
+        one_minute.get("latest")
+        if isinstance(one_minute.get("latest"), dict)
+        else {}
+    )
+    value = numeric_data_value(
+        latest_intraday.get("close")
+        if latest_intraday.get("close") is not None
+        else latest_intraday.get("price")
+    )
+    if value is not None:
+        return {
+            "value": value,
+            "source": "data.compact.intraday_bars.series.1m.latest.close",
+            "as_of": (
+                latest_intraday.get("bar_close_time")
+                or latest_intraday.get("time")
+                or one_minute.get("to_time")
+            ),
+        }
 
     latest_daily = data.get("latest_daily") if isinstance(data.get("latest_daily"), dict) else {}
     for key in ("close_price", "close", "last_price", "settlement_price"):

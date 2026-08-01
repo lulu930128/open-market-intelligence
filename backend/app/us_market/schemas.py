@@ -79,8 +79,13 @@ class USDailyPriceRefreshResultRead(BaseModel):
     provider: str
     symbol: str
     fetched_count: int
+    eligible_count: int = 0
+    skipped_count: int = 0
     inserted_count: int
     updated_count: int
+    expected_trade_date: date | None = None
+    latest_eligible_trade_date: date | None = None
+    warnings: list[str] = Field(default_factory=list)
     message: str
 
 
@@ -383,6 +388,9 @@ class USSourceHealthEntryRead(BaseModel):
     latest_fetched_at: datetime | None = None
     expected_data_date: date | None = None
     freshness_lag_days: int | None = None
+    latest_row_finalized: bool | None = None
+    latest_finalized_data_date: date | None = None
+    finalization_expected_at: datetime | None = None
     source_url: str | None = None
     data_quality: str
     reason: str
@@ -404,6 +412,7 @@ class USSourceHealthSummaryRead(BaseModel):
     ok_count: int
     empty_count: int
     stale_count: int
+    partial_count: int = 0
     error_count: int
 
 

@@ -628,10 +628,69 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
         self.assertEqual(refreshed["request_limit"], 20)
         self.assertEqual(refreshed["request_count"], 12)
         self.assertEqual(history["total_count"], 4)
+        self.assertEqual(history["returned_count"], 4)
+        self.assertEqual(history["sort_order"], "desc")
+        self.assertEqual(
+            [event["start_date"] for event in history["results"]],
+            sorted(
+                [event["start_date"] for event in history["results"]],
+                reverse=True,
+            ),
+        )
         self.assertTrue(all(event["status"] == "past" for event in history["results"]))
         self.assertEqual(calendar["date_from"], date(2026, 7, 20))
         self.assertEqual(calendar["result_count"], 0)
         self.assertEqual(set(calendar["sources"]), set(tw_corporate_events.CURRENT_PROVIDER_KEYS))
+
+    def test_history_limit_returns_latest_events_after_descending_sort(self) -> None:
+        with _cache_path("history-latest-first") as cache_path:
+            events = []
+            for event_date in (
+                date(2025, 9, 1),
+                date(2026, 1, 15),
+                date(2026, 6, 30),
+            ):
+                event = self._event("twse_ex_dividend_history")
+                event["event_id"] = f"twse-history-{event_date.isoformat()}"
+                event["stock_id"] = "2330"
+                event["start_date"] = event_date
+                event["end_date"] = event_date
+                events.append(tw_corporate_events._json_entry(event))
+            tw_corporate_events._atomic_write(
+                cache_path,
+                {
+                    "schema_version": tw_corporate_events.CACHE_SCHEMA_VERSION,
+                    "updated_at": datetime(2026, 7, 20, tzinfo=timezone.utc).isoformat(),
+                    "providers": {
+                        "twse_ex_dividend_history": {
+                            "fetched_at": datetime(
+                                2026, 7, 20, tzinfo=timezone.utc
+                            ).isoformat(),
+                            "entries": events,
+                        }
+                    },
+                },
+            )
+            tw_corporate_events.invalidate_taiwan_corporate_event_cache()
+
+            history = get_taiwan_stock_event_history(
+                "2330",
+                market="TWSE",
+                years=2,
+                max_results=2,
+                now=datetime(2026, 7, 20, tzinfo=timezone.utc),
+                cache_path=cache_path,
+            )
+
+        self.assertEqual(history["total_count"], 3)
+        self.assertEqual(history["returned_count"], 2)
+        self.assertEqual(history["result_count"], 2)
+        self.assertEqual(history["limit"], 2)
+        self.assertEqual(history["sort_order"], "desc")
+        self.assertEqual(
+            [event["start_date"] for event in history["results"]],
+            [date(2026, 6, 30), date(2026, 1, 15)],
+        )
 
     def test_calendar_route_clamps_past_range_and_history_has_separate_route(self) -> None:
         expected_calendar = {"kind": "taiwan_corporate_events"}

@@ -197,8 +197,36 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 351)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 350)
+        self.assertEqual(len(operations), 362)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 361)
+
+        radar_v2_operations = {
+            (
+                "post",
+                "/api/watchlists/groups/{group_id}/radar/v2/evaluate",
+            ),
+            (
+                "get",
+                "/api/watchlists/groups/{group_id}/radar/v2/snapshots/history",
+            ),
+            (
+                "get",
+                "/api/watchlists/groups/{group_id}/radar/v2/outcomes/latest",
+            ),
+            (
+                "get",
+                "/api/watchlists/groups/{group_id}/radar/v2/outcomes/history",
+            ),
+            (
+                "post",
+                "/api/watchlists/groups/{group_id}/radar/v2/backtests",
+            ),
+            (
+                "get",
+                "/api/watchlists/groups/{group_id}/radar/v2/backtests/latest",
+            ),
+        }
+        self.assertTrue(radar_v2_operations.issubset(set(operations)))
 
     def test_system_health_contracts_are_exposed(self) -> None:
         schema = app.openapi()

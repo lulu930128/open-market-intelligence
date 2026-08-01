@@ -9,12 +9,14 @@ from ._http import DEFAULT_HEADERS, ResponseGetter, get, get_json, json_from_res
 OPENAPI_PROVIDER = "twse_openapi"
 RWD_PROVIDER = "twse_rwd"
 INDEX_5S_PROVIDER = "twse_index_5s"
+INDEX_DAILY_OHLC_PROVIDER = "twse_index_daily_ohlc"
 
 HOLIDAY_SCHEDULE_URL = "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule"
 INDEX_LIST_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
 DAILY_QUOTES_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 RWD_MI_INDEX_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
 INDEX_5S_URL = "https://www.twse.com.tw/exchangeReport/MI_5MINS_INDEX"
+INDEX_DAILY_OHLC_URL = "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST"
 MARKET_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK"
 MARKET_DAILY_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
 COMPANY_BASIC_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -83,6 +85,8 @@ def _request_contract(url: str) -> tuple[str, str, str]:
         else:
             resource = "market_breadth" if "/MI_INDEX" in url else "market_daily_history"
         return RWD_PROVIDER, resource, "TAIEX"
+    if "MI_5MINS_HIST" in url:
+        return INDEX_DAILY_OHLC_PROVIDER, "index_daily_ohlc", "TAIEX"
     if "MI_5MINS_INDEX" in url:
         return INDEX_5S_PROVIDER, "index_intraday", "TAIEX"
     if "STOCK_DAY_ALL" in url:
@@ -140,6 +144,37 @@ def fetch_index_5s_payload(
         INDEX_5S_URL,
         provider=INDEX_5S_PROVIDER,
         resource="index_intraday",
+        target="TAIEX",
+        params=params,
+        headers=DEFAULT_HEADERS,
+        timeout_seconds=timeout_seconds,
+    )
+    return json_from_response(response)
+
+
+def fetch_index_daily_ohlc_payload(
+    trade_date: date,
+    *,
+    timeout_seconds: int = 20,
+    request: ResponseGetter | None = None,
+) -> Any:
+    params = {
+        "response": "json",
+        "date": trade_date.strftime("%Y%m%d"),
+    }
+    if request is not None:
+        response = request(
+            INDEX_DAILY_OHLC_URL,
+            params=params,
+            headers=DEFAULT_HEADERS,
+            timeout=timeout_seconds,
+        )
+        return json_from_response(response)
+
+    response = get(
+        INDEX_DAILY_OHLC_URL,
+        provider=INDEX_DAILY_OHLC_PROVIDER,
+        resource="index_daily_ohlc",
         target="TAIEX",
         params=params,
         headers=DEFAULT_HEADERS,

@@ -19,6 +19,7 @@ import {
   drawingSnapDistancePx,
   drawingTimeFromChartTime,
   finiteNumber,
+  isRiskRewardDrawingTool,
   isTwoPointDrawingTool,
   isTwoPointDrawingType,
   type ChartDrawing,
@@ -621,13 +622,13 @@ export function useChartDrawingInteraction({
       const widthAnchor = riskRewardWidthAnchorFromPointer(event, entryCoordinate);
 
       if (!widthAnchor) {
-      setHoverAnchor(draftAnchor);
-      setRiskRewardDraftPointerId(null);
-      setSnapCoordinate(null);
-      endChartInteraction();
-      restoreChartPointerInteractivity();
-      return;
-    }
+        setHoverAnchor(draftAnchor);
+        setRiskRewardDraftPointerId(null);
+        setSnapCoordinate(null);
+        endChartInteraction();
+        restoreChartPointerInteractivity();
+        return;
+      }
 
       commitDrawing("riskReward", buildDefaultRiskRewardPoints(draftAnchor, widthAnchor));
       setDraftAnchor(null);
@@ -770,7 +771,7 @@ export function useChartDrawingInteraction({
   }, [deleteDrawing, draftAnchor, onSelectedDrawingChange, selectedDrawingId]);
 
   useEffect(() => {
-    if (!isTwoPointDrawingTool(drawingTool)) {
+    if (!isTwoPointDrawingTool(drawingTool) && !isRiskRewardDrawingTool(drawingTool)) {
       const timer = window.setTimeout(() => {
         setDraftAnchor(null);
         setRiskRewardDraftPointerId(null);

@@ -135,6 +135,29 @@ def _selection(
     )
 
 
+def _apply_selection_trace(
+    canonical: dict[str, Any],
+    *,
+    selection: dict[str, Any],
+) -> None:
+    mode = _dict(canonical.get("mode"))
+    mode["requested_output"] = selection.get("requested_output")
+    mode["effective_output"] = selection.get("effective_output")
+    mode["output_override_reason"] = selection.get(
+        "output_override_reason"
+    )
+    canonical["mode"] = mode
+
+    execution = _dict(canonical.get("execution"))
+    query_plan = _dict(execution.get("query_plan"))
+    query_plan["capability_origins"] = deepcopy(
+        _dict(selection.get("capability_origins"))
+    )
+    query_plan["inference_policy"] = selection.get("inference_policy")
+    execution["query_plan"] = query_plan
+    canonical["execution"] = execution
+
+
 def _selected_slot_names(selection: dict[str, Any]) -> set[str]:
     output = {"data_quality"}
     for capability_id in list(selection.get("required") or []) + list(
@@ -156,6 +179,71 @@ def _selected_domains(selection: dict[str, Any]) -> set[str]:
         if spec and spec.domain and spec.domain != "freshness":
             domains.add(spec.domain)
     return domains
+
+
+def _selected_internal_tool_runs(
+    *,
+    response: dict[str, Any],
+    selection: dict[str, Any],
+) -> list[dict[str, Any]]:
+    capability_ids = [
+        capability_id
+        for capability_id in (
+            *selection.get("required", []),
+            *selection.get("optional", []),
+        )
+        if capability_id in capability_contract.CAPABILITIES
+        and "tool_runs"
+        in capability_contract.CAPABILITIES[capability_id].fields
+    ]
+    if not capability_ids:
+        return []
+    audit_selection = deepcopy(selection)
+    audit_selection["required"] = capability_ids
+    audit_selection["optional"] = []
+    audit_selection["fields"] = {
+        capability_id: ["tool_runs"]
+        for capability_id in capability_ids
+    }
+    audit_data, _ = capability_contract.project_selected_data(
+        response=response,
+        selection=audit_selection,
+    )
+    runs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for capability_id, payload in audit_data.items():
+        if not isinstance(payload, dict):
+            continue
+        for run in _list(payload.get("tool_runs")):
+            if not isinstance(run, dict):
+                continue
+            normalized = deepcopy(run)
+            normalized.setdefault(
+                "requested_capabilities",
+                [capability_id],
+            )
+            arguments = _dict(normalized.get("arguments"))
+            arguments.setdefault(
+                "requested_capabilities",
+                [capability_id],
+            )
+            normalized["arguments"] = arguments
+            identity = json.dumps(
+                {
+                    "tool": normalized.get("tool"),
+                    "provider": normalized.get("provider"),
+                    "arguments": arguments,
+                    "status": normalized.get("status"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            runs.append(normalized)
+    return runs
 
 
 def _freshness_dataset_name(value: Any) -> str | None:
@@ -191,10 +279,7 @@ def _project_selected_freshness(
     slots = _dict(evidence.get("slots"))
     selected_capabilities = [
         str(capability_id)
-        for capability_id in [
-            *list(selection.get("required") or []),
-            *list(selection.get("optional") or []),
-        ]
+        for capability_id in list(selection.get("required") or [])
         if capability_id
         not in {
             "target.identity",
@@ -209,10 +294,48 @@ def _project_selected_freshness(
         if not isinstance(row, dict):
             domain_row = freshness_by_domain.get(spec.domain) if spec and spec.domain else None
             slot_row = slots.get(spec.slot) if spec and spec.slot else None
+            payload = _dict(projected_data.get(capability_id))
+            payload_freshness = _dict(payload.get("freshness"))
+            explicit_is_current = payload.get("is_current")
+            payload_status = capability_contract.normalize_status(
+                payload_freshness.get("status")
+                or payload.get("freshness_status")
+                or payload.get("status")
+                or (
+                    "current"
+                    if explicit_is_current is True
+                    else "stale"
+                    if explicit_is_current is False
+                    else None
+                )
+            )
+            payload_row = (
+                {
+                    "status": payload_status,
+                    "is_current": (
+                        explicit_is_current
+                        if isinstance(explicit_is_current, bool)
+                        else capability_contract.status_class(
+                            {"status": payload_status}
+                        )
+                        == "ready"
+                    ),
+                    "latest": (
+                        payload.get("trade_date")
+                        or payload.get("as_of")
+                        or payload.get("calculated_at")
+                    ),
+                    "source": "selected_payload",
+                }
+                if payload and payload_status not in {"unknown", "missing"}
+                else None
+            )
             if isinstance(domain_row, dict):
                 row = deepcopy(domain_row)
             elif domain_row is not None:
                 row = {"status": capability_contract.normalize_status(domain_row)}
+            elif payload_row is not None:
+                row = payload_row
             elif isinstance(slot_row, dict):
                 slot_freshness = slot_row.get("freshness")
                 row = (
@@ -224,7 +347,8 @@ def _project_selected_freshness(
                 row = {
                     "status": "missing",
                     "reason": (
-                        f"No canonical freshness row is available for {capability_id}."
+                        "No canonical freshness row is available for "
+                        f"{capability_id}."
                     ),
                 }
             row.setdefault("dataset", capability_id)
@@ -337,6 +461,16 @@ def _project_selected_freshness(
             "status": status,
             "is_current": is_current,
             "selected_capabilities": selected_capabilities,
+            "supplemental_capabilities": [
+                str(capability_id)
+                for capability_id in list(selection.get("optional") or [])
+                if capability_id
+                not in {
+                    "target.identity",
+                    "data.freshness",
+                }
+                and not str(capability_id).startswith("diagnostics.")
+            ],
             "dependency_datasets": dependency_datasets,
             "datasets": selected_datasets,
             "missing": selected_missing,
@@ -450,10 +584,19 @@ def _compact_execution(execution: dict[str, Any]) -> None:
                     "tool",
                     "provider",
                     "status",
+                    "transport_status",
+                    "operation_status",
+                    "evidence_status",
                     "duration_ms",
+                    "error",
+                    "error_message",
                     "error_code",
                     "retryable",
                     "fallback_used",
+                    "external_fetch",
+                    "writes_cache",
+                    "requested_capabilities",
+                    "result_status",
                 )
                 if key in run
             }
@@ -489,8 +632,20 @@ def _compact_quality(quality: dict[str, Any]) -> None:
                 "completeness",
                 "release_phase",
                 "facts_usable",
+                "intraday_research_usable",
+                "execution_grade_usable",
+                "policy_satisfied",
                 "decision_usable",
                 "payload_included",
+                "status_authority",
+                "upstream_status_authority",
+                "trade_date",
+                "event_time",
+                "release_at",
+                "fetched_at",
+                "computed_at",
+                "served_at",
+                "units",
                 "issues",
             )
             if key in item
@@ -537,6 +692,38 @@ def _compact_quality(quality: dict[str, Any]) -> None:
     }
 
 
+def _compact_capability_status(
+    capability_status: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        capability_id: {
+            key: deepcopy(item[key])
+            for key in (
+                "required",
+                "applicability_status",
+                "availability_status",
+                "freshness_status",
+                "release_status",
+                "coverage_status",
+                "usability_status",
+                "facts_usable",
+                "decision_usable",
+                "trade_date",
+                "event_time",
+                "release_at",
+                "fetched_at",
+                "computed_at",
+                "served_at",
+                "reason_codes",
+                "status_authority",
+            )
+            if key in item
+        }
+        for capability_id, item in capability_status.items()
+        if isinstance(item, dict)
+    }
+
+
 def _compact_continuation(continuation: dict[str, Any]) -> None:
     fill_plan = _dict(continuation.get("fill_plan"))
     actions = [
@@ -546,6 +733,7 @@ def _compact_continuation(continuation: dict[str, Any]) -> None:
                 "action_id",
                 "capability",
                 "operation",
+                "refresh_strategy",
                 "status",
                 "executable",
                 "required",
@@ -553,6 +741,8 @@ def _compact_continuation(continuation: dict[str, Any]) -> None:
                 "reason",
                 "estimated_calls",
                 "estimated_timeout_seconds",
+                "refresh_possible_now",
+                "refresh_requires_market_open",
                 "writes_cache",
                 "requires_external_fetch",
             )
@@ -570,6 +760,17 @@ def _compact_continuation(continuation: dict[str, Any]) -> None:
                 "reason",
                 "release_status",
                 "next_eligible_refresh_at",
+                "refresh_strategy",
+                "refresh_possible_now",
+                "refresh_requires_market_open",
+                "writes_market_cache",
+                "estimated_calls",
+                "expected_timeout_seconds",
+                "operation",
+                "provider",
+                "target",
+                "error_message",
+                "retryable",
             )
             if key in action
         }
@@ -603,6 +804,14 @@ def _compact_manifest(manifest: dict[str, Any]) -> None:
                 "decision_usable",
                 "facts_usable",
                 "payload_included",
+                "refresh_recommended",
+                "refresh_strategy",
+                "fill_operation",
+                "refresh_possible_now",
+                "refresh_requires_market_open",
+                "writes_market_cache",
+                "estimated_calls",
+                "expected_timeout_seconds",
                 "limit",
                 "omission_reason",
                 "quality_ref",
@@ -691,6 +900,12 @@ def _emergency_compact_envelope(envelope: dict[str, Any]) -> None:
                 "decision_usable",
                 "payload_included",
                 "omission_reason",
+                "refresh_recommended",
+                "refresh_strategy",
+                "fill_operation",
+                "refresh_possible_now",
+                "refresh_requires_market_open",
+                "writes_market_cache",
             )
             if key in item
         }
@@ -759,10 +974,14 @@ def _emergency_compact_envelope(envelope: dict[str, Any]) -> None:
                     "action_id",
                     "capability",
                     "operation",
+                    "refresh_strategy",
                     "status",
                     "executable",
                     "required",
                     "estimated_calls",
+                    "refresh_possible_now",
+                    "refresh_requires_market_open",
+                    "writes_cache",
                 )
                 if key in action
             }
@@ -777,6 +996,10 @@ def _emergency_compact_envelope(envelope: dict[str, Any]) -> None:
                     "reason",
                     "release_status",
                     "next_eligible_refresh_at",
+                    "refresh_strategy",
+                    "refresh_possible_now",
+                    "refresh_requires_market_open",
+                    "writes_market_cache",
                 )
                 if key in action
             }
@@ -971,6 +1194,9 @@ def _hard_cap_envelope(
                 "optional",
                 "unsupported_capabilities",
                 "output",
+                "requested_output",
+                "effective_output",
+                "output_override_reason",
                 "realtime_policy",
                 "max_response_bytes",
             )
@@ -1128,6 +1354,8 @@ def _summary_dict(
 def _brief_capability_summary(
     capability_id: str,
     value: Any,
+    *,
+    minimum_rows: int | None = None,
 ) -> Any:
     if not isinstance(value, dict):
         return value
@@ -1180,6 +1408,15 @@ def _brief_capability_summary(
                     "provider_volume_unit",
                     "total_volume_lots",
                     "total_volume_contracts",
+                    "cumulative_volume_lots",
+                    "cumulative_volume_shares",
+                    "lot_size",
+                    "volume_scope",
+                    "volume_source",
+                    "official_daily_volume_scope",
+                    "volume_reconciliation",
+                    "volume_decision_usable",
+                    "price_decision_usable",
                     "trade_value",
                     "trade_value_unit",
                     "trade_value_status",
@@ -1191,6 +1428,14 @@ def _brief_capability_summary(
                     "snapshot_time_basis",
                     "provider_event_time",
                     "event_time",
+                    "release_at",
+                    "fetched_at",
+                    "computed_at",
+                    "received_at",
+                    "served_at",
+                    "event_age_seconds",
+                    "provider_delay_ms",
+                    "network_latency_ms",
                     "provider",
                     "source",
                     "market_status",
@@ -1388,17 +1633,30 @@ def _brief_capability_summary(
                 analysis,
                 fields=(
                     "requested_horizon",
+                    "effective_horizon",
                     "selected_horizon",
                     "selected_timeframe",
                     "selected_score",
                     "selected_title",
+                    "composite_score_title",
                     "selected_summary",
                     "selected_confidence",
+                    "today_state",
+                    "historical_structure",
+                    "composite_state",
+                    "fallback_reason",
                 ),
             ),
             "levels": {
                 key: deepcopy(levels[key])
-                for key in ("latest_price", "basis_timeframe", "entry", "risk")
+                for key in (
+                    "latest_price",
+                    "basis_timeframe",
+                    "technical_price_basis",
+                    "bid_ask_price_used",
+                    "entry",
+                    "risk",
+                )
                 if key in levels
             },
             "projection_level": "summary",
@@ -1437,6 +1695,11 @@ def _brief_capability_summary(
                     "short_balance",
                     "short_change",
                     "source",
+                    "quantity_unit",
+                    "raw_unit",
+                    "normalized_unit",
+                    "normalized_quantities",
+                    "lot_size",
                 ),
             ),
             "projection_level": "summary",
@@ -1497,6 +1760,75 @@ def _brief_capability_summary(
             ),
             "projection_level": "summary",
         }
+    if capability_id == "screening.ranking":
+        row_limit = max(5, int(minimum_rows or 0))
+        rows = _summary_rows(
+            value.get("rows"),
+            fields=(
+                "rank",
+                "position",
+                "stock_id",
+                "stock_name",
+                "market",
+                "metric",
+                "value",
+                "unit",
+                "observed_periods",
+                "requested_periods",
+                "window_complete",
+            ),
+            limit=row_limit,
+        )
+        return {
+            **_summary_dict(
+                value,
+                fields=(
+                    "snapshot_id",
+                    "status",
+                    "metric",
+                    "unit",
+                    "sort_order",
+                    "tie_policy",
+                    "window",
+                    "require_complete_window",
+                    "min_observed_periods",
+                    "incomplete_window_policy",
+                    "pagination",
+                    "as_of",
+                    "cache_policy",
+                ),
+            ),
+            "rows": rows,
+            "returned_count": len(rows),
+            "projection_level": "summary",
+        }
+    if capability_id == "screening.coverage":
+        return {
+            **_summary_dict(
+                value,
+                fields=(
+                    "snapshot_id",
+                    "status",
+                    "metric",
+                    "dataset",
+                    "requested_window_trade_days",
+                    "available_window_trade_days",
+                    "universe_count",
+                    "covered_count",
+                    "complete_window_count",
+                    "incomplete_window_count",
+                    "eligible_rank_count",
+                    "excluded_incomplete_count",
+                    "missing_count",
+                    "coverage_ratio",
+                    "coverage_status",
+                    "as_of",
+                    "cache_policy",
+                ),
+            ),
+            "coverage_gaps": _list(value.get("coverage_gaps"))[:3],
+            "projection_level": "summary",
+        }
     if capability_id == "data.freshness":
         return {
             **_summary_dict(
@@ -1514,6 +1846,450 @@ def _brief_capability_summary(
             "projection_level": "summary",
         }
     return value
+
+
+def _required_row_requirement(
+    capability_id: str,
+    value: Any,
+    *,
+    selection: dict[str, Any],
+) -> int:
+    if capability_id != "screening.ranking" or not isinstance(value, dict):
+        return 0
+    rows = value.get("rows")
+    if not isinstance(rows, list):
+        return 0
+    parameters = _dict(selection.get("parameters"))
+    ranking_parameters = _dict(parameters.get("screening.ranking"))
+    requested_limit = ranking_parameters.get("limit")
+    if not isinstance(requested_limit, int) or isinstance(requested_limit, bool):
+        pagination = _dict(value.get("pagination"))
+        requested_limit = pagination.get("returned_count")
+        if not isinstance(requested_limit, int) or isinstance(requested_limit, bool):
+            requested_limit = pagination.get("limit")
+    if not isinstance(requested_limit, int) or isinstance(requested_limit, bool):
+        requested_limit = len(rows)
+    return min(len(rows), max(0, requested_limit))
+
+
+def _apply_response_budget_error(
+    envelope: dict[str, Any],
+    *,
+    projection: dict[str, Any],
+    minimum_required_bytes: int,
+    max_bytes: int,
+) -> None:
+    target = _brief_capability_summary(
+        "target.identity",
+        _dict(envelope.get("target")),
+    )
+    question = str(envelope.get("question") or "")
+    mode = _dict(envelope.get("mode"))
+    compatibility = _dict(envelope.get("compatibility"))
+    required = [
+        str(value)
+        for value in _list(
+            _dict(_dict(envelope.get("execution")).get("selection")).get(
+                "required"
+            )
+        )
+        if str(value).strip()
+    ]
+    projection.update(
+        {
+            "truncated": True,
+            "required_payload_preserved": False,
+            "minimum_required_bytes": minimum_required_bytes,
+            "omitted_capabilities": list(
+                dict.fromkeys(
+                    [
+                        *projection.get("omitted_capabilities", []),
+                        *required,
+                    ]
+                )
+            ),
+        }
+    )
+    envelope.clear()
+    envelope.update(
+        {
+            "kind": KIND,
+            "contract_version": CONTRACT_VERSION,
+            "ok": False,
+            "transport_ok": True,
+            "request_valid": True,
+            "execution_completed": False,
+            "data_available": False,
+            "quality_status": "blocked",
+            "request_status": "rejected",
+            "question": question,
+            "target": target,
+            "mode": mode,
+            "action": "omi.ask",
+            "caller_profile": "unknown",
+            "status": {
+                "readiness": {
+                    "response_ready": True,
+                    "facts_ready": False,
+                    "analysis_ready": False,
+                    "decision_ready": False,
+                    "answer_ready": False,
+                    "evidence_status": "blocked",
+                    "blocked_sections": ["evidence"],
+                }
+            },
+            "answer": {},
+            "decision": {},
+            "evidence": {
+                "data": {},
+                "capability_status": {},
+                "quality": {
+                    "version": data_quality_contract.QUALITY_VERSION,
+                    "status": "blocked",
+                    "facts_ready": False,
+                    "blocked_required_capabilities": required,
+                },
+            },
+            "limitations": {
+                "missing": [
+                    f"capability:{capability_id}"
+                    for capability_id in required
+                ],
+                "warnings": [
+                    "The selected response budget cannot preserve the minimum "
+                    "required capability payload."
+                ],
+            },
+            "execution": {
+                "selection": {
+                    "required": required,
+                    "max_response_bytes": max_bytes,
+                }
+            },
+            "continuation": {},
+            "error": {
+                "code": "RESPONSE_BUDGET_TOO_SMALL",
+                "message": (
+                    "max_response_bytes is too small to preserve the minimum "
+                    "required capability payload."
+                ),
+                "minimum_required_bytes": minimum_required_bytes,
+                "max_response_bytes": max_bytes,
+                "retryable": True,
+            },
+            "compatibility": compatibility,
+            "projection": projection,
+        }
+    )
+
+
+def _compact_to_required_core(
+    envelope: dict[str, Any],
+    *,
+    required_core: dict[str, Any],
+    required: list[str],
+    max_bytes: int,
+) -> None:
+    # Per-capability schema versions remain available from the public manifest.
+    # Under a tight response budget they are metadata and must yield before any
+    # required capability payload.
+    envelope.pop("capability_schema_versions", None)
+    mode = _dict(envelope.get("mode"))
+    if mode.get("output_override_reason") is None:
+        mode.pop("output_override_reason", None)
+    mode.pop("requested", None)
+    envelope["mode"] = mode
+    evidence = _dict(envelope.get("evidence"))
+    required_set = set(required)
+    quality = _dict(evidence.get("quality"))
+    quality_capabilities = _dict(quality.get("capabilities"))
+    compact_quality = {
+        key: deepcopy(quality[key])
+        for key in (
+            "version",
+            "status",
+            "trust_level",
+            "facts_ready",
+            "analysis_ready",
+            "decision_ready",
+            "blocked_required_capabilities",
+            "limited_required_capabilities",
+        )
+        if key in quality
+    }
+    compact_quality["capabilities"] = {
+        capability_id: {
+            key: deepcopy(item[key])
+            for key in (
+                "required",
+                "status",
+                "status_class",
+                "facts_usable",
+                "decision_usable",
+                "payload_included",
+                "issues",
+            )
+            if key in item
+        }
+        for capability_id, item in quality_capabilities.items()
+        if capability_id in required_set and isinstance(item, dict)
+    }
+    manifest = _dict(evidence.get("manifest"))
+    compact_manifest = {
+        "version": manifest.get("version"),
+        "capabilities": [
+            {
+                **{
+                    key: deepcopy(item[key])
+                    for key in (
+                        "capability",
+                        "required",
+                        "status",
+                        "status_class",
+                        "payload_included",
+                        "canonical_status_ref",
+                    )
+                    if key in item
+                },
+                **(
+                    {
+                        key: deepcopy(item[key])
+                        for key in (
+                            "refresh_recommended",
+                            "refresh_strategy",
+                            "fill_operation",
+                            "refresh_possible_now",
+                            "refresh_requires_market_open",
+                            "writes_market_cache",
+                        )
+                        if key in item
+                    }
+                    if item.get("refresh_strategy")
+                    in {"reader_fetch", "granular_tool"}
+                    else {}
+                ),
+            }
+            for item in _list(manifest.get("capabilities"))
+            if isinstance(item, dict)
+            and str(item.get("capability") or "") in required_set
+        ],
+    }
+    compact_status = _compact_capability_status(
+        {
+            capability_id: item
+            for capability_id, item in _dict(
+                evidence.get("capability_status")
+            ).items()
+            if capability_id in required_set
+        }
+    )
+    compact_freshness = {
+        capability_id: {
+            key: deepcopy(item[key])
+            for key in (
+                "status",
+                "dataset",
+                "latest",
+                "is_current",
+                "release_status",
+                "coverage_status",
+                "refresh_recommended",
+                "canonical_status_ref",
+            )
+            if key in item
+        }
+        for capability_id, item in _dict(
+            evidence.get("freshness_by_capability")
+        ).items()
+        if capability_id in required_set and isinstance(item, dict)
+    }
+    evidence.clear()
+    evidence.update(
+        {
+            "data": deepcopy(required_core),
+            "capability_status": compact_status,
+            "quality": compact_quality,
+            "manifest": compact_manifest,
+            "freshness_by_capability": compact_freshness,
+            "source_refs": [],
+            "slots": {},
+            "realtime": {},
+        }
+    )
+    execution = _dict(envelope.get("execution"))
+    selection_contract = _dict(execution.get("selection"))
+    reconciliation = _dict(execution.get("refresh_reconciliation"))
+    reconciliation_capabilities = _dict(
+        reconciliation.get("capabilities")
+    )
+    envelope["execution"] = {
+        "selection": {
+            key: deepcopy(selection_contract[key])
+            for key in (
+                "version",
+                "required",
+                "optional",
+                "output",
+                "realtime_policy",
+                "max_response_bytes",
+            )
+            if key in selection_contract
+        },
+        "capability_catalog_version": execution.get(
+            "capability_catalog_version"
+        ),
+        "public_contract_digest": execution.get("public_contract_digest"),
+        "tool_runs": [
+            {
+                key: deepcopy(run[key])
+                for key in (
+                    "tool",
+                    "provider",
+                    "status",
+                    "transport_status",
+                    "operation_status",
+                    "evidence_status",
+                    "result_status",
+                    "duration_ms",
+                    "error",
+                    "retryable",
+                )
+                if key in run
+            }
+            for run in _list(execution.get("tool_runs"))[:4]
+            if isinstance(run, dict)
+        ],
+        "refresh_reconciliation": {
+            key: deepcopy(reconciliation[key])
+            for key in (
+                "version",
+                "attempted",
+                "attempt_count",
+                "remaining_action_count",
+                "remaining_action_ids",
+            )
+            if key in reconciliation
+        },
+    }
+    envelope["execution"]["refresh_reconciliation"]["capabilities"] = {
+        capability_id: {
+            key: deepcopy(item[key])
+            for key in (
+                "attempted",
+                "tool_succeeded",
+                "tool_statuses",
+                "refresh_outcomes",
+                "final_status",
+                "final_status_class",
+                "payload_included",
+                "usable_evidence_available",
+                "reconciliation",
+                "remaining_fill_action",
+                "remaining_fill_action_detail",
+            )
+            if key in item
+        }
+        for capability_id, item in reconciliation_capabilities.items()
+        if (
+            capability_id in required_set
+            and isinstance(item, dict)
+            and (
+                item.get("attempted") is True
+                or item.get("remaining_fill_action")
+            )
+        )
+    }
+    if not envelope["execution"]["tool_runs"]:
+        envelope["execution"].pop("tool_runs", None)
+    compact_reconciliation = envelope["execution"]["refresh_reconciliation"]
+    if not (
+        compact_reconciliation.get("attempted")
+        or compact_reconciliation.get("remaining_action_count")
+        or compact_reconciliation.get("capabilities")
+    ):
+        envelope["execution"].pop("refresh_reconciliation", None)
+    continuation = _dict(envelope.get("continuation"))
+    fill_plan = _dict(continuation.get("fill_plan"))
+    original_actions = [
+        action
+        for action in _list(fill_plan.get("actions"))
+        if isinstance(action, dict)
+        and str(action.get("capability") or "") in required_set
+    ][:4]
+    compact_actions = [
+        {
+            key: deepcopy(action[key])
+            for key in (
+                "action_id",
+                "capability",
+                "operation",
+                "refresh_strategy",
+                "status",
+                "executable",
+                "required",
+                "reason",
+                "estimated_calls",
+                "estimated_timeout_seconds",
+                "refresh_possible_now",
+                "refresh_requires_market_open",
+                "writes_cache",
+            )
+            if key in action
+        }
+        for action in original_actions
+    ]
+    compact_fill_plan = {
+        "version": fill_plan.get("version"),
+        "plan_id": fill_plan.get("plan_id"),
+        "actions": compact_actions,
+        "deferred_actions": [
+            {
+                key: deepcopy(action[key])
+                for key in (
+                    "capability",
+                    "status",
+                    "reason",
+                    "refresh_strategy",
+                    "refresh_possible_now",
+                    "refresh_requires_market_open",
+                    "writes_market_cache",
+                    "release_status",
+                    "next_eligible_refresh_at",
+                )
+                if key in action
+            }
+            for action in _list(fill_plan.get("deferred_actions"))[:4]
+            if isinstance(action, dict)
+            and str(action.get("capability") or "") in required_set
+            and action.get("refresh_strategy")
+            in {"reader_fetch", "granular_tool"}
+        ],
+        "action_count": fill_plan.get("action_count", len(compact_actions)),
+        "auto_executed": fill_plan.get("auto_executed", False),
+        "projection_truncated": True,
+    }
+    envelope["continuation"] = (
+        {"fill_plan": compact_fill_plan}
+        if compact_actions or compact_fill_plan["deferred_actions"]
+        else {}
+    )
+    limitations = _dict(envelope.get("limitations"))
+    envelope["limitations"] = {
+        "missing": _list(limitations.get("missing"))[:4],
+        "warnings": _list(limitations.get("warnings"))[:4],
+        "current_request_failures": deepcopy(
+            _list(limitations.get("current_request_failures"))[:4]
+        ),
+    }
+    if not envelope["limitations"]["current_request_failures"]:
+        envelope["limitations"].pop("current_request_failures", None)
+    for index, action in enumerate(original_actions):
+        invoke = action.get("invoke")
+        if not isinstance(invoke, dict):
+            continue
+        compact_actions[index]["invoke"] = deepcopy(invoke)
+        if _json_bytes(envelope) > max_bytes:
+            compact_actions[index].pop("invoke", None)
 
 
 def _fit_budget(
@@ -1555,17 +2331,45 @@ def _fit_budget(
     data = _dict(evidence.get("data"))
     optional = list(selection.get("optional") or [])
     required = list(selection.get("required") or [])
+    required_row_requirements = {
+        capability_id: _required_row_requirement(
+            capability_id,
+            data.get(capability_id),
+            selection=selection,
+        )
+        for capability_id in required
+    }
+    required_core = {
+        capability_id: _brief_capability_summary(
+            capability_id,
+            data[capability_id],
+            minimum_rows=required_row_requirements.get(capability_id),
+        )
+        for capability_id in required
+        if capability_id in data
+    }
+    core_payload_bytes = _json_bytes(
+        {
+            "target": _brief_capability_summary(
+                "target.identity",
+                _dict(envelope.get("target")),
+            ),
+            "data": required_core,
+        }
+    )
+    projection.update(
+        {
+            "required_payload_preserved": True,
+            "minimum_required_bytes": core_payload_bytes,
+            "core_payload_bytes": core_payload_bytes,
+            "envelope_bytes": pre_projection_bytes,
+        }
+    )
     optional_removal_order = [
         capability_id
         for capability_id in reversed(optional)
         if capability_id not in {"target.identity", "data.freshness"}
     ]
-    required_removal_order = [
-        capability_id
-        for capability_id in reversed(required)
-        if capability_id not in {"target.identity", "data.freshness"}
-    ]
-
     def summarize_capability_data() -> bool:
         changed = False
         for capability_id, value in list(data.items()):
@@ -1574,8 +2378,16 @@ def _fit_budget(
             summary_value = _brief_capability_summary(
                 capability_id,
                 value,
+                minimum_rows=(
+                    required_row_requirements.get(capability_id)
+                    if capability_id in required
+                    else None
+                ),
             )
-            if summary_value == value:
+            if (
+                summary_value == value
+                or _json_bytes(summary_value) >= _json_bytes(value)
+            ):
                 continue
             data[capability_id] = summary_value
             changed = True
@@ -1625,6 +2437,9 @@ def _fit_budget(
         _compact_execution(_dict(envelope.get("execution")))
         _compact_continuation(_dict(envelope.get("continuation")))
         _compact_quality(_dict(evidence.get("quality")))
+        evidence["capability_status"] = _compact_capability_status(
+            _dict(evidence.get("capability_status"))
+        )
         allowed_slots = _selected_slot_names(selection)
         slots = _dict(evidence.get("slots"))
         evidence["slots"] = {
@@ -1634,6 +2449,7 @@ def _fit_budget(
         mark_field("execution.tool_runs[].result_summary")
         mark_field("execution.diagnostics")
         mark_field("evidence.quality.capabilities.*.detail")
+        mark_field("evidence.capability_status.*.detail")
         if any(
             isinstance(action, dict) and isinstance(action.get("invoke"), dict)
             for action in fill_actions
@@ -1854,8 +2670,14 @@ def _fit_budget(
                     "required",
                     "optional",
                     "output",
+                    "requested_output",
+                    "effective_output",
+                    "output_override_reason",
                     "realtime_policy",
                     "limits",
+                    "requested_limits",
+                    "capability_origins",
+                    "inference_policy",
                     "max_response_bytes",
                 )
                 if key in selection_contract
@@ -1935,24 +2757,48 @@ def _fit_budget(
         mark_field("evidence.source_refs")
         projection["truncated"] = True
 
-    while data and _json_bytes(envelope) > max_bytes and required_removal_order:
-        capability_id = required_removal_order.pop(0)
-        if capability_id not in data:
-            continue
-        data.pop(capability_id, None)
-        projection["omitted_capabilities"].append(capability_id)
+    if _json_bytes(envelope) > max_bytes:
+        _compact_to_required_core(
+            envelope,
+            required_core=required_core,
+            required=required,
+            max_bytes=max_bytes,
+        )
+        mark_field("response.required_core_projection")
+        projection["trimmed_fields"] = list(
+            dict.fromkeys(projection["trimmed_fields"])
+        )[-4:]
+        projection["trimmed_lists"] = {}
         projection["truncated"] = True
 
     if _json_bytes(envelope) > max_bytes:
-        evidence["data"] = {}
-        projection["omitted_capabilities"] = list(
-            dict.fromkeys(
-                projection["omitted_capabilities"]
-                + list(selection.get("required") or [])
-                + list(selection.get("optional") or [])
-            )
+        minimum_required_bytes = max(
+            int(projection.get("minimum_required_bytes") or 0),
+            _json_bytes(envelope),
         )
-        projection["truncated"] = True
+        _apply_response_budget_error(
+            envelope,
+            projection=projection,
+            minimum_required_bytes=minimum_required_bytes,
+            max_bytes=max_bytes,
+        )
+        if _json_bytes(envelope) > max_bytes:
+            _hard_cap_envelope(envelope, max_bytes=max_bytes)
+        projection = _dict(envelope.get("projection"))
+        _finalize_projection(
+            envelope,
+            projection=projection,
+            max_bytes=max_bytes,
+        )
+        projection["envelope_bytes"] = projection.get(
+            "actual_response_bytes"
+        )
+        _finalize_projection(
+            envelope,
+            projection=projection,
+            max_bytes=max_bytes,
+        )
+        return envelope
 
     manifest = _dict(evidence.get("manifest"))
     quality_capabilities = _dict(_dict(evidence.get("quality")).get("capabilities"))
@@ -1985,6 +2831,24 @@ def _fit_budget(
         envelope,
         projection=projection,
         max_bytes=max_bytes,
+    )
+    projected_data = _dict(_dict(envelope.get("evidence")).get("data"))
+    projection["required_payload_preserved"] = all(
+        capability_id in projected_data
+        and (
+            required_row_requirements.get(capability_id, 0) <= 0
+            or len(
+                _list(
+                    _dict(projected_data.get(capability_id)).get("rows")
+                )
+            )
+            >= required_row_requirements[capability_id]
+        )
+        for capability_id in required
+        if capability_id not in {"target.identity"}
+    )
+    projection["envelope_bytes"] = projection.get(
+        "actual_response_bytes"
     )
     if projection["truncated"]:
         limitations = _dict(envelope.get("limitations"))
@@ -2131,14 +2995,30 @@ def _rejected_envelope(
     execution = _dict(canonical.get("execution"))
     canonical["execution"] = {
         "selection": deepcopy(selection),
+        "query_plan": deepcopy(_dict(execution.get("query_plan"))),
         "capability_catalog_version": (
             public_contract.CAPABILITY_REGISTRY_VERSION
         ),
+        "capability_schema_versions": {
+            capability_id: capability_contract.CAPABILITIES[
+                capability_id
+            ].schema_version
+            for capability_id in (
+                *selection.get("required", []),
+                *selection.get("optional", []),
+            )
+            if capability_id in capability_contract.CAPABILITIES
+        },
         "public_contract_digest": (
             contract_manifest.public_contract_manifest()["digest"]
         ),
         "tool_runs": [],
     }
+    canonical["transport_ok"] = True
+    canonical["request_valid"] = False
+    canonical["execution_completed"] = False
+    canonical["data_available"] = False
+    canonical["quality_status"] = "blocked"
     continuation = _dict(canonical.get("continuation"))
     canonical["continuation"] = {
         "resolution": deepcopy(_dict(continuation.get("resolution"))),
@@ -2151,7 +3031,17 @@ def _rejected_envelope(
             ),
             "actions": [],
             "deferred_actions": [],
+            "unfillable_actions": [],
+            "already_attempted_actions": [],
+            "resolutions": [],
             "action_count": 0,
+            "summary": {
+                "executable_count": 0,
+                "deferred_count": 0,
+                "unfillable_count": 0,
+                "already_attempted_count": 0,
+                "unresolved_count": 0,
+            },
             "auto_executed": False,
         },
     }
@@ -2202,6 +3092,7 @@ def build(
     canonical = decision_envelope.build(projection_response)
     scope_type = _scope_type(projection_response, canonical)
     selection = _selection(projection_response, canonical, scope_type=scope_type)
+    _apply_selection_trace(canonical, selection=selection)
     unsupported_capabilities = [
         deepcopy(item)
         for item in _list(selection.get("unsupported_capabilities"))
@@ -2267,10 +3158,35 @@ def build(
     execution["capability_catalog_version"] = (
         public_contract.CAPABILITY_REGISTRY_VERSION
     )
+    capability_schema_versions = {
+        capability_id: capability_contract.CAPABILITIES[
+            capability_id
+        ].schema_version
+        for capability_id in (
+            *selection.get("required", []),
+            *selection.get("optional", []),
+        )
+        if capability_id in capability_contract.CAPABILITIES
+    }
+    execution["capability_schema_versions"] = capability_schema_versions
     execution["public_contract_digest"] = (
         contract_manifest.public_contract_manifest()["digest"]
     )
+    existing_tool_runs = [
+        deepcopy(run)
+        for run in _list(execution.get("tool_runs"))
+        if isinstance(run, dict)
+    ]
+    internal_tool_runs = _selected_internal_tool_runs(
+        response=projection_response,
+        selection=selection,
+    )
+    execution["tool_runs"] = [
+        *existing_tool_runs,
+        *internal_tool_runs,
+    ]
     canonical["execution"] = execution
+    canonical["capability_schema_versions"] = capability_schema_versions
     canonical["compatibility"] = {
         "public_contract": CONTRACT_VERSION,
         "legacy_contracts_accepted": False,
@@ -2334,6 +3250,13 @@ def build(
     canonical = data_quality_contract.apply_quality_contract(
         canonical,
         quality=quality,
+    )
+    canonical["transport_ok"] = True
+    canonical["request_valid"] = True
+    canonical["execution_completed"] = True
+    canonical["data_available"] = bool(quality.get("facts_ready"))
+    canonical["quality_status"] = str(
+        quality.get("status") or "blocked"
     )
     reconciled_manifest = _dict(_dict(canonical.get("evidence")).get("manifest"))
     execution = _dict(canonical.get("execution"))

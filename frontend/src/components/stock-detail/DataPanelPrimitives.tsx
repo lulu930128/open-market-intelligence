@@ -141,7 +141,7 @@ export function EmptyDataState({
 export function DataPanelLoadingState({ message }: { message: string }) {
   return (
     <div className="omi-tab-panel omi-loading-surface border border-omi-border-subtle bg-omi-surface px-4 py-5">
-      <LoadingStateSurface title={message} compact className="mb-4" />
+      <LoadingStateSurface title={message} compact className="mb-3" />
       <div className="space-y-3">
         <div className="omi-skeleton h-3 w-2/3" />
         <div className="grid grid-cols-3 gap-3">

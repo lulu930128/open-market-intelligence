@@ -1907,6 +1907,7 @@ export default function LightweightKLineChart({
         data-chart-point-count={chartData.length}
         data-event-marker-count={projectedEventMarkers.length}
         data-drawing-count={activeDrawings.length}
+        data-drawing-draft={draftAnchor ? "active" : "idle"}
         data-drawing-tool={drawingTool}
         data-selected-drawing-id={selectedDrawingId ?? ""}
         data-source-point-count={sourceChartData.length}

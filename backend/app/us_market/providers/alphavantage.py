@@ -123,3 +123,30 @@ def fetch_alphavantage_splits_payload(
         resource="corporate_actions",
         timeout_seconds=timeout_seconds,
     )
+
+
+def fetch_alphavantage_earnings_calendar_csv(
+    *,
+    api_key: str,
+    horizon: str = "3month",
+    timeout_seconds: int,
+) -> tuple[str, str]:
+    response = provider_get(
+        ALPHAVANTAGE_QUERY_URL,
+        provider=PROVIDER_NAME,
+        resource="corporate_events",
+        target="all",
+        params={
+            "function": "EARNINGS_CALENDAR",
+            "horizon": horizon,
+            "apikey": api_key,
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    body = response.text
+    if body.lstrip().startswith("{"):
+        payload = _payload_or_raise(response)
+        raise USMarketDataFetchError(
+            f"Alpha Vantage returned JSON instead of an earnings calendar CSV: {payload!r}"
+        )
+    return body, redact_url_params(response.url)

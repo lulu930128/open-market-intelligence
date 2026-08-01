@@ -19,33 +19,24 @@ from app.db.models import (
 )
 from app.market.trading_calendar import next_taiwan_trading_day
 from app.watchlists import service as watchlist_service
+from app.watchlists.radar_rule_contract import (
+    RADAR_V1_RULE_VERSION,
+    V1_MOMENTUM_OUTCOME_BUCKETS,
+    V1_NON_SCORING_OUTCOME_BUCKETS,
+    V1_OUTCOME_THRESHOLDS,
+    V1_OVERHEAT_OUTCOME_BUCKETS,
+    V1_RISK_OUTCOME_BUCKETS,
+    V1_STRUCTURE_WATCH_OUTCOME_BUCKETS,
+)
 
 
-RADAR_RULE_VERSION = "radar_v1.0"
+RADAR_RULE_VERSION = RADAR_V1_RULE_VERSION
 
-MOMENTUM_BUCKETS = {
-    "limit_up_lock",
-    "surge_up",
-    "breakout_high",
-    "trend_reclaim",
-    "volume_up",
-    "momentum",
-    "pullback",
-    "breakout",
-    "limit_up_move",
-}
-RISK_BUCKETS = {
-    "limit_down_liquidity",
-    "selloff_risk",
-    "support_break",
-    "volume_down",
-    "bearish_momentum",
-    "risk",
-    "limit_down_move",
-}
-OVERHEAT_BUCKETS = {"overheated", "volatility_risk"}
-STRUCTURE_WATCH_BUCKETS = {"compression_watch", "volume", "watch"}
-NON_SCORING_BUCKETS = {"quiet", "no_data", "error"}
+MOMENTUM_BUCKETS = V1_MOMENTUM_OUTCOME_BUCKETS
+RISK_BUCKETS = V1_RISK_OUTCOME_BUCKETS
+OVERHEAT_BUCKETS = V1_OVERHEAT_OUTCOME_BUCKETS
+STRUCTURE_WATCH_BUCKETS = V1_STRUCTURE_WATCH_OUTCOME_BUCKETS
+NON_SCORING_BUCKETS = V1_NON_SCORING_OUTCOME_BUCKETS
 MAX_OUTCOME_ITEM_LIMIT = 200
 
 
@@ -711,28 +702,56 @@ def _outcome_status(
     adverse = max_adverse_pct or 0
 
     if bucket in MOMENTUM_BUCKETS:
-        if close_return_pct >= 0 or favorable >= 2:
+        policy = V1_OUTCOME_THRESHOLDS["momentum"]
+        if (
+            close_return_pct >= policy["hit_close_return_gte"]
+            or favorable >= policy["hit_favorable_gte"]
+        ):
             return "hit", "續強/突破類 bucket 在 T+1 維持正向或出現有利延伸。"
-        if close_return_pct <= -2 or adverse <= -4:
+        if (
+            close_return_pct <= policy["miss_close_return_lte"]
+            or adverse <= policy["miss_adverse_lte"]
+        ):
             return "miss", "續強/突破類 bucket 在 T+1 明顯反向或不利走勢擴大。"
         return "neutral", "T+1 未明顯延續也未明顯失效。"
 
     if bucket in RISK_BUCKETS:
-        if close_return_pct <= 0 or adverse <= -2:
+        policy = V1_OUTCOME_THRESHOLDS["risk"]
+        if (
+            close_return_pct <= policy["hit_close_return_lte"]
+            or adverse <= policy["hit_adverse_lte"]
+        ):
             return "hit", "風控/轉弱類 bucket 在 T+1 延續弱勢或出現不利走勢。"
-        if close_return_pct >= 2 and adverse > -1:
+        if (
+            close_return_pct >= policy["miss_close_return_gte"]
+            and adverse > policy["miss_adverse_gt"]
+        ):
             return "miss", "風控/轉弱類 bucket 在 T+1 快速修復。"
         return "neutral", "T+1 風險未擴大但也未完全修復。"
 
     if bucket in OVERHEAT_BUCKETS:
-        if close_return_pct < 0 or adverse <= -2:
+        policy = V1_OUTCOME_THRESHOLDS["overheat"]
+        if (
+            close_return_pct < policy["hit_close_return_lt"]
+            or adverse <= policy["hit_adverse_lte"]
+        ):
             return "hit", "過熱/波動 bucket 在 T+1 出現降溫、回落或不利波動。"
-        if close_return_pct >= 2 and adverse > -1:
+        if (
+            close_return_pct >= policy["miss_close_return_gte"]
+            and adverse > policy["miss_adverse_gt"]
+        ):
             return "miss", "過熱/波動 bucket 在 T+1 仍強勢且回撤有限。"
         return "neutral", "T+1 波動或降溫訊號不明顯。"
 
     if bucket in STRUCTURE_WATCH_BUCKETS:
-        if abs(close_return_pct) >= 2 or (intraday_range_pct is not None and intraday_range_pct >= 3):
+        policy = V1_OUTCOME_THRESHOLDS["structure_watch"]
+        if (
+            abs(close_return_pct) >= policy["hit_abs_close_return_gte"]
+            or (
+                intraday_range_pct is not None
+                and intraday_range_pct >= policy["hit_intraday_range_gte"]
+            )
+        ):
             return "hit", "觀察/壓縮 bucket 在 T+1 出現可驗證波動展開。"
         return "neutral", "觀察/壓縮 bucket 在 T+1 尚未展開。"
 

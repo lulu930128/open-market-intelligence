@@ -216,6 +216,7 @@ def read_tw_index_context(
                 index_id=normalized_index_id,
                 as_of=as_of,
                 index_snapshot=index_snapshot,
+                daily_chart=charts.get("daily"),
                 intraday=intraday,
                 include_intraday=include_intraday or normalized_horizon == "intraday",
                 market_data_params=market_data_params,

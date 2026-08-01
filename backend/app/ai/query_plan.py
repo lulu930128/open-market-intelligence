@@ -72,6 +72,7 @@ EVENT_ONLY_PUBLIC_CAPABILITIES = frozenset(
     {
         "events.upcoming",
         "events.history",
+        "corporate.actions",
         "regulation.disposition",
         "regulation.trading_restrictions",
     }
@@ -130,6 +131,19 @@ DOMAIN_HINTS = {
         "top gainers",
         "top losers",
     ),
+    "regulation": (
+        "處置股",
+        "處置期間",
+        "撮合方式",
+        "撮合間隔",
+        "分盤交易",
+        "全額交割",
+        "預收款券",
+        "交易限制",
+        "限制交易",
+        "disposition",
+        "trading restriction",
+    ),
 }
 SCOPE_DOMAIN_HINTS = {
     "tw_futures": {
@@ -171,6 +185,12 @@ DOMAIN_HINTS["chips"] = (
 )
 
 CAPABILITY_HINTS = {
+    "quote.official_close": (
+        "正式收盤價",
+        "正式收盤",
+        "official close",
+        "official closing price",
+    ),
     "chips.institutional": (
         "三大法人",
         "法人",
@@ -202,8 +222,118 @@ CAPABILITY_HINTS = {
     ),
 }
 
+TW_SCREENING_METRIC_HINTS = {
+    "foreign_investor_net_shares": (
+        "外資",
+        "foreign investor",
+        "foreign institutional investor",
+    ),
+    "investment_trust_net_shares": (
+        "投信",
+        "investment trust",
+    ),
+    "margin_balance_change_pct": (
+        "融資餘額",
+        "融資增減",
+        "融資增加",
+        "融資減少",
+        "margin balance",
+    ),
+}
+TW_SCREENING_ASCENDING_HINTS = (
+    "賣超",
+    "減少",
+    "減幅",
+    "下降",
+    "bottom",
+)
+TW_SCREENING_WINDOW_VALUES = frozenset({1, 5, 10, 20})
+TW_INTRADAY_SCREENING_METRIC_HINTS = {
+    "estimated_trade_value": (
+        "成交值排行",
+        "成交金額排行",
+        "turnover ranking",
+    ),
+    "cumulative_volume_lots": (
+        "成交量排行",
+        "爆量排行",
+        "volume ranking",
+    ),
+    "distance_from_high_pct": (
+        "高點回落",
+        "離高點",
+        "pullback from high",
+    ),
+    "rebound_from_low_pct": (
+        "低點反彈",
+        "離低點",
+        "rebound from low",
+    ),
+    "five_minute_return": (
+        "5分鐘",
+        "5 分鐘",
+        "五分鐘",
+        "急拉",
+        "急殺",
+        "5-minute",
+    ),
+    "fifteen_minute_return": (
+        "15分鐘",
+        "15 分鐘",
+        "十五分鐘",
+        "15-minute",
+    ),
+    "intraday_range_pct": (
+        "盤中振幅",
+        "intraday range",
+    ),
+    "vwap_deviation_pct": (
+        "vwap乖離",
+        "vwap 乖離",
+        "vwap deviation",
+    ),
+    "order_book_imbalance": (
+        "委買賣失衡",
+        "委買賣不平衡",
+        "order book imbalance",
+    ),
+    "change_pct": (
+        "盤中漲幅",
+        "盤中跌幅",
+        "今日漲幅",
+        "今日跌幅",
+        "漲幅排行",
+        "跌幅排行",
+        "top gainers",
+        "top losers",
+    ),
+}
+TW_HOT_GROUP_HINTS = (
+    "熱門族群",
+    "強勢族群",
+    "族群排行",
+    "熱門題材",
+    "hot groups",
+    "hot sectors",
+)
+_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "兩": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
 INTENT_DOMAINS = {
     "quote": ("quote",),
+    "regulation": ("regulation",),
     "broker_branch": ("broker_branch",),
     "market_breadth": ("breadth",),
     "trend_view": ("chart", "technical"),
@@ -375,6 +505,253 @@ def _query_capabilities(
     )
 
 
+def _parse_natural_number(value: str) -> int | None:
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.isdigit():
+        return int(normalized)
+    if any(
+        character not in {*_CHINESE_DIGITS, "十", "百"}
+        for character in normalized
+    ):
+        return None
+
+    total = 0
+    remainder = normalized
+    if "百" in remainder:
+        hundred_text, remainder = remainder.split("百", 1)
+        hundred = _CHINESE_DIGITS.get(hundred_text or "一")
+        if hundred is None:
+            return None
+        total += hundred * 100
+        remainder = remainder.lstrip("零〇")
+    if "十" in remainder:
+        tens_text, ones_text = remainder.split("十", 1)
+        tens = _CHINESE_DIGITS.get(tens_text or "一")
+        if tens is None:
+            return None
+        total += tens * 10
+        remainder = ones_text.lstrip("零〇")
+    if remainder:
+        if len(remainder) != 1 or remainder not in _CHINESE_DIGITS:
+            return None
+        total += _CHINESE_DIGITS[remainder]
+    return total
+
+
+def _infer_tw_screening_selection(
+    payload: AiAskRequest,
+    *,
+    scope_type: str,
+    target_market: str | None,
+) -> dict[str, Any] | None:
+    normalized_market = str(target_market or "TW").strip().upper()
+    if (
+        scope_type != "market"
+        or normalized_market not in {"TW", "TWSE", "TPEX", "TAIWAN"}
+    ):
+        return None
+
+    question = payload.question.casefold()
+    ranking_requested = bool(
+        any(
+            hint in question
+            for hint in ("排行", "排名", "排行榜", "ranking", "rank by", "top ", "bottom ")
+        )
+        or re.search(
+            r"[前後]\s*(?:\d{1,3}|[零〇一二兩三四五六七八九十百]+)\s*名",
+            question,
+        )
+    )
+    if not ranking_requested:
+        return None
+
+    metric = next(
+        (
+            metric_id
+            for metric_id, hints in TW_SCREENING_METRIC_HINTS.items()
+            if any(hint.casefold() in question for hint in hints)
+        ),
+        None,
+    )
+    if metric is None:
+        return None
+
+    parameters: dict[str, Any] = {
+        "metric": metric,
+        "sort_order": (
+            "asc"
+            if any(hint.casefold() in question for hint in TW_SCREENING_ASCENDING_HINTS)
+            or re.search(
+                r"後\s*(?:\d{1,3}|[零〇一二兩三四五六七八九十百]+)\s*名",
+                question,
+            )
+            else "desc"
+        ),
+        "offset": 0,
+    }
+
+    if any(term in question for term in ("今日", "今天", "當日", "單日")):
+        parameters["window"] = 1
+    else:
+        window_match = re.search(
+            r"(?:近|最近|過去)?\s*"
+            r"(?P<window>\d{1,3}|[零〇一二兩三四五六七八九十百]+)"
+            r"\s*(?:個)?(?:交易)?(?:日|天)",
+            question,
+        )
+        if window_match:
+            window = _parse_natural_number(window_match.group("window"))
+            if window not in TW_SCREENING_WINDOW_VALUES:
+                raise ValueError(
+                    "Taiwan screening window inferred from the question must be "
+                    "one of 1, 5, 10, or 20 trading days."
+                )
+            parameters["window"] = window
+
+    limit_match = re.search(
+        r"(?:前|後)\s*"
+        r"(?P<limit>\d{1,3}|[零〇一二兩三四五六七八九十百]+)"
+        r"\s*名",
+        question,
+    ) or re.search(
+        r"(?:top|bottom)\s*(?P<limit>\d{1,3})",
+        question,
+    )
+    if limit_match:
+        limit = _parse_natural_number(limit_match.group("limit"))
+        if limit is None or not 1 <= limit <= 200:
+            raise ValueError(
+                "Taiwan screening result limit inferred from the question must "
+                "be between 1 and 200."
+            )
+        parameters["limit"] = limit
+
+    raw_parameters = (
+        payload.selection.get("parameters")
+        if isinstance(payload.selection, dict)
+        and isinstance(payload.selection.get("parameters"), dict)
+        else {}
+    )
+    explicit_ranking_parameters = raw_parameters.get("screening.ranking")
+    if isinstance(explicit_ranking_parameters, dict):
+        parameters.update(explicit_ranking_parameters)
+
+    return {
+        "include": ["screening.ranking", "screening.coverage"],
+        "parameters": {
+            **raw_parameters,
+            "screening.ranking": parameters,
+        },
+    }
+
+
+def _infer_tw_intraday_screening_selection(
+    payload: AiAskRequest,
+    *,
+    scope_type: str,
+    target_market: str | None,
+) -> dict[str, Any] | None:
+    normalized_market = str(target_market or "TW").strip().upper()
+    if (
+        scope_type != "market"
+        or normalized_market not in {"TW", "TWSE", "TPEX", "TAIWAN"}
+    ):
+        return None
+
+    question = payload.question.casefold()
+    hot_groups_requested = any(
+        hint.casefold() in question for hint in TW_HOT_GROUP_HINTS
+    )
+    metric = next(
+        (
+            metric_id
+            for metric_id, hints in TW_INTRADAY_SCREENING_METRIC_HINTS.items()
+            if any(hint.casefold() in question for hint in hints)
+        ),
+        None,
+    )
+    intraday_ranking_requested = metric is not None and any(
+        hint in question
+        for hint in (
+            "排行",
+            "前",
+            "後",
+            "最多",
+            "最強",
+            "最弱",
+            "急拉",
+            "急殺",
+            "ranking",
+            "top ",
+            "bottom ",
+        )
+    )
+    if not hot_groups_requested and not intraday_ranking_requested:
+        return None
+
+    limit = 20
+    limit_match = re.search(
+        r"(?:前|後)\s*(?P<limit>\d{1,3})\s*(?:名|檔)?",
+        question,
+    ) or re.search(r"(?:top|bottom)\s*(?P<limit>\d{1,3})", question)
+    if limit_match:
+        limit = int(limit_match.group("limit"))
+        if not 1 <= limit <= 200:
+            raise ValueError(
+                "Taiwan intraday screening result limit inferred from the "
+                "question must be between 1 and 200."
+            )
+
+    raw_parameters = (
+        payload.selection.get("parameters")
+        if isinstance(payload.selection, dict)
+        and isinstance(payload.selection.get("parameters"), dict)
+        else {}
+    )
+    include: list[str] = []
+    parameters = dict(raw_parameters)
+    if intraday_ranking_requested:
+        include.append("screening.intraday")
+        intraday_parameters = {
+            "metric": metric or "change_pct",
+            "sort_order": (
+                "asc"
+                if any(
+                    hint in question
+                    for hint in (
+                        "跌幅",
+                        "跌最多",
+                        "最弱",
+                        "急殺",
+                        "高點回落",
+                        "bottom ",
+                    )
+                )
+                else "desc"
+            ),
+            "limit": limit,
+            "offset": 0,
+        }
+        explicit_parameters = raw_parameters.get("screening.intraday")
+        if isinstance(explicit_parameters, dict):
+            intraday_parameters.update(explicit_parameters)
+        parameters["screening.intraday"] = intraday_parameters
+    if hot_groups_requested:
+        include.append("market.hot_groups")
+        hot_group_parameters = {"limit": min(limit, 100)}
+        explicit_parameters = raw_parameters.get("market.hot_groups")
+        if isinstance(explicit_parameters, dict):
+            hot_group_parameters.update(explicit_parameters)
+        parameters["market.hot_groups"] = hot_group_parameters
+
+    return {
+        "include": include,
+        "parameters": parameters,
+    }
+
+
 def _domains_for_intents(intents: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
@@ -426,10 +803,42 @@ def build_query_plan(
         key in raw_selection
         for key in ("required", "include", "optional", "exclude")
     )
+    inferred_screening_selection = (
+        None
+        if has_explicit_capability_selection
+        else (
+            _infer_tw_intraday_screening_selection(
+                payload,
+                scope_type=scope_type,
+                target_market=target_market,
+            )
+            or _infer_tw_screening_selection(
+                payload,
+                scope_type=scope_type,
+                target_market=target_market,
+            )
+        )
+    )
     if has_explicit_capability_selection:
         requested_capabilities: tuple[str, ...] = ()
         excluded_selection_capabilities: tuple[str, ...] = ()
         capability_selection_mode = "explicit"
+    elif inferred_screening_selection is not None:
+        requested_capabilities = ()
+        excluded_selection_capabilities = ()
+        capability_selection_mode = "inferred"
+        requested_domains = tuple(
+            dict.fromkeys(
+                (
+                    *(
+                        domain
+                        for domain in requested_domains
+                        if domain not in {"chips", "sample_ranking"}
+                    ),
+                    "screening",
+                )
+            )
+        )
     else:
         (
             requested_capabilities,
@@ -480,6 +889,11 @@ def build_query_plan(
             **raw_selection,
             "include": list(requested_capabilities),
             "exclude": list(excluded_selection_capabilities),
+        }
+    elif inferred_screening_selection is not None:
+        selection_input = {
+            **raw_selection,
+            **inferred_screening_selection,
         }
     selection = capability_contract.normalize_selection(
         selection=selection_input,
@@ -533,7 +947,10 @@ def build_query_plan(
     }
     if (
         scope_type == "stock"
-        and has_explicit_capability_selection
+        and (
+            has_explicit_capability_selection
+            or question_intent == "regulation"
+        )
         and bool(
             selected_capability_set & EVENT_ONLY_PUBLIC_CAPABILITIES
         )
@@ -553,7 +970,10 @@ def build_query_plan(
             event_required_capabilities.append(
                 "taiwan_corporate_events"
             )
-        if "events.history" in selected_capability_set:
+        if selected_capability_set & {
+            "events.history",
+            "corporate.actions",
+        }:
             event_required_readers.append(
                 "get_taiwan_stock_event_history"
             )
@@ -604,21 +1024,38 @@ def build_query_plan(
             realtime_policy=str(selection["realtime_policy"]),
         )
 
+    profile_only_selection = bool(
+        scope_type == "stock"
+        and has_explicit_capability_selection
+        and selected_capability_set
+        <= {
+            "target.identity",
+            "company.profile",
+            "data.freshness",
+        }
+        and "company.profile" in selected_capability_set
+    )
     if (
         scope_type == "stock"
-        and question_intent == "quote"
-        and _is_pure_fast_path(
-            intents=intents,
-            requested_domains=request_domains_before_selection,
-            selection=selection,
-            allowed_intents={"quote", "data_freshness"},
-            allowed_domains={"quote", "intraday", "freshness"},
-            allowed_capabilities={
-                "target.identity",
-                "quote.snapshot",
-                "intraday.bars",
-                "data.freshness",
-            },
+        and (
+            profile_only_selection
+            or (
+                question_intent == "quote"
+                and _is_pure_fast_path(
+                    intents=intents,
+                    requested_domains=request_domains_before_selection,
+                    selection=selection,
+                    allowed_intents={"quote", "data_freshness"},
+                    allowed_domains={"quote", "intraday", "freshness"},
+                    allowed_capabilities={
+                        "target.identity",
+                        "quote.snapshot",
+                        "quote.official_close",
+                        "intraday.bars",
+                        "data.freshness",
+                    },
+                )
+            )
         )
     ):
         required_capabilities = list(QUOTE_ONLY_REQUIRED_CAPABILITIES)
@@ -736,13 +1173,18 @@ def build_query_plan(
         required_readers=(),
         excluded_readers=(),
         freshness_scope=(),
-        external_refresh_allowed=True,
+        external_refresh_allowed=inferred_screening_selection is None,
         requested_domains=requested_domains,
         excluded_domains=excluded_domains,
         matched_positive_terms=positive_terms,
         matched_negative_terms=negative_terms,
         capability_selection_mode=capability_selection_mode,
-        selected_action_reason="General intent uses the standard capability planner.",
+        selected_action_reason=(
+            "A Taiwan market ranking question uses the cache-only screening "
+            "capabilities with backend-validated typed parameters."
+            if inferred_screening_selection is not None
+            else "General intent uses the standard capability planner."
+        ),
         requested_provider=requested_provider,
         strict_provider=strict_provider,
         selection=selection,

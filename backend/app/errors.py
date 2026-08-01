@@ -39,8 +39,25 @@ async def http_exception_handler(
     exc: StarletteHTTPException,
 ) -> JSONResponse:
     detail = exc.detail
-    message = detail if isinstance(detail, str) else "Request failed."
-    code = "not_found" if exc.status_code == 404 else f"http_{exc.status_code}"
+    structured_detail = detail if isinstance(detail, dict) else {}
+    message = (
+        detail
+        if isinstance(detail, str)
+        else str(structured_detail.get("message") or "Request failed.")
+    )
+    code = str(
+        structured_detail.get("code")
+        or (
+            "not_found"
+            if exc.status_code == 404
+            else f"http_{exc.status_code}"
+        )
+    )
+    extra_detail = {
+        key: value
+        for key, value in structured_detail.items()
+        if key not in {"code", "message"}
+    }
 
     return JSONResponse(
         status_code=exc.status_code,
@@ -48,7 +65,7 @@ async def http_exception_handler(
             request=request,
             code=code,
             message=message,
-            detail=None if isinstance(detail, str) else detail,
+            detail=extra_detail or None,
         ),
         headers=exc.headers,
     )

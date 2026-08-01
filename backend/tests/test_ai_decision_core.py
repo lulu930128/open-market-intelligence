@@ -9,6 +9,18 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiDecisionCoreTests(unittest.TestCase):
+    def test_regulation_question_is_not_generic_analysis(self) -> None:
+        question = "2330 是否為處置股？撮合間隔與交易限制是什麼？"
+
+        self.assertEqual(
+            decision_core.infer_question_intent(question),
+            "regulation",
+        )
+        self.assertIn(
+            "regulation",
+            decision_core.infer_question_intents(question),
+        )
+
     def test_dated_close_question_is_quote_intent(self) -> None:
         for question in (
             "AAPL 2026-07-20 收盤價",

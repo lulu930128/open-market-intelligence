@@ -162,7 +162,9 @@ class TaiwanMarketStateTests(unittest.TestCase):
         self.assertEqual(state["available_cumulative_trade_value"], 240)
         self.assertTrue(state["trade_value_available"])
         self.assertTrue(state["trade_value_complete"])
-        self.assertEqual(state["trade_value_status"], "complete")
+        self.assertEqual(state["trade_value_coverage_status"], "complete")
+        self.assertEqual(state["trade_value_authority_status"], "official")
+        self.assertEqual(state["trade_value_status"], "official_complete")
         self.assertEqual(state["included_markets"], ["TWSE", "TPEX"])
         self.assertEqual(state["missing_markets"], [])
         self.assertEqual(state["currency"], "TWD")
@@ -205,11 +207,60 @@ class TaiwanMarketStateTests(unittest.TestCase):
             {
                 "trade_date": "2026-07-21",
                 "cumulative_trade_value": 180,
+                "authority_status": "official",
             },
         )
         self.assertEqual(
             state["same_time_baseline_20d"]["sample_status"],
             "provisional",
+        )
+        self.assertEqual(
+            state["same_time_baseline_20d"]["status"],
+            "warming_up",
+        )
+        self.assertIsNone(state["same_time_baseline_20d"]["pace_ratio"])
+        self.assertEqual(
+            state["same_time_baseline_20d"]["pace_ratio_status"],
+            "insufficient_history",
+        )
+        self.assertEqual(state["baseline_readiness_status"], "warming_up")
+        self.assertEqual(state["available_sample_days"], 6)
+        self.assertEqual(state["expected_5d_ready_after_sessions"], 0)
+        self.assertEqual(state["expected_20d_ready_after_sessions"], 14)
+        self.assertEqual(state["next_fill"], "scheduler_accumulation")
+
+    def test_volume_state_reports_warming_up_when_history_empty(self) -> None:
+        trade_date = date(2026, 7, 22)
+        persist_taiwan_market_minute_state(
+            self.db,
+            payload=market_summary_payload(
+                trade_date,
+                hour=10,
+                minute=30,
+                twse_trade_value=200,
+                tpex_trade_value=40,
+            ),
+        )
+
+        state = read_taiwan_market_volume_state(self.db)
+
+        baseline_5d = state["same_time_baseline_5d"]
+        self.assertEqual(state["status"], "partial")
+        self.assertEqual(state["baseline_readiness_status"], "warming_up")
+        self.assertEqual(state["available_sample_days"], 0)
+        self.assertEqual(state["expected_5d_ready_after_sessions"], 5)
+        self.assertEqual(state["expected_20d_ready_after_sessions"], 20)
+        self.assertEqual(state["next_fill"], "scheduler_accumulation")
+        self.assertEqual(baseline_5d["status"], "warming_up")
+        self.assertEqual(baseline_5d["sample_status"], "empty")
+        self.assertEqual(baseline_5d["available_sample_days"], 0)
+        self.assertEqual(baseline_5d["required_sample_days"], 5)
+        self.assertEqual(baseline_5d["expected_ready_after_sessions"], 5)
+        self.assertEqual(baseline_5d["next_fill"], "scheduler_accumulation")
+        self.assertIsNone(baseline_5d["pace_ratio"])
+        self.assertEqual(
+            baseline_5d["backfill_status"],
+            "unavailable_no_trusted_historical_minute_provider",
         )
 
     def test_final_reconciliation_uses_official_close_minute(self) -> None:

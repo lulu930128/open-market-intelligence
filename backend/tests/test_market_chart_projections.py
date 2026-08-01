@@ -52,6 +52,34 @@ class MarketChartProjectionTests(unittest.TestCase):
 
         self.assertEqual(rows, [complete])
 
+    def test_us_filter_excludes_daily_row_fetched_before_finalization(self) -> None:
+        finalized = USDailyPrice(
+            id=1,
+            provider="yahoo_chart",
+            symbol="AAPL",
+            trade_date=date(2026, 7, 9),
+            close_price=210.0,
+            fetched_at=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+        )
+        partial = USDailyPrice(
+            id=2,
+            provider="yahoo_chart",
+            symbol="AAPL",
+            trade_date=date(2026, 7, 10),
+            close_price=211.0,
+            fetched_at=datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc),
+        )
+
+        rows = us_chart.filter_ohlc_source_rows([finalized, partial])
+
+        self.assertEqual(rows, [finalized])
+        self.assertTrue(
+            us_chart.has_newer_untrusted_rows(
+                rows=[finalized, partial],
+                trusted_rows=rows,
+            )
+        )
+
     def test_jp_weekly_projection_dedupes_and_aggregates(self) -> None:
         rows = [
             JPDailyPrice(

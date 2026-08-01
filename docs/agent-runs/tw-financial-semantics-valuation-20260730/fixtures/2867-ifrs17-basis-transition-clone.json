@@ -1,0 +1,103 @@
+{
+  "package_version": "omi.tw-financial-basis-assessment.v1",
+  "package_id": "2867-ifrs17-basis-transition-clone-20260731",
+  "approval_scope": "clone_only",
+  "review_status": "approved",
+  "reviewer": "codex:insurance-ins-v3-official-pdf-accounting-basis-review-20260731",
+  "reviewed_at": "2026-07-31T02:30:00+08:00",
+  "known_at": "2026-05-15T18:29:22+08:00",
+  "stock_id": "2867",
+  "normalization_mode": "current_comparable",
+  "assessment_type": "accounting_basis_transition",
+  "outcome": "blocked",
+  "effective_date": "2026-01-01",
+  "issue_code": "accounting_basis_transition_incomplete_comparatives",
+  "rationale": "Mercuries Life adopted IFRS 17 from 2026-01-01 and the official 2026Q1 individual financial report retrospectively restated the 2025Q1 comparative period. The original 2025Q1 filing reports basic EPS of positive 0.03, while the 2026Q1 comparative column reports a loss per share of 0.03. The official EPS note reports 5,699,501 thousand comparative weighted-average shares, so the sign change is an accounting-basis restatement and cannot be explained by share-count scaling. Existing 2025Q2, Q3, and annual EPS facts remain from the pre-IFRS-17 reporting basis and cannot be combined with the restated 2025Q1 and 2026Q1 facts to produce a current-comparable TTM EPS or PE.",
+  "resolution_requirements": [
+    "official_restated_2025Q2_discrete_and_ytd_basic_eps",
+    "official_restated_2025Q3_discrete_and_ytd_basic_eps",
+    "official_restated_2025_annual_basic_eps",
+    "ifrs17_comparable_period_lineage",
+    "confirmed_individual_reporting_scope"
+  ],
+  "evidence_source_name": "MOPS Official Filing iXBRL",
+  "documents": [
+    {
+      "document_id": "202501_2867_AI2.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2867&SYEAR=2025&SSEASON=1&REPORT_ID=A",
+      "description": "MOPS official 2867 2025Q1 individual Inline XBRL on the pre-IFRS-17 reporting basis; current-period basic EPS is positive 0.03.",
+      "content_hash": "9ba09e357e42262c9b1d25fc5bd9e1d9ddd66ce52122cec3065b589a90b29313",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202502_2867_AI2.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2867&SYEAR=2025&SSEASON=2&REPORT_ID=A",
+      "description": "MOPS official 2867 2025Q2 individual Inline XBRL on the pre-IFRS-17 reporting basis; discrete basic EPS is -0.15 and YTD basic EPS is -0.12.",
+      "content_hash": "eed198be09c79a4a9569ba5db4909bb5b8e1bdd291718dc43577ceed5e835169",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202503_2867_AI2.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2867&SYEAR=2025&SSEASON=3&REPORT_ID=A",
+      "description": "MOPS official 2867 2025Q3 individual Inline XBRL on the pre-IFRS-17 reporting basis; discrete basic EPS is 0.28 and YTD basic EPS is 0.16.",
+      "content_hash": "ec98e9a866a5a663e81bc52e263904d5909cc2b9f70da0f618a9b692e2aa0c2e",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202504_2867_AI2.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2867&SYEAR=2025&SSEASON=4&REPORT_ID=A",
+      "description": "MOPS official 2867 2025 annual individual Inline XBRL on the pre-IFRS-17 reporting basis; annual basic EPS is 0.20.",
+      "content_hash": "1856a4ece14fe74b8c2495906ad8cad3faf88a4cb1a3daf2d78b8612b2489cf0",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202601_2867_AI2.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2867&SYEAR=2026&SSEASON=1&REPORT_ID=A",
+      "description": "MOPS official 2867 2026Q1 individual Inline XBRL; current basic EPS is -0.03 and the retrospectively restated 2025Q1 comparative basic EPS is also -0.03.",
+      "content_hash": "efd0c438b7eb58f4e309bfb3a05e2c4caea9f0bad5bbbce66102f25a65f7ac48",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202601_2867_AI2.pdf-binary",
+      "url": "https://doc.twse.com.tw/server-java/t57sb01?step=1&colorchg=1&co_id=2867&year=115&mtype=A",
+      "description": "MOPS official 2867 2026Q1 individual PDF. Page 4 states that IFRS 17 was adopted from 2026-01-01 and the comparative-period statements were retrospectively restated; page 7 reports current and restated comparative losses per share of 0.03; page 8 shows a 122,647,652 thousand IFRS 17 transition increase in 2025-01-01 equity; pages 13-14 describe the transition methods and restated 2025 balance-sheet effects; page 100 reports 5,899,501 and 5,699,501 thousand weighted-average shares.",
+      "content_hash": "601a2ed80a8e917d7cd9fc6b1790d7911a1f33f740b02a3e16568ebe35bcd96b",
+      "content_hash_status": "verified_source_bytes"
+    }
+  ],
+  "observations": [
+    {
+      "observation_code": "ifrs17_2025q1_retrospective_restatement",
+      "description": "The official auditor emphasis paragraph states that Mercuries Life adopted IFRS 17 from 2026-01-01 and retrospectively restated the 2025Q1 individual financial statements.",
+      "document_ids": [
+        "202601_2867_AI2.pdf-binary"
+      ]
+    },
+    {
+      "observation_code": "basic_eps_accounting_basis_conflict",
+      "description": "The original 2025Q1 filing reports positive basic EPS of 0.03, while the 2026Q1 comparative column reports a loss per share of 0.03. The official comparative weighted-average share count is 5,699,501 thousand, so share scaling cannot explain the sign change.",
+      "document_ids": [
+        "202501_2867_AI2.ixbrl",
+        "202601_2867_AI2.ixbrl",
+        "202601_2867_AI2.pdf-binary"
+      ]
+    },
+    {
+      "observation_code": "ifrs17_transition_material_to_equity",
+      "description": "The official statement of changes in equity and transition note report a 122,647,652 thousand increase in 2025-01-01 equity from retrospective IFRS 17 application, confirming that the accounting-basis change is material rather than a presentation-only relabeling.",
+      "document_ids": [
+        "202601_2867_AI2.pdf-binary"
+      ]
+    },
+    {
+      "observation_code": "restated_ttm_inputs_incomplete",
+      "description": "The available 2026Q1 filing supplies a restated 2025Q1 comparative, but no same-basis restated 2025Q2 discrete/YTD, Q3 discrete/YTD, or annual EPS facts. Pre-transition 2025 filings therefore remain as-reported evidence only and cannot form a current-comparable TTM series.",
+      "document_ids": [
+        "202502_2867_AI2.ixbrl",
+        "202503_2867_AI2.ixbrl",
+        "202504_2867_AI2.ixbrl",
+        "202601_2867_AI2.pdf-binary"
+      ]
+    }
+  ]
+}

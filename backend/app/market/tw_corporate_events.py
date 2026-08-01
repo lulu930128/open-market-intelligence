@@ -496,10 +496,14 @@ def list_taiwan_corporate_events(
     stock_ids: set[str] | None = None,
     markets: set[str] | None = None,
     event_types: set[str] | None = None,
+    financial_report_related: bool | None = None,
+    event_statuses: set[str] | None = None,
+    timing_statuses: set[str] | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = 500,
     offset: int = 0,
+    sort_order: str = "asc",
     now: datetime | None = None,
     cache_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -526,8 +530,21 @@ def list_taiwan_corporate_events(
     normalized_types = {
         str(item).strip().lower() for item in (event_types or set()) if str(item).strip()
     }
+    normalized_statuses = {
+        str(item).strip().lower()
+        for item in (event_statuses or set())
+        if str(item).strip()
+    }
+    normalized_timing_statuses = {
+        str(item).strip().lower()
+        for item in (timing_statuses or set())
+        if str(item).strip()
+    }
     normalized_limit = max(1, min(int(limit), 1000))
     normalized_offset = max(0, min(int(offset), 5000))
+    normalized_sort_order = (
+        "desc" if str(sort_order or "asc").strip().lower() == "desc" else "asc"
+    )
     cache = read_taiwan_corporate_event_cache(path=cache_path)
     providers = cache.get("providers") or {}
     results: list[dict[str, Any]] = []
@@ -587,6 +604,24 @@ def list_taiwan_corporate_events(
                 continue
             if normalized_types and str(event.get("event_type") or "").lower() not in normalized_types:
                 continue
+            if (
+                financial_report_related is not None
+                and bool(event.get("financial_report_related"))
+                is not financial_report_related
+            ):
+                continue
+            if (
+                normalized_statuses
+                and str(event.get("status") or "").lower()
+                not in normalized_statuses
+            ):
+                continue
+            if (
+                normalized_timing_statuses
+                and str(event.get("timing_status") or "").lower()
+                not in normalized_timing_statuses
+            ):
+                continue
             if event["start_date"] < start_filter or event["start_date"] > end_filter:
                 continue
             results.append(event)
@@ -617,6 +652,7 @@ def list_taiwan_corporate_events(
             type_priority.get(str(item.get("event_type")), 9),
             str(item.get("stock_id") or ""),
         ),
+        reverse=normalized_sort_order == "desc",
     )
     sorted_results = all_results[
         normalized_offset : normalized_offset + normalized_limit
@@ -637,10 +673,15 @@ def list_taiwan_corporate_events(
         "stock_ids": sorted(normalized_stock_ids),
         "markets": sorted(normalized_markets),
         "event_types": sorted(normalized_types),
+        "financial_report_related": financial_report_related,
+        "event_statuses": sorted(normalized_statuses),
+        "timing_statuses": sorted(normalized_timing_statuses),
         "offset": normalized_offset,
         "limit": normalized_limit,
+        "sort_order": normalized_sort_order,
         "total_count": len(all_results),
         "result_count": len(sorted_results),
+        "returned_count": len(sorted_results),
         "warning": "；".join(dict.fromkeys(warnings)) or None,
         "sources": source_status,
         "results": sorted_results,
@@ -721,17 +762,18 @@ def get_taiwan_stock_event_history(
     )
     date_to = local_now.date() - timedelta(days=1)
     date_from = date(local_now.year - history_years + 1, 1, 1)
+    normalized_limit = max(1, min(max_results, 200))
     listing = list_taiwan_corporate_events(
         stock_id=stock_id,
         market=market,
         date_from=date_from,
         date_to=date_to,
-        limit=1000,
+        limit=normalized_limit,
+        sort_order="desc",
         now=local_now,
         cache_path=cache_path,
     )
-    ordered = list(reversed(listing["results"]))
-    results = ordered[: max(1, min(max_results, 200))]
+    results = list(listing["results"])
     status_rank = {"missing": 3, "degraded": 2, "stale": 1, "current": 0}
     statuses = [
         source.get("status", "missing") for source in listing["sources"].values()
@@ -765,8 +807,12 @@ def get_taiwan_stock_event_history(
         "coverage_start": min(coverage_starts) if coverage_starts else None,
         "coverage_end": max(coverage_ends) if coverage_ends else None,
         "warning": listing["warning"],
-        "total_count": listing["result_count"],
+        "offset": 0,
+        "limit": normalized_limit,
+        "sort_order": "desc",
+        "total_count": listing["total_count"],
         "result_count": len(results),
+        "returned_count": len(results),
         "results": results,
     }
 

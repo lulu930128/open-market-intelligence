@@ -71,6 +71,7 @@ import {
   formatStockVolumePaceRatio,
   stockVolumePaceMetric,
 } from "@/lib/stockVolumePace";
+import type { USCorporateEventSummaryRead } from "@/types/corporateEvents";
 import type {
   ChartPoint,
   ChartDrawingSnapshotRead,
@@ -90,6 +91,7 @@ import type {
   USStockMasterRead,
 } from "@/types/market";
 import {
+  type CSSProperties,
   type ReactNode,
   useCallback,
   useEffect,
@@ -260,6 +262,16 @@ function formatActionValue(action: USCorporateActionRead) {
   return "-";
 }
 
+function corporateEventTone(eventType: string) {
+  if (eventType === "dividend") {
+    return "border-omi-success bg-omi-success-soft text-omi-success-strong";
+  }
+  if (eventType === "split") {
+    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  }
+  return "border-omi-warning bg-omi-warning-soft text-omi-warning-strong";
+}
+
 async function fetchOptionalJson<T>(
   path: string,
   params?: Record<string, string | number | boolean>
@@ -280,6 +292,8 @@ type USSupplementalData = {
   fundamentalData: USSecFundamentalSummaryRead | null;
   profileData: USCompanyProfileRead | null;
   actionData: USCorporateActionRead[];
+  eventSummaryData: USCorporateEventSummaryRead | null;
+  eventSummaryError: unknown | null;
   shortVolumeData: USShortVolumeDailyRead[];
 };
 
@@ -381,6 +395,7 @@ async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalDa
     fundamentalData,
     profileData,
     actionData,
+    eventSummaryResult,
     shortVolumeData,
   ] = await Promise.all([
     fetchJson<USSecCompanyFactRead[]>(
@@ -403,6 +418,11 @@ async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalDa
         offset: 0,
       }
     ).catch(() => []),
+    fetchJson<USCorporateEventSummaryRead>(
+      `/api/us-market/corporate-events/${encodedSymbol}/summary`
+    )
+      .then((data) => ({ data, error: null }))
+      .catch((error: unknown) => ({ data: null, error })),
     fetchJson<USShortVolumeDailyRead[]>(
       `/api/us-market/short-volume/${encodedSymbol}/history`,
       {
@@ -417,6 +437,8 @@ async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalDa
     fundamentalData,
     profileData,
     actionData,
+    eventSummaryData: eventSummaryResult.data,
+    eventSummaryError: eventSummaryResult.error,
     shortVolumeData,
   };
 }
@@ -751,9 +773,12 @@ function DataCoverageChip({
   );
 }
 
-function metricBarWidth(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "0%";
-  return `${Math.max(0, Math.min(100, Math.abs(value)))}%`;
+function metricBarStyle(value: number | null | undefined): CSSProperties {
+  const scale =
+    value === null || value === undefined || Number.isNaN(value)
+      ? 0
+      : Math.max(0, Math.min(100, Math.abs(value))) / 100;
+  return { "--omi-technical-bar-scale": scale } as CSSProperties;
 }
 
 function metricBarClass(value: number | null | undefined) {
@@ -933,6 +958,8 @@ export default function USStockDetailPanel({
   const [chart, setChart] = useState<USOhlcChartRead | null>(null);
   const [companyProfile, setCompanyProfile] = useState<USCompanyProfileRead | null>(null);
   const [corporateActions, setCorporateActions] = useState<USCorporateActionRead[]>([]);
+  const [corporateEventSummary, setCorporateEventSummary] =
+    useState<USCorporateEventSummaryRead | null>(null);
   const [shortVolumeRows, setShortVolumeRows] = useState<USShortVolumeDailyRead[]>([]);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
@@ -1118,6 +1145,15 @@ export default function USStockDetailPanel({
   const activeDataTabMeta =
     usDataPanelTabs.find((tab) => tab.key === activeDataTab) ?? usDataPanelTabs[0];
   const selectedIndexConfig = getUsMarketIndexConfig(selectedSymbol);
+  const upcomingCorporateEvents = selectedIndexConfig
+    ? []
+    : corporateEventSummary?.results ?? [];
+  const corporateEventSourceUncertain = Boolean(
+    !selectedIndexConfig &&
+      !upcomingCorporateEvents.length &&
+      corporateEventSummary &&
+      corporateEventSummary.cache_status !== "current"
+  );
   const selectedDisplaySymbol = selectedIndexConfig?.displaySymbol ?? selectedSymbol ?? "-";
   const selectedDisplayName =
     selectedIndexConfig?.name ?? stockName(visibleSelectedStock, selectedSecurityName);
@@ -1263,6 +1299,42 @@ export default function USStockDetailPanel({
 
     return () => clearDataStatusFocus(dataStatusContextKey);
   }, [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, selectedSymbol]);
+
+  useEffect(() => {
+    if (
+      !selectedSymbol ||
+      selectedIndexConfig ||
+      !corporateEventSummary ||
+      corporateEventSummary.symbol !== selectedSymbol.toUpperCase()
+    ) {
+      return;
+    }
+
+    emitDataStatusEvent({
+      market: "us",
+      level: corporateEventSummary.warning ? "warning" : "success",
+      title: corporateEventSummary.warning
+        ? t("settings.calendar.status.warningTitle")
+        : t("settings.calendar.status.successTitle"),
+      message:
+        corporateEventSummary.warning ??
+        t("settings.calendar.status.stockSuccessMessage", {
+          count: corporateEventSummary.result_count,
+          stock: dataStatusContextLabel,
+        }),
+      source: t("settings.calendar.status.usSource"),
+      contextKey: dataStatusContextKey,
+      contextLabel: dataStatusContextLabel,
+      dedupeKey: `${dataStatusContextKey}:corporate-events`,
+    });
+  }, [
+    corporateEventSummary,
+    dataStatusContextKey,
+    dataStatusContextLabel,
+    selectedIndexConfig,
+    selectedSymbol,
+    t,
+  ]);
 
   const dataCoverageItems: Array<{
     label: string;
@@ -1419,6 +1491,7 @@ export default function USStockDetailPanel({
             setCompanyProfile(null);
             onCompanyProfileChange?.(null);
             setCorporateActions([]);
+            setCorporateEventSummary(null);
             setShortVolumeRows([]);
             setLoadState("success");
             setFactLoadState("success");
@@ -1452,6 +1525,7 @@ export default function USStockDetailPanel({
           setCompanyProfile(null);
           onCompanyProfileChange?.(null);
           setCorporateActions([]);
+          setCorporateEventSummary(null);
           setShortVolumeRows([]);
           setLoadState("success");
           setFactLoadState("success");
@@ -1504,6 +1578,7 @@ export default function USStockDetailPanel({
           setCompanyProfile(null);
           onCompanyProfileChange?.(null);
           setCorporateActions([]);
+          setCorporateEventSummary(null);
           setShortVolumeRows([]);
           setLoadState("success");
           setFactLoadState("loading");
@@ -1516,7 +1591,14 @@ export default function USStockDetailPanel({
               setCompanyProfile(supplementalData.profileData);
               onCompanyProfileChange?.(supplementalData.profileData);
               setCorporateActions(supplementalData.actionData);
+              setCorporateEventSummary(supplementalData.eventSummaryData);
               setShortVolumeRows(supplementalData.shortVolumeData);
+              if (supplementalData.eventSummaryError) {
+                publishDetailDataStatus(
+                  tRef.current("settings.calendar.loadError"),
+                  supplementalData.eventSummaryError
+                );
+              }
               setFactLoadState("success");
             })
             .catch((error) => {
@@ -1561,6 +1643,7 @@ export default function USStockDetailPanel({
         setCompanyProfile(null);
         onCompanyProfileChange?.(null);
         setCorporateActions([]);
+        setCorporateEventSummary(null);
         setShortVolumeRows([]);
         setLoadState("success");
         setFactLoadState("loading");
@@ -1573,7 +1656,14 @@ export default function USStockDetailPanel({
             setCompanyProfile(supplementalData.profileData);
             onCompanyProfileChange?.(supplementalData.profileData);
             setCorporateActions(supplementalData.actionData);
+            setCorporateEventSummary(supplementalData.eventSummaryData);
             setShortVolumeRows(supplementalData.shortVolumeData);
+            if (supplementalData.eventSummaryError) {
+              publishDetailDataStatus(
+                tRef.current("settings.calendar.loadError"),
+                supplementalData.eventSummaryError
+              );
+            }
             setFactLoadState("success");
           })
           .catch((error) => {
@@ -1596,6 +1686,7 @@ export default function USStockDetailPanel({
         setCompanyProfile(null);
         onCompanyProfileChange?.(null);
         setCorporateActions([]);
+        setCorporateEventSummary(null);
         setShortVolumeRows([]);
         setLoadState("error");
         setFactLoadState("error");
@@ -1618,6 +1709,7 @@ export default function USStockDetailPanel({
         setCompanyProfile(null);
         onCompanyProfileChange?.(null);
         setCorporateActions([]);
+        setCorporateEventSummary(null);
         setShortVolumeRows([]);
         setTodayTrend([]);
         setTodayPreviousClose(null);
@@ -2680,18 +2772,55 @@ export default function USStockDetailPanel({
               <div className="mt-1 text-sm text-omi-text-muted">
                 {selectedSubtitle}
               </div>
-              {timeframe === "today" && visibleIntradaySourcePresentation ? (
-                <div
-                  data-testid="us-intraday-source-status"
-                  className={[
-                    "mt-2 inline-flex border px-2 py-1 text-xs font-semibold",
-                    visibleIntradaySourcePresentation.level === "error"
-                      ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
-                      : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
-                  ].join(" ")}
-                  title={visibleIntradaySourcePresentation.message}
-                >
-                  {visibleIntradaySourcePresentation.badge}
+              {((timeframe === "today" && visibleIntradaySourcePresentation) ||
+                upcomingCorporateEvents.length > 0 ||
+                corporateEventSourceUncertain) ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {timeframe === "today" && visibleIntradaySourcePresentation ? (
+                    <div
+                      data-testid="us-intraday-source-status"
+                      className={[
+                        "inline-flex border px-2 py-1 text-xs font-semibold",
+                        visibleIntradaySourcePresentation.level === "error"
+                          ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
+                          : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
+                      ].join(" ")}
+                      title={visibleIntradaySourcePresentation.message}
+                    >
+                      {visibleIntradaySourcePresentation.badge}
+                    </div>
+                  ) : null}
+                  {upcomingCorporateEvents.map((event) => (
+                    <span
+                      key={event.event_id}
+                      data-testid="us-upcoming-corporate-event"
+                      className={[
+                        "inline-flex items-center border px-2 py-1 text-xs font-bold",
+                        corporateEventTone(event.event_type),
+                      ].join(" ")}
+                      title={[
+                        event.title,
+                        `${event.event_date}${event.event_time ? ` ${event.event_time}` : ""}`,
+                        event.source,
+                        ...event.warnings,
+                      ]
+                        .filter(Boolean)
+                        .join("\n")}
+                    >
+                      {t("usStockDetail.corporateEvents.reminder", {
+                        date: event.event_date,
+                        type: t(`settings.calendar.eventTypes.${event.event_type}`),
+                      })}
+                    </span>
+                  ))}
+                  {corporateEventSourceUncertain ? (
+                    <span
+                      className="inline-flex items-center border border-omi-warning-border bg-omi-warning-soft px-2 py-1 text-xs font-semibold text-omi-warning-strong"
+                      title={corporateEventSummary?.warning ?? undefined}
+                    >
+                      {t("usStockDetail.corporateEvents.sourceUncertain")}
+                    </span>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -2944,7 +3073,7 @@ export default function USStockDetailPanel({
               <div className="h-2 bg-omi-surface-muted">
                 <div
                   className={`omi-technical-bar h-2 ${metricBarClass(priceVsMa20)}`}
-                  style={{ width: metricBarWidth(priceVsMa20) }}
+                  style={metricBarStyle(priceVsMa20)}
                 />
               </div>
             </div>
@@ -2974,7 +3103,7 @@ export default function USStockDetailPanel({
               <div className="h-2 bg-omi-surface-muted">
                 <div
                   className={`omi-technical-bar h-2 ${metricBarClass(technicalVolumeMetric)}`}
-                  style={{ width: metricBarWidth(technicalVolumeMetric) }}
+                  style={metricBarStyle(technicalVolumeMetric)}
                 />
               </div>
             </div>
@@ -2995,7 +3124,7 @@ export default function USStockDetailPanel({
               <div className="h-2 bg-omi-surface-muted">
                 <div
                   className={`omi-technical-bar h-2 ${metricBarClass(changePct)}`}
-                  style={{ width: metricBarWidth(changePct) }}
+                  style={metricBarStyle(changePct)}
                 />
               </div>
             </div>

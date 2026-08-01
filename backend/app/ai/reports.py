@@ -92,7 +92,12 @@ def _compact_technical_levels(levels: dict[str, Any]) -> dict[str, Any]:
         "conservative_entry": _zone_display(entry.get("conservative_zone")),
         "do_not_chase_above": _level_price_display(entry.get("do_not_chase_above")),
         "breakout_confirm_above": _level_price_display(entry.get("breakout_confirm_above")),
-        "short_stop": _level_price_display(risk.get("short_stop")),
+        "short_term_stop": _level_price_display(
+            risk.get("short_term_stop") or risk.get("short_stop")
+        ),
+        "short_stop": _level_price_display(
+            risk.get("short_term_stop") or risk.get("short_stop")
+        ),
         "technical_invalidation": _level_price_display(risk.get("technical_invalidation")),
         "context": levels.get("context") if isinstance(levels.get("context"), dict) else {},
         "validation": levels.get("validation") if isinstance(levels.get("validation"), dict) else {},
@@ -294,8 +299,10 @@ def _compact_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
             level_parts.append(f"do_not_chase_above={levels_summary['do_not_chase_above']}")
         if levels_summary.get("breakout_confirm_above"):
             level_parts.append(f"breakout_confirm_above={levels_summary['breakout_confirm_above']}")
-        if levels_summary.get("short_stop"):
-            level_parts.append(f"short_stop={levels_summary['short_stop']}")
+        if levels_summary.get("short_term_stop"):
+            level_parts.append(
+                f"short_term_stop={levels_summary['short_term_stop']}"
+            )
         if levels_summary.get("technical_invalidation"):
             level_parts.append(f"invalidation={levels_summary['technical_invalidation']}")
         if level_parts:
@@ -773,6 +780,27 @@ def _compact_watchlist_radar_item(row: dict[str, Any]) -> dict[str, Any]:
         "matched_signal_keys": list(row.get("matched_signal_keys") or [])[:5],
         "primary_signal_label": row.get("primary_signal_label"),
         "stale": bool(row.get("stale")),
+        "priority_score": row.get("priority_score"),
+        "technical_evidence_score": row.get("technical_evidence_score"),
+        "technical_grade": row.get("technical_grade"),
+        "direction": row.get("direction"),
+        "risk_label": row.get("risk_label"),
+        "radar_v2": {
+            key: (row.get("radar_v2") or {}).get(key)
+            for key in (
+                "rule_version",
+                "direction_score",
+                "evidence_score",
+                "confidence_score",
+                "conflict_score",
+                "risk_score",
+                "evidence_grade",
+                "data_status",
+                "freshness_status",
+            )
+        }
+        if isinstance(row.get("radar_v2"), dict)
+        else None,
     }
 
 
@@ -804,6 +832,8 @@ def _compact_watchlist_radar(radar: dict[str, Any], *, item_limit: int = 8) -> d
         "target_trade_date": radar.get("target_trade_date"),
         "is_current": radar.get("is_current"),
         "stale_stock_count": radar.get("stale_stock_count"),
+        "radar_engine": radar.get("radar_engine"),
+        "radar_v2_summary": radar.get("radar_v2_summary"),
         "buckets": buckets,
         "results": results,
     }

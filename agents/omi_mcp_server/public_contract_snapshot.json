@@ -357,6 +357,7 @@
                 "market.breadth",
                 "market.chips",
                 "market.cross_market",
+                "market.hot_groups",
                 "market.index_contributions",
                 "market.indices",
                 "market.institutional_flow",
@@ -377,6 +378,7 @@
                 "regulation.trading_restrictions",
                 "resource.metadata",
                 "screening.coverage",
+                "screening.intraday",
                 "screening.ranking",
                 "source.health",
                 "target.identity",
@@ -430,6 +432,7 @@
                 "market.breadth",
                 "market.chips",
                 "market.cross_market",
+                "market.hot_groups",
                 "market.index_contributions",
                 "market.indices",
                 "market.institutional_flow",
@@ -450,6 +453,7 @@
                 "regulation.trading_restrictions",
                 "resource.metadata",
                 "screening.coverage",
+                "screening.intraday",
                 "screening.ranking",
                 "source.health",
                 "target.identity",
@@ -506,6 +510,7 @@
                 "market.breadth",
                 "market.chips",
                 "market.cross_market",
+                "market.hot_groups",
                 "market.index_contributions",
                 "market.indices",
                 "market.institutional_flow",
@@ -526,6 +531,7 @@
                 "regulation.trading_restrictions",
                 "resource.metadata",
                 "screening.coverage",
+                "screening.intraday",
                 "screening.ranking",
                 "source.health",
                 "target.identity",
@@ -543,6 +549,24 @@
             "additionalProperties": false,
             "description": "Capability-keyed typed query parameters. Only capabilities with a registered parameter schema accept entries here.",
             "properties": {
+              "corporate.actions": {
+                "additionalProperties": false,
+                "properties": {
+                  "limit": {
+                    "default": 20,
+                    "maximum": 200,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "years": {
+                    "default": 5,
+                    "maximum": 10,
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
               "events.calendar": {
                 "additionalProperties": false,
                 "properties": {
@@ -564,6 +588,30 @@
                       "type": "string"
                     },
                     "maxItems": 3,
+                    "type": "array"
+                  },
+                  "exclude_instrument_types": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 20,
+                    "type": "array"
+                  },
+                  "financial_report_related": {
+                    "type": "boolean"
+                  },
+                  "industries": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 100,
+                    "type": "array"
+                  },
+                  "instrument_types": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 20,
                     "type": "array"
                   },
                   "limit": {
@@ -593,11 +641,35 @@
                     "minimum": 0,
                     "type": "integer"
                   },
+                  "status": {
+                    "items": {
+                      "enum": [
+                        "today",
+                        "ongoing",
+                        "upcoming",
+                        "past"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 4,
+                    "type": "array"
+                  },
                   "stock_ids": {
                     "items": {
                       "type": "string"
                     },
                     "maxItems": 2500,
+                    "type": "array"
+                  },
+                  "timing_status": {
+                    "items": {
+                      "enum": [
+                        "actual",
+                        "scheduled"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 2,
                     "type": "array"
                   }
                 },
@@ -639,6 +711,18 @@
                 },
                 "type": "object"
               },
+              "market.hot_groups": {
+                "additionalProperties": false,
+                "properties": {
+                  "limit": {
+                    "default": 20,
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
               "market.index_contributions": {
                 "additionalProperties": false,
                 "properties": {
@@ -666,9 +750,84 @@
                 },
                 "type": "object"
               },
+              "screening.intraday": {
+                "additionalProperties": false,
+                "properties": {
+                  "limit": {
+                    "default": 20,
+                    "maximum": 200,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "metric": {
+                    "default": "change_pct",
+                    "enum": [
+                      "change_pct",
+                      "estimated_trade_value",
+                      "cumulative_volume_lots",
+                      "distance_from_high_pct",
+                      "rebound_from_low_pct",
+                      "five_minute_return",
+                      "fifteen_minute_return",
+                      "intraday_range_pct",
+                      "vwap_deviation_pct",
+                      "order_book_imbalance"
+                    ],
+                    "type": "string"
+                  },
+                  "offset": {
+                    "default": 0,
+                    "maximum": 5000,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "sort_order": {
+                    "default": "desc",
+                    "enum": [
+                      "asc",
+                      "desc"
+                    ],
+                    "type": "string"
+                  },
+                  "universe": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "markets": {
+                        "items": {
+                          "enum": [
+                            "TWSE",
+                            "TPEX"
+                          ],
+                          "type": "string"
+                        },
+                        "maxItems": 2,
+                        "type": "array"
+                      },
+                      "stock_ids": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 2500,
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
               "screening.ranking": {
                 "additionalProperties": false,
                 "properties": {
+                  "incomplete_window_policy": {
+                    "default": "exclude",
+                    "enum": [
+                      "exclude",
+                      "include_and_flag",
+                      "separate_section"
+                    ],
+                    "type": "string"
+                  },
                   "limit": {
                     "default": 20,
                     "maximum": 200,
@@ -684,11 +843,20 @@
                     ],
                     "type": "string"
                   },
+                  "min_observed_periods": {
+                    "maximum": 20,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
                   "offset": {
                     "default": 0,
                     "maximum": 5000,
                     "minimum": 0,
                     "type": "integer"
+                  },
+                  "require_complete_window": {
+                    "default": true,
+                    "type": "boolean"
                   },
                   "sort_order": {
                     "default": "desc",
@@ -778,6 +946,7 @@
                 "market.breadth",
                 "market.chips",
                 "market.cross_market",
+                "market.hot_groups",
                 "market.index_contributions",
                 "market.indices",
                 "market.institutional_flow",
@@ -798,6 +967,7 @@
                 "regulation.trading_restrictions",
                 "resource.metadata",
                 "screening.coverage",
+                "screening.intraday",
                 "screening.ranking",
                 "source.health",
                 "target.identity",
@@ -944,7 +1114,10 @@
           "compact.target",
           "data.target"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "*"
         ],
@@ -990,6 +1163,25 @@
           "trade_value_source",
           "total_volume_lots",
           "total_volume_contracts",
+          "cumulative_volume_lots",
+          "cumulative_volume_shares",
+          "last_trade_volume_lots",
+          "last_trade_volume_shares",
+          "lot_size",
+          "volume_scope",
+          "volume_source",
+          "volume_source_field",
+          "provider_volume_available",
+          "last_trade_volume_semantics",
+          "last_trade_volume_source_field",
+          "last_trade_volume_status",
+          "official_daily_volume_shares",
+          "official_daily_volume_trade_date",
+          "official_daily_volume_source",
+          "official_daily_volume_scope",
+          "volume_reconciliation",
+          "volume_decision_usable",
+          "price_decision_usable",
           "bid",
           "ask",
           "best_bid_price",
@@ -1011,10 +1203,27 @@
           "snapshot_time_basis",
           "provider_event_time",
           "event_time",
+          "release_at",
           "fetched_at",
+          "computed_at",
           "received_at",
+          "served_at",
+          "event_age_seconds",
+          "provider_delay_ms",
+          "network_latency_ms",
           "source",
           "provider",
+          "primary_provider",
+          "selected_provider",
+          "fallback_provider",
+          "fallback_reason",
+          "provider_attempts",
+          "source_grade",
+          "cache_hit",
+          "cache_written",
+          "currency",
+          "price_unit",
+          "score_unit",
           "market_status",
           "session_phase",
           "quote_semantics",
@@ -1030,6 +1239,7 @@
           "is_latest_session_quote",
           "quote_age_seconds",
           "latency_ms",
+          "latency_ms_semantics",
           "depth_available",
           "depth_status",
           "auction_book_available",
@@ -1107,6 +1317,28 @@
           "trade_value_source",
           "total_volume_lots",
           "total_volume_contracts",
+          "cumulative_volume_lots",
+          "cumulative_volume_shares",
+          "last_trade_volume_lots",
+          "last_trade_volume_shares",
+          "lot_size",
+          "volume_scope",
+          "volume_source",
+          "volume_source_field",
+          "provider_volume_available",
+          "last_trade_volume_semantics",
+          "last_trade_volume_source_field",
+          "last_trade_volume_status",
+          "official_daily_volume_shares",
+          "official_daily_volume_trade_date",
+          "official_daily_volume_source",
+          "official_daily_volume_scope",
+          "volume_reconciliation",
+          "volume_decision_usable",
+          "price_decision_usable",
+          "volume_includes_odd_lot",
+          "volume_includes_after_hours",
+          "volume_includes_closing_auction",
           "bid",
           "ask",
           "best_bid_price",
@@ -1131,11 +1363,29 @@
           "snapshot_time_basis",
           "provider_event_time",
           "event_time",
+          "release_at",
           "fetched_at",
+          "computed_at",
           "refresh_outcome",
           "received_at",
+          "served_at",
+          "event_age_seconds",
+          "provider_delay_ms",
+          "network_latency_ms",
           "source",
           "provider",
+          "primary_provider",
+          "selected_provider",
+          "fallback_used",
+          "fallback_provider",
+          "fallback_reason",
+          "provider_attempts",
+          "source_grade",
+          "cache_hit",
+          "cache_written",
+          "currency",
+          "price_unit",
+          "score_unit",
           "market_status",
           "session_phase",
           "quote_semantics",
@@ -1152,6 +1402,7 @@
           "age_seconds",
           "quote_age_seconds",
           "latency_ms",
+          "latency_ms_semantics",
           "depth_available",
           "depth_status",
           "auction_book_available",
@@ -1194,7 +1445,6 @@
           "jp_stock": "jp.read_intraday_trend",
           "kr_index": "kr.read_index_intraday_trend",
           "kr_stock": "kr.read_stock_intraday_trend",
-          "stock": "tw.refresh_quote",
           "us_stock": "us.read_intraday_trend"
         },
         "frequency": "request",
@@ -1208,7 +1458,14 @@
           "compact.quote",
           "data.quote"
         ],
+        "refresh_requires_market_open_scopes": [
+          "stock"
+        ],
+        "refresh_strategies": {
+          "stock": "reader_fetch"
+        },
         "replacement_capabilities": [],
+        "schema_version": "tw.quote.snapshot.v2",
         "scopes": [
           "stock",
           "us_stock",
@@ -1251,7 +1508,9 @@
           "latency_ms",
           "provider",
           "source",
-          "freshness"
+          "freshness",
+          "quantity_unit",
+          "lot_size"
         ],
         "default_limit": 5,
         "deprecated": false,
@@ -1282,11 +1541,11 @@
           "latency_ms",
           "provider",
           "source",
-          "freshness"
+          "freshness",
+          "quantity_unit",
+          "lot_size"
         ],
-        "fill_operations": {
-          "stock": "tw.refresh_quote"
-        },
+        "fill_operations": {},
         "frequency": "intraday",
         "markets": [
           "TW"
@@ -1300,7 +1559,14 @@
           "compact.quote.components.order_book",
           "data.quote.components.order_book"
         ],
+        "refresh_requires_market_open_scopes": [
+          "stock"
+        ],
+        "refresh_strategies": {
+          "stock": "reader_fetch"
+        },
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -1315,6 +1581,12 @@
         "default_fields": [
           "status",
           "available",
+          "applicability_status",
+          "availability_status",
+          "unavailable_reason_code",
+          "market_session_status",
+          "refresh_possible_now",
+          "refresh_recommended",
           "session_phase",
           "auction_time",
           "best_bid",
@@ -1334,7 +1606,9 @@
           "latency_ms",
           "provider",
           "source",
-          "freshness"
+          "freshness",
+          "quantity_unit",
+          "lot_size"
         ],
         "default_limit": 5,
         "deprecated": false,
@@ -1345,6 +1619,12 @@
           "kind",
           "status",
           "available",
+          "applicability_status",
+          "availability_status",
+          "unavailable_reason_code",
+          "market_session_status",
+          "refresh_possible_now",
+          "refresh_recommended",
           "session_phase",
           "auction_time",
           "best_bid",
@@ -1364,11 +1644,11 @@
           "latency_ms",
           "provider",
           "source",
-          "freshness"
+          "freshness",
+          "quantity_unit",
+          "lot_size"
         ],
-        "fill_operations": {
-          "stock": "tw.refresh_quote"
-        },
+        "fill_operations": {},
         "frequency": "intraday",
         "markets": [
           "TW"
@@ -1382,9 +1662,17 @@
           "compact.quote.components.auction",
           "data.quote.components.auction"
         ],
-        "replacement_capabilities": [],
-        "scopes": [
+        "refresh_requires_market_open_scopes": [
           "stock"
+        ],
+        "refresh_strategies": {
+          "stock": "reader_fetch"
+        },
+        "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
+        "scopes": [
+          "stock",
+          "tw_index"
         ],
         "side_effect_policy": "read_only",
         "slot": "quote_auction",
@@ -1426,9 +1714,7 @@
           "delivery_status",
           "freshness"
         ],
-        "fill_operations": {
-          "stock": "tw.refresh_quote"
-        },
+        "fill_operations": {},
         "frequency": "daily",
         "markets": [
           "TW"
@@ -1442,7 +1728,12 @@
           "compact.quote.components.official_close",
           "data.quote.components.official_close"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {
+          "stock": "reader_fetch"
+        },
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock",
           "tw_index"
@@ -1500,6 +1791,8 @@
           "trade_value_unit",
           "quote_volume",
           "quote_volume_unit",
+          "currency",
+          "price_unit",
           "event_time",
           "fetched_at",
           "received_at",
@@ -1524,8 +1817,16 @@
           "approx_vwap",
           "vwap_method",
           "vwap_confidence",
+          "bar_type",
+          "synthetic",
+          "indicator_eligible",
+          "market_event",
+          "source_event_type",
+          "gap_reason",
           "partial_bar_count",
           "indicator_eligible_point_count",
+          "bar_classification_policy",
+          "indicator_policy",
           "partial_bar_policy",
           "aggregation_method",
           "source_point_count",
@@ -1622,8 +1923,17 @@
           "bar_close_time",
           "elapsed_seconds",
           "finalized",
+          "bar_type",
+          "synthetic",
+          "indicator_eligible",
+          "session_phase",
+          "market_event",
+          "source_event_type",
+          "gap_reason",
           "partial_bar_count",
           "indicator_eligible_point_count",
+          "bar_classification_policy",
+          "indicator_policy",
           "partial_bar_policy",
           "aggregation_method",
           "source_point_count",
@@ -1646,7 +1956,6 @@
           "jp_stock": "jp.read_intraday_trend",
           "kr_index": "kr.read_index_intraday_trend",
           "kr_stock": "kr.read_stock_intraday_trend",
-          "stock": "tw.refresh_intraday",
           "us_stock": "us.read_intraday_trend"
         },
         "frequency": "request",
@@ -1666,7 +1975,14 @@
           "data.intraday",
           "data.ohlcv"
         ],
+        "refresh_requires_market_open_scopes": [
+          "stock"
+        ],
+        "refresh_strategies": {
+          "stock": "reader_fetch"
+        },
         "replacement_capabilities": [],
+        "schema_version": "tw.intraday.bars.v2",
         "scopes": [
           "stock",
           "us_stock",
@@ -1780,7 +2096,10 @@
           "data.daily_prices",
           "data.ohlcv"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock",
           "us_stock",
@@ -1810,11 +2129,28 @@
           "price_context",
           "daily_indicator_time",
           "intraday_overlay",
+          "selected_horizon",
+          "effective_horizon",
+          "selected_score",
+          "selected_title",
+          "composite_score_title",
+          "selected_summary",
+          "selected_confidence",
+          "today_state",
+          "historical_structure",
+          "composite_state",
+          "fallback_reason",
+          "technical_price_basis",
+          "bid_ask_price_used",
           "levels",
           "reports",
           "freshness",
           "source",
-          "provider"
+          "provider",
+          "currency",
+          "price_unit",
+          "score_unit",
+          "score_contracts"
         ],
         "default_limit": 20,
         "deprecated": false,
@@ -1832,10 +2168,18 @@
           "intraday_overlay",
           "reports",
           "selected_horizon",
+          "effective_horizon",
           "selected_score",
           "selected_title",
+          "composite_score_title",
           "selected_summary",
           "selected_confidence",
+          "today_state",
+          "historical_structure",
+          "composite_state",
+          "fallback_reason",
+          "technical_price_basis",
+          "bid_ask_price_used",
           "scores",
           "levels",
           "support",
@@ -1845,7 +2189,11 @@
           "volume",
           "freshness",
           "source",
-          "provider"
+          "provider",
+          "currency",
+          "price_unit",
+          "score_unit",
+          "score_contracts"
         ],
         "fill_operations": {},
         "frequency": "request",
@@ -1862,7 +2210,10 @@
           "data.analysis",
           "data.technical_report"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock",
           "us_stock",
@@ -1890,7 +2241,9 @@
           "dealer_net",
           "total_institutional_net",
           "source",
-          "freshness"
+          "freshness",
+          "quantity_unit",
+          "lot_size"
         ],
         "default_limit": 5,
         "deprecated": false,
@@ -1906,7 +2259,9 @@
           "total_institutional_net",
           "total_net",
           "source",
-          "freshness"
+          "freshness",
+          "quantity_unit",
+          "lot_size"
         ],
         "fill_operations": {
           "stock": "tw.refresh_institutional"
@@ -1923,7 +2278,10 @@
           "data.institutional",
           "data.institutional_trade"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -1944,7 +2302,12 @@
           "short_covering",
           "short_today_balance",
           "source",
-          "freshness"
+          "freshness",
+          "quantity_unit",
+          "raw_unit",
+          "normalized_unit",
+          "normalized_quantities",
+          "lot_size"
         ],
         "default_limit": 5,
         "deprecated": false,
@@ -1964,7 +2327,12 @@
           "short_balance",
           "short_change",
           "source",
-          "freshness"
+          "freshness",
+          "quantity_unit",
+          "raw_unit",
+          "normalized_unit",
+          "normalized_quantities",
+          "lot_size"
         ],
         "fill_operations": {
           "stock": "tw.refresh_margin"
@@ -1981,7 +2349,10 @@
           "data.margin",
           "data.margin_trade"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -2002,7 +2373,11 @@
           "date_semantics",
           "buy_top",
           "sell_top",
-          "freshness"
+          "freshness",
+          "currency",
+          "price_unit",
+          "quantity_unit",
+          "lot_size"
         ],
         "default_limit": 15,
         "deprecated": false,
@@ -2026,7 +2401,11 @@
           "buy_top",
           "sell_top",
           "source",
-          "freshness"
+          "freshness",
+          "currency",
+          "price_unit",
+          "quantity_unit",
+          "lot_size"
         ],
         "fill_operations": {
           "stock": "tw.refresh_broker_branch"
@@ -2042,7 +2421,10 @@
           "compact.chips.broker_branch",
           "data.broker_branch"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -2086,7 +2468,10 @@
           "compact.chips.shareholding",
           "data.shareholding_distribution"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -2100,7 +2485,12 @@
         "capability_id": "fundamentals.revenue",
         "default_fields": [
           "latest_revenue",
-          "revenue_history"
+          "revenue_history",
+          "currency",
+          "source_amount_unit",
+          "normalized_amount_unit",
+          "amount_scale",
+          "ratio_unit"
         ],
         "default_limit": 12,
         "deprecated": false,
@@ -2118,7 +2508,12 @@
           "cumulative_year_over_year_pct",
           "history",
           "source",
-          "freshness"
+          "freshness",
+          "currency",
+          "source_amount_unit",
+          "normalized_amount_unit",
+          "amount_scale",
+          "ratio_unit"
         ],
         "fill_operations": {
           "stock": "tw.refresh_revenue"
@@ -2134,7 +2529,10 @@
           "compact.fundamentals",
           "data"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock",
           "us_stock",
@@ -2152,7 +2550,14 @@
         "default_fields": [
           "latest_financial",
           "financial_history",
-          "sec_fundamentals"
+          "financial_contract",
+          "sec_fundamentals",
+          "currency",
+          "source_amount_unit",
+          "normalized_amount_unit",
+          "amount_scale",
+          "ratio_unit",
+          "per_share_unit"
         ],
         "default_limit": 8,
         "deprecated": false,
@@ -2162,6 +2567,7 @@
         "fields": [
           "latest_financial",
           "financial_history",
+          "financial_contract",
           "sec_fundamentals",
           "period",
           "fiscal_year",
@@ -2173,7 +2579,13 @@
           "operating_margin",
           "history",
           "source",
-          "freshness"
+          "freshness",
+          "currency",
+          "source_amount_unit",
+          "normalized_amount_unit",
+          "amount_scale",
+          "ratio_unit",
+          "per_share_unit"
         ],
         "fill_operations": {
           "stock": "tw.refresh_financials",
@@ -2194,7 +2606,10 @@
           "data.sec_fundamentals",
           "data"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock",
           "us_stock",
@@ -2243,7 +2658,10 @@
           "data.cross_market",
           "data.us_overnight_impact"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -2258,6 +2676,7 @@
         "default_fields": [
           "symbol",
           "stock_id",
+          "stock_name",
           "security_name",
           "company_name",
           "exchange",
@@ -2266,6 +2685,16 @@
           "instrument_type",
           "sector",
           "industry",
+          "category",
+          "listed_date",
+          "paid_in_capital",
+          "issued_shares",
+          "is_active",
+          "currency",
+          "source",
+          "status",
+          "missing_fields",
+          "as_of",
           "provider",
           "fetched_at"
         ],
@@ -2277,6 +2706,7 @@
         "fields": [
           "symbol",
           "stock_id",
+          "stock_name",
           "security_name",
           "company_name",
           "exchange",
@@ -2285,6 +2715,17 @@
           "instrument_type",
           "sector",
           "industry",
+          "category",
+          "listed_date",
+          "established_date",
+          "paid_in_capital",
+          "issued_shares",
+          "is_active",
+          "currency",
+          "source",
+          "status",
+          "missing_fields",
+          "as_of",
           "cik",
           "sec_company_name",
           "provider",
@@ -2300,11 +2741,17 @@
           "type": "object"
         },
         "paths": [
+          "compact.company_profile",
+          "data.company_profile",
           "data.profile",
           "data.stock"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "tw.company.profile.v1",
         "scopes": [
+          "stock",
           "us_stock",
           "jp_stock",
           "kr_stock"
@@ -2320,11 +2767,27 @@
         "default_fields": [
           "provider",
           "symbol",
+          "stock_id",
+          "action_id",
           "action_type",
           "event_date",
+          "announce_date",
+          "ex_date",
+          "effective_date",
           "amount",
+          "cash_amount",
+          "stock_ratio",
           "split_ratio",
-          "currency"
+          "currency",
+          "source",
+          "status",
+          "as_of",
+          "actions",
+          "result_count",
+          "total_count",
+          "cache_status",
+          "empty_result_is_valid",
+          "warnings"
         ],
         "default_limit": 20,
         "deprecated": false,
@@ -2334,11 +2797,29 @@
         "fields": [
           "provider",
           "symbol",
+          "stock_id",
+          "action_id",
           "action_type",
           "event_date",
+          "announce_date",
+          "ex_date",
+          "record_date",
+          "payment_date",
+          "effective_date",
           "amount",
+          "cash_amount",
+          "stock_ratio",
           "split_ratio",
           "currency",
+          "source",
+          "status",
+          "as_of",
+          "actions",
+          "result_count",
+          "total_count",
+          "cache_status",
+          "empty_result_is_valid",
+          "warnings",
           "fetched_at"
         ],
         "fill_operations": {},
@@ -2346,14 +2827,32 @@
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
-          "properties": {},
+          "properties": {
+            "limit": {
+              "default": 20,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "years": {
+              "default": 5,
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "paths": [
+          "compact.corporate_actions",
           "data.corporate_actions"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "tw.corporate.actions.v1",
         "scopes": [
+          "stock",
           "us_stock"
         ],
         "side_effect_policy": "read_only",
@@ -2399,7 +2898,10 @@
         "paths": [
           "data.short_volume"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "us_stock"
         ],
@@ -2510,6 +3012,8 @@
           "markets",
           "trade_value_available",
           "trade_value_complete",
+          "trade_value_coverage_status",
+          "trade_value_authority_status",
           "trade_value_status",
           "trade_value_included_markets",
           "trade_value_missing_markets",
@@ -2533,7 +3037,10 @@
           "data.breadth",
           "data.market_breadth"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "tw.market.breadth.v1",
         "scopes": [
           "market",
           "tw_index",
@@ -2589,7 +3096,10 @@
           "compact.market.indices",
           "data.market.indices"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
@@ -2665,7 +3175,10 @@
           "compact.events.upcoming",
           "data.events.upcoming"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -2685,6 +3198,12 @@
           "event_types",
           "markets",
           "stock_ids",
+          "instrument_types",
+          "exclude_instrument_types",
+          "industries",
+          "financial_report_related",
+          "event_statuses",
+          "timing_statuses",
           "pagination",
           "result_count",
           "events",
@@ -2708,6 +3227,12 @@
           "event_types",
           "markets",
           "stock_ids",
+          "instrument_types",
+          "exclude_instrument_types",
+          "industries",
+          "financial_report_related",
+          "event_statuses",
+          "timing_statuses",
           "pagination",
           "result_count",
           "events",
@@ -2746,6 +3271,30 @@
               "maxItems": 3,
               "type": "array"
             },
+            "exclude_instrument_types": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "financial_report_related": {
+              "type": "boolean"
+            },
+            "industries": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 100,
+              "type": "array"
+            },
+            "instrument_types": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
             "limit": {
               "default": 300,
               "maximum": 500,
@@ -2773,11 +3322,35 @@
               "minimum": 0,
               "type": "integer"
             },
+            "status": {
+              "items": {
+                "enum": [
+                  "today",
+                  "ongoing",
+                  "upcoming",
+                  "past"
+                ],
+                "type": "string"
+              },
+              "maxItems": 4,
+              "type": "array"
+            },
             "stock_ids": {
               "items": {
                 "type": "string"
               },
               "maxItems": 2500,
+              "type": "array"
+            },
+            "timing_status": {
+              "items": {
+                "enum": [
+                  "actual",
+                  "scheduled"
+                ],
+                "type": "string"
+              },
+              "maxItems": 2,
               "type": "array"
             }
           },
@@ -2788,7 +3361,10 @@
           "data.events.calendar",
           "data.market.events_calendar"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "tw.events.calendar.v1",
         "scopes": [
           "market"
         ],
@@ -2806,7 +3382,10 @@
           "as_of",
           "years",
           "result_count",
+          "returned_count",
           "total_count",
+          "offset",
+          "sort_order",
           "events",
           "source",
           "cache_policy",
@@ -2828,7 +3407,10 @@
           "years",
           "limit",
           "result_count",
+          "returned_count",
           "total_count",
+          "offset",
+          "sort_order",
           "events",
           "source",
           "cache_policy",
@@ -2865,7 +3447,10 @@
           "compact.events.history",
           "data.events.history"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -2941,7 +3526,10 @@
           "compact.regulation.disposition",
           "data.regulation.disposition"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -3010,7 +3598,10 @@
           "compact.regulation.trading_restrictions",
           "data.regulation.trading_restrictions"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "stock"
         ],
@@ -3025,33 +3616,56 @@
         "default_fields": [
           "status",
           "as_of",
+          "observed_trade_date",
+          "computed_at",
+          "data_mode",
+          "is_intraday",
+          "snapshot_version",
+          "snapshot_id",
           "ranking_basis",
+          "aggregation_method",
+          "currency",
+          "trade_value_unit",
+          "trade_value_is_estimate",
           "is_full_market",
           "coverage",
           "count",
           "items",
           "missing",
+          "coverage_gaps",
           "warnings"
         ],
         "default_limit": 100,
         "deprecated": false,
         "description": "Taiwan sector performance with explicit ranking basis and coverage. The v1 fallback is labeled as an OMI local stock-sample aggregate, not an official full-market sector-index ranking.",
         "domain": "sectors",
-        "event_time_basis": "taiwan_completed_trade_date",
+        "event_time_basis": "taiwan_provider_event_time_or_completed_trade_date",
         "fields": [
           "kind",
+          "version",
           "status",
           "as_of",
+          "observed_trade_date",
+          "computed_at",
+          "data_mode",
+          "is_intraday",
+          "snapshot_version",
+          "snapshot_id",
           "ranking_basis",
+          "aggregation_method",
+          "currency",
+          "trade_value_unit",
+          "trade_value_is_estimate",
           "is_full_market",
           "coverage",
           "count",
           "items",
           "missing",
+          "coverage_gaps",
           "warnings"
         ],
         "fill_operations": {},
-        "frequency": "daily",
+        "frequency": "intraday_or_daily",
         "markets": [
           "TW"
         ],
@@ -3064,11 +3678,14 @@
           "compact.market.sectors",
           "data.market.sectors"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
-        "side_effect_policy": "read_only",
+        "side_effect_policy": "scheduler_owned_cache_read_or_daily_fallback",
         "slot": "market_sectors",
         "title": "Taiwan sector performance",
         "unit_semantics": "percent_counts_and_twd",
@@ -3082,7 +3699,17 @@
           "index_ids",
           "indices",
           "method",
+          "method_version",
+          "is_official",
+          "currency",
+          "trade_value_unit",
+          "contribution_unit",
+          "reconciliation_status",
           "cache_policy",
+          "external_fetch",
+          "writes_cache",
+          "tool_runs",
+          "provider_attempts",
           "missing",
           "warnings",
           "index_id",
@@ -3104,7 +3731,29 @@
           "index_ids",
           "indices",
           "method",
+          "method_version",
+          "is_official",
+          "currency",
+          "price_unit",
+          "market_value_unit",
+          "trade_value_unit",
+          "contribution_unit",
+          "component_universe_count",
+          "covered_component_count",
+          "coverage_ratio",
+          "estimated_total_contribution_points",
+          "actual_index_change_points",
+          "residual_points",
+          "residual_pct",
+          "reconciliation_status",
+          "confidence",
+          "component_policy",
+          "corporate_action_adjustment",
           "cache_policy",
+          "external_fetch",
+          "writes_cache",
+          "tool_runs",
+          "provider_attempts",
           "missing",
           "warnings",
           "index_id",
@@ -3155,7 +3804,10 @@
           "compact.contributions",
           "data.contributions"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market",
           "tw_index"
@@ -3216,7 +3868,10 @@
           "compact.market.institutional_flow",
           "data.market.institutional_flow"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
@@ -3278,7 +3933,10 @@
           "compact.market.margin_short",
           "data.market.margin_short"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
@@ -3291,8 +3949,18 @@
       {
         "capability_id": "market.sample_ranking",
         "default_fields": [
+          "status",
+          "scope",
+          "scope_label",
+          "is_full_market",
           "as_of",
           "latest_trade_date",
+          "source",
+          "currency",
+          "price_unit",
+          "volume_unit",
+          "trade_value_unit",
+          "unit_semantics",
           "sample_coverage",
           "distribution",
           "top_gainers",
@@ -3300,16 +3968,28 @@
           "value_leaders",
           "top_industries",
           "weak_industries",
-          "industry_strength_label"
+          "industry_strength_label",
+          "warnings"
         ],
         "default_limit": 20,
         "deprecated": true,
         "description": "Ranking over the bounded Taiwan daily sample available in the local OMI context. It is not a full-market screener.",
         "domain": "sample_ranking",
-        "event_time_basis": "capability_defined",
+        "event_time_basis": "taiwan_completed_trade_date",
         "fields": [
+          "kind",
+          "status",
+          "scope",
+          "scope_label",
+          "is_full_market",
           "as_of",
           "latest_trade_date",
+          "source",
+          "currency",
+          "price_unit",
+          "volume_unit",
+          "trade_value_unit",
+          "unit_semantics",
           "sample_breadth",
           "sample_coverage",
           "distribution",
@@ -3318,10 +3998,11 @@
           "value_leaders",
           "top_industries",
           "weak_industries",
-          "industry_strength_label"
+          "industry_strength_label",
+          "warnings"
         ],
         "fill_operations": {},
-        "frequency": "request",
+        "frequency": "daily",
         "markets": [
           "TW"
         ],
@@ -3331,19 +4012,23 @@
           "type": "object"
         },
         "paths": [
-          "compact"
+          "compact.sample_ranking",
+          "data.sample_ranking"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [
           "screening.ranking",
           "screening.coverage"
         ],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
         "side_effect_policy": "read_only",
         "slot": "sample_distribution",
         "title": "Taiwan local sample ranking",
-        "unit_semantics": "field_defined",
+        "unit_semantics": "TWD_per_share_shares_and_TWD",
         "writes_cache": false
       },
       {
@@ -3383,7 +4068,10 @@
           "compact.cross_market",
           "data.cross_market"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
@@ -3438,7 +4126,10 @@
           "compact.market_chips",
           "data.market_chips"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
@@ -3460,6 +4151,9 @@
           "window",
           "universe",
           "pagination",
+          "require_complete_window",
+          "min_observed_periods",
+          "incomplete_window_policy",
           "rows",
           "as_of",
           "cache_policy",
@@ -3484,7 +4178,11 @@
           "window",
           "universe",
           "pagination",
+          "require_complete_window",
+          "min_observed_periods",
+          "incomplete_window_policy",
           "rows",
+          "incomplete_rows",
           "as_of",
           "generated_at",
           "cache_policy",
@@ -3499,6 +4197,15 @@
         "parameter_schema": {
           "additionalProperties": false,
           "properties": {
+            "incomplete_window_policy": {
+              "default": "exclude",
+              "enum": [
+                "exclude",
+                "include_and_flag",
+                "separate_section"
+              ],
+              "type": "string"
+            },
             "limit": {
               "default": 20,
               "maximum": 200,
@@ -3514,11 +4221,20 @@
               ],
               "type": "string"
             },
+            "min_observed_periods": {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
             "offset": {
               "default": 0,
               "maximum": 5000,
               "minimum": 0,
               "type": "integer"
+            },
+            "require_complete_window": {
+              "default": true,
+              "type": "boolean"
             },
             "sort_order": {
               "default": "desc",
@@ -3580,7 +4296,10 @@
           "compact.screening.ranking",
           "data.screening.ranking"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "tw.screening.ranking.v2",
         "scopes": [
           "market"
         ],
@@ -3667,7 +4386,10 @@
           "compact.screening.coverage",
           "data.screening.coverage"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
@@ -3675,6 +4397,221 @@
         "slot": "screening_coverage",
         "title": "Taiwan stock screening coverage",
         "unit_semantics": "counts_and_ratio",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "screening.intraday",
+        "default_fields": [
+          "status",
+          "metric",
+          "unit",
+          "sort_order",
+          "rows",
+          "pagination",
+          "coverage",
+          "observed_trade_date",
+          "event_time",
+          "computed_at",
+          "data_mode",
+          "cache_policy",
+          "missing",
+          "warnings"
+        ],
+        "default_limit": 200,
+        "deprecated": false,
+        "description": "Deterministic ranking over scheduler-owned Taiwan rolling intraday stock state. The read path is cache-only and never fans out to per-stock providers.",
+        "domain": "screening",
+        "event_time_basis": "taiwan_provider_event_time",
+        "fields": [
+          "kind",
+          "version",
+          "status",
+          "metric",
+          "unit",
+          "frequency",
+          "sort_order",
+          "rows",
+          "pagination",
+          "coverage",
+          "observed_trade_date",
+          "event_time",
+          "computed_at",
+          "data_mode",
+          "is_intraday",
+          "cache_policy",
+          "missing",
+          "warnings"
+        ],
+        "fill_operations": {},
+        "frequency": "rolling_minute_state",
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "default": 20,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "metric": {
+              "default": "change_pct",
+              "enum": [
+                "change_pct",
+                "estimated_trade_value",
+                "cumulative_volume_lots",
+                "distance_from_high_pct",
+                "rebound_from_low_pct",
+                "five_minute_return",
+                "fifteen_minute_return",
+                "intraday_range_pct",
+                "vwap_deviation_pct",
+                "order_book_imbalance"
+              ],
+              "type": "string"
+            },
+            "offset": {
+              "default": 0,
+              "maximum": 5000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sort_order": {
+              "default": "desc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            },
+            "universe": {
+              "additionalProperties": false,
+              "properties": {
+                "markets": {
+                  "items": {
+                    "enum": [
+                      "TWSE",
+                      "TPEX"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 2,
+                  "type": "array"
+                },
+                "stock_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 2500,
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.screening.intraday",
+          "data.screening.intraday"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.screening.intraday.v2",
+        "scopes": [
+          "market"
+        ],
+        "side_effect_policy": "scheduler_owned_cache_read_only",
+        "slot": "screening_intraday",
+        "title": "Taiwan intraday stock screening",
+        "unit_semantics": "metric_defined_twd_lots_percent_or_ratio",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "market.hot_groups",
+        "default_fields": [
+          "status",
+          "groups",
+          "group_count",
+          "exchange_industry_group_count",
+          "watchlist_group_count",
+          "snapshot_version",
+          "snapshot_id",
+          "coverage",
+          "currency",
+          "trade_value_unit",
+          "trade_value_is_estimate",
+          "membership_provenance",
+          "observed_trade_date",
+          "event_time",
+          "computed_at",
+          "data_mode",
+          "missing",
+          "warnings"
+        ],
+        "default_limit": 100,
+        "deprecated": false,
+        "description": "Intraday industry and user-curated watchlist group metrics with explicit membership provenance; group membership is never inferred by the answer model.",
+        "domain": "screening",
+        "event_time_basis": "taiwan_provider_event_time",
+        "fields": [
+          "kind",
+          "version",
+          "status",
+          "groups",
+          "group_count",
+          "exchange_industry_group_count",
+          "watchlist_group_count",
+          "snapshot_version",
+          "snapshot_id",
+          "coverage",
+          "currency",
+          "trade_value_unit",
+          "trade_value_is_estimate",
+          "membership_provenance",
+          "observed_trade_date",
+          "event_time",
+          "computed_at",
+          "data_mode",
+          "is_intraday",
+          "missing",
+          "warnings"
+        ],
+        "fill_operations": {},
+        "frequency": "rolling_minute_state",
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.screening.hot_groups",
+          "data.screening.hot_groups"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.market.hot_groups.v1",
+        "scopes": [
+          "market"
+        ],
+        "side_effect_policy": "scheduler_owned_cache_read_only",
+        "slot": "market_hot_groups",
+        "title": "Taiwan intraday hot groups",
+        "unit_semantics": "group_returns_counts_twd_and_ratios",
         "writes_cache": false
       },
       {
@@ -3692,6 +4629,8 @@
           "available_cumulative_trade_value",
           "trade_value_available",
           "trade_value_complete",
+          "trade_value_coverage_status",
+          "trade_value_authority_status",
           "trade_value_status",
           "included_markets",
           "missing_markets",
@@ -3701,6 +4640,11 @@
           "field_status",
           "same_time_baseline_5d",
           "same_time_baseline_20d",
+          "baseline_readiness_status",
+          "available_sample_days",
+          "expected_5d_ready_after_sessions",
+          "expected_20d_ready_after_sessions",
+          "next_fill",
           "markets",
           "warnings",
           "limitations"
@@ -3735,6 +4679,11 @@
           "field_status",
           "same_time_baseline_5d",
           "same_time_baseline_20d",
+          "baseline_readiness_status",
+          "available_sample_days",
+          "expected_5d_ready_after_sessions",
+          "expected_20d_ready_after_sessions",
+          "next_fill",
           "history_trade_dates",
           "markets",
           "warnings",
@@ -3755,7 +4704,10 @@
           "compact.volume_state",
           "data.volume_state"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "market"
         ],
@@ -3793,7 +4745,10 @@
         "paths": [
           "compact"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "tw_futures"
         ],
@@ -3843,7 +4798,10 @@
           "compact.derivatives",
           "data.derivatives"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "tw_futures"
         ],
@@ -3914,7 +4872,10 @@
           "compact.ranking",
           "data.ranking"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "watchlist",
           "us_watchlist",
@@ -3939,6 +4900,13 @@
           "trade_date",
           "is_current",
           "stale_stock_count",
+          "cache_status",
+          "snapshot_id",
+          "snapshot_date",
+          "calculated_at",
+          "data_limitations",
+          "radar_engine",
+          "radar_v2_summary",
           "buckets",
           "results"
         ],
@@ -3960,6 +4928,13 @@
           "is_current",
           "current_stock_count",
           "stale_stock_count",
+          "cache_status",
+          "snapshot_id",
+          "snapshot_date",
+          "calculated_at",
+          "data_limitations",
+          "radar_engine",
+          "radar_v2_summary",
           "buckets",
           "results"
         ],
@@ -3975,7 +4950,10 @@
           "compact.radar",
           "data.radar"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.watchlist.radar.v2",
         "scopes": [
           "watchlist",
           "us_watchlist",
@@ -4033,7 +5011,10 @@
           "compact.evidence_coverage",
           "compact.resources"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "watchlist",
           "us_watchlist",
@@ -4081,7 +5062,10 @@
           "data.summary",
           "compact.resources"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "portfolio"
         ],
@@ -4144,7 +5128,10 @@
         "paths": [
           "data.holdings"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "portfolio"
         ],
@@ -4185,7 +5172,10 @@
           "data.valuation",
           "compact.resources.valuation"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "portfolio"
         ],
@@ -4227,7 +5217,10 @@
         "paths": [
           "data.series"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "us_macro"
         ],
@@ -4271,7 +5264,10 @@
         "paths": [
           "data.observations"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "us_macro"
         ],
@@ -4322,7 +5318,10 @@
           "data.instrument",
           "compact.resources.instrument"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "resource_asset"
         ],
@@ -4391,7 +5390,10 @@
           "data.order_book",
           "data.order_books"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "crypto_asset",
           "crypto_market"
@@ -4458,7 +5460,10 @@
           "compact.derivatives",
           "data.derivatives"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "crypto_asset",
           "crypto_market"
@@ -4506,7 +5511,10 @@
         "paths": [
           "compact"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "capability_status"
         ],
@@ -4556,7 +5564,10 @@
         "paths": [
           "compact"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "data_freshness"
         ],
@@ -4569,9 +5580,13 @@
       {
         "capability_id": "diagnostics.source_health",
         "default_fields": [
+          "status",
+          "as_of",
           "filters",
           "summary",
           "entries",
+          "provider_events",
+          "warnings",
           "freshness",
           "returned_count",
           "truncated",
@@ -4583,9 +5598,13 @@
         "domain": "source_health",
         "event_time_basis": "capability_defined",
         "fields": [
+          "status",
+          "as_of",
           "filters",
           "summary",
           "entries",
+          "provider_events",
+          "warnings",
           "freshness",
           "slots",
           "compact",
@@ -4602,11 +5621,17 @@
           "type": "object"
         },
         "paths": [
+          "compact.source_health",
+          "data.source_health",
+          "freshness.source_health",
           "data"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.diagnostics.source_health.v1",
         "scopes": [
-          "source_health"
+          "*"
         ],
         "side_effect_policy": "read_only",
         "slot": "data_quality",
@@ -4623,7 +5648,7 @@
           "warnings"
         ],
         "default_limit": 20,
-        "deprecated": false,
+        "deprecated": true,
         "description": "Canonical OMI capability source.health.",
         "domain": "source_health",
         "event_time_basis": "capability_defined",
@@ -4648,7 +5673,12 @@
           "data.source_health",
           "freshness.source_health"
         ],
-        "replacement_capabilities": [],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [
+          "diagnostics.source_health"
+        ],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "*"
         ],
@@ -4696,7 +5726,10 @@
         "paths": [
           "freshness"
         ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
         "replacement_capabilities": [],
+        "schema_version": "omi.capability.v1",
         "scopes": [
           "*"
         ],
@@ -4707,10 +5740,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "6fd8eacb0f17e48d0c369a0f49da887949ad856bc19249f5a2b13a5577965eb2",
-    "x-omi-capability-registry-version": "omi.capability.registry.v2",
+    "x-omi-capability-registry-digest": "9d7e453c49c4c209c8247239738c2b00942f3c73ca12090370ee218d51ec7a82",
+    "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "6fd8eacb0f17e48d0c369a0f49da887949ad856bc19249f5a2b13a5577965eb2",
+    "x-omi-public-contract-digest": "9d7e453c49c4c209c8247239738c2b00942f3c73ca12090370ee218d51ec7a82",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -5013,6 +6046,8 @@
     "market.chips",
     "screening.ranking",
     "screening.coverage",
+    "screening.intraday",
+    "market.hot_groups",
     "market.volume_state",
     "derivatives.positioning",
     "derivatives.structure",
@@ -5033,9 +6068,9 @@
     "source.health",
     "data.freshness"
   ],
-  "capability_registry_version": "omi.capability.registry.v2",
+  "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "6fd8eacb0f17e48d0c369a0f49da887949ad856bc19249f5a2b13a5577965eb2",
+  "digest": "9d7e453c49c4c209c8247239738c2b00942f3c73ca12090370ee218d51ec7a82",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

@@ -57,6 +57,7 @@ import type {
   MonthlyRevenueRead,
   ShareholdingDistributionWeeklyRead,
   StockChipCoverageRead,
+  TaiwanFinancialContractRead,
 } from "@/types/market";
 import { useT } from "@/i18n";
 import type { Dispatch, SetStateAction } from "react";
@@ -73,6 +74,7 @@ type StockDetailDataPanelProps = {
   earningsView: EarningsView;
   financialMetric: FinancialMetricQuarterlyRead | null;
   financialMetricHistory: FinancialMetricQuarterlyRead[];
+  financialContract: TaiwanFinancialContractRead | null;
   institutionalHoldingRatio: InstitutionalHoldingRatioRead | null;
   institutionalHistory: InstitutionalTradeDailyRead[];
   institutionalHoverDate: string | null;
@@ -98,6 +100,12 @@ type StockDetailDataPanelProps = {
   stockId: string;
 };
 
+function financialDecimal(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export default function StockDetailDataPanel({
   activeDataTab,
   branchDays,
@@ -110,6 +118,7 @@ export default function StockDetailDataPanel({
   earningsView,
   financialMetric,
   financialMetricHistory,
+  financialContract,
   institutionalHoldingRatio,
   institutionalHistory,
   institutionalHoverDate,
@@ -172,7 +181,9 @@ export default function StockDetailDataPanel({
     if (activeDataTab === "earnings") {
       return (
         (financialMetric !== null && financialMetric.stock_id !== selectedStockId) ||
-        hasRowsFromOtherStock(financialMetricHistory)
+        hasRowsFromOtherStock(financialMetricHistory) ||
+        (financialContract !== null &&
+          financialContract.target.stock_id !== selectedStockId)
       );
     }
 
@@ -897,11 +908,37 @@ export default function StockDetailDataPanel({
   }
 
   function renderEarningsTab() {
+    const currentFinancialContract =
+      financialContract?.target.stock_id === selectedStockId
+        ? financialContract
+        : null;
     const activeRows = earningsSeries.length
       ? earningsSeries
       : financialMetric
         ? buildEarningsSeries([financialMetric], earningsView)
         : [];
+    const financialContractReady =
+      currentFinancialContract?.normalized.status === "ready" &&
+      currentFinancialContract.derived.status === "ready" &&
+      currentFinancialContract.quality.decision_usable;
+    const sourceEpsByPeriod = new Map(
+      activeRows.map((row) => [row.period, row.eps] as const)
+    );
+    const singleQuarterEpsByPeriod = new Map(
+      (currentFinancialContract?.derived.single_quarter_eps ?? []).map((row) => [
+        row.period,
+        row,
+      ])
+    );
+    const normalizedRows = (
+      currentFinancialContract?.normalized.facts ?? []
+    )
+      .filter((row) => row.metric_code === "basic_eps")
+      .slice()
+      .reverse()
+      .slice(0, 8);
+    const latestSingleQuarterEps =
+      currentFinancialContract?.derived.single_quarter_eps?.at(-1) ?? null;
 
     if (!activeRows.length) {
       return <EmptyDataState message={t("stockDetail.dataPanel.empty.earnings")} />;
@@ -936,6 +973,172 @@ export default function StockDetailDataPanel({
             ))}
           </div>
         </div>
+
+        <div className="border border-omi-warning-border bg-omi-warning-soft px-3 py-2 text-xs leading-5 text-omi-warning-strong">
+          <div>{t("stockDetail.dataPanel.earningsSemanticsWarning")}</div>
+          {currentFinancialContract?.quality.revenue_continuity.missing_periods
+            ?.length ? (
+            <div className="mt-1">
+              {t("stockDetail.dataPanel.revenueContinuityWarning", {
+                periods:
+                  currentFinancialContract.quality.revenue_continuity.missing_periods.join(
+                    ", "
+                  ),
+              })}
+            </div>
+          ) : null}
+        </div>
+
+        {currentFinancialContract ? (
+          <div
+            className={[
+              "border px-3 py-2 text-xs leading-5",
+              financialContractReady
+                ? "border-omi-success-border bg-omi-success-soft text-omi-success-strong"
+                : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
+            ].join(" ")}
+          >
+            {financialContractReady
+              ? t("stockDetail.dataPanel.financialContractReady", {
+                  version: currentFinancialContract.contract_version,
+                })
+              : t("stockDetail.dataPanel.financialContractBlocked", {
+                  version: currentFinancialContract.contract_version,
+                  status:
+                    currentFinancialContract.normalized.status ??
+                    currentFinancialContract.derived.status ??
+                    "blocked",
+                })}
+          </div>
+        ) : null}
+
+        {financialContractReady ? (
+          <div
+            className="space-y-3 border border-omi-border-subtle bg-omi-surface px-3 py-3"
+            data-testid="financial-normalized-summary"
+          >
+            <div className="grid grid-cols-2 gap-px overflow-hidden border border-omi-border-subtle bg-omi-border-subtle">
+              {[
+                {
+                  label: t("stockDetail.dataPanel.financial.ttmEps"),
+                  value: formatPrice(
+                    financialDecimal(currentFinancialContract.derived.ttm_eps)
+                  ),
+                },
+                {
+                  label: t("stockDetail.dataPanel.financial.latestQuarterEps"),
+                  value: formatPrice(
+                    financialDecimal(latestSingleQuarterEps?.value)
+                  ),
+                },
+                {
+                  label: t("stockDetail.dataPanel.financial.peTtm"),
+                  value:
+                    currentFinancialContract.valuation.status === "ready"
+                      ? formatPrice(
+                          financialDecimal(
+                            currentFinancialContract.valuation.pe_ttm
+                          )
+                        )
+                      : t("stockDetail.dataPanel.financial.priceRequired"),
+                },
+                {
+                  label: t("stockDetail.dataPanel.financial.ttmPeriods"),
+                  value:
+                    currentFinancialContract.derived.ttm_periods?.join(" · ") ??
+                    "-",
+                },
+              ].map((item) => (
+                <div key={item.label} className="bg-omi-surface-subtle px-3 py-2">
+                  <div className="text-[11px] font-semibold text-omi-text-muted">
+                    {item.label}
+                  </div>
+                  <div className="mt-1 font-semibold text-omi-text-strong">
+                    {item.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="break-all text-[11px] leading-5 text-omi-text-muted">
+              {t("stockDetail.dataPanel.financial.comparisonBasis", {
+                basis:
+                  currentFinancialContract.normalized.comparison_basis_id ?? "-",
+              })}
+            </div>
+            {currentFinancialContract.valuation.status === "ready" ? (
+              <div className="break-all text-[11px] leading-5 text-omi-text-muted">
+                <div>
+                  {t("stockDetail.dataPanel.financial.valuationPrice", {
+                    price: formatPrice(
+                      financialDecimal(currentFinancialContract.valuation.price)
+                    ),
+                    date: formatDate(
+                      currentFinancialContract.valuation.price_trade_date
+                    ),
+                    source:
+                      currentFinancialContract.valuation.price_source ?? "-",
+                  })}
+                </div>
+                <div>
+                  {t("stockDetail.dataPanel.financial.valuationPriceBasis", {
+                    basis:
+                      currentFinancialContract.valuation.price_basis ?? "-",
+                    asOf:
+                      currentFinancialContract.valuation.price_as_of ?? "-",
+                  })}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="overflow-x-auto border border-omi-border-subtle">
+              <div className="min-w-[620px]">
+                <div className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle bg-omi-surface-subtle text-center text-xs font-semibold text-omi-text-muted">
+                  <div className="px-2 py-2 text-left">
+                    {t("stockDetail.dataPanel.columns.period")}
+                  </div>
+                  <div className="border-l border-omi-border-subtle px-2 py-2">
+                    {t("stockDetail.dataPanel.financial.reportedEps")}
+                  </div>
+                  <div className="border-l border-omi-border-subtle px-2 py-2">
+                    {t("stockDetail.dataPanel.financial.normalizedYtdEps")}
+                  </div>
+                  <div className="border-l border-omi-border-subtle px-2 py-2">
+                    {t("stockDetail.dataPanel.financial.singleQuarterEps")}
+                  </div>
+                  <div className="border-l border-omi-border-subtle px-2 py-2">
+                    {t("stockDetail.dataPanel.financial.adjustmentFactor")}
+                  </div>
+                </div>
+                {normalizedRows.map((row) => {
+                  const singleQuarter = singleQuarterEpsByPeriod.get(row.period);
+                  return (
+                    <div
+                      key={`${row.source_fact_id}:${row.period}`}
+                      className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle text-center text-xs last:border-b-0"
+                    >
+                      <div className="bg-omi-surface-subtle px-2 py-2 text-left font-semibold text-omi-text">
+                        {row.period}
+                      </div>
+                      <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
+                        {formatPrice(sourceEpsByPeriod.get(row.period))}
+                      </div>
+                      <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
+                        {formatPrice(financialDecimal(row.normalized_value))}
+                      </div>
+                      <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
+                        {formatPrice(financialDecimal(singleQuarter?.value))}
+                      </div>
+                      <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-muted">
+                        {formatPrice(financialDecimal(row.adjustment_factor))}×
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <EarningsTrendChart points={activeRows} view={earningsView} />
 

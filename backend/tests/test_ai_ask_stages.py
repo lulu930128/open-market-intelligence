@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from app.ai import ask_stages, llm, pipeline_progress
+from app.ai import ask_stages, capability_contract, llm, pipeline_progress
 from app.ai.schemas import AiAskRequest
 
 
@@ -47,6 +47,45 @@ class AiAskStagesTests(unittest.TestCase):
         self.assertEqual(stage.policy["question_intent"], "entry_decision")
         self.assertIn("question_understanding", stage.policy)
         self.assertEqual(events[0]["stage"], "question_understanding")
+
+    def test_build_question_stage_owns_intraday_inference_without_refresh_escalation(
+        self,
+    ) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        question = "TSM intraday live quote"
+        payload = AiAskRequest(
+            question=question,
+            target={"type": "us_stock", "id": "TSM"},
+            analysis_horizon="auto",
+            allow_external_fetch=False,
+        )
+
+        stage = ask_stages.build_question_stage(
+            payload=payload,
+            scope_type="us_stock",
+            server_policy=object(),
+            progress=progress,
+            build_policy=lambda request, server_policy: {
+                "allow_external_fetch": request.allow_external_fetch
+            },
+            infer_mode=lambda request, scope_type, policy: "data_only",
+            normalize_analysis_horizon=lambda value: value,
+        )
+
+        self.assertEqual(stage.payload.question, question)
+        self.assertEqual(stage.requested_horizon, "auto")
+        self.assertEqual(stage.effective_horizon, "intraday")
+        self.assertEqual(stage.payload.analysis_horizon, "intraday")
+        self.assertEqual(
+            stage.policy["analysis_horizon"],
+            {
+                "requested": "auto",
+                "effective": "intraday",
+                "defaulted": True,
+            },
+        )
+        self.assertFalse(stage.payload.allow_external_fetch)
+        self.assertFalse(stage.policy["allow_external_fetch"])
 
     def test_build_question_stage_attaches_response_preferences(self) -> None:
         progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
@@ -179,6 +218,88 @@ class AiAskStagesTests(unittest.TestCase):
         self.assertEqual(state.warnings, ["refreshed with fallback"])
         self.assertTrue(state.freshness_result["is_current"])
         self.assertIn("tool_execution", [event["stage"] for event in events])
+
+    def test_execute_tool_stages_runs_tw_selected_continuation_when_fresh(
+        self,
+    ) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        target = {"type": "tw_stock", "id": "8299"}
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["ownership.distribution"]},
+            output="evidence_only",
+            realtime_policy="prefer_live",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="general",
+        )
+        action_id = capability_contract.fill_action_id(
+            capability_id="ownership.distribution",
+            target=target,
+            selection_version=selection["version"],
+        )
+        payload = AiAskRequest(
+            question="補抓選取的股權分散能力",
+            target=target,
+            allow_external_fetch=True,
+            contract_version="omi.decision.v4",
+            continuation={
+                "plan_id": capability_contract.fill_plan_id(
+                    target=target,
+                    action_ids=[action_id],
+                ),
+                "plan_action_ids": [action_id],
+                "selected_action_ids": [action_id],
+            },
+        )
+        captured: dict = {}
+
+        def run_tw(**kwargs):
+            captured.update(kwargs)
+            return {
+                "tool_plan": {"provider": "deterministic"},
+                "tool_runs": [],
+                "warnings": [],
+                "freshness": {
+                    "is_current": True,
+                    "refresh_recommended": False,
+                },
+            }
+
+        state = ask_stages.execute_tool_stages(
+            scope_type="stock",
+            payload=payload,
+            resolution=SimpleNamespace(selected_scope_id="8299"),
+            policy={"can_external_fetch": True},
+            query_plan={
+                "realtime_policy": "prefer_live",
+                "external_refresh_allowed": True,
+                "selected_capabilities": ["ownership.distribution"],
+                "selection": selection,
+            },
+            freshness_result={
+                "is_current": True,
+                "refresh_recommended": False,
+            },
+            progress=progress,
+            progress_callback=None,
+            resolution_target=lambda resolution: {
+                "type": "tw_stock",
+                "id": resolution.selected_scope_id,
+            },
+            require_scope_id=lambda request, scope_type: request.target["id"],
+            require_group_id=lambda request: 1,
+            refresh_before_answer_enabled=lambda request: True,
+            run_us_stock_tool_session=lambda **kwargs: {},
+            run_tw_stock_tool_session=run_tw,
+            run_tw_watchlist_tool_session=lambda **kwargs: {},
+        )
+
+        self.assertEqual(captured["stock_id"], "8299")
+        self.assertEqual(
+            captured["requested_capabilities"],
+            ("ownership.distribution",),
+        )
+        self.assertEqual(state.tool_plan["provider"], "deterministic")
 
     def test_execute_tool_stages_runs_bounded_jp_stale_refresh(self) -> None:
         progress = pipeline_progress.OmiPipelineProgress(lambda event: None)

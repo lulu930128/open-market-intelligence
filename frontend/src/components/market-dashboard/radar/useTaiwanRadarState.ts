@@ -1,16 +1,16 @@
 "use client";
 
-import { fetchJson, requestJson } from "@/lib/api";
+import { fetchJson } from "@/lib/api";
 import { getTaiwanMarketRefreshState } from "@/lib/taiwanMarketTime";
 import type {
   WatchlistGroupRadarRead,
   WatchlistRadarMode,
-  WatchlistRadarOutcomeSummaryRead,
+  WatchlistRadarV2OutcomeSummaryRead,
 } from "@/types/market";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type TaiwanRadarLoadState = "idle" | "loading" | "success" | "error";
-export type TaiwanRadarErrorKind = "radar" | "outcome" | "history" | "evaluate";
+export type TaiwanRadarErrorKind = "radar" | "outcome" | "history";
 
 type UseTaiwanRadarStateOptions = {
   active: boolean;
@@ -56,6 +56,7 @@ function radarParams(
     use_intraday: useIntraday,
     intraday_limit: WATCHLIST_INTRADAY_LIMIT,
     prefer_snapshot: preferSnapshot,
+    version: "v2",
   };
 }
 
@@ -73,18 +74,18 @@ export function useTaiwanRadarState({
     initialRadar ? "success" : "idle"
   );
   const [outcomeSummary, setOutcomeSummary] =
-    useState<WatchlistRadarOutcomeSummaryRead | null>(null);
+    useState<WatchlistRadarV2OutcomeSummaryRead | null>(null);
   const [outcomeLoadState, setOutcomeLoadState] =
     useState<TaiwanRadarLoadState>("idle");
   const [outcomeHistory, setOutcomeHistory] =
-    useState<WatchlistRadarOutcomeSummaryRead[]>([]);
+    useState<WatchlistRadarV2OutcomeSummaryRead[]>([]);
   const [outcomeHistoryOpen, setOutcomeHistoryOpen] = useState(false);
   const [outcomeHistoryLoadState, setOutcomeHistoryLoadState] =
     useState<TaiwanRadarLoadState>("idle");
   const [outcomeDetailLoadState, setOutcomeDetailLoadState] =
     useState<TaiwanRadarLoadState>("idle");
   const [selectedOutcomeSnapshotId, setSelectedOutcomeSnapshotId] =
-    useState<number | null>(null);
+    useState<string | null>(null);
   const radarRequestSeqRef = useRef(0);
   const outcomeRequestSeqRef = useRef(0);
   const historyRequestSeqRef = useRef(0);
@@ -92,22 +93,16 @@ export function useTaiwanRadarState({
   const modeRef = useRef(mode);
   const groupIdRef = useRef(groupId);
   const onErrorRef = useRef(onError);
-  const outcomeSummaryRef = useRef(outcomeSummary);
-  const outcomeHistoryRef = useRef(outcomeHistory);
   const selectedOutcomeSnapshotIdRef = useRef(selectedOutcomeSnapshotId);
   const previousGroupIdRef = useRef(groupId);
 
   useEffect(() => {
     groupIdRef.current = groupId;
     onErrorRef.current = onError;
-    outcomeSummaryRef.current = outcomeSummary;
-    outcomeHistoryRef.current = outcomeHistory;
     selectedOutcomeSnapshotIdRef.current = selectedOutcomeSnapshotId;
   }, [
     groupId,
     onError,
-    outcomeHistory,
-    outcomeSummary,
     selectedOutcomeSnapshotId,
   ]);
 
@@ -143,7 +138,7 @@ export function useTaiwanRadarState({
     async (
       currentGroupId: number,
       options?: { mode?: WatchlistRadarMode; silent?: boolean }
-    ): Promise<WatchlistRadarOutcomeSummaryRead | null> => {
+    ): Promise<WatchlistRadarV2OutcomeSummaryRead | null> => {
       const requestSeq = outcomeRequestSeqRef.current + 1;
       outcomeRequestSeqRef.current = requestSeq;
       const currentMode = options?.mode ?? modeRef.current;
@@ -154,9 +149,13 @@ export function useTaiwanRadarState({
       }
 
       try {
-        const outcomeData = await fetchJson<WatchlistRadarOutcomeSummaryRead>(
-          `/api/watchlists/groups/${currentGroupId}/radar/outcomes/latest`,
-          { mode: currentMode }
+        const outcomeData = await fetchJson<WatchlistRadarV2OutcomeSummaryRead>(
+          `/api/watchlists/groups/${currentGroupId}/radar/v2/outcomes/latest`,
+          {
+            mode: currentMode,
+            horizon_trading_days: 1,
+            item_limit: WATCHLIST_RADAR_OUTCOME_ITEM_LIMIT,
+          }
         );
 
         if (outcomeRequestSeqRef.current !== requestSeq) return null;
@@ -181,18 +180,20 @@ export function useTaiwanRadarState({
   const loadOutcomeSnapshotDetails = useCallback(
     async (
       currentGroupId: number,
-      snapshotRunId: number,
+      snapshotDate: string,
       currentMode: WatchlistRadarMode
-    ): Promise<WatchlistRadarOutcomeSummaryRead | null> => {
+    ): Promise<WatchlistRadarV2OutcomeSummaryRead | null> => {
       const requestSeq = outcomeDetailRequestSeqRef.current + 1;
       outcomeDetailRequestSeqRef.current = requestSeq;
       setOutcomeDetailLoadState("loading");
 
       try {
-        const outcomeData = await fetchJson<WatchlistRadarOutcomeSummaryRead>(
-          `/api/watchlists/groups/${currentGroupId}/radar/outcomes/snapshots/${snapshotRunId}`,
+        const outcomeData = await fetchJson<WatchlistRadarV2OutcomeSummaryRead>(
+          `/api/watchlists/groups/${currentGroupId}/radar/v2/outcomes/latest`,
           {
             mode: currentMode,
+            snapshot_date: snapshotDate,
+            horizon_trading_days: 1,
             item_limit: WATCHLIST_RADAR_OUTCOME_ITEM_LIMIT,
           }
         );
@@ -201,7 +202,7 @@ export function useTaiwanRadarState({
 
         setOutcomeHistory((current) =>
           current.map((row) =>
-            row.snapshot?.id === outcomeData.snapshot?.id ? outcomeData : row
+            row.snapshot_date === outcomeData.snapshot_date ? outcomeData : row
           )
         );
         setOutcomeDetailLoadState("success");
@@ -221,7 +222,7 @@ export function useTaiwanRadarState({
     async (
       currentGroupId: number,
       options?: { mode?: WatchlistRadarMode; silent?: boolean }
-    ): Promise<WatchlistRadarOutcomeSummaryRead[] | null> => {
+    ): Promise<WatchlistRadarV2OutcomeSummaryRead[] | null> => {
       const requestSeq = historyRequestSeqRef.current + 1;
       historyRequestSeqRef.current = requestSeq;
       const currentMode = options?.mode ?? modeRef.current;
@@ -231,9 +232,9 @@ export function useTaiwanRadarState({
       }
 
       try {
-        const historyData = await fetchJson<WatchlistRadarOutcomeSummaryRead[]>(
-          `/api/watchlists/groups/${currentGroupId}/radar/outcomes/history`,
-          { mode: currentMode, limit: 60, item_limit: 0 }
+        const historyData = await fetchJson<WatchlistRadarV2OutcomeSummaryRead[]>(
+          `/api/watchlists/groups/${currentGroupId}/radar/v2/outcomes/history`,
+          { mode: currentMode, horizon_trading_days: 1, limit: 60 }
         );
 
         if (historyRequestSeqRef.current !== requestSeq) return null;
@@ -242,9 +243,9 @@ export function useTaiwanRadarState({
         const currentSnapshotId = selectedOutcomeSnapshotIdRef.current;
         const nextSnapshotId =
           currentSnapshotId &&
-          historyData.some((row) => row.snapshot?.id === currentSnapshotId)
+          historyData.some((row) => row.snapshot_date === currentSnapshotId)
             ? currentSnapshotId
-            : (historyData[0]?.snapshot?.id ?? null);
+            : (historyData[0]?.snapshot_date ?? null);
         setSelectedOutcomeSnapshotId(nextSnapshotId);
         selectedOutcomeSnapshotIdRef.current = nextSnapshotId;
         setOutcomeHistoryLoadState("success");
@@ -316,9 +317,21 @@ export function useTaiwanRadarState({
 
         if (radarRequestSeqRef.current !== requestSeq) return null;
 
+        if (
+          radarData.radar_engine?.active_version !== "radar_v2.0" ||
+          radarData.radar_engine?.mode !== "active"
+        ) {
+          throw new Error(
+            "Taiwan Radar requires the active radar_v2.0 backend contract."
+          );
+        }
+
         setRadar(radarData);
         setLoadState("success");
-        void loadOutcome(currentGroupId, { mode: currentMode, silent: true });
+        void loadOutcome(currentGroupId, {
+          mode: currentMode,
+          silent: true,
+        });
         return radarData;
       } catch (error) {
         if (radarRequestSeqRef.current !== requestSeq) return null;
@@ -410,70 +423,20 @@ export function useTaiwanRadarState({
   }, [loadOutcomeHistory]);
 
   const selectOutcomeSnapshot = useCallback(
-    (snapshotRunId: number) => {
-      setSelectedOutcomeSnapshotId(snapshotRunId);
-      selectedOutcomeSnapshotIdRef.current = snapshotRunId;
+    (snapshotDate: string) => {
+      setSelectedOutcomeSnapshotId(snapshotDate);
+      selectedOutcomeSnapshotIdRef.current = snapshotDate;
       const currentGroupId = groupIdRef.current;
       if (currentGroupId !== null) {
         void loadOutcomeSnapshotDetails(
           currentGroupId,
-          snapshotRunId,
+          snapshotDate,
           modeRef.current
         );
       }
     },
     [loadOutcomeSnapshotDetails]
   );
-
-  const evaluateOutcome = useCallback(async (snapshotRunId: number) => {
-    const currentGroupId = groupIdRef.current;
-    if (currentGroupId === null) return null;
-
-    const currentMode = modeRef.current;
-    const requestSeq = outcomeRequestSeqRef.current + 1;
-    outcomeRequestSeqRef.current = requestSeq;
-    setOutcomeLoadState("loading");
-
-    try {
-      const outcomeData = await requestJson<WatchlistRadarOutcomeSummaryRead>(
-        `/api/watchlists/groups/${currentGroupId}/radar/outcomes/evaluate`,
-        { method: "POST" },
-        {
-          mode: currentMode,
-          snapshot_run_id: snapshotRunId,
-          item_limit: WATCHLIST_RADAR_OUTCOME_ITEM_LIMIT,
-        }
-      );
-
-      if (outcomeRequestSeqRef.current !== requestSeq) return null;
-
-      outcomeDetailRequestSeqRef.current += 1;
-      setOutcomeHistory((current) =>
-        current.map((row) =>
-          row.snapshot?.id === outcomeData.snapshot?.id ? outcomeData : row
-        )
-      );
-      const latestSnapshotId =
-        outcomeHistoryRef.current[0]?.snapshot?.id ??
-        outcomeSummaryRef.current?.snapshot?.id ??
-        null;
-      if (outcomeData.snapshot?.id === latestSnapshotId) {
-        setOutcomeSummary(outcomeData);
-      }
-      setSelectedOutcomeSnapshotId(outcomeData.snapshot?.id ?? snapshotRunId);
-      selectedOutcomeSnapshotIdRef.current =
-        outcomeData.snapshot?.id ?? snapshotRunId;
-      setOutcomeLoadState("success");
-      setOutcomeDetailLoadState("success");
-      return outcomeData;
-    } catch (error) {
-      if (outcomeRequestSeqRef.current !== requestSeq) return null;
-
-      setOutcomeLoadState("error");
-      onErrorRef.current("evaluate", error, currentGroupId);
-      return null;
-    }
-  }, []);
 
   useEffect(() => {
     if (!active || routeMode === null || routeMode === modeRef.current) return;
@@ -530,7 +493,6 @@ export function useTaiwanRadarState({
     actions: {
       changeMode,
       closeOutcomeHistory,
-      evaluateOutcome,
       load,
       openOutcomeHistory,
       prepareCompanionLoad,

@@ -399,6 +399,8 @@ def _intraday_row_to_point(row: MarketIntradayBar) -> dict:
 
 def _interval_seconds(interval: str) -> int:
     normalized = str(interval or "1m").strip().lower()
+    if normalized.endswith("s") and normalized[:-1].isdigit():
+        return int(normalized[:-1])
     if normalized.endswith("m") and normalized[:-1].isdigit():
         return int(normalized[:-1]) * 60
     if normalized.endswith("h") and normalized[:-1].isdigit():
@@ -413,6 +415,81 @@ def _provider_volume_unit(source: str) -> str:
     if "yahoo" in normalized:
         return "shares"
     return "unknown"
+
+
+def _intraday_bar_semantics(
+    point: dict,
+    *,
+    point_time: datetime | None,
+    interval: str,
+) -> dict:
+    explicit_bar_type = str(point.get("bar_type") or "").strip().lower()
+    known_bar_types = {
+        "regular_interval",
+        "closing_auction",
+        "official_close_marker",
+        "post_close_summary",
+        "provider_irregular",
+        "synthetic_fill",
+    }
+    synthetic = bool(point.get("synthetic")) or explicit_bar_type == "synthetic_fill"
+    volume = _as_int(
+        point.get("volume_shares")
+        if point.get("volume_shares") is not None
+        else point.get("volume")
+    )
+
+    if explicit_bar_type in known_bar_types:
+        bar_type = explicit_bar_type
+    elif synthetic:
+        bar_type = "synthetic_fill"
+    elif point_time is None:
+        bar_type = "provider_irregular"
+    else:
+        local_time = point_time.astimezone(TAIPEI_TZ)
+        interval_seconds = max(_interval_seconds(interval), 1)
+        seconds_from_hour = local_time.minute * 60 + local_time.second
+        interval_aligned = seconds_from_hour % interval_seconds == 0
+        clock = local_time.time().replace(tzinfo=None)
+        if not interval_aligned:
+            bar_type = "provider_irregular"
+        elif clock == time(13, 30) and (volume is None or volume == 0):
+            bar_type = "official_close_marker"
+        elif time(13, 25) <= clock <= time(13, 30):
+            bar_type = "closing_auction"
+        elif time(9, 0) <= clock < time(13, 25):
+            bar_type = "regular_interval"
+        else:
+            bar_type = "provider_irregular"
+
+    session_phase = {
+        "regular_interval": "regular",
+        "closing_auction": "closing_auction",
+        "official_close_marker": "post_close",
+        "post_close_summary": "post_close",
+        "synthetic_fill": "synthetic",
+        "provider_irregular": "provider_irregular",
+    }[bar_type]
+    market_event = {
+        "regular_interval": "continuous_trading",
+        "closing_auction": "closing_auction",
+        "official_close_marker": "official_close",
+        "post_close_summary": "post_close_confirmation",
+        "synthetic_fill": "synthetic_fill",
+        "provider_irregular": "provider_irregular",
+    }[bar_type]
+    source_event_type = (
+        point.get("source_event_type")
+        or ("synthetic" if synthetic else "provider_bar")
+    )
+    return {
+        "bar_type": bar_type,
+        "synthetic": synthetic,
+        "session_phase": session_phase,
+        "market_event": market_event,
+        "source_event_type": source_event_type,
+        "gap_reason": point.get("gap_reason"),
+    }
 
 
 def _enrich_intraday_contract(
@@ -483,8 +560,21 @@ def _enrich_intraday_contract(
             if point_time is not None
             else None
         )
+        bar_semantics = _intraday_bar_semantics(
+            point,
+            point_time=point_time,
+            interval=interval,
+        )
+        finalized = not is_partial if point_time is not None else False
+        indicator_eligible = bool(
+            finalized
+            and not bar_semantics["synthetic"]
+            and bar_semantics["bar_type"]
+            in {"regular_interval", "closing_auction"}
+        )
         point.update(
             {
+                "close": close_price,
                 "volume_shares": volume_shares,
                 "volume_lots": (
                     volume_shares / 1000 if volume_shares is not None else None
@@ -507,7 +597,9 @@ def _enrich_intraday_contract(
                 ),
                 "elapsed_seconds": elapsed_seconds,
                 "is_partial": is_partial,
-                "finalized": not is_partial if point_time is not None else False,
+                "finalized": finalized,
+                "indicator_eligible": indicator_eligible,
+                **bar_semantics,
             }
         )
         enriched.append(point)
@@ -581,9 +673,16 @@ def _enrich_intraday_contract(
             1 for point in enriched if point.get("is_partial") is True
         ),
         "indicator_eligible_point_count": sum(
-            1 for point in enriched if point.get("finalized") is True
+            1 for point in enriched if point.get("indicator_eligible") is True
+        ),
+        "bar_classification_policy": "taiwan_cash_session_v1",
+        "indicator_policy": (
+            "finalized_regular_interval_or_closing_auction_only"
         ),
         "partial_bar_policy": "exclude_partial_bars_from_indicators",
+        "aggregation_method": (
+            "provider_interval_bars_with_explicit_market_event_markers"
+        ),
     }
     return enriched, metadata
 

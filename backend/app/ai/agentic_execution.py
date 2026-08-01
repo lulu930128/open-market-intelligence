@@ -36,6 +36,24 @@ TW_GRANULAR_TOOL_STEPS = {
     "tw.refresh_revenue": "monthly_revenue",
     "tw.refresh_financials": "financial_metrics",
 }
+_FAILED_RESULT_STATUSES = {
+    "error",
+    "failed",
+    "failure",
+    "timeout",
+    "cancelled",
+    "expired",
+}
+_PARTIAL_RESULT_STATUSES = {
+    "partial",
+    "partial_success",
+    "completed_with_error",
+}
+_PENDING_TRANSPORT_STATUSES = {
+    "background_running",
+    "queued",
+    "running",
+}
 
 
 def _background_job_request(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -110,11 +128,28 @@ def _finish_background_job_in_session(
         )
         return
     result = value if isinstance(value, dict) else {}
+    result_status = str(result.get("status") or "").strip().lower()
+    operation_status = _operation_status(status, result)
+    error_message = _result_error_message(result)
+    if operation_status == "failed":
+        job_service.fail_job(
+            db,
+            job_id,
+            error_message=error_message or f"{tool_name} refresh failed.",
+            result={
+                "status": "failed",
+                "tool": tool_name,
+                "result_status": result_status or None,
+                "error": error_message,
+                "result": _compact_result(result),
+            },
+        )
+        return
     public_status = (
         "cancelled"
         if result.get("cancelled") is True
         else "partial"
-        if str(result.get("status") or "").lower() in {"partial", "partial_success"}
+        if operation_status == "partial"
         else "completed"
     )
     job_service.complete_job(
@@ -229,6 +264,7 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "refreshed_count",
         "refreshed_count_semantics",
         "completed_count",
+        "partial_count",
         "unchanged_count",
         "changed_row_count",
         "refresh_outcome",
@@ -263,6 +299,8 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "source_url",
         "metric_count",
         "message",
+        "error_message",
+        "failed_steps",
         "volume_unit",
         "volume_semantics",
         "volume_status",
@@ -317,6 +355,103 @@ def _compact_result(value: Any) -> dict[str, Any]:
     return summary
 
 
+def _result_error_message(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    for key in ("error_message", "error"):
+        message = str(value.get(key) or "").strip()
+        if message:
+            return message[:1_000]
+    failed_steps = value.get("failed_steps")
+    if isinstance(failed_steps, list):
+        for step in failed_steps:
+            if not isinstance(step, dict):
+                continue
+            message = str(
+                step.get("error_message")
+                or step.get("error")
+                or ""
+            ).strip()
+            if message:
+                return message[:1_000]
+    nested_results = value.get("results")
+    nested_items = (
+        list(nested_results.values())
+        if isinstance(nested_results, dict)
+        else nested_results
+        if isinstance(nested_results, list)
+        else []
+    )
+    for item in nested_items[:20]:
+        if not isinstance(item, dict):
+            continue
+        message = str(
+            item.get("error_message")
+            or item.get("error")
+            or ""
+        ).strip()
+        if message:
+            return message[:1_000]
+    if str(value.get("status") or "").strip().lower() in _FAILED_RESULT_STATUSES:
+        message = str(value.get("message") or "").strip()
+        if message:
+            return message[:1_000]
+    return None
+
+
+def _operation_status(transport_status: str, result: Any) -> str:
+    normalized_transport = str(transport_status or "").strip().lower()
+    if normalized_transport in {"error", "failed"}:
+        return "failed"
+    if normalized_transport == "timeout":
+        return "timeout"
+    if normalized_transport in _PENDING_TRANSPORT_STATUSES:
+        return "pending"
+    if normalized_transport in {"blocked", "skipped"}:
+        return normalized_transport
+    result_status = (
+        str(result.get("status") or "").strip().lower()
+        if isinstance(result, dict)
+        else ""
+    )
+    if result_status in _FAILED_RESULT_STATUSES:
+        return "failed"
+    if result_status in _PARTIAL_RESULT_STATUSES:
+        return "partial"
+    if result_status == "skipped" or result_status.startswith("skipped_"):
+        return "skipped"
+    return "succeeded"
+
+
+def _evidence_status(operation_status: str, result: Any) -> str:
+    if operation_status in {"failed", "timeout", "blocked", "skipped"}:
+        return "unavailable"
+    if operation_status == "pending":
+        return "pending"
+    if operation_status == "partial":
+        return "partial"
+    if not isinstance(result, dict):
+        return "not_evaluated"
+    if isinstance(result.get("points"), list) and result.get("points"):
+        return "available"
+    if any(
+        isinstance(result.get(key), (int, float))
+        and not isinstance(result.get(key), bool)
+        and result.get(key) > 0
+        for key in (
+            "point_count",
+            "returned_point_count",
+            "fetched_count",
+            "refreshed_count",
+            "inserted_count",
+            "updated_count",
+            "changed_row_count",
+        )
+    ):
+        return "available"
+    return "not_evaluated"
+
+
 def _empty_tool_run(
     *,
     step: dict[str, Any],
@@ -325,9 +460,14 @@ def _empty_tool_run(
     error: str | None = None,
 ) -> dict[str, Any]:
     now = agentic_common._now().isoformat()
+    operation_status = _operation_status(status, {})
     return {
         "tool": step.get("tool"),
         "status": status,
+        "transport_status": status,
+        "operation_status": operation_status,
+        "evidence_status": _evidence_status(operation_status, {}),
+        "result_status": None,
         "reason": step.get("reason"),
         "arguments": step.get("args") or {},
         "external_fetch": bool(definition.external_fetch) if definition else False,
@@ -876,6 +1016,10 @@ def execute_tool_plan(
                     {
                         "tool": tool_name,
                         "status": "background_running",
+                        "transport_status": "background_running",
+                        "operation_status": "pending",
+                        "evidence_status": "pending",
+                        "result_status": None,
                         "request_status": "background_in_progress",
                         "reason": step.get("reason"),
                         "arguments": args,
@@ -941,9 +1085,21 @@ def execute_tool_plan(
         ended_at = agentic_common._now()
         duration_ms = int((perf_counter() - started_tick) * 1000)
         background_job = result.pop("__background_job", None)
+        result_status = str(result.get("status") or "").strip().lower() or None
+        operation_status = _operation_status(status, result)
+        evidence_status = _evidence_status(operation_status, result)
+        operation_error = error or (
+            _result_error_message(result)
+            if operation_status in {"failed", "partial"}
+            else None
+        )
         run = {
             "tool": tool_name,
             "status": status,
+            "transport_status": status,
+            "operation_status": operation_status,
+            "evidence_status": evidence_status,
+            "result_status": result_status,
             "reason": step.get("reason"),
             "arguments": args,
             "external_fetch": definition.external_fetch,
@@ -951,7 +1107,7 @@ def execute_tool_plan(
             "writes_market_cache": definition.writes_cache,
             "writes_user_data": False,
             "result_summary": _compact_result(result),
-            "error": error,
+            "error": operation_error,
             "started_at": started_at.isoformat(),
             "ended_at": ended_at.isoformat(),
             "duration_ms": duration_ms,
@@ -983,11 +1139,17 @@ def execute_tool_plan(
         _emit_tool_progress(
             progress_callback,
             tool_name=tool_name,
-            status=status,
+            status=(
+                "error"
+                if operation_status == "failed"
+                else "success"
+                if operation_status == "partial"
+                else status
+            ),
             reason=step.get("reason"),
             external_fetch=definition.external_fetch,
             writes_cache=definition.writes_cache,
-            error=error,
+            error=operation_error,
             duration_ms=duration_ms,
         )
 

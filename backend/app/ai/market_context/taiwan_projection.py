@@ -17,7 +17,14 @@ from app.ai.market_payload_contract import (
 )
 from app.db.models import FinancialMetricQuarterly, StockMaster
 from app.market.calendar_status import build_taiwan_calendar_status
+from app.market.financial_contract import (
+    FINANCIAL_CONTRACT_VERSION,
+    build_legacy_financial_contract,
+)
+from app.market.financial_metric_semantics import source_reported_financial_semantics
 from app.market.live_snapshot import classify_market_snapshot
+from app.market.monthly_revenue_continuity import analyze_monthly_revenue_continuity
+from app.market.quote_volume import build_taiwan_quote_volume_contract
 
 
 def _now() -> datetime:
@@ -74,26 +81,37 @@ def _latest_date_string(values: list[Any]) -> str | None:
 
 def _broker_branch_row(row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
-        return {key: _json_value(value) for key, value in row.items()}
-
-    return _row_dict(
-        row,
-        (
-            "trade_date",
-            "stock_id",
-            "stock_name",
-            "branch_code",
-            "branch_name",
-            "buy_lots",
-            "sell_lots",
-            "net_lots",
-            "buy_avg_price",
-            "sell_avg_price",
-            "buy_rank",
-            "sell_rank",
-            "source_label",
-        ),
-    ) or {}
+        payload = {
+            key: _json_value(value) for key, value in row.items()
+        }
+    else:
+        payload = _row_dict(
+            row,
+            (
+                "trade_date",
+                "stock_id",
+                "stock_name",
+                "branch_code",
+                "branch_name",
+                "buy_lots",
+                "sell_lots",
+                "net_lots",
+                "buy_avg_price",
+                "sell_avg_price",
+                "buy_rank",
+                "sell_rank",
+                "source_label",
+            ),
+        ) or {}
+    payload.update(
+        {
+            "currency": "TWD",
+            "price_unit": "TWD",
+            "quantity_unit": "lots",
+            "lot_size": 1000,
+        }
+    )
+    return payload
 
 
 def _broker_branch_metadata(summary: dict[str, Any]) -> dict[str, Any]:
@@ -173,6 +191,43 @@ def _intraday_slot_status(intraday_bars: dict[str, Any]) -> str:
     return "missing"
 
 
+def _fundamentals_slot_status(
+    fundamentals: dict[str, Any],
+    *,
+    missing: list[str],
+) -> str:
+    status = _payload_slot_status(fundamentals, missing=missing)
+    latest_financial = fundamentals.get("latest_financial")
+    financial_contract = fundamentals.get("financial_contract")
+    contract_quality = (
+        financial_contract.get("quality")
+        if isinstance(financial_contract, dict)
+        and isinstance(financial_contract.get("quality"), dict)
+        else {}
+    )
+    normalized_contract_ready = bool(
+        isinstance(financial_contract, dict)
+        and isinstance(financial_contract.get("normalized"), dict)
+        and financial_contract["normalized"].get("status") == "ready"
+        and contract_quality.get("decision_usable") is True
+    )
+    if (
+        status == "ready"
+        and not normalized_contract_ready
+        and isinstance(latest_financial, dict)
+        and latest_financial.get("normalization_status") not in {"normalized", "unchanged"}
+    ):
+        return "partial"
+    revenue_continuity = fundamentals.get("revenue_continuity")
+    if (
+        status == "ready"
+        and isinstance(revenue_continuity, dict)
+        and not revenue_continuity.get("decision_usable", False)
+    ):
+        return "partial"
+    return status
+
+
 def _build_tw_stock_slots(
     *,
     target: dict[str, Any],
@@ -246,7 +301,7 @@ def _build_tw_stock_slots(
             as_of=as_of,
         ),
         "fundamentals": _slot_envelope(
-            status=_payload_slot_status(
+            status=_fundamentals_slot_status(
                 fundamentals,
                 missing=[key for key in missing if key in FRESHNESS_DOMAIN_RESOURCES["fundamentals"]],
             ),
@@ -544,6 +599,70 @@ def _compact_row(row: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:
     return _row_dict(row, fields)
 
 
+def _quote_provider_path(
+    *,
+    selected_provider: str | None,
+    live_quote_requested: bool,
+    fallback_used: bool,
+    quote_error: str | None,
+    refresh_outcome: str | None,
+) -> dict[str, Any]:
+    primary_provider = (
+        "twse_mis"
+        if live_quote_requested
+        else selected_provider
+    )
+    attempts: list[dict[str, Any]] = []
+    if live_quote_requested:
+        attempts.append(
+            {
+                "provider": "twse_mis",
+                "status": (
+                    "success"
+                    if selected_provider == "twse_mis"
+                    and not fallback_used
+                    else "failed"
+                ),
+                "error": quote_error,
+            }
+        )
+    if selected_provider and (
+        not attempts
+        or fallback_used
+        or selected_provider != attempts[-1].get("provider")
+    ):
+        attempts.append(
+            {
+                "provider": selected_provider,
+                "status": "success",
+                "error": None,
+            }
+        )
+    return {
+        "primary_provider": primary_provider,
+        "selected_provider": selected_provider,
+        "fallback_used": fallback_used,
+        "fallback_provider": (
+            selected_provider if fallback_used else None
+        ),
+        "fallback_reason": (
+            quote_error or "live_quote_unavailable"
+            if fallback_used
+            else None
+        ),
+        "provider_attempts": attempts,
+        "source_grade": (
+            "official_realtime"
+            if selected_provider == "twse_mis" and not fallback_used
+            else "official_cache"
+            if selected_provider == "local_daily_close"
+            else "unavailable"
+        ),
+        "cache_hit": refresh_outcome == "cache_hit",
+        "cache_written": refresh_outcome == "updated",
+    }
+
+
 def _compact_latest_daily_quote(
     latest_daily: Any,
     *,
@@ -554,7 +673,7 @@ def _compact_latest_daily_quote(
     live_quote_requested: bool = True,
 ) -> dict[str, Any]:
     if latest_daily is None:
-        return {
+        quote = {
             "kind": "quote_snapshot",
             "source": "market_daily_price",
             "provider": "local_daily_close",
@@ -605,9 +724,20 @@ def _compact_latest_daily_quote(
                 "message": quote_error or "No local daily close is available.",
             },
         }
+        quote.update(
+            _quote_provider_path(
+                selected_provider=None,
+                live_quote_requested=live_quote_requested,
+                fallback_used=False,
+                quote_error=quote_error,
+                refresh_outcome=None,
+            )
+        )
+        return quote
 
     close_price = _json_value(getattr(latest_daily, "close_price", None))
     trade_date = _json_value(getattr(latest_daily, "trade_date", None))
+    daily_volume_shares = getattr(latest_daily, "trade_volume", None)
     prior_session_close = (
         close_price - _json_value(getattr(latest_daily, "price_change", 0))
         if close_price is not None and getattr(latest_daily, "price_change", None) is not None
@@ -723,14 +853,64 @@ def _compact_latest_daily_quote(
         ),
         "change_pct": change_pct if official_close_available else None,
         "total_volume_lots": (
-            int(getattr(latest_daily, "trade_volume", 0) / 1000)
+            int(daily_volume_shares / 1000)
             if (
                 official_close_available
-                and getattr(latest_daily, "trade_volume", None) is not None
+                and daily_volume_shares is not None
             )
             else None
         ),
+        "cumulative_volume_lots": (
+            int(daily_volume_shares / 1000)
+            if official_close_available
+            and daily_volume_shares is not None
+            else None
+        ),
+        "cumulative_volume_shares": (
+            int(daily_volume_shares)
+            if official_close_available
+            and daily_volume_shares is not None
+            else None
+        ),
         "volume_unit": "lots",
+        "canonical_volume_unit": "shares",
+        "lot_size": 1000,
+        "volume_semantics": "official_daily_total_volume",
+        "volume_scope": "official_daily_all_reported_trades",
+        "volume_source": "market_daily_price",
+        "volume_includes_odd_lot": None,
+        "volume_includes_after_hours": None,
+        "volume_includes_closing_auction": True,
+        "volume_reconciliation": {
+            "reference_dataset": "market_daily_price",
+            "reference_trade_date": trade_date,
+            "reference_volume_shares": (
+                int(daily_volume_shares)
+                if daily_volume_shares is not None
+                else None
+            ),
+            "snapshot_trade_date": trade_date,
+            "snapshot_volume_shares": (
+                int(daily_volume_shares)
+                if daily_volume_shares is not None
+                else None
+            ),
+            "difference_shares": 0
+            if daily_volume_shares is not None
+            else None,
+            "difference_pct": 0.0
+            if daily_volume_shares is not None
+            else None,
+            "status": "reconciled"
+            if daily_volume_shares is not None
+            else "not_comparable",
+            "reason": "same_official_daily_dataset",
+            "decision_usable": daily_volume_shares is not None,
+        },
+        "volume_decision_usable": daily_volume_shares is not None,
+        "price_decision_usable": official_close_available,
+        "currency": "TWD",
+        "price_unit": "TWD",
         "price_available": official_close_available,
         "last_trade_available": False,
         "last_trade_price": None,
@@ -803,6 +983,15 @@ def _compact_latest_daily_quote(
             or "No live quote was available for this response; using the latest local daily close.",
         },
     }
+    quote.update(
+        _quote_provider_path(
+            selected_provider="local_daily_close",
+            live_quote_requested=live_quote_requested,
+            fallback_used=bool(live_quote_requested),
+            quote_error=quote_error,
+            refresh_outcome=None,
+        )
+    )
     return quote
 
 
@@ -851,11 +1040,23 @@ def _component_freshness(
 
 
 def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
+    session_phase = str(
+        quote.get("session_phase")
+        or quote.get("current_session_phase")
+        or ""
+    )
+    post_close = session_phase in {
+        "post_close",
+        "post_close_snapshot",
+        "market_closed",
+    }
     depth_available = bool(quote.get("depth_available"))
     depth_status = (
         "current"
         if depth_available
         and not bool((quote.get("freshness") or {}).get("is_stale"))
+        else "not_applicable"
+        if post_close
         else str(quote.get("depth_status") or "unavailable")
     )
     snapshot_time = (
@@ -870,10 +1071,39 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         available=depth_available,
         event_time=snapshot_time,
     )
+    if post_close and not depth_available:
+        order_book_freshness.update(
+            {
+                "status": "latest_completed_session",
+                "is_current": True,
+                "refresh_possible_now": False,
+                "refresh_recommended": False,
+                "applicability_status": "not_applicable",
+                "reason_code": "MARKET_CLOSED_ORDER_BOOK_UNAVAILABLE",
+            }
+        )
     order_book = {
         "kind": "quote_order_book",
         "status": depth_status,
         "available": depth_available,
+        "applicability_status": (
+            "not_applicable"
+            if post_close and not depth_available
+            else "applicable"
+        ),
+        "availability_status": (
+            "available" if depth_available else "unavailable"
+        ),
+        "unavailable_reason_code": (
+            "MARKET_CLOSED_ORDER_BOOK_UNAVAILABLE"
+            if post_close and not depth_available
+            else None
+        ),
+        "market_session_status": session_phase or None,
+        "refresh_possible_now": not post_close,
+        "refresh_recommended": bool(
+            not depth_available and not post_close
+        ),
         "best_bid_price": quote.get("best_bid_price"),
         "best_bid_size_lots": quote.get("best_bid_size_lots"),
         "best_ask_price": quote.get("best_ask_price"),
@@ -902,18 +1132,19 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         "freshness": order_book_freshness,
     }
 
-    session_phase = str(
-        quote.get("session_phase")
-        or quote.get("current_session_phase")
-        or ""
+    cash_index = str(quote.get("instrument_type") or "") == "cash_index"
+    auction_relevant = not cash_index and (
+        session_phase
+        in {
+            "preopen",
+            "preopen_pending",
+            "closing_auction",
+            "disposition_batch_auction",
+            "batch_auction",
+        }
+        or str(quote.get("trading_mode") or "")
+        == "disposition_batch_auction"
     )
-    auction_relevant = session_phase in {
-        "preopen",
-        "preopen_pending",
-        "closing_auction",
-        "disposition_batch_auction",
-        "batch_auction",
-    } or str(quote.get("trading_mode") or "") == "disposition_batch_auction"
     auction_available = bool(
         quote.get("auction_book_available")
         or quote.get("auction_indicative_available")
@@ -941,10 +1172,38 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
     if auction_status == "not_applicable":
         auction_freshness["is_current"] = True
         auction_freshness["refresh_recommended"] = False
+        auction_freshness["applicability_status"] = "not_applicable"
+        auction_freshness["reason_code"] = (
+            "CASH_INDEX_NO_ORDER_BOOK_AUCTION"
+            if cash_index
+            else "SESSION_NOT_AUCTION"
+        )
     auction = {
         "kind": "quote_auction",
         "status": auction_status,
         "available": auction_available,
+        "applicability_status": (
+            "not_applicable"
+            if auction_status == "not_applicable"
+            else "applicable"
+        ),
+        "availability_status": (
+            "available" if auction_available else "unavailable"
+        ),
+        "unavailable_reason_code": (
+            "CASH_INDEX_NO_ORDER_BOOK_AUCTION"
+            if cash_index
+            else "SESSION_NOT_AUCTION"
+            if not auction_relevant
+            else "AUCTION_DATA_UNAVAILABLE"
+            if not auction_available
+            else None
+        ),
+        "market_session_status": session_phase or None,
+        "refresh_possible_now": bool(auction_relevant),
+        "refresh_recommended": bool(
+            auction_relevant and not auction_available
+        ),
         "session_phase": session_phase or None,
         "auction_time": _json_value(auction_time),
         "best_bid": quote.get("auction_best_bid"),
@@ -1126,7 +1385,6 @@ def _compact_quote_snapshot(
 
     freshness = quote_depth.get("freshness") if isinstance(quote_depth.get("freshness"), dict) else {}
     age_seconds = freshness.get("age_seconds")
-    latency_ms = int(age_seconds * 1000) if isinstance(age_seconds, (int, float)) else None
     is_realtime = bool(freshness.get("is_live")) and not bool(freshness.get("is_stale"))
     last_trade_price = quote_depth.get(
         "last_trade_price",
@@ -1143,6 +1401,32 @@ def _compact_quote_snapshot(
         price_available = last_trade_price is not None
     latest_price = last_trade_price if price_available else None
     depth_available = bool(quote_depth.get("depth_available"))
+    volume_contract = build_taiwan_quote_volume_contract(
+        snapshot_trade_date=quote_depth.get("trade_date"),
+        cumulative_volume_lots=quote_depth.get(
+            "cumulative_volume_lots",
+            quote_depth.get("total_volume_lots"),
+        ),
+        last_trade_volume_lots=quote_depth.get("last_trade_volume_lots"),
+        official_daily_trade_date=quote_depth.get(
+            "official_daily_volume_trade_date",
+            getattr(latest_daily, "trade_date", None)
+            if latest_daily is not None
+            else None,
+        ),
+        official_daily_volume_shares=quote_depth.get(
+            "official_daily_volume_shares",
+            getattr(latest_daily, "trade_volume", None)
+            if latest_daily is not None
+            else None,
+        ),
+        official_daily_volume_source=quote_depth.get(
+            "official_daily_volume_source"
+        ),
+    )
+    for field in tuple(volume_contract):
+        if field in quote_depth:
+            volume_contract[field] = quote_depth[field]
     quote = {
         "kind": "quote_snapshot",
         "source": quote_depth.get("source"),
@@ -1153,6 +1437,7 @@ def _compact_quote_snapshot(
         "phase_label": quote_depth.get("phase_label"),
         "trade_date": _json_value(quote_depth.get("trade_date")),
         "quote_time": _json_value(quote_depth.get("quote_time")),
+        "quote_time_basis": quote_depth.get("quote_time_basis"),
         "snapshot_time": _json_value(
             quote_depth.get("snapshot_time") or quote_depth.get("quote_time")
         ),
@@ -1160,7 +1445,19 @@ def _compact_quote_snapshot(
         "provider_event_time": _json_value(
             quote_depth.get("provider_event_time")
         ),
+        "event_time": _json_value(
+            quote_depth.get("event_time")
+            or quote_depth.get("provider_event_time")
+        ),
         "fetched_at": _json_value(quote_depth.get("fetched_at")),
+        "received_at": _json_value(quote_depth.get("received_at")),
+        "served_at": _json_value(quote_depth.get("served_at")),
+        "event_age_seconds": quote_depth.get(
+            "event_age_seconds",
+            age_seconds,
+        ),
+        "provider_delay_ms": quote_depth.get("provider_delay_ms"),
+        "network_latency_ms": quote_depth.get("network_latency_ms"),
         "refresh_outcome": quote_depth.get("refresh_outcome"),
         "latest_price": latest_price,
         "price": latest_price,
@@ -1190,8 +1487,10 @@ def _compact_quote_snapshot(
         "low_price": quote_depth.get("low_price"),
         "change": quote_depth.get("change"),
         "change_pct": quote_depth.get("change_pct"),
-        "total_volume_lots": quote_depth.get("total_volume_lots"),
-        "volume_unit": "lots",
+        **volume_contract,
+        "price_decision_usable": price_available,
+        "currency": "TWD",
+        "price_unit": "TWD",
         "best_bid_price": (
             quote_depth.get("best_bid_price") if depth_available else None
         ),
@@ -1313,7 +1612,8 @@ def _compact_quote_snapshot(
         ),
         "fallback_used": bool(quote_depth.get("fallback_used")),
         "is_realtime": is_realtime,
-        "latency_ms": latency_ms,
+        "latency_ms": quote_depth.get("network_latency_ms"),
+        "latency_ms_semantics": "deprecated_network_latency_ms",
         "freshness": {
             "status": freshness.get("status"),
             "is_live": bool(freshness.get("is_live")),
@@ -1326,25 +1626,50 @@ def _compact_quote_snapshot(
             "fetch_age_seconds": freshness.get("fetch_age_seconds"),
         },
     }
+    quote.update(
+        _quote_provider_path(
+            selected_provider=str(
+                quote_depth.get("provider") or ""
+            ).strip()
+            or None,
+            live_quote_requested=live_quote_requested,
+            fallback_used=bool(quote_depth.get("fallback_used")),
+            quote_error=quote_error,
+            refresh_outcome=str(
+                quote_depth.get("refresh_outcome") or ""
+            ).strip()
+            or None,
+        )
+    )
     quote["components"] = _quote_components(quote)
     return quote
 
 
 def _compact_intraday_point(point: dict[str, Any]) -> dict[str, Any]:
+    canonical_volume_unit = point.get("canonical_volume_unit") or (
+        "shares" if point.get("volume_shares") is not None else None
+    )
+    provider_volume_unit = point.get("provider_volume_unit")
     return {
         "time": _json_value(point.get("time")),
         "price": point.get("price") if point.get("price") is not None else point.get("close"),
+        "currency": point.get("currency") or "TWD",
+        "price_unit": point.get("price_unit") or "TWD",
         "open": point.get("open"),
         "high": point.get("high"),
         "low": point.get("low"),
         "close": point.get("close"),
         "volume": point.get("volume"),
+        "volume_unit": point.get("volume_unit")
+        or canonical_volume_unit
+        or provider_volume_unit,
         "volume_shares": point.get("volume_shares"),
         "volume_lots": point.get("volume_lots"),
-        "canonical_volume_unit": point.get("canonical_volume_unit"),
-        "provider_volume_unit": point.get("provider_volume_unit"),
+        "canonical_volume_unit": canonical_volume_unit,
+        "provider_volume_unit": provider_volume_unit,
         "volume_status": point.get("volume_status"),
         "trade_value": point.get("trade_value"),
+        "trade_value_unit": point.get("trade_value_unit") or "TWD",
         "approx_trade_value": point.get("approx_trade_value"),
         "trade_value_status": point.get("trade_value_status"),
         "transaction_count": point.get("transaction_count"),
@@ -1352,6 +1677,16 @@ def _compact_intraday_point(point: dict[str, Any]) -> dict[str, Any]:
         "elapsed_seconds": point.get("elapsed_seconds"),
         "is_partial": point.get("is_partial"),
         "finalized": point.get("finalized"),
+        "bar_type": point.get("bar_type"),
+        "synthetic": point.get("synthetic"),
+        "source_interval": point.get("source_interval"),
+        "source_point_count": point.get("source_point_count"),
+        "quality_status": point.get("quality_status"),
+        "indicator_eligible": point.get("indicator_eligible"),
+        "session_phase": point.get("session_phase"),
+        "market_event": point.get("market_event"),
+        "source_event_type": point.get("source_event_type"),
+        "gap_reason": point.get("gap_reason"),
     }
 
 
@@ -1364,6 +1699,24 @@ def _compact_intraday_history(
     points = [point for point in raw_points if isinstance(point, dict)]
     compact_points = [_compact_intraday_point(point) for point in points[-point_limit:]]
     first_point = points[0] if points else {}
+    unit_point = next(
+        (
+            point
+            for point in reversed(points)
+            if point.get("canonical_volume_unit")
+            or point.get("provider_volume_unit")
+            or point.get("volume_shares") is not None
+        ),
+        first_point,
+    )
+    canonical_volume_unit = history.get("canonical_volume_unit") or (
+        unit_point.get("canonical_volume_unit")
+        or ("shares" if unit_point.get("volume_shares") is not None else None)
+    )
+    provider_volume_unit = (
+        history.get("provider_volume_unit")
+        or unit_point.get("provider_volume_unit")
+    )
     latest_point = compact_points[-1] if compact_points else None
     refreshed_count = history.get("refreshed_count")
     empty_warning = (
@@ -1414,12 +1767,19 @@ def _compact_intraday_history(
         "truncated": len(points) > len(compact_points),
         "coverage_status": history.get("coverage_status"),
         "is_partial": bool(history.get("is_partial")),
+        "synthetic": bool(history.get("synthetic")),
+        "synthetic_semantics": history.get("synthetic_semantics"),
+        "indicator_eligible": history.get("indicator_eligible"),
         "trade_date": _json_value(history.get("trade_date")),
-        "volume_unit": history.get("volume_unit"),
-        "volume_status": history.get("volume_status"),
+        "currency": history.get("currency") or "TWD",
+        "price_unit": history.get("price_unit") or "TWD",
+        "volume_unit": history.get("volume_unit")
+        or canonical_volume_unit
+        or provider_volume_unit,
+        "volume_status": history.get("volume_status") or unit_point.get("volume_status"),
         "volume_semantics": history.get("volume_semantics"),
-        "canonical_volume_unit": history.get("canonical_volume_unit"),
-        "provider_volume_unit": history.get("provider_volume_unit"),
+        "canonical_volume_unit": canonical_volume_unit,
+        "provider_volume_unit": provider_volume_unit,
         "volume_conversion": history.get("volume_conversion"),
         "cumulative_volume_shares": history.get("cumulative_volume_shares"),
         "cumulative_volume_lots": history.get("cumulative_volume_lots"),
@@ -1430,7 +1790,7 @@ def _compact_intraday_history(
         "estimated_cumulative_trade_value": history.get(
             "estimated_cumulative_trade_value"
         ),
-        "trade_value_unit": history.get("trade_value_unit"),
+        "trade_value_unit": history.get("trade_value_unit") or "TWD",
         "trade_value_status": history.get("trade_value_status"),
         "official_vwap": history.get("official_vwap"),
         "approx_vwap": history.get("approx_vwap"),
@@ -1440,7 +1800,10 @@ def _compact_intraday_history(
         "indicator_eligible_point_count": history.get(
             "indicator_eligible_point_count"
         ),
+        "bar_classification_policy": history.get("bar_classification_policy"),
+        "indicator_policy": history.get("indicator_policy"),
         "partial_bar_policy": history.get("partial_bar_policy"),
+        "aggregation_method": history.get("aggregation_method"),
         "cached_count": history.get("cached_count"),
         "refreshed_count": refreshed_count,
         "cache_status": history.get("cache_status") or (
@@ -1523,6 +1886,9 @@ def _compact_single_intraday_series(
         "trade_date": payload.get("trade_date"),
         "coverage_status": payload.get("coverage_status"),
         "is_partial": payload.get("is_partial"),
+        "synthetic": payload.get("synthetic"),
+        "synthetic_semantics": payload.get("synthetic_semantics"),
+        "indicator_eligible": payload.get("indicator_eligible"),
         "volume_unit": payload.get("volume_unit"),
         "volume_status": payload.get("volume_status"),
         "volume_semantics": payload.get("volume_semantics"),
@@ -1552,12 +1918,17 @@ def _compact_single_intraday_series(
         "points": points,
     }
     warnings = [
-        (
+        str(item)
+        for item in payload.get("warnings") or []
+        if str(item).strip()
+    ]
+    if interval_status != "ready":
+        warnings.append(
             f"Requested Taiwan index intraday interval {requested_interval} "
-            f"is not available; returned {effective_interval} source bars "
-            "without relabeling."
+            f"is not fully provider-native; returned {effective_interval} "
+            "without relabeling it as the requested interval, "
+            f"with interval_status={interval_status}."
         )
-    ] if interval_status != "ready" else []
     return {
         "kind": "intraday_bars",
         "enabled": True,
@@ -1580,7 +1951,57 @@ def _compact_single_intraday_series(
     }
 
 
-def _compact_technical_report(report: dict[str, Any]) -> dict[str, Any]:
+def _technical_report_score_contract(
+    *,
+    report: dict[str, Any],
+    timeframe: str,
+    analysis: dict[str, Any],
+) -> dict[str, Any]:
+    if report.get("kind") == "tw_stock_technical_report":
+        bounds = {
+            "today": (-3, 3, "tw_technical_intraday_raw_v1"),
+            "daily": (-16, 16, "tw_technical_daily_raw_v1"),
+            "weekly": (-6, 6, "tw_technical_aggregate_raw_v1"),
+            "monthly": (-6, 6, "tw_technical_aggregate_raw_v1"),
+        }.get(
+            timeframe,
+            (-16, 16, "tw_technical_stock_raw_v1"),
+        )
+        model_version = "tw_stock_technical_report.v1"
+    else:
+        bounds = (-5, 5, "omi_point_series_technical_raw_v1")
+        model_version = "omi_point_series_technical.v1"
+    components = (
+        analysis.get("components")
+        if isinstance(analysis.get("components"), list)
+        else []
+    )
+    component = next(
+        (
+            item
+            for item in components
+            if isinstance(item, dict)
+            and item.get("timeframe") == timeframe
+        ),
+        {},
+    )
+    return {
+        "score": report.get("score"),
+        "score_min": bounds[0],
+        "score_max": bounds[1],
+        "score_scale_id": bounds[2],
+        "score_model_version": model_version,
+        "normalization_method": "none_raw_additive",
+        "weight_in_composite": component.get("weight"),
+    }
+
+
+def _compact_technical_report(
+    report: dict[str, Any],
+    *,
+    timeframe: str,
+    analysis: dict[str, Any],
+) -> dict[str, Any]:
     data = report.get("data") if isinstance(report.get("data"), dict) else {}
     daily_indicator = data.get("daily_indicator") if isinstance(data.get("daily_indicator"), dict) else {}
     intraday = data.get("intraday") if isinstance(data.get("intraday"), dict) else {}
@@ -1594,6 +2015,11 @@ def _compact_technical_report(report: dict[str, Any]) -> dict[str, Any]:
         "value": report.get("value"),
         "value_label": report.get("value_label"),
         "latest_close": daily_indicator.get("close") or (intraday.get("latest_point") or {}).get("close"),
+        "score_contract": _technical_report_score_contract(
+            report=report,
+            timeframe=timeframe,
+            analysis=analysis,
+        ),
         "missing": report.get("missing") or [],
         "warnings": report.get("warnings") or [],
     }
@@ -1605,27 +2031,77 @@ def _compact_technical_evidence(
     technical_levels: dict[str, Any],
     technical_reports: dict[str, Any],
 ) -> dict[str, Any]:
+    score_model = (
+        analysis.get("score_model")
+        if isinstance(analysis.get("score_model"), dict)
+        else {}
+    )
+    composite_score_contract = {
+        "score": analysis.get("selected_score"),
+        "score_min": -7,
+        "score_max": 7,
+        "score_scale_id": "technical_factor_composite_v1",
+        "score_model_version": (
+            score_model.get("version")
+            or "technical_factor_weight_v1"
+        ),
+        "normalization_method": (
+            "available_factor_weighted_mean_scaled_to_7"
+        ),
+        "weight_in_composite": 1.0,
+    }
+    report_score_contracts = {
+        timeframe: _technical_report_score_contract(
+            report=report,
+            timeframe=timeframe,
+            analysis=analysis,
+        )
+        for timeframe, report in technical_reports.items()
+        if isinstance(report, dict)
+    }
     return {
+        "currency": "TWD",
+        "price_unit": "TWD",
+        "score_unit": "model_points",
+        "score_contracts": {
+            "selected_composite": composite_score_contract,
+            "reports": report_score_contracts,
+        },
         "analysis": {
             "requested_horizon": analysis.get("requested_horizon"),
+            "effective_horizon": analysis.get("effective_horizon"),
             "selected_horizon": analysis.get("selected_horizon"),
             "selected_timeframe": analysis.get("selected_timeframe"),
             "selected_score": analysis.get("selected_score"),
             "selected_title": analysis.get("selected_title"),
+            "composite_score_title": analysis.get("composite_score_title"),
             "selected_summary": analysis.get("selected_summary"),
             "selected_confidence": analysis.get("selected_confidence"),
+            "today_state": analysis.get("today_state") or {},
+            "historical_structure": analysis.get("historical_structure") or {},
+            "composite_state": analysis.get("composite_state"),
+            "fallback_reason": analysis.get("fallback_reason"),
             "scores": analysis.get("scores") or {},
             "score_range": (analysis.get("score_model") or {}).get("score_range"),
+            "selected_score_contract": composite_score_contract,
         },
         "levels": {
+            "currency": "TWD",
+            "price_unit": "TWD",
             "latest_price": technical_levels.get("latest_price"),
             "basis_timeframe": technical_levels.get("basis_timeframe"),
+            "technical_price_basis": technical_levels.get("technical_price_basis"),
+            "bid_ask_price_used": bool(technical_levels.get("bid_ask_price_used")),
             "context": technical_levels.get("context") or {},
             "entry": technical_levels.get("entry") or {},
             "risk": technical_levels.get("risk") or {},
         },
         "reports": {
-            timeframe: _compact_technical_report(report)
+            timeframe: _compact_technical_report(
+                report,
+                timeframe=timeframe,
+                analysis=analysis,
+            )
             for timeframe, report in technical_reports.items()
             if isinstance(report, dict)
         },
@@ -2352,31 +2828,63 @@ def _compact_index_quote(
             "is_live": False,
             "is_realtime": False,
         }
+    timezone_name = str(effective_calendar.get("timezone") or "Asia/Taipei")
+    selected_trade_date = resolution.get("selected_trade_date")
+    selected_session_date = _index_candidate_date(
+        selected_trade_date,
+        timezone_name=timezone_name,
+    )
+    snapshot_session_date = _index_candidate_date(
+        snapshot.get("time") or snapshot.get("as_of"),
+        timezone_name=timezone_name,
+    )
+    snapshot_matches_selected_session = bool(
+        selected_session_date is not None
+        and snapshot_session_date == selected_session_date
+    )
+
+    def _point_matches_selected_session(point: dict[str, Any]) -> bool:
+        if selected_session_date is None:
+            return True
+        point_date = _index_candidate_date(
+            point.get("trade_date")
+            or point.get("event_time")
+            or point.get("bar_time")
+            or point.get("time"),
+            timezone_name=timezone_name,
+        )
+        return point_date == selected_session_date
+
+    selected_intraday_points = [
+        point
+        for point in intraday_points
+        if _point_matches_selected_session(point)
+    ]
     open_values = [
         value
-        for point in intraday_points
+        for point in selected_intraday_points
         for value in [point.get("open") if point.get("open") is not None else point.get("price")]
         if isinstance(value, (int, float))
     ]
     high_values = [
         value
-        for point in intraday_points
+        for point in selected_intraday_points
         for value in [point.get("high") if point.get("high") is not None else point.get("price")]
         if isinstance(value, (int, float))
     ]
-    if isinstance(snapshot.get("high"), (int, float)):
+    if snapshot_matches_selected_session and isinstance(snapshot.get("high"), (int, float)):
         high_values.append(snapshot["high"])
     low_values = [
         value
-        for point in intraday_points
+        for point in selected_intraday_points
         for value in [point.get("low") if point.get("low") is not None else point.get("price")]
         if isinstance(value, (int, float))
     ]
-    if isinstance(snapshot.get("low"), (int, float)):
+    if snapshot_matches_selected_session and isinstance(snapshot.get("low"), (int, float)):
         low_values.append(snapshot["low"])
     volume_values = [
         int(point["volume"])
-        for point in intraday_points
+        for point in selected_intraday_points
         if isinstance(point.get("volume"), (int, float)) and point["volume"] > 0
     ]
     snapshot_volume = snapshot.get("volume")
@@ -2384,7 +2892,9 @@ def _compact_index_quote(
         sum(volume_values)
         if volume_values
         else snapshot_volume
-        if isinstance(snapshot_volume, (int, float)) and snapshot_volume > 0
+        if snapshot_matches_selected_session
+        and isinstance(snapshot_volume, (int, float))
+        and snapshot_volume > 0
         else None
     )
     intraday_volume_semantics = (
@@ -2425,19 +2935,57 @@ def _compact_index_quote(
     )
     trade_value = (
         snapshot.get("trade_value")
-        if snapshot.get("trade_value") is not None
+        if snapshot_matches_selected_session
+        and snapshot.get("trade_value") is not None
         else snapshot.get("estimated_trade_value")
+        if snapshot_matches_selected_session
+        and snapshot.get("estimated_trade_value") is not None
+        else None
     )
     trade_value_status = (
         "official"
-        if snapshot.get("trade_value") is not None
+        if trade_value is not None and snapshot.get("trade_value") is not None
         else "estimated"
-        if snapshot.get("estimated_trade_value") is not None
+        if trade_value is not None
+        and snapshot.get("estimated_trade_value") is not None
         else "not_provided"
+    )
+    previous_session = (
+        {
+            "trade_date": snapshot_session_date.isoformat(),
+            "source": snapshot.get("source"),
+            "open_price": snapshot.get("open"),
+            "high_price": snapshot.get("high"),
+            "low_price": snapshot.get("low"),
+            "close_price": snapshot.get("close"),
+            "trade_value": (
+                snapshot.get("trade_value")
+                if snapshot.get("trade_value") is not None
+                else snapshot.get("estimated_trade_value")
+            ),
+            "trade_value_unit": (
+                "TWD"
+                if snapshot.get("trade_value") is not None
+                or snapshot.get("estimated_trade_value") is not None
+                else None
+            ),
+            "trade_value_status": (
+                "official"
+                if snapshot.get("trade_value") is not None
+                else "estimated"
+                if snapshot.get("estimated_trade_value") is not None
+                else "not_provided"
+            ),
+        }
+        if snapshot_session_date is not None
+        and selected_session_date is not None
+        and snapshot_session_date != selected_session_date
+        else None
     )
 
     quote = {
         "kind": "quote_snapshot",
+        "instrument_type": "cash_index",
         "source": source,
         "provider": source,
         "status": (
@@ -2476,9 +3024,27 @@ def _compact_index_quote(
         "selection_reason": resolution["selection_reason"],
         "quote_candidates": resolution["candidates"],
         "previous_close": previous_close,
-        "open_price": open_values[0] if open_values else snapshot.get("open"),
-        "high_price": max(high_values) if high_values else snapshot.get("high"),
-        "low_price": min(low_values) if low_values else snapshot.get("low"),
+        "open_price": (
+            open_values[0]
+            if open_values
+            else snapshot.get("open")
+            if snapshot_matches_selected_session
+            else None
+        ),
+        "high_price": (
+            max(high_values)
+            if high_values
+            else snapshot.get("high")
+            if snapshot_matches_selected_session
+            else None
+        ),
+        "low_price": (
+            min(low_values)
+            if low_values
+            else snapshot.get("low")
+            if snapshot_matches_selected_session
+            else None
+        ),
         "change": change,
         "change_pct": change_pct,
         "volume": volume,
@@ -2501,6 +3067,11 @@ def _compact_index_quote(
         "trade_value_status": trade_value_status,
         "trade_value_source": (
             snapshot.get("source") if trade_value is not None else None
+        ),
+        "trade_value_source_trade_date": (
+            snapshot_session_date.isoformat()
+            if trade_value is not None and snapshot_session_date is not None
+            else None
         ),
         "official_vwap": (
             intraday.get("official_vwap")
@@ -2530,6 +3101,39 @@ def _compact_index_quote(
         "last_quote_session": freshness["last_quote_session"],
         "quote_semantics": resolution["quote_semantics"],
         "delivery_status": resolution["delivery_status"],
+        "session_reconciliation_status": (
+            "separated" if previous_session is not None else "aligned"
+        ),
+        "current_session": {
+            "trade_date": selected_trade_date,
+            "source": source,
+            "open_price": (
+                open_values[0]
+                if open_values
+                else snapshot.get("open")
+                if snapshot_matches_selected_session
+                else None
+            ),
+            "high_price": (
+                max(high_values)
+                if high_values
+                else snapshot.get("high")
+                if snapshot_matches_selected_session
+                else None
+            ),
+            "low_price": (
+                min(low_values)
+                if low_values
+                else snapshot.get("low")
+                if snapshot_matches_selected_session
+                else None
+            ),
+            "latest_price": latest_price,
+            "trade_value": trade_value,
+            "trade_value_unit": "TWD" if trade_value is not None else None,
+            "trade_value_status": trade_value_status,
+        },
+        "previous_session": previous_session,
         "warnings": resolution["warnings"],
         "latency_ms": None,
         "freshness": {
@@ -2595,6 +3199,7 @@ def _build_tw_index_compact_evidence(
     index_id: str,
     as_of: str | None,
     index_snapshot: dict[str, Any] | None,
+    daily_chart: dict[str, Any] | None,
     intraday: dict[str, Any] | None,
     include_intraday: bool,
     market_data_params: dict[str, Any] | None,
@@ -2647,6 +3252,7 @@ def _build_tw_index_compact_evidence(
         technical_reports=technical_reports,
     )
     chips = {"market_chip": market_chip}
+
     data_quality = {
         "missing": list(dict.fromkeys(missing)),
         "warnings": list(dict.fromkeys(warnings)),
@@ -2672,6 +3278,29 @@ def _build_tw_index_compact_evidence(
         "intraday.bars": {
             **_intraday_bar_freshness_resource(intraday_bars),
             "dataset": "market_index_intraday",
+        },
+        "daily.ohlcv": {
+            "status": (
+                "current"
+                if isinstance(daily_chart, dict)
+                and bool(daily_chart.get("points"))
+                else "missing"
+            ),
+            "dataset": "market_index_daily_stat",
+            "latest": (
+                daily_chart.get("latest_data_date")
+                or daily_chart.get("as_of")
+                if isinstance(daily_chart, dict)
+                else None
+            ),
+            "is_current": bool(
+                isinstance(daily_chart, dict)
+                and daily_chart.get("points")
+            ),
+            "refresh_recommended": not bool(
+                isinstance(daily_chart, dict)
+                and daily_chart.get("points")
+            ),
         },
     }
     slots = _build_tw_index_slots(
@@ -2699,6 +3328,7 @@ def _build_tw_index_compact_evidence(
         "target": target,
         "as_of": as_of,
         "quote": quote,
+        "daily_chart": daily_chart or {},
         "intraday_bars": intraday_bars,
         "technical": technical,
         "chips": chips,
@@ -2714,6 +3344,7 @@ def _build_tw_index_compact_evidence(
 def _build_stock_compact_evidence(
     *,
     stock: StockMaster | None,
+    company_profile: dict[str, Any],
     stock_id: str,
     as_of: str | None,
     latest_daily: Any,
@@ -2736,6 +3367,7 @@ def _build_stock_compact_evidence(
     missing: list[str],
     warnings: list[str],
     source_refs: list[dict[str, Any]],
+    financial_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target = {
         "type": "tw_stock",
@@ -2748,18 +3380,8 @@ def _build_stock_compact_evidence(
         technical_levels=technical_levels,
         technical_reports=technical_reports,
     )
-    chips = {
-        "institutional": _compact_row(
-            latest_institutional,
-            (
-                "trade_date",
-                "foreign_investor_net",
-                "investment_trust_net",
-                "dealer_net",
-                "total_institutional_net",
-            ),
-        ),
-        "margin": _compact_row(
+    margin_payload = (
+        _compact_row(
             latest_margin,
             (
                 "trade_date",
@@ -2770,7 +3392,47 @@ def _build_stock_compact_evidence(
                 "short_covering",
                 "short_today_balance",
             ),
-        ),
+        )
+        or {}
+    )
+    margin_quantity_fields = (
+        "margin_buy",
+        "margin_sell",
+        "margin_today_balance",
+        "short_sale",
+        "short_covering",
+        "short_today_balance",
+    )
+    chips = {
+        "institutional": {
+            **(
+                _compact_row(
+                    latest_institutional,
+                    (
+                        "trade_date",
+                        "foreign_investor_net",
+                        "investment_trust_net",
+                        "dealer_net",
+                        "total_institutional_net",
+                    ),
+                )
+                or {}
+            ),
+            "quantity_unit": "shares",
+            "lot_size": 1000,
+        },
+        "margin": {
+            **margin_payload,
+            "quantity_unit": "lots",
+            "raw_unit": "lots",
+            "normalized_unit": "shares",
+            "normalized_quantities": {
+                field: margin_payload[field] * 1000
+                for field in margin_quantity_fields
+                if isinstance(margin_payload.get(field), (int, float))
+            },
+            "lot_size": 1000,
+        },
         "shareholding": {
             "trade_date": (
                 max(
@@ -2802,6 +3464,10 @@ def _build_stock_compact_evidence(
         },
         "broker_branch": {
             "trade_date": _json_value(branch_summary.get("trade_date")),
+            "currency": "TWD",
+            "price_unit": "TWD",
+            "quantity_unit": "lots",
+            "lot_size": 1000,
             "requested_days": branch_summary.get("requested_days"),
             "available_days": branch_summary.get("available_days"),
             "is_partial": branch_summary.get("is_partial"),
@@ -2810,7 +3476,63 @@ def _build_stock_compact_evidence(
             "sell_top": [_broker_branch_row(row) for row in branch_summary.get("sell_top", [])[:5]],
         },
     }
+    latest_financial_payload = _compact_row(
+        latest_financial,
+        (
+            "period",
+            "report_date",
+            "released_at",
+            "filed_at",
+            "revenue",
+            "gross_profit",
+            "operating_income",
+            "net_income",
+            "eps",
+            "book_value_per_share",
+            "roe",
+            "roa",
+        ),
+    )
+    if latest_financial is not None:
+        latest_financial_payload.update(source_reported_financial_semantics(latest_financial))
+
+    financial_history_payload = []
+    for row in financial_history[-4:]:
+        payload = _compact_row(
+            row,
+            (
+                "period",
+                "report_date",
+                "released_at",
+                "filed_at",
+                "eps",
+                "book_value_per_share",
+                "roe",
+                "roa",
+            ),
+        )
+        payload.update(source_reported_financial_semantics(row))
+        financial_history_payload.append(payload)
+
+    revenue_continuity = analyze_monthly_revenue_continuity(revenue_history)
+    resolved_financial_contract = (
+        financial_contract
+        or build_legacy_financial_contract(
+            stock_id=stock_id,
+            financial_history=financial_history,
+            revenue_history=revenue_history,
+            mode="current_comparable",
+            revenue_continuity=revenue_continuity,
+        )
+    )
     fundamentals = {
+        "contract_version": FINANCIAL_CONTRACT_VERSION,
+        "currency": "TWD",
+        "source_amount_unit": "TWD_thousands",
+        "normalized_amount_unit": "TWD_thousands",
+        "amount_scale": 1000,
+        "ratio_unit": "percent",
+        "per_share_unit": "TWD_per_share",
         "latest_revenue": _compact_row(
             latest_revenue,
             (
@@ -2822,23 +3544,9 @@ def _build_stock_compact_evidence(
                 "cumulative_year_over_year_pct",
             ),
         ),
-        "latest_financial": _compact_row(
-            latest_financial,
-            (
-                "period",
-                "report_date",
-                "released_at",
-                "filed_at",
-                "revenue",
-                "gross_profit",
-                "operating_income",
-                "net_income",
-                "eps",
-                "book_value_per_share",
-                "roe",
-                "roa",
-            ),
-        ),
+        "revenue_continuity": revenue_continuity,
+        "financial_contract": resolved_financial_contract,
+        "latest_financial": latest_financial_payload,
         "revenue_history": [
             _compact_row(
                 row,
@@ -2853,26 +3561,13 @@ def _build_stock_compact_evidence(
             )
             for row in revenue_history[-6:]
         ],
-        "financial_history": [
-            _compact_row(
-                row,
-                (
-                    "period",
-                    "report_date",
-                    "released_at",
-                    "filed_at",
-                    "eps",
-                    "book_value_per_share",
-                    "roe",
-                    "roa",
-                ),
-            )
-            for row in financial_history[-4:]
-        ],
+        "financial_history": financial_history_payload,
     }
     data_quality = {
         "missing": list(dict.fromkeys(missing)),
-        "warnings": list(dict.fromkeys(warnings)),
+        "warnings": list(
+            dict.fromkeys(warnings + list(revenue_continuity.get("issues") or []))
+        ),
     }
     event_context = event_context if isinstance(event_context, dict) else {}
     event_data = (
@@ -2890,6 +3585,7 @@ def _build_stock_compact_evidence(
         for key, value in event_data.items()
         if str(key).startswith("regulation.")
     }
+    corporate_actions = event_data.get("corporate.actions")
     raw_payload_level = intraday_bars.get("payload_level") if isinstance(intraday_bars, dict) else None
     payload_level = str(raw_payload_level) if raw_payload_level in PAYLOAD_LEVELS else "compact"
     freshness_by_capability = _build_freshness_by_capability(
@@ -2904,6 +3600,21 @@ def _build_stock_compact_evidence(
         if isinstance(event_context.get("freshness_by_capability"), dict)
         else {}
     )
+    freshness_by_capability["company.profile"] = {
+        "status": company_profile.get("status"),
+        "dataset": company_profile.get("source"),
+        "latest": company_profile.get("as_of"),
+        "is_current": company_profile.get("status") in {"ready", "partial"},
+        "coverage_status": (
+            "complete"
+            if company_profile.get("status") == "ready"
+            else "partial"
+            if company_profile.get("status") == "partial"
+            else "missing"
+        ),
+        "refresh_recommended": False,
+        "cache_policy": "read_only_no_refresh",
+    }
     slots = _build_tw_stock_slots(
         target=target,
         as_of=as_of,
@@ -2935,11 +3646,13 @@ def _build_stock_compact_evidence(
         "target": target,
         "as_of": as_of,
         "quote": quote,
+        "company_profile": company_profile,
         "intraday_bars": intraday_bars,
         "technical": technical,
         "chips": chips,
         "fundamentals": fundamentals,
         "events": events,
+        "corporate_actions": corporate_actions,
         "regulation": regulation,
         "cross_market": overnight_impact,
         "freshness_by_domain": _build_freshness_by_domain(

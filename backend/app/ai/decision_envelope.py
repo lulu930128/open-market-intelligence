@@ -486,6 +486,20 @@ SOURCE_HEALTH_CAPABILITY_HINTS: dict[str, tuple[str, ...]] = {
     "technical.structure": SOURCE_HEALTH_DOMAIN_HINTS["technical"],
     "market.breadth": SOURCE_HEALTH_DOMAIN_HINTS["breadth"],
     "market.volume": SOURCE_HEALTH_DOMAIN_HINTS["market_volume"],
+    "market.volume_state": SOURCE_HEALTH_DOMAIN_HINTS["market_volume"],
+    "market.hot_groups": (
+        "taiwan_intraday_stock_state",
+        "stock_master",
+        "watchlist_group",
+        "watchlist_item",
+    ),
+    "market.sectors": (
+        "taiwan_intraday_stock_state",
+        "market_daily_price",
+        "stock_master",
+    ),
+    "market.sample_ranking": ("market_daily_price", "stock_master"),
+    "screening.intraday": ("taiwan_intraday_stock_state",),
     "chips.institutional": ("institutional",),
     "chips.margin": ("margin",),
     "broker_branch.summary": ("broker_branch",),
@@ -607,36 +621,94 @@ def _provider_failure_scopes(
     for run in _list(response.get("tool_runs")):
         if not isinstance(run, dict):
             continue
-        status = str(run.get("status") or "").lower()
-        if status not in {
+        transport_status = str(
+            run.get("transport_status") or run.get("status") or ""
+        ).lower()
+        operation_status = str(run.get("operation_status") or "").lower()
+        if not operation_status:
+            operation_status = {
+                "success": "succeeded",
+                "success_with_fallback": "succeeded",
+                "partial_success": "partial",
+                "background_running": "pending",
+                "queued": "pending",
+                "running": "pending",
+                "error": "failed",
+            }.get(transport_status, transport_status)
+        if operation_status not in {
             "blocked",
-            "error",
             "failed",
-            "rate_limited",
+            "partial",
             "skipped",
             "timeout",
             "unavailable",
         }:
             continue
-        current_request_failures.append(
-            {
-                "failure_scope": "current_request",
-                **{
-                    key: deepcopy(run[key])
-                    for key in (
-                        "tool",
-                        "provider",
-                        "status",
-                        "error",
-                        "error_code",
-                        "message",
-                        "duration_ms",
-                        "retryable",
-                    )
-                    if key in run
-                },
-            }
-        )
+        result_summary = _dict(run.get("result_summary"))
+        failed_steps = [
+            step
+            for step in _list(result_summary.get("failed_steps"))[:5]
+            if isinstance(step, dict)
+        ]
+        base = {
+            "failure_scope": "current_request",
+            **{
+                key: deepcopy(run[key])
+                for key in (
+                    "tool",
+                    "provider",
+                    "status",
+                    "transport_status",
+                    "operation_status",
+                    "evidence_status",
+                    "result_status",
+                    "error",
+                    "error_code",
+                    "message",
+                    "duration_ms",
+                    "retryable",
+                )
+                if key in run
+            },
+        }
+        if failed_steps:
+            for step in failed_steps:
+                current_request_failures.append(
+                    {
+                        **base,
+                        **{
+                            key: deepcopy(step[key])
+                            for key in (
+                                "dataset",
+                                "label",
+                                "provider",
+                                "target",
+                                "status",
+                                "refresh_outcome",
+                                "error_message",
+                                "retryable",
+                            )
+                            if key in step
+                        },
+                    }
+                )
+        else:
+            current_request_failures.append(
+                {
+                    **base,
+                    **{
+                        key: deepcopy(result_summary[key])
+                        for key in (
+                            "provider",
+                            "stock_id",
+                            "symbol",
+                            "error_message",
+                            "refresh_outcome",
+                        )
+                        if key in result_summary
+                    },
+                }
+            )
     result = _dict(response.get("result"))
 
     def walk(value: Any, *, depth: int = 0) -> None:

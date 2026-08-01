@@ -135,6 +135,79 @@ class MarketChipParserTests(unittest.TestCase):
         self.assertEqual(result["dealer_net_value"], -20)
         self.assertEqual(result["total_institutional_net_value"], -800)
 
+    def test_parse_tpex_institutional_amount_summary_current_schema(self) -> None:
+        payload = [
+            {
+                "Date": "1150730",
+                "Investor": "外資及陸資合計",
+                "PurchaseAmount": "67700536661",
+                "SaleAmount": "76144883904",
+                "Net": "-8444347243",
+            },
+            {
+                "Date": "1150730",
+                "Investor": "　外資及陸資(不含自營商)",
+                "PurchaseAmount": "67700536661",
+                "SaleAmount": "76144883904",
+                "Net": "-8444347243",
+            },
+            {
+                "Date": "1150730",
+                "Investor": "　外資自營商",
+                "PurchaseAmount": "0",
+                "SaleAmount": "0",
+                "Net": "0",
+            },
+            {
+                "Date": "1150730",
+                "Investor": "投信",
+                "PurchaseAmount": "4379639890",
+                "SaleAmount": "2710134808",
+                "Net": "1669505082",
+            },
+            {
+                "Date": "1150730",
+                "Investor": "自營商合計",
+                "PurchaseAmount": "4823057120",
+                "SaleAmount": "5440239824",
+                "Net": "-617182704",
+            },
+            {
+                "Date": "1150730",
+                "Investor": "　自營商(自行買賣)",
+                "PurchaseAmount": "2187495347",
+                "SaleAmount": "2718634084",
+                "Net": "-531138737",
+            },
+            {
+                "Date": "1150730",
+                "Investor": "　自營商(避險)",
+                "PurchaseAmount": "2635561773",
+                "SaleAmount": "2721605740",
+                "Net": "-86043967",
+            },
+            {
+                "Date": "1150730",
+                "Investor": "三大法人合計*",
+                "PurchaseAmount": "76903233671",
+                "SaleAmount": "84295258536",
+                "Net": "-7392024865",
+            },
+        ]
+
+        result = parse_institutional_amount_summary(
+            payload,
+            fallback_trade_date=date(2026, 7, 30),
+        )
+
+        self.assertEqual(result["trade_date"], date(2026, 7, 30))
+        self.assertEqual(result["foreign_investor_net_value"], -8_444_347_243)
+        self.assertEqual(result["investment_trust_net_value"], 1_669_505_082)
+        self.assertEqual(result["dealer_self_net_value"], -531_138_737)
+        self.assertEqual(result["dealer_hedge_net_value"], -86_043_967)
+        self.assertEqual(result["dealer_net_value"], -617_182_704)
+        self.assertEqual(result["total_institutional_net_value"], -7_392_024_865)
+
     def test_parse_taifex_futures_positions(self) -> None:
         payload = parse_taifex_futures_institutional_html(TAIFEX_HTML)
         result = extract_index_futures_position_summary(payload)

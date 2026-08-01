@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import unittest
 from unittest.mock import patch
@@ -354,9 +355,18 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             canonical["evidence"]["quality"]["version"],
             "omi.data.quality.v1",
         )
-        self.assertIn(
-            "quote.snapshot",
-            canonical["evidence"]["quality"]["capabilities"],
+        self.assertFalse(canonical["ok"])
+        self.assertEqual(canonical["request_status"], "rejected")
+        self.assertEqual(
+            canonical["error"]["code"],
+            "RESPONSE_BUDGET_TOO_SMALL",
+        )
+        self.assertFalse(
+            canonical["projection"]["required_payload_preserved"]
+        )
+        self.assertGreater(
+            canonical["projection"]["minimum_required_bytes"],
+            selection["max_response_bytes"],
         )
         self.assertTrue(canonical["projection"]["budget_met"])
         self.assertTrue(canonical["projection"]["truncated"])
@@ -453,6 +463,195 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             canonical["evidence"]["quality"]["version"],
             "omi.data.quality.v1",
         )
+
+    def test_v4_screening_budget_preserves_required_rows_before_metadata(
+        self,
+    ) -> None:
+        response = _v2_response(
+            freshness_by_domain={"screening": "latest_completed_session"}
+        )
+        response["target"] = {
+            "type": "market",
+            "id": "TW",
+            "market": "TW",
+            "label": "台股市場",
+        }
+        response["resolution"]["target"] = dict(response["target"])
+        response["result"]["data"]["compact"]["screening"] = {
+            "ranking": {
+                "snapshot_id": "tw-screening-fixture",
+                "status": "partial",
+                "metric": "foreign_investor_net_shares",
+                "unit": "shares",
+                "sort_order": "desc",
+                "tie_policy": "competition_rank_then_stock_id",
+                "window": {
+                    "requested_trade_days": 5,
+                    "available_trade_days": 5,
+                },
+                "require_complete_window": True,
+                "min_observed_periods": 5,
+                "incomplete_window_policy": "exclude",
+                "pagination": {
+                    "offset": 0,
+                    "limit": 20,
+                    "returned_count": 20,
+                    "total_ranked_count": 1068,
+                    "has_more": True,
+                },
+                "rows": [
+                    {
+                        "rank": index,
+                        "position": index,
+                        "stock_id": f"{index:04d}",
+                        "stock_name": f"fixture-{index}",
+                        "market": "TWSE",
+                        "metric": "foreign_investor_net_shares",
+                        "value": 1_000_000 - index,
+                        "unit": "shares",
+                        "observed_periods": 5,
+                        "requested_periods": 5,
+                        "window_complete": True,
+                    }
+                    for index in range(1, 21)
+                ],
+                "as_of": "2026-07-28",
+                "cache_policy": "read_only_no_refresh",
+            },
+            "coverage": {
+                "snapshot_id": "tw-screening-fixture",
+                "status": "partial",
+                "metric": "foreign_investor_net_shares",
+                "dataset": "institutional_trade_daily",
+                "universe_count": 1973,
+                "covered_count": 1910,
+                "complete_window_count": 1068,
+                "incomplete_window_count": 842,
+                "eligible_rank_count": 1068,
+                "coverage_ratio": 0.9681,
+                "as_of": "2026-07-28",
+            },
+        }
+        response["result"]["data"]["compact"][
+            "freshness_by_capability"
+        ] = {
+            "screening.ranking": {
+                "status": "latest_completed_session",
+                "dataset": "institutional_trade_daily",
+                "latest": "2026-07-28",
+                "is_current": True,
+                "refresh_recommended": False,
+            },
+            "screening.coverage": {
+                "status": "partial",
+                "dataset": "institutional_trade_daily",
+                "latest": "2026-07-28",
+                "is_current": True,
+                "refresh_recommended": False,
+            },
+        }
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": [
+                    "screening.ranking",
+                    "screening.coverage",
+                ],
+                "max_response_bytes": 8_192,
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="TW",
+            question_intent="general",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "market"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        if canonical["ok"]:
+            self.assertTrue(
+                canonical["projection"]["required_payload_preserved"]
+            )
+            self.assertEqual(
+                len(
+                    canonical["evidence"]["data"]["screening.ranking"][
+                        "rows"
+                    ]
+                ),
+                20,
+            )
+            self.assertNotIn(
+                "screening.ranking",
+                canonical["projection"]["omitted_capabilities"],
+            )
+        else:
+            self.assertEqual(
+                canonical["error"]["code"],
+                "RESPONSE_BUDGET_TOO_SMALL",
+            )
+            self.assertFalse(
+                canonical["projection"]["required_payload_preserved"]
+            )
+        self.assertLessEqual(
+            canonical["projection"]["actual_response_bytes"],
+            8_192,
+        )
+        for budget, expected_ok in (
+            (4_096, False),
+            (16_384, True),
+            (65_536, True),
+        ):
+            with self.subTest(max_response_bytes=budget):
+                candidate = deepcopy(response)
+                candidate_selection = capability_contract.normalize_selection(
+                    selection={
+                        "include": [
+                            "screening.ranking",
+                            "screening.coverage",
+                        ],
+                        "max_response_bytes": budget,
+                    },
+                    output="evidence_only",
+                    realtime_policy="cache_only",
+                    payload_level="compact",
+                    scope_type="market",
+                    target_market="TW",
+                    question_intent="general",
+                )
+                candidate["query_plan"]["selection"] = candidate_selection
+                projected = decision_envelope.for_requested_contract(
+                    candidate,
+                    requested_contract_version="omi.decision.v4",
+                )
+                self.assertEqual(projected["ok"], expected_ok)
+                self.assertLessEqual(
+                    projected["projection"]["actual_response_bytes"],
+                    budget,
+                )
+                if expected_ok:
+                    self.assertEqual(
+                        len(
+                            projected["evidence"]["data"][
+                                "screening.ranking"
+                            ]["rows"]
+                        ),
+                        20,
+                    )
+                    self.assertTrue(
+                        projected["projection"][
+                            "required_payload_preserved"
+                        ]
+                    )
+                else:
+                    self.assertEqual(
+                        projected["error"]["code"],
+                        "RESPONSE_BUDGET_TOO_SMALL",
+                    )
 
     def test_v4_semantic_empty_ownership_payload_is_not_usable(self) -> None:
         response = _v2_response()
@@ -687,7 +886,7 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         )
         self.assertEqual(
             canonical["evidence"]["passport"]["trust_scope"],
-            "selected_capabilities",
+            "selected_required_capabilities",
         )
 
     def test_v4_selected_freshness_ignores_unselected_stock_datasets(
@@ -839,6 +1038,204 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             supplemental["missing"],
         )
         self.assertIn("monthly_revenue", supplemental["missing"])
+
+    def test_v4_watchlist_radar_uses_payload_freshness_when_row_is_absent(
+        self,
+    ) -> None:
+        response = _v2_response()
+        response["target"] = {
+            "type": "tw_watchlist",
+            "id": "1",
+            "market": "TW",
+            "label": "核心自選",
+        }
+        response["resolution"]["target"] = deepcopy(response["target"])
+        compact = response["result"]["data"]["compact"]
+        compact["radar"] = {
+            "group_id": 1,
+            "trade_date": "2026-07-31",
+            "is_current": True,
+            "requested_stock_count": 15,
+            "ranked_count": 15,
+            "radar_engine": {
+                "active_version": "radar_v2.0",
+                "mode": "active",
+            },
+            "radar_v2_summary": {
+                "universe_evaluated_count": 15,
+                "readiness": {
+                    "operational_status": "active",
+                    "validation_status": "unverified",
+                },
+            },
+            "results": [],
+        }
+        compact["slots"] = {
+            "radar": {
+                "status": "partial",
+                "freshness": {"status": "partial"},
+            }
+        }
+        compact.pop("freshness_by_capability", None)
+        selection = capability_contract.normalize_selection(
+            selection={"required": ["watchlist.radar"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="watchlist",
+            target_market="TW",
+            question_intent="general",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "watchlist"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        radar = canonical["evidence"]["data"]["watchlist.radar"]
+        freshness = canonical["evidence"]["data"]["data.freshness"]
+        self.assertEqual(canonical["evidence"]["quality"]["status"], "ready")
+        self.assertEqual(freshness["status"], "current")
+        self.assertTrue(freshness["is_current"])
+        self.assertEqual(
+            radar["radar_engine"]["active_version"],
+            "radar_v2.0",
+        )
+        self.assertEqual(
+            radar["radar_v2_summary"]["universe_evaluated_count"],
+            15,
+        )
+
+    def test_v4_optional_stale_capability_does_not_lower_selected_quality(
+        self,
+    ) -> None:
+        response = _v2_response()
+        compact = response["result"]["data"]["compact"]
+        compact["quote"] = {
+            "price": 1160.0,
+            "trade_date": "2026-07-31",
+            "event_time": "2026-07-31T13:30:00+08:00",
+            "release_at": "2026-07-31T13:30:00+08:00",
+            "fetched_at": "2026-07-31T13:31:00+08:00",
+            "computed_at": "2026-07-31T13:31:01+08:00",
+            "served_at": "2026-07-31T13:31:02+08:00",
+            "last_trade_available": True,
+            "last_trade_price": 1160.0,
+            "market_status": "closed",
+            "session_phase": "latest_completed_session",
+            "quote_semantics": "latest_completed_session_close",
+            "source": "market_daily_price",
+        }
+        compact["technical"] = {
+            "as_of": "2026-07-24",
+            "trend": "bullish",
+        }
+        compact["freshness_by_capability"] = {
+            "quote.snapshot": {
+                "status": "current",
+                "dataset": "market_daily_price",
+                "is_current": True,
+                "latest": "2026-07-31",
+                "refresh_recommended": False,
+            },
+            "technical.structure": {
+                "status": "stale",
+                "dataset": "market_daily_price",
+                "is_current": False,
+                "latest": "2026-07-24",
+                "refresh_recommended": True,
+            },
+        }
+        response["freshness"] = {
+            "status": "partial",
+            "is_current": False,
+            "datasets": [
+                {
+                    "key": "market_daily_price",
+                    "latest": "2026-07-31",
+                    "is_current": True,
+                },
+            ],
+            "missing": [],
+            "warnings": ["technical.structure is stale"],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={
+                "required": ["quote.snapshot"],
+                "optional": ["technical.structure"],
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="general",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "stock"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        quality = canonical["evidence"]["quality"]
+        selected_freshness = canonical["evidence"]["data"][
+            "data.freshness"
+        ]
+        quote_status = canonical["evidence"]["capability_status"][
+            "quote.snapshot"
+        ]
+        self.assertEqual(quality["status"], "ready")
+        self.assertEqual(quality["trust_level"], "high")
+        self.assertEqual(
+            quality["trust_scope"],
+            "selected_required_capabilities",
+        )
+        self.assertFalse(
+            quality["supplemental_context_quality"][
+                "affects_selected_quality"
+            ]
+        )
+        self.assertIn(
+            "technical.structure",
+            quality["supplemental_context_quality"]["capabilities"],
+        )
+        self.assertEqual(
+            selected_freshness["selected_capabilities"],
+            ["quote.snapshot"],
+        )
+        self.assertEqual(
+            selected_freshness["supplemental_capabilities"],
+            ["technical.structure"],
+        )
+        self.assertTrue(selected_freshness["is_current"])
+        self.assertEqual(
+            selected_freshness["is_current_semantics"],
+            "selected_required_capabilities_current",
+        )
+        self.assertEqual(quote_status["trade_date"], "2026-07-31")
+        self.assertEqual(
+            quote_status["event_time"],
+            "2026-07-31T13:30:00+08:00",
+        )
+        self.assertEqual(
+            quote_status["release_at"],
+            "2026-07-31T13:30:00+08:00",
+        )
+        self.assertEqual(
+            quote_status["fetched_at"],
+            "2026-07-31T13:31:00+08:00",
+        )
+        self.assertEqual(
+            quote_status["computed_at"],
+            "2026-07-31T13:31:01+08:00",
+        )
+        self.assertEqual(
+            quote_status["served_at"],
+            "2026-07-31T13:31:02+08:00",
+        )
 
     def test_v4_unselected_intraday_gap_is_supplemental_only(self) -> None:
         response = _v2_response(
@@ -1051,7 +1448,11 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         )
 
         freshness = canonical["evidence"]["data"]["data.freshness"]
-        self.assertEqual(freshness["status"], "current")
+        self.assertEqual(freshness["status"], "partial")
+        self.assertEqual(
+            freshness["categories"]["stale"],
+            ["quote.snapshot"],
+        )
         self.assertEqual(freshness["scope"], "selected_capabilities")
         self.assertEqual(freshness["selected_capabilities"], ["quote.snapshot"])
         self.assertIn("quote.snapshot", freshness["dependency_datasets"])
@@ -1392,7 +1793,9 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             "current",
         )
         self.assertEqual(
-            canonical["evidence"]["data"]["source.health"]["summary"],
+            canonical["evidence"]["data"]["diagnostics.source_health"][
+                "summary"
+            ],
             {
                 "healthy_count": 3,
                 "problem_count": 0,
@@ -1403,7 +1806,26 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             for item in canonical["evidence"]["manifest"]["capabilities"]
         }
         self.assertTrue(manifest["data.freshness"]["payload_included"])
-        self.assertTrue(manifest["source.health"]["payload_included"])
+        self.assertTrue(
+            manifest["diagnostics.source_health"]["payload_included"]
+        )
+        self.assertTrue(canonical["transport_ok"])
+        self.assertTrue(canonical["request_valid"])
+        self.assertTrue(canonical["execution_completed"])
+        self.assertTrue(canonical["data_available"])
+        self.assertEqual(canonical["quality_status"], "ready")
+        self.assertEqual(
+            canonical["capability_schema_versions"][
+                "diagnostics.source_health"
+            ],
+            "omi.diagnostics.source_health.v1",
+        )
+        self.assertEqual(
+            canonical["execution"]["selection"]["deprecated_aliases"][0][
+                "canonical_capability"
+            ],
+            "diagnostics.source_health",
+        )
 
     def test_v4_compacts_metadata_before_omitting_required_evidence(self) -> None:
         response = _v2_response()
@@ -1807,7 +2229,9 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             ]
         )
 
-    def test_v4_stale_capability_returns_granular_fill_action(self) -> None:
+    def test_v4_stale_tw_quote_declares_reader_fetch_without_fake_action(
+        self,
+    ) -> None:
         response = _v2_response(
             freshness_by_domain={
                 "quote": "stale",
@@ -1834,27 +2258,31 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             requested_contract_version="omi.decision.v4",
         )
 
-        actions = canonical["continuation"]["fill_plan"]["actions"]
-        quote_action = next(
-            item for item in actions if item["capability"] == "quote.snapshot"
+        fill_plan = canonical["continuation"]["fill_plan"]
+        self.assertEqual(fill_plan["actions"], [])
+        quote_deferred = next(
+            item
+            for item in fill_plan["deferred_actions"]
+            if item["capability"] == "quote.snapshot"
         )
-        self.assertEqual(quote_action["operation"], "tw.refresh_quote")
-        self.assertEqual(quote_action["estimated_calls"], 1)
-        self.assertTrue(quote_action["executable"])
-        self.assertEqual(quote_action["invoke"]["tool"], "omi.ask")
-        self.assertTrue(quote_action["invoke"]["arguments"]["question"])
         self.assertEqual(
-            quote_action["invoke"]["arguments"]["continuation"][
-                "selected_action_ids"
-            ],
-            [quote_action["action_id"]],
+            quote_deferred["reason"],
+            "reader_fetch_on_primary_request",
         )
-        self.assertIn(
-            quote_action["action_id"],
-            quote_action["invoke"]["arguments"]["continuation"][
-                "plan_action_ids"
-            ],
+        self.assertEqual(
+            quote_deferred["refresh_strategy"],
+            "reader_fetch",
         )
+        self.assertFalse(quote_deferred["refresh_possible_now"])
+        self.assertTrue(quote_deferred["refresh_requires_market_open"])
+        quote_manifest = next(
+            item
+            for item in canonical["evidence"]["manifest"]["capabilities"]
+            if item["capability"] == "quote.snapshot"
+        )
+        self.assertEqual(quote_manifest["refresh_strategy"], "reader_fetch")
+        self.assertIsNone(quote_manifest["fill_operation"])
+        self.assertFalse(quote_manifest["writes_market_cache"])
         self.assertFalse(canonical["answer"])
         self.assertFalse(canonical["decision"])
 
@@ -1926,6 +2354,10 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
 
         self.assertEqual(
             quality["chips.institutional"]["status_authority"],
+            "canonical_status_resolver",
+        )
+        self.assertEqual(
+            quality["chips.institutional"]["upstream_status_authority"],
             "freshness_by_capability",
         )
         self.assertEqual(
@@ -2032,6 +2464,11 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             "change_pct": -2.2869,
             "total_volume_lots": 21505,
             "volume_unit": "lots",
+            "volume_reconciliation": {
+                "status": "mismatch",
+                "decision_usable": False,
+                "reason": "provider_scope_unknown",
+            },
             "trade_date": "2026-07-24",
             "quote_time": "2026-07-24T13:30:00+08:00",
             "status": "final_snapshot",
@@ -2066,10 +2503,21 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         quote_quality = canonical["evidence"]["quality"]["capabilities"][
             "quote.snapshot"
         ]
-        self.assertEqual(quote_quality["status_authority"], "realtime")
+        self.assertEqual(
+            quote_quality["status_authority"],
+            "canonical_status_resolver",
+        )
+        self.assertEqual(
+            quote_quality["upstream_status_authority"],
+            "realtime",
+        )
         self.assertEqual(quote_quality["status_class"], "ready")
         self.assertTrue(quote_quality["facts_usable"])
         self.assertTrue(quote_quality["decision_usable"])
+        self.assertIn(
+            "volume_reconciliation_mismatch",
+            quote_quality["issues"],
+        )
         self.assertNotIn("status_sources_disagree", quote_quality["issues"])
         self.assertTrue(
             any(
@@ -2131,10 +2579,13 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             passport["source_trust"]["trust_level"],
             selected_trust,
         )
-        self.assertEqual(passport["trust_scope"], "selected_capabilities")
+        self.assertEqual(
+            passport["trust_scope"],
+            "selected_required_capabilities",
+        )
         self.assertEqual(
             passport["source_trust"]["trust_scope"],
-            "selected_capabilities",
+            "selected_required_capabilities",
         )
         self.assertEqual(
             passport["upstream_source_trust"]["trust_level"],
@@ -2154,7 +2605,7 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         )
         self.assertEqual(
             canonical["evidence"]["quality"]["trust_scope"],
-            "decision_readiness",
+            "selected_required_capabilities",
         )
 
     def test_v4_quality_contract_detects_intraday_interval_mismatch(self) -> None:
@@ -2510,6 +2961,52 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             canonical["limitations"]["current_request_failures"],
             failures,
         )
+
+    def test_provider_failures_project_inner_operation_error_details(
+        self,
+    ) -> None:
+        response = _v2_response()
+        response["tool_runs"] = [
+            {
+                "tool": "tw.refresh_shareholding",
+                "status": "success",
+                "transport_status": "success",
+                "operation_status": "failed",
+                "evidence_status": "unavailable",
+                "result_status": "error",
+                "error": "TDCC request timed out",
+                "result_summary": {
+                    "status": "error",
+                    "refresh_outcome": "failed",
+                    "failed_steps": [
+                        {
+                            "dataset": "shareholding_distribution",
+                            "provider": "tdcc",
+                            "target": "8299",
+                            "status": "error",
+                            "refresh_outcome": "failed",
+                            "error_message": "TDCC request timed out",
+                            "retryable": True,
+                        }
+                    ],
+                },
+            }
+        ]
+
+        canonical = decision_envelope.build(response)
+        failure = canonical["limitations"]["current_request_failures"][0]
+
+        self.assertEqual(failure["tool"], "tw.refresh_shareholding")
+        self.assertEqual(failure["transport_status"], "success")
+        self.assertEqual(failure["operation_status"], "failed")
+        self.assertEqual(failure["dataset"], "shareholding_distribution")
+        self.assertEqual(failure["provider"], "tdcc")
+        self.assertEqual(failure["target"], "8299")
+        self.assertEqual(
+            failure["error_message"],
+            "TDCC request timed out",
+        )
+        self.assertTrue(failure["retryable"])
 
     def test_focused_quote_treats_same_target_unselected_resource_as_supplemental(
         self,
@@ -3064,6 +3561,111 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             canonical["projection"]["omitted_capabilities"],
         )
         self.assertTrue(canonical["projection"]["budget_met"])
+
+    def test_v4_preserves_explicit_evidence_only_mode_and_selection_trace(
+        self,
+    ) -> None:
+        response = _v2_response()
+        response["mode"]["response"] = "data_only"
+        response["output"] = "evidence_only"
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["quote.snapshot"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            target_market="TW",
+            question_intent="entry_decision",
+            requested_capabilities=("technical.structure",),
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "stock"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        self.assertEqual(canonical["decision"], {})
+        self.assertEqual(canonical["mode"]["requested_output"], "evidence_only")
+        self.assertEqual(canonical["mode"]["effective_output"], "evidence_only")
+        self.assertIsNone(canonical["mode"]["output_override_reason"])
+        query_plan = canonical["execution"]["query_plan"]
+        self.assertEqual(
+            query_plan["inference_policy"],
+            "explicit_selection_locked",
+        )
+        self.assertNotIn(
+            "technical.structure",
+            query_plan["capability_origins"],
+        )
+
+    def test_v4_promotes_internal_index_fetch_audit_into_execution(
+        self,
+    ) -> None:
+        response = _v2_response()
+        response["target"] = {
+            "type": "market",
+            "id": "TW",
+            "market": "TW",
+        }
+        response["result"]["data"]["compact"]["market"] = {
+            "index_contributions": {
+                "status": "ready",
+                "indices": {"TAIEX": {"positive": [], "negative": []}},
+                "tool_runs": [
+                    {
+                        "tool": "tw.read_market_index_contributions",
+                        "provider": "twse_official",
+                        "status": "success",
+                        "external_fetch": True,
+                        "duration_ms": 12,
+                        "writes_cache": False,
+                        "requested_capabilities": [
+                            "market.index_contributions"
+                        ],
+                        "arguments": {
+                            "index_id": "TAIEX",
+                            "requested_capabilities": [
+                                "market.index_contributions"
+                            ],
+                        },
+                        "result_status": "within_tolerance",
+                    }
+                ],
+            }
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["market.index_contributions"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="TW",
+            question_intent="market_overview",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "market"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        internal = next(
+            run
+            for run in canonical["execution"]["tool_runs"]
+            if run["tool"] == "tw.read_market_index_contributions"
+        )
+        self.assertTrue(internal["external_fetch"])
+        self.assertFalse(internal["writes_cache"])
+        self.assertEqual(
+            internal["requested_capabilities"],
+            ["market.index_contributions"],
+        )
+        self.assertTrue(
+            canonical["execution"]["refresh_reconciliation"]["attempted"]
+        )
 
 
 if __name__ == "__main__":

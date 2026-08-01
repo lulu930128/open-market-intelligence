@@ -8,6 +8,7 @@ STOCK_EVENT_CAPABILITIES = frozenset(
     {
         "events.upcoming",
         "events.history",
+        "corporate.actions",
         "regulation.disposition",
         "regulation.trading_restrictions",
     }
@@ -139,7 +140,13 @@ def _event_payload(
         "as_of": _json_value(result.get("checked_at")),
         **requested_window,
         "result_count": len(rows),
+        "returned_count": result.get("returned_count", len(rows)),
         "total_count": result.get("total_count", len(rows)),
+        "offset": result.get("offset", 0),
+        "sort_order": result.get(
+            "sort_order",
+            "desc" if kind == "tw_stock_event_history" else "asc",
+        ),
         "events": rows,
         "source": "taiwan_corporate_event_cache",
         "cache_policy": "cache_only",
@@ -171,6 +178,101 @@ def _event_payload(
         event_time=event_time,
         reason=warning,
     )
+    return payload, freshness
+
+
+def _corporate_actions_payload(
+    result: Mapping[str, Any],
+    *,
+    years: int,
+    limit: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    event_payload, _ = _event_payload(
+        kind="tw_stock_event_history",
+        result=result,
+        requested_window={"years": years, "limit": limit},
+    )
+    actions: list[dict[str, Any]] = []
+    for event in event_payload["events"]:
+        if not isinstance(event, Mapping):
+            continue
+        if str(event.get("event_type") or "") != "ex_dividend":
+            continue
+        base = {
+            "stock_id": event.get("stock_id"),
+            "event_date": event.get("start_date"),
+            "announce_date": event.get("announced_date"),
+            "ex_date": event.get("start_date"),
+            "record_date": event.get("record_date"),
+            "payment_date": event.get("payment_date"),
+            "effective_date": event.get("start_date"),
+            "currency": "TWD",
+            "provider": event.get("provider"),
+            "source": (
+                event.get("source_name")
+                or event.get("source")
+                or "taiwan_corporate_event_cache"
+            ),
+            "status": event.get("status"),
+        }
+        event_id = str(event.get("event_id") or "")
+        cash_amount = event.get("cash_dividend")
+        stock_ratio = event.get("stock_dividend_ratio")
+        if cash_amount is not None:
+            actions.append(
+                {
+                    **base,
+                    "action_id": f"{event_id}:cash" if event_id else None,
+                    "action_type": "cash_dividend",
+                    "amount": cash_amount,
+                    "cash_amount": cash_amount,
+                    "stock_ratio": None,
+                    "split_ratio": None,
+                }
+            )
+        if stock_ratio is not None:
+            actions.append(
+                {
+                    **base,
+                    "action_id": f"{event_id}:stock" if event_id else None,
+                    "action_type": "stock_dividend",
+                    "amount": None,
+                    "cash_amount": None,
+                    "stock_ratio": stock_ratio,
+                    "split_ratio": None,
+                }
+            )
+    actions = actions[:limit]
+    payload = {
+        "kind": "tw_corporate_actions",
+        "status": event_payload["status"],
+        "stock_id": event_payload["stock_id"],
+        "as_of": event_payload["as_of"],
+        "years": years,
+        "limit": limit,
+        "result_count": len(actions),
+        "total_count": len(actions),
+        "actions": actions,
+        "source": "taiwan_corporate_event_cache",
+        "cache_policy": "cache_only",
+        "cache_status": event_payload["cache_status"],
+        "cache_fetched_at": event_payload["cache_fetched_at"],
+        "empty_result_is_valid": event_payload["empty_result_is_valid"],
+        "missing": list(event_payload["missing"]),
+        "warnings": list(event_payload["warnings"]),
+    }
+    freshness = _freshness(
+        capability_id="corporate.actions",
+        cache_status=payload["cache_status"],
+        fetched_at=payload["cache_fetched_at"],
+        event_time=(
+            actions[0].get("effective_date")
+            if actions
+            else payload["as_of"]
+        ),
+        reason=(payload["warnings"][0] if payload["warnings"] else None),
+    )
+    freshness["event_time_basis"] = "official_corporate_action_effective_date"
     return payload, freshness
 
 
@@ -392,6 +494,51 @@ def build_tw_stock_event_context(
         freshness_by_capability["events.history"] = freshness
         slots["events_history"] = _slot(
             capability_id="events.history",
+            payload=payload,
+            freshness=freshness,
+        )
+        missing.extend(payload["missing"])
+        warnings.extend(payload["warnings"])
+        source_refs.append(
+            {
+                "type": "external_or_cache",
+                "name": "taiwan_corporate_event_history",
+            }
+        )
+
+    if "corporate.actions" in requested:
+        capability_params = _capability_parameters(
+            params,
+            "corporate.actions",
+        )
+        years = _bounded_int(
+            capability_params.get("years"),
+            default=5,
+            minimum=1,
+            maximum=10,
+        )
+        limit = _bounded_int(
+            capability_params.get("limit"),
+            default=20,
+            minimum=1,
+            maximum=200,
+        )
+        result = get_event_history(
+            stock_id,
+            market=market,
+            years=years,
+            max_results=limit,
+            now=now,
+        )
+        payload, freshness = _corporate_actions_payload(
+            result,
+            years=years,
+            limit=limit,
+        )
+        data["corporate.actions"] = payload
+        freshness_by_capability["corporate.actions"] = freshness
+        slots["corporate_actions"] = _slot(
+            capability_id="corporate.actions",
             payload=payload,
             freshness=freshness,
         )

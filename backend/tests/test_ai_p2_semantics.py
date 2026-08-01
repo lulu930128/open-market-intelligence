@@ -35,9 +35,62 @@ class AiP2SemanticTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["selected_horizon"], "short")
+        self.assertEqual(summary["effective_horizon"], "short")
         self.assertEqual(summary["selected_timeframe"], "daily")
         self.assertIsNone(summary["intraday_score"])
         self.assertEqual(summary["horizon_fallback_reason"], "intraday_evidence_unavailable")
+        self.assertEqual(summary["fallback_reason"], "intraday_evidence_unavailable")
+        self.assertIn("今日：盤中證據不足", summary["selected_title"])
+        self.assertIn("歷史結構：短線偏多", summary["selected_title"])
+        self.assertEqual(summary["today_state"]["status"], "unavailable")
+        self.assertEqual(summary["historical_structure"]["title"], "短線偏多")
+        self.assertIn("僅能引用歷史結構", summary["composite_state"])
+
+    def test_intraday_summary_separates_today_from_historical_structure(self) -> None:
+        summary = technical_analysis._technical_analysis_summary(
+            technical_reports={
+                "today": {
+                    "timeframe": "today",
+                    "phase": "intraday",
+                    "score": 4,
+                    "title": "盤中偏多",
+                    "summary": "今日量價轉強。",
+                    "confidence": "medium",
+                    "rows": [],
+                    "data": {
+                        "intraday": {
+                            "point_count": 12,
+                            "score_eligible": True,
+                            "is_current_session": True,
+                            "latest_point": {
+                                "time": "2026-07-31T10:15:00+08:00",
+                                "price": 110,
+                            },
+                        }
+                    },
+                },
+                "daily": {
+                    "timeframe": "daily",
+                    "phase": "daily",
+                    "score": -3,
+                    "title": "波段偏空",
+                    "summary": "日線仍在空頭結構。",
+                    "confidence": "high",
+                    "rows": [],
+                },
+            },
+            requested_horizon="intraday",
+        )
+
+        self.assertEqual(summary["effective_horizon"], "intraday")
+        self.assertIsNone(summary["fallback_reason"])
+        self.assertEqual(summary["today_state"]["title"], "盤中偏多")
+        self.assertEqual(summary["historical_structure"]["title"], "波段偏空")
+        self.assertEqual(
+            summary["selected_title"],
+            "今日：盤中偏多｜歷史結構：波段偏空",
+        )
+        self.assertIn("歷史結構為波段偏空", summary["composite_state"])
 
     def test_provider_refresh_without_points_is_explicit_empty(self) -> None:
         compact = _compact_intraday_history(

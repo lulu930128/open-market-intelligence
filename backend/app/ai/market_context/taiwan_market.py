@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from time import perf_counter
 from typing import Any, Callable, Protocol
 
 from sqlalchemy.orm import Session
@@ -109,6 +110,57 @@ def _build_tw_market_compact(
     market_aggregates: dict[str, Any],
     slots: dict[str, Any],
 ) -> dict[str, Any]:
+    sample_slot = (
+        slots.get("sample_distribution")
+        if isinstance(slots.get("sample_distribution"), dict)
+        else {}
+    )
+    sample_status = str(
+        sample_slot.get("status")
+        or (
+            "ready"
+            if sample_coverage.get("status") == "complete"
+            else "partial"
+        )
+    )
+    sample_warnings = (
+        []
+        if sample_coverage.get("status") == "complete"
+        else [
+            "This ranking is derived from the bounded OMI local daily sample "
+            "and must not be treated as a full-market screener."
+        ]
+    )
+    sample_ranking = {
+        "kind": "tw_market_sample_ranking",
+        "status": sample_status,
+        "scope": "omi_local_daily_sample",
+        "scope_label": "OMI 台股本機日線樣本",
+        "is_full_market": False,
+        "as_of": as_of,
+        "latest_trade_date": latest_trade_date,
+        "source": "market_daily_price",
+        "currency": "TWD",
+        "price_unit": "TWD_per_share",
+        "volume_unit": "shares",
+        "trade_value_unit": "TWD",
+        "unit_semantics": {
+            "close_price": "TWD_per_share",
+            "trade_volume": "shares",
+            "trade_value": "TWD",
+            "change_pct": "percent",
+        },
+        "sample_breadth": sample_breadth,
+        "sample_coverage": sample_coverage,
+        "distribution": distribution,
+        "top_gainers": top_gainers,
+        "top_losers": top_losers,
+        "value_leaders": value_leaders,
+        "top_industries": top_industries,
+        "weak_industries": weak_industries,
+        "industry_strength_label": industry_strength_label,
+        "warnings": sample_warnings,
+    }
     return {
         "kind": "tw_market_compact_evidence",
         "version": "market_compact_evidence.v1",
@@ -118,6 +170,7 @@ def _build_tw_market_compact(
         "latest_trade_date": latest_trade_date,
         "breadth": breadth,
         "breadth_by_market": breadth_by_market,
+        "sample_ranking": sample_ranking,
         "sample_breadth": sample_breadth,
         "sample_coverage": sample_coverage,
         "distribution": distribution,
@@ -242,6 +295,83 @@ def _market_index_intraday_pack(
         if not any(isinstance(item, dict) and item.get("returned_point_count") for item in series.values()):
             missing.append(f"market_index_intraday.{index_id}")
 
+    quotes = [
+        item.get("quote")
+        for item in rows
+        if isinstance(item.get("quote"), dict)
+    ]
+    requested_count = len(index_ids)
+    returned_count = len(quotes)
+
+    def _quote_flag(quote: dict[str, Any], key: str) -> bool:
+        freshness = quote.get("freshness")
+        return bool(
+            quote.get(key)
+            or isinstance(freshness, dict) and freshness.get(key)
+        )
+
+    current_session_count = sum(
+        1
+        for quote in quotes
+        if bool(
+            quote.get("last_trade_is_current_session")
+            or quote.get("is_latest_session_quote")
+        )
+    )
+    live_index_count = sum(
+        1
+        for quote in quotes
+        if _quote_flag(quote, "is_live")
+        and bool(
+            quote.get("last_trade_is_current_session")
+            or quote.get("is_latest_session_quote")
+        )
+    )
+    all_requested_returned = bool(
+        requested_count and returned_count == requested_count
+    )
+    all_current_session = bool(
+        all_requested_returned
+        and current_session_count == requested_count
+    )
+    all_live = bool(
+        all_requested_returned
+        and live_index_count == requested_count
+    )
+
+    def _consensus(key: str) -> str | None:
+        values = {
+            str(quote.get(key))
+            for quote in quotes
+            if quote.get(key) is not None
+        }
+        if not values:
+            return None
+        return next(iter(values)) if len(values) == 1 else "mixed"
+
+    event_time = _latest_timestamp(
+        [
+            quote.get("quote_time")
+            or quote.get("last_trade_time")
+            or quote.get("trade_date")
+            for quote in quotes
+        ]
+    )
+    coverage_status = (
+        "ready"
+        if all_requested_returned
+        else "partial"
+        if returned_count
+        else "unavailable"
+    )
+    freshness_status = (
+        "live"
+        if all_live
+        else "partial"
+        if returned_count
+        else "unavailable"
+    )
+
     return {
         "kind": "market_index_intraday_pack",
         "enabled": True,
@@ -249,6 +379,29 @@ def _market_index_intraday_pack(
         "bar_limit": point_limit,
         "index_ids": index_ids,
         "indices": rows,
+        "requested_index_count": requested_count,
+        "returned_index_count": returned_count,
+        "live_index_count": live_index_count,
+        "current_session_index_count": current_session_count,
+        "partial_index_count": max(requested_count - live_index_count, 0),
+        "coverage_status": coverage_status,
+        "is_live": all_live,
+        "is_realtime": all_live,
+        "is_current_session": all_current_session,
+        "is_latest_session_quote": all_current_session,
+        "market_status": _consensus("market_status"),
+        "current_session_phase": _consensus("current_session_phase"),
+        "session_phase": _consensus("current_session_phase"),
+        "event_time": event_time,
+        "freshness": {
+            "status": freshness_status,
+            "is_live": all_live,
+            "is_realtime": all_live,
+            "is_current_session": all_current_session,
+            "coverage_status": coverage_status,
+            "live_index_count": live_index_count,
+            "requested_index_count": requested_count,
+        },
         "warnings": local_warnings,
     }
 
@@ -324,7 +477,14 @@ def _volume_state_with_breadth_current_value(
         )
         output.setdefault("trade_value_available", True)
         output.setdefault("trade_value_complete", True)
-        output.setdefault("trade_value_status", "complete")
+        output.setdefault("trade_value_coverage_status", "complete")
+        output.setdefault("trade_value_authority_status", "unavailable")
+        output.setdefault(
+            "trade_value_status",
+            f"{output['trade_value_authority_status']}_complete"
+            if output["trade_value_authority_status"] != "unavailable"
+            else "complete",
+        )
         output.setdefault("included_markets", native_markets or ["TWSE", "TPEX"])
         output.setdefault("missing_markets", [])
         output.setdefault("trade_value_estimate", None)
@@ -364,12 +524,30 @@ def _volume_state_with_breadth_current_value(
     output["trade_value_complete"] = (
         len(selected) == 2 and len(values) == 2 and len(trade_dates) == 1
     )
-    output["trade_value_status"] = (
+    output["trade_value_coverage_status"] = (
         "complete"
         if output["trade_value_complete"]
         else "partial"
         if available_value is not None
         else "missing"
+    )
+    selected_authorities = [
+        "estimated" if item.get("trade_value_is_estimate") else "official"
+        for item in selected
+        if isinstance(item.get("trade_value"), (int, float))
+    ]
+    output["trade_value_authority_status"] = (
+        selected_authorities[0]
+        if selected_authorities
+        and all(value == selected_authorities[0] for value in selected_authorities)
+        else "mixed"
+        if selected_authorities
+        else "unavailable"
+    )
+    output["trade_value_status"] = (
+        f"{output['trade_value_authority_status']}_complete"
+        if output["trade_value_coverage_status"] == "complete"
+        else output["trade_value_coverage_status"]
     )
     output["included_markets"] = available_markets
     output["missing_markets"] = missing_markets
@@ -396,9 +574,11 @@ def _volume_state_with_breadth_current_value(
                 "currency": "TWD",
                 "trade_value_unit": "TWD",
                 "cumulative_trade_value": item.get("trade_value"),
+                "trade_value_semantics": item.get("trade_value_semantics"),
+                "trade_value_is_estimate": bool(item.get("trade_value_is_estimate")),
                 "quality_status": item.get("status"),
                 "source": item.get("source"),
-                "official_flag": item.get("scope") == "full_market",
+                "official_flag": not bool(item.get("trade_value_is_estimate")),
             }
             for item in selected
         ]
@@ -442,8 +622,18 @@ def _market_evidence_as_of(
             candidates.append(str(value))
     if fallback_trade_date:
         candidates.append(str(_json_scalar(fallback_trade_date)))
+    return _latest_timestamp(candidates)
+
+
+def _latest_timestamp(values: list[Any]) -> str | None:
     parsed: list[tuple[datetime, str]] = []
-    for value in candidates:
+    for raw_value in values:
+        scalar = _json_scalar(raw_value)
+        if scalar is None:
+            continue
+        value = str(scalar).strip()
+        if not value:
+            continue
         try:
             normalized = value.replace("Z", "+00:00")
             timestamp = datetime.fromisoformat(normalized)
@@ -514,20 +704,28 @@ def _market_breadth_from_index_summary(
         total_count = int(breadth.get("total_count") or 0)
         unchanged_count = int(breadth.get("unchanged_count") or 0)
         classified_count = advance_count + decline_count + unchanged_count
-        unknown_count = max(total_count - classified_count, 0)
         universe_count = int(
             breadth.get("universe_count")
-            or breadth.get("coverage_count")
             or total_count
         )
+        coverage_count = int(
+            breadth.get("coverage_count")
+            if breadth.get("coverage_count") is not None
+            else classified_count
+        )
+        unknown_count = int(
+            breadth.get("unknown_count")
+            if breadth.get("unknown_count") is not None
+            else max(universe_count - coverage_count, 0)
+        )
         breadth["universe_count"] = universe_count
-        breadth["coverage_count"] = total_count
+        breadth["coverage_count"] = coverage_count
         (
             breadth["coverage_ratio"],
             breadth["coverage_ratio_raw"],
             coverage_overflow,
         ) = _coverage_ratio(
-            total_count,
+            coverage_count,
             universe_count,
         )
         breadth["coverage_overflow"] = coverage_overflow
@@ -535,7 +733,7 @@ def _market_breadth_from_index_summary(
             breadth["status"] = "partial"
             breadth["coverage_issue"] = "coverage_count_exceeds_universe"
             warnings.append(
-                f"{market} breadth coverage count {total_count} exceeds "
+                f"{market} breadth coverage count {coverage_count} exceeds "
                 f"universe count {universe_count}; ratio was bounded to 1.0."
             )
         breadth["classified_count"] = classified_count
@@ -543,20 +741,23 @@ def _market_breadth_from_index_summary(
         breadth["reconciliation_status"] = (
             "balanced"
             if (
-                total_count > 0
-                and classified_count == total_count
+                universe_count > 0
+                and classified_count == coverage_count
+                and coverage_count + unknown_count == universe_count
                 and not coverage_overflow
             )
             else "partial"
             if (
-                total_count > 0
-                and classified_count < total_count
+                universe_count > 0
+                and classified_count <= coverage_count
+                and coverage_count + unknown_count <= universe_count
                 and not coverage_overflow
             )
             else "inconsistent"
         )
         breadth["reconciliation_formula"] = (
-            "advance_count+decline_count+unchanged_count=total_count"
+            "advance_count+decline_count+unchanged_count=coverage_count; "
+            "coverage_count+unknown_count=universe_count"
         )
         breadth_by_market[market] = breadth
 
@@ -586,8 +787,10 @@ def _market_breadth_from_index_summary(
     decline_count = _sum_count("decline_count")
     unchanged_count = _sum_count("unchanged_count")
     total_count = _sum_count("total_count")
+    coverage_count = _sum_count("coverage_count")
+    universe_count = _sum_count("universe_count")
     classified_count = advance_count + decline_count + unchanged_count
-    unknown_count = max(total_count - classified_count, 0)
+    unknown_count = _sum_count("unknown_count")
     comparison_count = advance_count + decline_count
     trade_dates = {
         str(item.get("trade_date"))
@@ -612,13 +815,32 @@ def _market_breadth_from_index_summary(
         if market not in trade_value_included_markets
     ]
     cumulative_trade_value = _sum_optional("trade_value")
+    trade_value_authorities = [
+        "estimated" if item.get("trade_value_is_estimate") else "official"
+        for item in breadth_by_market.values()
+        if item.get("trade_value") is not None
+    ]
+    trade_value_authority_status = (
+        trade_value_authorities[0]
+        if trade_value_authorities
+        and all(value == trade_value_authorities[0] for value in trade_value_authorities)
+        else "mixed"
+        if trade_value_authorities
+        else "unavailable"
+    )
+    trade_value_coverage_status = (
+        "complete"
+        if not trade_value_missing_markets
+        else "partial"
+        if cumulative_trade_value is not None
+        else "missing"
+    )
     market_completion_ratio = len(breadth_by_market) / 2
-    combined_universe_count = _sum_count("universe_count")
     (
         combined_coverage_ratio,
         combined_coverage_ratio_raw,
         combined_coverage_overflow,
-    ) = _coverage_ratio(total_count, combined_universe_count)
+    ) = _coverage_ratio(coverage_count, universe_count)
     breadth = {
         "market": "TW",
         "scope": "full_market" if component_scopes == {"full_market"} else "mixed",
@@ -631,8 +853,8 @@ def _market_breadth_from_index_summary(
         "decline_count": decline_count,
         "unchanged_count": unchanged_count,
         "total_count": total_count,
-        "universe_count": combined_universe_count,
-        "coverage_count": total_count,
+        "universe_count": universe_count,
+        "coverage_count": coverage_count,
         "coverage_ratio": combined_coverage_ratio,
         "coverage_ratio_raw": combined_coverage_ratio_raw,
         "coverage_overflow": combined_coverage_overflow,
@@ -645,8 +867,9 @@ def _market_breadth_from_index_summary(
         "unknown_count": unknown_count,
         "reconciliation_status": (
             "balanced"
-            if total_count > 0
-            and classified_count == total_count
+            if universe_count > 0
+            and classified_count == coverage_count
+            and coverage_count + unknown_count == universe_count
             and all(
                 item.get("reconciliation_status") == "balanced"
                 for item in breadth_by_market.values()
@@ -654,19 +877,20 @@ def _market_breadth_from_index_summary(
             else "partial"
         ),
         "reconciliation_formula": (
-            "advance_count+decline_count+unchanged_count=total_count"
+            "advance_count+decline_count+unchanged_count=coverage_count; "
+            "coverage_count+unknown_count=universe_count"
         ),
         "limit_up_count": _sum_optional("limit_up_count"),
         "limit_down_count": _sum_optional("limit_down_count"),
         "trade_value": cumulative_trade_value,
         "trade_value_available": cumulative_trade_value is not None,
         "trade_value_complete": not trade_value_missing_markets,
+        "trade_value_coverage_status": trade_value_coverage_status,
+        "trade_value_authority_status": trade_value_authority_status,
         "trade_value_status": (
-            "complete"
-            if not trade_value_missing_markets
-            else "partial"
-            if cumulative_trade_value is not None
-            else "missing"
+            f"{trade_value_authority_status}_complete"
+            if trade_value_coverage_status == "complete"
+            else trade_value_coverage_status
         ),
         "trade_value_included_markets": trade_value_included_markets,
         "trade_value_missing_markets": trade_value_missing_markets,
@@ -923,20 +1147,123 @@ def _market_index_contributions_capability(
 
     rows: dict[str, Any] = {}
     warnings: list[str] = []
-    for index_id in index_ids:
+    tool_runs: list[dict[str, Any]] = []
+    tool_budget = (
+        data_params.get("tool_budget")
+        if isinstance(data_params.get("tool_budget"), dict)
+        else {}
+    )
+    max_external_fetches = tool_budget.get("max_external_fetches")
+    if (
+        isinstance(max_external_fetches, bool)
+        or not isinstance(max_external_fetches, int)
+    ):
+        max_external_fetches = len(index_ids)
+    max_external_fetches = max(0, max_external_fetches)
+    for position, index_id in enumerate(index_ids):
+        requested_capabilities = ["market.index_contributions"]
+        if position >= max_external_fetches:
+            warnings.append(
+                f"{index_id} contributions skipped because the external "
+                "fetch budget was exhausted."
+            )
+            tool_runs.append(
+                {
+                    "tool": "tw.read_market_index_contributions",
+                    "provider": None,
+                    "status": "skipped_budget",
+                    "external_fetch": True,
+                    "duration_ms": 0,
+                    "writes_cache": False,
+                    "requested_capabilities": requested_capabilities,
+                    "arguments": {
+                        "index_id": index_id,
+                        "limit": limit,
+                        "requested_capabilities": requested_capabilities,
+                    },
+                    "result_status": "skipped_budget",
+                }
+            )
+            continue
+        started_at = perf_counter()
         try:
             rows[index_id] = dependencies.get_market_index_contributions(
                 index_id=index_id,
                 limit=limit,
                 db=db,
             )
+            result = (
+                rows[index_id]
+                if isinstance(rows[index_id], dict)
+                else {}
+            )
+            selected_provider = str(
+                result.get("source") or ""
+            ).strip() or None
+            fallback_used = bool(
+                result.get("fallback_used")
+            )
+            tool_runs.append(
+                {
+                    "tool": "tw.read_market_index_contributions",
+                    "provider": selected_provider,
+                    "status": (
+                        "success_with_fallback"
+                        if fallback_used
+                        else "success"
+                    ),
+                    "external_fetch": True,
+                    "duration_ms": max(
+                        0,
+                        int((perf_counter() - started_at) * 1000),
+                    ),
+                    "writes_cache": False,
+                    "requested_capabilities": requested_capabilities,
+                    "arguments": {
+                        "index_id": index_id,
+                        "limit": limit,
+                        "requested_capabilities": requested_capabilities,
+                    },
+                    "result_status": (
+                        result.get("reconciliation_status")
+                        or "completed"
+                    ),
+                    "fallback_used": fallback_used,
+                }
+            )
         except Exception as exc:
             warnings.append(f"{index_id} contributions unavailable: {exc}")
+            tool_runs.append(
+                {
+                    "tool": "tw.read_market_index_contributions",
+                    "provider": None,
+                    "status": "failed",
+                    "external_fetch": True,
+                    "duration_ms": max(
+                        0,
+                        int((perf_counter() - started_at) * 1000),
+                    ),
+                    "writes_cache": False,
+                    "requested_capabilities": requested_capabilities,
+                    "arguments": {
+                        "index_id": index_id,
+                        "limit": limit,
+                        "requested_capabilities": requested_capabilities,
+                    },
+                    "result_status": "failed",
+                    "error": str(exc),
+                }
+            )
     trade_dates = [
         str(item.get("trade_date"))
         for item in rows.values()
         if isinstance(item, dict) and item.get("trade_date")
     ]
+    reconciliation_statuses = {
+        str(item.get("reconciliation_status") or "unavailable")
+        for item in rows.values()
+        if isinstance(item, dict)
+    }
     return {
         "kind": "tw_market_index_contributions",
         "status": (
@@ -950,7 +1277,36 @@ def _market_index_contributions_capability(
         "index_ids": index_ids,
         "indices": rows,
         "method": "estimated_market_cap_weight",
+        "method_version": "v1",
+        "is_official": False,
+        "currency": "TWD",
+        "price_unit": "TWD",
+        "market_value_unit": "TWD",
+        "trade_value_unit": "TWD",
+        "contribution_unit": "index_points",
+        "reconciliation_status": (
+            "within_tolerance"
+            if reconciliation_statuses
+            and reconciliation_statuses <= {"within_tolerance"}
+            else "outside_tolerance"
+            if "outside_tolerance" in reconciliation_statuses
+            else "unavailable"
+        ),
         "cache_policy": "bounded_external_fetch",
+        "external_fetch": True,
+        "writes_cache": False,
+        "tool_runs": tool_runs,
+        "provider_attempts": [
+            {
+                "index_id": (
+                    run.get("arguments") or {}
+                ).get("index_id"),
+                "provider": run.get("provider"),
+                "status": run.get("status"),
+                "duration_ms": run.get("duration_ms"),
+            }
+            for run in tool_runs
+        ],
         "missing": [
             f"market_index_contributions.{index_id}"
             for index_id in index_ids
@@ -963,6 +1319,7 @@ def _market_index_contributions_capability(
 def _official_market_flow_capabilities(
     market_chips: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    requested_markets = ["TWSE", "TPEX"]
     official = (
         market_chips.get("official_market_aggregate")
         if isinstance(market_chips.get("official_market_aggregate"), dict)
@@ -979,9 +1336,34 @@ def _official_market_flow_capabilities(
         for value in official.get("trade_dates") or []
         if value
     ]
+    available_markets = list(
+        dict.fromkeys(
+            "TWSE"
+            if str(row.get("market") or row.get("index_id") or "").upper()
+            in {"TWSE", "TAIEX"}
+            else "TPEX"
+            if str(row.get("market") or row.get("index_id") or "").upper()
+            == "TPEX"
+            else str(row.get("market") or row.get("index_id") or "").upper()
+            for row in rows
+            if str(row.get("market") or row.get("index_id") or "").strip()
+        )
+    )
+    missing_markets = [
+        market
+        for market in requested_markets
+        if market not in available_markets
+    ]
+    coverage_status = (
+        "complete"
+        if not missing_markets and len(available_markets) == len(requested_markets)
+        else "partial"
+        if available_markets
+        else "unknown"
+    )
     status = (
         "ready"
-        if rows and same_trade_date
+        if rows and same_trade_date and coverage_status == "complete"
         else "partial"
         if rows
         else "missing"
@@ -1002,7 +1384,25 @@ def _official_market_flow_capabilities(
         else None,
         "trade_dates": trade_dates,
         "same_trade_date": same_trade_date,
-        "markets": list(official.get("markets") or []),
+        "markets": available_markets,
+        "coverage": {
+            "requested_markets": requested_markets,
+            "available_markets": available_markets,
+            "missing_markets": missing_markets,
+            "coverage_ratio": round(
+                len(available_markets) / len(requested_markets),
+                6,
+            ),
+            "coverage_status": coverage_status,
+            "aggregate_scope": (
+                "TWSE_TPEX"
+                if coverage_status == "complete"
+                else "_".join(available_markets) + "_only"
+                if available_markets
+                else "unavailable"
+            ),
+        },
+        "coverage_status": coverage_status,
         "rows": rows,
         "source_grade": (
             "official"
@@ -1018,6 +1418,18 @@ def _official_market_flow_capabilities(
             "event_time_basis": "taiwan_completed_trade_date",
         },
         "missing": [] if rows else ["market_chip_daily"],
+        "coverage_gaps": (
+            [
+                {
+                    "dataset": "market_chip_daily",
+                    "requested_markets": requested_markets,
+                    "available_markets": available_markets,
+                    "missing_markets": missing_markets,
+                }
+            ]
+            if missing_markets
+            else []
+        ),
         "warnings": (
             []
             if same_trade_date or not rows
@@ -1031,6 +1443,9 @@ def _official_market_flow_capabilities(
         "kind": "tw_market_institutional_flow",
         **common,
         "unit": "TWD",
+        "currency": "TWD",
+        "value_unit": "TWD",
+        "aggregate_scope": common["coverage"]["aggregate_scope"],
         "aggregate": {
             "total_institutional_net_value": sum_field(
                 "total_institutional_net_value"
@@ -1044,25 +1459,68 @@ def _official_market_flow_capabilities(
             "dealer_net_value": sum_field("dealer_net_value"),
         },
     }
+    margin_aggregate = {
+        "margin_balance_change_value": sum_field(
+            "margin_balance_change_value"
+        ),
+        "margin_balance_change_shares": sum_field(
+            "margin_balance_change_shares"
+        ),
+        "short_balance_change_shares": sum_field(
+            "short_balance_change_shares"
+        ),
+    }
+    field_status = {
+        field: "available" if value is not None else "missing"
+        for field, value in margin_aggregate.items()
+    }
+    available_margin_fields = sum(
+        value == "available" for value in field_status.values()
+    )
+    margin_status = (
+        "missing"
+        if available_margin_fields == 0
+        else "partial"
+        if available_margin_fields < len(field_status)
+        or coverage_status != "complete"
+        or not same_trade_date
+        else "ready"
+    )
     margin_short = {
         "kind": "tw_market_margin_short",
         **common,
+        "status": margin_status,
+        "availability_status": (
+            "missing" if available_margin_fields == 0 else "available"
+        ),
+        "coverage_status": coverage_status,
+        "aggregate_scope": common["coverage"]["aggregate_scope"],
+        "freshness": {
+            **common["freshness"],
+            "status": margin_status,
+            "is_current": margin_status in {"ready", "partial"},
+        },
         "unit_semantics": {
             "margin_balance_change_value": "TWD",
             "margin_balance_change_shares": "shares",
             "short_balance_change_shares": "shares",
         },
-        "aggregate": {
-            "margin_balance_change_value": sum_field(
-                "margin_balance_change_value"
-            ),
-            "margin_balance_change_shares": sum_field(
-                "margin_balance_change_shares"
-            ),
-            "short_balance_change_shares": sum_field(
-                "short_balance_change_shares"
-            ),
-        },
+        "aggregate": margin_aggregate,
+        "field_status": field_status,
+        "missing": list(
+            dict.fromkeys(
+                [
+                    *common["missing"],
+                    *(
+                        [
+                            f"market_chip_daily.{field}"
+                            for field, field_state in field_status.items()
+                            if field_state == "missing"
+                        ]
+                    ),
+                ]
+            )
+        ),
         "margin_status": [
             {
                 "index_id": row.get("index_id"),
@@ -1082,6 +1540,7 @@ def _official_market_flow_capabilities(
 
 def _events_calendar_capability(
     *,
+    db: Session | None = None,
     dependencies: TaiwanMarketDependencies,
     data_params: dict[str, Any],
     generated_at: datetime,
@@ -1169,8 +1628,96 @@ def _events_calendar_capability(
         for value in parameters.get("stock_ids") or []
         if str(value).strip()
     }
+    instrument_types = {
+        str(value).strip().lower()
+        for value in parameters.get("instrument_types") or []
+        if str(value).strip()
+    }
+    exclude_instrument_types = {
+        str(value).strip().lower()
+        for value in parameters.get("exclude_instrument_types") or []
+        if str(value).strip()
+    }
+    industries = {
+        normalize_tw_industry_label(str(value))
+        for value in parameters.get("industries") or []
+        if str(value).strip()
+    }
+    financial_report_related = parameters.get(
+        "financial_report_related"
+    )
+    event_statuses = {
+        str(value).strip().lower()
+        for value in parameters.get("status") or []
+        if str(value).strip()
+    }
+    timing_statuses = {
+        str(value).strip().lower()
+        for value in parameters.get("timing_status") or []
+        if str(value).strip()
+    }
+    instrument_metadata: dict[str, dict[str, Any]] = {}
+    if instrument_types or exclude_instrument_types or industries:
+        if db is None:
+            return {
+                "kind": "tw_market_event_calendar",
+                "status": "unavailable",
+                "as_of": generated_at.isoformat(),
+                "events": [],
+                "cache_policy": "cache_only",
+                "missing": ["stock_master"],
+                "warnings": [
+                    "Instrument filters require the local stock_master reader."
+                ],
+            }
+        stock_rows = (
+            db.query(StockMaster)
+            .filter(StockMaster.is_active.is_(True))
+            .all()
+        )
+        eligible_stock_ids: set[str] = set()
+        for stock in stock_rows:
+            instrument_type = str(
+                getattr(stock, "instrument_type", "") or ""
+            ).strip().lower()
+            industry = normalize_tw_industry_label(
+                str(getattr(stock, "industry", "") or "")
+            )
+            if instrument_types and instrument_type not in instrument_types:
+                continue
+            if (
+                exclude_instrument_types
+                and instrument_type in exclude_instrument_types
+            ):
+                continue
+            if industries and industry not in industries:
+                continue
+            stock_id = str(getattr(stock, "stock_id", "") or "").strip()
+            if not stock_id:
+                continue
+            eligible_stock_ids.add(stock_id)
+            instrument_metadata[stock_id] = {
+                "instrument_type": getattr(stock, "instrument_type", None),
+                "industry": getattr(stock, "industry", None),
+            }
+        stock_ids = (
+            stock_ids & eligible_stock_ids
+            if stock_ids
+            else eligible_stock_ids
+        )
+        if not stock_ids:
+            stock_ids = {"__NO_MATCH__"}
     limit = max(1, min(int(parameters.get("limit") or 300), 500))
     offset = max(0, min(int(parameters.get("offset") or 0), 5000))
+    listing_filters: dict[str, Any] = {}
+    if isinstance(financial_report_related, bool):
+        listing_filters[
+            "financial_report_related"
+        ] = financial_report_related
+    if event_statuses:
+        listing_filters["event_statuses"] = event_statuses
+    if timing_statuses:
+        listing_filters["timing_statuses"] = timing_statuses
     listing = dependencies.list_taiwan_corporate_events(
         event_types=event_types or None,
         markets=markets or None,
@@ -1180,12 +1727,18 @@ def _events_calendar_capability(
         limit=limit,
         offset=offset,
         now=generated_at,
+        **listing_filters,
     )
     rows = [
         _json_event_value(row)
         for row in listing.get("results") or []
         if isinstance(row, dict)
     ]
+    for row in rows:
+        stock_id = str(row.get("stock_id") or "")
+        metadata = instrument_metadata.get(stock_id)
+        if metadata:
+            row.update(metadata)
     total_count = int(listing.get("total_count") or len(rows))
     sources = (
         listing.get("sources")
@@ -1204,6 +1757,24 @@ def _events_calendar_capability(
     else:
         status = "partial"
     warning = str(listing.get("warning") or "").strip() or None
+    source_refs = [
+        {
+            "type": "provider_cache",
+            "provider": str(provider),
+            "dataset": "taiwan_corporate_events",
+            "name": f"{provider}.taiwan_corporate_events",
+            "source_grade": "official",
+        }
+        for provider in sorted(sources)
+    ] or [
+        {
+            "type": "table",
+            "provider": "taiwan_corporate_event_cache",
+            "dataset": "taiwan_corporate_events",
+            "name": "taiwan_corporate_events",
+            "source_grade": "official_cache",
+        }
+    ]
     return {
         "kind": "tw_market_event_calendar",
         "status": status,
@@ -1213,6 +1784,16 @@ def _events_calendar_capability(
         "event_types": sorted(event_types),
         "markets": sorted(markets),
         "stock_ids": sorted(stock_ids),
+        "instrument_types": sorted(instrument_types),
+        "exclude_instrument_types": sorted(exclude_instrument_types),
+        "industries": sorted(industries),
+        "financial_report_related": (
+            financial_report_related
+            if isinstance(financial_report_related, bool)
+            else None
+        ),
+        "event_statuses": sorted(event_statuses),
+        "timing_statuses": sorted(timing_statuses),
         "pagination": {
             "offset": offset,
             "limit": limit,
@@ -1223,6 +1804,7 @@ def _events_calendar_capability(
         "result_count": len(rows),
         "events": rows,
         "source": "taiwan_corporate_event_cache",
+        "source_refs": source_refs,
         "sources": _json_event_value(sources),
         "cache_policy": "cache_only",
         "empty_result_is_valid": status == "ready" and not rows,
@@ -1238,6 +1820,7 @@ def _sample_sector_capability(
     industry_summary: list[dict[str, Any]],
     sample_coverage: dict[str, Any],
     as_of: str | None,
+    computed_at: str | None = None,
 ) -> dict[str, Any]:
     rows = [
         {
@@ -1248,6 +1831,9 @@ def _sample_sector_capability(
             "advance_count": item.get("advance_count"),
             "decline_count": item.get("decline_count"),
             "trade_value": item.get("trade_value"),
+            "currency": "TWD",
+            "trade_value_unit": "TWD",
+            "change_pct_method": "equal_weighted_mean_stock_return_pct",
             "universe_count": item.get("count"),
             "coverage_count": item.get("count"),
             "coverage_ratio": 1.0 if item.get("count") else None,
@@ -1265,15 +1851,32 @@ def _sample_sector_capability(
         "kind": "tw_market_sectors",
         "status": "partial" if rows else "missing",
         "as_of": as_of,
+        "observed_trade_date": as_of,
+        "computed_at": computed_at,
+        "data_mode": "previous_completed_session",
+        "is_intraday": False,
         "ranking_basis": "omi_local_daily_sample_stock_aggregation",
+        "aggregation_method": "equal_weighted_mean_stock_return_pct",
+        "currency": "TWD",
+        "trade_value_unit": "TWD",
         "is_full_market": False,
-        "coverage": sample_coverage,
+        "coverage": {
+            **sample_coverage,
+            "scope": "active_stock_master",
+            "full_market_universe_count": sample_coverage.get(
+                "universe_count"
+            ),
+            "covered_stock_count": sample_coverage.get("coverage_count"),
+            "coverage_status": "sample_only",
+            "is_full_market": False,
+        },
         "count": len(rows),
         "items": rows,
-        "missing": (
+        "missing": [] if rows else ["market_daily_price.sector_sample"],
+        "coverage_gaps": (
             ["market_daily_price.full_market_sector_index"]
             if rows
-            else ["market_daily_price.sector_sample"]
+            else []
         ),
         "warnings": [
             "Sector rows are derived from the latest OMI local stock sample and "
@@ -1367,7 +1970,7 @@ def read_market_overview(
     latest_trade_date = dependencies.market_service.get_latest_trade_date(db)
     missing: list[str] = []
     warnings: list[str] = []
-    source_refs: list[dict[str, Any]] = [{"type": "table", "name": "market_daily_price"}]
+    source_refs: list[dict[str, Any]] = []
     payload_level = _payload_level(market_data_params)
     data_params = _market_data_params(market_data_params)
     requested_domains = {
@@ -1385,6 +1988,21 @@ def read_market_overview(
         for value in data_params.get("requested_capabilities") or []
         if str(value).strip()
     }
+    if (
+        not requested_capabilities
+        or requested_capabilities
+        & {
+            "market.indices",
+            "market.sectors",
+            "market.breadth",
+            "market.volume_state",
+            "market.index_contributions",
+        }
+    ):
+        _append_source_ref_once(
+            source_refs,
+            {"type": "table", "name": "market_daily_price"},
+        )
     source_health_requested = (
         "source.health" in requested_capabilities
         or "source_health" in requested_domains
@@ -1436,12 +2054,16 @@ def read_market_overview(
     if "events.calendar" in requested_capabilities:
         market_aggregates["events_calendar"] = (
             _events_calendar_capability(
+                db=db,
                 dependencies=dependencies,
                 data_params=data_params,
                 generated_at=generated_at,
             )
         )
         calendar_payload = market_aggregates["events_calendar"]
+        for source_ref in calendar_payload.get("source_refs") or []:
+            if isinstance(source_ref, dict):
+                _append_source_ref_once(source_refs, source_ref)
         market_aggregates["freshness_by_capability"][
             "events.calendar"
         ] = {
@@ -1457,6 +2079,10 @@ def read_market_overview(
             "warnings": list(calendar_payload.get("warnings") or []),
         }
     if "market.indices" in requested_capabilities:
+        _append_source_ref_once(
+            source_refs,
+            {"type": "table", "name": "market_daily_price"},
+        )
         market_aggregates["indices"] = _market_indices_capability(
             db=db,
             dependencies=dependencies,
@@ -1469,6 +2095,10 @@ def read_market_overview(
             dataset="market_index_summary",
         )
     if "market.index_contributions" in requested_capabilities:
+        _append_source_ref_once(
+            source_refs,
+            {"type": "table", "name": "market_daily_price"},
+        )
         market_aggregates[
             "index_contributions"
         ] = _market_index_contributions_capability(
@@ -1840,7 +2470,8 @@ def read_market_overview(
         market_aggregates["sectors"] = _sample_sector_capability(
             industry_summary=industry_summary,
             sample_coverage=sample_coverage,
-            as_of=evidence_as_of,
+            as_of=latest_trade_date.isoformat(),
+            computed_at=_json_scalar(generated_at),
         )
         market_aggregates["freshness_by_capability"][
             "market.sectors"

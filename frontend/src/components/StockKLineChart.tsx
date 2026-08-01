@@ -46,6 +46,7 @@ type Props = {
   volumeValueFormatter?: (value: number | null | undefined) => string;
   priceMaximumFractionDigits?: number;
   latestPreviousClose?: number | null;
+  timeLabelFormatter?: (value: string) => string;
 };
 
 type Panel = {
@@ -274,6 +275,7 @@ export default function StockKLineChart({
   volumeValueFormatter = formatLots,
   priceMaximumFractionDigits = 2,
   latestPreviousClose = null,
+  timeLabelFormatter = (value) => value,
 }: Props) {
   const t = useT();
   const formatChartPrice = (value: number | null | undefined) =>
@@ -905,7 +907,9 @@ export default function StockKLineChart({
             <div className="grid min-h-[4.75rem] max-w-full grid-cols-[repeat(4,minmax(10.5rem,max-content))] gap-x-5 gap-y-1 overflow-x-auto pb-1 text-right text-xs [&>div>div]:whitespace-nowrap [&>div>div]:tabular-nums [&>div>span]:whitespace-nowrap [&>div]:min-w-[10.5rem] [&>div]:whitespace-nowrap">
               <div>
                 <span className="text-omi-text-subtle">{t("chart.kline.date")}</span>
-                <div className="font-semibold text-omi-text">{hoveredPoint.time}</div>
+                <div className="font-semibold text-omi-text">
+                  {timeLabelFormatter(hoveredPoint.time)}
+                </div>
               </div>
               <div>
                 <span className="text-omi-text-subtle">{t("chart.kline.close")}</span>
@@ -2043,7 +2047,7 @@ export default function StockKLineChart({
         ) : null}
 
         <text x={paddingLeft} y={labelY} textAnchor="start" className="fill-omi-text-muted text-[11px]">
-          {visibleData[0]?.time ?? "-"}
+          {visibleData[0] ? timeLabelFormatter(visibleData[0].time) : "-"}
         </text>
         <text
           x={width - paddingRight}
@@ -2051,7 +2055,9 @@ export default function StockKLineChart({
           textAnchor="end"
           className="fill-omi-text-muted text-[11px]"
         >
-          {visibleData[visibleData.length - 1]?.time ?? "-"}
+          {visibleData[visibleData.length - 1]
+            ? timeLabelFormatter(visibleData[visibleData.length - 1].time)
+            : "-"}
         </text>
 
         <g transform={`translate(${paddingLeft}, 18)`}>

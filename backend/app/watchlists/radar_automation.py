@@ -7,14 +7,26 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    RadarOutcomePath,
+    RadarUniverseObservation,
     WatchlistGroup,
     WatchlistRadarOutcome,
     WatchlistRadarSnapshotItem,
     WatchlistRadarSnapshotRun,
 )
+from app.watchlists.radar_rule_contract import (
+    RADAR_V1_FROZEN_AT,
+    RADAR_V1_LIFECYCLE_STATUS,
+    RADAR_V1_RULE_VERSION,
+    RADAR_V1_WRITE_ENABLED,
+    RADAR_V2_ACTIVE_RULE_CONFIG_HASH,
+    RADAR_V2_ACTIVE_RULE_VERSION,
+)
 from app.watchlists import (
+    radar_active_v2_service,
     radar_outcome_service,
     radar_service,
+    radar_shadow_v2_service,
     service as watchlist_service,
 )
 
@@ -86,7 +98,7 @@ def get_watchlist_radar_daily_coverage(
     include_children: bool = True,
     enabled_only: bool = True,
     evaluate_lookback_days: int = 10,
-    radar_rule_version: str = radar_outcome_service.RADAR_RULE_VERSION,
+    radar_rule_version: str = RADAR_V2_ACTIVE_RULE_VERSION,
 ) -> dict[str, Any]:
     resolved_group_ids = _resolve_group_ids(db=db, group_ids=group_ids)
     resolved_modes = _normalize_modes(modes)
@@ -121,25 +133,91 @@ def get_watchlist_radar_daily_coverage(
     expected_count = len(expected_scopes)
     covered_count = expected_count - len(missing_scopes)
     pending_evaluations: list[dict[str, Any]] = []
-    for group_id, mode in expected_scopes:
-        runs = _recent_runs_to_evaluate(
-            db=db,
-            group_id=group_id,
-            mode=mode,
-            before_date=snapshot_date,
-            lookback_days=evaluate_lookback_days,
-            radar_rule_version=radar_rule_version,
+    if radar_rule_version == RADAR_V2_ACTIVE_RULE_VERSION:
+        earliest_date = snapshot_date - timedelta(
+            days=max(1, min(evaluate_lookback_days, 365))
         )
-        pending_evaluations.extend(
+        pending_rows = (
+            db.query(
+                RadarUniverseObservation.group_id,
+                RadarUniverseObservation.mode,
+                RadarOutcomePath.evaluation_id,
+                RadarOutcomePath.horizon_trading_days,
+                RadarOutcomePath.horizon_end_trade_date,
+            )
+            .join(
+                RadarOutcomePath,
+                RadarOutcomePath.evaluation_id
+                == RadarUniverseObservation.evaluation_id,
+            )
+            .filter(
+                RadarUniverseObservation.group_id.in_(
+                    resolved_group_ids
+                )
+            )
+            .filter(
+                RadarUniverseObservation.mode.in_(resolved_modes)
+            )
+            .filter(
+                RadarUniverseObservation.rule_version
+                == RADAR_V2_ACTIVE_RULE_VERSION
+            )
+            .filter(
+                RadarUniverseObservation.rule_config_hash
+                == RADAR_V2_ACTIVE_RULE_CONFIG_HASH
+            )
+            .filter(
+                RadarUniverseObservation.snapshot_date
+                >= earliest_date
+            )
+            .filter(RadarOutcomePath.status == "pending")
+            .filter(
+                RadarOutcomePath.horizon_end_trade_date
+                <= snapshot_date
+            )
+            .distinct()
+            .all()
+            if expected_scopes
+            else []
+        )
+        pending_evaluations = [
             {
-                "group_id": group_id,
-                "mode": mode,
-                "snapshot_run_id": run.id,
-                "snapshot_date": run.snapshot_date.isoformat(),
+                "group_id": int(group_id),
+                "mode": str(mode),
+                "evaluation_id": int(evaluation_id),
+                "horizon_trading_days": int(horizon),
+                "horizon_end_trade_date": (
+                    horizon_end.isoformat() if horizon_end else None
+                ),
             }
-            for run in runs
-            if _run_needs_evaluation(db, run.id)
-        )
+            for (
+                group_id,
+                mode,
+                evaluation_id,
+                horizon,
+                horizon_end,
+            ) in pending_rows
+        ]
+    else:
+        for group_id, mode in expected_scopes:
+            runs = _recent_runs_to_evaluate(
+                db=db,
+                group_id=group_id,
+                mode=mode,
+                before_date=snapshot_date,
+                lookback_days=evaluate_lookback_days,
+                radar_rule_version=radar_rule_version,
+            )
+            pending_evaluations.extend(
+                {
+                    "group_id": group_id,
+                    "mode": mode,
+                    "snapshot_run_id": run.id,
+                    "snapshot_date": run.snapshot_date.isoformat(),
+                }
+                for run in runs
+                if _run_needs_evaluation(db, run.id)
+            )
 
     if expected_count == 0:
         status = "no_groups"
@@ -301,7 +379,7 @@ def run_watchlist_radar_automation(
     resolved_modes = _normalize_modes(modes)
     before_date = evaluate_before_date or date.today()
     total_scopes = len(resolved_group_ids) * len(resolved_modes)
-    total_steps = total_scopes * 2
+    total_steps = total_scopes
 
     if total_scopes == 0:
         return {
@@ -312,6 +390,10 @@ def run_watchlist_radar_automation(
             "saved_count": 0,
             "existing_count": 0,
             "evaluated_count": 0,
+            "active_persisted_count": 0,
+            "active_outcome_evaluated_count": 0,
+            "shadow_persisted_count": 0,
+            "shadow_outcome_evaluated_count": 0,
             "skipped_count": 0,
             "invalid_count": 0,
             "error_count": 0,
@@ -332,6 +414,14 @@ def run_watchlist_radar_automation(
                 "group_ids": [],
                 "modes": resolved_modes,
             },
+            "legacy_v1_coverage": {
+                "status": RADAR_V1_LIFECYCLE_STATUS,
+                "complete": True,
+                "reconciliation_complete": True,
+                "rule_version": RADAR_V1_RULE_VERSION,
+                "frozen_at": RADAR_V1_FROZEN_AT,
+                "write_enabled": RADAR_V1_WRITE_ENABLED,
+            },
             "results": [],
             "errors": [],
         }
@@ -343,6 +433,10 @@ def run_watchlist_radar_automation(
     evaluated_count = 0
     skipped_count = 0
     invalid_count = 0
+    active_persisted_count = 0
+    active_outcome_evaluated_count = 0
+    shadow_persisted_count = 0
+    shadow_outcome_evaluated_count = 0
     processed = 0
     intraday_overlay_cache: dict[str, dict | None] | None = (
         {} if use_intraday else None
@@ -372,36 +466,23 @@ def run_watchlist_radar_automation(
                 results.append(row)
                 continue
 
-            request = {
-                "group_id": group_id,
-                "include_children": include_children,
-                "enabled_only": enabled_only,
-                "mode": mode,
-                "max_results": max_results,
-                "ma_windows": ma_windows,
-                "volume_ma_windows": volume_ma_windows,
-                "calculation_limit": calculation_limit,
-                "volume_ratio_threshold": volume_ratio_threshold,
-                "use_intraday": use_intraday,
-                "intraday_limit": intraday_limit,
-                "source": "scheduler.watchlist_radar_auto_snapshot",
-            }
-
             try:
-                radar = radar_service.get_watchlist_group_radar(
-                    db=db,
-                    group_id=group_id,
-                    include_children=include_children,
-                    enabled_only=enabled_only,
-                    mode=mode,
-                    max_results=max_results,
-                    ma_windows=ma_windows,
-                    volume_ma_windows=volume_ma_windows,
-                    calculation_limit=calculation_limit,
-                    volume_ratio_threshold=volume_ratio_threshold,
-                    use_intraday=use_intraday,
-                    intraday_limit=intraday_limit,
-                    intraday_overlay_cache=intraday_overlay_cache,
+                radar, v2_universe = (
+                    radar_service.get_watchlist_group_radar_bundle(
+                        db=db,
+                        group_id=group_id,
+                        include_children=include_children,
+                        enabled_only=enabled_only,
+                        mode=mode,
+                        max_results=max_results,
+                        ma_windows=ma_windows,
+                        volume_ma_windows=volume_ma_windows,
+                        calculation_limit=calculation_limit,
+                        volume_ratio_threshold=volume_ratio_threshold,
+                        use_intraday=use_intraday,
+                        intraday_limit=intraday_limit,
+                        intraday_overlay_cache=intraday_overlay_cache,
+                    )
                 )
                 observed_snapshot_date = (
                     radar_outcome_service.watchlist_radar_snapshot_date(radar)
@@ -426,13 +507,51 @@ def run_watchlist_radar_automation(
                     invalid_count += 1
                     continue
 
-                save_result = radar_outcome_service.save_watchlist_radar_snapshot_with_status(
-                    db=db,
-                    radar=radar,
-                    request=request,
-                    enabled_only=enabled_only,
-                    radar_rule_version=radar_rule_version,
+                active_radar = (
+                    radar_active_v2_service.build_radar_v2_active_projection_from_db(
+                        db=db,
+                        radar=radar,
+                        universe_items=v2_universe,
+                    )
                 )
+                active_result = (
+                    radar_active_v2_service.persist_radar_v2_active(
+                        db=db,
+                        radar=active_radar,
+                        group_id=group_id,
+                        mode=mode,
+                    )
+                )
+                active_persisted_count += int(
+                    active_result["evaluation_created_count"]
+                )
+                active_outcomes = (
+                    radar_shadow_v2_service.evaluate_pending_radar_v2_outcomes(
+                        db=db,
+                        evaluation_ids=active_result["evaluation_ids"],
+                        group_id=group_id,
+                        mode=mode,
+                        rule_version=str(active_result["rule_version"]),
+                    )
+                )
+                active_outcome_evaluated_count += int(
+                    active_outcomes["evaluated_count"]
+                )
+                row["radar_v2_active"] = {
+                    **active_result,
+                    "outcomes": active_outcomes,
+                }
+                if active_outcomes["error_count"]:
+                    errors.extend(
+                        {
+                            "group_id": group_id,
+                            "mode": mode,
+                            "status": "error",
+                            "phase": "radar_v2_active_outcome",
+                            **error,
+                        }
+                        for error in active_outcomes["errors"]
+                    )
             except Exception as exc:
                 db.rollback()
                 error = {
@@ -444,60 +563,29 @@ def run_watchlist_radar_automation(
                 errors.append(error)
                 results.append({**row, **error})
                 continue
-
-            snapshot = save_result.snapshot
-            if save_result.created:
-                saved_count += 1
-                snapshot_status = "created"
-            else:
-                existing_count += 1
-                snapshot_status = "existing"
+            saved_count += 1
+            evaluated_count += int(active_outcomes["evaluated_count"])
             row.update(
                 {
-                    "snapshot_status": snapshot_status,
-                    "snapshot_id": snapshot.get("id"),
-                    "snapshot_date": str(snapshot.get("snapshot_date")),
-                    "radar_count": snapshot.get("radar_count", 0),
-                    "stale_stock_count": snapshot.get("stale_stock_count", 0),
-                    "is_current": snapshot.get("is_current", True),
+                    "snapshot_status": "persisted",
+                    "snapshot_id": active_result.get("snapshot_run_id"),
+                    "snapshot_date": str(active_result.get("snapshot_date")),
+                    "radar_count": active_radar.get("radar_count", 0),
+                    "stale_stock_count": active_radar.get("stale_stock_count", 0),
+                    "is_current": active_radar.get("is_current", True),
                 }
             )
+            row["radar_v1"] = {
+                "status": RADAR_V1_LIFECYCLE_STATUS,
+                "rule_version": RADAR_V1_RULE_VERSION,
+                "frozen_at": RADAR_V1_FROZEN_AT,
+                "write_enabled": RADAR_V1_WRITE_ENABLED,
+            }
+            row["radar_v2_shadow"] = {
+                "status": "retired_from_scheduler",
+                "active_version": RADAR_V2_ACTIVE_RULE_VERSION,
+            }
             results.append(row)
-
-    evaluation_processed = 0
-    for group_id in resolved_group_ids:
-        for mode in resolved_modes:
-            evaluation_processed += 1
-            if progress_callback is not None:
-                progress_callback(
-                    total_scopes + evaluation_processed - 1,
-                    total_steps,
-                    f"Evaluating watchlist radar group {group_id} mode {mode}.",
-                )
-
-            evaluated, evaluation_errors = _evaluate_recent_runs(
-                db=db,
-                group_id=group_id,
-                mode=mode,
-                before_date=before_date,
-                lookback_days=evaluate_lookback_days,
-                radar_rule_version=radar_rule_version,
-            )
-            evaluated_count += len(evaluated)
-            errors.extend(evaluation_errors)
-
-            result_row = next(
-                (
-                    item
-                    for item in results
-                    if item.get("group_id") == group_id and item.get("mode") == mode
-                ),
-                None,
-            )
-            if result_row is not None:
-                result_row["evaluated_snapshots"] = evaluated
-                if evaluation_errors:
-                    result_row["evaluation_errors"] = evaluation_errors
 
     if progress_callback is not None:
         progress_callback(total_steps, total_steps, "Watchlist radar automation completed.")
@@ -510,8 +598,16 @@ def run_watchlist_radar_automation(
         include_children=include_children,
         enabled_only=enabled_only,
         evaluate_lookback_days=evaluate_lookback_days,
-        radar_rule_version=radar_rule_version,
+        radar_rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
     )
+    legacy_coverage = {
+        "status": RADAR_V1_LIFECYCLE_STATUS,
+        "complete": True,
+        "reconciliation_complete": True,
+        "rule_version": RADAR_V1_RULE_VERSION,
+        "frozen_at": RADAR_V1_FROZEN_AT,
+        "write_enabled": RADAR_V1_WRITE_ENABLED,
+    }
     error_count = len(errors)
     status = "success"
     if error_count and (saved_count or existing_count or evaluated_count):
@@ -532,6 +628,10 @@ def run_watchlist_radar_automation(
         "saved_count": saved_count,
         "existing_count": existing_count,
         "evaluated_count": evaluated_count,
+        "active_persisted_count": active_persisted_count,
+        "active_outcome_evaluated_count": active_outcome_evaluated_count,
+        "shadow_persisted_count": shadow_persisted_count,
+        "shadow_outcome_evaluated_count": shadow_outcome_evaluated_count,
         "skipped_count": skipped_count,
         "invalid_count": invalid_count,
         "error_count": error_count,
@@ -539,6 +639,7 @@ def run_watchlist_radar_automation(
         "modes": resolved_modes,
         "evaluate_before_date": before_date.isoformat(),
         "coverage": coverage,
+        "legacy_v1_coverage": legacy_coverage,
         "results": results,
         "errors": errors,
     }

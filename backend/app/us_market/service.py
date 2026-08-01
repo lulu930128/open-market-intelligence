@@ -30,7 +30,7 @@ from app.us_market.chart_projection import (
     aggregate_daily_rows as _aggregate_us_daily_rows,
     dedupe_daily_rows_by_trade_date as _dedupe_us_daily_rows_by_trade_date,
     filter_ohlc_source_rows as _filter_us_ohlc_source_rows,
-    has_newer_untrusted_yahoo_rows as _has_newer_untrusted_yahoo_rows,
+    has_newer_untrusted_rows as _has_newer_untrusted_us_daily_rows,
     is_sparse_daily_ohlc_shape as _is_sparse_daily_ohlc_shape,
     is_yahoo_range_max_price_record as _is_yahoo_range_max_price_record,
     is_yahoo_range_max_record as _is_yahoo_range_max_record,
@@ -116,6 +116,69 @@ def expected_us_daily_price_date() -> date:
         return date.today()
 
     return expected_date
+
+
+def _partition_eligible_us_daily_price_records(
+    records: list[USDailyPriceRecord],
+) -> tuple[list[USDailyPriceRecord], list[USDailyPriceRecord], date]:
+    expected_trade_date = expected_us_daily_price_date()
+    eligible_records = [
+        record
+        for record in records
+        if record.trade_date <= expected_trade_date
+    ]
+    skipped_records = [
+        record
+        for record in records
+        if record.trade_date > expected_trade_date
+    ]
+    return eligible_records, skipped_records, expected_trade_date
+
+
+def _us_daily_price_refresh_result(
+    *,
+    provider: str,
+    source_label: str,
+    symbol: str,
+    records: list[USDailyPriceRecord],
+    eligible_records: list[USDailyPriceRecord],
+    skipped_records: list[USDailyPriceRecord],
+    expected_trade_date: date,
+    inserted_count: int,
+    updated_count: int,
+) -> dict:
+    skipped_dates = sorted({record.trade_date for record in skipped_records})
+    warnings = (
+        [
+            "Skipped unfinalized daily rows newer than the expected completed "
+            f"US trade date {expected_trade_date.isoformat()}: "
+            + ", ".join(value.isoformat() for value in skipped_dates)
+            + "."
+        ]
+        if skipped_dates
+        else []
+    )
+    message = f"US daily prices refreshed from {source_label}."
+    if warnings:
+        message = f"{message} {warnings[0]}"
+
+    return {
+        "status": "partial_success" if skipped_records else "success",
+        "provider": provider,
+        "symbol": symbol,
+        "fetched_count": len(records),
+        "eligible_count": len(eligible_records),
+        "skipped_count": len(skipped_records),
+        "inserted_count": inserted_count,
+        "updated_count": updated_count,
+        "expected_trade_date": expected_trade_date,
+        "latest_eligible_trade_date": max(
+            (record.trade_date for record in eligible_records),
+            default=None,
+        ),
+        "warnings": warnings,
+        "message": message,
+    }
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
@@ -716,17 +779,22 @@ def refresh_us_daily_prices_from_alphavantage(
         symbol=normalized_symbol,
         source_url=source_url,
     )
-    result = upsert_us_daily_price_records(db, records)
+    eligible_records, skipped_records, expected_trade_date = (
+        _partition_eligible_us_daily_price_records(records)
+    )
+    result = upsert_us_daily_price_records(db, eligible_records)
 
-    return {
-        "status": "success",
-        "provider": "alphavantage",
-        "symbol": normalized_symbol,
-        "fetched_count": len(records),
-        "inserted_count": result["inserted_count"],
-        "updated_count": result["updated_count"],
-        "message": "US daily prices refreshed from Alpha Vantage.",
-    }
+    return _us_daily_price_refresh_result(
+        provider="alphavantage",
+        source_label="Alpha Vantage",
+        symbol=normalized_symbol,
+        records=records,
+        eligible_records=eligible_records,
+        skipped_records=skipped_records,
+        expected_trade_date=expected_trade_date,
+        inserted_count=result["inserted_count"],
+        updated_count=result["updated_count"],
+    )
 
 
 def _yahoo_daily_range_for_symbol(*, symbol: str, outputsize: str) -> str:
@@ -763,17 +831,22 @@ def refresh_us_daily_prices_from_yahoo_chart(
         symbol=normalized_symbol,
         source_url=source_url,
     )
-    result = upsert_us_daily_price_records(db, records)
+    eligible_records, skipped_records, expected_trade_date = (
+        _partition_eligible_us_daily_price_records(records)
+    )
+    result = upsert_us_daily_price_records(db, eligible_records)
 
-    return {
-        "status": "success",
-        "provider": "yahoo_chart",
-        "symbol": normalized_symbol,
-        "fetched_count": len(records),
-        "inserted_count": result["inserted_count"],
-        "updated_count": result["updated_count"],
-        "message": "US daily prices refreshed from Yahoo chart.",
-    }
+    return _us_daily_price_refresh_result(
+        provider="yahoo_chart",
+        source_label="Yahoo chart",
+        symbol=normalized_symbol,
+        records=records,
+        eligible_records=eligible_records,
+        skipped_records=skipped_records,
+        expected_trade_date=expected_trade_date,
+        inserted_count=result["inserted_count"],
+        updated_count=result["updated_count"],
+    )
 
 
 @_translate_us_provider_errors
@@ -844,7 +917,7 @@ def _refresh_us_ohlc_history_if_needed(
     outputsize: str,
     adjusted: bool,
     provider: str,
-    has_newer_untrusted_yahoo_rows: bool,
+    has_newer_untrusted_rows: bool,
     latest_data_date: date | None,
     expected_data_date: date | None,
 ) -> dict | None:
@@ -860,7 +933,7 @@ def _refresh_us_ohlc_history_if_needed(
         refresh_reasons.append("insufficient_history")
     if has_sparse_daily_shape:
         refresh_reasons.append("sparse_daily_shape")
-    if has_newer_untrusted_yahoo_rows:
+    if has_newer_untrusted_rows:
         refresh_reasons.append("untrusted_newer_rows")
     if expected_data_date is not None and (
         latest_data_date is None or latest_data_date < expected_data_date
@@ -871,7 +944,7 @@ def _refresh_us_ohlc_history_if_needed(
 
     if timeframe in {"weekly", "monthly"}:
         refresh_outputsize = "full"
-    elif has_sparse_daily_shape or has_newer_untrusted_yahoo_rows:
+    elif has_sparse_daily_shape or has_newer_untrusted_rows:
         refresh_outputsize = "compact"
 
     try:
@@ -962,7 +1035,7 @@ def list_us_ohlc_chart_data(
         outputsize=outputsize,
         adjusted=adjusted,
         provider=provider,
-        has_newer_untrusted_yahoo_rows=_has_newer_untrusted_yahoo_rows(
+        has_newer_untrusted_rows=_has_newer_untrusted_us_daily_rows(
             rows=source_rows,
             trusted_rows=rows,
         ),
@@ -1617,10 +1690,14 @@ def _apply_us_intraday_previous_close_reference(
             before_date=latest_trade_date,
         )
 
-    if result.get("session_phase") == "pre_market" and latest_trade_date is not None:
-        expected_reference_date = previous_us_trading_day(
-            latest_trade_date,
-            include_value=False,
+    if latest_trade_date is not None:
+        expected_reference_date = (
+            latest_trade_date
+            if result.get("session_phase") == "after_hours"
+            else previous_us_trading_day(
+                latest_trade_date,
+                include_value=False,
+            )
         )
 
         if _us_reference_trade_date(reference) != expected_reference_date:

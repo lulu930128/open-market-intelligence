@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
@@ -32,7 +33,14 @@ from app.ai.market_payload_contract import (
     requested_intraday_interval as _requested_intraday_interval,
     slot_envelope as _slot_envelope,
 )
+from app.ai.taiwan_intraday_contract import (
+    classify_taiwan_session_date_relation,
+    resolve_effective_source_health,
+    resolve_taiwan_current_price,
+)
 from app.market.live_snapshot import classify_market_snapshot, market_status_from_session
+from app.market.financial_contract import build_database_financial_contract
+from app.db.models import StockProfile
 
 
 normalize_analysis_horizon = technical_analysis.normalize_analysis_horizon
@@ -81,6 +89,86 @@ class TaiwanStockDependencies:
     )
 
 
+def _company_profile_payload(
+    stock: Any,
+    profile: StockProfile | None,
+) -> dict[str, Any]:
+    stock_id = str(getattr(stock, "stock_id", "") or "").strip() or None
+    stock_name = getattr(stock, "stock_name", None)
+    company_name = getattr(profile, "company_name", None) or stock_name
+    market = (
+        getattr(profile, "market", None)
+        or getattr(stock, "market", None)
+        or "TW"
+    )
+    payload = {
+        "stock_id": stock_id,
+        "stock_name": stock_name,
+        "company_name": company_name,
+        "market": market,
+        "exchange": market,
+        "instrument_type": getattr(stock, "instrument_type", None),
+        "industry": (
+            getattr(profile, "industry", None)
+            or getattr(stock, "industry", None)
+        ),
+        "category": getattr(stock, "category", None),
+        "listed_date": _json_value(getattr(profile, "listed_date", None)),
+        "established_date": _json_value(
+            getattr(profile, "established_date", None)
+        ),
+        "paid_in_capital": getattr(profile, "paid_in_capital", None),
+        "issued_shares": getattr(profile, "issued_shares", None),
+        "is_active": getattr(stock, "is_active", None),
+        "currency": "TWD",
+        "source": (
+            "stock_master+stock_profile"
+            if profile is not None
+            else "stock_master"
+        ),
+        "as_of": _json_value(
+            getattr(profile, "updated_at", None)
+            or getattr(stock, "updated_at", None)
+            or getattr(stock, "last_seen_at", None)
+        ),
+    }
+    important_fields = (
+        "stock_id",
+        "stock_name",
+        "company_name",
+        "market",
+        "instrument_type",
+        "industry",
+        "listed_date",
+        "issued_shares",
+    )
+    missing_fields = [
+        field for field in important_fields if payload.get(field) is None
+    ]
+    payload["missing_fields"] = missing_fields
+    payload["status"] = (
+        "missing"
+        if stock is None
+        else "partial"
+        if missing_fields
+        else "ready"
+    )
+    return payload
+
+
+def _load_company_profile(
+    db: Session,
+    stock_id: str,
+) -> StockProfile | None:
+    if not callable(getattr(db, "query", None)):
+        return None
+    return (
+        db.query(StockProfile)
+        .filter(StockProfile.stock_id == stock_id)
+        .first()
+    )
+
+
 def _apply_disposition_quote_contract(
     quote: dict[str, Any],
     disposition: dict[str, Any],
@@ -101,11 +189,16 @@ def _apply_disposition_quote_contract(
     quote["disposition_end_date"] = (
         _json_value(disposition.get("end_date")) if is_active else None
     )
-    quote["last_trade_price"] = (
-        quote.get("last_price")
-        if quote.get("last_price") is not None
-        else quote.get("price")
-    )
+    if quote.get("last_trade_available") is True:
+        quote["last_trade_price"] = (
+            quote.get("last_trade_price")
+            if quote.get("last_trade_price") is not None
+            else quote.get("last_price")
+            if quote.get("last_price") is not None
+            else quote.get("price")
+        )
+    else:
+        quote["last_trade_price"] = None
     quote["indicative_bid"] = quote.get("best_bid_price") if is_active else None
     quote["indicative_ask"] = quote.get("best_ask_price") if is_active else None
     quote["next_batch_time"] = None
@@ -242,6 +335,148 @@ def _compact_intraday_bars(
     }
 
 
+def _apply_taiwan_current_price_contract(
+    *,
+    quote: dict[str, Any],
+    intraday_bars: dict[str, Any],
+    latest_daily: Any,
+    calendar_status: dict[str, Any],
+    checked_at: datetime,
+) -> dict[str, Any]:
+    resolved = resolve_taiwan_current_price(
+        quote=quote,
+        intraday_bars=intraday_bars,
+        current_session_date=calendar_status.get("date"),
+        checked_at=checked_at,
+    )
+    provider_trade_date = quote.get("trade_date")
+    resolved_trade_date = resolved.get("trade_date")
+    completed_daily_date = _json_value(
+        getattr(latest_daily, "trade_date", None)
+    )
+    relation = classify_taiwan_session_date_relation(
+        quote_date=resolved_trade_date or provider_trade_date,
+        completed_daily_date=completed_daily_date,
+        current_session_date=calendar_status.get("date"),
+        previous_trading_day=calendar_status.get(
+            "previous_trading_day"
+        ),
+        is_trading_day=calendar_status.get("is_trading_day"),
+        session_phase=calendar_status.get("phase"),
+    )
+    quote["provider_trade_date"] = provider_trade_date
+    quote["current_price"] = resolved
+    quote["current_price_available"] = resolved.get("value") is not None
+    quote["current_price_source"] = resolved.get("source_kind")
+    quote["price_source"] = resolved.get("source_kind")
+    quote["price_semantics"] = resolved.get("semantics")
+    quote["price_event_time"] = resolved.get("event_time")
+    quote["price_confidence"] = resolved.get("confidence")
+    quote["session_date_relation"] = relation
+    if resolved.get("value") is not None:
+        quote["latest_price"] = resolved["value"]
+        quote["price"] = resolved["value"]
+        quote["trade_date"] = (
+            resolved_trade_date or provider_trade_date
+        )
+        quote["event_time"] = (
+            resolved.get("event_time") or quote.get("event_time")
+        )
+        quote["facts_usable_for_current_session"] = bool(
+            resolved.get("is_current_session")
+            and resolved.get("is_estimate") is not True
+        )
+    quote["components"] = _quote_components(quote)
+    return resolved
+
+
+def _financial_valuation_input(
+    resolved_current_price: dict[str, Any] | None,
+) -> tuple[Decimal | None, datetime | None, str]:
+    resolved = (
+        resolved_current_price
+        if isinstance(resolved_current_price, dict)
+        else {}
+    )
+    if resolved.get("is_estimate") is True:
+        return None, None, "unavailable"
+    raw_value = resolved.get("value")
+    observed_at = resolved.get("event_time") or resolved.get("trade_date")
+    if raw_value is None or observed_at is None:
+        return None, None, "unavailable"
+    try:
+        price = Decimal(str(raw_value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None, None, "unavailable"
+    if price <= 0:
+        return None, None, "unavailable"
+    if isinstance(observed_at, datetime):
+        parsed_at = observed_at
+    else:
+        try:
+            parsed_at = datetime.fromisoformat(
+                str(observed_at).replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None, None, "unavailable"
+    source_kind = str(resolved.get("source_kind") or "unknown")
+    return price, parsed_at, f"resolved_current_price:{source_kind}"
+
+
+def _with_effective_quote_source_health(
+    source_health: dict[str, Any] | None,
+    *,
+    quote_depth: dict[str, Any] | None,
+    quote_error: str | None,
+    requested: bool,
+    checked_at: datetime,
+) -> dict[str, Any]:
+    health = dict(source_health) if isinstance(source_health, dict) else {}
+    entries = health.get("entries") if isinstance(health.get("entries"), list) else []
+    persisted = next(
+        (
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("resource") == "taiwan_stock_quote_snapshot"
+        ),
+        None,
+    )
+    request_health: dict[str, Any] | None = None
+    if requested:
+        request_health = {
+            "resource": "taiwan_stock_quote_snapshot",
+            "status": "success" if quote_depth is not None and not quote_error else "error",
+            "evidence_status": (
+                (quote_depth.get("freshness") or {}).get("status")
+                if isinstance((quote_depth or {}).get("freshness"), dict)
+                else None
+            ),
+            "provider": (quote_depth or {}).get("provider") or "twse_mis",
+            "source": (quote_depth or {}).get("source"),
+            "observed_at": (
+                (quote_depth or {}).get("provider_event_time")
+                or (quote_depth or {}).get("quote_time")
+            ),
+            "checked_at": checked_at.isoformat(),
+            "refresh_outcome": (quote_depth or {}).get("refresh_outcome"),
+            "error": quote_error,
+        }
+    effective = resolve_effective_source_health(
+        request_health=request_health,
+        persisted_health=persisted,
+    )
+    effective_by_resource = (
+        dict(health.get("effective_health_by_resource"))
+        if isinstance(health.get("effective_health_by_resource"), dict)
+        else {}
+    )
+    effective_by_resource["taiwan_stock_quote_snapshot"] = effective
+    health["effective_health_by_resource"] = effective_by_resource
+    health["effective_quote_health"] = effective
+    return health
+
+
 
 
 
@@ -316,6 +551,12 @@ def read_stock_quote_context(
     except dependencies.stock_service.StockNotFoundError:
         stock = None
         missing.append("stock_master")
+    stock_profile = (
+        _load_company_profile(db, normalized_stock_id)
+        if stock is not None
+        else None
+    )
+    company_profile = _company_profile_payload(stock, stock_profile)
 
     latest_daily = dependencies.market_service.get_latest_stock_daily_price(
         db,
@@ -482,6 +723,35 @@ def read_stock_quote_context(
         intraday_bars["warnings"] = [
             f"strict_provider={requested_provider} does not permit Yahoo intraday fallback."
         ]
+    resolved_current_price = _apply_taiwan_current_price_contract(
+        quote=quote,
+        intraday_bars=intraday_bars,
+        latest_daily=latest_daily,
+        calendar_status=calendar_status,
+        checked_at=dependencies.now(),
+    )
+    try:
+        source_health = dependencies.build_taiwan_source_health(
+            db=db,
+            stock_id=normalized_stock_id,
+            dataset="taiwan_stock_quote_snapshot",
+        )
+    except Exception as exc:
+        source_health = {
+            "kind": "taiwan_source_health",
+            "entries": [],
+            "warnings": [
+                "Taiwan quote source health unavailable: "
+                f"{str(exc) or type(exc).__name__}"
+            ],
+        }
+    source_health = _with_effective_quote_source_health(
+        source_health,
+        quote_depth=quote_depth,
+        quote_error=quote_error,
+        requested=live_quote_requested,
+        checked_at=dependencies.now(),
+    )
     intraday_series = (
         intraday_bars.get("series")
         if isinstance(intraday_bars.get("series"), dict)
@@ -703,6 +973,10 @@ def read_stock_quote_context(
             source_refs,
             {"type": "external_or_cache", "name": "market_intraday_bar"},
         )
+    _append_source_ref_once(
+        source_refs,
+        {"type": "derived", "name": "app.market.source_health"},
+    )
     intraday_domain_status = (
         str((intraday_series.get("1m") or {}).get("freshness_status") or "unavailable")
         if intraday_requested
@@ -726,6 +1000,7 @@ def read_stock_quote_context(
         "intraday_bars": intraday_bars,
         "provider_contract": provider_contract,
         "refresh_summary": refresh_summary,
+        "source_health": source_health,
         "freshness_by_domain": {
             "quote": quote_freshness.get("status"),
             "intraday": intraday_domain_status,
@@ -762,10 +1037,13 @@ def read_stock_quote_context(
         "scope": {"stock_id": normalized_stock_id},
         "data": {
             "stock": _stock_dict(stock),
+            "company_profile": company_profile,
             "quote": quote,
+            "current_price": resolved_current_price,
             "intraday_bars": intraday_bars,
             "provider_contract": provider_contract,
             "refresh_summary": refresh_summary,
+            "source_health": source_health,
             "compact": compact,
         },
         "missing": missing,
@@ -842,6 +1120,7 @@ def read_stock_event_context(
         for key, value in capability_data.items()
         if str(key).startswith("regulation.")
     }
+    corporate_actions = capability_data.get("corporate.actions")
     freshness_by_capability = (
         event_context.get("freshness_by_capability")
         if isinstance(event_context.get("freshness_by_capability"), dict)
@@ -900,6 +1179,7 @@ def read_stock_event_context(
         "data": {
             "stock": _stock_dict(stock),
             "events": events,
+            "corporate_actions": corporate_actions,
             "regulation": regulation,
             "compact": compact,
         },
@@ -1116,6 +1396,12 @@ def read_stock_context(
     except dependencies.stock_service.StockNotFoundError:
         stock = None
         missing.append("stock_master")
+    stock_profile = (
+        _load_company_profile(db, normalized_stock_id)
+        if stock is not None
+        else None
+    )
+    company_profile = _company_profile_payload(stock, stock_profile)
 
     latest_daily = dependencies.market_service.get_latest_stock_daily_price(db, normalized_stock_id)
     latest_institutional = dependencies.market_service.get_latest_stock_institutional_trade(db, normalized_stock_id)
@@ -1182,10 +1468,7 @@ def read_stock_context(
         technical_reports=technical_reports,
         requested_horizon=analysis_horizon,
     )
-    technical_levels = _technical_price_levels(
-        technical_reports=technical_reports,
-        latest_daily=latest_daily,
-    )
+    technical_levels: dict[str, Any] = {}
     overnight_impact: dict[str, Any] | None = None
 
     if stock is not None:
@@ -1270,6 +1553,13 @@ def read_stock_context(
             quote_error = str(exc) or exc.__class__.__name__
             warnings.append(f"Taiwan quote depth unavailable: {quote_error}")
             missing.append("quote_depth")
+    source_health = _with_effective_quote_source_health(
+        source_health,
+        quote_depth=quote_depth,
+        quote_error=quote_error,
+        requested=include_intraday,
+        checked_at=dependencies.now(),
+    )
 
     quote = _compact_quote_snapshot(
         latest_daily=latest_daily,
@@ -1330,6 +1620,18 @@ def read_stock_context(
         series = intraday_bars.get("series") if isinstance(intraday_bars.get("series"), dict) else {}
         if not any(isinstance(item, dict) and item.get("returned_point_count") for item in series.values()):
             missing.append("intraday_bars")
+    resolved_current_price = _apply_taiwan_current_price_contract(
+        quote=quote,
+        intraday_bars=intraday_bars,
+        latest_daily=latest_daily,
+        calendar_status=market_calendar_status,
+        checked_at=dependencies.now(),
+    )
+    technical_levels = _technical_price_levels(
+        technical_reports=technical_reports,
+        latest_daily=latest_daily,
+        resolved_current_price=resolved_current_price,
+    )
     intraday_latest_times = [
         item.get("to_time")
         for item in (intraday_bars.get("series") or {}).values()
@@ -1342,6 +1644,24 @@ def read_stock_context(
             quote.get("trade_date"),
             *intraday_latest_times,
         ]
+    )
+    financial_price, financial_price_as_of, financial_price_basis = (
+        _financial_valuation_input(resolved_current_price)
+    )
+    financial_contract = build_database_financial_contract(
+        db,
+        stock_id=normalized_stock_id,
+        mode="current_comparable",
+        as_of=dependencies.now(),
+        financial_history=financial_history,
+        revenue_history=revenue_history,
+        price=financial_price,
+        price_as_of=financial_price_as_of,
+        price_basis=financial_price_basis,
+        normalized_period_limit=max(
+            5,
+            min(financial_quarters + 1, 41),
+        ),
     )
 
     decision_evidence = _stock_decision_evidence(
@@ -1362,6 +1682,7 @@ def read_stock_context(
         "scope": {"stock_id": normalized_stock_id},
         "data": {
             "stock": _stock_dict(stock),
+            "company_profile": company_profile,
             "latest_daily": _row_dict(
                 latest_daily,
                 (
@@ -1393,8 +1714,10 @@ def read_stock_context(
             "technical_reports": technical_reports,
             "analysis": technical_analysis,
             "technical_levels": technical_levels,
+            "current_price": resolved_current_price,
             "compact": _build_stock_compact_evidence(
                 stock=stock,
+                company_profile=company_profile,
                 stock_id=normalized_stock_id,
                 as_of=compact_as_of or as_of,
                 latest_daily=latest_daily,
@@ -1417,6 +1740,7 @@ def read_stock_context(
                 missing=missing,
                 warnings=warnings,
                 source_refs=source_refs,
+                financial_contract=financial_contract,
             ),
             "market_calendar_status": market_calendar_status,
             "source_health": source_health,
@@ -1425,6 +1749,11 @@ def read_stock_context(
                 for key, value in (event_context.get("data") or {}).items()
                 if str(key).startswith("events.")
             },
+            "corporate_actions": (
+                event_context.get("data", {}).get("corporate.actions")
+                if isinstance(event_context.get("data"), dict)
+                else None
+            ),
             "regulation": {
                 key.split(".", 1)[1]: value
                 for key, value in (event_context.get("data") or {}).items()

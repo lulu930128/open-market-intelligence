@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from app.ai import capability_contract
 from app.ai.market_context.taiwan_projection import (
@@ -10,6 +11,129 @@ from app.ai.market_context.taiwan_projection import (
 
 
 class TaiwanQuoteComponentTests(unittest.TestCase):
+    def test_quote_projection_preserves_backend_volume_contract(self) -> None:
+        backend_reconciliation = {
+            "reference_dataset": "market_daily_price",
+            "reference_source": "TWSE OpenAPI Daily Trading",
+            "reference_trade_date": "2026-07-30",
+            "reference_volume_shares": 51_372_177,
+            "snapshot_trade_date": "2026-07-30",
+            "snapshot_volume_shares": 44_328_000,
+            "difference_shares": -7_044_177,
+            "difference_pct": -13.712,
+            "tolerance_pct": 1.0,
+            "status": "mismatch",
+            "reason": (
+                "provider_cumulative_volume_differs_from_official_daily_total"
+            ),
+            "decision_usable": False,
+        }
+        quote = _compact_quote_snapshot(
+            latest_daily=SimpleNamespace(
+                trade_date="2026-07-30",
+                trade_volume=44_328_000,
+            ),
+            quote_depth={
+                "source": "twse_mis_quote_depth",
+                "provider": "twse_mis",
+                "session_phase": "post_close_snapshot",
+                "trade_date": "2026-07-30",
+                "quote_time": "2026-07-30T13:30:00+08:00",
+                "last_trade_available": True,
+                "last_trade_price": 2205.0,
+                "price_available": True,
+                "total_volume_lots": 44_328,
+                "cumulative_volume_lots": 44_328,
+                "cumulative_volume_shares": 44_328_000,
+                "last_trade_volume_lots": 5_494,
+                "last_trade_volume_shares": 5_494_000,
+                "official_daily_volume_shares": 51_372_177,
+                "official_daily_volume_trade_date": "2026-07-30",
+                "official_daily_volume_source": (
+                    "TWSE OpenAPI Daily Trading"
+                ),
+                "volume_reconciliation": backend_reconciliation,
+                "volume_decision_usable": False,
+                "depth_available": False,
+                "official_close_available": True,
+                "official_close_status": "confirmed",
+                "freshness": {
+                    "status": "official_close",
+                    "is_live": False,
+                    "is_stale": False,
+                },
+            },
+            quote_error=None,
+        )
+
+        self.assertEqual(quote["last_trade_volume_lots"], 5_494)
+        self.assertEqual(quote["last_trade_volume_shares"], 5_494_000)
+        self.assertEqual(
+            quote["official_daily_volume_shares"],
+            51_372_177,
+        )
+        self.assertEqual(
+            quote["volume_reconciliation"],
+            backend_reconciliation,
+        )
+        self.assertFalse(quote["volume_decision_usable"])
+
+    def test_quote_volume_reconciliation_preserves_price_usability(self) -> None:
+        quote = _compact_quote_snapshot(
+            latest_daily=SimpleNamespace(
+                trade_date="2026-07-29",
+                trade_volume=68_139_691,
+            ),
+            quote_depth={
+                "source": "twse_mis_quote_depth",
+                "provider": "twse_mis",
+                "session_phase": "post_close_snapshot",
+                "trade_date": "2026-07-29",
+                "quote_time": "2026-07-29T13:30:00+08:00",
+                "snapshot_time": "2026-07-29T20:36:56+08:00",
+                "provider_event_time": "2026-07-29T13:30:00+08:00",
+                "last_trade_available": True,
+                "last_trade_price": 1500.0,
+                "price_available": True,
+                "total_volume_lots": 55_171,
+                "depth_available": False,
+                "official_close_available": True,
+                "official_close_status": "confirmed",
+                "freshness": {
+                    "status": "official_close",
+                    "is_live": False,
+                    "is_stale": False,
+                },
+            },
+            quote_error=None,
+        )
+
+        reconciliation = quote["volume_reconciliation"]
+        self.assertEqual(
+            quote["cumulative_volume_shares"],
+            55_171_000,
+        )
+        self.assertEqual(
+            reconciliation["reference_volume_shares"],
+            68_139_691,
+        )
+        self.assertEqual(
+            reconciliation["difference_shares"],
+            -12_968_691,
+        )
+        self.assertAlmostEqual(
+            reconciliation["difference_pct"],
+            -19.0325,
+            places=3,
+        )
+        self.assertEqual(reconciliation["status"], "scope_different")
+        self.assertEqual(
+            reconciliation["reason"],
+            "provider_and_official_volume_scopes_differ",
+        )
+        self.assertFalse(quote["volume_decision_usable"])
+        self.assertTrue(quote["price_decision_usable"])
+
     def test_preopen_order_book_is_current_without_last_trade(self) -> None:
         quote = _compact_quote_snapshot(
             latest_daily=None,

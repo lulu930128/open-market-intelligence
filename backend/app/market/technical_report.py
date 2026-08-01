@@ -1027,6 +1027,8 @@ def _build_today_report(
         "data": {
             "intraday": {
                 "source": intraday.get("source"),
+                "technical_price_basis": "intraday_series_latest_price",
+                "bid_ask_price_used": False,
                 "point_count": point_count,
                 "previous_close": reference_close,
                 "latest_point": latest_point,
@@ -1478,6 +1480,12 @@ def _build_daily_report(
                 "price": analysis_price,
                 "price_time": _json_value(analysis_price_time),
                 "price_source": analysis_price_source,
+                "technical_price_basis": (
+                    "intraday_series_latest_price"
+                    if analysis_is_intraday
+                    else "official_completed_daily_close"
+                ),
+                "bid_ask_price_used": False,
                 "is_intraday": analysis_is_intraday,
                 "is_provisional": analysis_is_intraday,
                 "daily_indicator_time": _json_value(indicator.get("time")),

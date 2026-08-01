@@ -1,0 +1,109 @@
+{
+  "actions_created": 0,
+  "actions_reused": 0,
+  "approval_scope": "production",
+  "database": "C:\\project\\Open Market Intelligence\\data\\open_market_intelligence.db",
+  "database_revision": "20260731_0049",
+  "integrity_check": "deferred_explicitly",
+  "mode": "apply",
+  "normalized_facts_created": 7,
+  "normalized_facts_reused": 0,
+  "package_hash": "a1c46783b3b0bcfff5362a708575bf54471e90d5bff62aa8d45bbe9cd24b88c1",
+  "package_id": "2324-mops-ci-fast-lane-consolidated-period-scope-2026q1-v1-production-source-aligned-20260801",
+  "package_version": "omi.tw-financial-evidence.v1",
+  "raw_evidence_created": 1,
+  "results": [
+    {
+      "action_ids": [],
+      "adjustment_factor": "1",
+      "adjustment_treatment": "automatic",
+      "normalization_status": "unchanged",
+      "normalized_value": "0.5000000000",
+      "period": "2025Q1",
+      "period_scope": "ytd_3m",
+      "source_fact_id": 38934,
+      "source_value": "0.5000000000"
+    },
+    {
+      "action_ids": [],
+      "adjustment_factor": "1",
+      "adjustment_treatment": "automatic",
+      "normalization_status": "unchanged",
+      "normalized_value": "0.1100000000",
+      "period": "2025Q2",
+      "period_scope": "discrete_3m",
+      "source_fact_id": 38964,
+      "source_value": "0.1100000000"
+    },
+    {
+      "action_ids": [],
+      "adjustment_factor": "1",
+      "adjustment_treatment": "automatic",
+      "normalization_status": "unchanged",
+      "normalized_value": "0.6100000000",
+      "period": "2025Q2",
+      "period_scope": "ytd_6m",
+      "source_fact_id": 38963,
+      "source_value": "0.6100000000"
+    },
+    {
+      "action_ids": [],
+      "adjustment_factor": "1",
+      "adjustment_treatment": "automatic",
+      "normalization_status": "unchanged",
+      "normalized_value": "0.4500000000",
+      "period": "2025Q3",
+      "period_scope": "discrete_3m",
+      "source_fact_id": 39000,
+      "source_value": "0.4500000000"
+    },
+    {
+      "action_ids": [],
+      "adjustment_factor": "1",
+      "adjustment_treatment": "automatic",
+      "normalization_status": "unchanged",
+      "normalized_value": "1.0600000000",
+      "period": "2025Q3",
+      "period_scope": "ytd_9m",
+      "source_fact_id": 38999,
+      "source_value": "1.0600000000"
+    },
+    {
+      "action_ids": [],
+      "adjustment_factor": "1",
+      "adjustment_treatment": "automatic",
+      "normalization_status": "unchanged",
+      "normalized_value": "1.3800000000",
+      "period": "2025Q4",
+      "period_scope": "annual_12m",
+      "source_fact_id": 39028,
+      "source_value": "1.3800000000"
+    },
+    {
+      "action_ids": [],
+      "adjustment_factor": "1",
+      "adjustment_treatment": "automatic",
+      "normalization_status": "unchanged",
+      "normalized_value": "0.4500000000",
+      "period": "2026Q1",
+      "period_scope": "ytd_3m",
+      "source_fact_id": 39050,
+      "source_value": "0.4500000000"
+    }
+  ],
+  "share_basis_assessment": {
+    "evidence_document_ids": [
+      "202501_2324_AI1.pdf",
+      "202502_2324_AI1.pdf",
+      "202503_2324_AI1.pdf",
+      "202504_2324_AI1.pdf",
+      "202601_2324_AI1.pdf"
+    ],
+    "rationale": "All five official consolidated filings report current-period issued capital of TWD 44071466 thousand. The 2026Q1 filing presents comparative 2025Q1 basic EPS 0.5, exactly matching the 2025Q1 current-period filing. Official Q2 and Q3 discrete EPS contexts are retained directly; YTD arithmetic is diagnostic only because duration contexts can use different weighted-average shares. Factor 1 is approved only through 2026Q1.",
+    "status": "verified_unchanged",
+    "verification_method": "cross_filing_comparative_reconciliation"
+  },
+  "sources_created": 0,
+  "sources_reused": 1,
+  "stock_id": "2324"
+}

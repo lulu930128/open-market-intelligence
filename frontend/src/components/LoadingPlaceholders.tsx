@@ -64,6 +64,7 @@ export function StateSurface({
       className={[
         "omi-state-surface",
         `omi-state-surface-${tone}`,
+        busy ? "omi-state-surface-busy" : "",
         compact ? "omi-state-surface-compact" : "",
         className,
       ]
@@ -80,7 +81,6 @@ export function StateSurface({
         {children}
         {action ? <div className="omi-state-action">{action}</div> : null}
       </div>
-      {busy ? <LoadingDots label={title} className="omi-state-dots" /> : null}
     </div>
   );
 }
@@ -104,10 +104,6 @@ export function LoadingStateSurface({
       busy
       compact={compact}
       className={className}
-    >
-      <span className="omi-state-progress" aria-hidden="true">
-        <span />
-      </span>
-    </StateSurface>
+    />
   );
 }

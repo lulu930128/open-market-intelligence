@@ -1,0 +1,893 @@
+{
+  "accounted_request_count": 14,
+  "actual_request_count": null,
+  "boundaries": [
+    "ingestion_does_not_approve_parse_runs",
+    "ingestion_does_not_create_normalized_facts",
+    "single_symbol_failure_is_rolled_back",
+    "inter_symbol_requests_are_explicitly_throttled_when_configured",
+    "special_financial_variants_are_rejected"
+  ],
+  "contract_version": "omi.tw-financial-ci-rollout.v1",
+  "database": "C:\\project\\Open Market Intelligence\\data\\open_market_intelligence.db",
+  "database_revision": "20260731_0049",
+  "failed_count": 1,
+  "integrity_check": "ok",
+  "inter_symbol_delay_seconds": 10.0,
+  "max_provider_requests": 21,
+  "mode": "dry_run",
+  "operation": "ci_official_filing_ingestion",
+  "periods": [
+    "2025Q1",
+    "2025Q2",
+    "2025Q3",
+    "2025Q4",
+    "2026Q1"
+  ],
+  "planned_request_limit": 21,
+  "report_id": "AUTO",
+  "request_count_complete": false,
+  "results": [
+    {
+      "status": "succeeded",
+      "stock_id": "2324",
+      "summary": {
+        "canonical_facts_selected": 138,
+        "documents": [
+          {
+            "canonical_fact_count": 22,
+            "content_hash": "007bb30bd9e04e5059395786afe8481af1c8476b5db7933564145afee0b84efa",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240101To20240331|comparative_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q1:007bb30bd9e04e50:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.43"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240101To20240331|comparative_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q1:007bb30bd9e04e50:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.43"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250331|current_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q1:007bb30bd9e04e50:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.50"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20250331|current_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q1:007bb30bd9e04e50:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.50"
+              }
+            ],
+            "file_size_bytes": 1522994,
+            "filed_at": "2025-05-15T15:44:57+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2324&SYEAR=2025&SSEASON=1&REPORT_ID=C",
+            "parse_output_hash": "c1f7dcb4327a4e497511d55938fe5e09c155f88f48da0e889d47d7db10054e56",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2025Q1",
+            "source_document_id": "202501_2324_AI1.pdf"
+          },
+          {
+            "canonical_fact_count": 36,
+            "content_hash": "7d0029abc452417b1700aa57966db256b277381edd5b565bc5936b731d157b1d",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240101To20240630|comparative_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q2:7d0029abc452417b:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.10"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240401To20240630|comparative_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q2:7d0029abc452417b:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.66"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240101To20240630|comparative_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q2:7d0029abc452417b:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.09"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240401To20240630|comparative_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q2:7d0029abc452417b:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.66"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250630|current_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q2:7d0029abc452417b:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.61"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250401To20250630|current_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q2:7d0029abc452417b:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.11"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20250630|current_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q2:7d0029abc452417b:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.61"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250401To20250630|current_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q2:7d0029abc452417b:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.11"
+              }
+            ],
+            "file_size_bytes": 1557334,
+            "filed_at": "2025-08-14T14:49:04+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2324&SYEAR=2025&SSEASON=2&REPORT_ID=C",
+            "parse_output_hash": "3c682d51c690fb5d42dafc746ff94814e2a78dd723538ae2b204865867aab282",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2025Q2",
+            "source_document_id": "202502_2324_AI1.pdf"
+          },
+          {
+            "canonical_fact_count": 36,
+            "content_hash": "f9039cdb3e4a2dfa64d7a086b27a942f35348b8ac4702a2a37054cc7572cb9e6",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240101To20240930|comparative_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q3:f9039cdb3e4a2dfa:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.86"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240701To20240930|comparative_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q3:f9039cdb3e4a2dfa:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.77"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240101To20240930|comparative_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q3:f9039cdb3e4a2dfa:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.84"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240701To20240930|comparative_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q3:f9039cdb3e4a2dfa:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.76"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250930|current_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q3:f9039cdb3e4a2dfa:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.06"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250701To20250930|current_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q3:f9039cdb3e4a2dfa:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.45"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20250930|current_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q3:f9039cdb3e4a2dfa:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.06"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250701To20250930|current_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q3:f9039cdb3e4a2dfa:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.45"
+              }
+            ],
+            "file_size_bytes": 1531369,
+            "filed_at": "2025-11-14T13:30:48+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2324&SYEAR=2025&SSEASON=3&REPORT_ID=C",
+            "parse_output_hash": "76068142a33041f2cfba1211ff8fe1dc639f71f7d04bc93e94099451dc3e55fc",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2025Q3",
+            "source_document_id": "202503_2324_AI1.pdf"
+          },
+          {
+            "canonical_fact_count": 22,
+            "content_hash": "72c36a3038ace78e9400e4877bbb3e78e8721cf05059143b5be0f682dd9ad3f9",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240101To20241231|comparative_period",
+                "fiscal_quarter": 4,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q4:72c36a3038ace78e:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "2.30"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240101To20241231|comparative_period",
+                "fiscal_quarter": 4,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2025Q4:72c36a3038ace78e:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "2.28"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20251231|current_period",
+                "fiscal_quarter": 4,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q4:72c36a3038ace78e:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.38"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20251231|current_period",
+                "fiscal_quarter": 4,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2025Q4:72c36a3038ace78e:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.37"
+              }
+            ],
+            "file_size_bytes": 2026833,
+            "filed_at": "2026-03-09T19:13:18+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2324&SYEAR=2025&SSEASON=4&REPORT_ID=C",
+            "parse_output_hash": "7c0144216942b61a5c8c0f87f5d47bda79ed1166ecabc6b3a641f6ef73e56b6a",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2025Q4",
+            "source_document_id": "202504_2324_AI1.pdf"
+          },
+          {
+            "canonical_fact_count": 22,
+            "content_hash": "e617732cab569b64604eaa20e178e5ba38142be523213a68290454c4d4a402d7",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250331|comparative_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2026Q1:e617732cab569b64:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.50"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20250331|comparative_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "2324:2026Q1:e617732cab569b64:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.50"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20260101To20260331|current_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2026,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2026Q1:e617732cab569b64:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.45"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20260101To20260331|current_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2026,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "2324:2026Q1:e617732cab569b64:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.45"
+              }
+            ],
+            "file_size_bytes": 1529463,
+            "filed_at": "2026-05-15T18:02:48+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2324&SYEAR=2026&SSEASON=1&REPORT_ID=C",
+            "parse_output_hash": "1514082cc46a409568e31b51b47adba26e6be5d658e3c2426ad9cfae2105b5f4",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2026Q1",
+            "source_document_id": "202601_2324_AI1.pdf"
+          }
+        ],
+        "facts_created": 138,
+        "facts_reused": 0,
+        "filings_created": 5,
+        "filings_reused": 0,
+        "ingestion_version": "mops-ixbrl-v4",
+        "mode": "dry_run",
+        "numeric_facts_seen": 14785,
+        "parse_runs_created": 5,
+        "parse_runs_reused": 0,
+        "periods": [
+          "2025Q1",
+          "2025Q2",
+          "2025Q3",
+          "2025Q4",
+          "2026Q1"
+        ],
+        "raw_results_created": 5,
+        "raw_results_reused": 0,
+        "report_id": "C",
+        "request_count": 7,
+        "request_limit": 7,
+        "requested_report_id": "AUTO",
+        "source_created": 0,
+        "source_reused": 1,
+        "stock_id": "2324"
+      }
+    },
+    {
+      "error": "GET provider request for tw/mops_official_filing/financial_filing_ixbrl/3528 failed: HTTP 502.",
+      "error_type": "ProviderHttpError",
+      "request_count": null,
+      "request_count_status": "unknown_after_failure",
+      "status": "failed",
+      "stock_id": "3528"
+    },
+    {
+      "status": "succeeded",
+      "stock_id": "5902",
+      "summary": {
+        "canonical_facts_selected": 138,
+        "documents": [
+          {
+            "canonical_fact_count": 22,
+            "content_hash": "515840dd9bc20563c982d97c8eecbeb4a73431b94151c58ba8c896e6a71c0d45",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240101To20240331|comparative_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q1:515840dd9bc20563:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.54"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240101To20240331|comparative_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q1:515840dd9bc20563:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.53"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250331|current_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q1:515840dd9bc20563:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.54"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20250331|current_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q1:515840dd9bc20563:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.53"
+              }
+            ],
+            "file_size_bytes": 770919,
+            "filed_at": "2025-04-29T18:21:34+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=5902&SYEAR=2025&SSEASON=1&REPORT_ID=C",
+            "parse_output_hash": "3acd4aaf132f0e6f51a3d2fea99da480d57e7d79d9b0ce6f001ae1297215969e",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2025Q1",
+            "source_document_id": "202501_5902_AI1.pdf"
+          },
+          {
+            "canonical_fact_count": 36,
+            "content_hash": "f13ea81e682c6f49f71f552770754791dcfe7911403a9170325ca98a3b18d433",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240101To20240630|comparative_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q2:f13ea81e682c6f49:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.20"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240401To20240630|comparative_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q2:f13ea81e682c6f49:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.66"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240101To20240630|comparative_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q2:f13ea81e682c6f49:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.19"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240401To20240630|comparative_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q2:f13ea81e682c6f49:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.66"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250630|current_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q2:f13ea81e682c6f49:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.20"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250401To20250630|current_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q2:f13ea81e682c6f49:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.66"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20250630|current_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q2:f13ea81e682c6f49:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.19"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250401To20250630|current_period",
+                "fiscal_quarter": 2,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q2:f13ea81e682c6f49:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.66"
+              }
+            ],
+            "file_size_bytes": 811596,
+            "filed_at": "2025-07-30T18:02:25+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=5902&SYEAR=2025&SSEASON=2&REPORT_ID=C",
+            "parse_output_hash": "965e059da9d737def777e624d303a0426f1774857ecf3402ec0a36c79f74c88c",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2025Q2",
+            "source_document_id": "202502_5902_AI1.pdf"
+          },
+          {
+            "canonical_fact_count": 36,
+            "content_hash": "ccba028980639e3cf51c637252e0fc2607b2e619de6db6ad66ab0feafcfec58e",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240101To20240930|comparative_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q3:ccba028980639e3c:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.77"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240701To20240930|comparative_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q3:ccba028980639e3c:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.58"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240101To20240930|comparative_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q3:ccba028980639e3c:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.76"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240701To20240930|comparative_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q3:ccba028980639e3c:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.57"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250930|current_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q3:ccba028980639e3c:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.79"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250701To20250930|current_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q3:ccba028980639e3c:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.59"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20250930|current_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q3:ccba028980639e3c:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "1.78"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250701To20250930|current_period",
+                "fiscal_quarter": 3,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q3:ccba028980639e3c:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.58"
+              }
+            ],
+            "file_size_bytes": 840360,
+            "filed_at": "2025-10-29T15:25:44+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=5902&SYEAR=2025&SSEASON=3&REPORT_ID=C",
+            "parse_output_hash": "2cc379b06fe485cbe0210ce2fded74290ba67fdc0cf651554a09836bd4b8e934",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2025Q3",
+            "source_document_id": "202503_5902_AI1.pdf"
+          },
+          {
+            "canonical_fact_count": 22,
+            "content_hash": "fc969845f7b9096186db009788ccaa3002851d20cfde907a2c1ee947289c3f8d",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20240101To20241231|comparative_period",
+                "fiscal_quarter": 4,
+                "fiscal_year": 2024,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q4:fc969845f7b90961:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "2.11"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20240101To20241231|comparative_period",
+                "fiscal_quarter": 4,
+                "fiscal_year": 2024,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2025Q4:fc969845f7b90961:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "2.10"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20251231|current_period",
+                "fiscal_quarter": 4,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q4:fc969845f7b90961:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "2.24"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20251231|current_period",
+                "fiscal_quarter": 4,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2025Q4:fc969845f7b90961:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "2.23"
+              }
+            ],
+            "file_size_bytes": 5004190,
+            "filed_at": "2026-02-26T08:38:50+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=5902&SYEAR=2025&SSEASON=4&REPORT_ID=C",
+            "parse_output_hash": "29d48955c2e1717cb3dcfbb8767dae9e7f43902b054fcdfa82633b83e2f41a4b",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2025Q4",
+            "source_document_id": "202504_5902_AI1.pdf"
+          },
+          {
+            "canonical_fact_count": 22,
+            "content_hash": "ad94712aadba6514ca1181f73b43f6da14b508cb2c0ad3d81d9d44222befd9b4",
+            "correction_status": "無",
+            "eps_facts": [
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250331|comparative_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2025,
+                "metric_code": "basic_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2026Q1:ad94712aadba6514:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.54"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20250101To20250331|comparative_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2025,
+                "metric_code": "diluted_eps",
+                "presentation_role": "comparative_period",
+                "source_restated_status": "unknown",
+                "source_share_basis_id": "5902:2026Q1:ad94712aadba6514:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.53"
+              },
+              {
+                "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20260101To20260331|current_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2026,
+                "metric_code": "basic_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2026Q1:ad94712aadba6514:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.46"
+              },
+              {
+                "fact_key": "ifrs-full:DilutedEarningsLossPerShare|From20260101To20260331|current_period",
+                "fiscal_quarter": 1,
+                "fiscal_year": 2026,
+                "metric_code": "diluted_eps",
+                "presentation_role": "current_period",
+                "source_restated_status": "not_restated",
+                "source_share_basis_id": "5902:2026Q1:ad94712aadba6514:presentation",
+                "source_unit": "TWD_per_share",
+                "source_value": "0.46"
+              }
+            ],
+            "file_size_bytes": 802305,
+            "filed_at": "2026-04-28T15:41:58+08:00",
+            "ixbrl_url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=5902&SYEAR=2026&SSEASON=1&REPORT_ID=C",
+            "parse_output_hash": "bdc9758f3d140c6ec53c122a9404dd8e3b1c806dc1732bcdef91560845fb9327",
+            "parse_review_status": "pending",
+            "parse_run_id": null,
+            "parse_status": "succeeded",
+            "period": "2026Q1",
+            "source_document_id": "202601_5902_AI1.pdf"
+          }
+        ],
+        "facts_created": 138,
+        "facts_reused": 0,
+        "filings_created": 5,
+        "filings_reused": 0,
+        "ingestion_version": "mops-ixbrl-v4",
+        "mode": "dry_run",
+        "numeric_facts_seen": 4467,
+        "parse_runs_created": 5,
+        "parse_runs_reused": 0,
+        "periods": [
+          "2025Q1",
+          "2025Q2",
+          "2025Q3",
+          "2025Q4",
+          "2026Q1"
+        ],
+        "raw_results_created": 5,
+        "raw_results_reused": 0,
+        "report_id": "C",
+        "request_count": 7,
+        "request_limit": 7,
+        "requested_report_id": "AUTO",
+        "source_created": 0,
+        "source_reused": 1,
+        "stock_id": "5902"
+      }
+    }
+  ],
+  "status": "partial",
+  "stock_ids": [
+    "2324",
+    "3528",
+    "5902"
+  ],
+  "succeeded_count": 2,
+  "timeout_seconds": 30,
+  "unknown_request_count_failure_count": 1
+}

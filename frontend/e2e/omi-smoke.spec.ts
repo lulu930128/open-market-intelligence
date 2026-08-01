@@ -643,6 +643,131 @@ function corporateEventHistoryResponse(stockId: string) {
   };
 }
 
+function usCorporateEventResponse(symbol = "AAPL") {
+  return {
+    event_id: `us:${symbol}:earnings:2026-06-30`,
+    event_uid: `us:${symbol}:earnings:2026-06-30`,
+    symbol,
+    company_name: symbol === "AAPL" ? "Apple Inc." : symbol,
+    exchange: "NASDAQ",
+    country: "US",
+    currency: "USD",
+    event_type: "earnings",
+    event_subtype: "quarterly_earnings",
+    title: `${symbol} Earnings`,
+    description: null,
+    event_status: "scheduled",
+    verification_status: "third_party",
+    event_date: "2026-07-31",
+    event_time: null,
+    event_datetime_utc: null,
+    timezone: "America/New_York",
+    market_session: "unknown",
+    is_all_day: true,
+    days_until: 2,
+    fiscal_year: 2026,
+    fiscal_quarter: null,
+    fiscal_period_end: "2026-06-30",
+    estimated_eps: 1.42,
+    declaration_date: null,
+    ex_date: null,
+    record_date: null,
+    payment_date: null,
+    dividend_amount: null,
+    dividend_currency: null,
+    split_from: null,
+    split_to: null,
+    split_ratio: null,
+    source: "alphavantage",
+    source_type: "provider_api",
+    source_event_id: null,
+    source_url: "https://example.com/us-earnings",
+    first_seen_at: "2026-07-29T08:00:00Z",
+    last_seen_at: "2026-07-29T08:00:00Z",
+    fetched_at: "2026-07-29T08:00:00Z",
+    freshness: "fresh",
+    data_mode: "cached",
+    is_stale: false,
+    missing_fields: ["event_time"],
+    warnings: ["The provider does not supply a reliable earnings release time."],
+  };
+}
+
+function usCorporateEventSummaryResponse(
+  symbol = "AAPL",
+  results: ReturnType<typeof usCorporateEventResponse>[] = []
+) {
+  return {
+    symbol,
+    checked_at: "2026-07-29T08:05:00Z",
+    as_of: "2026-07-29",
+    timezone: "America/New_York",
+    reminder_days: 7,
+    cache_status: "current",
+    cache_fetched_at: "2026-07-29T08:00:00Z",
+    warning: null,
+    result_count: results.length,
+    results,
+  };
+}
+
+function usCorporateEventListResponse() {
+  const results = [usCorporateEventResponse()];
+  return {
+    kind: "us_corporate_events",
+    generated_at: "2026-07-29T08:05:00Z",
+    as_of: "2026-07-29",
+    timezone: "America/New_York",
+    date_from: "2026-07-29",
+    date_to: "2026-10-27",
+    symbol: null,
+    event_types: [],
+    offset: 0,
+    limit: 1000,
+    total_count: results.length,
+    result_count: results.length,
+    warning: null,
+    sources: {
+      alphavantage_earnings: {
+        source: "Alpha Vantage Earnings Calendar",
+        status: "current",
+        freshness: "current",
+        coverage: "us_market_3month",
+        fetched_at: "2026-07-29T08:00:00Z",
+        entry_count: results.length,
+        warning: null,
+      },
+      alphavantage_actions: {
+        source: "Alpha Vantage Corporate Actions",
+        status: "watchlist_only",
+        freshness: "current",
+        coverage: "cached_symbols_only",
+        fetched_at: "2026-07-29T08:00:00Z",
+        entry_count: 0,
+        warning: "Coverage is limited to cached symbols.",
+      },
+    },
+    results,
+  };
+}
+
+function emptyTaiwanCorporateEventListResponse() {
+  return {
+    kind: "taiwan_corporate_events",
+    generated_at: "2026-07-29T16:05:00+08:00",
+    as_of: "2026-07-29",
+    date_from: "2026-07-29",
+    date_to: "2026-10-27",
+    stock_id: null,
+    market: null,
+    event_types: [],
+    result_count: 0,
+    warning: null,
+    sources: {},
+    results: [],
+  };
+}
+
 function intradayResponse(stockId: string) {
   const latestPrice = stockId === "2303" ? 52.4 : 1_015;
   const previousClose = stockId === "2303" ? 53 : 1_000;
@@ -697,19 +822,64 @@ function quoteDepthResponse(stockId: string) {
     change,
     change_pct: (change / previousClose) * 100,
     total_volume_lots: 12_000,
+    cumulative_volume_lots: 12_000,
+    cumulative_volume_shares: 12_000_000,
+    last_trade_volume_lots: 320,
+    last_trade_volume_shares: 320_000,
+    lot_size: 1_000,
+    volume_unit: "lots",
+    canonical_volume_unit: "shares",
+    provider_volume_unit: "lots",
+    volume_semantics: "session_cumulative_provider_volume",
+    volume_scope: "regular_session_board_lot_cumulative",
+    volume_source: "twse_mis",
+    volume_source_field: "v",
+    volume_status: "available",
+    provider_volume_available: true,
+    last_trade_volume_semantics: "provider_reported_last_match_volume",
+    last_trade_volume_source_field: "tv",
+    last_trade_volume_status: "available",
+    official_daily_volume_shares: 12_300_000,
+    official_daily_volume_trade_date: "2026-06-15",
+    official_daily_volume_source: "market_daily_price",
+    official_daily_volume_scope: "official_daily_aggregate",
+    volume_includes_odd_lot: false,
+    volume_includes_after_hours: false,
+    volume_includes_closing_auction: null,
+    volume_reconciliation: {
+      reference_dataset: "market_daily_price",
+      reference_source: "market_daily_price",
+      reference_trade_date: "2026-06-15",
+      reference_volume_shares: 12_300_000,
+      reference_volume_scope: "official_daily_aggregate",
+      snapshot_trade_date: "2026-06-15",
+      snapshot_volume_shares: 12_000_000,
+      snapshot_volume_scope: "regular_session_board_lot_cumulative",
+      difference_shares: -300_000,
+      difference_pct: -2.439,
+      difference_semantics: "informational_cross_scope_difference",
+      tolerance_pct: null,
+      status: "scope_different",
+      reason: "provider_and_official_volume_scopes_differ",
+      decision_usable: false,
+    },
+    volume_decision_usable: false,
     best_bid_price: lastPrice - tick,
-    best_bid_size_lots: 100,
+    best_bid_size_lots: stockId === "2303" ? null : 100,
     best_ask_price: lastPrice + tick,
     best_ask_size_lots: 120,
-    bid_total_size_lots: 500,
+    bid_total_size_lots: stockId === "2303" ? null : 500,
     ask_total_size_lots: 600,
     spread: tick * 2,
     spread_pct: ((tick * 2) / lastPrice) * 100,
-    bid_levels: Array.from({ length: 5 }, (_, index) => ({
-      level: index + 1,
-      price: lastPrice - tick * (index + 1),
-      size_lots: 100 - index * 10,
-    })),
+    bid_levels:
+      stockId === "2303"
+        ? []
+        : Array.from({ length: 5 }, (_, index) => ({
+            level: index + 1,
+            price: lastPrice - tick * (index + 1),
+            size_lots: 100 - index * 10,
+          })),
     ask_levels: Array.from({ length: 5 }, (_, index) => ({
       level: index + 1,
       price: lastPrice + tick * (index + 1),
@@ -921,6 +1091,43 @@ function emptyRadarResponse(path: string, mode = "action") {
     stale_stock_count: 0,
     buckets: [],
     results: [],
+    ...(market === "tw"
+      ? {
+          radar_engine: {
+            active_version: "radar_v2.0",
+            active_config_hash: "playwright-active-v2",
+            shadow_version: "radar_v2.0-shadow",
+            shadow_config_hash: "playwright-shadow-v2",
+            mode: "active",
+            rollback_version: "radar_v1.0",
+            technical_direction_owner: "backend",
+            legacy_status: "frozen",
+            legacy_frozen_at: "2026-08-01",
+          },
+          radar_v2_summary: {
+            evaluated_count: 0,
+            universe_evaluated_count: 0,
+            universe_scope: "complete_calculation_universe",
+            direction_changed_count: 0,
+            bucket_changed_count: 0,
+            conflict_count: 0,
+            insufficient_count: 0,
+            market_regime: "mixed",
+            market_regime_clarity: 0.5,
+            market_limitations: [],
+            readiness: {
+              operational_status: "active",
+              validation_status: "unverified",
+              backtest_status: "missing",
+              completed_backtest_count: 0,
+              outcome_count: 0,
+              finalized_outcome_count: 0,
+              pending_outcome_count: 0,
+              limitations: [],
+            },
+          },
+        }
+      : {}),
   };
 }
 
@@ -1004,175 +1211,76 @@ function seededRadarResponse(url: URL, label: string) {
   };
 }
 
-function radarSnapshot(id: number, snapshotDate: string, mode = "action") {
-  return {
-    id,
-    group_id: 7,
-    include_children: true,
-    enabled_only: true,
-    mode,
-    max_results: 20,
-    calculation_limit: 100,
-    radar_rule_version: "playwright.v1",
-    snapshot_date: snapshotDate,
-    trade_date: snapshotDate,
-    target_trade_date: snapshotDate,
-    is_current: true,
-    current_stock_count: 1,
-    stale_stock_count: 0,
-    requested_stock_count: 1,
-    ranked_count: 1,
-    matched_count: 1,
-    radar_count: 1,
-    no_data_count: 0,
-    error_count: 0,
-    buckets: [],
-    data_limitations: [],
-    created_at: `${snapshotDate}T14:00:00+08:00`,
-    updated_at: `${snapshotDate}T14:00:00+08:00`,
-  };
-}
-
-function radarOutcomeSummary(
-  id: number,
-  snapshotDate: string,
-  status = "evaluated"
-) {
+function radarV2OutcomeSummary(snapshotDate: string, status = "evaluated") {
   return {
     status,
-    snapshot: radarSnapshot(id, snapshotDate),
-    evaluated_at: `${snapshotDate}T15:00:00+08:00`,
+    group_id: 7,
+    mode: "action",
+    snapshot_date: snapshotDate,
+    horizon_trading_days: 1,
+    rule_version: "radar_v2.0",
+    outcome_contract_version: "outcome_v2.0",
     total_count: 1,
-    hit_count: status === "evaluated" ? 1 : 0,
-    miss_count: 0,
-    neutral_count: 0,
-    unevaluable_count: 0,
+    finalized_count: status === "evaluated" ? 1 : 0,
     pending_count: status === "pending" ? 1 : 0,
-    avg_close_return_pct: status === "evaluated" ? 1.25 : null,
-    avg_max_favorable_pct: status === "evaluated" ? 2.5 : null,
-    avg_max_adverse_pct: status === "evaluated" ? -0.5 : null,
-    bucket_summaries: [],
+    summary_state_counts: {
+      [status === "pending" ? "pending" : "close_confirmed"]: 1,
+    },
     items: [],
     data_limitations: [],
   };
 }
 
-function radarOutcomeItem(rank: number, status: "hit" | "miss") {
+function radarV2OutcomeItem(
+  rank: number,
+  state: "close_confirmed" | "reversed"
+) {
   const stockId = `${7000 + rank}`;
   return {
-    id: rank,
-    snapshot_item_id: rank,
-    rank,
+    evaluation_id: rank,
     stock_id: stockId,
     stock_name: `測試股 ${rank}`,
-    bucket: "volume_up",
-    bucket_label: "量價轉強",
-    status,
-    reason: status === "miss" ? "隔日明顯反向。" : "隔日維持正向。",
-    snapshot_date: "2026-06-13",
-    outcome_trade_date: "2026-06-14",
-    signal_close_price: 100,
-    outcome_open_price: 100,
-    outcome_high_price: status === "miss" ? 100 : 103,
-    outcome_low_price: status === "miss" ? 96 : 99,
-    outcome_close_price: status === "miss" ? 98 : 102,
-    outcome_volume: 2000,
-    open_gap_pct: 0,
-    close_return_pct: status === "miss" ? -2 : 2,
-    max_favorable_pct: status === "miss" ? 0 : 3,
-    max_adverse_pct: status === "miss" ? -4 : -1,
-    intraday_range_pct: status === "miss" ? 4 : 4,
-    volume_change_pct: 100,
-    radar_item: {
-      rank,
-      source_rank: rank,
-      bucket: "volume_up",
-      bucket_label: "量價轉強",
-      urgency: "high",
-      priority_score: 85,
-      technical_evidence_score: 70,
-      technical_score: 72,
-      technical_grade: "strong",
-      technical_grade_label: "強",
-      technical_grade_description: "多項技術證據一致",
-      direction: "bullish",
-      direction_label: "偏多",
-      setup_label: "量價轉強",
-      timing_label: "等待確認",
-      risk_label: "跌破支撐失效",
-      factor_scores: { trend: 2 },
-      price_levels: { ma20: 98, ma60: 95 },
-      technical_notes: [],
-      action_label: "觀察續強",
-      reason: "量價與 RSI 同步轉強",
-      stock_id: stockId,
-      stock_name: `測試股 ${rank}`,
-      time: "2026-06-13",
-      trade_date: "2026-06-13",
-      close: 100,
-      volume: 1000,
-      change: 1,
-      previous_close: 99,
-      change_pct: 1.01,
-      limit_status: null,
-      score: 72,
-      status: "ok",
-      signal_count: 1,
-      signal_keys: ["volume_up"],
-      matched_signal_keys: ["volume_up"],
-      matched_signal_labels: ["量價轉強"],
-      signal_labels: ["量價轉強"],
-      primary_signal_key: "volume_up",
-      primary_signal_label: "量價轉強",
-      indicator_snapshot: { rsi: { rsi14: 58 } },
-      context_snapshot: {},
-      context_signals: [],
-      context_summary: "",
-      context_score: 0,
-      stale: false,
-      error_message: null,
-    },
+    source_rank: rank,
+    status: "finalized",
+    summary_state: state,
+    horizon_end_trade_date: "2026-06-14",
+    signal_close_return_pct: state === "reversed" ? -2 : 2,
+    signal_mfe_pct: state === "reversed" ? 0 : 3,
+    signal_mae_pct: state === "reversed" ? -4 : -1,
+    outcome_quality: "final",
+    limitations: [],
   };
 }
 
-function radarOutcomeDetailSummary(id: number, snapshotDate: string) {
+function radarV2OutcomeDetailSummary(snapshotDate: string) {
   const items = Array.from({ length: 30 }, (_, index) =>
-    radarOutcomeItem(index + 1, index === 29 ? "miss" : "hit")
+    radarV2OutcomeItem(
+      index + 1,
+      index === 29 ? "reversed" : "close_confirmed"
+    )
   );
   return {
-    ...radarOutcomeSummary(id, snapshotDate),
-    snapshot: {
-      ...radarSnapshot(id, snapshotDate),
-      max_results: 30,
-      current_stock_count: 30,
-      requested_stock_count: 30,
-      ranked_count: 30,
-      matched_count: 30,
-      radar_count: 30,
-    },
+    ...radarV2OutcomeSummary(snapshotDate),
     total_count: 30,
-    hit_count: 29,
-    miss_count: 1,
-    avg_close_return_pct: 1.8667,
+    finalized_count: 30,
+    summary_state_counts: { close_confirmed: 29, reversed: 1 },
     items,
   };
 }
 
-function noRadarOutcomeSummary() {
+function noRadarV2OutcomeSummary() {
   return {
     status: "no_snapshot",
-    snapshot: null,
-    evaluated_at: null,
+    group_id: 7,
+    mode: "action",
+    snapshot_date: null,
+    horizon_trading_days: 1,
+    rule_version: "radar_v2.0",
+    outcome_contract_version: "outcome_v2.0",
     total_count: 0,
-    hit_count: 0,
-    miss_count: 0,
-    neutral_count: 0,
-    unevaluable_count: 0,
+    finalized_count: 0,
     pending_count: 0,
-    avg_close_return_pct: null,
-    avg_max_favorable_pct: null,
-    avg_max_adverse_pct: null,
-    bucket_summaries: [],
+    summary_state_counts: {},
     items: [],
     data_limitations: [],
   };
@@ -1595,10 +1703,9 @@ type MockOmiApiOptions = {
     search: string;
   }>;
   omiAskRequests?: unknown[];
-  taiwanRadarOutcomeLatest?: unknown;
-  taiwanRadarOutcomeHistory?: unknown[];
-  taiwanRadarOutcomeSnapshots?: Record<number, unknown>;
-  taiwanRadarOutcomeEvaluation?: unknown;
+  taiwanRadarV2OutcomeLatest?: unknown;
+  taiwanRadarV2OutcomeHistory?: unknown[];
+  taiwanRadarV2OutcomeSnapshots?: Record<string, unknown>;
 };
 
 async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
@@ -1724,8 +1831,55 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (/\/market\/tw-futures\/[^/]+\/daily\/refresh$/.test(path)) {
+      await fulfillJson(route, completedRefreshJob());
+      return;
+    }
+
     if (/\/market\/tw-futures\/[^/]+\/(?:intraday|daily)$/.test(path)) {
       await fulfillJson(route, []);
+      return;
+    }
+
+    if (path.includes("/jp-market/overview")) {
+      await fulfillJson(route, {
+        kind: "jp_market_overview",
+        generated_at: "2026-06-15T15:30:00+09:00",
+        expected_trade_date: "2026-06-15",
+        calendar_status: {},
+        coverage: {
+          scope: "playwright_fixture",
+          active_stock_count: 0,
+          observed_symbol_count: 0,
+          current_symbol_count: 0,
+          stale_symbol_count: 0,
+          missing_symbol_count: 0,
+          active_coverage_ratio: 0,
+          observed_current_ratio: 0,
+          status: "empty",
+          is_partial: true,
+        },
+        watchlist_coverage: {},
+        breadth: {
+          trade_date: null,
+          advance_count: 0,
+          decline_count: 0,
+          unchanged_count: 0,
+          no_comparison_count: 0,
+          total_count: 0,
+          coverage_count: 0,
+          source: "playwright.fixture",
+          is_partial: true,
+        },
+        sectors: [],
+        indices: [],
+        top_gainers: [],
+        top_losers: [],
+        source_health: {},
+        refresh_recommended: false,
+        refresh_scope: "none",
+        warnings: [],
+      });
       return;
     }
 
@@ -2061,6 +2215,19 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 
     if (/\/us-market\/corporate-actions\/[^/]+$/.test(path)) {
       await fulfillJson(route, []);
+      return;
+    }
+
+    const usCorporateEventSummaryMatch = path.match(
+      /\/us-market\/corporate-events\/([^/]+)\/summary$/
+    );
+    if (usCorporateEventSummaryMatch) {
+      await fulfillJson(
+        route,
+        usCorporateEventSummaryResponse(
+          decodeURIComponent(usCorporateEventSummaryMatch[1])
+        )
+      );
       return;
     }
 
@@ -2517,38 +2684,24 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
-    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/latest$/.test(path)) {
+    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/v2\/outcomes\/latest$/.test(path)) {
+      const snapshotDate = url.searchParams.get("snapshot_date");
       await fulfillJson(
         route,
-        options.taiwanRadarOutcomeLatest ?? noRadarOutcomeSummary()
+        (snapshotDate
+          ? options.taiwanRadarV2OutcomeSnapshots?.[snapshotDate]
+          : options.taiwanRadarV2OutcomeLatest) ?? noRadarV2OutcomeSummary()
       );
       return;
     }
 
-    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/history$/.test(path)) {
-      await fulfillJson(route, options.taiwanRadarOutcomeHistory ?? []);
+    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/v2\/outcomes\/history$/.test(path)) {
+      await fulfillJson(route, options.taiwanRadarV2OutcomeHistory ?? []);
       return;
     }
 
-    const radarOutcomeSnapshotMatch = path.match(
-      /\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/snapshots\/(\d+)$/
-    );
-    if (radarOutcomeSnapshotMatch) {
-      const snapshotId = Number(radarOutcomeSnapshotMatch[1]);
-      await fulfillJson(
-        route,
-        options.taiwanRadarOutcomeSnapshots?.[snapshotId] ??
-          noRadarOutcomeSummary()
-      );
-      return;
-    }
-
-    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/evaluate$/.test(path)) {
-      if (options.taiwanRadarOutcomeEvaluation === undefined) {
-        throw new Error(`Unexpected radar outcome evaluation: ${route.request().method()} ${path}`);
-      }
-      await fulfillJson(route, options.taiwanRadarOutcomeEvaluation);
-      return;
+    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes(?:\/|$)/.test(path)) {
+      throw new Error(`Unexpected frozen Radar v1 request: ${route.request().method()} ${path}`);
     }
 
     if (/\/(?:us-market|jp-market|kr-market)\/watchlists\/ranking$/.test(path)) {
@@ -3359,6 +3512,137 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByTestId("market-tape-tw")).toBeHidden();
   });
 
+  test("TPEX today reuses the ordinary K-line chart with one-minute candles", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/indices/TPEX/ohlc")) {
+          return { body: ohlcResponse("TPEX") };
+        }
+        if (path.endsWith("/market/indices/TPEX/contributions")) {
+          return {
+            body: {
+              index_id: "TPEX",
+              market: "TPEX",
+              source: "playwright.fixture",
+              method: "fixture",
+              as_of: "2026-06-15T09:02:00+08:00",
+              trade_date: "2026-06-15",
+              index_close: 101,
+              index_change: 1,
+              total_market_value: null,
+              positive: [],
+              negative: [],
+            },
+          };
+        }
+        if (path.endsWith("/market/indices/TPEX/intraday")) {
+          return {
+            body: {
+              stock_id: "TPEX",
+              index_id: "TPEX",
+              market: "TPEX",
+              symbol: "^TWOII",
+              source: "tpex_index_5s_twse_mis_snapshot",
+              trade_date: "2026-06-15",
+              reference_price: 100,
+              latest_price: 101,
+              previous_close: 100,
+              point_count: 8,
+              points: [
+                {
+                  time: "2026-06-15T09:00:00+08:00",
+                  price: 100,
+                  volume: null,
+                  open: 100,
+                  high: 100,
+                  low: 100,
+                },
+                {
+                  time: "2026-06-15T09:00:05+08:00",
+                  price: 101,
+                  volume: null,
+                  open: 101,
+                  high: 101,
+                  low: 101,
+                },
+                {
+                  time: "2026-06-15T09:00:30+08:00",
+                  price: 102,
+                  volume: null,
+                  open: 102,
+                  high: 102,
+                  low: 102,
+                },
+                {
+                  time: "2026-06-15T09:01:00+08:00",
+                  price: 102,
+                  volume: null,
+                  open: 102,
+                  high: 102,
+                  low: 102,
+                },
+                {
+                  time: "2026-06-15T09:01:30+08:00",
+                  price: 100,
+                  volume: null,
+                  open: 100,
+                  high: 100,
+                  low: 100,
+                },
+                {
+                  time: "2026-06-15T09:02:00+08:00",
+                  price: 101,
+                  volume: null,
+                  open: 101,
+                  high: 101,
+                  low: 101,
+                },
+                {
+                  time: "2026-06-15T13:30:00+08:00",
+                  price: 100,
+                  volume: null,
+                  open: 100,
+                  high: 100,
+                  low: 100,
+                },
+                {
+                  time: "2026-06-15T13:33:00+08:00",
+                  price: 103,
+                  volume: 1_000_000,
+                  open: 101,
+                  high: 999,
+                  low: 1,
+                },
+              ],
+            },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=TPEX", {
+      waitUntil: "domcontentloaded",
+    });
+
+    await page.getByRole("button", { name: "今日", exact: true }).click();
+
+    const chart = page.getByTestId("tpex-today-kline");
+    await expect(chart).toBeVisible();
+    await expect(chart).toHaveAttribute("data-point-count", "4");
+    await expect(chart).toContainText("2026/06/15 13:30");
+    await expect(chart).toContainText("103");
+    await expect(chart).not.toContainText("999");
+    await expect(page.getByTestId("professional-chart-panel")).toHaveCount(0);
+    await expect(page.getByTestId("stock-detail-expand")).toHaveCount(0);
+
+    await page.getByTestId("chart-indicator-menu-toggle").click();
+    const indicatorMenu = page.getByTestId("technical-indicator-menu");
+    await expect(indicatorMenu).toBeVisible();
+    await expect(indicatorMenu.locator('[data-indicator-option="volume"]')).toHaveCount(0);
+  });
+
   test("Taiwan stock detail ignores stale chart and quote responses after selection changes", async ({
     page,
   }) => {
@@ -3402,6 +3686,20 @@ test.describe("OMI dashboard smoke", () => {
     await expect(technicalCurrentState).toContainText("站回 MA20");
 
     await expect(quoteDepthPanel).toContainText("52.4");
+    await expect(chartCard).toContainText("成交量(股)");
+    await expect(page.getByTestId("quote-volume-last-trade")).toContainText("320 張");
+    await expect(page.getByTestId("quote-volume-cumulative")).toContainText("12,000 張");
+    await expect(page.getByTestId("quote-volume-official")).toContainText("12,300 張");
+    await expect(page.getByTestId("quote-volume-status")).toHaveText("口徑不同");
+    await expect(page.getByTestId("quote-depth-bid-empty")).toContainText("目前無有效買價");
+    await expect
+      .poll(async () => {
+        const bookBox = await page.getByTestId("quote-depth-book").boundingBox();
+        const volumeBox = await page.getByTestId("quote-volume-summary").boundingBox();
+        if (!bookBox || !volumeBox) return false;
+        return volumeBox.y >= bookBox.y + bookBox.height;
+      })
+      .toBe(true);
     await expect
       .poll(async () => {
         const chartBox = await chartCard.boundingBox();
@@ -4059,11 +4357,13 @@ test.describe("OMI dashboard smoke", () => {
     const overlayBox = await overlay.boundingBox();
     expect(overlayBox).not.toBeNull();
     await page.locator('[data-drawing-tool-option="riskReward"]').click();
+    await expect(chart).toHaveAttribute("data-drawing-tool", "riskReward");
     await page.mouse.move(
       (overlayBox?.x ?? 0) + (overlayBox?.width ?? 600) * 0.48,
       (overlayBox?.y ?? 0) + (overlayBox?.height ?? 600) * 0.42
     );
     await page.mouse.down();
+    await expect(chart).toHaveAttribute("data-drawing-draft", "active");
     await page.mouse.move(
       (overlayBox?.x ?? 0) + (overlayBox?.width ?? 600) * 0.64,
       (overlayBox?.y ?? 0) + (overlayBox?.height ?? 600) * 0.42,
@@ -5186,74 +5486,70 @@ test.describe("OMI dashboard smoke", () => {
     expect(pageErrors).toEqual([]);
   });
 
-  test("Taiwan radar history evaluates the selected snapshot", async ({ page }) => {
+  test("Taiwan radar uses v2 outcome history without v1 writes", async ({ page }) => {
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await mockOmiApi(page, {
       taiwanWatchlistTree: seededTaiwanWatchlistTree(),
       taiwanWatchlistItems: seededTaiwanWatchlistItems(),
       taiwanRankingRows: seededTaiwanRankingRows(),
-      radarResponder: ({ market, url }) =>
-        market === "tw" ? { body: seededRadarResponse(url, "history-radar") } : null,
-      taiwanRadarOutcomeLatest: radarOutcomeSummary(102, "2026-06-14"),
-      taiwanRadarOutcomeHistory: [
-        radarOutcomeSummary(102, "2026-06-14"),
-        radarOutcomeSummary(101, "2026-06-13", "pending"),
-      ],
-      taiwanRadarOutcomeSnapshots: {
-        101: radarOutcomeDetailSummary(101, "2026-06-13"),
-        102: radarOutcomeDetailSummary(102, "2026-06-14"),
+      radarResponder: ({ market, url }) => {
+        if (market !== "tw") return null;
+        expect(url.searchParams.get("version")).toBe("v2");
+        return { body: seededRadarResponse(url, "history-radar") };
       },
-      taiwanRadarOutcomeEvaluation: radarOutcomeDetailSummary(101, "2026-06-13"),
+      taiwanRadarV2OutcomeLatest: radarV2OutcomeSummary("2026-06-14"),
+      taiwanRadarV2OutcomeHistory: [
+        radarV2OutcomeSummary("2026-06-14"),
+        radarV2OutcomeSummary("2026-06-13", "pending"),
+      ],
+      taiwanRadarV2OutcomeSnapshots: {
+        "2026-06-13": radarV2OutcomeDetailSummary("2026-06-13"),
+        "2026-06-14": radarV2OutcomeDetailSummary("2026-06-14"),
+      },
     });
     await page.goto("/", { waitUntil: "domcontentloaded" });
 
     await page.locator('[data-watchlist-group-id="7"]').click();
     await expect(page.getByTestId("watchlist-radar-result-2330")).toBeVisible();
+    await expect(page.getByTestId("watchlist-radar-v2-outcome-summary")).toHaveCount(0);
+    const radarHeaderButtons = page
+      .getByTestId("watchlist-radar-controls")
+      .locator("button");
+    await expect(radarHeaderButtons).toHaveCount(2);
+    await expect(radarHeaderButtons.nth(0)).toHaveAttribute(
+      "data-testid",
+      "watchlist-radar-history-open"
+    );
+    await expect(radarHeaderButtons.nth(1)).toHaveAttribute(
+      "data-testid",
+      "watchlist-radar-reload"
+    );
     const historyResponse = page.waitForResponse((response) =>
-      /\/(?:wl|watchlists)\/groups\/7\/radar\/outcomes\/history$/.test(
+      /\/(?:wl|watchlists)\/groups\/7\/radar\/v2\/outcomes\/history$/.test(
         new URL(response.url()).pathname
       )
     );
     await page.getByTestId("watchlist-radar-history-open").click();
     const response = await historyResponse;
-    expect(new URL(response.url()).searchParams.get("item_limit")).toBe("0");
+    expect(new URL(response.url()).searchParams.get("horizon_trading_days")).toBe("1");
     await expect(page.getByTestId("watchlist-radar-history-dialog")).toBeVisible();
     const detailResponse = page.waitForResponse((candidate) =>
-      /\/(?:wl|watchlists)\/groups\/7\/radar\/outcomes\/snapshots\/101$/.test(
+      /\/(?:wl|watchlists)\/groups\/7\/radar\/v2\/outcomes\/latest$/.test(
         new URL(candidate.url()).pathname
-      )
+      ) && new URL(candidate.url()).searchParams.get("snapshot_date") === "2026-06-13"
     );
-    await page.getByTestId("watchlist-radar-history-snapshot-101").click();
+    await page.getByTestId("watchlist-radar-v2-history-snapshot-2026-06-13").click();
     const selectedDetailResponse = await detailResponse;
     expect(
       new URL(selectedDetailResponse.url()).searchParams.get("item_limit")
     ).toBe("200");
     await expect(
-      page.getByTestId("watchlist-radar-history-items").locator(":scope > article")
+      page.getByTestId("watchlist-radar-v2-history-items").locator(":scope > article")
     ).toHaveCount(30);
     await expect(
-      page.getByTestId("watchlist-radar-history-item-30-7030")
-    ).toContainText("失誤");
-    const collapsedDetails = page.getByTestId(
-      "watchlist-radar-history-item-details-30-7030"
-    );
-    await expect(collapsedDetails).not.toHaveAttribute("open", "");
-    await collapsedDetails.locator("summary").click();
-    await expect(collapsedDetails).toContainText("RSI14 58");
-
-    const evaluationRequest = page.waitForRequest((request) =>
-      /\/(?:wl|watchlists)\/groups\/7\/radar\/outcomes\/evaluate$/.test(
-        new URL(request.url()).pathname
-      )
-    );
-    await page.getByTestId("watchlist-radar-history-evaluate-selected").click();
-    const request = await evaluationRequest;
-    const evaluationUrl = new URL(request.url());
-    expect(evaluationUrl.searchParams.get("mode")).toBe("action");
-    expect(evaluationUrl.searchParams.get("snapshot_run_id")).toBe("101");
-    expect(evaluationUrl.searchParams.get("item_limit")).toBe("200");
-    expect(request.postData()).toBeNull();
+      page.getByTestId("watchlist-radar-v2-history-item-30-7030")
+    ).toContainText("方向反轉");
     await expect(page.getByTestId("watchlist-radar-history-dialog")).toBeVisible();
     expect(pageErrors).toEqual([]);
   });
@@ -5408,6 +5704,81 @@ test.describe("OMI dashboard smoke", () => {
     await expect(rankingReload).toBeEnabled();
     await rankingReload.click();
     await expect(page.locator('[data-ranking-symbol="7203.T"]')).toContainText("2,850.5");
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("calendar switches between Taiwan and US while Japan and Korea remain planned", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      apiRequests,
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/tw-corporate-events")) {
+          return { body: emptyTaiwanCorporateEventListResponse() };
+        }
+        if (path.endsWith("/us-market/corporate-events")) {
+          return { body: usCorporateEventListResponse() };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw", { waitUntil: "domcontentloaded" });
+
+    await page.getByRole("button", { name: /開啟設定|Open settings/ }).click();
+    await page.getByRole("button", { name: /行事曆|Calendar/ }).click();
+
+    const japanButton = page.getByTestId("calendar-market-jp");
+    const koreaButton = page.getByTestId("calendar-market-kr");
+    await expect(japanButton).toBeDisabled();
+    await expect(koreaButton).toBeDisabled();
+    await expect(japanButton).toContainText(/規劃中|Planned/);
+    await expect(koreaButton).toContainText(/規劃中|Planned/);
+
+    const usResponse = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.endsWith("/us-market/corporate-events")
+    );
+    await page.getByTestId("calendar-market-us").click();
+    await usResponse;
+    await expect(page.getByText("AAPL Apple Inc.", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Alpha Vantage Earnings Calendar/)).toBeVisible();
+    expect(
+      apiRequests.filter(
+        (request) =>
+          request.path.includes("/jp-market/corporate-events") ||
+          request.path.includes("/kr-market/corporate-events")
+      )
+    ).toHaveLength(0);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("US stock detail shows a cached corporate event within seven days", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path }) =>
+        path.endsWith("/us-market/corporate-events/AAPL/summary")
+          ? {
+              body: usCorporateEventSummaryResponse("AAPL", [
+                usCorporateEventResponse("AAPL"),
+              ]),
+            }
+          : null,
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const reminder = page.getByTestId("us-upcoming-corporate-event");
+    await expect(reminder).toBeVisible();
+    await expect(reminder).toContainText("2026-07-31");
     expect(pageErrors).toEqual([]);
   });
 

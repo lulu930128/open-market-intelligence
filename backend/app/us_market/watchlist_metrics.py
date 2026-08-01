@@ -5,6 +5,7 @@ from datetime import date, datetime
 from sqlalchemy.orm import Session
 
 from app.db.models import USDailyPrice
+from app.us_market.trading_calendar import is_us_daily_price_finalized
 
 
 def _valid_number(value) -> bool:
@@ -38,6 +39,12 @@ def _latest_distinct_us_daily_rows(
     seen_dates: set[date] = set()
 
     for row in rows:
+        if not is_us_daily_price_finalized(
+            trade_date=row.trade_date,
+            fetched_at=row.fetched_at,
+        ):
+            continue
+
         if row.trade_date in seen_dates:
             continue
 

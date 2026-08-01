@@ -75,6 +75,37 @@ class USMarketDateRequestTests(unittest.TestCase):
             )
         )
 
+    def test_yesterday_resolves_to_previous_us_trading_session(self) -> None:
+        self.assertEqual(
+            requested_us_trade_date(
+                "AAPL 昨天的成交量",
+                now=self.now,
+            ).isoformat(),
+            "2026-07-24",
+        )
+        self.assertEqual(
+            requested_us_trade_date(
+                "AAPL yesterday closing price",
+                now=self.now,
+            ).isoformat(),
+            "2026-07-24",
+        )
+
+    def test_yesterday_uses_new_york_date_before_rolling_calendar_gap(self) -> None:
+        result = requested_us_trade_date(
+            "AAPL 昨天收盤",
+            now=datetime(
+                2026,
+                7,
+                6,
+                0,
+                30,
+                tzinfo=ZoneInfo("Asia/Taipei"),
+            ),
+        )
+
+        self.assertEqual(result.isoformat(), "2026-07-02")
+
     def test_public_us_params_bind_close_date_and_disable_current_intraday(self) -> None:
         payload = AiAskRequest(
             question="AAPL closing price on 2026-07-20",
@@ -95,6 +126,34 @@ class USMarketDateRequestTests(unittest.TestCase):
         self.assertEqual(params["trade_date"], "2026-07-20")
         self.assertFalse(params["include_intraday"])
         self.assertEqual(params["session_scope"], "all")
+
+    def test_public_us_params_bind_yesterday_and_disable_current_intraday(self) -> None:
+        payload = AiAskRequest(
+            question="AAPL 昨天的成交量",
+            target={"type": "us_stock", "id": "AAPL"},
+            analysis_horizon="intraday",
+            allow_external_fetch=False,
+            market_data_params={"include_intraday": True},
+        )
+
+        with patch(
+            "app.ai.market_date_request.datetime",
+        ) as mocked_datetime:
+            mocked_datetime.now.return_value = datetime(
+                2026,
+                7,
+                26,
+                10,
+                0,
+                tzinfo=ZoneInfo("America/New_York"),
+            )
+            params = _us_market_data_params(
+                payload,
+                policy={"can_external_fetch": False},
+            )
+
+        self.assertEqual(params["trade_date"], "2026-07-24")
+        self.assertFalse(params["include_intraday"])
 
 
 class USQuoteSessionContractTests(unittest.TestCase):

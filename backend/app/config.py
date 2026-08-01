@@ -143,6 +143,8 @@ class Settings(BaseSettings):
     scheduler_market_chip_refresh_force: bool = False
     enable_taiwan_market_index_scheduler: bool = True
     scheduler_taiwan_market_index_interval_seconds: int = 5
+    enable_taiwan_source_health_scheduler: bool = True
+    scheduler_taiwan_source_health_interval_seconds: int = 120
     enable_taiwan_quote_contract_scheduler: bool = True
     scheduler_taiwan_quote_contract_symbols: str = "2330"
     scheduler_taiwan_quote_contract_max_symbols: int = 3
@@ -163,6 +165,11 @@ class Settings(BaseSettings):
     scheduler_us_market_refresh_outputsize: str = "compact"
     scheduler_us_market_refresh_adjusted: bool = False
     scheduler_us_market_refresh_sleep_seconds: float = 12.0
+    enable_us_corporate_event_scheduler: bool = True
+    scheduler_us_corporate_event_refresh_hours: int = 3
+    us_corporate_event_http_timeout_seconds: int = 20
+    us_corporate_event_cache_stale_hours: int = 6
+    us_corporate_event_reminder_days: int = 7
     enable_jp_market_scheduler: bool = False
     scheduler_jp_market_refresh_time: str = "16:10"
     scheduler_jp_market_refresh_day_of_week: str = "mon-fri"

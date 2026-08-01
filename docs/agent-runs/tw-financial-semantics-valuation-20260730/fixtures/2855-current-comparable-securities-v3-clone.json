@@ -1,0 +1,238 @@
+{
+  "package_version": "omi.tw-financial-evidence.v1",
+  "package_id": "2855-current-comparable-securities-v3-clone-20260731",
+  "approval_scope": "clone_only",
+  "review_status": "approved",
+  "reviewer": "codex:securities-bd-v3-official-pdf-reconciliation-20260731",
+  "reviewed_at": "2026-07-31T01:52:43+08:00",
+  "stock_id": "2855",
+  "mode": "current_comparable",
+  "comparison_basis_id": "2855-current-share-basis-2025-07-14",
+  "target_basis_date": "2026-03-31",
+  "normalization_version": "tw-financial-normalization-v1",
+  "evidence_source_name": "MOPS Official Filing iXBRL",
+  "sources": [
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "source_type": "official_filing",
+      "category": "financial_filing",
+      "priority": 5,
+      "reliability_level": "official"
+    }
+  ],
+  "documents": [
+    {
+      "document_id": "202501_2855_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2855&SYEAR=2025&SSEASON=1&REPORT_ID=C",
+      "description": "MOPS official 2855 2025Q1 consolidated Inline XBRL; the original current-period basic EPS was a loss of 0.05 before the later earnings-capitalization retrospective adjustment.",
+      "content_hash": "a27ac92c282192c167b9b6f1c00071696e9c2475cc59562658d552fa3a5d4919",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202502_2855_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2855&SYEAR=2025&SSEASON=2&REPORT_ID=C",
+      "description": "MOPS official 2855 2025Q2 consolidated Inline XBRL; current official discrete-quarter basic EPS is 0.37 and YTD basic EPS is 0.33.",
+      "content_hash": "2a69b0a3f8debdd7e9c42ec83f6a6d8a097fdc293cfd3e610a02191ba8f3f7ce",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202503_2855_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2855&SYEAR=2025&SSEASON=3&REPORT_ID=C",
+      "description": "MOPS official 2855 2025Q3 consolidated Inline XBRL; current official discrete-quarter basic EPS is 1.34 and YTD basic EPS is 1.67.",
+      "content_hash": "ac596a5a493050d8f9de9c82c6e50c36f4aceebd740659a5a5a64fe741ebe7ae",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202504_2855_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2855&SYEAR=2025&SSEASON=4&REPORT_ID=C",
+      "description": "MOPS official 2855 2025 annual consolidated Inline XBRL; annual basic EPS is 3.00.",
+      "content_hash": "59a09c3b2144ef4f765e79894ff5681aaf476b1cfb86daa19c7e1cc333650de2",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202601_2855_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2855&SYEAR=2026&SSEASON=1&REPORT_ID=C",
+      "description": "MOPS official 2855 2026Q1 consolidated Inline XBRL; current basic EPS is 1.43 and comparative 2025Q1 basic EPS is the officially restated loss of 0.04.",
+      "content_hash": "9ab2ae870ba9172704d35898a8b4a747b602e05c4754dce8d54d26b214d11bd0",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202502_2855_AI1.pdf-binary",
+      "url": "https://doc.twse.com.tw/server-java/t57sb01?step=1&colorchg=1&co_id=2855&year=114&mtype=A",
+      "description": "MOPS official 2855 2025Q2 PDF. Page 43 reports weighted-average common shares of 1,601,414 thousand, discrete Q2 basic EPS of 0.37, YTD basic EPS of 0.33, and explicitly states that the comparative share counts and EPS were retrospectively adjusted for the 2025-07-14 earnings capitalization.",
+      "content_hash": "9591c2417f757dabf96be7a18251732e488a554ae6b0daa8894215d312ababc7",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202601_2855_AI1.pdf-binary",
+      "url": "https://doc.twse.com.tw/server-java/t57sb01?step=1&colorchg=1&co_id=2855&year=115&mtype=A",
+      "description": "MOPS official 2855 2026Q1 PDF. Page 34 records the 2025-07-14 earnings capitalization and issued-share increase from 1,455,831 thousand to 1,601,415 thousand; page 40 confirms 2026Q1 EPS of 1.43 and the retrospectively recalculated 2025Q1 comparative loss per share of 0.04 on 1,601,415 thousand weighted-average shares.",
+      "content_hash": "d36b83d1d47ac58fd204135498e9c43e9b5a174173c685ceb027df2632968360",
+      "content_hash_status": "verified_source_bytes"
+    }
+  ],
+  "actions": [
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "action_key": "2855-earnings-capitalization-2025-07-14",
+      "action_type": "earnings_capitalization",
+      "announced_at": null,
+      "record_date": "2025-07-14",
+      "effective_date": "2025-07-14",
+      "old_share_basis": "1455831",
+      "new_share_basis": "1601415",
+      "adjustment_ratio": "1.10",
+      "adjustment_purpose": "per_share_financials",
+      "source_document_id": "202601_2855_AI1.pdf-binary",
+      "source_document_url": "https://doc.twse.com.tw/server-java/t57sb01?step=1&colorchg=1&co_id=2855&year=115&mtype=A",
+      "status": "confirmed"
+    }
+  ],
+  "share_basis_assessment": {
+    "status": "confirmed_action_adjusted",
+    "verification_method": "official_corporate_action_document",
+    "rationale": "The official 2026Q1 PDF identifies the 2025-07-14 earnings-capitalization date and issued-share increase from 1,455,831 thousand to 1,601,415 thousand. It explicitly states that 2025Q1 weighted-average shares and EPS were retrospectively adjusted, producing the authoritative comparative loss per share of 0.04. The official 2025Q2 PDF was published after that action and already presents Q2 EPS of 0.37 and YTD EPS of 0.33 on approximately 1,601,414 thousand weighted-average shares, so those reviewed values are also used directly rather than divided by 1.10 again. Q3, annual 2025, and 2026Q1 facts are post-action and require no additional factor. Discrete and YTD facts coexist so Q4 derives from annual minus official Q3 YTD.",
+    "evidence_document_ids": [
+      "202501_2855_AI1.ixbrl",
+      "202502_2855_AI1.ixbrl",
+      "202503_2855_AI1.ixbrl",
+      "202504_2855_AI1.ixbrl",
+      "202601_2855_AI1.ixbrl",
+      "202502_2855_AI1.pdf-binary",
+      "202601_2855_AI1.pdf-binary"
+    ]
+  },
+  "facts": [
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 1,
+      "metric_code": "basic_eps",
+      "expected_source_value": "-0.04",
+      "source_share_basis_id": "2855:2026Q1:9ab2ae870ba91727:presentation",
+      "source_restated_status": "confirmed",
+      "expected_normalized_value": "-0.04",
+      "evidence_document_ids": [
+        "202601_2855_AI1.ixbrl",
+        "202601_2855_AI1.pdf-binary"
+      ],
+      "source_document_id": "202601_2855_AI1.pdf",
+      "presentation_role": "comparative_period",
+      "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250331|comparative_period",
+      "period_scope": "ytd_3m",
+      "normalization_treatment": "official_restated"
+    },
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 2,
+      "metric_code": "basic_eps",
+      "expected_source_value": "0.37",
+      "source_share_basis_id": "2855:2025Q2:2a69b0a3f8debdd7:presentation",
+      "source_restated_status": "confirmed",
+      "expected_normalized_value": "0.37",
+      "evidence_document_ids": [
+        "202502_2855_AI1.ixbrl",
+        "202502_2855_AI1.pdf-binary",
+        "202601_2855_AI1.pdf-binary"
+      ],
+      "source_document_id": "202502_2855_AI1.pdf",
+      "presentation_role": "current_period",
+      "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250401To20250630|current_period",
+      "period_scope": "discrete_3m",
+      "normalization_treatment": "official_restated"
+    },
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 2,
+      "metric_code": "basic_eps",
+      "expected_source_value": "0.33",
+      "source_share_basis_id": "2855:2025Q2:2a69b0a3f8debdd7:presentation",
+      "source_restated_status": "confirmed",
+      "expected_normalized_value": "0.33",
+      "evidence_document_ids": [
+        "202502_2855_AI1.ixbrl",
+        "202502_2855_AI1.pdf-binary",
+        "202601_2855_AI1.pdf-binary"
+      ],
+      "source_document_id": "202502_2855_AI1.pdf",
+      "presentation_role": "current_period",
+      "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250630|current_period",
+      "period_scope": "ytd_6m",
+      "normalization_treatment": "official_restated"
+    },
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 3,
+      "metric_code": "basic_eps",
+      "expected_source_value": "1.34",
+      "source_share_basis_id": "2855:2025Q3:ac596a5a493050d8:presentation",
+      "source_restated_status": "not_restated",
+      "expected_normalized_value": "1.34",
+      "evidence_document_ids": [
+        "202503_2855_AI1.ixbrl",
+        "202601_2855_AI1.pdf-binary"
+      ],
+      "source_document_id": "202503_2855_AI1.pdf",
+      "presentation_role": "current_period",
+      "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250701To20250930|current_period",
+      "period_scope": "discrete_3m"
+    },
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 3,
+      "metric_code": "basic_eps",
+      "expected_source_value": "1.67",
+      "source_share_basis_id": "2855:2025Q3:ac596a5a493050d8:presentation",
+      "source_restated_status": "not_restated",
+      "expected_normalized_value": "1.67",
+      "evidence_document_ids": [
+        "202503_2855_AI1.ixbrl",
+        "202601_2855_AI1.pdf-binary"
+      ],
+      "source_document_id": "202503_2855_AI1.pdf",
+      "presentation_role": "current_period",
+      "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20250930|current_period",
+      "period_scope": "ytd_9m"
+    },
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 4,
+      "metric_code": "basic_eps",
+      "expected_source_value": "3.00",
+      "source_share_basis_id": "2855:2025Q4:59a09c3b2144ef4f:presentation",
+      "source_restated_status": "not_restated",
+      "expected_normalized_value": "3.00",
+      "evidence_document_ids": [
+        "202504_2855_AI1.ixbrl",
+        "202601_2855_AI1.pdf-binary"
+      ],
+      "source_document_id": "202504_2855_AI1.pdf",
+      "presentation_role": "current_period",
+      "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20250101To20251231|current_period",
+      "period_scope": "annual_12m"
+    },
+    {
+      "source_name": "MOPS Official Filing iXBRL",
+      "fiscal_year": 2026,
+      "fiscal_quarter": 1,
+      "metric_code": "basic_eps",
+      "expected_source_value": "1.43",
+      "source_share_basis_id": "2855:2026Q1:9ab2ae870ba91727:presentation",
+      "source_restated_status": "not_restated",
+      "expected_normalized_value": "1.43",
+      "evidence_document_ids": [
+        "202601_2855_AI1.ixbrl",
+        "202601_2855_AI1.pdf-binary"
+      ],
+      "source_document_id": "202601_2855_AI1.pdf",
+      "presentation_role": "current_period",
+      "fact_key": "ifrs-full:BasicEarningsLossPerShare|From20260101To20260331|current_period",
+      "period_scope": "ytd_3m"
+    }
+  ]
+}

@@ -54,6 +54,20 @@ class AiPublicV4ContractTests(unittest.TestCase):
             ]["$ref"],
             "#/components/schemas/AiDecisionEnvelopeV4",
         )
+        public_status_fields = {
+            "transport_ok",
+            "request_valid",
+            "execution_completed",
+            "data_available",
+            "quality_status",
+        }
+        v4_response = components["AiDecisionEnvelopeV4"]
+        self.assertTrue(
+            public_status_fields <= set(v4_response["properties"])
+        )
+        self.assertTrue(
+            public_status_fields <= set(v4_response["required"])
+        )
 
     def test_openapi_exposes_us_exchange_trade_date_on_context_and_brief(self) -> None:
         schema = app.openapi()

@@ -164,6 +164,11 @@ class AiTechnicalAnalysisTests(unittest.TestCase):
         self.assertIn("preferred_zone", levels["entry"])
         self.assertIn("do_not_chase_above", levels["entry"])
         self.assertIn("short_stop", levels["risk"])
+        self.assertIn("short_term_stop", levels["risk"])
+        self.assertEqual(
+            levels["risk"]["short_stop"]["deprecated_alias_for"],
+            "short_term_stop",
+        )
         self.assertIn("technical_invalidation", levels["risk"])
 
 

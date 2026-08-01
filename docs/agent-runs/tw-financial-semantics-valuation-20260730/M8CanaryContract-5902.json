@@ -1,0 +1,423 @@
+{
+  "basis_assessment": null,
+  "contract_version": "omi.financial.v1",
+  "database": "C:\\project\\Open Market Intelligence\\data\\open_market_intelligence.db",
+  "database_revision": "20260731_0049",
+  "derived": {
+    "action_ids": [],
+    "annual_reconciliations": [
+      {
+        "annual_value": "2.2400000000",
+        "difference": "0E-10",
+        "discrete_sum": "2.2400000000",
+        "fiscal_year": 2025,
+        "input_fact_ids": [
+          "39280",
+          "39186",
+          "39216",
+          "39252",
+          "39251"
+        ],
+        "issue_codes": [],
+        "status": "ready",
+        "tolerance": "0.030",
+        "within_tolerance": true
+      }
+    ],
+    "input_fact_ids": [
+      "39216",
+      "39252",
+      "39280",
+      "39251",
+      "39302"
+    ],
+    "issue_codes": [],
+    "single_quarter_eps": [
+      {
+        "action_ids": [],
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "input_fact_ids": [
+          "39186"
+        ],
+        "issue_codes": [],
+        "known_at": "2025-04-29T10:21:34Z",
+        "metric_code": "single_quarter_basic_eps",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "period": "2025Q1",
+        "period_end": "2025-03-31",
+        "rounding_tolerance": "0.005",
+        "status": "ready",
+        "unit": "TWD_per_share",
+        "value": "0.5400000000"
+      },
+      {
+        "action_ids": [],
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "input_fact_ids": [
+          "39216"
+        ],
+        "issue_codes": [],
+        "known_at": "2025-07-30T10:02:25Z",
+        "metric_code": "single_quarter_basic_eps",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "period": "2025Q2",
+        "period_end": "2025-06-30",
+        "rounding_tolerance": "0.005",
+        "status": "ready",
+        "unit": "TWD_per_share",
+        "value": "0.6600000000"
+      },
+      {
+        "action_ids": [],
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "input_fact_ids": [
+          "39252"
+        ],
+        "issue_codes": [],
+        "known_at": "2025-10-29T07:25:44Z",
+        "metric_code": "single_quarter_basic_eps",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "period": "2025Q3",
+        "period_end": "2025-09-30",
+        "rounding_tolerance": "0.005",
+        "status": "ready",
+        "unit": "TWD_per_share",
+        "value": "0.5900000000"
+      },
+      {
+        "action_ids": [],
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "input_fact_ids": [
+          "39280",
+          "39251"
+        ],
+        "issue_codes": [],
+        "known_at": "2026-02-26T00:38:50Z",
+        "metric_code": "single_quarter_basic_eps",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "period": "2025Q4",
+        "period_end": "2025-12-31",
+        "rounding_tolerance": "0.010",
+        "status": "ready",
+        "unit": "TWD_per_share",
+        "value": "0.4500000000"
+      },
+      {
+        "action_ids": [],
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "input_fact_ids": [
+          "39302"
+        ],
+        "issue_codes": [],
+        "known_at": "2026-04-28T07:41:58Z",
+        "metric_code": "single_quarter_basic_eps",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "period": "2026Q1",
+        "period_end": "2026-03-31",
+        "rounding_tolerance": "0.005",
+        "status": "ready",
+        "unit": "TWD_per_share",
+        "value": "0.4600000000"
+      }
+    ],
+    "status": "ready",
+    "ttm_eps": "2.16",
+    "ttm_eps_exact": "2.1600000000",
+    "ttm_eps_status": "ready",
+    "ttm_periods": [
+      "2025Q2",
+      "2025Q3",
+      "2025Q4",
+      "2026Q1"
+    ],
+    "ttm_rounding_tolerance": "0.025"
+  },
+  "mode": "current_comparable",
+  "normalized": {
+    "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+    "facts": [
+      {
+        "action_ids": [],
+        "adjustment_factor": "1.0000000000",
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "decision_usable": true,
+        "issue_codes": [],
+        "known_at": "2025-04-29T10:21:34Z",
+        "metric_code": "basic_eps",
+        "normalization_mode": "current_comparable",
+        "normalization_status": "unchanged",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "normalized_unit": "TWD_per_share",
+        "normalized_value": "0.5400000000",
+        "period": "2025Q1",
+        "period_end": "2025-03-31",
+        "period_scope": "ytd_3m",
+        "rounding_tolerance": "0.005",
+        "source_fact_id": "39186"
+      },
+      {
+        "action_ids": [],
+        "adjustment_factor": "1.0000000000",
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "decision_usable": true,
+        "issue_codes": [],
+        "known_at": "2025-07-30T10:02:25Z",
+        "metric_code": "basic_eps",
+        "normalization_mode": "current_comparable",
+        "normalization_status": "unchanged",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "normalized_unit": "TWD_per_share",
+        "normalized_value": "0.6600000000",
+        "period": "2025Q2",
+        "period_end": "2025-06-30",
+        "period_scope": "discrete_3m",
+        "rounding_tolerance": "0.005",
+        "source_fact_id": "39216"
+      },
+      {
+        "action_ids": [],
+        "adjustment_factor": "1.0000000000",
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "decision_usable": true,
+        "issue_codes": [],
+        "known_at": "2025-07-30T10:02:25Z",
+        "metric_code": "basic_eps",
+        "normalization_mode": "current_comparable",
+        "normalization_status": "unchanged",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "normalized_unit": "TWD_per_share",
+        "normalized_value": "1.2000000000",
+        "period": "2025Q2",
+        "period_end": "2025-06-30",
+        "period_scope": "ytd_6m",
+        "rounding_tolerance": "0.005",
+        "source_fact_id": "39215"
+      },
+      {
+        "action_ids": [],
+        "adjustment_factor": "1.0000000000",
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "decision_usable": true,
+        "issue_codes": [],
+        "known_at": "2025-10-29T07:25:44Z",
+        "metric_code": "basic_eps",
+        "normalization_mode": "current_comparable",
+        "normalization_status": "unchanged",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "normalized_unit": "TWD_per_share",
+        "normalized_value": "0.5900000000",
+        "period": "2025Q3",
+        "period_end": "2025-09-30",
+        "period_scope": "discrete_3m",
+        "rounding_tolerance": "0.005",
+        "source_fact_id": "39252"
+      },
+      {
+        "action_ids": [],
+        "adjustment_factor": "1.0000000000",
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "decision_usable": true,
+        "issue_codes": [],
+        "known_at": "2025-10-29T07:25:44Z",
+        "metric_code": "basic_eps",
+        "normalization_mode": "current_comparable",
+        "normalization_status": "unchanged",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "normalized_unit": "TWD_per_share",
+        "normalized_value": "1.7900000000",
+        "period": "2025Q3",
+        "period_end": "2025-09-30",
+        "period_scope": "ytd_9m",
+        "rounding_tolerance": "0.005",
+        "source_fact_id": "39251"
+      },
+      {
+        "action_ids": [],
+        "adjustment_factor": "1.0000000000",
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "decision_usable": true,
+        "issue_codes": [],
+        "known_at": "2026-02-26T00:38:50Z",
+        "metric_code": "basic_eps",
+        "normalization_mode": "current_comparable",
+        "normalization_status": "unchanged",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "normalized_unit": "TWD_per_share",
+        "normalized_value": "2.2400000000",
+        "period": "2025Q4",
+        "period_end": "2025-12-31",
+        "period_scope": "annual_12m",
+        "rounding_tolerance": "0.005",
+        "source_fact_id": "39280"
+      },
+      {
+        "action_ids": [],
+        "adjustment_factor": "1.0000000000",
+        "comparison_basis_id": "5902-official-consolidated-presentation-basis-through-2026Q1",
+        "decision_usable": true,
+        "issue_codes": [],
+        "known_at": "2026-04-28T07:41:58Z",
+        "metric_code": "basic_eps",
+        "normalization_mode": "current_comparable",
+        "normalization_status": "unchanged",
+        "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+        "normalized_unit": "TWD_per_share",
+        "normalized_value": "0.4600000000",
+        "period": "2026Q1",
+        "period_end": "2026-03-31",
+        "period_scope": "ytd_3m",
+        "rounding_tolerance": "0.005",
+        "source_fact_id": "39302"
+      }
+    ],
+    "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+    "status": "ready"
+  },
+  "quality": {
+    "continuity": "complete",
+    "decision_usable": true,
+    "freshness": "unknown",
+    "issues": [],
+    "revenue_continuity": {
+      "decision_usable": true,
+      "duplicate_periods": [],
+      "expected_from": "2026-04",
+      "expected_to": "2026-06",
+      "invalid_period_count": 0,
+      "issues": [],
+      "missing_periods": [],
+      "observed_from": "2026-04",
+      "observed_to": "2026-06",
+      "status": "complete"
+    },
+    "semantic_validity": "valid"
+  },
+  "source_refs": [
+    {
+      "name": "financial_metric_quarterly",
+      "raw_result_id": 50066,
+      "row_id": 5425,
+      "semantics": "source_reported_legacy",
+      "source_id": 15,
+      "type": "table"
+    },
+    {
+      "name": "market_daily_price",
+      "price_basis": "latest_completed_daily_close:market_daily_price",
+      "raw_result_id": 8,
+      "row_id": 1953,
+      "semantics": "latest_completed_daily_close",
+      "source_id": 6,
+      "source_name": "TPEx Mainboard Daily Quotes",
+      "source_reliability": "official",
+      "trade_date": "2026-05-12",
+      "type": "table"
+    },
+    {
+      "filing_id": 3917,
+      "name": "tw_financial_normalized_fact",
+      "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+      "parse_run_id": 3930,
+      "row_id": 50,
+      "source_fact_id": 39186,
+      "source_id": 17,
+      "source_name": "MOPS Official Filing iXBRL",
+      "source_reliability": "official",
+      "type": "table"
+    },
+    {
+      "filing_id": 3918,
+      "name": "tw_financial_normalized_fact",
+      "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+      "parse_run_id": 3931,
+      "row_id": 51,
+      "source_fact_id": 39216,
+      "source_id": 17,
+      "source_name": "MOPS Official Filing iXBRL",
+      "source_reliability": "official",
+      "type": "table"
+    },
+    {
+      "filing_id": 3918,
+      "name": "tw_financial_normalized_fact",
+      "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+      "parse_run_id": 3931,
+      "row_id": 52,
+      "source_fact_id": 39215,
+      "source_id": 17,
+      "source_name": "MOPS Official Filing iXBRL",
+      "source_reliability": "official",
+      "type": "table"
+    },
+    {
+      "filing_id": 3919,
+      "name": "tw_financial_normalized_fact",
+      "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+      "parse_run_id": 3932,
+      "row_id": 53,
+      "source_fact_id": 39252,
+      "source_id": 17,
+      "source_name": "MOPS Official Filing iXBRL",
+      "source_reliability": "official",
+      "type": "table"
+    },
+    {
+      "filing_id": 3919,
+      "name": "tw_financial_normalized_fact",
+      "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+      "parse_run_id": 3932,
+      "row_id": 54,
+      "source_fact_id": 39251,
+      "source_id": 17,
+      "source_name": "MOPS Official Filing iXBRL",
+      "source_reliability": "official",
+      "type": "table"
+    },
+    {
+      "filing_id": 3920,
+      "name": "tw_financial_normalized_fact",
+      "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+      "parse_run_id": 3933,
+      "row_id": 55,
+      "source_fact_id": 39280,
+      "source_id": 17,
+      "source_name": "MOPS Official Filing iXBRL",
+      "source_reliability": "official",
+      "type": "table"
+    },
+    {
+      "filing_id": 3921,
+      "name": "tw_financial_normalized_fact",
+      "normalization_version": "tw-financial-normalization-v1+mops-ci-fast-lane-v1",
+      "parse_run_id": 3934,
+      "row_id": 56,
+      "source_fact_id": 39302,
+      "source_id": 17,
+      "source_name": "MOPS Official Filing iXBRL",
+      "source_reliability": "official",
+      "type": "table"
+    }
+  ],
+  "stock_id": "5902",
+  "valuation": {
+    "decision_usable": false,
+    "expected_price_trade_date": "2026-07-31",
+    "financial_basis": "ttm_basic_eps",
+    "input_fact_ids": [],
+    "issue_codes": [
+      "valuation_price_expected_close_stale"
+    ],
+    "pe_ttm": null,
+    "pe_ttm_exact": null,
+    "price": null,
+    "price_as_of": null,
+    "price_basis": "latest_completed_daily_close:market_daily_price",
+    "price_raw_result_id": 8,
+    "price_resolution_status": "stale",
+    "price_source": "TPEx Mainboard Daily Quotes",
+    "price_source_id": 6,
+    "price_source_reliability": "official",
+    "price_trade_date": "2026-05-12",
+    "status": "unavailable"
+  }
+}

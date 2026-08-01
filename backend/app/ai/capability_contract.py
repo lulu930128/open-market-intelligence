@@ -18,6 +18,7 @@ DIAGNOSTIC_SCOPES = {
 }
 MIN_RESPONSE_BYTES = 4_096
 MAX_RESPONSE_BYTES = 1_048_576
+MAX_CAPABILITY_LIMIT = 500
 DEFAULT_RESPONSE_BYTES = {
     "summary": 16_384,
     "compact": 32_768,
@@ -40,8 +41,6 @@ READY_STATUSES = {
 LIMITED_STATUSES = {"cached", "delayed", "partial", "pending", "waiting"}
 NEUTRAL_STATUSES = {"not_applicable", "not_requested"}
 EXECUTABLE_FILL_OPERATIONS = {
-    "tw.refresh_quote",
-    "tw.refresh_intraday",
     "tw.refresh_daily_price",
     "tw.refresh_institutional",
     "tw.refresh_margin",
@@ -64,13 +63,6 @@ EXECUTABLE_FILL_OPERATIONS = {
     "crypto.refresh_derivatives",
 }
 FILL_OPERATION_PRODUCED_CAPABILITIES: dict[str, tuple[str, ...]] = {
-    "tw.refresh_quote": (
-        "quote.snapshot",
-        "quote.order_book",
-        "quote.auction",
-        "quote.official_close",
-    ),
-    "tw.refresh_intraday": ("intraday.bars",),
     "tw.refresh_daily_price": ("daily.ohlcv",),
     "tw.refresh_institutional": ("chips.institutional",),
     "tw.refresh_margin": ("chips.margin",),
@@ -123,6 +115,7 @@ class CapabilitySpec:
     fields: tuple[str, ...]
     default_fields: tuple[str, ...]
     default_limit: int
+    schema_version: str = "omi.capability.v1"
     fill_operations: tuple[tuple[str, str], ...] = ()
     writes_cache: bool = False
     title: str = ""
@@ -135,6 +128,8 @@ class CapabilitySpec:
     deprecated: bool = False
     replacement_capabilities: tuple[str, ...] = ()
     side_effect_policy: str = "read_only"
+    refresh_strategies: tuple[tuple[str, str], ...] = ()
+    refresh_requires_market_open_scopes: tuple[str, ...] = ()
 
     def as_public_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -155,10 +150,28 @@ class CapabilitySpec:
         payload["fill_operations"] = {
             scope: operation for scope, operation in self.fill_operations
         }
+        payload["refresh_strategies"] = {
+            scope: strategy for scope, strategy in self.refresh_strategies
+        }
         return payload
 
     def fill_operation_for_scope(self, scope_type: str) -> str | None:
         return dict(self.fill_operations).get(scope_type)
+
+    def refresh_strategy_for_scope(self, scope_type: str) -> str:
+        explicit = dict(self.refresh_strategies).get(scope_type)
+        if explicit:
+            return explicit
+        if self.fill_operation_for_scope(scope_type):
+            return "granular_tool"
+        if "scheduler_owned" in self.side_effect_policy:
+            return "scheduler_owned"
+        if "cache" in self.side_effect_policy:
+            return "cache_only"
+        return "derived"
+
+    def refresh_requires_market_open_for_scope(self, scope_type: str) -> bool:
+        return scope_type in self.refresh_requires_market_open_scopes
 
 
 ALL_STOCK_SCOPES = ("stock", "us_stock", "jp_stock", "kr_stock")
@@ -195,6 +208,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="quote.snapshot",
+        schema_version="tw.quote.snapshot.v2",
         domain="quote",
         slot="quote",
         scopes=(*ALL_INSTRUMENT_SCOPES, "crypto_market"),
@@ -235,6 +249,28 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "trade_value_source",
             "total_volume_lots",
             "total_volume_contracts",
+            "cumulative_volume_lots",
+            "cumulative_volume_shares",
+            "last_trade_volume_lots",
+            "last_trade_volume_shares",
+            "lot_size",
+            "volume_scope",
+            "volume_source",
+            "volume_source_field",
+            "provider_volume_available",
+            "last_trade_volume_semantics",
+            "last_trade_volume_source_field",
+            "last_trade_volume_status",
+            "official_daily_volume_shares",
+            "official_daily_volume_trade_date",
+            "official_daily_volume_source",
+            "official_daily_volume_scope",
+            "volume_reconciliation",
+            "volume_decision_usable",
+            "price_decision_usable",
+            "volume_includes_odd_lot",
+            "volume_includes_after_hours",
+            "volume_includes_closing_auction",
             "bid",
             "ask",
             "best_bid_price",
@@ -259,11 +295,29 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "snapshot_time_basis",
             "provider_event_time",
             "event_time",
+            "release_at",
             "fetched_at",
+            "computed_at",
             "refresh_outcome",
             "received_at",
+            "served_at",
+            "event_age_seconds",
+            "provider_delay_ms",
+            "network_latency_ms",
             "source",
             "provider",
+            "primary_provider",
+            "selected_provider",
+            "fallback_used",
+            "fallback_provider",
+            "fallback_reason",
+            "provider_attempts",
+            "source_grade",
+            "cache_hit",
+            "cache_written",
+            "currency",
+            "price_unit",
+            "score_unit",
             "market_status",
             "session_phase",
             "quote_semantics",
@@ -280,6 +334,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "age_seconds",
             "quote_age_seconds",
             "latency_ms",
+            "latency_ms_semantics",
             "depth_available",
             "depth_status",
             "auction_book_available",
@@ -350,6 +405,25 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "trade_value_source",
             "total_volume_lots",
             "total_volume_contracts",
+            "cumulative_volume_lots",
+            "cumulative_volume_shares",
+            "last_trade_volume_lots",
+            "last_trade_volume_shares",
+            "lot_size",
+            "volume_scope",
+            "volume_source",
+            "volume_source_field",
+            "provider_volume_available",
+            "last_trade_volume_semantics",
+            "last_trade_volume_source_field",
+            "last_trade_volume_status",
+            "official_daily_volume_shares",
+            "official_daily_volume_trade_date",
+            "official_daily_volume_source",
+            "official_daily_volume_scope",
+            "volume_reconciliation",
+            "volume_decision_usable",
+            "price_decision_usable",
             "bid",
             "ask",
             "best_bid_price",
@@ -371,10 +445,27 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "snapshot_time_basis",
             "provider_event_time",
             "event_time",
+            "release_at",
             "fetched_at",
+            "computed_at",
             "received_at",
+            "served_at",
+            "event_age_seconds",
+            "provider_delay_ms",
+            "network_latency_ms",
             "source",
             "provider",
+            "primary_provider",
+            "selected_provider",
+            "fallback_provider",
+            "fallback_reason",
+            "provider_attempts",
+            "source_grade",
+            "cache_hit",
+            "cache_written",
+            "currency",
+            "price_unit",
+            "score_unit",
             "market_status",
             "session_phase",
             "quote_semantics",
@@ -390,6 +481,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "is_latest_session_quote",
             "quote_age_seconds",
             "latency_ms",
+            "latency_ms_semantics",
             "depth_available",
             "depth_status",
             "auction_book_available",
@@ -428,7 +520,6 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
         default_limit=5,
         fill_operations=(
-            ("stock", "tw.refresh_quote"),
             ("us_stock", "us.read_intraday_trend"),
             ("jp_stock", "jp.read_intraday_trend"),
             ("jp_index", "jp.read_intraday_trend"),
@@ -436,6 +527,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             ("kr_index", "kr.read_index_intraday_trend"),
             ("crypto_asset", "crypto.refresh_ticker"),
         ),
+        refresh_strategies=(("stock", "reader_fetch"),),
+        refresh_requires_market_open_scopes=("stock",),
     ),
     CapabilitySpec(
         capability_id="quote.order_book",
@@ -471,6 +564,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "provider",
             "source",
             "freshness",
+            "quantity_unit",
+            "lot_size",
         ),
         default_fields=(
             "status",
@@ -494,9 +589,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "provider",
             "source",
             "freshness",
+            "quantity_unit",
+            "lot_size",
         ),
         default_limit=5,
-        fill_operations=(("stock", "tw.refresh_quote"),),
+        refresh_strategies=(("stock", "reader_fetch"),),
+        refresh_requires_market_open_scopes=("stock",),
         title="Taiwan quote order book",
         description=(
             "Taiwan five-level order book with provider event time, latency, "
@@ -512,7 +610,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         capability_id="quote.auction",
         domain="quote",
         slot="quote_auction",
-        scopes=("stock",),
+        scopes=("stock", "tw_index"),
         paths=(
             "compact.quote.components.auction",
             "data.quote.components.auction",
@@ -521,6 +619,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "kind",
             "status",
             "available",
+            "applicability_status",
+            "availability_status",
+            "unavailable_reason_code",
+            "market_session_status",
+            "refresh_possible_now",
+            "refresh_recommended",
             "session_phase",
             "auction_time",
             "best_bid",
@@ -541,10 +645,18 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "provider",
             "source",
             "freshness",
+            "quantity_unit",
+            "lot_size",
         ),
         default_fields=(
             "status",
             "available",
+            "applicability_status",
+            "availability_status",
+            "unavailable_reason_code",
+            "market_session_status",
+            "refresh_possible_now",
+            "refresh_recommended",
             "session_phase",
             "auction_time",
             "best_bid",
@@ -565,9 +677,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "provider",
             "source",
             "freshness",
+            "quantity_unit",
+            "lot_size",
         ),
         default_limit=5,
-        fill_operations=(("stock", "tw.refresh_quote"),),
+        refresh_strategies=(("stock", "reader_fetch"),),
+        refresh_requires_market_open_scopes=("stock",),
         title="Taiwan quote auction state",
         description=(
             "Taiwan pre-open, closing, or disposition batch-auction state. "
@@ -615,7 +730,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "freshness",
         ),
         default_limit=1,
-        fill_operations=(("stock", "tw.refresh_quote"),),
+        refresh_strategies=(("stock", "reader_fetch"),),
         title="Taiwan official close",
         description=(
             "Confirmed Taiwan stock or index close with explicit availability, "
@@ -628,6 +743,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="intraday.bars",
+        schema_version="tw.intraday.bars.v2",
         domain="intraday",
         slot="intraday",
         scopes=(*ALL_INSTRUMENT_SCOPES, "market", "crypto_market"),
@@ -719,8 +835,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "bar_close_time",
             "elapsed_seconds",
             "finalized",
+            "bar_type",
+            "synthetic",
+            "indicator_eligible",
+            "session_phase",
+            "market_event",
+            "source_event_type",
+            "gap_reason",
             "partial_bar_count",
             "indicator_eligible_point_count",
+            "bar_classification_policy",
+            "indicator_policy",
             "partial_bar_policy",
             "aggregation_method",
             "source_point_count",
@@ -782,6 +907,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "trade_value_unit",
             "quote_volume",
             "quote_volume_unit",
+            "currency",
+            "price_unit",
             "event_time",
             "fetched_at",
             "received_at",
@@ -806,8 +933,16 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "approx_vwap",
             "vwap_method",
             "vwap_confidence",
+            "bar_type",
+            "synthetic",
+            "indicator_eligible",
+            "market_event",
+            "source_event_type",
+            "gap_reason",
             "partial_bar_count",
             "indicator_eligible_point_count",
+            "bar_classification_policy",
+            "indicator_policy",
             "partial_bar_policy",
             "aggregation_method",
             "source_point_count",
@@ -823,7 +958,6 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
         default_limit=20,
         fill_operations=(
-            ("stock", "tw.refresh_intraday"),
             ("us_stock", "us.read_intraday_trend"),
             ("jp_stock", "jp.read_intraday_trend"),
             ("jp_index", "jp.read_intraday_trend"),
@@ -831,6 +965,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             ("kr_index", "kr.read_index_intraday_trend"),
             ("crypto_asset", "crypto.refresh_ohlcv"),
         ),
+        refresh_strategies=(("stock", "reader_fetch"),),
+        refresh_requires_market_open_scopes=("stock",),
     ),
     CapabilitySpec(
         capability_id="daily.ohlcv",
@@ -942,10 +1078,18 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "intraday_overlay",
             "reports",
             "selected_horizon",
+            "effective_horizon",
             "selected_score",
             "selected_title",
+            "composite_score_title",
             "selected_summary",
             "selected_confidence",
+            "today_state",
+            "historical_structure",
+            "composite_state",
+            "fallback_reason",
+            "technical_price_basis",
+            "bid_ask_price_used",
             "scores",
             "levels",
             "support",
@@ -956,6 +1100,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "freshness",
             "source",
             "provider",
+            "currency",
+            "price_unit",
+            "score_unit",
+            "score_contracts",
         ),
         default_fields=(
             "analysis",
@@ -966,11 +1114,28 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "price_context",
             "daily_indicator_time",
             "intraday_overlay",
+            "selected_horizon",
+            "effective_horizon",
+            "selected_score",
+            "selected_title",
+            "composite_score_title",
+            "selected_summary",
+            "selected_confidence",
+            "today_state",
+            "historical_structure",
+            "composite_state",
+            "fallback_reason",
+            "technical_price_basis",
+            "bid_ask_price_used",
             "levels",
             "reports",
             "freshness",
             "source",
             "provider",
+            "currency",
+            "price_unit",
+            "score_unit",
+            "score_contracts",
         ),
         default_limit=20,
     ),
@@ -994,6 +1159,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "total_net",
             "source",
             "freshness",
+            "quantity_unit",
+            "lot_size",
         ),
         default_fields=(
             "trade_date",
@@ -1003,6 +1170,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "total_institutional_net",
             "source",
             "freshness",
+            "quantity_unit",
+            "lot_size",
         ),
         default_limit=5,
         fill_operations=(("stock", "tw.refresh_institutional"),),
@@ -1028,6 +1197,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "short_change",
             "source",
             "freshness",
+            "quantity_unit",
+            "raw_unit",
+            "normalized_unit",
+            "normalized_quantities",
+            "lot_size",
         ),
         default_fields=(
             "trade_date",
@@ -1039,6 +1213,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "short_today_balance",
             "source",
             "freshness",
+            "quantity_unit",
+            "raw_unit",
+            "normalized_unit",
+            "normalized_quantities",
+            "lot_size",
         ),
         default_limit=5,
         fill_operations=(("stock", "tw.refresh_margin"),),
@@ -1068,6 +1247,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "sell_top",
             "source",
             "freshness",
+            "currency",
+            "price_unit",
+            "quantity_unit",
+            "lot_size",
         ),
         default_fields=(
             "trade_date",
@@ -1079,6 +1262,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "buy_top",
             "sell_top",
             "freshness",
+            "currency",
+            "price_unit",
+            "quantity_unit",
+            "lot_size",
         ),
         default_limit=15,
         fill_operations=(("stock", "tw.refresh_broker_branch"),),
@@ -1114,10 +1301,20 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "history",
             "source",
             "freshness",
+            "currency",
+            "source_amount_unit",
+            "normalized_amount_unit",
+            "amount_scale",
+            "ratio_unit",
         ),
         default_fields=(
             "latest_revenue",
             "revenue_history",
+            "currency",
+            "source_amount_unit",
+            "normalized_amount_unit",
+            "amount_scale",
+            "ratio_unit",
         ),
         default_limit=12,
         fill_operations=(("stock", "tw.refresh_revenue"),),
@@ -1139,6 +1336,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         fields=(
             "latest_financial",
             "financial_history",
+            "financial_contract",
             "sec_fundamentals",
             "period",
             "fiscal_year",
@@ -1151,11 +1349,24 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "history",
             "source",
             "freshness",
+            "currency",
+            "source_amount_unit",
+            "normalized_amount_unit",
+            "amount_scale",
+            "ratio_unit",
+            "per_share_unit",
         ),
         default_fields=(
             "latest_financial",
             "financial_history",
+            "financial_contract",
             "sec_fundamentals",
+            "currency",
+            "source_amount_unit",
+            "normalized_amount_unit",
+            "amount_scale",
+            "ratio_unit",
+            "per_share_unit",
         ),
         default_limit=8,
         fill_operations=(
@@ -1176,13 +1387,20 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="company.profile",
+        schema_version="tw.company.profile.v1",
         domain=None,
         slot="profile",
-        scopes=("us_stock", "jp_stock", "kr_stock"),
-        paths=("data.profile", "data.stock"),
+        scopes=("stock", "us_stock", "jp_stock", "kr_stock"),
+        paths=(
+            "compact.company_profile",
+            "data.company_profile",
+            "data.profile",
+            "data.stock",
+        ),
         fields=(
             "symbol",
             "stock_id",
+            "stock_name",
             "security_name",
             "company_name",
             "exchange",
@@ -1191,6 +1409,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "instrument_type",
             "sector",
             "industry",
+            "category",
+            "listed_date",
+            "established_date",
+            "paid_in_capital",
+            "issued_shares",
+            "is_active",
+            "currency",
+            "source",
+            "status",
+            "missing_fields",
+            "as_of",
             "cik",
             "sec_company_name",
             "provider",
@@ -1200,6 +1429,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         default_fields=(
             "symbol",
             "stock_id",
+            "stock_name",
             "security_name",
             "company_name",
             "exchange",
@@ -1208,6 +1438,16 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "instrument_type",
             "sector",
             "industry",
+            "category",
+            "listed_date",
+            "paid_in_capital",
+            "issued_shares",
+            "is_active",
+            "currency",
+            "source",
+            "status",
+            "missing_fields",
+            "as_of",
             "provider",
             "fetched_at",
         ),
@@ -1215,30 +1455,83 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="corporate.actions",
+        schema_version="tw.corporate.actions.v1",
         domain=None,
         slot="news_events",
-        scopes=("us_stock",),
-        paths=("data.corporate_actions",),
+        scopes=("stock", "us_stock"),
+        paths=("compact.corporate_actions", "data.corporate_actions"),
         fields=(
             "provider",
             "symbol",
+            "stock_id",
+            "action_id",
             "action_type",
             "event_date",
+            "announce_date",
+            "ex_date",
+            "record_date",
+            "payment_date",
+            "effective_date",
             "amount",
+            "cash_amount",
+            "stock_ratio",
             "split_ratio",
             "currency",
+            "source",
+            "status",
+            "as_of",
+            "actions",
+            "result_count",
+            "total_count",
+            "cache_status",
+            "empty_result_is_valid",
+            "warnings",
             "fetched_at",
         ),
         default_fields=(
             "provider",
             "symbol",
+            "stock_id",
+            "action_id",
             "action_type",
             "event_date",
+            "announce_date",
+            "ex_date",
+            "effective_date",
             "amount",
+            "cash_amount",
+            "stock_ratio",
             "split_ratio",
             "currency",
+            "source",
+            "status",
+            "as_of",
+            "actions",
+            "result_count",
+            "total_count",
+            "cache_status",
+            "empty_result_is_valid",
+            "warnings",
         ),
         default_limit=20,
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "years": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 5,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 20,
+                },
+            },
+            "additionalProperties": False,
+        },
     ),
     CapabilitySpec(
         capability_id="market.short_volume",
@@ -1269,6 +1562,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="market.breadth",
+        schema_version="tw.market.breadth.v1",
         domain="breadth",
         slot="market_breadth",
         scopes=ALL_MARKET_SCOPES,
@@ -1321,6 +1615,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "markets",
             "trade_value_available",
             "trade_value_complete",
+            "trade_value_coverage_status",
+            "trade_value_authority_status",
             "trade_value_status",
             "trade_value_included_markets",
             "trade_value_missing_markets",
@@ -1486,6 +1782,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="events.calendar",
+        schema_version="tw.events.calendar.v1",
         domain="events",
         slot="events_calendar",
         scopes=("market",),
@@ -1503,6 +1800,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "event_types",
             "markets",
             "stock_ids",
+            "instrument_types",
+            "exclude_instrument_types",
+            "industries",
+            "financial_report_related",
+            "event_statuses",
+            "timing_statuses",
             "pagination",
             "result_count",
             "events",
@@ -1521,6 +1824,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "event_types",
             "markets",
             "stock_ids",
+            "instrument_types",
+            "exclude_instrument_types",
+            "industries",
+            "financial_report_related",
+            "event_statuses",
+            "timing_statuses",
             "pagination",
             "result_count",
             "events",
@@ -1570,6 +1879,38 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
                     "items": {"type": "string"},
                     "maxItems": 2500,
                 },
+                "instrument_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 20,
+                },
+                "exclude_instrument_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 20,
+                },
+                "industries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 100,
+                },
+                "financial_report_related": {"type": "boolean"},
+                "status": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["today", "ongoing", "upcoming", "past"],
+                    },
+                    "maxItems": 4,
+                },
+                "timing_status": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["actual", "scheduled"],
+                    },
+                    "maxItems": 2,
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -1604,7 +1945,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "years",
             "limit",
             "result_count",
+            "returned_count",
             "total_count",
+            "offset",
+            "sort_order",
             "events",
             "source",
             "cache_policy",
@@ -1620,7 +1964,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "as_of",
             "years",
             "result_count",
+            "returned_count",
             "total_count",
+            "offset",
+            "sort_order",
             "events",
             "source",
             "cache_policy",
@@ -1792,25 +2139,48 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         paths=("compact.market.sectors", "data.market.sectors"),
         fields=(
             "kind",
+            "version",
             "status",
             "as_of",
+            "observed_trade_date",
+            "computed_at",
+            "data_mode",
+            "is_intraday",
+            "snapshot_version",
+            "snapshot_id",
             "ranking_basis",
+            "aggregation_method",
+            "currency",
+            "trade_value_unit",
+            "trade_value_is_estimate",
             "is_full_market",
             "coverage",
             "count",
             "items",
             "missing",
+            "coverage_gaps",
             "warnings",
         ),
         default_fields=(
             "status",
             "as_of",
+            "observed_trade_date",
+            "computed_at",
+            "data_mode",
+            "is_intraday",
+            "snapshot_version",
+            "snapshot_id",
             "ranking_basis",
+            "aggregation_method",
+            "currency",
+            "trade_value_unit",
+            "trade_value_is_estimate",
             "is_full_market",
             "coverage",
             "count",
             "items",
             "missing",
+            "coverage_gaps",
             "warnings",
         ),
         default_limit=100,
@@ -1821,9 +2191,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "not an official full-market sector-index ranking."
         ),
         markets=("TW",),
-        frequency="daily",
+        frequency="intraday_or_daily",
         unit_semantics="percent_counts_and_twd",
-        event_time_basis="taiwan_completed_trade_date",
+        event_time_basis=(
+            "taiwan_provider_event_time_or_completed_trade_date"
+        ),
+        side_effect_policy="scheduler_owned_cache_read_or_daily_fallback",
     ),
     CapabilitySpec(
         capability_id="market.index_contributions",
@@ -1843,7 +2216,29 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "index_ids",
             "indices",
             "method",
+            "method_version",
+            "is_official",
+            "currency",
+            "price_unit",
+            "market_value_unit",
+            "trade_value_unit",
+            "contribution_unit",
+            "component_universe_count",
+            "covered_component_count",
+            "coverage_ratio",
+            "estimated_total_contribution_points",
+            "actual_index_change_points",
+            "residual_points",
+            "residual_pct",
+            "reconciliation_status",
+            "confidence",
+            "component_policy",
+            "corporate_action_adjustment",
             "cache_policy",
+            "external_fetch",
+            "writes_cache",
+            "tool_runs",
+            "provider_attempts",
             "missing",
             "warnings",
             "index_id",
@@ -1862,7 +2257,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "index_ids",
             "indices",
             "method",
+            "method_version",
+            "is_official",
+            "currency",
+            "trade_value_unit",
+            "contribution_unit",
+            "reconciliation_status",
             "cache_policy",
+            "external_fetch",
+            "writes_cache",
+            "tool_runs",
+            "provider_attempts",
             "missing",
             "warnings",
             "index_id",
@@ -2011,10 +2416,21 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         domain="sample_ranking",
         slot="sample_distribution",
         scopes=("market",),
-        paths=("compact",),
+        paths=("compact.sample_ranking", "data.sample_ranking"),
         fields=(
+            "kind",
+            "status",
+            "scope",
+            "scope_label",
+            "is_full_market",
             "as_of",
             "latest_trade_date",
+            "source",
+            "currency",
+            "price_unit",
+            "volume_unit",
+            "trade_value_unit",
+            "unit_semantics",
             "sample_breadth",
             "sample_coverage",
             "distribution",
@@ -2024,10 +2440,21 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "top_industries",
             "weak_industries",
             "industry_strength_label",
+            "warnings",
         ),
         default_fields=(
+            "status",
+            "scope",
+            "scope_label",
+            "is_full_market",
             "as_of",
             "latest_trade_date",
+            "source",
+            "currency",
+            "price_unit",
+            "volume_unit",
+            "trade_value_unit",
+            "unit_semantics",
             "sample_coverage",
             "distribution",
             "top_gainers",
@@ -2036,6 +2463,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "top_industries",
             "weak_industries",
             "industry_strength_label",
+            "warnings",
         ),
         default_limit=20,
         title="Taiwan local sample ranking",
@@ -2044,6 +2472,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "OMI context. It is not a full-market screener."
         ),
         markets=("TW",),
+        frequency="daily",
+        unit_semantics="TWD_per_share_shares_and_TWD",
+        event_time_basis="taiwan_completed_trade_date",
         deprecated=True,
         replacement_capabilities=(
             "screening.ranking",
@@ -2119,6 +2550,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="screening.ranking",
+        schema_version="tw.screening.ranking.v2",
         domain="screening",
         slot="screening_ranking",
         scopes=("market",),
@@ -2136,7 +2568,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "window",
             "universe",
             "pagination",
+            "require_complete_window",
+            "min_observed_periods",
+            "incomplete_window_policy",
             "rows",
+            "incomplete_rows",
             "as_of",
             "generated_at",
             "cache_policy",
@@ -2153,6 +2589,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "window",
             "universe",
             "pagination",
+            "require_complete_window",
+            "min_observed_periods",
+            "incomplete_window_policy",
             "rows",
             "as_of",
             "cache_policy",
@@ -2200,6 +2639,24 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
                     "minimum": 0,
                     "maximum": 5000,
                     "default": 0,
+                },
+                "require_complete_window": {
+                    "type": "boolean",
+                    "default": True,
+                },
+                "min_observed_periods": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                },
+                "incomplete_window_policy": {
+                    "type": "string",
+                    "enum": [
+                        "exclude",
+                        "include_and_flag",
+                        "separate_section",
+                    ],
+                    "default": "exclude",
                 },
                 "universe": {
                     "type": "object",
@@ -2309,6 +2766,201 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         side_effect_policy="cache_read_only_no_refresh",
     ),
     CapabilitySpec(
+        capability_id="screening.intraday",
+        schema_version="tw.screening.intraday.v2",
+        domain="screening",
+        slot="screening_intraday",
+        scopes=("market",),
+        paths=(
+            "compact.screening.intraday",
+            "data.screening.intraday",
+        ),
+        fields=(
+            "kind",
+            "version",
+            "status",
+            "metric",
+            "unit",
+            "frequency",
+            "sort_order",
+            "rows",
+            "pagination",
+            "coverage",
+            "observed_trade_date",
+            "event_time",
+            "computed_at",
+            "data_mode",
+            "is_intraday",
+            "cache_policy",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "metric",
+            "unit",
+            "sort_order",
+            "rows",
+            "pagination",
+            "coverage",
+            "observed_trade_date",
+            "event_time",
+            "computed_at",
+            "data_mode",
+            "cache_policy",
+            "missing",
+            "warnings",
+        ),
+        default_limit=200,
+        title="Taiwan intraday stock screening",
+        description=(
+            "Deterministic ranking over scheduler-owned Taiwan rolling "
+            "intraday stock state. The read path is cache-only and never "
+            "fans out to per-stock providers."
+        ),
+        markets=("TW",),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "metric": {
+                    "type": "string",
+                    "enum": [
+                        "change_pct",
+                        "estimated_trade_value",
+                        "cumulative_volume_lots",
+                        "distance_from_high_pct",
+                        "rebound_from_low_pct",
+                        "five_minute_return",
+                        "fifteen_minute_return",
+                        "intraday_range_pct",
+                        "vwap_deviation_pct",
+                        "order_book_imbalance",
+                    ],
+                    "default": "change_pct",
+                },
+                "sort_order": {
+                    "type": "string",
+                    "enum": ["asc", "desc"],
+                    "default": "desc",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 20,
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 5000,
+                    "default": 0,
+                },
+                "universe": {
+                    "type": "object",
+                    "properties": {
+                        "markets": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["TWSE", "TPEX"],
+                            },
+                            "maxItems": 2,
+                        },
+                        "stock_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 2500,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "additionalProperties": False,
+        },
+        frequency="rolling_minute_state",
+        unit_semantics="metric_defined_twd_lots_percent_or_ratio",
+        event_time_basis="taiwan_provider_event_time",
+        side_effect_policy="scheduler_owned_cache_read_only",
+    ),
+    CapabilitySpec(
+        capability_id="market.hot_groups",
+        schema_version="tw.market.hot_groups.v1",
+        domain="screening",
+        slot="market_hot_groups",
+        scopes=("market",),
+        paths=(
+            "compact.screening.hot_groups",
+            "data.screening.hot_groups",
+        ),
+        fields=(
+            "kind",
+            "version",
+            "status",
+            "groups",
+            "group_count",
+            "exchange_industry_group_count",
+            "watchlist_group_count",
+            "snapshot_version",
+            "snapshot_id",
+            "coverage",
+            "currency",
+            "trade_value_unit",
+            "trade_value_is_estimate",
+            "membership_provenance",
+            "observed_trade_date",
+            "event_time",
+            "computed_at",
+            "data_mode",
+            "is_intraday",
+            "missing",
+            "warnings",
+        ),
+        default_fields=(
+            "status",
+            "groups",
+            "group_count",
+            "exchange_industry_group_count",
+            "watchlist_group_count",
+            "snapshot_version",
+            "snapshot_id",
+            "coverage",
+            "currency",
+            "trade_value_unit",
+            "trade_value_is_estimate",
+            "membership_provenance",
+            "observed_trade_date",
+            "event_time",
+            "computed_at",
+            "data_mode",
+            "missing",
+            "warnings",
+        ),
+        default_limit=100,
+        title="Taiwan intraday hot groups",
+        description=(
+            "Intraday industry and user-curated watchlist group metrics with "
+            "explicit membership provenance; group membership is never "
+            "inferred by the answer model."
+        ),
+        markets=("TW",),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 20,
+                }
+            },
+            "additionalProperties": False,
+        },
+        frequency="rolling_minute_state",
+        unit_semantics="group_returns_counts_twd_and_ratios",
+        event_time_basis="taiwan_provider_event_time",
+        side_effect_policy="scheduler_owned_cache_read_only",
+    ),
+    CapabilitySpec(
         capability_id="market.volume_state",
         domain="volume",
         slot="market_volume",
@@ -2339,6 +2991,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "field_status",
             "same_time_baseline_5d",
             "same_time_baseline_20d",
+            "baseline_readiness_status",
+            "available_sample_days",
+            "expected_5d_ready_after_sessions",
+            "expected_20d_ready_after_sessions",
+            "next_fill",
             "history_trade_dates",
             "markets",
             "warnings",
@@ -2358,6 +3015,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "available_cumulative_trade_value",
             "trade_value_available",
             "trade_value_complete",
+            "trade_value_coverage_status",
+            "trade_value_authority_status",
             "trade_value_status",
             "included_markets",
             "missing_markets",
@@ -2367,6 +3026,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "field_status",
             "same_time_baseline_5d",
             "same_time_baseline_20d",
+            "baseline_readiness_status",
+            "available_sample_days",
+            "expected_5d_ready_after_sessions",
+            "expected_20d_ready_after_sessions",
+            "next_fill",
             "markets",
             "warnings",
             "limitations",
@@ -2481,6 +3145,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="watchlist.radar",
+        schema_version="omi.watchlist.radar.v2",
         domain=None,
         slot="radar",
         scopes=("watchlist", "us_watchlist", "jp_watchlist", "kr_watchlist"),
@@ -2498,6 +3163,13 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "is_current",
             "current_stock_count",
             "stale_stock_count",
+            "cache_status",
+            "snapshot_id",
+            "snapshot_date",
+            "calculated_at",
+            "data_limitations",
+            "radar_engine",
+            "radar_v2_summary",
             "buckets",
             "results",
         ),
@@ -2511,6 +3183,13 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "trade_date",
             "is_current",
             "stale_stock_count",
+            "cache_status",
+            "snapshot_id",
+            "snapshot_date",
+            "calculated_at",
+            "data_limitations",
+            "radar_engine",
+            "radar_v2_summary",
             "buckets",
             "results",
         ),
@@ -2862,14 +3541,24 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="diagnostics.source_health",
+        schema_version="omi.diagnostics.source_health.v1",
         domain="source_health",
         slot="data_quality",
-        scopes=("source_health",),
-        paths=("data",),
+        scopes=("*",),
+        paths=(
+            "compact.source_health",
+            "data.source_health",
+            "freshness.source_health",
+            "data",
+        ),
         fields=(
+            "status",
+            "as_of",
             "filters",
             "summary",
             "entries",
+            "provider_events",
+            "warnings",
             "freshness",
             "slots",
             "compact",
@@ -2878,9 +3567,13 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "is_partial",
         ),
         default_fields=(
+            "status",
+            "as_of",
             "filters",
             "summary",
             "entries",
+            "provider_events",
+            "warnings",
             "freshness",
             "returned_count",
             "truncated",
@@ -2904,6 +3597,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
         default_fields=("status", "as_of", "summary", "warnings"),
         default_limit=20,
+        deprecated=True,
+        replacement_capabilities=("diagnostics.source_health",),
     ),
     CapabilitySpec(
         capability_id="data.freshness",
@@ -2936,6 +3631,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
 )
 
 CAPABILITIES = {spec.capability_id: spec for spec in CAPABILITY_SPECS}
+CAPABILITY_ALIASES = {
+    "source.health": "diagnostics.source_health",
+}
 
 DOMAIN_CAPABILITIES = {
     "quote": ("quote.snapshot",),
@@ -2965,7 +3663,13 @@ DOMAIN_CAPABILITIES = {
     "index_contributions": ("market.index_contributions",),
     "volume": ("market.volume_state",),
     "sample_ranking": ("market.sample_ranking",),
-    "screening": ("screening.ranking", "screening.coverage"),
+    "screening": (
+        "screening.ranking",
+        "screening.coverage",
+        "screening.intraday",
+        "market.hot_groups",
+    ),
+    "hot_groups": ("market.hot_groups",),
     "events": (
         "events.upcoming",
         "events.history",
@@ -3066,6 +3770,13 @@ def _default_capabilities(scope_type: str, question_intent: str) -> tuple[str, .
         return ("target.identity", "diagnostics.data_freshness")
     if question_intent == "quote":
         return ("target.identity", "quote.snapshot", "data.freshness")
+    if question_intent == "regulation":
+        return (
+            "target.identity",
+            "regulation.disposition",
+            "regulation.trading_restrictions",
+            "data.freshness",
+        )
     if question_intent == "broker_branch":
         return (
             "target.identity",
@@ -3183,6 +3894,30 @@ def _capabilities_from_domains(
     return tuple(output)
 
 
+def _canonical_capability_id(capability_id: Any) -> str:
+    normalized = str(capability_id or "").strip()
+    return CAPABILITY_ALIASES.get(normalized, normalized)
+
+
+def _canonicalize_capability_mapping(
+    raw_mapping: Any,
+    *,
+    name: str,
+) -> Any:
+    if raw_mapping is None or not isinstance(raw_mapping, dict):
+        return raw_mapping
+    output: dict[str, Any] = {}
+    for raw_key, value in raw_mapping.items():
+        key = _canonical_capability_id(raw_key)
+        if key in output and output[key] != value:
+            raise ValueError(
+                f"{name} provides conflicting values for capability alias {raw_key} "
+                f"and canonical capability {key}."
+            )
+        output[key] = value
+    return output
+
+
 def _normalized_fields(
     raw_fields: Any,
     *,
@@ -3222,6 +3957,7 @@ def _normalized_limits(
     raw_limits: Any,
     *,
     ignored_capabilities: frozenset[str] = frozenset(),
+    clamp: bool = True,
 ) -> dict[str, int]:
     if raw_limits is None:
         return {}
@@ -3237,7 +3973,11 @@ def _normalized_limits(
             continue
         if isinstance(raw_value, bool) or not isinstance(raw_value, int):
             raise ValueError(f"selection.limits.{key} must be an integer.")
-        output[key] = max(1, min(raw_value, 500))
+        output[key] = (
+            max(1, min(raw_value, MAX_CAPABILITY_LIMIT))
+            if clamp
+            else raw_value
+        )
     return output
 
 
@@ -3395,11 +4135,39 @@ def _normalized_parameters(
                 )
             output[normalized_id] = {}
             continue
-        output[normalized_id] = _validate_parameter_value(
+        normalized_parameters = _validate_parameter_value(
             raw_value,
             schema=spec.parameter_schema,
             path=f"selection.parameters.{normalized_id}",
         )
+        if normalized_id in {
+            "events.calendar",
+            "events.history",
+            "events.upcoming",
+        }:
+            date_from = normalized_parameters.get("date_from")
+            date_to = normalized_parameters.get("date_to")
+            if (
+                date_from
+                and date_to
+                and date.fromisoformat(date_to)
+                < date.fromisoformat(date_from)
+            ):
+                raise ValueError(
+                    f"selection.parameters.{normalized_id}.date_to "
+                    "must not precede date_from."
+                )
+        if normalized_id == "screening.ranking":
+            window = int(normalized_parameters.get("window") or 1)
+            min_observed = normalized_parameters.get(
+                "min_observed_periods"
+            )
+            if min_observed is not None and int(min_observed) > window:
+                raise ValueError(
+                    "selection.parameters.screening.ranking."
+                    "min_observed_periods must not exceed window."
+                )
+        output[normalized_id] = normalized_parameters
     return output
 
 
@@ -3417,19 +4185,68 @@ def normalize_selection(
     requested_capabilities: tuple[str, ...] = (),
     excluded_capabilities: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    raw = selection if isinstance(selection, dict) else {}
-    explicit_include = _string_list(
-        raw.get("required") or raw.get("include"),
+    original_raw = selection if isinstance(selection, dict) else {}
+    deprecated_aliases: list[dict[str, str]] = []
+
+    def canonicalize_list(values: Any, *, name: str) -> tuple[str, ...]:
+        output: list[str] = []
+        for capability_id in _string_list(values, name=name):
+            canonical_id = _canonical_capability_id(capability_id)
+            if canonical_id != capability_id:
+                alias_record = {
+                    "alias": capability_id,
+                    "canonical_capability": canonical_id,
+                    "status": "deprecated_alias",
+                }
+                if alias_record not in deprecated_aliases:
+                    deprecated_aliases.append(alias_record)
+            if canonical_id not in output:
+                output.append(canonical_id)
+        return tuple(output)
+
+    raw = {
+        **original_raw,
+        "fields": _canonicalize_capability_mapping(
+            original_raw.get("fields"),
+            name="selection.fields",
+        ),
+        "limits": _canonicalize_capability_mapping(
+            original_raw.get("limits"),
+            name="selection.limits",
+        ),
+        "parameters": _canonicalize_capability_mapping(
+            original_raw.get("parameters"),
+            name="selection.parameters",
+        ),
+    }
+    explicit_include = canonicalize_list(
+        original_raw.get("required") or original_raw.get("include"),
         name="selection.include",
     )
-    explicit_optional = _string_list(
-        raw.get("optional"),
+    explicit_optional = canonicalize_list(
+        original_raw.get("optional"),
         name="selection.optional",
     )
-    explicit_exclude = _string_list(
-        raw.get("exclude"),
+    explicit_exclude = canonicalize_list(
+        original_raw.get("exclude"),
         name="selection.exclude",
     )
+    requested_capabilities = canonicalize_list(
+        requested_capabilities,
+        name="requested_capabilities",
+    )
+    excluded_capabilities = canonicalize_list(
+        excluded_capabilities,
+        name="excluded_capabilities",
+    )
+    if scope_type in DIAGNOSTIC_SCOPES:
+        # Diagnostic targets describe OMI itself.  Natural-language mentions of
+        # market domains (for example, "法人、融資、技術面") are inventory labels,
+        # not a request to attach stock capabilities to the diagnostic target.
+        requested_domains = ()
+        excluded_domains = ()
+        requested_capabilities = ()
+        excluded_capabilities = ()
     requested_specific_domains = {
         CAPABILITIES[capability_id].domain
         for capability_id in requested_capabilities
@@ -3471,20 +4288,31 @@ def normalize_selection(
             target_market,
         )
     )
+    has_explicit_capability_selection = any(
+        key in original_raw
+        for key in ("required", "include", "optional")
+    )
+    auto_planning_requested = original_raw.get("auto_planning") is True
+    explicit_selection_locked = (
+        has_explicit_capability_selection
+        and not auto_planning_requested
+    )
     required = list(explicit_include)
-    if not required:
-        required.extend(
-            capability_id
-            for capability_id in _default_capabilities(
-                scope_type,
-                question_intent,
+    optional = list(explicit_optional)
+    if not explicit_selection_locked:
+        if not required:
+            required.extend(
+                capability_id
+                for capability_id in _default_capabilities(
+                    scope_type,
+                    question_intent,
+                )
+                if _compatible(
+                    CAPABILITIES[capability_id],
+                    scope_type,
+                    target_market,
+                )
             )
-            if _compatible(
-                CAPABILITIES[capability_id],
-                scope_type,
-                target_market,
-            )
-        )
         required.extend(legacy_include)
         required.extend(
             capability_id
@@ -3496,15 +4324,16 @@ def normalize_selection(
                 target_market,
             )
         )
-    optional = list(explicit_optional)
-    excluded = list(
-        dict.fromkeys(
-            (
-                *explicit_exclude,
-                *legacy_exclude,
-                *excluded_capabilities,
-            )
+    inferred_excluded = (*legacy_exclude, *excluded_capabilities)
+    if explicit_selection_locked:
+        explicitly_selected = {*explicit_include, *explicit_optional}
+        inferred_excluded = tuple(
+            capability_id
+            for capability_id in inferred_excluded
+            if capability_id not in explicitly_selected
         )
+    excluded = list(
+        dict.fromkeys((*explicit_exclude, *inferred_excluded))
     )
 
     mandatory_capabilities = (
@@ -3585,28 +4414,33 @@ def normalize_selection(
         record_unsupported(
             capability_id,
             requested_as="optional",
-            request_source="explicit_selection",
+            request_source=(
+                "explicit_selection"
+                if capability_id in explicit_optional
+                else "nlp_inferred"
+            ),
         )
-    for capability_id in requested_capabilities:
-        record_unsupported(
-            capability_id,
-            requested_as="required",
-            request_source="requested_capability",
+    if not explicit_selection_locked:
+        for capability_id in requested_capabilities:
+            record_unsupported(
+                capability_id,
+                requested_as="required",
+                request_source="nlp_inferred",
+            )
+        requested_domain_capabilities = _capabilities_from_domains(
+            tuple(
+                domain
+                for domain in requested_domains
+                if domain not in requested_specific_domains
+            ),
+            scope_type=scope_type,
         )
-    requested_domain_capabilities = _capabilities_from_domains(
-        tuple(
-            domain
-            for domain in requested_domains
-            if domain not in requested_specific_domains
-        ),
-        scope_type=scope_type,
-    )
-    for capability_id in requested_domain_capabilities:
-        record_unsupported(
-            capability_id,
-            requested_as="required",
-            request_source="requested_domain",
-        )
+        for capability_id in requested_domain_capabilities:
+            record_unsupported(
+                capability_id,
+                requested_as="required",
+                request_source="nlp_inferred",
+            )
 
     unsupported_ids = frozenset(
         str(item["capability"]) for item in unsupported_capabilities
@@ -3647,19 +4481,36 @@ def normalize_selection(
         raw.get("limits"),
         ignored_capabilities=unsupported_ids,
     )
+    requested_limits = _normalized_limits(
+        raw.get("limits"),
+        ignored_capabilities=unsupported_ids,
+        clamp=False,
+    )
     parameters = _normalized_parameters(
         raw.get("parameters"),
         selected=selected,
         ignored_capabilities=unsupported_ids,
     )
 
-    output_mode = str(output or raw.get("output") or "").strip().lower()
+    requested_output = str(
+        output or raw.get("output") or ""
+    ).strip().lower() or None
+    if requested_output is not None and requested_output not in OUTPUT_MODES:
+        raise ValueError(
+            f"output must be one of: {', '.join(sorted(OUTPUT_MODES))}"
+        )
+    output_mode = requested_output
+    output_override_reason = None
     if scope_type in DIAGNOSTIC_SCOPES:
+        if requested_output not in {None, "evidence_only"}:
+            output_override_reason = "diagnostic_scope_forces_evidence_only"
         output_mode = "evidence_only"
     elif not output_mode:
-        output_mode = "evidence_only" if question_intent in {"quote", "data_freshness"} else "decision_with_evidence"
-    if output_mode not in OUTPUT_MODES:
-        raise ValueError(f"output must be one of: {', '.join(sorted(OUTPUT_MODES))}")
+        output_mode = (
+            "evidence_only"
+            if question_intent in {"quote", "data_freshness", "regulation"}
+            else "decision_with_evidence"
+        )
 
     realtime = str(realtime_policy or raw.get("realtime_policy") or "prefer_live").strip().lower()
     if realtime not in REALTIME_POLICIES:
@@ -3678,9 +4529,42 @@ def normalize_selection(
             min(raw_max_bytes, MAX_RESPONSE_BYTES),
         )
 
+    capability_origins: dict[str, dict[str, str]] = {}
+    for capability_id in (*required, *optional):
+        if capability_id in explicit_include:
+            origin = "explicit_required"
+            requested_as = "required"
+        elif capability_id in explicit_optional:
+            origin = "explicit_optional"
+            requested_as = "optional"
+        elif capability_id in mandatory_capabilities:
+            origin = "target_required"
+            requested_as = "required"
+        elif capability_id in (*legacy_include, *requested_capabilities):
+            origin = "nlp_inferred"
+            requested_as = (
+                "optional"
+                if explicit_selection_locked
+                else "required"
+            )
+        else:
+            origin = "auto_planned"
+            requested_as = (
+                "required"
+                if capability_id in required
+                else "optional"
+            )
+        capability_origins[capability_id] = {
+            "origin": origin,
+            "requested_as": requested_as,
+        }
+
     return {
         "version": public_contract.CAPABILITY_SELECTION_VERSION,
         "output": output_mode,
+        "requested_output": requested_output,
+        "effective_output": output_mode,
+        "output_override_reason": output_override_reason,
         "realtime_policy": realtime,
         "target_market": _target_market(scope_type, target_market),
         "required": required,
@@ -3688,9 +4572,19 @@ def normalize_selection(
         "excluded": excluded,
         "fields": fields,
         "limits": limits,
+        "requested_limits": requested_limits,
         "parameters": parameters,
+        "capability_origins": capability_origins,
+        "inference_policy": (
+            "explicit_selection_locked"
+            if explicit_selection_locked
+            else "auto_planning_enabled"
+            if auto_planning_requested
+            else "automatic_selection"
+        ),
         "unsupported_capabilities": unsupported_capabilities,
         "unmet_required_capabilities": unmet_required_capabilities,
+        "deprecated_aliases": deprecated_aliases,
         "max_response_bytes": max_response_bytes,
     }
 
@@ -3887,10 +4781,21 @@ def _canonical_intraday_value(value: Any) -> Any:
         "base_volume",
         "base_volume_unit",
         "volume_unit",
+        "canonical_volume_unit",
+        "provider_volume_unit",
+        "volume_conversion",
+        "volume_shares",
+        "volume_lots",
         "volume_contracts",
+        "volume_event_time",
         "cumulative_volume",
         "cumulative_volume_unit",
         "cumulative_volume_contracts",
+        "cumulative_volume_shares",
+        "cumulative_volume_lots",
+        "cumulative_trade_value",
+        "available_cumulative_trade_value",
+        "estimated_cumulative_trade_value",
         "lot_size",
         "quote_volume",
         "quote_volume_unit",
@@ -3906,6 +4811,11 @@ def _canonical_intraday_value(value: Any) -> Any:
         "volume_semantics",
         "volume_status",
         "trade_value_unit",
+        "trade_value_status",
+        "official_vwap",
+        "approx_vwap",
+        "vwap_method",
+        "vwap_confidence",
         "aggregation_method",
         "source_point_count",
         "aggregated_point_count",
@@ -4135,6 +5045,37 @@ def status_class(value: Any) -> str:
     return "blocked"
 
 
+def _projected_returned_count(value: Any, *, included: bool) -> int:
+    if not included:
+        return 0
+    if isinstance(value, list):
+        return len(value)
+    if not isinstance(value, dict):
+        return 1
+    for key in (
+        "returned_count",
+        "returned_point_count",
+        "returned_entry_count",
+    ):
+        count = value.get(key)
+        if isinstance(count, int) and not isinstance(count, bool):
+            return max(0, count)
+    for key in (
+        "rows",
+        "items",
+        "events",
+        "actions",
+        "entries",
+        "points",
+        "bars",
+        "results",
+    ):
+        rows = value.get(key)
+        if isinstance(rows, list):
+            return len(rows)
+    return 1
+
+
 def build_manifest(
     *,
     canonical: dict[str, Any],
@@ -4143,6 +5084,11 @@ def build_manifest(
     realtime_assessments: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     evidence = canonical.get("evidence") if isinstance(canonical.get("evidence"), dict) else {}
+    target = canonical.get("target") if isinstance(canonical.get("target"), dict) else {}
+    raw_scope_type = str(target.get("type") or "").strip()
+    scope_type = {
+        "tw_stock": "stock",
+    }.get(raw_scope_type, raw_scope_type)
     freshness_by_domain = (
         evidence.get("freshness_by_domain")
         if isinstance(evidence.get("freshness_by_domain"), dict)
@@ -4154,6 +5100,16 @@ def build_manifest(
         else {}
     )
     slots = evidence.get("slots") if isinstance(evidence.get("slots"), dict) else {}
+    quality = (
+        evidence.get("quality")
+        if isinstance(evidence.get("quality"), dict)
+        else {}
+    )
+    quality_by_capability = (
+        quality.get("capabilities")
+        if isinstance(quality.get("capabilities"), dict)
+        else {}
+    )
     required = set(selection.get("required") or [])
     capabilities: list[dict[str, Any]] = []
     for capability_id in list(selection.get("required") or []) + list(selection.get("optional") or []):
@@ -4186,6 +5142,48 @@ def build_manifest(
             if isinstance(freshness, dict):
                 status = normalize_status(freshness)
         included = capability_id in projected_data
+        projected_value = projected_data.get(capability_id)
+        capability_quality = (
+            quality_by_capability.get(capability_id)
+            if isinstance(
+                quality_by_capability.get(capability_id),
+                dict,
+            )
+            else {}
+        )
+        requested_limits = (
+            selection.get("requested_limits")
+            if isinstance(selection.get("requested_limits"), dict)
+            else {}
+        )
+        effective_limits = (
+            selection.get("limits")
+            if isinstance(selection.get("limits"), dict)
+            else {}
+        )
+        limit_aliases = {
+            "intraday.bars": "intraday.points",
+            "daily.ohlcv": "daily.points",
+        }
+        limit_alias = limit_aliases.get(capability_id)
+        requested_limit = requested_limits.get(
+            capability_id,
+            requested_limits.get(limit_alias) if limit_alias else None,
+        )
+        effective_limit = effective_limits.get(
+            capability_id,
+            effective_limits.get(limit_alias, spec.default_limit)
+            if limit_alias
+            else spec.default_limit,
+        )
+        returned_count = _projected_returned_count(
+            projected_value,
+            included=included,
+        )
+        payload_truncated = bool(
+            isinstance(projected_value, dict)
+            and projected_value.get("truncated") is True
+        )
         realtime = (realtime_assessments or {}).get(capability_id)
         if realtime is None and isinstance(projected_data.get(capability_id), dict):
             realtime = projected_data[capability_id].get("realtime")
@@ -4198,9 +5196,43 @@ def build_manifest(
             if isinstance(realtime, dict)
             else status_class(status)
         )
+        fill_operation = spec.fill_operation_for_scope(scope_type)
+        refresh_strategy = spec.refresh_strategy_for_scope(scope_type)
+        refresh_requires_market_open = (
+            spec.refresh_requires_market_open_for_scope(scope_type)
+        )
+        refresh_possible_now = (
+            bool(realtime.get("refresh_possible_now"))
+            if isinstance(realtime, dict)
+            and "refresh_possible_now" in realtime
+            else refresh_strategy in {"reader_fetch", "granular_tool"}
+        )
+        refresh_metadata: dict[str, Any] = {}
+        if refresh_strategy != "derived":
+            refresh_metadata = {
+                "refresh_strategy": refresh_strategy,
+                "fill_operation": fill_operation,
+                "refresh_possible_now": refresh_possible_now,
+                "refresh_requires_market_open": refresh_requires_market_open,
+                "writes_market_cache": bool(
+                    spec.writes_cache
+                    or fill_operation in FILL_OPERATIONS_WRITING_CACHE
+                ),
+                "estimated_calls": (
+                    1
+                    if refresh_strategy in {"reader_fetch", "granular_tool"}
+                    else 0
+                ),
+                "expected_timeout_seconds": (
+                    8
+                    if refresh_strategy in {"reader_fetch", "granular_tool"}
+                    else 0
+                ),
+            }
         capabilities.append(
             {
                 "capability": capability_id,
+                "schema_version": spec.schema_version,
                 "domain": spec.domain,
                 "slot": spec.slot,
                 "required": capability_id in required,
@@ -4224,14 +5256,23 @@ def build_manifest(
                 "next_eligible_refresh_at": capability_freshness.get(
                     "next_eligible_refresh_at"
                 ),
+                **refresh_metadata,
                 "payload_included": included,
                 "fields": list(
                     (selection.get("fields") or {}).get(capability_id)
                     or spec.default_fields
                 ),
-                "limit": (selection.get("limits") or {}).get(
-                    capability_id,
-                    spec.default_limit,
+                "default_limit": spec.default_limit,
+                "maximum_limit": MAX_CAPABILITY_LIMIT,
+                "requested_limit": requested_limit,
+                "effective_limit": effective_limit,
+                "returned_count": returned_count,
+                "truncated": payload_truncated,
+                "quality_issues": list(
+                    capability_quality.get("issues") or []
+                ),
+                "coverage_status": capability_quality.get(
+                    "coverage_status"
                 ),
             }
         )
@@ -4258,6 +5299,81 @@ def build_manifest(
     }
 
 
+def _tool_run_operation_status(run: dict[str, Any]) -> str:
+    explicit = str(run.get("operation_status") or "").strip().lower()
+    if explicit:
+        return explicit
+    legacy = str(run.get("status") or "unknown").strip().lower()
+    return {
+        "success": "succeeded",
+        "success_with_fallback": "succeeded",
+        "partial_success": "partial",
+        "background_running": "pending",
+        "queued": "pending",
+        "running": "pending",
+        "error": "failed",
+    }.get(legacy, legacy)
+
+
+def _fill_resolution_without_operation(
+    *,
+    capability_id: str,
+    item: dict[str, Any],
+    refresh_strategy: str,
+) -> tuple[str, str]:
+    payload_included = item.get("payload_included") is True
+    quality_issues = {
+        str(issue) for issue in item.get("quality_issues") or []
+    }
+    if capability_id == "data.freshness":
+        return "deferred_action", "dependent_capabilities_unresolved"
+    if refresh_strategy == "scheduler_owned":
+        return (
+            "deferred_action",
+            "scheduler_owned_current"
+            if payload_included
+            else "scheduler_owned",
+        )
+    if refresh_strategy == "reader_fetch":
+        return (
+            "already_attempted",
+            "reader_fetch_on_primary_request",
+        ) if capability_id == "intraday.bars" and payload_included else (
+            "deferred_action",
+            "reader_fetch_on_primary_request",
+        )
+    if refresh_strategy == "cache_only":
+        return "deferred_action", "cache_only"
+    if capability_id == "market.volume_state":
+        return "deferred_action", "history_accumulation_required"
+    if capability_id == "market.breadth":
+        return "deferred_action", "coverage_reconciliation_required"
+    if capability_id == "market.sectors":
+        return (
+            "deferred_action",
+            "derived_rebuild_completed_with_quality_limits",
+        ) if payload_included else (
+            "deferred_action",
+            "derived_rebuild_unavailable",
+        )
+    if capability_id == "market.sample_ranking":
+        if quality_issues & {
+            "volume_unit_missing",
+            "semantic_payload_empty",
+        } or not payload_included:
+            return "unfillable_action", "contract_schema_fix_required"
+        return "deferred_action", "bounded_sample_only"
+    if refresh_strategy == "derived":
+        return (
+            "deferred_action",
+            "derived_payload_quality_limited",
+        ) if payload_included else (
+            "unfillable_action",
+            "derived_payload_bug",
+        )
+    return "unfillable_action", "no_executable_fill_operation"
+
+
 def build_fill_plan(
     *,
     canonical: dict[str, Any],
@@ -4269,13 +5385,25 @@ def build_fill_plan(
     target = canonical.get("target") if isinstance(canonical.get("target"), dict) else {}
     actions: list[dict[str, Any]] = []
     deferred_actions: list[dict[str, Any]] = []
+    unfillable_actions: list[dict[str, Any]] = []
+    already_attempted_actions: list[dict[str, Any]] = []
     if canonical.get("ok") is not True or canonical.get("request_status") != "completed":
         return {
             "version": "omi.fill.plan.v1",
             "plan_id": fill_plan_id(target=target, action_ids=[]),
             "actions": [],
             "deferred_actions": [],
+            "unfillable_actions": [],
+            "already_attempted_actions": [],
+            "resolutions": [],
             "action_count": 0,
+            "summary": {
+                "executable_count": 0,
+                "deferred_count": 0,
+                "unfillable_count": 0,
+                "already_attempted_count": 0,
+                "unresolved_count": 0,
+            },
             "auto_executed": False,
         }
     selected = {
@@ -4286,11 +5414,10 @@ def build_fill_plan(
         )
         if str(capability).strip()
     }
-    successfully_attempted = {
+    attempted_capabilities = {
         capability
         for run in tool_runs or []
         if isinstance(run, dict)
-        and str(run.get("status") or "").strip().lower() == "success"
         for capability in _capabilities_for_tool_run(
             run=run,
             selected=selected,
@@ -4300,16 +5427,31 @@ def build_fill_plan(
     for item in manifest.get("capabilities") or []:
         if not isinstance(item, dict):
             continue
+        capability_id = str(item.get("capability") or "")
+        if capability_id in {"target.identity", "data.freshness"}:
+            continue
         if (
             item.get("status_class") == "ready"
             and item.get("payload_included") is True
         ):
             continue
-        capability_id = str(item.get("capability") or "")
         if (
-            item.get("payload_included") is True
-            and capability_id in successfully_attempted
+            capability_id in attempted_capabilities
+            and item.get("payload_included") is True
         ):
+            already_attempted_actions.append(
+                {
+                    "capability": capability_id,
+                    "status": item.get("status"),
+                    "status_class": item.get("status_class"),
+                    "payload_included": item.get("payload_included") is True,
+                    "resolution_type": "already_attempted",
+                    "reason": "already_attempted_primary_reader",
+                    "quality_issues": list(
+                        item.get("quality_issues") or []
+                    ),
+                }
+            )
             continue
         refresh_is_deferred = bool(
             item.get("refresh_recommended") is False
@@ -4323,6 +5465,7 @@ def build_fill_plan(
                 {
                     "capability": capability_id,
                     "status": item.get("status"),
+                    "resolution_type": "deferred_action",
                     "reason": (
                         "release_pending"
                         if item.get("release_status") == "pending"
@@ -4337,16 +5480,82 @@ def build_fill_plan(
                 }
             )
             continue
+        spec = CAPABILITIES.get(capability_id)
+        if spec is None:
+            unfillable_actions.append(
+                {
+                    "capability": capability_id,
+                    "status": item.get("status"),
+                    "resolution_type": "unfillable_action",
+                    "reason": "unsupported_target_scope",
+                }
+            )
+            continue
+        refresh_strategy = str(
+            item.get("refresh_strategy")
+            or spec.refresh_strategy_for_scope(scope_type)
+        )
+        operation = spec.fill_operation_for_scope(scope_type)
+        if not operation:
+            if capability_id in attempted_capabilities:
+                resolution_type = "already_attempted"
+                reason = "already_attempted_primary_reader"
+            else:
+                resolution_type, reason = _fill_resolution_without_operation(
+                    capability_id=capability_id,
+                    item=item,
+                    refresh_strategy=refresh_strategy,
+                )
+            resolution = {
+                "capability": capability_id,
+                "status": item.get("status"),
+                "status_class": item.get("status_class"),
+                "payload_included": item.get("payload_included") is True,
+                "resolution_type": resolution_type,
+                "reason": reason,
+                "refresh_strategy": refresh_strategy,
+                "refresh_possible_now": bool(
+                    item.get("refresh_possible_now")
+                ),
+                "refresh_requires_market_open": bool(
+                    item.get("refresh_requires_market_open")
+                ),
+                "writes_market_cache": bool(
+                    item.get("writes_market_cache")
+                ),
+                "estimated_calls": item.get("estimated_calls", 0),
+                "expected_timeout_seconds": item.get(
+                    "expected_timeout_seconds",
+                    0,
+                ),
+                "quality_issues": list(item.get("quality_issues") or []),
+            }
+            if resolution_type == "unfillable_action":
+                unfillable_actions.append(resolution)
+            elif resolution_type == "already_attempted":
+                already_attempted_actions.append(resolution)
+            else:
+                deferred_actions.append(resolution)
+            continue
         if (
             item.get("refresh_recommended") is False
             and item.get("payload_included") is True
         ):
-            continue
-        spec = CAPABILITIES.get(capability_id)
-        if spec is None:
-            continue
-        operation = spec.fill_operation_for_scope(scope_type)
-        if not operation:
+            deferred_actions.append(
+                {
+                    "capability": capability_id,
+                    "status": item.get("status"),
+                    "status_class": item.get("status_class"),
+                    "payload_included": True,
+                    "resolution_type": "deferred_action",
+                    "reason": "refresh_not_recommended",
+                    "operation": operation,
+                    "refresh_strategy": refresh_strategy,
+                    "quality_issues": list(
+                        item.get("quality_issues") or []
+                    ),
+                }
+            )
             continue
         produced_capabilities = list(
             FILL_OPERATION_PRODUCED_CAPABILITIES.get(operation, ())
@@ -4356,6 +5565,7 @@ def build_fill_plan(
                 {
                     "capability": capability_id,
                     "status": item.get("status"),
+                    "resolution_type": "deferred_action",
                     "reason": "operation_does_not_produce_capability",
                     "operation": operation,
                     "produced_capabilities": produced_capabilities,
@@ -4373,8 +5583,10 @@ def build_fill_plan(
                 "capability": capability_id,
                 "target": target,
                 "operation": operation,
+                "refresh_strategy": refresh_strategy,
                 "produced_capabilities": produced_capabilities,
                 "status": "planned",
+                "resolution_type": "executable_action",
                 "executable": operation in EXECUTABLE_FILL_OPERATIONS,
                 "required": bool(item.get("required")),
                 "fields": list(item.get("fields") or []),
@@ -4384,8 +5596,18 @@ def build_fill_plan(
                     if item.get("payload_included") is not True
                     else f"capability_status={item.get('status') or 'unknown'}"
                 ),
+                "primary_reader_attempted": (
+                    capability_id in attempted_capabilities
+                ),
+                "auto_retry_eligible": False,
                 "estimated_calls": 1,
                 "estimated_timeout_seconds": 8,
+                "refresh_possible_now": bool(
+                    item.get("refresh_possible_now", True)
+                ),
+                "refresh_requires_market_open": bool(
+                    item.get("refresh_requires_market_open")
+                ),
                 "writes_cache": (
                     spec.writes_cache
                     or operation in FILL_OPERATIONS_WRITING_CACHE
@@ -4433,12 +5655,28 @@ def build_fill_plan(
                 },
             },
         }
+    resolutions = [
+        *actions,
+        *deferred_actions,
+        *unfillable_actions,
+        *already_attempted_actions,
+    ]
     return {
         "version": "omi.fill.plan.v1",
         "plan_id": plan_id,
         "actions": actions,
         "deferred_actions": deferred_actions,
+        "unfillable_actions": unfillable_actions,
+        "already_attempted_actions": already_attempted_actions,
+        "resolutions": resolutions,
         "action_count": len(actions),
+        "summary": {
+            "executable_count": len(actions),
+            "deferred_count": len(deferred_actions),
+            "unfillable_count": len(unfillable_actions),
+            "already_attempted_count": len(already_attempted_actions),
+            "unresolved_count": len(resolutions),
+        },
         "auto_executed": False,
     }
 
@@ -4500,6 +5738,21 @@ def build_refresh_reconciliation(
         for action in fill_plan.get("actions") or []
         if isinstance(action, dict) and action.get("capability")
     }
+    deferred_by_capability = {
+        str(action.get("capability")): action
+        for action in fill_plan.get("deferred_actions") or []
+        if isinstance(action, dict) and action.get("capability")
+    }
+    unfillable_by_capability = {
+        str(action.get("capability")): action
+        for action in fill_plan.get("unfillable_actions") or []
+        if isinstance(action, dict) and action.get("capability")
+    }
+    already_attempted_by_capability = {
+        str(action.get("capability")): action
+        for action in fill_plan.get("already_attempted_actions") or []
+        if isinstance(action, dict) and action.get("capability")
+    }
     attempts: list[dict[str, Any]] = []
     attempt_indexes_by_capability: dict[str, list[int]] = {
         capability: [] for capability in selected
@@ -4516,6 +5769,10 @@ def build_refresh_reconciliation(
         )
 
         status = str(run.get("status") or "unknown").strip().lower()
+        transport_status = str(
+            run.get("transport_status") or status
+        ).strip().lower()
+        operation_status = _tool_run_operation_status(run)
         result_summary = (
             run.get("result_summary")
             if isinstance(run.get("result_summary"), dict)
@@ -4525,7 +5782,7 @@ def build_refresh_reconciliation(
             result_summary.get("refresh_outcome")
             or (
                 "data_returned"
-                if status == "success"
+                if operation_status == "succeeded"
                 and (
                     isinstance(result_summary.get("points"), list)
                     and bool(result_summary.get("points"))
@@ -4544,14 +5801,18 @@ def build_refresh_reconciliation(
                     )
                 )
                 else "completed"
-                if status == "success"
-                else status
+                if operation_status == "succeeded"
+                else operation_status
             )
         ).strip().lower()
         attempt = {
             "run_index": run_index,
             "tool": tool,
             "status": status,
+            "transport_status": transport_status,
+            "operation_status": operation_status,
+            "evidence_status": run.get("evidence_status"),
+            "result_status": run.get("result_status"),
             "requested_capabilities": requested,
             "refresh_outcome": refresh_outcome,
             "external_fetch": bool(run.get("external_fetch")),
@@ -4576,13 +5837,23 @@ def build_refresh_reconciliation(
         manifest_item = manifest_by_capability.get(capability) or {}
         indexes = attempt_indexes_by_capability.get(capability) or []
         related_attempts = [attempts[index] for index in indexes]
-        statuses = [str(attempt.get("status") or "") for attempt in related_attempts]
+        statuses = [
+            str(attempt.get("operation_status") or "")
+            for attempt in related_attempts
+        ]
         usable_evidence_available = bool(
             manifest_item.get("payload_included") is True
             and manifest_item.get("status_class") in {"ready", "limited"}
         )
         evidence_payload_available = manifest_item.get("payload_included") is True
-        tool_succeeded = "success" in statuses
+        tool_succeeded = any(
+            status
+            in {
+                "succeeded",
+                "partial",
+            }
+            for status in statuses
+        )
         if usable_evidence_available:
             reconciliation = "satisfied"
         elif evidence_payload_available and tool_succeeded:
@@ -4590,7 +5861,7 @@ def build_refresh_reconciliation(
         elif tool_succeeded:
             reconciliation = "successful_without_usable_evidence"
         elif any(
-            status in {"background_running", "queued", "running", "timeout"}
+            status in {"pending", "timeout"}
             for status in statuses
         ):
             reconciliation = "pending_or_incomplete"
@@ -4599,8 +5870,33 @@ def build_refresh_reconciliation(
         else:
             reconciliation = "not_attempted"
         remaining_action = remaining_actions.get(capability)
+        resolution_detail = (
+            remaining_action
+            or already_attempted_by_capability.get(capability)
+            or deferred_by_capability.get(capability)
+            or unfillable_by_capability.get(capability)
+        )
+        resolution_type = (
+            "satisfied"
+            if manifest_item.get("status_class") == "ready"
+            and evidence_payload_available
+            else str(
+                (resolution_detail or {}).get("resolution_type")
+                or "unresolved"
+            )
+        )
+        unresolved_reason = (
+            None
+            if resolution_type == "satisfied"
+            else (resolution_detail or {}).get("reason")
+            or "no_resolution_recorded"
+        )
         capability_outcomes[capability] = {
             "attempted": bool(related_attempts),
+            "primary_reader_attempted": bool(
+                related_attempts
+                or capability in already_attempted_by_capability
+            ),
             "attempt_count": len(related_attempts),
             "attempt_indexes": indexes,
             "tool_succeeded": tool_succeeded,
@@ -4614,11 +5910,33 @@ def build_refresh_reconciliation(
             "final_status": manifest_item.get("status") or "unknown",
             "final_status_class": manifest_item.get("status_class") or "blocked",
             "payload_included": evidence_payload_available,
+            "final_payload_present": evidence_payload_available,
+            "final_quality_issue": list(
+                manifest_item.get("quality_issues") or []
+            ),
             "usable_evidence_available": usable_evidence_available,
             "reconciliation": reconciliation,
+            "resolution_type": resolution_type,
+            "unresolved_reason": unresolved_reason,
             "remaining_fill_action": remaining_action.get("action_id")
             if isinstance(remaining_action, dict)
             else None,
+            "remaining_fill_action_detail": (
+                {
+                    key: remaining_action.get(key)
+                    for key in (
+                        "action_id",
+                        "capability",
+                        "operation",
+                        "refresh_strategy",
+                        "status",
+                        "reason",
+                        "executable",
+                    )
+                }
+                if isinstance(remaining_action, dict)
+                else None
+            ),
         }
 
     return {

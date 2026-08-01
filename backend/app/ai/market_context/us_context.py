@@ -441,7 +441,7 @@ def _project_source_health_for_instrument(
     projected["entries"] = entries
     projected["summary"] = summarize_source_health(
         entries,
-        counted_statuses=("empty", "stale", "error"),
+        counted_statuses=("empty", "stale", "partial", "error"),
     )
     projected["not_applicable_resources"] = [
         "profile",
@@ -484,11 +484,11 @@ def _annotate_daily_provider_roles(
     )
     annotated["selected_evidence_summary"] = summarize_source_health(
         selected_entries,
-        counted_statuses=("empty", "stale", "error"),
+        counted_statuses=("empty", "stale", "partial", "error"),
     )
     annotated["fallback_provider_summary"] = summarize_source_health(
         fallback_entries,
-        counted_statuses=("empty", "stale", "error"),
+        counted_statuses=("empty", "stale", "partial", "error"),
     )
     return annotated
 

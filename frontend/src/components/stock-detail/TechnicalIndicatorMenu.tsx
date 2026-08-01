@@ -189,6 +189,7 @@ export default function TechnicalIndicatorMenu({
   onUpdateParameter,
   supplementalMarkerOptions = [],
   onToggleSupplementalMarker,
+  showTemplates = true,
   className = "w-80",
 }: {
   indicators: IndicatorSettings;
@@ -206,6 +207,7 @@ export default function TechnicalIndicatorMenu({
   ) => void;
   supplementalMarkerOptions?: SupplementalMarkerOption[];
   onToggleSupplementalMarker?: (key: string) => void;
+  showTemplates?: boolean;
   className?: string;
 }) {
   const t = useT();
@@ -218,26 +220,28 @@ export default function TechnicalIndicatorMenu({
         className,
       ].join(" ")}
     >
-      <div className="border-b border-omi-border-subtle pb-3">
-        <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("indicators.quickTemplates")}</div>
-        <div className="grid grid-cols-5 gap-1">
-          {indicatorTemplates.map((template) => (
-            <button
-              key={template.key}
-              type="button"
-              onClick={() => onApplyTemplate(template.key)}
-              className={[
-                "h-8 border text-xs font-semibold",
-                activeTemplate === template.key
-                  ? "border-omi-accent bg-omi-accent text-omi-text-inverse"
-                  : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control",
-              ].join(" ")}
-            >
-              {templateLabel(t, template.key, template.label)}
-            </button>
-          ))}
+      {showTemplates ? (
+        <div className="border-b border-omi-border-subtle pb-3">
+          <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("indicators.quickTemplates")}</div>
+          <div className="grid grid-cols-5 gap-1">
+            {indicatorTemplates.map((template) => (
+              <button
+                key={template.key}
+                type="button"
+                onClick={() => onApplyTemplate(template.key)}
+                className={[
+                  "h-8 border text-xs font-semibold",
+                  activeTemplate === template.key
+                    ? "border-omi-accent bg-omi-accent text-omi-text-inverse"
+                    : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control",
+                ].join(" ")}
+              >
+                {templateLabel(t, template.key, template.label)}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      ) : null}
 
       <div className="space-y-3 border-b border-omi-border-subtle py-3">
         {groups.map((group) => (

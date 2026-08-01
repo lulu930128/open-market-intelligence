@@ -1,6 +1,7 @@
 "use client";
 
 import { StateSurface } from "@/components/LoadingPlaceholders";
+import { WatchlistRadarV2OutcomePanel } from "@/components/WatchlistRadarV2OutcomePanel";
 import type {
   WatchlistGroupRadarRead,
   WatchlistRadarBucketRead,
@@ -8,6 +9,7 @@ import type {
   WatchlistRadarMode,
   WatchlistRadarOutcomeItemRead,
   WatchlistRadarOutcomeSummaryRead,
+  WatchlistRadarV2OutcomeSummaryRead,
 } from "@/types/market";
 import {
   radarActionLabel,
@@ -53,6 +55,15 @@ type WatchlistRadarPanelProps = {
   onReloadOutcomeHistory?: () => void;
   onSelectOutcomeSnapshot?: (snapshotId: number) => void;
   onEvaluateOutcomeSnapshot?: (snapshotId: number) => void;
+  v2OutcomeHistory?: WatchlistRadarV2OutcomeSummaryRead[];
+  v2OutcomeHistoryOpen?: boolean;
+  v2OutcomeHistoryLoadState?: LoadState;
+  v2OutcomeDetailLoadState?: LoadState;
+  selectedV2OutcomeSnapshotDate?: string | null;
+  onOpenV2OutcomeHistory?: () => void;
+  onCloseV2OutcomeHistory?: () => void;
+  onReloadV2OutcomeHistory?: () => void;
+  onSelectV2OutcomeSnapshot?: (snapshotDate: string) => void;
   onSelectStock: (stockId: string, stockName: string | null) => void;
 };
 
@@ -570,6 +581,74 @@ function factorScoreDetails(item: WatchlistRadarItemRead, t: TranslationFunction
     .filter((value): value is string => Boolean(value));
 }
 
+function radarV2Label(
+  t: TranslationFunction,
+  namespace: "directions" | "grades" | "regimes",
+  value: string
+) {
+  const key = `radar.v2.${namespace}.${value}`;
+  const translated = t(key);
+  return translated === key ? value.replaceAll("_", " ") : translated;
+}
+
+function radarV2DirectionClass(direction: number) {
+  if (direction > 0) {
+    return "border-omi-success-border bg-omi-success-soft text-omi-success";
+  }
+  if (direction < 0) {
+    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  }
+  return "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-muted";
+}
+
+function radarV2Details(item: WatchlistRadarItemRead, t: TranslationFunction) {
+  const evaluation = item.radar_v2;
+  if (!evaluation) return [];
+
+  const directionKey =
+    evaluation.direction > 0
+      ? "bullish"
+      : evaluation.direction < 0
+        ? "bearish"
+        : "neutral";
+  const topFamilies = Object.entries(evaluation.family_scores)
+    .map(([family, values]) => {
+      const rawValue = values.direction_score;
+      const value =
+        typeof rawValue === "number" && !Number.isNaN(rawValue)
+          ? formatSignedRadarNumber(rawValue, 1)
+          : null;
+      return value
+        ? `${radarV2Label(t, "regimes", family)} ${value}`
+        : null;
+    })
+    .filter((value): value is string => Boolean(value))
+    .slice(0, 4);
+
+  return [
+    `${t("radar.v2.fields.direction")} ${radarV2Label(
+      t,
+      "directions",
+      directionKey
+    )} ${formatSignedRadarNumber(evaluation.direction_score, 1) ?? "0"}`,
+    `${t("radar.v2.fields.evidence")} ${evaluation.evidence_score.toFixed(1)}`,
+    `${t("radar.v2.fields.confidence")} ${evaluation.confidence_score.toFixed(1)}`,
+    `${t("radar.v2.fields.conflict")} ${evaluation.conflict_score.toFixed(1)}`,
+    `${t("radar.v2.fields.risk")} ${evaluation.risk_score.toFixed(1)}`,
+    `${t("radar.v2.fields.instrumentRegime")} ${radarV2Label(
+      t,
+      "regimes",
+      evaluation.instrument_regime
+    )}`,
+    `${t("radar.v2.fields.marketRegime")} ${radarV2Label(
+      t,
+      "regimes",
+      evaluation.market_regime
+    )}`,
+    ...topFamilies,
+  ];
+}
+
 function priceLevelDetails(item: WatchlistRadarItemRead, t: TranslationFunction) {
   const levelDetail = (label: string, key: string) => {
     const value = priceLevelNumber(item, key);
@@ -722,13 +801,25 @@ function keyLevelText(item: WatchlistRadarItemRead, t: TranslationFunction) {
 
 function scanLine(item: WatchlistRadarItemRead, t: TranslationFunction) {
   const bucketLabel = radarBucketLabel(t, item.bucket, item.bucket_label);
+  const backendOwnedV2 =
+    item.radar_v2?.rule_version === "radar_v2.0";
 
   return [
-    item.setup_label
+    backendOwnedV2
+      ? item.setup_label || bucketLabel
+      : item.setup_label
       ? radarSetupLabel(t, item.bucket, item.setup_label)
       : bucketLabel,
-    item.timing_label ? radarTimingLabel(t, item.bucket, item.timing_label) : null,
-    item.risk_label ? radarRiskLabel(t, item.bucket, item.risk_label) : null,
+    backendOwnedV2
+      ? item.timing_label
+      : item.timing_label
+        ? radarTimingLabel(t, item.bucket, item.timing_label)
+        : null,
+    backendOwnedV2
+      ? item.risk_label
+      : item.risk_label
+        ? radarRiskLabel(t, item.bucket, item.risk_label)
+        : null,
     keyLevelText(item, t),
   ]
     .filter(Boolean)
@@ -836,6 +927,15 @@ export default function WatchlistRadarPanel({
   onReloadOutcomeHistory,
   onSelectOutcomeSnapshot,
   onEvaluateOutcomeSnapshot,
+  v2OutcomeHistory = [],
+  v2OutcomeHistoryOpen = false,
+  v2OutcomeHistoryLoadState = "idle",
+  v2OutcomeDetailLoadState = "idle",
+  selectedV2OutcomeSnapshotDate,
+  onOpenV2OutcomeHistory,
+  onCloseV2OutcomeHistory,
+  onReloadV2OutcomeHistory,
+  onSelectV2OutcomeSnapshot,
   onSelectStock,
 }: WatchlistRadarPanelProps) {
   const t = useT();
@@ -843,9 +943,21 @@ export default function WatchlistRadarPanel({
   const hasResults = (radar?.results.length ?? 0) > 0;
   const activeBuckets = radar?.buckets.filter((bucket) => bucket.count > 0) ?? [];
   const activeBucketGroups = groupedRadarBuckets(activeBuckets);
-  const showOutcomeTools = Boolean(outcomeSummary || onOpenOutcomeHistory);
+  const radarV2IsActive =
+    radar?.radar_engine?.mode === "active" &&
+    radar.radar_engine.active_version === "radar_v2.0";
+  const radarV2Readiness = radar?.radar_v2_summary?.readiness ?? null;
+  const showOutcomeTools =
+    !radarV2IsActive && Boolean(outcomeSummary || onOpenOutcomeHistory);
   const outcomeBusy = outcomeLoadState === "loading";
   const outcomeHistoryBusy = outcomeHistoryLoadState === "loading";
+  const v2OutcomeHistoryBusy = v2OutcomeHistoryLoadState === "loading";
+  const openActiveOutcomeHistory = radarV2IsActive
+    ? onOpenV2OutcomeHistory
+    : onOpenOutcomeHistory;
+  const activeOutcomeHistoryBusy = radarV2IsActive
+    ? v2OutcomeHistoryBusy
+    : outcomeHistoryBusy;
   const outcomeDetailBusy = outcomeDetailLoadState === "loading";
   const outcomeBuckets = outcomeSummary?.bucket_summaries.slice(0, 4) ?? [];
   const selectedOutcomeSummary =
@@ -859,7 +971,9 @@ export default function WatchlistRadarPanel({
     ? t("radar.dateLabel", { date: formatRadarDate(radar.trade_date) })
     : t("radar.notLoaded");
   const radarSnapshotLabel =
-    radar?.cache_status === "snapshot" && radar.snapshot_date
+    (radar?.cache_status === "snapshot" ||
+      radar?.cache_status === "v2_snapshot") &&
+    radar.snapshot_date
       ? t("radar.snapshotLabel", { date: formatRadarDate(radar.snapshot_date) })
       : null;
 
@@ -918,12 +1032,12 @@ export default function WatchlistRadarPanel({
                 </a>
               ))}
             </div>
-            {onOpenOutcomeHistory ? (
+            {openActiveOutcomeHistory ? (
               <button
                 type="button"
                 data-testid="watchlist-radar-history-open"
-                onClick={onOpenOutcomeHistory}
-                disabled={disabled || outcomeHistoryBusy}
+                onClick={openActiveOutcomeHistory}
+                disabled={disabled || activeOutcomeHistoryBusy}
                 className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
               >
                 {t("radar.outcome.history")}
@@ -949,6 +1063,107 @@ export default function WatchlistRadarPanel({
           ) : null}
         </div>
       </div>
+
+      {radar?.radar_engine && radar.radar_v2_summary ? (
+        <div
+          className="border-b border-omi-border-subtle bg-omi-surface-subtle px-5 py-3"
+          data-testid={
+            radarV2IsActive
+              ? "watchlist-radar-v2-active-summary"
+              : "watchlist-radar-v2-shadow-summary"
+          }
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-bold uppercase tracking-[0.14em] text-omi-text-muted">
+                  {t("radar.v2.title")}
+                </span>
+                <span className="border border-omi-info-border bg-omi-info-soft px-2 py-0.5 text-xs font-semibold text-omi-info-strong">
+                  {t(
+                    radarV2IsActive
+                      ? "radar.v2.activeBadge"
+                      : "radar.v2.shadowBadge"
+                  )}
+                </span>
+                <span className="text-xs text-omi-text-muted">
+                  {radarV2IsActive
+                    ? t("radar.v2.activeContract", {
+                        active: radar.radar_engine.active_version,
+                        rollback: radar.radar_engine.rollback_version,
+                      })
+                    : t("radar.v2.shadowContract", {
+                        active: radar.radar_engine.active_version,
+                        shadow: radar.radar_engine.shadow_version,
+                      })}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-omi-text-muted">
+                {t(
+                  radarV2IsActive
+                    ? "radar.v2.activeNotice"
+                    : "radar.v2.shadowNotice"
+                )}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <span className="border border-omi-border-subtle bg-omi-surface px-2 py-1 text-omi-text-muted">
+                {t("radar.v2.summary.universeEvaluated", {
+                  count: radar.radar_v2_summary.universe_evaluated_count,
+                })}
+              </span>
+              <span className="border border-omi-warning-border bg-omi-warning-soft px-2 py-1 font-semibold text-omi-warning">
+                {t("radar.v2.summary.conflict", {
+                  count: radar.radar_v2_summary.conflict_count,
+                })}
+              </span>
+              {radarV2IsActive && radarV2Readiness ? (
+                <span
+                  className={[
+                    "border px-2 py-1 font-semibold",
+                    radarV2Readiness.validation_status === "verified"
+                      ? "border-omi-success-border bg-omi-success-soft text-omi-success"
+                      : "border-omi-warning-border bg-omi-warning-soft text-omi-warning",
+                  ].join(" ")}
+                >
+                  {t(
+                    `radar.v2.validation.${radarV2Readiness.validation_status}`
+                  )}
+                </span>
+              ) : (
+                <span className="border border-omi-border-subtle bg-omi-surface px-2 py-1 text-omi-text-muted">
+                  {t("radar.v2.summary.changed", {
+                    count: radar.radar_v2_summary.direction_changed_count,
+                  })}
+                </span>
+              )}
+              <span className="border border-omi-border-subtle bg-omi-surface px-2 py-1 text-omi-text-muted">
+                {t("radar.v2.summary.marketRegime", {
+                  regime: radarV2Label(
+                    t,
+                    "regimes",
+                    radar.radar_v2_summary.market_regime
+                  ),
+                })}
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {radarV2IsActive ? (
+        <WatchlistRadarV2OutcomePanel
+          history={v2OutcomeHistory}
+          historyOpen={v2OutcomeHistoryOpen}
+          historyLoadState={v2OutcomeHistoryLoadState}
+          detailLoadState={v2OutcomeDetailLoadState}
+          selectedSnapshotDate={selectedV2OutcomeSnapshotDate}
+          disabled={disabled}
+          onCloseHistory={onCloseV2OutcomeHistory}
+          onReloadHistory={onReloadV2OutcomeHistory}
+          onSelectSnapshot={onSelectV2OutcomeSnapshot}
+        />
+      ) : null}
 
       {showOutcomeTools ? (
         <div className="border-b border-omi-border-subtle bg-omi-surface px-5 py-3">
@@ -1508,20 +1723,25 @@ export default function WatchlistRadarPanel({
             const radarMeta = itemMeta(item, t);
             const signalDetails = technicalSignalDetails(item, t);
             const scoreDetails = factorScoreDetails(item, t);
+            const v2Details = radarV2Details(item, t);
             const levelDetails = priceLevelDetails(item, t);
             const rawIndicatorDetails = indicatorDetails(item, t);
             const indicatorDetailValues = rawIndicatorDetails.filter(
               (detail) => !signalDetails.includes(detail)
             );
-            const actionLabel = radarActionLabel(
-              t,
-              item.bucket,
-              item.action_label,
-              item.stale
-            );
+            const actionLabel =
+              item.radar_v2?.rule_version === "radar_v2.0"
+                ? item.action_label
+                : radarActionLabel(
+                    t,
+                    item.bucket,
+                    item.action_label,
+                    item.stale
+                  );
             const collapsedDetailCount = detailCount(
               signalDetails,
               scoreDetails,
+              v2Details,
               levelDetails,
               indicatorDetailValues
             );
@@ -1571,6 +1791,33 @@ export default function WatchlistRadarPanel({
                         technicalGradeClass(item.technical_grade),
                         technicalGradeDescription
                       )}
+                      {item.radar_v2
+                        ? signalBadge(
+                            t("radar.v2.badge"),
+                            `${radarV2Label(
+                              t,
+                              "directions",
+                              item.radar_v2.direction > 0
+                                ? "bullish"
+                                : item.radar_v2.direction < 0
+                                  ? "bearish"
+                                  : "neutral"
+                            )} ${formatSignedRadarNumber(
+                              item.radar_v2.direction_score,
+                              0
+                            ) ?? "0"} · ${radarV2Label(
+                              t,
+                              "grades",
+                              item.radar_v2.evidence_grade
+                            )}`,
+                            radarV2DirectionClass(item.radar_v2.direction),
+                            t("radar.v2.badgeDescription", {
+                              confidence: item.radar_v2.confidence_score.toFixed(1),
+                              conflict: item.radar_v2.conflict_score.toFixed(1),
+                              risk: item.radar_v2.risk_score.toFixed(1),
+                            })
+                          )
+                        : null}
                       {visibleContextSignals.map((signal) => {
                         const sourceLabel = radarContextSourceLabel(
                           t,
@@ -1634,7 +1881,7 @@ export default function WatchlistRadarPanel({
                         +
                       </span>
                     </summary>
-                    <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-5">
                       {detailPanel(
                         t("radar.detailSections.signals"),
                         t("radar.detailDescriptions.signals"),
@@ -1644,6 +1891,11 @@ export default function WatchlistRadarPanel({
                         t("radar.detailSections.factors"),
                         t("radar.detailDescriptions.factors"),
                         scoreDetails
+                      )}
+                      {detailPanel(
+                        t("radar.v2.detailTitle"),
+                        t("radar.v2.detailDescription"),
+                        v2Details
                       )}
                       {detailPanel(
                         t("radar.detailSections.levels"),

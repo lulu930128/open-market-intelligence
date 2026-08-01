@@ -34,6 +34,7 @@ import type {
   ShareholdingDistributionWeeklyRead,
   StockChipCoverageRead,
   StockMasterRead,
+  TaiwanFinancialContractRead,
 } from "@/types/market";
 import { useEffect, useRef, useState } from "react";
 
@@ -154,6 +155,8 @@ export function useTaiwanDataPanel({
     useState<FinancialMetricQuarterlyRead | null>(null);
   const [financialMetricHistory, setFinancialMetricHistory] =
     useState<FinancialMetricQuarterlyRead[]>([]);
+  const [financialContract, setFinancialContract] =
+    useState<TaiwanFinancialContractRead | null>(null);
   const [stockInfo, setStockInfo] = useState<StockMasterRead | null>(null);
   const [activeDataTab, setActiveDataTab] = useState<DataPanelTab>("chips");
   const [dataPanelLoading, setDataPanelLoading] = useState<DataPanelTab | null>(null);
@@ -262,6 +265,7 @@ export function useTaiwanDataPanel({
         setMonthlyRevenueHistory([]);
         setFinancialMetric(null);
         setFinancialMetricHistory([]);
+        setFinancialContract(null);
         setStockInfo(null);
         setActiveDataTab("chips");
         setDataPanelLoading(null);
@@ -286,6 +290,7 @@ export function useTaiwanDataPanel({
       setMonthlyRevenueHistory([]);
       setFinancialMetric(null);
       setFinancialMetricHistory([]);
+      setFinancialContract(null);
       setStockInfo(null);
       setDataPanelLoading(null);
       setDataPanelMessage(null);
@@ -732,16 +737,31 @@ export function useTaiwanDataPanel({
           return;
         }
 
-        const cachedRows = await fetchJson<InstitutionalTradeDailyRead[]>(
-          `/api/market/institutional/${targetStockId}/history`,
-          {
-            lookback_days: institutionalLookbackDays,
-            limit: institutionalHistoryLimit,
-            ensure_history: false,
-          }
-        );
+        const [cachedRowsResult, cachedHoldingRatioResult] = await Promise.allSettled([
+          fetchJson<InstitutionalTradeDailyRead[]>(
+            `/api/market/institutional/${targetStockId}/history`,
+            {
+              lookback_days: institutionalLookbackDays,
+              limit: institutionalHistoryLimit,
+              ensure_history: false,
+            }
+          ),
+          fetchJson<InstitutionalHoldingRatioRead>(
+            `/api/market/institutional/${targetStockId}/holding-ratios`
+          ),
+        ]);
         if (activeStockIdRef.current !== targetStockId) return;
 
+        if (cachedHoldingRatioResult.status === "fulfilled") {
+          setInstitutionalHoldingRatio(cachedHoldingRatioResult.value);
+        } else {
+          setInstitutionalHoldingRatio(null);
+        }
+        if (cachedRowsResult.status === "rejected") {
+          throw cachedRowsResult.reason;
+        }
+
+        const cachedRows = cachedRowsResult.value;
         resolvedKeysRef.current.add(requestKey);
         setInstitutional(cachedRows[cachedRows.length - 1] ?? null);
         setInstitutionalHistory(cachedRows);
@@ -755,7 +775,11 @@ export function useTaiwanDataPanel({
             )
           )
         ) {
-          setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
+          setDataPanelMessage(
+            cachedHoldingRatioResult.status === "fulfilled"
+              ? t("stockDetail.dataPanel.cache.localShown")
+              : t("stockDetail.dataPanel.holdingRatioUnavailable")
+          );
           return;
         }
 
@@ -837,15 +861,26 @@ export function useTaiwanDataPanel({
         return;
       }
 
-      const cachedRows = await fetchJson<FinancialMetricQuarterlyRead[]>(
-        `/api/market/financials/${targetStockId}/history`,
-        { limit: financialHistoryLimit, ensure_history: false }
-      );
+      const [cachedRows, cachedContract] = await Promise.all([
+        fetchJson<FinancialMetricQuarterlyRead[]>(
+          `/api/market/financials/${targetStockId}/history`,
+          { limit: financialHistoryLimit, ensure_history: false }
+        ),
+        fetchOptional<TaiwanFinancialContractRead>(
+          `/api/market/financials/${targetStockId}/contract`,
+          {
+            mode: "current_comparable",
+            financial_limit: 8,
+            revenue_limit: 24,
+          }
+        ),
+      ]);
       if (activeStockIdRef.current !== targetStockId) return;
 
       resolvedKeysRef.current.add(requestKey);
       setFinancialMetric(cachedRows[cachedRows.length - 1] ?? null);
       setFinancialMetricHistory(cachedRows);
+      setFinancialContract(cachedContract);
       if (!allowProviderRefresh) {
         setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
         return;
@@ -870,15 +905,26 @@ export function useTaiwanDataPanel({
       }
 
       const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
-      const rows = await fetchJson<FinancialMetricQuarterlyRead[]>(
-        `/api/market/financials/${targetStockId}/history`,
-        { limit: financialHistoryLimit, ensure_history: false }
-      );
+      const [rows, refreshedContract] = await Promise.all([
+        fetchJson<FinancialMetricQuarterlyRead[]>(
+          `/api/market/financials/${targetStockId}/history`,
+          { limit: financialHistoryLimit, ensure_history: false }
+        ),
+        fetchOptional<TaiwanFinancialContractRead>(
+          `/api/market/financials/${targetStockId}/contract`,
+          {
+            mode: "current_comparable",
+            financial_limit: 8,
+            revenue_limit: 24,
+          }
+        ),
+      ]);
       if (activeStockIdRef.current !== targetStockId) return;
 
       resolvedKeysRef.current.add(requestKey);
       setFinancialMetric(rows[rows.length - 1] ?? null);
       setFinancialMetricHistory(rows);
+      setFinancialContract(refreshedContract);
       setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel, t));
     } catch {
       if (activeStockIdRef.current === targetStockId) {
@@ -970,6 +1016,7 @@ export function useTaiwanDataPanel({
       dataPanelMessage,
       financialMetric,
       financialMetricHistory,
+      financialContract,
       institutional,
       institutionalHoldingRatio,
       institutionalHistory,

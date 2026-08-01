@@ -38,5 +38,39 @@
 ## 已知限制
 
 - 本機 US fallback calendar 尚未建模特殊提早收盤日，因此 daily quote 的 `quote_time_basis` 明確標為 `scheduled_regular_session_close`，回答也會顯示限制。
-- 正式 launcher runtime 尚未重啟；目前 8400 listener 仍是修改前程序。因 worktree 另有進行中的台股變更，本任務未擅自重啟或載入整個 dirty worktree。
+- 正式 launcher runtime 已於 2026-07-30 22:38 依 source-stale 流程重啟；
+  8400 backend 啟動時間為 `2026-07-30T22:39:02+08:00`。
 - 既有 `build_us_source_health` 讀取流程會同步 source-health snapshot；read-only smoke 需 mock 此副作用，本任務未擴張處理。
+
+## 2026-07-30 相對日期語意補強
+
+### 根因
+
+- `requested_us_trade_date()` 只支援 ISO 日期、中文年月日、月日與「幾號」；
+  `昨天`、`昨日`、`yesterday` 皆解析為 `None`。
+- 因此問句沒有綁定 historical `trade_date`，後續可能讀 current context，
+  或由模型看到日期不一致後錯誤判斷「昨天沒有資料」。
+
+### 修正
+
+- `昨天`、`昨日`、`yesterday`、`前一交易日`、`previous/last trading
+  day/session` 先以 `America/New_York` 決定參考日期。
+- 先取美東曆日的昨天，再遇週末或已知休市日向前解析到最近交易日。
+- relative historical request 強制 `include_intraday=false`，不以目前盤前、
+  盤中或盤後報價代替歷史資料。
+- 保留原 exact-date 行為：明確指定不存在的歷史日資料時仍回 missing，
+  不靜默換成別日或 current quote。
+
+### 驗證
+
+- 週末、時區跨日、Independence Day observed holiday 與 public params
+  regression 已涵蓋。
+- Taiwan quote-depth 與 US dated-close focused：
+  `26 passed, 10 subtests passed`。
+- 正式 `POST /api/ai/ask`、`omi.decision.v4`、`allow_llm=false`、
+  `allow_external_fetch=false` smoke：
+  - 問句 `AAPL 昨天的成交量`
+  - `request_status=completed`
+  - `requested_trade_date=2026-07-29`
+  - `trade_date=2026-07-29`
+  - `quote_semantics=historical_regular_session_close`

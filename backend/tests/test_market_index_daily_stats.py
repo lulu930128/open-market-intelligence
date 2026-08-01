@@ -182,6 +182,139 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(rows[0]["close_value"], 429.37)
         self.assertEqual(rows[0]["price_change"], 9.65)
 
+    def test_twse_index_daily_ohlc_rows_parse_official_values(self) -> None:
+        rows = indices._parse_twse_index_daily_ohlc_rows(
+            {
+                "stat": "OK",
+                "fields": ["日期", "開盤指數", "最高指數", "最低指數", "收盤指數"],
+                "data": [
+                    [
+                        "115/07/30",
+                        "40,048.94",
+                        "41,155.42",
+                        "39,404.65",
+                        "39,933.30",
+                    ],
+                    ["115/07/31", "invalid", "1", "1", "1"],
+                ],
+            }
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "trade_date": date(2026, 7, 30),
+                    "open": 40048.94,
+                    "high": 41155.42,
+                    "low": 39404.65,
+                    "close": 39933.3,
+                }
+            ],
+        )
+
+    def test_tpex_market_highlight_rows_normalize_official_units(self) -> None:
+        rows = indices._parse_tpex_market_highlight_rows(
+            {
+                "stat": "ok",
+                "date": "20260529",
+                "tables": [
+                    {
+                        "fields": [
+                            "上櫃家數",
+                            "本日總成交值(佰萬元)",
+                            "本日總成交股數(張數)",
+                            "收市指數",
+                            "指數漲跌",
+                        ],
+                        "data": [
+                            ["888", "385,397", "1,570,935", "443.64", "11.16"]
+                        ],
+                    }
+                ],
+            },
+            expected_trade_date=date(2026, 5, 29),
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "trade_date": date(2026, 5, 29),
+                    "trade_volume": 1_570_935_000,
+                    "trade_value": 385_397_000_000,
+                    "transaction_count": None,
+                    "close_value": 443.64,
+                    "price_change": 11.16,
+                }
+            ],
+        )
+
+    def test_tpex_history_refresh_fetches_only_missing_trading_dates(self) -> None:
+        self.db.add(
+            MarketIndexDailyStat(
+                index_id="TPEX",
+                market="TPEX",
+                trade_date=date(2026, 5, 28),
+                trade_volume=1,
+                trade_value=1,
+                source="existing",
+            )
+        )
+        self.db.commit()
+
+        def historical_row(trade_date: date):
+            return (
+                [
+                    {
+                        "trade_date": trade_date,
+                        "trade_volume": 2_000,
+                        "trade_value": 3_000,
+                        "transaction_count": None,
+                        "close_value": 400.0,
+                        "price_change": 1.0,
+                    }
+                ],
+                f"https://example.test/highlight?date={trade_date.isoformat()}",
+            )
+
+        with (
+            patch.object(
+                indices,
+                "_fetch_tpex_market_daily_stat_for_date",
+                side_effect=historical_row,
+            ) as fetch,
+            patch.object(
+                indices,
+                "_fetch_recent_market_index_daily_stats",
+                return_value=[],
+            ),
+        ):
+            result = indices.refresh_market_index_daily_stats(
+                db=self.db,
+                index_id="TPEX",
+                from_date=date(2026, 5, 28),
+                to_date=date(2026, 5, 30),
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in fetch.call_args_list],
+            [date(2026, 5, 29)],
+        )
+        self.assertEqual(result["inserted_count"], 1)
+        self.assertEqual(result["source"], "tpex_after_trading_highlight")
+        stored = (
+            self.db.query(MarketIndexDailyStat)
+            .filter(MarketIndexDailyStat.index_id == "TPEX")
+            .order_by(MarketIndexDailyStat.trade_date.asc())
+            .all()
+        )
+        self.assertEqual(
+            [row.trade_date for row in stored],
+            [date(2026, 5, 28), date(2026, 5, 29)],
+        )
+        self.assertEqual(stored[-1].trade_value, 3_000)
+
     def test_daily_ohlc_appends_newer_official_index_stat_when_yahoo_is_stale(self) -> None:
         yahoo_points = [
             yahoo_point(date(2026, 6, 11), 43000),
@@ -205,6 +338,22 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 "price_change": 1227.95,
             },
         ]
+        official_ohlc = {
+            date(2026, 6, 12): {
+                "trade_date": date(2026, 6, 12),
+                "open": 43_500.0,
+                "high": 44_500.0,
+                "low": 43_200.0,
+                "close": 44_169.04,
+            },
+            date(2026, 6, 15): {
+                "trade_date": date(2026, 6, 15),
+                "open": 44_800.0,
+                "high": 45_500.0,
+                "low": 44_700.0,
+                "close": 45_396.99,
+            },
+        }
 
         with (
             patch.object(
@@ -219,6 +368,11 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 return_value=([], "https://example.test/fmtqik"),
             ),
             patch.object(indices, "_fetch_recent_market_index_daily_stats", return_value=official_rows),
+            patch.object(
+                indices,
+                "_fetch_twse_index_daily_ohlc_for_month",
+                return_value=official_ohlc,
+            ),
         ):
             indices.refresh_market_index_daily_stats(
                 db=self.db,
@@ -235,8 +389,76 @@ class MarketIndexDailyStatTests(unittest.TestCase):
 
         self.assertEqual([point["time"] for point in payload["points"]], [date(2026, 6, 12), date(2026, 6, 15)])
         self.assertEqual(payload["to_date"], date(2026, 6, 15))
+        self.assertEqual(payload["points"][-1]["open"], 44_800.0)
+        self.assertEqual(payload["points"][-1]["high"], 45_500.0)
+        self.assertEqual(payload["points"][-1]["low"], 44_700.0)
         self.assertEqual(payload["points"][-1]["close"], 45396.99)
         self.assertEqual(payload["points"][-1]["trade_value"], 1_115_744_351_199)
+        self.assertEqual(payload["latest_data_date"], date(2026, 6, 15))
+        self.assertEqual(payload["expected_data_date"], date(2026, 6, 15))
+        self.assertEqual(payload["freshness_status"], "current")
+        self.assertTrue(payload["is_current"])
+        self.assertFalse(payload["refresh_recommended"])
+        self.assertEqual(
+            payload["backfill"]["official_ohlc_overlay"]["status"],
+            "success",
+        )
+
+    def test_daily_ohlc_does_not_synthesize_taiex_bar_when_official_ohlc_fails(
+        self,
+    ) -> None:
+        self.db.add(
+            MarketIndexDailyStat(
+                index_id="TAIEX",
+                market="TWSE",
+                trade_date=date(2026, 6, 15),
+                trade_volume=12_695_045_659,
+                trade_value=1_115_744_351_199,
+                transaction_count=900_000,
+                close_value=45_396.99,
+                price_change=1_227.95,
+                source="twse_openapi_fmtqik",
+            )
+        )
+        self.db.commit()
+        yahoo_points = [
+            yahoo_point(date(2026, 6, 11), 43_000.0),
+            yahoo_point(date(2026, 6, 12), 44_169.04),
+        ]
+
+        with (
+            patch.object(
+                indices,
+                "_fetch_yahoo_index_points",
+                return_value=(yahoo_points, {}, timezone(timedelta(hours=8))),
+            ),
+            patch.object(indices, "datetime", FixedDateTime),
+            patch.object(
+                indices,
+                "_fetch_twse_index_daily_ohlc_for_month",
+                side_effect=RuntimeError("provider unavailable"),
+            ),
+            patch.object(indices, "observe_provider_fallback"),
+        ):
+            payload = indices.get_market_index_ohlc_chart_data(
+                index_id="TAIEX",
+                timeframe="daily",
+                bars=2,
+                db=self.db,
+            )
+
+        self.assertEqual(
+            [point["time"] for point in payload["points"]],
+            [date(2026, 6, 11), date(2026, 6, 12)],
+        )
+        self.assertEqual(payload["to_date"], date(2026, 6, 12))
+        self.assertEqual(payload["freshness_status"], "stale")
+        self.assertFalse(payload["is_current"])
+        self.assertTrue(payload["refresh_recommended"])
+        overlay = payload["backfill"]["official_ohlc_overlay"]
+        self.assertEqual(overlay["status"], "unavailable")
+        self.assertEqual(overlay["merged_date_count"], 0)
+        self.assertEqual(overlay["missing_dates"], ["2026-06-15"])
 
     def test_current_month_index_stat_refresh_updates_existing_same_day_row(self) -> None:
         self.db.add(
@@ -1003,6 +1225,20 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["index_close"], 120.0)
         self.assertEqual(payload["positive"][0]["stock_id"], "2330")
         self.assertEqual(payload["negative"][0]["stock_id"], "2383")
+        self.assertFalse(payload["is_official"])
+        self.assertEqual(payload["method_version"], "v1")
+        self.assertEqual(payload["contribution_unit"], "index_points")
+        self.assertEqual(payload["trade_value_unit"], "TWD")
+        self.assertEqual(
+            payload["positive"][0]["trade_value_unit"],
+            "TWD",
+        )
+        self.assertGreater(payload["component_universe_count"], 0)
+        self.assertGreater(payload["covered_component_count"], 0)
+        self.assertIn(
+            payload["reconciliation_status"],
+            {"within_tolerance", "outside_tolerance", "unavailable"},
+        )
 
     def test_index_intraday_overlays_mis_snapshot_on_yahoo_history(self) -> None:
         yahoo_payload = {
@@ -1085,7 +1321,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["point_count"], 1)
         self.assertEqual(payload["points"][0]["price"], 45430.31)
 
-    def test_index_intraday_keeps_yahoo_payload_when_mis_is_unavailable(self) -> None:
+    def test_index_intraday_keeps_yahoo_data_when_mis_is_unavailable(self) -> None:
         yahoo_payload = {
             "stock_id": "TAIEX",
             "symbol": "^TWII",
@@ -1115,7 +1351,13 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         ):
             payload = indices.get_market_index_intraday("TAIEX")
 
-        self.assertEqual(payload, yahoo_payload)
+        self.assertEqual(payload["source"], yahoo_payload["source"])
+        self.assertEqual(payload["previous_close"], yahoo_payload["previous_close"])
+        self.assertEqual(payload["point_count"], 1)
+        self.assertEqual(payload["points"][0]["time"], "2026-06-26T09:40:10+08:00")
+        self.assertEqual(payload["points"][0]["price"], 45605.52)
+        self.assertEqual(payload["bar_contract_version"], "tw.intraday.bars.v2")
+        self.assertEqual(payload["points"][0]["volume_status"], "not_provided")
 
     def test_index_intraday_ignores_older_mis_snapshot(self) -> None:
         yahoo_payload = {
@@ -1156,7 +1398,13 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         ):
             payload = indices.get_market_index_intraday("TAIEX")
 
-        self.assertEqual(payload, yahoo_payload)
+        self.assertEqual(payload["source"], yahoo_payload["source"])
+        self.assertEqual(payload["previous_close"], yahoo_payload["previous_close"])
+        self.assertEqual(payload["point_count"], 1)
+        self.assertEqual(payload["points"][0]["time"], "2026-06-26T09:50:00+08:00")
+        self.assertEqual(payload["points"][0]["price"], 45500.0)
+        self.assertEqual(payload["bar_contract_version"], "tw.intraday.bars.v2")
+        self.assertEqual(payload["points"][0]["volume_status"], "not_provided")
 
 
 if __name__ == "__main__":

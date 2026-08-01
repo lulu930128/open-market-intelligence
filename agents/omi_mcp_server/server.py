@@ -187,6 +187,8 @@ CAPABILITY_IDS = [
     "market.chips",
     "screening.ranking",
     "screening.coverage",
+    "screening.intraday",
+    "market.hot_groups",
     "market.volume_state",
     "derivatives.positioning",
     "derivatives.structure",

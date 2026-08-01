@@ -1,0 +1,98 @@
+{
+  "contract_version": "omi.tw-financial-m8-production-manifest.v1",
+  "generated_at": "2026-08-01T15:35:00+08:00",
+  "status": "complete",
+  "database": {
+    "path": "data/open_market_intelligence.db",
+    "revision": "20260731_0049",
+    "counts": {
+      "tw_financial_basis_assessment": 3,
+      "tw_financial_filing": 3921,
+      "tw_financial_normalized_fact": 56,
+      "tw_financial_parse_run": 3934,
+      "tw_financial_parse_run_review": 3939,
+      "tw_financial_statement_fact": 39312,
+      "financial_metric_quarterly": 3883
+    },
+    "quick_check": "ok",
+    "foreign_key_violations": 0
+  },
+  "backup": {
+    "path": "data/backups/open_market_intelligence-before-m8-ci-canary-20260801-151400.db",
+    "size_bytes": 13144727552,
+    "sha256": "5195a3ecff894b2237edd8a8aca391362ca2b73bed524f897a29a013805cfac1",
+    "integrity_check": "ok",
+    "revision": "20260731_0049"
+  },
+  "canary": {
+    "stocks": ["2324", "3528", "5902"],
+    "provider_requests": 21,
+    "provider_requests_succeeded": 21,
+    "filings": 15,
+    "parse_run_ids": {"from": 3920, "to": 3934},
+    "review_event_ids": {"from": 3925, "to": 3939},
+    "statement_facts": 390,
+    "normalized_facts_per_stock": 7,
+    "packages": [
+      {
+        "stock_id": "2324",
+        "path": "docs/agent-runs/tw-financial-semantics-valuation-20260730/2324-ci-fast-lane-v1-production-source-aligned.json",
+        "canonical_package_hash": "a1c46783b3b0bcfff5362a708575bf54471e90d5bff62aa8d45bbe9cd24b88c1",
+        "file_sha256": "fdf657a2c0a13046525485a5a23e4f91bcf13eafcc22048b52f140844ac1e094",
+        "ttm_eps": "1.33"
+      },
+      {
+        "stock_id": "3528",
+        "path": "docs/agent-runs/tw-financial-semantics-valuation-20260730/3528-ci-fast-lane-v1-production-source-aligned.json",
+        "canonical_package_hash": "49def746792cdea8f497981b2addd849379db0560212f4fde549a3353b01279e",
+        "file_sha256": "cfbb1194f237701ddf59c65dc6807f1131e9c3eb39724fdbbe0d2477e0c9c675",
+        "ttm_eps": "3.11"
+      },
+      {
+        "stock_id": "5902",
+        "path": "docs/agent-runs/tw-financial-semantics-valuation-20260730/fixtures/5902-ci-fast-lane-v1-production.json",
+        "canonical_package_hash": "0a803080301f6246fc43f87aac92545954400f7cba38526234b02c509314501c",
+        "file_sha256": "6a0b2da89c020390c3486f606c19fdf065bbd5d5e8ec0c760f4478ac222ab647",
+        "ttm_eps": "2.16"
+      }
+    ],
+    "valuation_status": "unavailable",
+    "valuation_issue_code": "valuation_price_expected_close_stale"
+  },
+  "universe": {
+    "variant": "ci",
+    "stock_count": 1928,
+    "unique_stock_count": 1928,
+    "planner_query_only": true,
+    "pages": [
+      "M8FinalPlanner-0.json",
+      "M8FinalPlanner-500.json",
+      "M8FinalPlanner-1000.json",
+      "M8FinalPlanner-1500.json"
+    ],
+    "terminal_stage_counts": {
+      "normalized_ready": 5,
+      "missing_official_filings": 1923
+    },
+    "normalized_ready_stocks": ["2324", "2327", "2330", "3528", "5902"]
+  },
+  "runtime": {
+    "launcher": "formal",
+    "backend_port": 8400,
+    "frontend_port": 3000,
+    "health": "ok",
+    "readyz": "ready",
+    "frontend_proxy": "ok",
+    "http_ai_contract": "omi.decision.v4",
+    "mcp_protocol": "2025-06-18",
+    "mcp_call_is_error": false,
+    "frontend_financial_panel_verified_stock": "2324"
+  },
+  "boundary": {
+    "all_market_normalized": false,
+    "remaining_not_normalized": 1923,
+    "legacy_raw_queryable": true,
+    "unbounded_refresh_allowed": false,
+    "next_mode": "bounded_reviewed_coverage_maintenance"
+  }
+}

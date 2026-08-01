@@ -223,6 +223,11 @@ class AiDecisionEnvelope(BaseModel):
 
 class AiDecisionEnvelopeV4(AiDecisionEnvelope):
     contract_version: Literal["omi.decision.v4"] = "omi.decision.v4"
+    transport_ok: bool
+    request_valid: bool
+    execution_completed: bool
+    data_available: bool
+    quality_status: str
     projection: dict[str, Any] = Field(default_factory=dict)
 
 

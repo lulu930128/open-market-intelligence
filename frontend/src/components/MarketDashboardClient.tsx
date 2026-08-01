@@ -384,8 +384,6 @@ export default function MarketDashboardClient({
       mode: radarMode,
       radar,
       loadState: radarLoadState,
-      outcomeSummary: radarOutcomeSummary,
-      outcomeLoadState: radarOutcomeLoadState,
       outcomeHistory: radarOutcomeHistory,
       outcomeHistoryOpen: radarOutcomeHistoryOpen,
       outcomeHistoryLoadState: radarOutcomeHistoryLoadState,
@@ -725,15 +723,13 @@ export default function MarketDashboardClient({
     const title =
       kind === "radar"
         ? t("radar.loadError")
-        : kind === "evaluate"
-          ? t("radar.outcome.evaluateError")
-          : t("radar.outcome.loadError");
+        : t("radar.v2.outcomes.loadError");
     const source =
       kind === "radar"
         ? t("radar.title")
         : kind === "history"
-          ? t("radar.outcome.history")
-          : t("radar.outcome.title");
+          ? t("radar.v2.outcomes.history")
+          : t("radar.v2.outcomes.title");
     const contextSuffix =
       kind === "radar"
         ? "radar"
@@ -1303,13 +1299,11 @@ export default function MarketDashboardClient({
         mode={radarMode}
         selectedStockId={selectedStockId}
         disabled={activeGroupId === null}
-        outcomeSummary={radarOutcomeSummary}
-        outcomeLoadState={radarOutcomeLoadState}
-        outcomeHistory={radarOutcomeHistory}
-        outcomeHistoryOpen={radarOutcomeHistoryOpen}
-        outcomeHistoryLoadState={radarOutcomeHistoryLoadState}
-        outcomeDetailLoadState={radarOutcomeDetailLoadState}
-        selectedOutcomeSnapshotId={selectedRadarOutcomeSnapshotId}
+        v2OutcomeHistory={radarOutcomeHistory}
+        v2OutcomeHistoryOpen={radarOutcomeHistoryOpen}
+        v2OutcomeHistoryLoadState={radarOutcomeHistoryLoadState}
+        v2OutcomeDetailLoadState={radarOutcomeDetailLoadState}
+        selectedV2OutcomeSnapshotDate={selectedRadarOutcomeSnapshotId}
         getModeHref={(nextMode) =>
           dashboardHref({
             market: "tw",
@@ -1324,13 +1318,10 @@ export default function MarketDashboardClient({
             void taiwanRadarActions.load(activeGroupId);
           }
         }}
-        onOpenOutcomeHistory={taiwanRadarActions.openOutcomeHistory}
-        onCloseOutcomeHistory={taiwanRadarActions.closeOutcomeHistory}
-        onReloadOutcomeHistory={taiwanRadarActions.reloadOutcomeHistory}
-        onSelectOutcomeSnapshot={taiwanRadarActions.selectOutcomeSnapshot}
-        onEvaluateOutcomeSnapshot={(snapshotRunId) => {
-          void taiwanRadarActions.evaluateOutcome(snapshotRunId);
-        }}
+        onOpenV2OutcomeHistory={taiwanRadarActions.openOutcomeHistory}
+        onCloseV2OutcomeHistory={taiwanRadarActions.closeOutcomeHistory}
+        onReloadV2OutcomeHistory={taiwanRadarActions.reloadOutcomeHistory}
+        onSelectV2OutcomeSnapshot={taiwanRadarActions.selectOutcomeSnapshot}
         onSelectStock={onTaiwanStockChange}
       />
       <section className="border border-omi-border-subtle bg-omi-surface">

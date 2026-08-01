@@ -413,6 +413,53 @@ class JobRetryTests(unittest.TestCase):
         telemetry_db.rollback.assert_not_called()
         telemetry_db.close.assert_called_once()
 
+    def test_shareholding_inner_error_is_a_failed_selected_refresh(self) -> None:
+        with (
+            patch.object(
+                stock_selection_refresh,
+                "ensure_stock_shareholding_history",
+                return_value={
+                    "status": "error",
+                    "error_count": 1,
+                    "results": [
+                        {
+                            "stock_id": "8299",
+                            "status": "error",
+                            "error_message": "TDCC request timed out",
+                        }
+                    ],
+                },
+            ),
+            patch.object(
+                stock_selection_refresh,
+                "_record_shareholding_refresh_outcome",
+            ) as record_outcome,
+        ):
+            result = stock_selection_refresh.refresh_selected_stock_data(
+                db=SimpleNamespace(),
+                stock_id="8299",
+                steps=["shareholding_distribution"],
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["refresh_outcome"], "failed")
+        self.assertEqual(result["error_count"], 1)
+        self.assertEqual(result["completed_count"], 0)
+        failed_step = result["failed_steps"][0]
+        self.assertEqual(
+            failed_step["dataset"],
+            "shareholding_distribution",
+        )
+        self.assertEqual(failed_step["provider"], "tdcc")
+        self.assertEqual(failed_step["target"], "8299")
+        self.assertEqual(
+            failed_step["error_message"],
+            "TDCC request timed out",
+        )
+        recorded = record_outcome.call_args.kwargs["result"]
+        self.assertEqual(recorded["refresh_outcome"], "failed")
+        self.assertEqual(recorded["error_message"], "TDCC request timed out")
+
     def test_shareholding_telemetry_failure_does_not_poison_caller_session(
         self,
     ) -> None:

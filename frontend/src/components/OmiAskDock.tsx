@@ -161,6 +161,18 @@ const STAGE_LABEL_KEYS = new Set([
 const INTRADAY_QUESTION_PATTERN =
   /盤中|場中|即時|當沖|今天|現在|intraday|real[-\s]?time|today|now|デイトレ|リアルタイム|当日/i;
 const SLOT_PRIORITY = [
+  "quote.snapshot",
+  "intraday.bars",
+  "market.indices",
+  "market.breadth",
+  "technical.structure",
+  "screening.intraday",
+  "market.hot_groups",
+  "data.freshness",
+  "daily.ohlcv",
+  "chips.institutional",
+  "fundamentals.financials",
+  "events.upcoming",
   "quote",
   "intraday",
   "index_intraday",
@@ -173,6 +185,18 @@ const SLOT_PRIORITY = [
   "news_events",
 ];
 const SLOT_LABEL_KEYS: Record<string, string> = {
+  "quote.snapshot": "ask.slots.quote",
+  "intraday.bars": "ask.slots.intraday",
+  "market.indices": "ask.slots.indexIntraday",
+  "market.breadth": "ask.slots.marketBreadth",
+  "technical.structure": "ask.slots.technical",
+  "screening.intraday": "ask.slots.intradayScreening",
+  "market.hot_groups": "ask.slots.hotGroups",
+  "data.freshness": "ask.slots.dataQuality",
+  "daily.ohlcv": "ask.slots.dailyChart",
+  "chips.institutional": "ask.slots.institutional",
+  "fundamentals.financials": "ask.slots.fundamentals",
+  "events.upcoming": "ask.slots.newsEvents",
   quote: "ask.slots.quote",
   intraday: "ask.slots.intraday",
   index_intraday: "ask.slots.indexIntraday",
@@ -578,7 +602,57 @@ function responsePayloadLevel(response: UnknownRecord) {
 }
 
 function responseSlots(response: UnknownRecord) {
-  const canonicalSlots = asRecord(asRecord(response.evidence).slots);
+  const evidence = asRecord(response.evidence);
+  const capabilityStatus = asRecord(evidence.capability_status);
+  if (Object.keys(capabilityStatus).length > 0) {
+    return Object.fromEntries(
+      Object.entries(capabilityStatus).map(([capabilityId, value]) => {
+        const status = asRecord(value);
+        const applicability = stringValue(status.applicability_status)?.toLowerCase();
+        const availability = stringValue(status.availability_status)?.toLowerCase();
+        const freshness = (
+          stringValue(status.freshness_status) || stringValue(status.temporal_status)
+        )?.toLowerCase();
+        const release = stringValue(status.release_status)?.toLowerCase();
+        const policy = (
+          stringValue(status.policy_status) ||
+          (status.policy_satisfied === false ? "non_compliant" : null)
+        )?.toLowerCase();
+        const usability = stringValue(status.usability_status)?.toLowerCase();
+        const factsUsable = status.facts_usable === true;
+        const decisionUsable = status.decision_usable === true;
+        const displayStatus =
+          applicability === "not_applicable"
+            ? "not_applicable"
+            : ["missing", "unavailable", "failed", "error"].includes(availability || "")
+              ? "missing"
+              : ["stale", "expired"].includes(freshness || "")
+                ? "stale"
+                : release === "pending_release"
+                  ? "partial"
+                : decisionUsable ||
+                    ["ready", "available", "current"].includes(usability || "")
+                  ? "ready"
+                  : factsUsable ||
+                      ["partial", "limited", "degraded"].includes(availability || "") ||
+                      ["partial", "limited", "degraded"].includes(usability || "") ||
+                      ["non_compliant", "blocked"].includes(policy || "")
+                    ? "partial"
+                    : "blocked";
+        return [
+          capabilityId,
+          {
+            ...status,
+            status: displayStatus,
+            capability: capabilityId,
+            reason: textItems(status.reason_codes, 3).join("、") || null,
+          },
+        ];
+      })
+    );
+  }
+
+  const canonicalSlots = asRecord(evidence.slots);
   if (Object.keys(canonicalSlots).length > 0) return canonicalSlots;
 
   const result = asRecord(response.result);

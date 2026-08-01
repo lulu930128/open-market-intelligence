@@ -14,6 +14,7 @@ from app.ai import agentic_tools
 from app.ai import ask as ai_ask
 from app.ai import freshness
 from app.ai import reports as ai_reports
+from app.ai import scope_resolution
 from app.ai import tools as ai_tools
 from app.ai.market_context import taiwan_market
 from app.ai.schemas import AiAskRequest
@@ -237,6 +238,20 @@ def add_complete_stock_evidence(
 
 
 class AiFreshnessGuardTests(unittest.TestCase):
+    def test_date_year_is_not_parsed_as_stock_id(self) -> None:
+        self.assertEqual(
+            scope_resolution._stock_ids_in_text(
+                "查 5328 在 2026-08-01 的最近交易日資料"
+            ),
+            ("5328",),
+        )
+        self.assertEqual(
+            scope_resolution._stock_ids_in_text(
+                "查 5328 在 2026 年 Q2 的資料"
+            ),
+            ("5328",),
+        )
+
     def test_shareholding_cooldown_keeps_gap_visible_but_not_refreshable(self) -> None:
         db = make_session()
         try:
@@ -1412,6 +1427,32 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 "get_watchlist_group_latest_ranking",
                 return_value=ranking,
             ) as read_ranking,
+            patch(
+                "app.ai.market_context.taiwan_watchlist."
+                "radar_active_v2_service."
+                "build_radar_v2_active_projection_from_db",
+                side_effect=lambda **kwargs: {
+                    **kwargs["radar"],
+                    "radar_engine": {
+                        "active_version": "radar_v2.0-active",
+                        "mode": "active",
+                    },
+                    "radar_v2_summary": {
+                        "evaluated_count": len(
+                            kwargs["radar"].get("results") or []
+                        ),
+                        "universe_evaluated_count": len(
+                            kwargs["universe_items"]
+                        ),
+                        "universe_scope": "complete_calculation_universe",
+                        "readiness": {
+                            "operational_status": "active",
+                            "validation_status": "unverified",
+                            "limitations": [],
+                        },
+                    },
+                },
+            ),
         ):
             context = ai_tools.read_watchlist_context(
                 db=object(),
@@ -1439,6 +1480,16 @@ class AiFreshnessGuardTests(unittest.TestCase):
         self.assertEqual(context["scope"]["radar_mode"], "momentum")
         self.assertEqual(radar["matched_count"], 1)
         self.assertEqual(radar["radar_count"], 1)
+        self.assertEqual(
+            radar["radar_engine"]["active_version"],
+            "radar_v2.0-active",
+        )
+        self.assertEqual(
+            context["data"]["compact"]["radar"]["radar_v2_summary"][
+                "readiness"
+            ]["operational_status"],
+            "active",
+        )
         self.assertEqual(radar["results"][0]["stock_id"], "2330")
         self.assertEqual(radar["results"][0]["bucket"], "breakout_high")
         compact = context["data"]["compact"]

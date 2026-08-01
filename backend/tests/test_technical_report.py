@@ -235,6 +235,11 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["confidence"], "medium")
         self.assertEqual(price_context["price"], 130.0)
         self.assertTrue(price_context["is_provisional"])
+        self.assertEqual(
+            price_context["technical_price_basis"],
+            "intraday_series_latest_price",
+        )
+        self.assertFalse(price_context["bid_ask_price_used"])
         self.assertEqual(price_context["daily_indicator_time"], "2026-03-21")
         self.assertEqual(
             price_context["moving_average_structure"]["price_state"],
@@ -277,6 +282,10 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["phase"], "daily")
         self.assertEqual(report["confidence"], "high")
         self.assertFalse(report["data"]["price_context"]["is_provisional"])
+        self.assertEqual(
+            report["data"]["price_context"]["technical_price_basis"],
+            "official_completed_daily_close",
+        )
         self.assertEqual(report["data"]["price_context"]["price_time"], "2026-03-20")
         self.assertFalse(
             any(
@@ -338,6 +347,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertIsNotNone(levels["entry"]["preferred_zone"]["high"])
         self.assertIn("do_not_chase_above", levels["entry"])
         self.assertIn("short_stop", levels["risk"])
+        self.assertIn("short_term_stop", levels["risk"])
         self.assertIn("technical_invalidation", levels["risk"])
 
     def test_stock_context_exposes_refined_score_model(self) -> None:
@@ -386,6 +396,17 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertFalse(compact["intraday_bars"]["enabled"])
         self.assertIn("technical", compact)
         self.assertIn("chips", compact)
+        self.assertEqual(compact["chips"]["institutional"]["quantity_unit"], "shares")
+        self.assertEqual(compact["chips"]["margin"]["quantity_unit"], "lots")
+        self.assertEqual(compact["chips"]["margin"]["raw_unit"], "lots")
+        self.assertEqual(compact["chips"]["margin"]["normalized_unit"], "shares")
+        self.assertEqual(
+            compact["chips"]["margin"]["normalized_quantities"][
+                "margin_today_balance"
+            ],
+            98_000_000,
+        )
+        self.assertEqual(compact["chips"]["margin"]["lot_size"], 1000)
         self.assertIn("fundamentals", compact)
         self.assertEqual(compact["events"], {})
         self.assertEqual(compact["regulation"], {})
@@ -552,7 +573,12 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(compact["quote"]["price"], 181.5)
         self.assertEqual(compact["quote"]["last_price"], 181.5)
         self.assertTrue(compact["quote"]["is_realtime"])
-        self.assertEqual(compact["quote"]["latency_ms"], 5000)
+        self.assertEqual(compact["quote"]["event_age_seconds"], 5)
+        self.assertIsNone(compact["quote"]["latency_ms"])
+        self.assertEqual(
+            compact["quote"]["latency_ms_semantics"],
+            "deprecated_network_latency_ms",
+        )
         self.assertEqual(compact["quote"]["session_phase"], "regular")
         self.assertTrue(compact["intraday_bars"]["enabled"])
         self.assertEqual(set(compact["intraday_bars"]["series"].keys()), {"1m", "5m"})
@@ -652,6 +678,8 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(compact["payload_level"], "summary")
         self.assertEqual(compact["target"]["type"], "tw_index")
         self.assertEqual(compact["quote"]["price"], 18111.0)
+        self.assertEqual(compact["daily_chart"]["timeframe"], "daily")
+        self.assertTrue(compact["daily_chart"]["points"])
         self.assertEqual(compact["intraday_bars"]["bar_limit"], 1)
         series = compact["intraday_bars"]["series"]["1m"]
         self.assertEqual(series["point_count"], 12)

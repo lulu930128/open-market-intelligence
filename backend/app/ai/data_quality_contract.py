@@ -18,20 +18,24 @@ READY_STATUSES = {
     "healthy",
     "historical",
     "latest_completed_session",
+    "latest_released",
     "latest_session_close",
     "live",
     "ok",
     "ready",
+    "valid_empty",
 }
 LIMITED_STATUSES = {
     "cached",
     "delayed",
     "partial",
     "pending",
+    "pending_release",
     "provisional",
     "waiting",
 }
 NEUTRAL_STATUSES = {
+    "market_closed_no_live_book",
     "not_applicable",
     "not_requested",
 }
@@ -645,6 +649,13 @@ def _has_semantic_value(value: Any) -> bool:
 
 
 def _semantic_payload_empty(capability_id: str, payload: Any) -> bool:
+    if isinstance(payload, dict) and (
+        payload.get("empty_result_is_valid") is True
+        or _normalized_status(payload.get("status")) == "valid_empty"
+        or _normalized_status(_dict(payload.get("freshness")).get("status"))
+        == "valid_empty"
+    ):
+        return False
     if capability_id == "ownership.distribution":
         rows = (
             payload
@@ -672,6 +683,130 @@ def _semantic_payload_empty(capability_id: str, payload: Any) -> bool:
     return not _has_semantic_value(payload)
 
 
+def _first_semantic_value(
+    payload: Any,
+    *,
+    keys: set[str],
+) -> Any:
+    return next(
+        (
+            raw_value
+            for _, raw_value in _iter_values(payload, keys=keys)
+            if _has_semantic_value(raw_value)
+        ),
+        None,
+    )
+
+
+def _canonical_freshness_status(
+    *,
+    status: str,
+    payload: Any,
+    realtime: dict[str, Any],
+    payload_included: bool,
+) -> str:
+    explicit = _normalized_status(
+        realtime.get("state")
+        or _first_semantic_value(
+            payload,
+            keys={"freshness_status"},
+        )
+        or status
+    )
+    aliases = {
+        "daily_close": "latest_completed_session",
+        "final": "latest_completed_session",
+        "final_snapshot": "latest_completed_session",
+        "latest_session_close": "latest_completed_session",
+        "official_close": "latest_completed_session",
+    }
+    explicit = aliases.get(explicit, explicit)
+    release_status = _normalized_status(
+        _first_semantic_value(payload, keys={"release_status"})
+    )
+    if (
+        payload_included
+        and release_status in {"pending", "pending_release"}
+        and explicit in {"pending", "pending_release", "partial", "unknown"}
+    ):
+        return "latest_released"
+    if explicit == "not_applicable":
+        return "latest_completed_session"
+    return explicit
+
+
+def _canonical_release_status(
+    *,
+    payload: Any,
+    payload_included: bool,
+    applicability_status: str,
+    freshness_status: str,
+) -> str:
+    if applicability_status == "not_applicable":
+        return "not_applicable"
+    explicit = _normalized_status(
+        _first_semantic_value(
+            payload,
+            keys={"release_status"},
+        )
+    )
+    if explicit in {"pending", "pending_release"}:
+        return "pending_release"
+    if explicit not in {"unknown", "missing"}:
+        return explicit
+    if freshness_status == "pending_release":
+        return "pending_release"
+    return "released" if payload_included else "unknown"
+
+
+def _canonical_coverage_status(
+    *,
+    payload: Any,
+    payload_included: bool,
+) -> str:
+    explicit = _normalized_status(
+        _first_semantic_value(
+            payload,
+            keys={"coverage_status"},
+        )
+    )
+    if explicit in {"complete", "partial", "sample_only"}:
+        return explicit
+    if isinstance(payload, dict):
+        coverage = _dict(payload.get("coverage"))
+        if coverage.get("is_full_market") is False:
+            return "sample_only"
+        if coverage.get("is_full_requested_universe") is False:
+            return "partial"
+        ratio = coverage.get("coverage_ratio", payload.get("coverage_ratio"))
+        try:
+            if ratio is not None and float(ratio) < 1:
+                return "partial"
+        except (TypeError, ValueError):
+            pass
+    return "complete" if payload_included else "unknown"
+
+
+def _canonical_reason_codes(
+    *,
+    issues: list[str],
+    applicability_status: str,
+    availability_status: str,
+    freshness_status: str,
+    coverage_status: str,
+) -> list[str]:
+    values = list(issues)
+    if applicability_status == "not_applicable":
+        values.append("not_applicable")
+    if availability_status in {"missing", "error"}:
+        values.append(f"availability_{availability_status}")
+    if freshness_status in {"stale", "delayed", "pending_release"}:
+        values.append(f"freshness_{freshness_status}")
+    if coverage_status in {"partial", "sample_only"}:
+        values.append(f"coverage_{coverage_status}")
+    return list(dict.fromkeys(values))
+
+
 def _has_payload_provenance(payload: Any) -> bool:
     populated_keys = {
         key
@@ -692,6 +827,50 @@ def _has_payload_observation_timestamp(payload: Any) -> bool:
             keys=OBSERVATION_TIMESTAMP_KEYS,
         )
     )
+
+
+def _financial_semantic_quality(
+    capability_id: str,
+    payload: Any,
+) -> dict[str, Any] | None:
+    if capability_id != "fundamentals.financials" or not isinstance(payload, dict):
+        return None
+
+    financial_contract = _dict(payload.get("financial_contract"))
+    quality = _dict(financial_contract.get("quality"))
+    normalized = _dict(financial_contract.get("normalized"))
+    if not financial_contract or not quality:
+        return None
+
+    semantic_validity = _normalized_status(quality.get("semantic_validity"))
+    if (
+        quality.get("decision_usable") is True
+        and normalized.get("status") == "ready"
+        and semantic_validity == "valid"
+    ):
+        return None
+
+    as_reported = _dict(financial_contract.get("as_reported"))
+    as_reported_status = _normalized_status(as_reported.get("status"))
+    facts_available = bool(
+        as_reported_status.startswith("available")
+        or as_reported.get("latest")
+        or as_reported.get("history")
+        or payload.get("latest_financial")
+        or payload.get("financial_history")
+    )
+    issues = [
+        str(issue)
+        for issue in quality.get("issues") or []
+        if str(issue).strip()
+    ]
+    issues.append("financial_contract_decision_blocked")
+    return {
+        "source": "payload.semantic_quality",
+        "status": "partial" if facts_available else "blocked",
+        "status_class": "limited" if facts_available else "blocked",
+        "issues": list(dict.fromkeys(issues)),
+    }
 
 
 def _quality_for_capability(
@@ -725,6 +904,7 @@ def _quality_for_capability(
     payload_included = bool(
         projected_payload_included and not semantic_payload_empty
     )
+    semantic_quality = _financial_semantic_quality(capability_id, payload)
 
     candidates = [
         candidate
@@ -812,6 +992,8 @@ def _quality_for_capability(
         contradiction_codes.append("status_sources_disagree")
     if "neutral" in status_classes and ({"ready", "limited", "blocked"} & status_classes):
         contradiction_codes.append("applicability_sources_disagree")
+    if semantic_quality is not None:
+        candidates.append(semantic_quality)
 
     temporal = _temporal_summary(payload)
     units = _unit_summary(payload)
@@ -827,6 +1009,41 @@ def _quality_for_capability(
     )
     status = canonical_candidate["status"]
     status_class = canonical_candidate["status_class"]
+    applicability_status = (
+        "not_applicable"
+        if status_class == "neutral"
+        or _normalized_status(
+            _first_semantic_value(payload, keys={"applicability_status"})
+        )
+        == "not_applicable"
+        else "applicable"
+    )
+    freshness_status = _canonical_freshness_status(
+        status=status,
+        payload=payload,
+        realtime=realtime,
+        payload_included=payload_included,
+    )
+    release_status = _canonical_release_status(
+        payload=payload,
+        payload_included=payload_included,
+        applicability_status=applicability_status,
+        freshness_status=freshness_status,
+    )
+    if applicability_status == "not_applicable":
+        status = "not_applicable"
+        status_class = "neutral"
+    elif (
+        payload_included
+        and freshness_status == "latest_released"
+        and release_status == "pending_release"
+    ):
+        status = freshness_status
+        status_class = "ready"
+    if semantic_quality is not None:
+        status = str(semantic_quality["status"])
+        status_class = str(semantic_quality["status_class"])
+        canonical_candidate = semantic_quality
     capability_freshness_status = (
         _normalized_status(freshness_by_capability.get(capability_id))
         if freshness_by_capability.get(capability_id) is not None
@@ -865,13 +1082,37 @@ def _quality_for_capability(
         and _has_payload_provenance(payload)
         and _price_value(payload) is not None
     )
+    realtime_facts_usable = bool(
+        realtime.get("facts_usable")
+        if isinstance(realtime.get("facts_usable"), bool)
+        else False
+    )
     facts_usable = bool(
         payload_included
         and (
             status_class in {"ready", "limited"}
+            or realtime_facts_usable
             or stale_intraday_facts_usable
             or stale_quote_facts_usable
         )
+    )
+    intraday_research_usable = bool(
+        payload_included
+        and (
+            realtime.get("intraday_research_usable")
+            if isinstance(
+                realtime.get("intraday_research_usable"),
+                bool,
+            )
+            else capability_id == "intraday.bars"
+            and facts_usable
+            and freshness_status in {"current", "delayed"}
+        )
+    )
+    execution_grade_usable = bool(
+        realtime.get("execution_grade_usable")
+        if isinstance(realtime.get("execution_grade_usable"), bool)
+        else False
     )
     contradictions = [
         {
@@ -891,6 +1132,45 @@ def _quality_for_capability(
         issues.append("volume_unit_missing")
     if realtime_policy_unsatisfied:
         issues.append("live_requirement_not_satisfied")
+    if semantic_quality is not None:
+        issues.extend(str(value) for value in semantic_quality.get("issues") or [])
+    if (
+        capability_id == "quote.snapshot"
+        and _normalized_status(
+            _dict(_dict(payload).get("volume_reconciliation")).get(
+                "status"
+            )
+        )
+        == "mismatch"
+    ):
+        issues.append("volume_reconciliation_mismatch")
+    availability_status = (
+        "available"
+        if payload_included
+        else "unavailable"
+        if applicability_status == "not_applicable"
+        else "missing"
+    )
+    coverage_status = _canonical_coverage_status(
+        payload=payload,
+        payload_included=payload_included,
+    )
+    usability_status = (
+        "not_applicable"
+        if applicability_status == "not_applicable"
+        else "unusable"
+        if not facts_usable
+        else "limited"
+        if not decision_usable or coverage_status in {"partial", "sample_only"}
+        else "usable"
+    )
+    reason_codes = _canonical_reason_codes(
+        issues=issues,
+        applicability_status=applicability_status,
+        availability_status=availability_status,
+        freshness_status=freshness_status,
+        coverage_status=coverage_status,
+    )
     return {
         "capability": capability_id,
         "domain": item.get("domain"),
@@ -898,21 +1178,17 @@ def _quality_for_capability(
         "required": bool(item.get("required")),
         "status": status,
         "status_class": status_class,
-        "status_authority": canonical_candidate["source"],
-        "availability": (
-            "not_applicable"
-            if status_class == "neutral"
-            else "available"
-            if payload_included
-            else "missing"
-        ),
+        "status_authority": "canonical_status_resolver",
+        "upstream_status_authority": canonical_candidate["source"],
+        "applicability_status": applicability_status,
+        "availability_status": availability_status,
+        "freshness_status": freshness_status,
+        "release_status": release_status,
+        "coverage_status": coverage_status,
+        "usability_status": usability_status,
+        "availability": availability_status,
         "freshness": (
-            realtime.get("state")
-            or capability_freshness_status
-            or payload_freshness.get("status")
-            or _dict(slot.get("freshness")).get("status")
-            or freshness_by_domain.get(domain)
-            or status
+            freshness_status
         ),
         "completeness": completeness,
         "release_phase": _release_phase(
@@ -920,6 +1196,9 @@ def _quality_for_capability(
             payload,
         ),
         "facts_usable": facts_usable,
+        "intraday_research_usable": intraday_research_usable,
+        "execution_grade_usable": execution_grade_usable,
+        "policy_satisfied": realtime.get("policy_satisfied"),
         "decision_usable": decision_usable,
         "payload_included": payload_included,
         "temporal": temporal,
@@ -928,6 +1207,64 @@ def _quality_for_capability(
         "status_evidence": candidates,
         "contradictions": contradictions,
         "issues": list(dict.fromkeys(issues)),
+        "reason_codes": reason_codes,
+        "as_of": _first_semantic_value(
+            payload,
+            keys={"as_of", "latest_data_date", "trade_date", "date"},
+        ),
+        "trade_date": _first_semantic_value(
+            payload,
+            keys={"trade_date", "latest_data_date", "date"},
+        ),
+        "event_time": _first_semantic_value(
+            payload,
+            keys={"event_time", "provider_event_time", "bar_time"},
+        ),
+        "release_at": _first_semantic_value(
+            payload,
+            keys={"release_at", "released_at", "next_release_at"},
+        ),
+        "fetched_at": _first_semantic_value(payload, keys={"fetched_at"}),
+        "computed_at": _first_semantic_value(
+            payload,
+            keys={"computed_at", "calculated_at", "generated_at"},
+        ),
+        "served_at": (
+            _first_semantic_value(payload, keys={"served_at"})
+            or canonical.get("served_at")
+            or canonical.get("generated_at")
+        ),
+        "refresh_possible_now": (
+            False
+            if applicability_status == "not_applicable"
+            else realtime.get("refresh_possible_now")
+        ),
+        "refresh_recommended": (
+            False
+            if applicability_status == "not_applicable"
+            or (
+                release_status == "pending_release"
+                and freshness_status == "latest_released"
+            )
+            else bool(
+                realtime.get("refresh_recommended")
+                or payload_freshness.get("refresh_recommended")
+                or _dict(
+                    freshness_by_capability.get(capability_id)
+                ).get("refresh_recommended")
+            )
+        ),
+        "source_grade": _first_semantic_value(
+            payload,
+            keys={"source_grade"},
+        ),
+        "selected_provider": _first_semantic_value(
+            payload,
+            keys={"selected_provider", "provider"},
+        ),
+        "fallback_used": bool(
+            _first_semantic_value(payload, keys={"fallback_used"})
+        ),
     }
 
 
@@ -980,7 +1317,22 @@ def _fusion_issues(
     if quote and daily:
         quote_date = _dict(quote.get("temporal")).get("latest_date")
         daily_date = _dict(daily.get("temporal")).get("latest_date")
-        if quote_date and daily_date and quote_date != daily_date:
+        quote_payload = _dict(projected_data.get("quote.snapshot"))
+        date_relation = _dict(
+            quote_payload.get("session_date_relation")
+        )
+        expected_cross_date_relation = bool(
+            date_relation.get("expected") is True
+            and date_relation.get("status") == "aligned"
+            and date_relation.get("quote_date") == quote_date
+            and date_relation.get("completed_daily_date") == daily_date
+        )
+        if (
+            quote_date
+            and daily_date
+            and quote_date != daily_date
+            and not expected_cross_date_relation
+        ):
             daily["decision_usable"] = False
             daily["issues"] = list(
                 dict.fromkeys(
@@ -1103,12 +1455,18 @@ def build_quality_contract(
         for item in _list(manifest.get("capabilities"))
         if isinstance(item, dict) and item.get("capability")
     }
+    required_capability_rows = {
+        capability_id: item
+        for capability_id, item in capability_rows.items()
+        if item.get("required")
+    }
     fusion_issues = _fusion_issues(
-        capability_rows,
+        required_capability_rows,
         projected_data=projected_data,
     )
-    required_rows = [
-        item for item in capability_rows.values() if item.get("required")
+    required_rows = list(required_capability_rows.values())
+    supplemental_rows = [
+        item for item in capability_rows.values() if not item.get("required")
     ]
     required_data_rows = [
         item
@@ -1124,6 +1482,7 @@ def build_quality_contract(
         str(item["capability"])
         for item in required_rows
         if not item.get("facts_usable")
+        and item.get("applicability_status") != "not_applicable"
     ]
     blocked_required.extend(unmet_required_capabilities)
     limited_required = [
@@ -1144,7 +1503,11 @@ def build_quality_contract(
         and (
             scope_type in DIAGNOSTIC_SCOPES
             and any(item.get("payload_included") for item in required_data_rows)
-            or any(item.get("facts_usable") for item in required_data_rows)
+            or any(
+                item.get("facts_usable")
+                or item.get("applicability_status") == "not_applicable"
+                for item in required_data_rows
+            )
         )
     )
     output = str(selection.get("output") or "decision_with_evidence")
@@ -1186,9 +1549,23 @@ def build_quality_contract(
                 "capabilities": [capability_id],
             }
         )
-    for item in capability_rows.values():
+    supplemental_issues: list[dict[str, Any]] = []
+    for item in required_rows:
         for code in item.get("issues") or []:
             issues.append(
+                {
+                    "code": str(code),
+                    "severity": (
+                        "blocked"
+                        if item.get("status_class") == "blocked"
+                        else "limited"
+                    ),
+                    "capabilities": [str(item.get("capability"))],
+                }
+            )
+    for item in supplemental_rows:
+        for code in item.get("issues") or []:
+            supplemental_issues.append(
                 {
                     "code": str(code),
                     "severity": (
@@ -1216,13 +1593,42 @@ def build_quality_contract(
         "output": output,
         "status": overall_status,
         "trust_level": trust_level,
-        "trust_scope": "decision_readiness",
+        "trust_scope": "selected_required_capabilities",
         "response_ready": response_ready,
         "facts_ready": facts_ready,
         "analysis_ready": analysis_ready,
         "decision_ready": decision_ready,
         "blocked_required_capabilities": list(dict.fromkeys(blocked_required)),
         "limited_required_capabilities": list(dict.fromkeys(limited_required)),
+        "selected_capability_quality": {
+            "scope": "required_capabilities",
+            "status": overall_status,
+            "trust_level": trust_level,
+            "capabilities": [
+                str(item.get("capability")) for item in required_rows
+            ],
+        },
+        "supplemental_context_quality": {
+            "scope": "optional_capabilities",
+            "affects_selected_quality": False,
+            "status": (
+                "blocked"
+                if any(
+                    item.get("status_class") == "blocked"
+                    for item in supplemental_rows
+                )
+                else "partial"
+                if any(
+                    item.get("status_class") == "limited"
+                    for item in supplemental_rows
+                )
+                else "ready"
+            ),
+            "capabilities": [
+                str(item.get("capability")) for item in supplemental_rows
+            ],
+            "issues": supplemental_issues,
+        },
         "capabilities": capability_rows,
         "fusion": {
             "status": "blocked" if any(
@@ -1260,6 +1666,57 @@ def _slot_status_from_quality(items: list[dict[str, Any]]) -> tuple[str, str]:
     )
 
 
+def _consumer_capability_status(item: dict[str, Any]) -> dict[str, Any]:
+    projection = {
+        key: deepcopy(item.get(key))
+        for key in (
+            "capability",
+            "required",
+            "applicability_status",
+            "availability_status",
+            "freshness_status",
+            "release_status",
+            "coverage_status",
+            "usability_status",
+            "facts_usable",
+            "intraday_research_usable",
+            "execution_grade_usable",
+            "policy_satisfied",
+            "decision_usable",
+            "as_of",
+            "event_time",
+            "fetched_at",
+            "trade_date",
+            "release_at",
+            "computed_at",
+            "served_at",
+            "refresh_possible_now",
+            "refresh_recommended",
+            "source_grade",
+            "selected_provider",
+            "fallback_used",
+            "reason_codes",
+        )
+    }
+    projection.update(
+        {
+            "missing_fields": [],
+            "coverage_gaps": (
+                list(item.get("reason_codes") or [])
+                if item.get("coverage_status") in {"partial", "sample_only"}
+                else []
+            ),
+            "warning_codes": list(item.get("issues") or []),
+            "status_authority": "canonical_status_resolver",
+            "quality_ref": (
+                "evidence.quality.capabilities."
+                f"{item.get('capability')}"
+            ),
+        }
+    )
+    return projection
+
+
 def apply_quality_contract(
     canonical: dict[str, Any],
     *,
@@ -1269,6 +1726,12 @@ def apply_quality_contract(
     evidence["quality"] = deepcopy(quality)
     manifest = _dict(evidence.get("manifest"))
     quality_capabilities = _dict(quality.get("capabilities"))
+    capability_status = {
+        capability_id: _consumer_capability_status(item)
+        for capability_id, item in quality_capabilities.items()
+        if isinstance(item, dict)
+    }
+    evidence["capability_status"] = capability_status
     for item in _list(manifest.get("capabilities")):
         if not isinstance(item, dict):
             continue
@@ -1281,6 +1744,21 @@ def apply_quality_contract(
         item["status_class"] = capability_quality.get("status_class")
         item["decision_usable"] = capability_quality.get("decision_usable")
         item["facts_usable"] = capability_quality.get("facts_usable")
+        for key in (
+            "applicability_status",
+            "availability_status",
+            "freshness_status",
+            "release_status",
+            "coverage_status",
+            "usability_status",
+        ):
+            item[key] = capability_quality.get(key)
+        item["status_authority"] = "canonical_status_resolver"
+        item["canonical_status_ref"] = (
+            f"evidence.capability_status.{item.get('capability')}"
+        )
+        if capability_quality.get("refresh_recommended") is False:
+            item["refresh_recommended"] = False
         item["quality_ref"] = (
             f"evidence.quality.capabilities.{item.get('capability')}"
         )
@@ -1307,9 +1785,11 @@ def apply_quality_contract(
         by_slot.setdefault(str(item["slot"]), []).append(item)
     for slot_name, items in by_slot.items():
         slot = _dict(slots.get(slot_name))
-        slot_status, usability = _slot_status_from_quality(items)
+        required_items = [item for item in items if item.get("required")]
+        selected_items = required_items or items
+        slot_status, usability = _slot_status_from_quality(selected_items)
         worst_item = max(
-            items,
+            selected_items,
             key=lambda item: STATUS_CLASS_SEVERITY.get(
                 str(item.get("status_class") or "blocked"),
                 3,
@@ -1319,15 +1799,23 @@ def apply_quality_contract(
         slot["usability"] = usability
         slot["decision_usable"] = all(
             bool(item.get("decision_usable"))
-            for item in items
-            if item.get("required")
+            for item in selected_items
         )
         slot["quality_ref"] = "evidence.quality"
+        slot["canonical_status_refs"] = [
+            f"evidence.capability_status.{item.get('capability')}"
+            for item in selected_items
+        ]
+        slot["supplemental_status_refs"] = [
+            f"evidence.capability_status.{item.get('capability')}"
+            for item in items
+            if not item.get("required")
+        ]
         slot["freshness"] = {
             **_dict(slot.get("freshness")),
             "status": (
                 worst_item.get("freshness")
-                if len(items) == 1
+                if len(selected_items) == 1
                 else quality.get("status")
             ),
         }
@@ -1355,6 +1843,154 @@ def apply_quality_contract(
     )
     slots["data_quality"] = data_quality_slot
     evidence["slots"] = slots
+
+    freshness_by_capability = _dict(
+        evidence.get("freshness_by_capability")
+    )
+    for capability_id, canonical_status in capability_status.items():
+        raw = _dict(freshness_by_capability.get(capability_id))
+        raw_status = raw.get("status")
+        raw.update(
+            {
+                "status": canonical_status.get("freshness_status"),
+                "applicability_status": canonical_status.get(
+                    "applicability_status"
+                ),
+                "availability_status": canonical_status.get(
+                    "availability_status"
+                ),
+                "release_status": canonical_status.get("release_status"),
+                "coverage_status": canonical_status.get("coverage_status"),
+                "usability_status": canonical_status.get("usability_status"),
+                "refresh_possible_now": canonical_status.get(
+                    "refresh_possible_now"
+                ),
+                "refresh_recommended": canonical_status.get(
+                    "refresh_recommended"
+                ),
+                "status_authority": "canonical_status_resolver",
+                "canonical_status_ref": (
+                    f"evidence.capability_status.{capability_id}"
+                ),
+            }
+        )
+        if raw_status is not None and raw_status != raw.get("status"):
+            debug = _dict(raw.get("debug"))
+            debug["upstream_status"] = raw_status
+            raw["debug"] = debug
+        freshness_by_capability[capability_id] = raw
+    evidence["freshness_by_capability"] = freshness_by_capability
+
+    freshness_categories: dict[str, list[Any]] = {
+        "missing": [],
+        "stale": [],
+        "pending_release": [],
+        "not_applicable": [],
+        "valid_empty": [],
+        "coverage_gaps": [],
+        "warnings": [],
+    }
+    for capability_id, item in capability_status.items():
+        if item.get("required") is not True:
+            continue
+        applicability = item.get("applicability_status")
+        availability = item.get("availability_status")
+        freshness_status = item.get("freshness_status")
+        release_status = item.get("release_status")
+        coverage_status = item.get("coverage_status")
+        if applicability == "not_applicable":
+            freshness_categories["not_applicable"].append(capability_id)
+        elif availability in {"missing", "error"}:
+            freshness_categories["missing"].append(capability_id)
+        if freshness_status == "stale":
+            freshness_categories["stale"].append(capability_id)
+        if release_status == "pending_release":
+            freshness_categories["pending_release"].append(capability_id)
+        if "valid_empty" in set(item.get("reason_codes") or []):
+            freshness_categories["valid_empty"].append(capability_id)
+        if coverage_status in {"partial", "sample_only"}:
+            freshness_categories["coverage_gaps"].append(
+                {
+                    "capability": capability_id,
+                    "coverage_status": coverage_status,
+                }
+            )
+        for warning in item.get("warning_codes") or []:
+            marker = {
+                "capability": capability_id,
+                "code": warning,
+            }
+            if marker not in freshness_categories["warnings"]:
+                freshness_categories["warnings"].append(marker)
+
+    projected_data = _dict(evidence.get("data"))
+    selected_freshness = _dict(projected_data.get("data.freshness"))
+    if selected_freshness:
+        selected_freshness["categories"] = deepcopy(freshness_categories)
+        selected_freshness["missing"] = list(
+            freshness_categories["missing"]
+        )
+        selected_freshness["missing_datasets"] = list(
+            freshness_categories["missing"]
+        )
+        selected_freshness["stale_datasets"] = list(
+            freshness_categories["stale"]
+        )
+        selected_freshness["pending_release"] = list(
+            freshness_categories["pending_release"]
+        )
+        selected_freshness["not_applicable"] = list(
+            freshness_categories["not_applicable"]
+        )
+        selected_freshness["valid_empty"] = list(
+            freshness_categories["valid_empty"]
+        )
+        selected_freshness["coverage_gaps"] = deepcopy(
+            freshness_categories["coverage_gaps"]
+        )
+        selected_freshness["refresh_recommended"] = bool(
+            freshness_categories["missing"]
+            or freshness_categories["stale"]
+        )
+        selected_freshness["is_current"] = not bool(
+            freshness_categories["missing"]
+            or freshness_categories["stale"]
+        )
+        selected_freshness["status"] = (
+            "missing"
+            if freshness_categories["missing"]
+            else "partial"
+            if freshness_categories["stale"]
+            or freshness_categories["coverage_gaps"]
+            else "current"
+        )
+        selected_freshness["is_current_semantics"] = (
+            "selected_required_capabilities_current"
+        )
+        selected_freshness["release_current"] = not bool(
+            freshness_categories["pending_release"]
+        )
+        selected_freshness["served_at"] = (
+            canonical.get("served_at") or canonical.get("generated_at")
+        )
+        selected_freshness["capability_times"] = {
+            capability_id: {
+                key: item.get(key)
+                for key in (
+                    "trade_date",
+                    "event_time",
+                    "release_at",
+                    "fetched_at",
+                    "computed_at",
+                    "served_at",
+                )
+                if item.get(key) is not None
+            }
+            for capability_id, item in capability_status.items()
+            if item.get("required") is True
+        }
+        projected_data["data.freshness"] = selected_freshness
+        evidence["data"] = projected_data
 
     status = _dict(canonical.get("status"))
     previous_readiness = _dict(status.get("readiness"))
@@ -1442,12 +2078,12 @@ def apply_quality_contract(
     passport["source_trust"] = {
         "trust_level": trust_level,
         "trust_score": trust_score,
-        "trust_scope": "selected_capabilities",
+        "trust_scope": "selected_required_capabilities",
         "status": quality.get("status"),
     }
     passport["trust_level"] = trust_level
     passport["trust_score"] = trust_score
-    passport["trust_scope"] = "selected_capabilities"
+    passport["trust_scope"] = "selected_required_capabilities"
     passport["summary"] = (
         "Trust is derived from the selected capability quality contract."
     )
@@ -1485,10 +2121,29 @@ def apply_quality_contract(
     canonical["evidence"] = evidence
 
     limitations = _dict(canonical.get("limitations"))
+    non_missing_capabilities = {
+        capability_id
+        for capability_id, item in capability_status.items()
+        if item.get("applicability_status") == "not_applicable"
+        or (
+            item.get("release_status") == "pending_release"
+            and item.get("freshness_status") == "latest_released"
+        )
+    }
+    non_missing_datasets = {
+        str(_dict(freshness_by_capability.get(capability_id)).get("dataset"))
+        for capability_id in non_missing_capabilities
+        if _dict(freshness_by_capability.get(capability_id)).get("dataset")
+    }
     missing = [
         str(value)
         for value in _list(limitations.get("missing"))
         if str(value).strip()
+        and str(value) not in non_missing_datasets
+        and not (
+            str(value).startswith("capability:")
+            and str(value).split(":", 1)[1] in non_missing_capabilities
+        )
     ]
     for capability_id in quality.get("blocked_required_capabilities") or []:
         marker = f"capability:{capability_id}"

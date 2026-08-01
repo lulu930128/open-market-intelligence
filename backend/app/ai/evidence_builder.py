@@ -4,6 +4,11 @@ from datetime import date, datetime
 import math
 from typing import Any
 
+from app.market.financial_metric_semantics import (
+    financial_period_scope_label,
+    source_reported_financial_semantics,
+)
+
 
 def json_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
@@ -443,16 +448,24 @@ def fundamental_evidence(
             parts.append(f"累計年增 {format_pct(cumulative_yoy)}")
         revenue_summary = "，".join(parts) + "。"
 
-    eps = finite_number(source_value(latest_financial, "eps"))
+    financial_semantics = source_reported_financial_semantics(latest_financial)
+    eps = finite_number(financial_semantics["raw_eps"])
     roe = finite_number(source_value(latest_financial, "roe"))
     financial_period = latest_financial_period(latest_financial)
     financial_summary = None
     if latest_financial is not None:
         parts = [f"{financial_period} 財報"] if financial_period else ["最新財報"]
+        parts.append(
+            financial_period_scope_label(
+                financial_semantics["period_scope"],
+                financial_semantics["months_covered"],
+            )
+        )
         if eps is not None:
-            parts.append(f"EPS {format_number(eps)}")
+            parts.append(f"來源揭露 EPS {format_number(eps)}")
         if roe is not None:
-            parts.append(f"ROE {format_pct(roe)}")
+            parts.append(f"來源衍生 ROE {format_pct(roe)}")
+        parts.append("尚未完成股本基準正規化，不可直接推導單季、TTM 或估值")
         financial_summary = "，".join(parts) + "。"
 
     return {
@@ -469,7 +482,8 @@ def fundamental_evidence(
             "eps": eps,
             "roe": roe,
             "summary": financial_summary,
-            "tone": "positive" if eps is not None and eps > 0 else "neutral",
+            **financial_semantics,
+            "tone": "neutral",
         },
     }
 

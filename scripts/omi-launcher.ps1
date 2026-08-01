@@ -951,6 +951,40 @@ function Find-AvailableFrontendPort {
     throw "Could not find an available frontend port from $PreferredPort to $maxPort. Set OMI_FRONTEND_PORT to an available port and restart OMI."
 }
 
+function Find-ExpectedFrontendPort {
+    param([Parameter(Mandatory = $true)][int]$PreferredPort)
+
+    $maxPort = [Math]::Min($PreferredPort + $script:FrontendPortSearchSpan, 65535)
+    $netstat = Join-Path $env:SystemRoot "System32\netstat.exe"
+    if (-not (Test-Path -LiteralPath $netstat)) {
+        return $null
+    }
+
+    $candidatePorts = @()
+    $lines = & $netstat -ano -p TCP 2>$null
+    foreach ($line in $lines) {
+        if ($line -notmatch "^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+\d+\s*$") {
+            continue
+        }
+
+        $port = [int]$Matches[1]
+        if ($port -ge $PreferredPort -and $port -le $maxPort) {
+            $candidatePorts += $port
+        }
+    }
+
+    $urlHost = Format-UrlHost -HostName $script:FrontendHost
+    foreach ($port in @($candidatePorts | Sort-Object -Unique)) {
+        $healthUrl = "http://$urlHost`:$port/omi-ui-health"
+        $health = Get-FrontendHealth -Url $healthUrl
+        if ($null -ne $health -and (Test-FrontendHealthMatchesExpected -Health $health)) {
+            return $port
+        }
+    }
+
+    return $null
+}
+
 function Find-AvailableBackendPort {
     param([Parameter(Mandatory = $true)][int]$PreferredPort)
 
@@ -1354,6 +1388,15 @@ function Start-Frontend {
     $frontendHealth = Get-FrontendHealth
     if ($null -ne $frontendHealth -and (Test-FrontendHealthMatchesExpected -Health $frontendHealth)) {
         Write-LauncherLog "Frontend health endpoint already responds with the expected project/runtime; skipping frontend start."
+        return
+    }
+
+    $existingFrontendPort = Find-ExpectedFrontendPort -PreferredPort $script:FrontendPort
+    if ($null -ne $existingFrontendPort) {
+        $previousUrl = $script:DashboardUrl
+        $script:FrontendPort = [int]$existingFrontendPort
+        Update-FrontendServiceUrls
+        Write-LauncherLog "Adopted existing expected frontend runtime. previous=$previousUrl selected=$($script:DashboardUrl)"
         return
     }
 

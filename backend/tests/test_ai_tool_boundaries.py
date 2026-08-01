@@ -52,7 +52,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "57349622b99583195851fdc44678cd0d80cbadb308e333f33a144365eaa4e261"
+    "daa1f8228ca0b7bd7bec56be293593bac0075f9697d7488043d872c2b427f55c"
 )
 
 
@@ -187,7 +187,7 @@ class AIToolBoundaryTests(unittest.TestCase):
         schema = catalog["tools"][0]["input_schema"]
         self.assertEqual(
             schema["x-omi-capability-registry-version"],
-            "omi.capability.registry.v2",
+            "omi.capability.registry.v3",
         )
         self.assertEqual(
             schema["x-omi-capability-selection-version"],

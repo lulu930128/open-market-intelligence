@@ -311,10 +311,13 @@ def read_market_overview(
         if screening_requested
         else None
     )
+    screening_only_capabilities = (
+        taiwan_screening.SCREENING_CAPABILITIES - {"market.sectors"}
+    )
     non_screening_capabilities = requested_capabilities - {
         "target.identity",
         "data.freshness",
-        *taiwan_screening.SCREENING_CAPABILITIES,
+        *screening_only_capabilities,
     }
     if screening_context is not None and not non_screening_capabilities:
         return screening_context

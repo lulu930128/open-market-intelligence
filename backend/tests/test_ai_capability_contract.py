@@ -8,6 +8,8 @@ from app.ai import (
     agentic_planning,
     capability_contract,
     contract_manifest,
+    data_quality_contract,
+    decision_core,
     public_contract,
     query_plan,
 )
@@ -15,12 +17,82 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def test_market_sample_ranking_projects_sample_scope_and_units(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["market.sample_ranking"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="TW",
+            question_intent="market_overview",
+        )
+        response = {
+            "target": {"type": "market", "id": "TW", "market": "TW"},
+            "result": {
+                "data": {
+                    "compact": {
+                        "sample_ranking": {
+                            "kind": "tw_market_sample_ranking",
+                            "status": "partial",
+                            "scope": "omi_local_daily_sample",
+                            "scope_label": "OMI 台股本機日線樣本",
+                            "is_full_market": False,
+                            "as_of": "2026-07-31",
+                            "latest_trade_date": "2026-07-31",
+                            "source": "market_daily_price",
+                            "currency": "TWD",
+                            "price_unit": "TWD_per_share",
+                            "volume_unit": "shares",
+                            "trade_value_unit": "TWD",
+                            "unit_semantics": {
+                                "close_price": "TWD_per_share",
+                                "trade_volume": "shares",
+                                "trade_value": "TWD",
+                            },
+                            "sample_coverage": {
+                                "status": "partial",
+                                "sample_count": 84,
+                                "universe_count": 1_973,
+                            },
+                            "value_leaders": [
+                                {
+                                    "stock_id": "2330",
+                                    "close_price": 1_160.0,
+                                    "trade_volume": 25_000_000,
+                                    "trade_value": 29_000_000_000,
+                                }
+                            ],
+                            "warnings": ["bounded local sample"],
+                        }
+                    }
+                }
+            },
+        }
+
+        projected, unavailable = capability_contract.project_selected_data(
+            response=response,
+            selection=selection,
+        )
+
+        sample = projected["market.sample_ranking"]
+        self.assertNotIn("market.sample_ranking", unavailable)
+        self.assertEqual(sample["scope"], "omi_local_daily_sample")
+        self.assertFalse(sample["is_full_market"])
+        self.assertEqual(sample["volume_unit"], "shares")
+        self.assertEqual(sample["trade_value_unit"], "TWD")
+        self.assertFalse(
+            data_quality_contract._unit_summary(sample)[
+                "missing_volume_unit"
+            ]
+        )
+
     def test_registry_v2_manifest_is_metadata_complete_and_digest_stable(self) -> None:
         manifest = contract_manifest.public_contract_manifest()
 
         self.assertEqual(
             manifest["capability_registry_version"],
-            "omi.capability.registry.v2",
+            "omi.capability.registry.v3",
         )
         self.assertEqual(
             manifest["selection_version"],
@@ -33,6 +105,10 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(
             manifest["capabilities"],
             capability_contract.capability_catalog(),
+        )
+        self.assertEqual(
+            manifest["capability_schema_versions"]["quote.snapshot"],
+            "tw.quote.snapshot.v2",
         )
         self.assertEqual(
             manifest["digest"],
@@ -52,6 +128,7 @@ class AiCapabilityContractTests(unittest.TestCase):
                     "deprecated",
                     "replacement_capabilities",
                     "side_effect_policy",
+                    "schema_version",
                 }
                 <= set(item)
                 for item in manifest["capabilities"]
@@ -124,6 +201,8 @@ class AiCapabilityContractTests(unittest.TestCase):
             "volume_event_time",
             "volume_semantics",
             "volume_status",
+            "currency",
+            "price_unit",
             "market_events",
             "sort_order",
         ):
@@ -208,6 +287,40 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(intraday["source"], "TAIFEX MIS 1-minute chart")
         self.assertEqual(intraday["provider"], "taifex_mis")
         self.assertEqual(intraday["points"][0]["volume_contracts"], 82)
+
+    def test_intraday_series_promotes_canonical_unit_metadata(self) -> None:
+        canonical = capability_contract._canonical_intraday_value(
+            {
+                "series": {
+                    "1m": {
+                        "interval": "1m",
+                        "volume_unit": "shares",
+                        "canonical_volume_unit": "shares",
+                        "provider_volume_unit": "lots",
+                        "volume_conversion": {
+                            "from": "lots",
+                            "to": "shares",
+                            "multiplier": 1000,
+                        },
+                        "trade_value_unit": "TWD",
+                        "points": [
+                            {
+                                "time": "2026-07-29T13:30:00+08:00",
+                                "volume": 7_206_000,
+                                "volume_shares": 7_206_000,
+                                "volume_lots": 7_206.0,
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(canonical["volume_unit"], "shares")
+        self.assertEqual(canonical["canonical_volume_unit"], "shares")
+        self.assertEqual(canonical["provider_volume_unit"], "lots")
+        self.assertEqual(canonical["volume_conversion"]["multiplier"], 1000)
+        self.assertEqual(canonical["trade_value_unit"], "TWD")
 
     def test_selection_keeps_mandatory_truth_and_bounded_fields(self) -> None:
         selection = capability_contract.normalize_selection(
@@ -342,6 +455,110 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertNotIn("ownership.distribution", plan.selected_capabilities)
         self.assertEqual(plan.capability_selection_mode, "restrictive")
 
+    def test_tw_screening_question_infers_typed_ranking_selection(self) -> None:
+        payload = AiAskRequest(
+            question="台股近五日外資買超排行前十名",
+            contract_version="omi.decision.v4",
+            target={"type": "market", "market": "TW"},
+            mode="data_only",
+            output="evidence_only",
+        )
+
+        plan = query_plan.build_query_plan(
+            payload=payload,
+            scope_type="market",
+            question_intent="general",
+            effective_mode="data_only",
+            target_market="TW",
+        )
+
+        self.assertEqual(plan.capability_selection_mode, "inferred")
+        self.assertEqual(
+            set(plan.selected_capabilities),
+            {
+                "target.identity",
+                "screening.ranking",
+                "screening.coverage",
+                "data.freshness",
+            },
+        )
+        self.assertEqual(
+            plan.selection["parameters"]["screening.ranking"],
+            {
+                "metric": "foreign_investor_net_shares",
+                "window": 5,
+                "sort_order": "desc",
+                "limit": 10,
+                "offset": 0,
+            },
+        )
+        self.assertIn("screening", plan.requested_domains)
+        self.assertNotIn("chips", plan.requested_domains)
+        self.assertNotIn("sample_ranking", plan.requested_domains)
+        self.assertEqual(plan.selection["unsupported_capabilities"], [])
+        self.assertFalse(plan.external_refresh_allowed)
+
+    def test_tw_screening_question_infers_metric_and_sort_direction(self) -> None:
+        cases = (
+            (
+                "台股投信賣超排行前20名",
+                "investment_trust_net_shares",
+                "asc",
+                20,
+            ),
+            (
+                "台股近十日融資餘額減少排行前五名",
+                "margin_balance_change_pct",
+                "asc",
+                5,
+            ),
+        )
+
+        for question, metric, sort_order, limit in cases:
+            with self.subTest(question=question):
+                plan = query_plan.build_query_plan(
+                    payload=AiAskRequest(
+                        question=question,
+                        contract_version="omi.decision.v4",
+                        target={"type": "market", "market": "TW"},
+                        mode="data_only",
+                        output="evidence_only",
+                    ),
+                    scope_type="market",
+                    question_intent="general",
+                    effective_mode="data_only",
+                    target_market="TW",
+                )
+
+                parameters = plan.selection["parameters"][
+                    "screening.ranking"
+                ]
+                self.assertEqual(parameters["metric"], metric)
+                self.assertEqual(parameters["sort_order"], sort_order)
+                self.assertEqual(parameters["limit"], limit)
+
+    def test_explicit_selection_overrides_tw_screening_question_inference(
+        self,
+    ) -> None:
+        plan = query_plan.build_query_plan(
+            payload=AiAskRequest(
+                question="台股近五日外資買超排行前十名",
+                contract_version="omi.decision.v4",
+                target={"type": "market", "market": "TW"},
+                mode="data_only",
+                output="evidence_only",
+                selection={"include": ["market.breadth"]},
+            ),
+            scope_type="market",
+            question_intent="general",
+            effective_mode="data_only",
+            target_market="TW",
+        )
+
+        self.assertEqual(plan.capability_selection_mode, "explicit")
+        self.assertIn("market.breadth", plan.selected_capabilities)
+        self.assertNotIn("screening.ranking", plan.selected_capabilities)
+
     def test_structured_selection_remains_authoritative_over_question_hints(self) -> None:
         payload = AiAskRequest(
             question="查 2330 法人、融資券與股權分級。",
@@ -450,7 +667,7 @@ class AiCapabilityContractTests(unittest.TestCase):
 
     def test_fill_plan_defers_operation_that_cannot_produce_capability(self) -> None:
         selection = capability_contract.normalize_selection(
-            selection={"include": ["quote.snapshot"]},
+            selection={"include": ["ownership.distribution"]},
             output="evidence_only",
             realtime_policy="prefer_live",
             payload_level="compact",
@@ -464,7 +681,7 @@ class AiCapabilityContractTests(unittest.TestCase):
             "evidence": {
                 "freshness": {"status": "missing"},
                 "freshness_by_capability": {
-                    "quote.snapshot": {
+                    "ownership.distribution": {
                         "status": "empty",
                         "refresh_recommended": True,
                     }
@@ -484,7 +701,7 @@ class AiCapabilityContractTests(unittest.TestCase):
 
         with patch.dict(
             capability_contract.FILL_OPERATION_PRODUCED_CAPABILITIES,
-            {"tw.refresh_quote": ("intraday.bars",)},
+            {"tw.refresh_shareholding": ("intraday.bars",)},
         ):
             fill_plan = capability_contract.build_fill_plan(
                 canonical=canonical,
@@ -499,8 +716,326 @@ class AiCapabilityContractTests(unittest.TestCase):
             deferred["reason"],
             "operation_does_not_produce_capability",
         )
-        self.assertEqual(deferred["operation"], "tw.refresh_quote")
+        self.assertEqual(deferred["operation"], "tw.refresh_shareholding")
         self.assertEqual(deferred["produced_capabilities"], ["intraday.bars"])
+
+    def test_non_ready_market_capabilities_receive_explicit_fill_resolution(
+        self,
+    ) -> None:
+        selection = {
+            "version": "omi.capability.selection.v2",
+            "required": [
+                "market.sectors",
+                "market.sample_ranking",
+                "market.hot_groups",
+                "market.volume_state",
+                "intraday.bars",
+            ],
+            "optional": [],
+        }
+        manifest = {
+            "capabilities": [
+                {
+                    "capability": "market.sectors",
+                    "status": "partial",
+                    "status_class": "limited",
+                    "payload_included": True,
+                    "refresh_recommended": False,
+                    "refresh_strategy": "derived",
+                    "quality_issues": [],
+                },
+                {
+                    "capability": "market.sample_ranking",
+                    "status": "missing",
+                    "status_class": "blocked",
+                    "payload_included": False,
+                    "refresh_recommended": False,
+                    "refresh_strategy": "derived",
+                    "quality_issues": ["volume_unit_missing"],
+                },
+                {
+                    "capability": "market.hot_groups",
+                    "status": "partial",
+                    "status_class": "limited",
+                    "payload_included": True,
+                    "refresh_recommended": False,
+                    "refresh_strategy": "scheduler_owned",
+                    "quality_issues": [],
+                },
+                {
+                    "capability": "market.volume_state",
+                    "status": "partial",
+                    "status_class": "limited",
+                    "payload_included": True,
+                    "refresh_recommended": False,
+                    "refresh_strategy": "derived",
+                    "quality_issues": [],
+                },
+                {
+                    "capability": "intraday.bars",
+                    "status": "stale",
+                    "status_class": "blocked",
+                    "payload_included": True,
+                    "refresh_recommended": False,
+                    "refresh_strategy": "reader_fetch",
+                    "quality_issues": ["live_requirement_not_satisfied"],
+                },
+            ]
+        }
+        canonical = {
+            "ok": True,
+            "request_status": "completed",
+            "target": {"type": "market", "id": "TW", "market": "TW"},
+        }
+
+        plan = capability_contract.build_fill_plan(
+            canonical=canonical,
+            selection=selection,
+            manifest=manifest,
+            scope_type="market",
+        )
+
+        self.assertEqual(plan["actions"], [])
+        self.assertEqual(plan["summary"]["deferred_count"], 3)
+        self.assertEqual(plan["summary"]["unfillable_count"], 1)
+        self.assertEqual(plan["summary"]["already_attempted_count"], 1)
+        reasons = {
+            item["capability"]: item["reason"]
+            for item in plan["resolutions"]
+        }
+        self.assertEqual(
+            reasons["market.sectors"],
+            "derived_rebuild_completed_with_quality_limits",
+        )
+        self.assertEqual(
+            reasons["market.sample_ranking"],
+            "contract_schema_fix_required",
+        )
+        self.assertEqual(
+            reasons["market.hot_groups"],
+            "scheduler_owned_current",
+        )
+        self.assertEqual(
+            reasons["market.volume_state"],
+            "history_accumulation_required",
+        )
+        self.assertEqual(
+            reasons["intraday.bars"],
+            "reader_fetch_on_primary_request",
+        )
+
+    def test_fill_plan_does_not_repeat_already_attempted_primary_reader(
+        self,
+    ) -> None:
+        selection = {
+            "version": "omi.capability.selection.v2",
+            "required": ["intraday.bars"],
+            "optional": [],
+        }
+        manifest = {
+            "capabilities": [
+                {
+                    "capability": "intraday.bars",
+                    "status": "missing",
+                    "status_class": "blocked",
+                    "payload_included": False,
+                    "refresh_recommended": True,
+                    "refresh_strategy": "reader_fetch",
+                    "quality_issues": [],
+                }
+            ]
+        }
+        canonical = {
+            "ok": True,
+            "request_status": "completed",
+            "target": {"type": "market", "id": "TW", "market": "TW"},
+        }
+
+        plan = capability_contract.build_fill_plan(
+            canonical=canonical,
+            selection=selection,
+            manifest=manifest,
+            scope_type="market",
+            tool_runs=[
+                {
+                    "tool": "tw.read_market_overview",
+                    "status": "error",
+                    "operation_status": "failed",
+                    "arguments": {
+                        "requested_capabilities": [
+                            "intraday.bars"
+                        ]
+                    },
+                }
+            ],
+        )
+
+        self.assertEqual(plan["actions"], [])
+        attempted = plan["already_attempted_actions"][0]
+        self.assertEqual(
+            attempted["reason"],
+            "already_attempted_primary_reader",
+        )
+
+    def test_reconciliation_exposes_primary_reader_and_final_quality(self) -> None:
+        selection = {
+            "version": "omi.capability.selection.v2",
+            "required": ["intraday.bars"],
+            "optional": [],
+        }
+        manifest = {
+            "capabilities": [
+                {
+                    "capability": "intraday.bars",
+                    "status": "stale",
+                    "status_class": "blocked",
+                    "payload_included": True,
+                    "refresh_recommended": False,
+                    "refresh_strategy": "reader_fetch",
+                    "quality_issues": ["live_requirement_not_satisfied"],
+                }
+            ]
+        }
+        canonical = {
+            "ok": True,
+            "request_status": "completed",
+            "target": {"type": "market", "id": "TW", "market": "TW"},
+        }
+        plan = capability_contract.build_fill_plan(
+            canonical=canonical,
+            selection=selection,
+            manifest=manifest,
+            scope_type="market",
+        )
+
+        reconciliation = capability_contract.build_refresh_reconciliation(
+            selection=selection,
+            manifest=manifest,
+            fill_plan=plan,
+            tool_runs=[],
+            scope_type="market",
+        )
+        outcome = reconciliation["capabilities"]["intraday.bars"]
+        self.assertTrue(outcome["primary_reader_attempted"])
+        self.assertTrue(outcome["final_payload_present"])
+        self.assertEqual(
+            outcome["final_quality_issue"],
+            ["live_requirement_not_satisfied"],
+        )
+        self.assertEqual(outcome["resolution_type"], "already_attempted")
+        self.assertEqual(
+            outcome["unresolved_reason"],
+            "reader_fetch_on_primary_request",
+        )
+
+    def test_tw_quote_and_intraday_use_reader_fetch_not_fill_operations(
+        self,
+    ) -> None:
+        for capability_id in (
+            "quote.snapshot",
+            "quote.order_book",
+            "quote.auction",
+            "quote.official_close",
+            "intraday.bars",
+        ):
+            spec = capability_contract.CAPABILITIES[capability_id]
+            self.assertEqual(
+                spec.refresh_strategy_for_scope("stock"),
+                "reader_fetch",
+            )
+            self.assertIsNone(spec.fill_operation_for_scope("stock"))
+
+        self.assertNotIn(
+            "tw.refresh_quote",
+            capability_contract.EXECUTABLE_FILL_OPERATIONS,
+        )
+        self.assertNotIn(
+            "tw.refresh_intraday",
+            capability_contract.EXECUTABLE_FILL_OPERATIONS,
+        )
+        self.assertLessEqual(
+            capability_contract.EXECUTABLE_FILL_OPERATIONS,
+            set(agentic_execution.ALLOWED_TOOLS),
+        )
+
+    def test_reconciliation_uses_operation_failure_not_transport_success(
+        self,
+    ) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["ownership.distribution"]},
+            output="evidence_only",
+            realtime_policy="prefer_live",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="general",
+        )
+        canonical = {
+            "ok": True,
+            "request_status": "completed",
+            "target": {"type": "tw_stock", "id": "8299", "market": "TW"},
+            "evidence": {
+                "freshness_by_capability": {
+                    "ownership.distribution": {
+                        "status": "empty",
+                        "refresh_recommended": True,
+                    }
+                },
+                "slots": {},
+            },
+        }
+        manifest = capability_contract.build_manifest(
+            canonical=canonical,
+            selection=selection,
+            projected_data={
+                "target.identity": canonical["target"],
+                "data.freshness": {"status": "missing"},
+            },
+        )
+        fill_plan = capability_contract.build_fill_plan(
+            canonical=canonical,
+            selection=selection,
+            manifest=manifest,
+            scope_type="stock",
+        )
+        reconciliation = capability_contract.build_refresh_reconciliation(
+            selection=selection,
+            manifest=manifest,
+            fill_plan=fill_plan,
+            tool_runs=[
+                {
+                    "tool": "tw.refresh_shareholding",
+                    "status": "success",
+                    "transport_status": "success",
+                    "operation_status": "failed",
+                    "evidence_status": "unavailable",
+                    "result_status": "error",
+                    "arguments": {
+                        "stock_id": "8299",
+                        "requested_capabilities": [
+                            "ownership.distribution"
+                        ],
+                    },
+                    "result_summary": {
+                        "status": "error",
+                        "refresh_outcome": "failed",
+                        "error_message": "TDCC timed out",
+                    },
+                }
+            ],
+            scope_type="stock",
+        )
+
+        attempt = reconciliation["attempts"][0]
+        outcome = reconciliation["capabilities"]["ownership.distribution"]
+        self.assertEqual(attempt["transport_status"], "success")
+        self.assertEqual(attempt["operation_status"], "failed")
+        self.assertFalse(outcome["tool_succeeded"])
+        self.assertEqual(outcome["reconciliation"], "attempt_failed_or_blocked")
+        self.assertIsNotNone(outcome["remaining_fill_action"])
+        self.assertEqual(
+            outcome["remaining_fill_action_detail"]["operation"],
+            "tw.refresh_shareholding",
+        )
 
     def test_fill_plan_defers_stale_capability_during_refresh_cooldown(self) -> None:
         selection = capability_contract.normalize_selection(
@@ -1185,6 +1720,7 @@ class AiCapabilityContractTests(unittest.TestCase):
                     "quote.snapshot",
                     "chips.institutional",
                     "fundamentals.revenue",
+                    "fundamentals.financials",
                 ],
                 "fields": {
                     "quote.snapshot": ["latest_price", "quote_time"],
@@ -1195,6 +1731,9 @@ class AiCapabilityContractTests(unittest.TestCase):
                     "fundamentals.revenue": [
                         "latest_revenue",
                         "revenue_history",
+                    ],
+                    "fundamentals.financials": [
+                        "financial_contract",
                     ],
                 },
                 "limits": {"fundamentals.revenue": 1},
@@ -1232,6 +1771,20 @@ class AiCapabilityContractTests(unittest.TestCase):
                                 {"period": "2026-05-01", "monthly_revenue": 90},
                                 {"period": "2026-06-01", "monthly_revenue": 100},
                             ],
+                            "financial_contract": {
+                                "contract_version": "omi.financial.v1",
+                                "normalized": {"status": "ready"},
+                                "derived": {
+                                    "ttm_eps_status": "ready",
+                                    "ttm_eps": "12.72",
+                                },
+                                "valuation": {"status": "unavailable"},
+                                "quality": {
+                                    "semantic_validity": "valid",
+                                    "decision_usable": True,
+                                    "issues": [],
+                                },
+                            },
                         },
                     }
                 }
@@ -1258,6 +1811,18 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(
             projected["fundamentals.revenue"]["revenue_history"],
             [{"period": "2026-06-01", "monthly_revenue": 100}],
+        )
+        self.assertEqual(
+            projected["fundamentals.financials"]["financial_contract"][
+                "contract_version"
+            ],
+            "omi.financial.v1",
+        )
+        self.assertEqual(
+            projected["fundamentals.financials"]["financial_contract"][
+                "derived"
+            ]["ttm_eps"],
+            "12.72",
         )
 
     def test_capability_catalog_is_consumer_neutral(self) -> None:
@@ -1380,14 +1945,35 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
 
         self.assertEqual(unavailable, [])
+        self.assertEqual(
+            selection["required"],
+            [
+                "target.identity",
+                "data.freshness",
+                "diagnostics.source_health",
+            ],
+        )
+        self.assertEqual(
+            selection["deprecated_aliases"],
+            [
+                {
+                    "alias": "source.health",
+                    "canonical_capability": "diagnostics.source_health",
+                    "status": "deprecated_alias",
+                }
+            ],
+        )
         self.assertEqual(projected["data.freshness"]["status"], "missing")
         self.assertEqual(
             projected["data.freshness"]["as_of"],
             "2026-07-27T13:30:00+08:00",
         )
-        self.assertEqual(projected["source.health"]["status"], "partial")
         self.assertEqual(
-            projected["source.health"]["summary"]["stale_count"],
+            projected["diagnostics.source_health"]["status"],
+            "partial",
+        )
+        self.assertEqual(
+            projected["diagnostics.source_health"]["summary"]["stale_count"],
             1,
         )
 
@@ -1607,6 +2193,244 @@ class AiCapabilityContractTests(unittest.TestCase):
                 target=target,
                 scope_type="stock",
             )
+
+    def test_explicit_selection_locks_required_capabilities_and_traces_origins(
+        self,
+    ) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["market.indices"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="TW",
+            question_intent="market_overview",
+            requested_capabilities=(
+                "market.sectors",
+                "chips.institutional",
+            ),
+        )
+
+        self.assertEqual(
+            selection["required"],
+            ["target.identity", "market.indices", "data.freshness"],
+        )
+        self.assertEqual(selection["optional"], [])
+        self.assertEqual(
+            selection["inference_policy"],
+            "explicit_selection_locked",
+        )
+        self.assertEqual(
+            selection["capability_origins"]["market.indices"],
+            {
+                "origin": "explicit_required",
+                "requested_as": "required",
+            },
+        )
+        self.assertEqual(selection["unmet_required_capabilities"], [])
+        self.assertEqual(selection["unsupported_capabilities"], [])
+
+    def test_explicit_selection_survives_nlp_negation_of_same_domain(self) -> None:
+        payload = AiAskRequest(
+            question="請提供台積電最近交易日盤中資料，但不要把週六描述成盤中。",
+            contract_version="omi.decision.v4",
+            target={"type": "tw_stock", "id": "2330"},
+            mode="data_only",
+            output="evidence_only",
+            selection={"include": ["intraday.bars"]},
+        )
+
+        plan = query_plan.build_query_plan(
+            payload=payload,
+            scope_type="stock",
+            question_intent="quote",
+            effective_mode="data_only",
+            target_market="TW",
+        )
+
+        self.assertIn("intraday.bars", plan.selection["required"])
+        self.assertNotIn("intraday.bars", plan.selection["excluded"])
+        self.assertEqual(
+            plan.selection["inference_policy"],
+            "explicit_selection_locked",
+        )
+
+    def test_natural_regulation_question_uses_event_only_capabilities(self) -> None:
+        question = "2330 是否為處置股？請說明撮合間隔與交易限制。"
+        intent = decision_core.infer_question_intent(question)
+        plan = query_plan.build_query_plan(
+            payload=AiAskRequest(
+                question=question,
+                contract_version="omi.decision.v4",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="data_only",
+                output="evidence_only",
+            ),
+            scope_type="stock",
+            question_intent=intent,
+            effective_mode="data_only",
+            target_market="TW",
+        )
+
+        self.assertEqual(intent, "regulation")
+        self.assertEqual(plan.reader_profile, "event_only")
+        self.assertEqual(
+            set(plan.selected_capabilities),
+            {
+                "target.identity",
+                "regulation.disposition",
+                "regulation.trading_restrictions",
+                "data.freshness",
+            },
+        )
+
+    def test_natural_official_close_question_uses_quote_only_path(self) -> None:
+        question = "2330 最近交易日的正式收盤價是多少？"
+        intent = decision_core.infer_question_intent(question)
+        plan = query_plan.build_query_plan(
+            payload=AiAskRequest(
+                question=question,
+                contract_version="omi.decision.v4",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="data_only",
+                output="evidence_only",
+            ),
+            scope_type="stock",
+            question_intent=intent,
+            effective_mode="data_only",
+            target_market="TW",
+        )
+
+        self.assertEqual(intent, "quote")
+        self.assertEqual(plan.reader_profile, "quote_only")
+        self.assertIn("quote.official_close", plan.selected_capabilities)
+        self.assertNotIn("daily.ohlcv", plan.selected_capabilities)
+        self.assertNotIn("technical.structure", plan.selected_capabilities)
+
+    def test_watchlist_radar_v2_engine_and_readiness_are_public(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["watchlist.radar"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="watchlist",
+            target_market="TW",
+            question_intent="general",
+        )
+        response = {
+            "target": {"type": "tw_watchlist", "id": 1, "market": "TW"},
+            "result": {
+                "freshness": {
+                    "status": "latest_completed_session",
+                    "is_current": True,
+                },
+                "data": {
+                    "compact": {
+                        "radar": {
+                            "mode": "action",
+                            "radar_count": 1,
+                            "cache_status": "computed",
+                            "radar_engine": {
+                                "active_version": "radar_v2.0-active",
+                                "mode": "active",
+                                "technical_direction_owner": "backend",
+                            },
+                            "radar_v2_summary": {
+                                "evaluated_count": 1,
+                                "universe_evaluated_count": 20,
+                                "universe_scope": "complete_calculation_universe",
+                                "readiness": {
+                                    "operational_status": "active",
+                                    "validation_status": "unverified",
+                                    "limitations": [
+                                        {
+                                            "code": "walk_forward_incremental_value_not_verified"
+                                        }
+                                    ],
+                                },
+                            },
+                            "results": [
+                                {
+                                    "stock_id": "2330",
+                                    "radar_v2": {
+                                        "rule_version": "radar_v2.0-active"
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                }
+            },
+        }
+
+        projected, unavailable = capability_contract.project_selected_data(
+            response=response,
+            selection=selection,
+        )
+
+        self.assertEqual(unavailable, [])
+        radar = projected["watchlist.radar"]
+        self.assertEqual(
+            radar["radar_engine"]["active_version"],
+            "radar_v2.0-active",
+        )
+        self.assertEqual(
+            radar["radar_v2_summary"]["readiness"]["operational_status"],
+            "active",
+        )
+        self.assertEqual(
+            radar["radar_v2_summary"]["universe_evaluated_count"],
+            20,
+        )
+
+    def test_manifest_distinguishes_requested_and_effective_limits(
+        self,
+    ) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["daily.ohlcv"],
+                "limits": {"daily.ohlcv": 700},
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            target_market="TW",
+            question_intent="general",
+        )
+        projected = {
+            "daily.ohlcv": {
+                "points": [{"close": index} for index in range(500)],
+                "returned_point_count": 500,
+                "truncated": True,
+            }
+        }
+        manifest = capability_contract.build_manifest(
+            canonical={
+                "ok": True,
+                "request_status": "completed",
+                "target": {
+                    "type": "tw_stock",
+                    "id": "2330",
+                    "market": "TW",
+                },
+                "evidence": {},
+            },
+            selection=selection,
+            projected_data=projected,
+        )
+        daily = next(
+            item
+            for item in manifest["capabilities"]
+            if item["capability"] == "daily.ohlcv"
+        )
+
+        self.assertEqual(daily["default_limit"], 30)
+        self.assertEqual(daily["maximum_limit"], 500)
+        self.assertEqual(daily["requested_limit"], 700)
+        self.assertEqual(daily["effective_limit"], 500)
+        self.assertEqual(daily["returned_count"], 500)
+        self.assertTrue(daily["truncated"])
 
 
 if __name__ == "__main__":

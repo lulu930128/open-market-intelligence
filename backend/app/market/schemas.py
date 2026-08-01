@@ -1,7 +1,9 @@
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.market.financial_metric_semantics import source_reported_financial_semantics
 
 
 class MarketCalendarReleaseWindowRead(BaseModel):
@@ -768,6 +770,24 @@ class TaiwanStockQuoteDepthFreshnessRead(BaseModel):
     source_error_detail: dict[str, Any] | None = None
 
 
+class TaiwanStockQuoteVolumeReconciliationRead(BaseModel):
+    reference_dataset: str = "market_daily_price"
+    reference_source: str | None = None
+    reference_trade_date: date | None = None
+    reference_volume_shares: int | None = None
+    reference_volume_scope: str = "official_daily_aggregate"
+    snapshot_trade_date: date | None = None
+    snapshot_volume_shares: int | None = None
+    snapshot_volume_scope: str = "regular_session_board_lot_cumulative"
+    difference_shares: int | None = None
+    difference_pct: float | None = None
+    difference_semantics: str = "informational_cross_scope_difference"
+    tolerance_pct: float | None = None
+    status: str = "not_comparable"
+    reason: str | None = None
+    decision_usable: bool = False
+
+
 class TaiwanStockQuoteDepthRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
@@ -798,6 +818,34 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     change: float | None = None
     change_pct: float | None = None
     total_volume_lots: int | None = None
+    cumulative_volume_lots: int | None = None
+    cumulative_volume_shares: int | None = None
+    last_trade_volume_lots: int | None = None
+    last_trade_volume_shares: int | None = None
+    lot_size: int = 1000
+    volume_unit: str = "lots"
+    canonical_volume_unit: str = "shares"
+    provider_volume_unit: str = "lots"
+    volume_semantics: str = "session_cumulative_provider_volume"
+    volume_scope: str = "provider_reported_scope"
+    volume_source: str = "twse_mis"
+    volume_source_field: str = "v"
+    volume_status: str = "unavailable"
+    provider_volume_available: bool = False
+    last_trade_volume_semantics: str = "provider_reported_last_match_volume"
+    last_trade_volume_source_field: str = "tv"
+    last_trade_volume_status: str = "not_provided"
+    official_daily_volume_shares: int | None = None
+    official_daily_volume_trade_date: date | None = None
+    official_daily_volume_source: str | None = None
+    official_daily_volume_scope: str = "official_daily_aggregate"
+    volume_includes_odd_lot: bool | None = None
+    volume_includes_after_hours: bool | None = None
+    volume_includes_closing_auction: bool | None = None
+    volume_reconciliation: TaiwanStockQuoteVolumeReconciliationRead = Field(
+        default_factory=TaiwanStockQuoteVolumeReconciliationRead
+    )
+    volume_decision_usable: bool = False
 
     best_bid_price: float | None = None
     best_bid_size_lots: int | None = None
@@ -838,11 +886,15 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     auction_best_ask: float | None = None
     auction_indicative_available: bool
     auction_indicative_status: str
+    auction_indicative_source: str | None = None
     auction_phase: str | None = None
     auction_event_time: datetime | None = None
     indicative_match_available: bool
     indicative_match_price: float | None = None
     indicative_match_volume_lots: int | None = None
+    indicative_match_price_source_field: str | None = None
+    indicative_match_volume_source_field: str | None = None
+    indicative_match_status_source_field: str | None = None
     indicative_unmatched_buy_volume_lots: int | None = None
     indicative_unmatched_sell_volume_lots: int | None = None
     indicative_match_status: str = "not_provided"
@@ -1697,6 +1749,53 @@ class FinancialMetricQuarterlyRead(BaseModel):
     book_value_per_share: float | None = None
     roe: float | None = None
     roa: float | None = None
+    period_scope: str | None = None
+    months_covered: int | None = None
+    flow_semantics: str | None = None
+    eps_semantics: str | None = None
+    raw_eps: float | None = None
+    single_quarter_eps: float | None = None
+    adjusted_eps_ytd: float | None = None
+    ttm_eps: float | None = None
+    source_restated_status: str | None = None
+    share_basis_status: str | None = None
+    date_semantics_status: str | None = None
+    normalization_status: str | None = None
+    valuation_status: str | None = None
+    decision_usable: bool | None = None
+    normalization_warnings: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def add_source_reported_semantics(self) -> "FinancialMetricQuarterlyRead":
+        semantics = source_reported_financial_semantics(self)
+        for key, value in semantics.items():
+            current = getattr(self, key)
+            if current is None or (key == "normalization_warnings" and not current):
+                setattr(self, key, value)
+        return self
+
+
+class TaiwanFinancialQualityRead(BaseModel):
+    freshness: str
+    continuity: str
+    semantic_validity: str
+    decision_usable: bool
+    issues: list[str] = Field(default_factory=list)
+    revenue_continuity: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaiwanFinancialContractRead(BaseModel):
+    contract_version: str
+    target: dict[str, Any]
+    as_of: str
+    mode: str
+    as_reported: dict[str, Any]
+    normalized: dict[str, Any]
+    derived: dict[str, Any]
+    valuation: dict[str, Any]
+    basis_assessment: dict[str, Any] | None = None
+    quality: TaiwanFinancialQualityRead
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)

@@ -298,6 +298,80 @@ class WatchlistRadarBucketRead(BaseModel):
     count: int
 
 
+class WatchlistRadarV2EvaluationRead(BaseModel):
+    rule_version: str
+    rule_config_hash: str
+    feature_version: str
+    feature_config_hash: str
+    direction: int
+    direction_score: float
+    evidence_score: float
+    within_family_conflict_score: float
+    cross_family_conflict_score: float
+    timeframe_conflict_score: float
+    conflict_score: float
+    risk_score: float
+    confidence_score: float
+    priority_score: float
+    context_alignment_score: float
+    primary_bucket: str
+    urgency: str
+    evidence_grade: str
+    instrument_regime: str
+    instrument_regime_clarity: float
+    market_regime: str
+    market_regime_clarity: float
+    combined_regime_clarity: float
+    volatility_state: str
+    data_status: str
+    freshness_status: str
+    data_quality_score: float
+    state_tags: list[str] = Field(default_factory=list)
+    risk_tags: list[str] = Field(default_factory=list)
+    family_scores: dict[str, dict[str, object]] = Field(default_factory=dict)
+    signal_contributions: list[dict[str, object]] = Field(default_factory=list)
+    limitations: list[dict[str, object]] = Field(default_factory=list)
+
+
+class WatchlistRadarEngineRead(BaseModel):
+    active_version: str
+    active_config_hash: str | None = None
+    shadow_version: str
+    shadow_config_hash: str
+    mode: str
+    rollback_version: str
+    technical_direction_owner: str
+    legacy_status: str = "available"
+    legacy_frozen_at: date | None = None
+
+
+class WatchlistRadarV2ReadinessRead(BaseModel):
+    operational_status: str
+    validation_status: str
+    backtest_status: str
+    latest_backtest_id: int | None = None
+    completed_backtest_count: int = 0
+    outcome_count: int = 0
+    finalized_outcome_count: int = 0
+    pending_outcome_count: int = 0
+    limitations: list[dict[str, object]] = Field(default_factory=list)
+
+
+class WatchlistRadarV2SummaryRead(BaseModel):
+    evaluated_count: int
+    universe_evaluated_count: int = 0
+    universe_scope: str = "presentation_results_fallback"
+    direction_changed_count: int
+    bucket_changed_count: int
+    conflict_count: int
+    insufficient_count: int
+    market_regime: str
+    market_regime_clarity: float
+    market_limitations: list[dict[str, object]] = Field(default_factory=list)
+    market_snapshot: dict[str, object] = Field(default_factory=dict)
+    readiness: WatchlistRadarV2ReadinessRead | None = None
+
+
 class WatchlistRadarItemRead(BaseModel):
     rank: int
     source_rank: int | None = None
@@ -354,6 +428,7 @@ class WatchlistRadarItemRead(BaseModel):
 
     stale: bool = False
     error_message: str | None = None
+    radar_v2: WatchlistRadarV2EvaluationRead | None = None
 
 
 class WatchlistGroupRadarRead(BaseModel):
@@ -385,6 +460,105 @@ class WatchlistGroupRadarRead(BaseModel):
     snapshot_id: int | None = None
     snapshot_date: date | None = None
     calculated_at: datetime | None = None
+    radar_engine: WatchlistRadarEngineRead | None = None
+    radar_v2_summary: WatchlistRadarV2SummaryRead | None = None
+
+
+class WatchlistRadarV2PersistResultRead(BaseModel):
+    status: str
+    rule_version: str
+    rule_config_hash: str
+    group_id: int
+    mode: str
+    snapshot_date: date
+    snapshot_run_id: int | None = None
+    feature_created_count: int
+    evaluation_created_count: int
+    projection_created_count: int
+    event_created_count: int
+    event_updated_count: int
+    event_link_created_count: int = 0
+    event_unobserved_count: int = 0
+    universe_scope: str = "presentation_results_fallback"
+    universe_observed_count: int = 0
+    universe_evaluated_count: int = 0
+    observation_status_counts: dict[str, int] = Field(default_factory=dict)
+    evaluation_ids: list[int] = Field(default_factory=list)
+    skipped_count: int
+    skipped: list[dict[str, object]] = Field(default_factory=list)
+    outcomes: dict[str, object] | None = None
+
+
+class WatchlistRadarV2ProjectionHistoryRead(BaseModel):
+    group_id: int
+    mode: str
+    snapshot_date: date
+    rule_version: str
+    rule_config_hash: str
+    universe_observed_count: int
+    selected_count: int
+    observed_at: datetime
+
+
+class WatchlistRadarV2OutcomeItemRead(BaseModel):
+    evaluation_id: int | None = None
+    stock_id: str
+    stock_name: str | None = None
+    source_rank: int | None = None
+    status: str
+    summary_state: str
+    horizon_end_trade_date: date | None = None
+    signal_close_return_pct: float | None = None
+    signal_mfe_pct: float | None = None
+    signal_mae_pct: float | None = None
+    outcome_quality: str
+    limitations: list[dict[str, object]] = Field(default_factory=list)
+
+
+class WatchlistRadarV2OutcomeSummaryRead(BaseModel):
+    status: str
+    group_id: int
+    mode: str
+    snapshot_date: date | None = None
+    horizon_trading_days: int
+    rule_version: str
+    outcome_contract_version: str
+    total_count: int
+    finalized_count: int
+    pending_count: int
+    summary_state_counts: dict[str, int] = Field(default_factory=dict)
+    items: list[WatchlistRadarV2OutcomeItemRead] = Field(default_factory=list)
+    data_limitations: list[str] = Field(default_factory=list)
+
+
+class WatchlistRadarV2BacktestRead(BaseModel):
+    id: int
+    run_key: str
+    status: str
+    rule_version: str
+    rule_config_hash: str
+    feature_version: str
+    feature_config_hash: str
+    outcome_contract_version: str
+    outcome_config_hash: str
+    period_start: date
+    period_end: date
+    purge_trading_days: int
+    embargo_trading_days: int
+    requested_sample_count: int
+    eligible_sample_count: int
+    excluded_sample_count: int
+    coverage_ratio: float
+    horizons: list[int] = Field(default_factory=list)
+    universe: dict[str, object] = Field(default_factory=dict)
+    coverage: dict[str, object] = Field(default_factory=dict)
+    splits: dict[str, object] = Field(default_factory=dict)
+    baseline: dict[str, object] = Field(default_factory=dict)
+    metrics: dict[str, object] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+    error_message: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
 
 
 class WatchlistRadarSnapshotRead(BaseModel):

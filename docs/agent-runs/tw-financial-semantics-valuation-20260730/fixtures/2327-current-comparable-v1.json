@@ -1,0 +1,153 @@
+{
+  "package_version": "omi.tw-financial-evidence.v1",
+  "package_id": "2327-current-comparable-2026q1-v1",
+  "approval_scope": "clone_only",
+  "review_status": "approved",
+  "reviewer": "codex-source-reconciliation-2026-07-30",
+  "reviewed_at": "2026-07-30T18:00:00+08:00",
+  "stock_id": "2327",
+  "mode": "current_comparable",
+  "comparison_basis_id": "2327-current-share-basis-2025-08-22",
+  "target_basis_date": "2026-03-31",
+  "normalization_version": "tw-financial-normalization-v1+2327-evidence-v1",
+  "evidence_source_name": "Yageo IFRS Filing Evidence Mirror",
+  "sources": [
+    {
+      "source_name": "TWSE Financial Metrics",
+      "source_type": "api_bundle",
+      "category": "financial_metrics",
+      "endpoint_url": "https://openapi.twse.com.tw/",
+      "priority": 70,
+      "reliability_level": "official"
+    },
+    {
+      "source_name": "Yageo IFRS Filing Evidence Mirror",
+      "source_type": "filing_mirror",
+      "category": "financial_filing_evidence",
+      "endpoint_url": "https://financialfilings.com/filings/yageo-2327/",
+      "priority": 20,
+      "reliability_level": "verified_official_mirror"
+    }
+  ],
+  "documents": [
+    {
+      "document_id": "twse-financial-openapi-contract",
+      "url": "https://openapi.twse.com.tw/",
+      "description": "TWSE official OpenAPI source for source-reported EPS facts.",
+      "content_hash": null,
+      "content_hash_status": "unavailable"
+    },
+    {
+      "document_id": "yageo-2026q1-interim-note23-26",
+      "url": "https://financialfilings.com/filings/yageo-2327/interim-quarterly-report/2026/49303040/",
+      "description": "Mirror of the 2026Q1 IFRS filing. Note 23 records the 2025-08-22 par-value change; Note 26 records current and retrospectively adjusted comparative EPS and weighted-average shares.",
+      "content_hash": null,
+      "content_hash_status": "package_assertion_only"
+    },
+    {
+      "document_id": "yageo-2025-annual-eps",
+      "url": "https://financialfilings.com/filings/yageo-2327/agm-information/2026/48029138/",
+      "description": "Mirror of the 2025 annual filing evidence reporting basic EPS of 11.51.",
+      "content_hash": null,
+      "content_hash_status": "package_assertion_only"
+    },
+    {
+      "document_id": "ias33-retrospective-split-rule",
+      "url": "https://www.ardf.org.tw/TIFRS-Q%26A/IAS33.pdf",
+      "description": "Taiwan IFRS IAS 33 reference for retrospective adjustment of EPS after share splits.",
+      "content_hash": null,
+      "content_hash_status": "unavailable"
+    }
+  ],
+  "actions": [
+    {
+      "source_name": "Yageo IFRS Filing Evidence Mirror",
+      "action_key": "2327-share-basis-change-2025-08-22",
+      "action_type": "share_split_equivalent_par_value_change",
+      "announced_at": null,
+      "record_date": "2025-08-22",
+      "effective_date": "2025-08-22",
+      "old_share_basis": "10",
+      "new_share_basis": "2.5",
+      "adjustment_ratio": "4",
+      "adjustment_purpose": "per_share_financials",
+      "source_document_id": "yageo-2026q1-interim-note23-26",
+      "source_document_url": "https://financialfilings.com/filings/yageo-2327/interim-quarterly-report/2026/49303040/",
+      "status": "confirmed"
+    }
+  ],
+  "facts": [
+    {
+      "source_name": "TWSE Financial Metrics",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 1,
+      "metric_code": "basic_eps",
+      "expected_source_value": "10.77",
+      "source_share_basis_id": "2327-par-value-10-pre-2025-08-22",
+      "source_restated_status": "not_restated",
+      "expected_normalized_value": "2.6925",
+      "evidence_document_ids": [
+        "twse-financial-openapi-contract",
+        "yageo-2026q1-interim-note23-26",
+        "ias33-retrospective-split-rule"
+      ]
+    },
+    {
+      "source_name": "TWSE Financial Metrics",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 2,
+      "metric_code": "basic_eps",
+      "expected_source_value": "20.51",
+      "source_share_basis_id": "2327-par-value-10-pre-2025-08-22",
+      "source_restated_status": "not_restated",
+      "expected_normalized_value": "5.1275",
+      "evidence_document_ids": [
+        "twse-financial-openapi-contract",
+        "yageo-2026q1-interim-note23-26",
+        "ias33-retrospective-split-rule"
+      ]
+    },
+    {
+      "source_name": "TWSE Financial Metrics",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 3,
+      "metric_code": "basic_eps",
+      "expected_source_value": "8.22",
+      "source_share_basis_id": "2327-par-value-2.5-post-2025-08-22",
+      "source_restated_status": "confirmed",
+      "expected_normalized_value": "8.22",
+      "evidence_document_ids": [
+        "twse-financial-openapi-contract",
+        "yageo-2026q1-interim-note23-26"
+      ]
+    },
+    {
+      "source_name": "TWSE Financial Metrics",
+      "fiscal_year": 2025,
+      "fiscal_quarter": 4,
+      "metric_code": "basic_eps",
+      "expected_source_value": "11.51",
+      "source_share_basis_id": "2327-par-value-2.5-post-2025-08-22",
+      "source_restated_status": "confirmed",
+      "expected_normalized_value": "11.51",
+      "evidence_document_ids": [
+        "twse-financial-openapi-contract",
+        "yageo-2025-annual-eps"
+      ]
+    },
+    {
+      "source_name": "TWSE Financial Metrics",
+      "fiscal_year": 2026,
+      "fiscal_quarter": 1,
+      "metric_code": "basic_eps",
+      "expected_source_value": "3.90",
+      "source_share_basis_id": "2327-par-value-2.5-post-2025-08-22",
+      "source_restated_status": "confirmed",
+      "expected_normalized_value": "3.90",
+      "evidence_document_ids": [
+        "twse-financial-openapi-contract",
+        "yageo-2026q1-interim-note23-26"
+      ]
+    }
+  ]
+}

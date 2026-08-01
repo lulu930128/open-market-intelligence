@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 from app.db.models import USDailyPrice
 from app.market.ohlc_overlay import aggregate_ohlc_points
 from app.us_market.sources import USDailyPriceRecord
+from app.us_market.trading_calendar import is_us_daily_price_finalized
 
 
 US_DAILY_CANONICAL_PROVIDER_PRIORITY = {
@@ -115,18 +116,32 @@ def is_sparse_daily_ohlc_shape(points: list[dict]) -> bool:
 
 
 def filter_ohlc_source_rows(rows: list[USDailyPrice]) -> list[USDailyPrice]:
-    filtered_rows = [row for row in rows if not is_yahoo_range_max_record(row)]
+    filtered_rows = [
+        row
+        for row in rows
+        if not is_yahoo_range_max_record(row)
+        and is_us_daily_price_finalized(
+            trade_date=row.trade_date,
+            fetched_at=row.fetched_at,
+        )
+    ]
     return dedupe_daily_rows_by_trade_date(filtered_rows)
 
 
-def has_newer_untrusted_yahoo_rows(
+def has_newer_untrusted_rows(
     *,
     rows: list[USDailyPrice],
     trusted_rows: list[USDailyPrice],
 ) -> bool:
     trusted_latest_date = max((row.trade_date for row in trusted_rows), default=None)
     for row in rows:
-        if not is_yahoo_range_max_record(row):
+        if (
+            not is_yahoo_range_max_record(row)
+            and is_us_daily_price_finalized(
+                trade_date=row.trade_date,
+                fetched_at=row.fetched_at,
+            )
+        ):
             continue
         if trusted_latest_date is None or row.trade_date > trusted_latest_date:
             return True

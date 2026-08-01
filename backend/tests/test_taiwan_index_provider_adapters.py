@@ -65,6 +65,117 @@ class TaiwanIndexProviderAdapterTests(unittest.TestCase):
         self.assertEqual(error.context.target, "TAIEX")
         self.assertTrue(error.rate_limited)
 
+    def test_twse_index_daily_ohlc_uses_explicit_provider_context_and_timeout(
+        self,
+    ) -> None:
+        response = _response({"stat": "OK", "fields": [], "data": []})
+        with patch.object(
+            provider_http.http_client,
+            "request",
+            return_value=response,
+        ) as request:
+            payload = twse.fetch_index_daily_ohlc_payload(
+                date(2026, 7, 30),
+                timeout_seconds=9,
+            )
+
+        self.assertEqual(payload["stat"], "OK")
+        args, kwargs = request.call_args
+        self.assertEqual(args[:2], ("GET", twse.INDEX_DAILY_OHLC_URL))
+        self.assertEqual(kwargs["timeout"], 9)
+        self.assertEqual(kwargs["params"]["date"], "20260730")
+        self.assertEqual(kwargs["params"]["response"], "json")
+
+    def test_twse_index_daily_ohlc_http_error_keeps_taiwan_context(self) -> None:
+        response = _response({}, status_code=429)
+        with (
+            patch.object(provider_http.http_client, "request", return_value=response),
+            self.assertRaises(provider_http.ProviderHttpError) as raised,
+        ):
+            twse.fetch_index_daily_ohlc_payload(
+                date(2026, 7, 30),
+                timeout_seconds=6,
+            )
+
+        error = raised.exception
+        self.assertEqual(error.context.market, "tw")
+        self.assertEqual(error.context.provider, "twse_index_daily_ohlc")
+        self.assertEqual(error.context.resource, "index_daily_ohlc")
+        self.assertEqual(error.context.target, "TAIEX")
+        self.assertTrue(error.rate_limited)
+
+    def test_tpex_index_5s_uses_official_date_contract(self) -> None:
+        response = _response(
+            {
+                "stat": "ok",
+                "date": "20260730",
+                "tables": [],
+            }
+        )
+        with patch.object(
+            provider_http.http_client,
+            "request",
+            return_value=response,
+        ) as request:
+            payload = tpex.fetch_index_5s_payload(
+                date(2026, 7, 30),
+                timeout_seconds=8,
+            )
+
+        self.assertEqual(payload["stat"], "ok")
+        args, kwargs = request.call_args
+        self.assertEqual(args[:2], ("GET", tpex.INDEX_5S_URL))
+        self.assertEqual(kwargs["timeout"], 8)
+        self.assertEqual(kwargs["params"]["date"], "2026/07/30")
+        self.assertEqual(kwargs["params"]["response"], "json")
+
+    def test_tpex_index_5s_http_error_keeps_intraday_context(self) -> None:
+        response = _response({}, status_code=429)
+        with (
+            patch.object(
+                provider_http.http_client,
+                "request",
+                return_value=response,
+            ),
+            self.assertRaises(provider_http.ProviderHttpError) as raised,
+        ):
+            tpex.fetch_index_5s_payload(
+                date(2026, 7, 30),
+                timeout_seconds=6,
+            )
+
+        error = raised.exception
+        self.assertEqual(error.context.market, "tw")
+        self.assertEqual(error.context.provider, tpex.INDEX_5S_PROVIDER)
+        self.assertEqual(error.context.resource, "index_intraday")
+        self.assertEqual(error.context.target, "TPEX")
+        self.assertTrue(error.rate_limited)
+
+    def test_tpex_market_highlight_uses_official_date_contract(self) -> None:
+        response = _response(
+            {
+                "stat": "ok",
+                "date": "20260529",
+                "tables": [],
+            }
+        )
+        with patch.object(
+            provider_http.http_client,
+            "request",
+            return_value=response,
+        ) as request:
+            payload = tpex.fetch_market_highlight_payload(
+                date(2026, 5, 29),
+                timeout_seconds=8,
+            )
+
+        self.assertEqual(payload["stat"], "ok")
+        args, kwargs = request.call_args
+        self.assertEqual(args[:2], ("GET", tpex.MARKET_HIGHLIGHT_URL))
+        self.assertEqual(kwargs["timeout"], 8)
+        self.assertEqual(kwargs["params"]["date"], "2026/05/29")
+        self.assertEqual(kwargs["params"]["response"], "json")
+
     def test_tpex_json_adapter_classifies_daily_quote_resource(self) -> None:
         response = _response([])
         with patch.object(provider_http.http_client, "request", return_value=response):

@@ -18,6 +18,7 @@ logs/*
 
 # Local scratch / browser automation state
 .tmp/
+tmp/
 
 # Local data
 data/*

@@ -6,6 +6,7 @@ import {
   type ProfessionalTimeframe,
 } from "@/components/stock-detail/stockDetailTypes";
 import {
+  TAIWAN_SESSION_END_MINUTES,
   TAIWAN_SESSION_START_MINUTES,
   getTaipeiMinutesOfDay,
   isTaiwanRegularSessionPoint,
@@ -32,15 +33,62 @@ export function intradayTimeMs(value: string) {
 
 export function aggregateProfessionalIntradayBars(
   points: IntradayTrendPoint[],
-  intervalMinutes: number
+  intervalMinutes: number,
+  options: {
+    discardOpeningReferencePrice?: number | null;
+    includePostCloseSnapshot?: boolean;
+    includeVolume?: boolean;
+    priceOnly?: boolean;
+  } = {}
 ): ChartPoint[] {
   const buckets = new Map<number, IntradayTrendPoint[]>();
-
-  points
-    .filter((point) => finiteNumber(point.price) && isTaiwanRegularSessionPoint(point.time))
+  const sortedPoints = points
+    .filter((point) => finiteNumber(point.price))
     .slice()
-    .sort((left, right) => intradayTimeMs(left.time) - intradayTimeMs(right.time))
-    .forEach((point) => {
+    .sort((left, right) => intradayTimeMs(left.time) - intradayTimeMs(right.time));
+  const regularSessionPoints = sortedPoints.filter((point) =>
+    isTaiwanRegularSessionPoint(point.time)
+  );
+  const lastRegularPoint = regularSessionPoints[regularSessionPoints.length - 1] ?? null;
+  const postCloseSnapshot = options.includePostCloseSnapshot
+    ? [...sortedPoints]
+        .reverse()
+        .find((point) => {
+          const minutes = getTaipeiMinutesOfDay(point.time);
+
+          return (
+            minutes !== null &&
+            minutes > TAIWAN_SESSION_END_MINUTES &&
+            minutes <= TAIWAN_SESSION_END_MINUTES + 5
+          );
+        }) ?? null
+    : null;
+  const pointsWithClosingSnapshot =
+    postCloseSnapshot && lastRegularPoint
+      ? [
+          ...regularSessionPoints,
+          {
+            ...postCloseSnapshot,
+            time: lastRegularPoint.time,
+          },
+        ]
+      : regularSessionPoints;
+  const firstPoint = pointsWithClosingSnapshot[0] ?? null;
+  const secondPoint = pointsWithClosingSnapshot[1] ?? null;
+  const firstMinutes = firstPoint ? getTaipeiMinutesOfDay(firstPoint.time) : null;
+  const secondMinutes = secondPoint ? getTaipeiMinutesOfDay(secondPoint.time) : null;
+  const shouldDiscardOpeningReference =
+    firstPoint !== null &&
+    secondPoint !== null &&
+    finiteNumber(options.discardOpeningReferencePrice) &&
+    firstPoint.price === options.discardOpeningReferencePrice &&
+    firstMinutes === TAIWAN_SESSION_START_MINUTES &&
+    secondMinutes === TAIWAN_SESSION_START_MINUTES;
+  const aggregationPoints = shouldDiscardOpeningReference
+    ? pointsWithClosingSnapshot.slice(1)
+    : pointsWithClosingSnapshot;
+
+  aggregationPoints.forEach((point) => {
       const minutes = getTaipeiMinutesOfDay(point.time);
 
       if (minutes === null) return;
@@ -60,19 +108,23 @@ export function aggregateProfessionalIntradayBars(
     .map(([, bucketPoints]) => {
       const first = bucketPoints[0];
       const last = bucketPoints[bucketPoints.length - 1];
-      const highs = bucketPoints.map((point) => point.high ?? point.price).filter(finiteNumber);
-      const lows = bucketPoints.map((point) => point.low ?? point.price).filter(finiteNumber);
+      const highs = bucketPoints
+        .map((point) => (options.priceOnly ? point.price : point.high ?? point.price))
+        .filter(finiteNumber);
+      const lows = bucketPoints
+        .map((point) => (options.priceOnly ? point.price : point.low ?? point.price))
+        .filter(finiteNumber);
       const volume = bucketPoints.reduce((total, point) => {
         return total + (finiteNumber(point.volume) && point.volume > 0 ? point.volume : 0);
       }, 0);
 
       return {
         time: first.time,
-        open: first.open ?? first.price,
+        open: options.priceOnly ? first.price : first.open ?? first.price,
         high: highs.length ? Math.max(...highs) : last.price,
         low: lows.length ? Math.min(...lows) : last.price,
         close: last.price,
-        volume: volume > 0 ? volume : null,
+        volume: options.includeVolume === false || volume <= 0 ? null : volume,
         trade_value: null,
         transaction_count: null,
       };

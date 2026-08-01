@@ -302,6 +302,9 @@ QUOTE_ONLY_HINTS = (
     "latest price",
     "closing price",
     "close price",
+    "正式收盤價",
+    "正式收盤",
+    "收盤價",
     "最新報價",
     "最新股價",
     "最新價格",
@@ -314,6 +317,19 @@ QUOTE_ONLY_HINTS = (
     "股價多少",
     "現在幾塊",
     "現在多少錢",
+)
+REGULATION_QUERY_HINTS = (
+    "處置股",
+    "處置期間",
+    "撮合方式",
+    "撮合間隔",
+    "分盤交易",
+    "全額交割",
+    "預收款券",
+    "交易限制",
+    "限制交易",
+    "disposition",
+    "trading restriction",
 )
 NEGATION_TERMS = (
     "不查",
@@ -669,6 +685,8 @@ def infer_question_intent(
         return "broker_branch"
     if contains_hint(question, MARKET_BREADTH_QUERY_HINTS):
         return "market_breadth"
+    if contains_hint(question, REGULATION_QUERY_HINTS):
+        return "regulation"
     if (
         contains_hint(question, QUOTE_ONLY_HINTS)
         or requested_us_trade_date(question) is not None
@@ -704,6 +722,7 @@ def infer_question_intents(
     intent_hints = (
         ("broker_branch", BROKER_BRANCH_QUERY_HINTS),
         ("market_breadth", MARKET_BREADTH_QUERY_HINTS),
+        ("regulation", REGULATION_QUERY_HINTS),
         ("quote", QUOTE_ONLY_HINTS),
         ("risk_check", (*RISK_PRIORITY_HINTS, *RISK_DECISION_HINTS)),
         ("entry_decision", ENTRY_DECISION_HINTS),

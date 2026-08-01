@@ -235,6 +235,68 @@ class QueryPlanContractTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_tool_run_separates_transport_success_from_operation_failure(
+        self,
+    ) -> None:
+        db = make_session()
+        try:
+            with patch.object(
+                agentic_execution,
+                "_execute_tool_with_deadline",
+                return_value=(
+                    {
+                        "status": "error",
+                        "provider": "tdcc",
+                        "stock_id": "8299",
+                        "refresh_outcome": "failed",
+                        "error_message": "TDCC request timed out",
+                        "failed_steps": [
+                            {
+                                "dataset": "shareholding_distribution",
+                                "provider": "tdcc",
+                                "target": "8299",
+                                "status": "error",
+                                "error_message": "TDCC request timed out",
+                            }
+                        ],
+                    },
+                    "success",
+                    None,
+                ),
+            ):
+                runs, _ = agentic_execution.execute_tool_plan(
+                    db=db,
+                    plan={
+                        "tool_plan": [
+                            {
+                                "tool": "us.read_sec_fundamentals",
+                                "args": {"symbol": "8299"},
+                                "reason": "status contract regression",
+                            }
+                        ]
+                    },
+                    budget={
+                        "max_calls": 1,
+                        "max_external_fetches": 0,
+                        "max_total_seconds": 10,
+                    },
+                    can_external_fetch=False,
+                )
+
+            run = runs[0]
+            self.assertEqual(run["status"], "success")
+            self.assertEqual(run["transport_status"], "success")
+            self.assertEqual(run["operation_status"], "failed")
+            self.assertEqual(run["evidence_status"], "unavailable")
+            self.assertEqual(run["result_status"], "error")
+            self.assertEqual(run["error"], "TDCC request timed out")
+            self.assertEqual(
+                run["result_summary"]["failed_steps"][0]["provider"],
+                "tdcc",
+            )
+        finally:
+            db.close()
+
     def test_job_public_status_uses_final_business_state(self) -> None:
         db = make_session()
         try:
@@ -255,6 +317,41 @@ class QueryPlanContractTests(unittest.TestCase):
 
             self.assertEqual(serialized["status"], "success")
             self.assertEqual(serialized["public_status"], "partial")
+        finally:
+            db.close()
+
+    def test_background_job_inner_error_finishes_as_failed(self) -> None:
+        db = make_session()
+        try:
+            job = job_service.create_job(
+                db,
+                job_type=agentic_execution.BACKGROUND_TOOL_JOB_TYPE,
+                target="8299",
+                request={"profile": "shareholding"},
+            )
+            job_service.start_job(db, job.id)
+
+            agentic_execution._finish_background_job_in_session(
+                db,
+                job.id,
+                tool_name="tw.refresh_shareholding",
+                status="success",
+                value={
+                    "status": "error",
+                    "provider": "tdcc",
+                    "error_message": "TDCC request timed out",
+                },
+            )
+
+            serialized = job_service.serialize_job(
+                job_service.get_job(db, job.id)
+            )
+            self.assertEqual(serialized["status"], "error")
+            self.assertEqual(serialized["public_status"], "failed")
+            self.assertEqual(
+                serialized["result"]["error"],
+                "TDCC request timed out",
+            )
         finally:
             db.close()
 

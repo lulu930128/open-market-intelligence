@@ -66,6 +66,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("us_sec_company_fact", table_names)
             self.assertIn("us_company_profile", table_names)
             self.assertIn("us_corporate_action", table_names)
+            self.assertIn("us_corporate_event", table_names)
             self.assertIn("us_short_volume_daily", table_names)
             self.assertIn("macro_series_observation", table_names)
             self.assertIn("us_watchlist_group", table_names)
@@ -96,6 +97,16 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertTrue({"report_date", "released_at", "filed_at"}.issubset(financial_columns))
             self.assertIn("market_intraday_bar", table_names)
             self.assertIn("taiwan_stock_quote_snapshot", table_names)
+            quote_snapshot_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns(
+                    "taiwan_stock_quote_snapshot"
+                )
+            }
+            self.assertIn(
+                "last_trade_volume_lots",
+                quote_snapshot_columns,
+            )
             self.assertIn("taiwan_quote_contract_snapshot", table_names)
             self.assertIn("chart_drawing_snapshot", table_names)
             self.assertIn("taiwan_futures_quote_snapshot", table_names)
@@ -134,6 +145,16 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("watchlist_radar_snapshot_run", table_names)
             self.assertIn("watchlist_radar_snapshot_item", table_names)
             self.assertIn("watchlist_radar_outcome", table_names)
+            self.assertIn("radar_rule_config", table_names)
+            self.assertIn("radar_feature_snapshot", table_names)
+            self.assertIn("radar_rule_evaluation", table_names)
+            self.assertIn("radar_signal_event", table_names)
+            self.assertIn("radar_universe_observation", table_names)
+            self.assertIn("radar_evaluation_event_link", table_names)
+            self.assertIn("radar_watchlist_projection", table_names)
+            self.assertIn("radar_outcome_path", table_names)
+            self.assertIn("radar_outcome_event_link", table_names)
+            self.assertIn("radar_backtest_run", table_names)
             self.assertIn("portfolio_holding", table_names)
             jp_master_columns = {
                 column["name"]

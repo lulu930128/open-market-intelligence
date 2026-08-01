@@ -349,6 +349,7 @@ def ask(
                     execution_plan.selection.get("parameters") or {}
                 ),
                 "external_fetch_allowed": bool(policy.get("can_external_fetch")),
+                "tool_budget": dict(policy.get("tool_budget") or {}),
             }
         }
     )

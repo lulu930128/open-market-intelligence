@@ -4,8 +4,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from sqlalchemy.orm import Session
 from app.watchlists import (
     indicator_service,
+    radar_active_v2_service,
+    radar_backtest_v2,
     radar_outcome_service,
     radar_service,
+    radar_shadow_v2_service,
+    radar_v2_service,
     ranking_service,
     service,
     signal_service,
@@ -32,9 +36,38 @@ from app.watchlists.schemas import (
     WatchlistItemUpdate,
     WatchlistRadarOutcomeSummaryRead,
     WatchlistRadarSnapshotRead,
+    WatchlistRadarV2BacktestRead,
+    WatchlistRadarV2OutcomeSummaryRead,
+    WatchlistRadarV2PersistResultRead,
+    WatchlistRadarV2ProjectionHistoryRead,
+)
+from app.watchlists.radar_rule_contract import (
+    RADAR_V1_FROZEN_AT,
+    RADAR_V1_LIFECYCLE_STATUS,
+    RADAR_V1_RULE_VERSION,
+    RADAR_V2_ACTIVE_CONTRACT,
+    RADAR_V2_ACTIVE_RULE_CONFIG_HASH,
+    RADAR_V2_ACTIVE_RULE_VERSION,
+    RADAR_V2_RULE_CONFIG_HASH,
+    RADAR_V2_RULE_VERSION,
 )
 
 router = APIRouter()
+
+
+def _raise_frozen_radar_v1_write() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "RADAR_V1_FROZEN",
+            "message": (
+                "Radar v1 is frozen and no longer accepts snapshots or outcome "
+                "evaluation writes. Use the Radar v2 endpoints instead."
+            ),
+            "rule_version": RADAR_V1_RULE_VERSION,
+            "frozen_at": RADAR_V1_FROZEN_AT,
+        },
+    )
 
 
 def _handle_group_error(exc: Exception) -> HTTPException:
@@ -607,37 +640,303 @@ def get_watchlist_group_radar(
     intraday_limit: int = Query(default=30, ge=1, le=100),
     prefer_snapshot: bool = True,
     snapshot_only: bool = False,
+    include_shadow_v2: bool | None = None,
+    version: str = Query(default="v2", pattern="^(v1|v2)$"),
     db: Session = Depends(get_db),
 ):
     try:
-        snapshot_matches_default_calculation = (
-            ma_windows is None
-            and volume_ma_windows is None
-            and calculation_limit == 100
-            and volume_ratio_threshold is None
-        )
-        if (
-            prefer_snapshot
-            and not use_intraday
-            and snapshot_matches_default_calculation
-        ) or snapshot_only:
-            snapshot = radar_outcome_service.get_latest_watchlist_radar_snapshot_payload(
-                db=db,
-                group_id=group_id,
-                include_children=include_children,
-                enabled_only=enabled_only,
-                mode=mode,
-                max_results=max_results,
-                minimum_target_trade_date=ranking_service.expected_daily_price_date(),
+        if version == "v2":
+            snapshot_matches_default_calculation = (
+                ma_windows is None
+                and volume_ma_windows is None
+                and calculation_limit == 100
+                and volume_ratio_threshold is None
             )
-            if snapshot is not None:
-                return snapshot
-            if snapshot_only:
-                raise radar_outcome_service.WatchlistRadarSnapshotNotFoundError(
-                    f"No Radar snapshot is available for group id={group_id}, mode={mode}."
+            if (
+                prefer_snapshot
+                and not use_intraday
+                and snapshot_matches_default_calculation
+            ) or snapshot_only:
+                active_snapshot = (
+                    radar_v2_service.get_latest_radar_v2_projection(
+                        db=db,
+                        group_id=group_id,
+                        mode=mode,
+                        max_results=max_results,
+                        minimum_snapshot_date=(
+                            ranking_service.expected_daily_price_date()
+                        ),
+                    )
                 )
+                if (
+                    active_snapshot is not None
+                    and bool(active_snapshot.get("include_children"))
+                    == include_children
+                ):
+                    return active_snapshot
+                if snapshot_only:
+                    raise radar_outcome_service.WatchlistRadarSnapshotNotFoundError(
+                        "No Radar v2 snapshot is available for "
+                        f"group id={group_id}, mode={mode}."
+                    )
 
-        radar = radar_service.get_watchlist_group_radar(
+            base_radar, calculation_universe = (
+                radar_service.get_watchlist_group_radar_bundle(
+                    db=db,
+                    group_id=group_id,
+                    include_children=include_children,
+                    enabled_only=enabled_only,
+                    mode=mode,
+                    max_results=max_results,
+                    ma_windows=ma_windows,
+                    volume_ma_windows=volume_ma_windows,
+                    calculation_limit=calculation_limit,
+                    volume_ratio_threshold=volume_ratio_threshold,
+                    use_intraday=use_intraday,
+                    intraday_limit=intraday_limit,
+                )
+            )
+            base_radar["group_id"] = group_id
+            base_radar["cache_status"] = "computed"
+            return (
+                radar_active_v2_service.build_radar_v2_active_projection_from_db(
+                    db=db,
+                    radar=base_radar,
+                    universe_items=calculation_universe,
+                )
+            )
+
+        snapshot = radar_outcome_service.get_latest_watchlist_radar_snapshot_payload(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            mode=mode,
+            max_results=max_results,
+            radar_rule_version=RADAR_V1_RULE_VERSION,
+        )
+        if snapshot is None:
+            raise radar_outcome_service.WatchlistRadarSnapshotNotFoundError(
+                "No frozen Radar v1 snapshot is available for "
+                f"group id={group_id}, mode={mode}."
+            )
+        limitations = list(snapshot.get("data_limitations") or [])
+        limitations.append(
+            "Radar v1 is frozen at 2026-08-01; this is read-only persisted history."
+        )
+        return {
+            **snapshot,
+            "cache_status": "frozen_v1_snapshot",
+            "data_limitations": limitations,
+            "radar_engine": {
+                "active_version": RADAR_V2_ACTIVE_RULE_VERSION,
+                "active_config_hash": RADAR_V2_ACTIVE_RULE_CONFIG_HASH,
+                "shadow_version": RADAR_V2_RULE_VERSION,
+                "shadow_config_hash": RADAR_V2_RULE_CONFIG_HASH,
+                "mode": "frozen",
+                "rollback_version": RADAR_V1_RULE_VERSION,
+                "technical_direction_owner": "backend",
+                "legacy_status": RADAR_V1_LIFECYCLE_STATUS,
+                "legacy_frozen_at": RADAR_V1_FROZEN_AT,
+            },
+        }
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get(
+    "/groups/{group_id}/radar/v2/snapshots/history",
+    response_model=list[WatchlistRadarV2ProjectionHistoryRead],
+)
+def list_watchlist_group_radar_v2_snapshots(
+    group_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    limit: int = Query(default=30, ge=1, le=120),
+    db: Session = Depends(get_db),
+):
+    return radar_v2_service.list_radar_v2_projection_history(
+        db=db,
+        group_id=group_id,
+        mode=mode,
+        limit=limit,
+    )
+
+
+@router.get(
+    "/groups/{group_id}/radar/v2/outcomes/latest",
+    response_model=WatchlistRadarV2OutcomeSummaryRead,
+)
+def get_latest_watchlist_group_radar_v2_outcome(
+    group_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    snapshot_date: date | None = None,
+    horizon_trading_days: int = Query(default=1, ge=1, le=20),
+    item_limit: int = Query(default=30, ge=0, le=200),
+    db: Session = Depends(get_db),
+):
+    return radar_v2_service.get_radar_v2_outcome_summary(
+        db=db,
+        group_id=group_id,
+        mode=mode,
+        snapshot_date=snapshot_date,
+        horizon_trading_days=horizon_trading_days,
+        item_limit=item_limit,
+    )
+
+
+@router.get(
+    "/groups/{group_id}/radar/v2/outcomes/history",
+    response_model=list[WatchlistRadarV2OutcomeSummaryRead],
+)
+def list_watchlist_group_radar_v2_outcomes(
+    group_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    horizon_trading_days: int = Query(default=1, ge=1, le=20),
+    limit: int = Query(default=30, ge=1, le=120),
+    db: Session = Depends(get_db),
+):
+    return radar_v2_service.list_radar_v2_outcome_history(
+        db=db,
+        group_id=group_id,
+        mode=mode,
+        horizon_trading_days=horizon_trading_days,
+        limit=limit,
+    )
+
+
+@router.post(
+    "/groups/{group_id}/radar/v2/backtests",
+    response_model=WatchlistRadarV2BacktestRead,
+)
+def run_watchlist_group_radar_v2_backtest(
+    group_id: int,
+    period_start: date,
+    period_end: date,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    horizon_trading_days: int = Query(default=5, ge=1, le=20),
+    minimum_samples: int = Query(default=30, ge=5, le=10000),
+    db: Session = Depends(get_db),
+):
+    try:
+        service.get_group(db=db, group_id=group_id)
+        stock_ids = radar_v2_service.list_radar_v2_scope_stock_ids(
+            db=db,
+            group_id=group_id,
+            mode=mode,
+            period_start=period_start,
+            period_end=period_end,
+        )
+        contract = RADAR_V2_ACTIVE_CONTRACT
+        return radar_backtest_v2.run_radar_backtest_v2(
+            db=db,
+            request=radar_backtest_v2.RadarBacktestRequest(
+                rule_version=str(contract["rule_version"]),
+                rule_config_hash=str(contract["rule_config_hash"]),
+                feature_version=str(contract["feature_version"]),
+                feature_config_hash=str(contract["feature_config_hash"]),
+                outcome_contract_version=str(
+                    contract["outcome_contract_version"]
+                ),
+                outcome_config_hash=str(
+                    contract["outcome_config_hash"]
+                ),
+                period_start=period_start,
+                period_end=period_end,
+                horizon_trading_days=horizon_trading_days,
+                stock_ids=tuple(stock_ids),
+                scope_key=f"watchlist_group:{group_id}:{mode}",
+                minimum_samples=minimum_samples,
+            ),
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/groups/{group_id}/radar/v2/backtests/latest",
+    response_model=WatchlistRadarV2BacktestRead,
+)
+def get_latest_watchlist_group_radar_v2_backtest(
+    group_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    db: Session = Depends(get_db),
+):
+    contract = RADAR_V2_ACTIVE_CONTRACT
+    result = radar_backtest_v2.get_latest_radar_backtest_v2(
+        db=db,
+        rule_version=str(contract["rule_version"]),
+        rule_config_hash=str(contract["rule_config_hash"]),
+        scope_key=f"watchlist_group:{group_id}:{mode}",
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No Radar v2 backtest is available for "
+                f"group id={group_id}, mode={mode}."
+            ),
+        )
+    return result
+
+
+@router.post(
+    "/groups/{group_id}/radar/v2/shadow-evaluate",
+    response_model=WatchlistRadarV2PersistResultRead,
+)
+def persist_watchlist_group_radar_v2_shadow(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    max_results: int = Query(default=30, ge=1, le=200),
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
+    calculation_limit: int = Query(default=100, ge=20, le=500),
+    volume_ratio_threshold: float | None = Query(default=None, ge=1.0, le=5.0),
+    use_intraday: bool = False,
+    intraday_limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        if not radar_shadow_v2_service.radar_v2_shadow_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "Radar v2 shadow is disabled by "
+                    "OMI_RADAR_V2_SHADOW_ENABLED."
+                ),
+            )
+        radar, v2_universe = radar_service.get_watchlist_group_radar_bundle(
             db=db,
             group_id=group_id,
             include_children=include_children,
@@ -651,13 +950,94 @@ def get_watchlist_group_radar(
             use_intraday=use_intraday,
             intraday_limit=intraday_limit,
         )
-        return {**radar, "cache_status": "computed"}
+        attached = radar_shadow_v2_service.attach_radar_v2_shadow_from_db(
+            db=db,
+            radar=radar,
+            universe_items=v2_universe,
+        )
+        return radar_shadow_v2_service.persist_radar_v2_shadow(
+            db=db,
+            radar=attached,
+            group_id=group_id,
+            mode=mode,
+        )
     except service.WatchlistGroupNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post(
+    "/groups/{group_id}/radar/v2/evaluate",
+    response_model=WatchlistRadarV2PersistResultRead,
+)
+def persist_watchlist_group_radar_v2_active(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    max_results: int = Query(default=30, ge=1, le=200),
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
+    calculation_limit: int = Query(default=100, ge=20, le=500),
+    volume_ratio_threshold: float | None = Query(default=None, ge=1.0, le=5.0),
+    use_intraday: bool = False,
+    intraday_limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        base_radar, calculation_universe = (
+            radar_service.get_watchlist_group_radar_bundle(
+                db=db,
+                group_id=group_id,
+                include_children=include_children,
+                enabled_only=enabled_only,
+                mode=mode,
+                max_results=max_results,
+                ma_windows=ma_windows,
+                volume_ma_windows=volume_ma_windows,
+                calculation_limit=calculation_limit,
+                volume_ratio_threshold=volume_ratio_threshold,
+                use_intraday=use_intraday,
+                intraday_limit=intraday_limit,
+            )
+        )
+        active = (
+            radar_active_v2_service.build_radar_v2_active_projection_from_db(
+                db=db,
+                radar=base_radar,
+                universe_items=calculation_universe,
+            )
+        )
+        persisted = radar_active_v2_service.persist_radar_v2_active(
+            db=db,
+            radar=active,
+            group_id=group_id,
+            mode=mode,
+        )
+        outcomes = (
+            radar_shadow_v2_service.evaluate_pending_radar_v2_outcomes(
+                db=db,
+                evaluation_ids=persisted["evaluation_ids"],
+                group_id=group_id,
+                mode=mode,
+                rule_version=str(persisted["rule_version"]),
+            )
+        )
+        return {**persisted, "outcomes": outcomes}
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post(
@@ -682,43 +1062,7 @@ def create_watchlist_group_radar_snapshot(
     intraday_limit: int = Query(default=30, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    try:
-        radar = radar_service.get_watchlist_group_radar(
-            db=db,
-            group_id=group_id,
-            include_children=include_children,
-            enabled_only=enabled_only,
-            mode=mode,
-            max_results=max_results,
-            ma_windows=ma_windows,
-            volume_ma_windows=volume_ma_windows,
-            calculation_limit=calculation_limit,
-            volume_ratio_threshold=volume_ratio_threshold,
-            use_intraday=use_intraday,
-            intraday_limit=intraday_limit,
-        )
-        return radar_outcome_service.save_watchlist_radar_snapshot(
-            db=db,
-            radar=radar,
-            enabled_only=enabled_only,
-            request={
-                "group_id": group_id,
-                "include_children": include_children,
-                "enabled_only": enabled_only,
-                "mode": mode,
-                "max_results": max_results,
-                "ma_windows": ma_windows,
-                "volume_ma_windows": volume_ma_windows,
-                "calculation_limit": calculation_limit,
-                "volume_ratio_threshold": volume_ratio_threshold,
-                "use_intraday": use_intraday,
-                "intraday_limit": intraday_limit,
-            },
-        )
-    except service.WatchlistGroupNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    _raise_frozen_radar_v1_write()
 
 
 @router.post(
@@ -736,17 +1080,7 @@ def evaluate_watchlist_group_radar_outcome(
     item_limit: int = Query(default=12, ge=0, le=200),
     db: Session = Depends(get_db),
 ):
-    try:
-        return radar_outcome_service.evaluate_watchlist_radar_outcome(
-            db=db,
-            group_id=group_id,
-            mode=mode,
-            snapshot_run_id=snapshot_run_id,
-            snapshot_date=snapshot_date,
-            item_limit=item_limit,
-        )
-    except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    _raise_frozen_radar_v1_write()
 
 
 @router.get(

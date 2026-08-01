@@ -51,11 +51,17 @@ def _fetch_payload(
 def fetch_stock_messages(
     codes: list[str],
     *,
+    exchange: str = "tse",
     timeout_seconds: int = 20,
     request: ResponseGetter | None = None,
 ) -> list[dict]:
+    normalized_exchange = str(exchange or "").strip().lower()
+    if normalized_exchange not in {"tse", "otc"}:
+        raise ValueError("TWSE MIS exchange must be tse or otc.")
     payload = _fetch_payload(
-        channel="|".join(f"tse_{code}.tw" for code in codes),
+        channel="|".join(
+            f"{normalized_exchange}_{code}.tw" for code in codes
+        ),
         resource="stock_quote_batch",
         target=f"count:{len(codes)}",
         timeout_seconds=timeout_seconds,

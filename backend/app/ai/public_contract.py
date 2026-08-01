@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-CAPABILITY_REGISTRY_VERSION = "omi.capability.registry.v2"
+CAPABILITY_REGISTRY_VERSION = "omi.capability.registry.v3"
 CAPABILITY_SELECTION_VERSION = "omi.capability.selection.v2"
 
 

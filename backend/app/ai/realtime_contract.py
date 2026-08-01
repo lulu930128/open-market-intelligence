@@ -522,13 +522,19 @@ def classify_observation(
         policy_satisfied = state == "live"
     else:
         policy_satisfied = has_observation
-    decision_usable = state in {
+    facts_usable = state in {
         "live",
         "delayed",
         "final_snapshot",
         "historical",
         "latest_completed_session",
     }
+    intraday_research_usable = bool(
+        has_observation and state in {"live", "delayed"}
+    )
+    execution_grade_usable = bool(
+        state == "live" and policy_satisfied
+    )
     refresh_possible_now = (
         continuous or str(market_status).casefold() in OPEN_MARKET_STATUSES
     )
@@ -540,7 +546,7 @@ def classify_observation(
     )
     status_class = (
         "blocked"
-        if not policy_satisfied or not decision_usable
+        if not policy_satisfied or not facts_usable
         else "limited"
         if state == "delayed"
         else "ready"
@@ -550,9 +556,21 @@ def classify_observation(
         "version": "omi.realtime.observation.v1",
         "policy": realtime_policy,
         "state": state,
+        "temporal_freshness": state,
         "status_class": status_class,
         "policy_satisfied": policy_satisfied,
-        "decision_usable": decision_usable and policy_satisfied,
+        "contract_compliant": policy_satisfied,
+        "facts_usable": facts_usable,
+        "intraday_research_usable": intraday_research_usable,
+        "semantic_usability": (
+            "usable_for_intraday_research"
+            if intraday_research_usable
+            else "usable_for_completed_session_research"
+            if facts_usable
+            else "unusable"
+        ),
+        "execution_grade_usable": execution_grade_usable,
+        "decision_usable": facts_usable and policy_satisfied,
         "refresh_recommended": refresh_recommended,
         "refresh_possible_now": refresh_possible_now,
         "observation_mode": observation_mode,

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from app.ai import ask_execution, capability_contract, query_plan
-from app.ai.market_context import taiwan_events, taiwan_stock
+from app.ai.market_context import taiwan_events, taiwan_market, taiwan_stock
 from app.ai.schemas import AiAskRequest
 
 
@@ -57,6 +57,171 @@ class TaiwanEventSurfaceTests(unittest.TestCase):
             max_results=7,
             now=NOW,
         )
+
+    def test_tw_corporate_actions_normalize_cached_dividend_events(self) -> None:
+        history = Mock(
+            return_value={
+                "stock_id": "2330",
+                "checked_at": NOW,
+                "cache_status": "current",
+                "cache_fetched_at": NOW,
+                "warning": None,
+                "total_count": 1,
+                "result_count": 1,
+                "results": [
+                    {
+                        "event_id": "twse:2330:2026-07-10",
+                        "event_type": "ex_dividend",
+                        "provider": "twse_openapi",
+                        "source_name": "TWSE ex-right/dividend",
+                        "stock_id": "2330",
+                        "start_date": date(2026, 7, 10),
+                        "end_date": date(2026, 7, 10),
+                        "cash_dividend": 5.0,
+                        "stock_dividend_ratio": 0.1,
+                        "status": "past",
+                    }
+                ],
+            }
+        )
+
+        context = taiwan_events.build_tw_stock_event_context(
+            stock_id="2330",
+            market="TWSE",
+            market_data_params={
+                "requested_capabilities": ["corporate.actions"],
+                "capability_parameters": {
+                    "corporate.actions": {"years": 5, "limit": 20}
+                },
+            },
+            now=NOW,
+            get_event_summary=Mock(),
+            get_event_history=history,
+            get_disposition_status=Mock(),
+        )
+
+        payload = context["data"]["corporate.actions"]
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(
+            [item["action_type"] for item in payload["actions"]],
+            ["cash_dividend", "stock_dividend"],
+        )
+        self.assertEqual(payload["actions"][0]["currency"], "TWD")
+        self.assertEqual(payload["actions"][0]["cash_amount"], 5.0)
+        self.assertEqual(payload["actions"][1]["stock_ratio"], 0.1)
+        self.assertEqual(context["missing"], [])
+
+    def test_company_profile_is_supported_and_uses_bounded_reader(self) -> None:
+        profile = taiwan_stock._company_profile_payload(
+            SimpleNamespace(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="common_stock",
+                industry="Semiconductor",
+                category="listed",
+                is_active=True,
+                updated_at=NOW,
+            ),
+            SimpleNamespace(
+                company_name="Taiwan Semiconductor Manufacturing",
+                market="TWSE",
+                industry="Semiconductor",
+                listed_date=date(1994, 9, 5),
+                established_date=date(1987, 2, 21),
+                paid_in_capital=259_303_804_580,
+                issued_shares=25_930_380_458,
+                updated_at=NOW,
+            ),
+        )
+        self.assertEqual(profile["status"], "ready")
+        self.assertEqual(profile["currency"], "TWD")
+        self.assertEqual(profile["source"], "stock_master+stock_profile")
+
+        payload = AiAskRequest(
+            question="2330 company profile",
+            target={"type": "tw_stock", "id": "2330"},
+            mode="data_only",
+            output="evidence_only",
+            selection={"include": ["company.profile"]},
+        )
+        plan = query_plan.build_query_plan(
+            payload=payload,
+            scope_type="stock",
+            target_market="TW",
+            question_intent="general",
+            effective_mode="data_only",
+        )
+        self.assertEqual(plan.reader_profile, "quote_only")
+        self.assertIn("company.profile", plan.selected_capabilities)
+
+    def test_event_calendar_applies_explicit_instrument_filters(self) -> None:
+        class QueryStub:
+            def filter(self, *_args):
+                return self
+
+            def all(self):
+                return [
+                    SimpleNamespace(
+                        stock_id="2330",
+                        instrument_type="common_stock",
+                        industry="Semiconductor",
+                    ),
+                    SimpleNamespace(
+                        stock_id="0050",
+                        instrument_type="etf",
+                        industry="ETF",
+                    ),
+                ]
+
+        listing = Mock(
+            return_value={
+                "as_of": date(2026, 7, 29),
+                "date_from": date(2026, 7, 29),
+                "date_to": date(2026, 8, 29),
+                "total_count": 1,
+                "results": [
+                    {
+                        "event_id": "event-1",
+                        "stock_id": "2330",
+                        "event_type": "financial_report",
+                        "start_date": date(2026, 8, 1),
+                    }
+                ],
+                "sources": {
+                    "mops": {"status": "current", "warning": None}
+                },
+                "warning": None,
+            }
+        )
+        dependencies = SimpleNamespace(
+            list_taiwan_corporate_events=listing,
+        )
+        payload = taiwan_market._events_calendar_capability(
+            db=SimpleNamespace(query=lambda *_args: QueryStub()),
+            dependencies=dependencies,
+            data_params={
+                "capability_parameters": {
+                    "events.calendar": {
+                        "instrument_types": ["common_stock"],
+                        "exclude_instrument_types": ["etf"],
+                        "financial_report_related": True,
+                        "status": ["upcoming"],
+                        "timing_status": ["scheduled"],
+                    }
+                }
+            },
+            generated_at=NOW,
+        )
+
+        self.assertEqual(payload["instrument_types"], ["common_stock"])
+        self.assertEqual(payload["events"][0]["instrument_type"], "common_stock")
+        self.assertEqual(payload["events"][0]["industry"], "Semiconductor")
+        listing.assert_called_once()
+        kwargs = listing.call_args.kwargs
+        self.assertEqual(kwargs["stock_ids"], {"2330"})
+        self.assertTrue(kwargs["financial_report_related"])
+        self.assertEqual(kwargs["event_statuses"], {"upcoming"})
 
     def test_event_only_stock_reader_does_not_load_market_analysis_domains(
         self,

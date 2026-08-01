@@ -30,6 +30,15 @@
   --omi-shadow-surface-inset: inset 0 1px 0 rgb(255 255 255 / 0.75);
   --omi-shadow-selected-row: 0 10px 24px rgb(15 23 42 / 0.12);
 
+  --omi-motion-instant: 100ms;
+  --omi-motion-fast: 140ms;
+  --omi-motion-standard: 180ms;
+  --omi-motion-panel: 220ms;
+  --omi-motion-data: 460ms;
+  --omi-motion-loop: 1600ms;
+  --omi-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --omi-ease-emphasized: cubic-bezier(0.2, 0.8, 0.2, 1);
+
   --omi-color-accent-soft: #fef2f2;
   --omi-color-accent-border: #fecaca;
   --omi-color-accent: #b91c1c;
@@ -529,42 +538,29 @@ select {
 
 .omi-price-pulse {
   position: relative;
-  transform-origin: center;
-  will-change: transform;
+  isolation: isolate;
 }
 
 .omi-price-pulse::after {
   content: "";
   position: absolute;
-  inset: -5px;
-  border-radius: inherit;
+  inset: -2px -4px;
+  border-radius: 3px;
   opacity: 0;
   pointer-events: none;
   z-index: 0;
 }
 
-.omi-price-pulse-up {
-  animation: omi-price-nudge-up 760ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.omi-price-pulse-down {
-  animation: omi-price-nudge-down 760ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.omi-price-pulse-neutral {
-  animation: omi-price-nudge-neutral 680ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
 .omi-price-pulse-up::after {
-  animation: omi-price-flash-up 760ms ease-out;
+  animation: omi-price-flash-up var(--omi-motion-data) var(--omi-ease-standard);
 }
 
 .omi-price-pulse-down::after {
-  animation: omi-price-flash-down 760ms ease-out;
+  animation: omi-price-flash-down var(--omi-motion-data) var(--omi-ease-standard);
 }
 
 .omi-price-pulse-neutral::after {
-  animation: omi-price-flash-neutral 680ms ease-out;
+  animation: omi-price-flash-neutral var(--omi-motion-data) var(--omi-ease-standard);
 }
 
 .omi-price-limit-value {
@@ -582,9 +578,7 @@ select {
     var(--omi-price-limit-bg)
   );
   color: var(--omi-price-limit-color);
-  box-shadow:
-    inset 0 0 0 1px rgb(var(--omi-rgb-surface) / 0.32),
-    0 6px 14px rgb(var(--omi-rgb-text) / 0.06);
+  box-shadow: inset 0 0 0 1px rgb(var(--omi-rgb-surface) / 0.32);
 }
 
 :root[data-theme="dark"] .omi-price-limit-value {
@@ -593,9 +587,7 @@ select {
     var(--omi-price-limit-color) 7%,
     var(--omi-price-limit-bg)
   );
-  box-shadow:
-    inset 0 0 0 1px rgb(var(--omi-rgb-surface) / 0.16),
-    0 8px 18px rgb(0 0 0 / 0.2);
+  box-shadow: inset 0 0 0 1px rgb(var(--omi-rgb-surface) / 0.16);
 }
 
 .omi-price-limit-up {
@@ -620,16 +612,16 @@ select {
 
 .omi-live-point-ring {
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1.6;
   transform-box: fill-box;
   transform-origin: center;
-  animation: omi-live-point-ring 980ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: omi-live-point-ring var(--omi-motion-data) var(--omi-ease-standard);
 }
 
 .omi-live-point-core {
   transform-box: fill-box;
   transform-origin: center;
-  animation: omi-live-point-core 980ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: omi-live-point-core var(--omi-motion-data) var(--omi-ease-standard);
 }
 
 .omi-live-sparkline-point .omi-live-point-ring {
@@ -637,75 +629,35 @@ select {
 }
 
 .omi-live-sparkline-point .omi-live-point-core {
-  animation-duration: 860ms;
+  animation-duration: var(--omi-motion-data);
 }
 
 .omi-technical-bar {
+  width: 100%;
+  transform: scaleX(var(--omi-technical-bar-scale, 0));
   transform-origin: left center;
   transition:
-    width 560ms cubic-bezier(0.22, 1, 0.36, 1),
-    background-color 220ms ease;
-  will-change: width;
+    transform var(--omi-motion-data) var(--omi-ease-standard),
+    background-color var(--omi-motion-fast) var(--omi-ease-standard);
 }
 
 .omi-ranking-row {
   position: relative;
   isolation: isolate;
-  overflow: hidden;
-  transform: translateZ(0);
   transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    box-shadow 180ms ease,
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
-  animation: omi-row-in 190ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.omi-ranking-row > * {
-  position: relative;
-  z-index: 1;
-}
-
-.omi-ranking-row::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background: linear-gradient(
-    90deg,
-    rgb(var(--omi-rgb-surface) / 0) 0%,
-    rgb(var(--omi-rgb-text-subtle) / 0.14) 48%,
-    rgb(var(--omi-rgb-surface) / 0) 100%
-  );
-  opacity: 0;
-  transform: translateX(-42%);
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    border-color var(--omi-motion-fast) var(--omi-ease-standard),
+    color var(--omi-motion-fast) var(--omi-ease-standard),
+    box-shadow var(--omi-motion-standard) var(--omi-ease-standard);
+  animation: omi-row-in var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-ranking-row:hover {
-  transform: translateX(1px);
-  box-shadow: inset 3px 0 0 rgb(var(--omi-rgb-border) / 0.9);
-}
-
-.omi-ranking-row:hover::after {
-  animation: omi-row-sweep 720ms cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: inset 2px 0 0 var(--omi-color-border-strong);
 }
 
 .omi-ranking-row-selected {
-  transform: translateY(-1px);
-  box-shadow:
-    inset 4px 0 0 var(--omi-color-market-up),
-    0 10px 24px rgb(var(--omi-rgb-text) / 0.12);
-}
-
-.omi-ranking-row-selected::after {
-  background: linear-gradient(
-    90deg,
-    rgb(var(--omi-rgb-surface) / 0) 0%,
-    rgb(var(--omi-rgb-market-up-flash) / 0.08) 46%,
-    rgb(var(--omi-rgb-surface) / 0) 100%
-  );
-  animation: omi-row-sweep 860ms cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: inset 3px 0 0 var(--omi-color-market-up);
 }
 
 .omi-ranking-trend-chip {
@@ -730,14 +682,11 @@ select {
   background: var(--omi-ranking-trend-bg);
   color: color-mix(in srgb, var(--omi-ranking-trend-color) 72%, var(--omi-color-text));
   box-shadow: inset 0 0 0 1px rgb(var(--omi-rgb-surface) / 0.16);
-  transform-origin: center;
   transition:
-    background-color 160ms ease,
-    border-color 160ms ease,
-    color 160ms ease,
-    box-shadow 180ms ease,
-    filter 180ms ease,
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    border-color var(--omi-motion-fast) var(--omi-ease-standard),
+    color var(--omi-motion-fast) var(--omi-ease-standard),
+    box-shadow var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 :root[data-theme="dark"] .omi-ranking-trend-chip {
@@ -819,8 +768,16 @@ select {
 }
 
 .omi-ranking-row:hover .omi-ranking-trend-chip {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 16px rgb(var(--omi-rgb-text) / 0.08);
+  border-color: color-mix(
+    in srgb,
+    var(--omi-ranking-trend-color) 28%,
+    var(--omi-color-border)
+  );
+  background: color-mix(
+    in srgb,
+    var(--omi-ranking-trend-color) 7%,
+    var(--omi-color-surface)
+  );
 }
 
 .omi-ranking-trend-chip-selected {
@@ -829,55 +786,28 @@ select {
     var(--omi-ranking-trend-color) 40%,
     var(--omi-color-border)
   );
-  box-shadow:
-    inset 0 0 0 1px rgb(var(--omi-rgb-surface) / 0.22),
-    0 0 0 1px rgb(var(--omi-rgb-surface) / 0.38);
+  box-shadow: inset 0 0 0 1px rgb(var(--omi-rgb-surface) / 0.28);
 }
 
 .omi-ranking-loading-row {
   position: relative;
   overflow: hidden;
   background: var(--omi-color-surface);
-  animation: omi-loading-surface-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: omi-loading-surface-in var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-technical-summary {
   position: relative;
-  isolation: isolate;
-  overflow: hidden;
-}
-
-.omi-technical-summary > * {
-  position: relative;
-  z-index: 1;
-}
-
-.omi-technical-summary::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background: linear-gradient(
-    90deg,
-    rgb(var(--omi-rgb-surface) / 0) 0%,
-    rgb(var(--omi-rgb-surface-subtle) / 0.78) 48%,
-    rgb(var(--omi-rgb-surface) / 0) 100%
-  );
-  opacity: 0;
-  transform: translateX(-44%);
-  animation: omi-technical-summary-sweep 820ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: omi-loading-surface-in var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-technical-row {
   position: relative;
   overflow: hidden;
-  transform: translateZ(0);
   transition:
-    background-color 160ms ease,
-    box-shadow 160ms ease,
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
-  animation: omi-technical-row-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    box-shadow var(--omi-motion-standard) var(--omi-ease-standard);
+  animation: omi-technical-row-in var(--omi-motion-panel) var(--omi-ease-standard);
 }
 
 .omi-technical-row::before {
@@ -891,14 +821,13 @@ select {
   transform: scaleY(0.42);
   transform-origin: center;
   transition:
-    opacity 160ms ease,
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    opacity var(--omi-motion-fast) var(--omi-ease-standard),
+    transform var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-technical-row:hover {
   background: var(--omi-color-surface-subtle);
   box-shadow: inset 0 0 0 1px rgb(var(--omi-rgb-border-subtle) / 0.72);
-  transform: translateX(1px);
 }
 
 .omi-technical-row:hover::before {
@@ -923,21 +852,13 @@ select {
 }
 
 .omi-technical-score {
-  transform-origin: right center;
-  transition:
-    text-shadow 180ms ease,
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.omi-technical-row:hover .omi-technical-score {
-  transform: translateY(-1px);
-  text-shadow: 0 8px 16px rgb(var(--omi-rgb-text) / 0.08);
+  transition: color var(--omi-motion-fast) var(--omi-ease-standard);
 }
 
 .omi-technical-market {
   transition:
-    background-color 160ms ease,
-    box-shadow 160ms ease;
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    box-shadow var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-technical-market:hover {
@@ -947,29 +868,34 @@ select {
 
 .omi-technical-badge {
   display: inline-flex;
-  transform-origin: center;
   transition:
-    box-shadow 180ms ease,
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
-  animation: omi-badge-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    border-color var(--omi-motion-fast) var(--omi-ease-standard),
+    color var(--omi-motion-fast) var(--omi-ease-standard),
+    filter var(--omi-motion-fast) var(--omi-ease-standard);
+  animation: omi-badge-in var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
-.omi-technical-badge:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 16px rgb(var(--omi-rgb-text) / 0.08);
+.omi-technical-badge:hover,
+.omi-technical-badge:active {
+  transform: none;
 }
 
 .omi-technical-loading-row {
-  animation: omi-loading-surface-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: omi-loading-surface-in var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-tab-panel {
-  animation: omi-tab-panel-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: omi-tab-panel-in var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-data-tab {
   position: relative;
   overflow: hidden;
+  transition:
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    border-color var(--omi-motion-fast) var(--omi-ease-standard),
+    color var(--omi-motion-fast) var(--omi-ease-standard);
 }
 
 .omi-data-tab::after {
@@ -982,62 +908,61 @@ select {
   background: var(--omi-color-accent);
   transform: scaleX(0);
   transform-origin: center;
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-data-tab-active::after {
   transform: scaleX(1);
 }
 
+.omi-data-tab:active {
+  background: color-mix(
+    in srgb,
+    var(--omi-color-accent) 4%,
+    var(--omi-color-surface)
+  );
+}
+
+.omi-data-tab:focus-visible,
+.omi-ranking-row:focus-visible {
+  z-index: 2;
+  outline: 2px solid color-mix(in srgb, var(--omi-color-accent) 58%, transparent);
+  outline-offset: -2px;
+}
+
 .omi-sidebar-selected {
   position: relative;
   isolation: isolate;
-  transform: translateY(-1px);
-  background:
-    linear-gradient(
-      90deg,
-      rgb(var(--omi-rgb-market-up-flash) / 0.11) 0%,
-      rgb(var(--omi-rgb-surface-subtle) / 0.76) 48%,
-      rgb(var(--omi-rgb-surface) / 0.18) 100%
-    );
-  box-shadow:
-    inset 3px 0 0 var(--omi-color-accent),
-    0 8px 18px rgb(var(--omi-rgb-text) / 0.08);
-  transition:
-    background-color 160ms ease,
-    box-shadow 180ms ease,
-    color 160ms ease,
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.omi-sidebar-selected::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background: linear-gradient(
-    90deg,
-    rgb(var(--omi-rgb-market-up-flash) / 0.12) 0%,
-    rgb(var(--omi-rgb-surface) / 0) 54%
+  background: color-mix(
+    in srgb,
+    var(--omi-color-accent) 5%,
+    var(--omi-color-surface-subtle)
   );
-  opacity: 0.72;
+  box-shadow: inset 3px 0 0 var(--omi-color-accent);
+  transition:
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    box-shadow var(--omi-motion-standard) var(--omi-ease-standard),
+    color var(--omi-motion-fast) var(--omi-ease-standard);
 }
 
 .omi-sidebar-selected:hover {
-  transform: translateX(1px) translateY(-1px);
-  box-shadow:
-    inset 3px 0 0 var(--omi-color-accent-hover),
-    0 10px 22px rgb(var(--omi-rgb-text) / 0.1);
+  background: color-mix(
+    in srgb,
+    var(--omi-color-accent) 7%,
+    var(--omi-color-surface-subtle)
+  );
+  box-shadow: inset 3px 0 0 var(--omi-color-accent-hover);
 }
 
 .omi-sidebar-market-tab-active {
   position: relative;
   color: var(--omi-color-accent);
   background: var(--omi-color-accent-soft);
-  box-shadow:
-    inset 0 0 0 1px var(--omi-color-accent-border),
-    0 6px 14px rgb(var(--omi-rgb-market-up-flash) / 0.08);
+  box-shadow: inset 0 0 0 1px var(--omi-color-accent-border);
+  transition:
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    box-shadow var(--omi-motion-standard) var(--omi-ease-standard),
+    color var(--omi-motion-fast) var(--omi-ease-standard);
 }
 
 .omi-sidebar-market-tab-active::after {
@@ -1054,9 +979,11 @@ select {
   position: relative;
   color: var(--omi-color-text-strong);
   background: var(--omi-color-surface);
-  box-shadow:
-    inset 0 0 0 1px var(--omi-color-border),
-    0 6px 12px rgb(var(--omi-rgb-text) / 0.06);
+  box-shadow: inset 0 0 0 1px var(--omi-color-border);
+  transition:
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    box-shadow var(--omi-motion-standard) var(--omi-ease-standard),
+    color var(--omi-motion-fast) var(--omi-ease-standard);
 }
 
 .omi-timeframe-tab-active::after {
@@ -1118,25 +1045,26 @@ select {
 }
 
 .omi-radar-row-selected {
-  transform: translateY(-1px);
   border-color: var(--omi-color-border);
-  background:
-    linear-gradient(
-      90deg,
-      rgb(var(--omi-rgb-market-up-flash) / 0.08) 0%,
-      rgb(var(--omi-rgb-surface-subtle) / 0.76) 45%,
-      rgb(var(--omi-rgb-surface) / 0.22) 100%
-    );
-  box-shadow:
-    inset 3px 0 0 var(--omi-color-accent),
-    0 10px 22px rgb(var(--omi-rgb-text) / 0.08);
+  background: color-mix(
+    in srgb,
+    var(--omi-color-accent) 4%,
+    var(--omi-color-surface)
+  );
+  box-shadow: inset 3px 0 0 var(--omi-color-accent);
+  transition:
+    background-color var(--omi-motion-fast) var(--omi-ease-standard),
+    border-color var(--omi-motion-fast) var(--omi-ease-standard),
+    box-shadow var(--omi-motion-standard) var(--omi-ease-standard);
 }
 
 .omi-radar-row-selected:hover {
-  transform: translateX(1px) translateY(-1px);
-  box-shadow:
-    inset 3px 0 0 var(--omi-color-accent-hover),
-    0 12px 24px rgb(var(--omi-rgb-text) / 0.1);
+  background: color-mix(
+    in srgb,
+    var(--omi-color-accent) 6%,
+    var(--omi-color-surface)
+  );
+  box-shadow: inset 3px 0 0 var(--omi-color-accent-hover);
 }
 
 .omi-job-status-pill {
@@ -1240,9 +1168,69 @@ select {
 
 .omi-state-surface {
   --omi-state-color: var(--omi-color-text-muted);
+  --omi-state-bg: var(--omi-color-surface-subtle);
+  --omi-state-border: var(--omi-color-border-subtle);
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.625rem;
+  min-height: 4.5rem;
+  overflow: hidden;
+  border: 1px solid var(--omi-state-border);
+  background: var(--omi-state-bg);
+  box-shadow: none;
+  color: var(--omi-color-text);
+  padding: 0.875rem 1rem;
+  animation: omi-loading-surface-in var(--omi-motion-standard) var(--omi-ease-standard);
+}
+
+.omi-state-surface-compact {
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  min-height: 3.75rem;
+  gap: 0.5rem;
+  padding: 0.625rem 0.75rem;
+}
+
+.omi-state-surface-neutral {
+  --omi-state-color: var(--omi-color-text-muted);
+}
+
+.omi-state-surface-info {
+  --omi-state-color: var(--omi-color-info);
   --omi-state-bg: color-mix(
     in srgb,
-    var(--omi-state-color) 6%,
+    var(--omi-state-color) 3%,
+    var(--omi-color-surface-subtle)
+  );
+  --omi-state-border: color-mix(
+    in srgb,
+    var(--omi-state-color) 18%,
+    var(--omi-color-border-subtle)
+  );
+}
+
+.omi-state-surface-loading {
+  --omi-state-color: var(--omi-color-info);
+  --omi-state-bg: color-mix(
+    in srgb,
+    var(--omi-state-color) 2%,
+    var(--omi-color-surface-subtle)
+  );
+  --omi-state-border: transparent;
+}
+
+.omi-state-surface-empty {
+  --omi-state-color: var(--omi-color-text-subtle);
+  --omi-state-bg: var(--omi-color-surface-subtle);
+  --omi-state-border: transparent;
+}
+
+.omi-state-surface-warning {
+  --omi-state-color: var(--omi-color-warning);
+  --omi-state-bg: color-mix(
+    in srgb,
+    var(--omi-state-color) 4%,
     var(--omi-color-surface)
   );
   --omi-state-border: color-mix(
@@ -1250,99 +1238,58 @@ select {
     var(--omi-state-color) 24%,
     var(--omi-color-border-subtle)
   );
-  position: relative;
-  display: grid;
-  grid-template-columns: 2.5rem minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.75rem;
-  min-height: 5.5rem;
-  overflow: hidden;
-  border: 1px solid var(--omi-state-border);
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--omi-state-color) 9%, transparent) 0%,
-      transparent 58%
-    ),
-    var(--omi-state-bg);
-  box-shadow:
-    var(--omi-shadow-surface-inset),
-    0 10px 24px rgb(var(--omi-rgb-text) / 0.05);
-  color: var(--omi-color-text);
-  padding: 1rem;
-}
-
-.omi-state-surface::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  background: var(--omi-state-color);
-}
-
-.omi-state-surface-compact {
-  grid-template-columns: 2rem minmax(0, 1fr) auto;
-  min-height: 4.25rem;
-  gap: 0.625rem;
-  padding: 0.75rem 0.875rem;
-}
-
-.omi-state-surface-neutral {
-  --omi-state-color: var(--omi-color-text-muted);
-}
-
-.omi-state-surface-loading,
-.omi-state-surface-info {
-  --omi-state-color: var(--omi-color-info);
-}
-
-.omi-state-surface-empty {
-  --omi-state-color: var(--omi-color-text-subtle);
-  --omi-state-bg: var(--omi-color-surface-subtle);
-  --omi-state-border: color-mix(
-    in srgb,
-    var(--omi-color-border) 62%,
-    transparent
-  );
-}
-
-.omi-state-surface-warning {
-  --omi-state-color: var(--omi-color-warning);
 }
 
 .omi-state-surface-danger {
   --omi-state-color: var(--omi-color-danger);
+  --omi-state-bg: color-mix(
+    in srgb,
+    var(--omi-state-color) 4%,
+    var(--omi-color-surface)
+  );
+  --omi-state-border: color-mix(
+    in srgb,
+    var(--omi-state-color) 24%,
+    var(--omi-color-border-subtle)
+  );
 }
 
 .omi-state-surface-success {
   --omi-state-color: var(--omi-color-success);
+  --omi-state-bg: color-mix(
+    in srgb,
+    var(--omi-state-color) 4%,
+    var(--omi-color-surface)
+  );
+  --omi-state-border: color-mix(
+    in srgb,
+    var(--omi-state-color) 24%,
+    var(--omi-color-border-subtle)
+  );
 }
 
 .omi-state-glyph {
   display: grid;
   place-items: center;
-  width: 2.5rem;
-  height: 2.5rem;
-  border: 1px solid color-mix(in srgb, var(--omi-state-color) 32%, transparent);
-  background: color-mix(
-    in srgb,
-    var(--omi-state-color) 11%,
-    var(--omi-color-surface)
-  );
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  background: transparent;
   color: var(--omi-state-color);
 }
 
 .omi-state-surface-compact .omi-state-glyph {
-  width: 2rem;
-  height: 2rem;
+  width: 1.25rem;
+  height: 1.25rem;
 }
 
 .omi-state-glyph span {
   position: relative;
   display: block;
-  width: 1rem;
-  height: 0.875rem;
-  border: 1.5px solid currentColor;
+  width: 0.875rem;
+  height: 0.75rem;
+  border: 1.25px solid currentColor;
+  opacity: 0.72;
 }
 
 .omi-state-glyph span::before,
@@ -1367,17 +1314,19 @@ select {
   border-style: dashed;
 }
 
-.omi-state-surface-loading .omi-state-glyph span {
-  width: 1rem;
-  height: 1rem;
-  border: 2px solid currentColor;
-  border-right-color: transparent;
+.omi-state-surface-busy .omi-state-glyph span {
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 1.5px solid color-mix(in srgb, var(--omi-state-color) 24%, transparent);
+  border-top-color: currentColor;
   border-radius: 999px;
-  animation: omi-state-spin 780ms linear infinite;
+  opacity: 1;
+  animation: omi-state-spin var(--omi-motion-loop) linear infinite;
+  will-change: transform;
 }
 
-.omi-state-surface-loading .omi-state-glyph span::before,
-.omi-state-surface-loading .omi-state-glyph span::after {
+.omi-state-surface-busy .omi-state-glyph span::before,
+.omi-state-surface-busy .omi-state-glyph span::after {
   content: none;
 }
 
@@ -1394,10 +1343,10 @@ select {
 .omi-state-title {
   display: block;
   color: var(--omi-color-text-strong);
-  font-size: 0.9375rem;
-  font-weight: 750;
+  font-size: 0.875rem;
+  font-weight: 600;
   letter-spacing: 0;
-  line-height: 1.35;
+  line-height: 1.4;
 }
 
 .omi-state-eyebrow + .omi-state-title {
@@ -1408,7 +1357,7 @@ select {
   display: block;
   margin-top: 0.25rem;
   color: var(--omi-color-text-muted);
-  font-size: 0.8125rem;
+  font-size: 0.75rem;
   font-weight: 500;
   line-height: 1.5;
 }
@@ -1420,43 +1369,10 @@ select {
   margin-top: 0.75rem;
 }
 
-.omi-state-dots {
-  color: var(--omi-state-color);
-}
-
-.omi-state-progress {
-  position: relative;
-  display: block;
-  width: min(18rem, 100%);
-  height: 0.25rem;
-  margin-top: 0.75rem;
-  overflow: hidden;
-  background: color-mix(
-    in srgb,
-    var(--omi-state-color) 10%,
-    var(--omi-color-surface-muted)
-  );
-}
-
-.omi-state-progress > span {
-  display: block;
-  width: 42%;
-  height: 100%;
-  background: var(--omi-state-color);
-  transform-origin: left center;
-  animation: omi-loading-bar 1040ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
-}
-
 .omi-loading-surface {
   position: relative;
   overflow: hidden;
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--omi-color-info) 5%, transparent),
-      transparent 62%
-    ),
-    var(--omi-color-surface);
+  background: var(--omi-color-surface);
 }
 
 .omi-refresh-frame {
@@ -1468,18 +1384,18 @@ select {
 .omi-refresh-frame[data-refreshing="true"]::after {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: 0 auto auto 0;
+  width: 34%;
+  height: 2px;
   z-index: 3;
   pointer-events: none;
-  background:
-    linear-gradient(
-      90deg,
-      transparent 0%,
-      rgb(var(--omi-rgb-surface-subtle) / 0.52) 46%,
-      transparent 100%
-    ),
-    rgb(var(--omi-rgb-surface) / 0.18);
-  animation: omi-soft-refresh-sweep 1200ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--omi-color-info) 68%, transparent) 50%,
+    transparent 100%
+  );
+  animation: omi-loading-bar var(--omi-motion-loop) var(--omi-ease-standard) infinite;
 }
 
 .omi-soft-refresh {
@@ -1491,22 +1407,23 @@ select {
 .omi-soft-refresh::after {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: 0 auto auto 0;
+  width: 34%;
+  height: 2px;
+  z-index: 3;
   pointer-events: none;
   background: linear-gradient(
     90deg,
-    rgb(var(--omi-rgb-surface) / 0) 0%,
-    rgb(var(--omi-rgb-surface-subtle) / 0.72) 46%,
-    rgb(var(--omi-rgb-surface) / 0) 100%
+    transparent 0%,
+    color-mix(in srgb, var(--omi-color-info) 68%, transparent) 50%,
+    transparent 100%
   );
-  opacity: 0;
-  transform: translateX(-42%);
-  animation: omi-soft-refresh-sweep 1200ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  animation: omi-loading-bar var(--omi-motion-loop) var(--omi-ease-standard) infinite;
 }
 
 .omi-loading-bar {
-  animation: omi-loading-bar 1040ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
-  transform-origin: left center;
+  animation: omi-loading-bar var(--omi-motion-loop) var(--omi-ease-standard) infinite;
+  will-change: transform;
 }
 
 .omi-loading-dots {
@@ -1519,110 +1436,82 @@ select {
 
 .omi-loading-dots span {
   display: block;
-  width: 4px;
-  height: 4px;
+  width: 3px;
+  height: 3px;
   border-radius: 999px;
   background: currentColor;
-  opacity: 0.42;
-  transform: translateY(0);
-  animation: omi-loading-dot 980ms ease-in-out infinite;
+  opacity: 0.3;
+  animation: omi-loading-dot var(--omi-motion-loop) ease-in-out infinite;
 }
 
 .omi-loading-dots span:nth-child(2) {
-  animation-delay: 120ms;
+  animation-delay: 160ms;
 }
 
 .omi-loading-dots span:nth-child(3) {
-  animation-delay: 240ms;
+  animation-delay: 320ms;
 }
 
 .omi-skeleton {
   position: relative;
   overflow: hidden;
   background: var(--omi-color-skeleton);
-}
-
-.omi-skeleton::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    rgb(var(--omi-rgb-surface) / 0) 0%,
-    rgb(var(--omi-rgb-surface) / 0.72) 48%,
-    rgb(var(--omi-rgb-surface) / 0) 100%
-  );
-  transform: translateX(-100%);
-  animation: omi-skeleton-shimmer 1280ms ease-in-out infinite;
+  animation: omi-skeleton-breathe var(--omi-motion-loop) ease-in-out infinite;
 }
 
 @keyframes omi-tab-panel-in {
   0% {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(2px);
   }
   100% {
     opacity: 1;
     transform: translateY(0);
-  }
-}
-
-@keyframes omi-soft-refresh-sweep {
-  0% {
-    opacity: 0;
-    transform: translateX(-55%);
-  }
-  24% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translateX(55%);
   }
 }
 
 @keyframes omi-loading-bar {
   0% {
-    transform: translateX(-120%) scaleX(0.72);
+    opacity: 0;
+    transform: translateX(-100%);
   }
-  48% {
-    transform: translateX(85%) scaleX(1);
+  18%,
+  82% {
+    opacity: 0.72;
   }
   100% {
-    transform: translateX(240%) scaleX(0.72);
-  }
-}
-
-@keyframes omi-loading-dot {
-  0%,
-  80%,
-  100% {
-    opacity: 0.34;
-    transform: translateY(0);
-  }
-  36% {
-    opacity: 0.9;
-    transform: translateY(-3px);
+    opacity: 0;
+    transform: translateX(300%);
   }
 }
 
 @keyframes omi-loading-surface-in {
   0% {
     opacity: 0;
-    transform: translateY(3px);
   }
   100% {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
-@keyframes omi-skeleton-shimmer {
-  0% {
-    transform: translateX(-100%);
-  }
+@keyframes omi-loading-dot {
+  0%,
+  70%,
   100% {
-    transform: translateX(100%);
+    opacity: 0.3;
+  }
+  35% {
+    opacity: 0.78;
+  }
+}
+
+@keyframes omi-skeleton-breathe {
+  0%,
+  100% {
+    opacity: 0.62;
+  }
+  50% {
+    opacity: 1;
   }
 }
 
@@ -1638,179 +1527,93 @@ select {
 @keyframes omi-row-in {
   0% {
     opacity: 0;
-    transform: translateY(3px);
   }
   100% {
     opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes omi-row-sweep {
-  0% {
-    opacity: 0;
-    transform: translateX(-48%);
-  }
-  24% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translateX(48%);
-  }
-}
-
-@keyframes omi-technical-summary-sweep {
-  0% {
-    opacity: 0;
-    transform: translateX(-52%);
-  }
-  28% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translateX(52%);
   }
 }
 
 @keyframes omi-technical-row-in {
   0% {
     opacity: 0;
-    transform: translateY(4px);
   }
   100% {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
 @keyframes omi-badge-in {
   0% {
     opacity: 0;
-    transform: scale(0.96);
   }
   100% {
     opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@keyframes omi-price-nudge-up {
-  0% {
-    transform: translateY(0) scale(1);
-  }
-  22% {
-    transform: translateY(-3px) scale(1.04);
-  }
-  55% {
-    transform: translateY(1px) scale(0.995);
-  }
-  100% {
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes omi-price-nudge-down {
-  0% {
-    transform: translateY(0) scale(1);
-  }
-  22% {
-    transform: translateY(3px) scale(1.035);
-  }
-  55% {
-    transform: translateY(-1px) scale(0.995);
-  }
-  100% {
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes omi-price-nudge-neutral {
-  0% {
-    transform: scale(1);
-  }
-  24% {
-    transform: scale(1.025);
-  }
-  100% {
-    transform: scale(1);
   }
 }
 
 @keyframes omi-price-flash-up {
   0% {
     opacity: 0;
-    box-shadow: 0 0 0 0 rgb(var(--omi-rgb-market-up-flash) / 0);
   }
-  18% {
+  22% {
     opacity: 1;
-    background: rgb(var(--omi-rgb-market-up-flash) / 0.16);
-    box-shadow:
-      0 0 0 3px rgb(var(--omi-rgb-market-up-flash) / 0.22),
-      0 10px 22px rgb(var(--omi-rgb-market-up-flash) / 0.16);
+    background: rgb(var(--omi-rgb-market-up-flash) / 0.1);
+    box-shadow: inset 0 0 0 1px rgb(var(--omi-rgb-market-up-flash) / 0.14);
   }
   100% {
     opacity: 0;
-    box-shadow: 0 0 0 10px rgb(var(--omi-rgb-market-up-flash) / 0);
   }
 }
 
 @keyframes omi-price-flash-down {
   0% {
     opacity: 0;
-    box-shadow: 0 0 0 0 rgb(var(--omi-rgb-market-down-flash) / 0);
   }
-  18% {
+  22% {
     opacity: 1;
-    background: rgb(var(--omi-rgb-market-down-flash) / 0.16);
-    box-shadow:
-      0 0 0 3px rgb(var(--omi-rgb-market-down-flash) / 0.22),
-      0 10px 22px rgb(var(--omi-rgb-market-down-flash) / 0.14);
+    background: rgb(var(--omi-rgb-market-down-flash) / 0.1);
+    box-shadow: inset 0 0 0 1px rgb(var(--omi-rgb-market-down-flash) / 0.14);
   }
   100% {
     opacity: 0;
-    box-shadow: 0 0 0 10px rgb(var(--omi-rgb-market-down-flash) / 0);
   }
 }
 
 @keyframes omi-price-flash-neutral {
   0% {
     opacity: 0;
-    box-shadow: 0 0 0 0 rgb(var(--omi-rgb-text-muted) / 0);
   }
   22% {
     opacity: 1;
-    background: rgb(var(--omi-rgb-text-muted) / 0.12);
-    box-shadow: 0 0 0 3px rgb(var(--omi-rgb-text-muted) / 0.18);
+    background: rgb(var(--omi-rgb-text-muted) / 0.08);
+    box-shadow: inset 0 0 0 1px rgb(var(--omi-rgb-text-muted) / 0.12);
   }
   100% {
     opacity: 0;
-    box-shadow: 0 0 0 8px rgb(var(--omi-rgb-text-muted) / 0);
   }
 }
 
 @keyframes omi-live-point-ring {
   0% {
-    opacity: 0.78;
-    transform: scale(0.55);
+    opacity: 0.46;
+    transform: scale(0.88);
   }
-  58% {
-    opacity: 0.18;
-    transform: scale(1.9);
+  62% {
+    opacity: 0.14;
+    transform: scale(1.38);
   }
   100% {
     opacity: 0;
-    transform: scale(2.2);
+    transform: scale(1.55);
   }
 }
 
 @keyframes omi-live-point-core {
   0% {
-    transform: scale(0.82);
+    transform: scale(0.94);
   }
-  28% {
-    transform: scale(1.22);
+  36% {
+    transform: scale(1.08);
   }
   100% {
     transform: scale(1);
@@ -1818,12 +1621,6 @@ select {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .omi-price-pulse-up,
-  .omi-price-pulse-down,
-  .omi-price-pulse-neutral {
-    animation: none;
-  }
-
   .omi-live-point-ring,
   .omi-live-point-core {
     animation: none;
@@ -1838,10 +1635,10 @@ select {
   .omi-technical-row,
   .omi-technical-loading-row,
   .omi-technical-badge,
-  .omi-state-surface-loading .omi-state-glyph span,
-  .omi-state-progress > span,
+  .omi-state-surface-busy .omi-state-glyph span,
   .omi-loading-dots span,
-  .omi-technical-summary::after {
+  .omi-skeleton,
+  .omi-technical-summary {
     animation: none;
   }
 
@@ -1849,6 +1646,9 @@ select {
   .omi-ranking-trend-chip,
   .omi-radar-row-selected,
   .omi-sidebar-selected,
+  .omi-sidebar-market-tab-active,
+  .omi-timeframe-tab-active,
+  .omi-data-tab,
   .omi-technical-row,
   .omi-technical-score,
   .omi-technical-market,
@@ -1856,32 +1656,15 @@ select {
     transition: none;
   }
 
-  .omi-ranking-row:hover,
-  .omi-ranking-row:hover .omi-ranking-trend-chip,
-  .omi-radar-row-selected,
-  .omi-radar-row-selected:hover,
-  .omi-sidebar-selected,
-  .omi-sidebar-selected:hover,
-  .omi-technical-row:hover,
-  .omi-technical-row:hover .omi-technical-score,
-  .omi-technical-badge:hover {
-    transform: none;
-  }
-
-  .omi-ranking-row::after,
-  .omi-ranking-row:hover::after {
-    animation: none;
-  }
-
   .omi-technical-row::before {
     transition: none;
   }
 
+  .omi-state-surface,
   .omi-tab-panel,
   .omi-soft-refresh::after,
   .omi-refresh-frame[data-refreshing="true"]::after,
-  .omi-loading-bar,
-  .omi-skeleton::after {
+  .omi-loading-bar {
     animation: none;
   }
 
@@ -1892,7 +1675,7 @@ select {
   .omi-price-pulse-up::after,
   .omi-price-pulse-down::after,
   .omi-price-pulse-neutral::after {
-    animation-duration: 180ms;
+    animation: none;
   }
 }
 

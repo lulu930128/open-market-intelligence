@@ -434,13 +434,38 @@ def _position_entry_price_spans(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(spans)
 
 
+def _date_like_spans(text: str) -> tuple[tuple[int, int], ...]:
+    patterns = (
+        re.compile(
+            r"(?<!\d)(?:19|20)\d{2}\s*[-/.]\s*\d{1,2}"
+            r"(?:\s*[-/.]\s*\d{1,2})?(?!\d)"
+        ),
+        re.compile(
+            r"(?<!\d)(?:19|20)\d{2}\s*年"
+            r"(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日)?)?"
+        ),
+        re.compile(r"(?<!\d)(?:19|20)\d{2}\s*[Qq][1-4](?!\d)"),
+    )
+    return tuple(
+        match.span()
+        for pattern in patterns
+        for match in pattern.finditer(text)
+    )
+
+
 def _stock_ids_in_text(text: str) -> tuple[str, ...]:
-    position_price_spans = _position_entry_price_spans(text)
+    ignored_numeric_spans = (
+        *_position_entry_price_spans(text),
+        *_date_like_spans(text),
+    )
     stock_ids: list[str] = []
     for match in re.finditer(r"(?<!\d)(\d{4,6}[A-Za-z0-9]?)(?!\d)", text):
         value = match.group(1).strip()
         value_span = match.span(1)
-        if any(value_span[0] < end and start < value_span[1] for start, end in position_price_spans):
+        if any(
+            value_span[0] < end and start < value_span[1]
+            for start, end in ignored_numeric_spans
+        ):
             continue
         if _looks_like_stock_id(value) and value not in stock_ids:
             stock_ids.append(value)
@@ -1396,6 +1421,163 @@ def _resolve_watchlist_group_name_from_db(db: Session | None, question: str) -> 
     )
 
 
+def _resolve_explicit_watchlist_group(
+    db: Session | None,
+    *,
+    target_id: str | None,
+    requested_label: str | None,
+    question: str,
+) -> ScopeResolution:
+    requested = str(target_id or requested_label or "").strip()
+    if db is None or not requested:
+        return _clarify_scope(
+            "watchlist",
+            question,
+            "An active watchlist group could not be resolved without a database and target id or name.",
+        )
+
+    rows = (
+        db.query(WatchlistGroup)
+        .filter(WatchlistGroup.is_active.is_(True))
+        .order_by(
+            WatchlistGroup.parent_id.asc(),
+            WatchlistGroup.sort_order.asc(),
+            WatchlistGroup.id.asc(),
+        )
+        .all()
+    )
+    selected: WatchlistGroup | None = None
+    source = "explicit_watchlist_group_name"
+    try:
+        requested_group_id = int(requested)
+    except ValueError:
+        requested_group_id = 0
+    if requested_group_id > 0:
+        selected = next(
+            (row for row in rows if int(row.id) == requested_group_id),
+            None,
+        )
+        source = "explicit_watchlist_group_id"
+        if selected is None:
+            group_id = str(requested_group_id)
+            group_name = requested_label or f"Watchlist {group_id}"
+            return ScopeResolution(
+                selected_scope_type="watchlist",
+                selected_scope_id=group_id,
+                display_name=group_name,
+                confidence="medium",
+                assumption=(
+                    "保留顯式自選群組 id；本次 scope resolution "
+                    "未從啟用中群組清單驗證其名稱。"
+                ),
+                source="explicit_watchlist_group_id_unverified",
+                candidates=(
+                    _resolution_candidate(
+                        scope_type="watchlist",
+                        scope_id=group_id,
+                        label=group_name,
+                        confidence="medium",
+                        source="explicit_watchlist_group_id_unverified",
+                    ),
+                ),
+            )
+    else:
+        normalized = requested.casefold()
+        if normalized in {
+            "default",
+            "default group",
+            "預設",
+            "預設群組",
+            "預設自選",
+        }:
+            selected = next(
+                (row for row in rows if row.parent_id is None),
+                None,
+            )
+            source = "default_watchlist_group_alias"
+        if selected is None:
+            selected = next(
+                (
+                    row
+                    for row in rows
+                    if str(row.group_name or "").strip().casefold()
+                    == normalized
+                ),
+                None,
+            )
+
+    if selected is not None:
+        group_id = str(selected.id)
+        group_name = str(selected.group_name)
+        return ScopeResolution(
+            selected_scope_type="watchlist",
+            selected_scope_id=group_id,
+            display_name=group_name,
+            confidence="high",
+            source=source,
+            candidates=(
+                _resolution_candidate(
+                    scope_type="watchlist",
+                    scope_id=group_id,
+                    label=group_name,
+                    confidence="high",
+                    source=source,
+                ),
+            ),
+        )
+
+    normalized = requested.casefold()
+    partial_matches = [
+        row
+        for row in rows
+        if normalized in str(row.group_name or "").casefold()
+        or str(row.group_name or "").casefold() in normalized
+    ]
+    if len(partial_matches) == 1:
+        row = partial_matches[0]
+        group_id = str(row.id)
+        group_name = str(row.group_name)
+        return ScopeResolution(
+            selected_scope_type="watchlist",
+            selected_scope_id=group_id,
+            display_name=group_name,
+            confidence="medium",
+            assumption=f"將自選群組名稱「{requested}」解析為「{group_name}」。",
+            source="fuzzy_watchlist_group_name",
+            candidates=(
+                _resolution_candidate(
+                    scope_type="watchlist",
+                    scope_id=group_id,
+                    label=group_name,
+                    confidence="medium",
+                    source="fuzzy_watchlist_group_name",
+                ),
+            ),
+        )
+
+    candidates = tuple(
+        _resolution_candidate(
+            scope_type="watchlist",
+            scope_id=str(row.id),
+            label=str(row.group_name),
+            confidence="low",
+            source="active_watchlist_group",
+        )
+        for row in (partial_matches or rows)[:5]
+    )
+    return ScopeResolution(
+        selected_scope_type="watchlist",
+        confidence="low",
+        source="clarification",
+        candidates=candidates,
+        clarification_required=True,
+        clarification_question="請指定要分析的自選群組名稱或群組 id。",
+        clarification_reason=(
+            f"找不到唯一的啟用中自選群組：{requested}。"
+        ),
+    )
+
+
 def _clarify_scope(scope_type: str, question: str, reason: str) -> ScopeResolution:
     if scope_type == "watchlist":
         clarification_question = "你想看哪一個自選群組？請提供群組 id 或群組名稱。"
@@ -1469,6 +1651,10 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 "tw_futures",
             }
             and target_id is None
+            and not (
+                scope_type == "watchlist"
+                and requested_label is not None
+            )
         ):
             return _clarify_scope(
                 scope_type,
@@ -1502,6 +1688,14 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 confidence="high",
                 source="explicit_request",
                 candidates=(),
+            )
+
+        if scope_type == "watchlist":
+            return _resolve_explicit_watchlist_group(
+                db,
+                target_id=target_id,
+                requested_label=requested_label,
+                question=question,
             )
 
         if scope_type == "tw_index":

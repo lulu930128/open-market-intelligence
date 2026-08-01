@@ -112,6 +112,37 @@ def normalize_screening_parameters(
         raise ValueError(
             f"screening offset must be between 0 and {MAX_RESULT_OFFSET}."
         )
+    require_complete_window = raw.get("require_complete_window", True)
+    if not isinstance(require_complete_window, bool):
+        raise ValueError(
+            "screening require_complete_window must be a boolean."
+        )
+    min_observed_periods = raw.get(
+        "min_observed_periods",
+        window if require_complete_window else 1,
+    )
+    if (
+        isinstance(min_observed_periods, bool)
+        or not isinstance(min_observed_periods, int)
+        or not 1 <= min_observed_periods <= window
+    ):
+        raise ValueError(
+            "screening min_observed_periods must be an integer between 1 "
+            "and the requested window."
+        )
+    incomplete_window_policy = str(
+        raw.get("incomplete_window_policy")
+        or ("exclude" if require_complete_window else "include_and_flag")
+    ).strip().lower()
+    if incomplete_window_policy not in {
+        "exclude",
+        "include_and_flag",
+        "separate_section",
+    }:
+        raise ValueError(
+            "screening incomplete_window_policy must be exclude, "
+            "include_and_flag, or separate_section."
+        )
 
     universe = raw.get("universe")
     if universe is None:
@@ -133,6 +164,9 @@ def normalize_screening_parameters(
         "sort_order": sort_order,
         "limit": limit,
         "offset": offset,
+        "require_complete_window": require_complete_window,
+        "min_observed_periods": min_observed_periods,
+        "incomplete_window_policy": incomplete_window_policy,
         "universe": {
             "markets": list(markets),
             "stock_ids": list(stock_ids),
@@ -296,20 +330,38 @@ def build_tw_screening_snapshot(
         values.sort(key=lambda item: (-item[1], item[0]))
     else:
         values.sort(key=lambda item: (item[1], item[0]))
+    eligible_values = [
+        item
+        for item in values
+        if observed_periods.get(item[0], 0)
+        >= normalized["min_observed_periods"]
+        and (
+            not normalized["require_complete_window"]
+            or observed_periods.get(item[0], 0) >= normalized["window"]
+        )
+    ]
+    incomplete_values = [
+        item
+        for item in values
+        if observed_periods.get(item[0], 0) < normalized["window"]
+    ]
 
     snapshot_id = _snapshot_id(
         query=normalized,
         dates=trade_dates,
-        ranked_values=values,
+        ranked_values=eligible_values,
         universe_ids=universe_ids,
     )
     offset = normalized["offset"]
     limit = normalized["limit"]
-    selected_values = values[offset : offset + limit]
+    selected_values = eligible_values[offset : offset + limit]
     rows: list[dict[str, Any]] = []
     previous_value: float | int | None = None
     previous_rank = 0
-    for position, (stock_id, value) in enumerate(values, start=1):
+    for position, (stock_id, value) in enumerate(
+        eligible_values,
+        start=1,
+    ):
         rank = previous_rank if previous_value == value else position
         previous_value = value
         previous_rank = rank
@@ -370,19 +422,46 @@ def build_tw_screening_snapshot(
         warnings.append(
             f"No cached {metric.dataset} rows cover the requested universe."
         )
+    coverage_gaps: list[dict[str, Any]] = []
     if available_dates < normalized["window"]:
-        missing.append(f"{metric.dataset}.window_{normalized['window']}d")
+        coverage_gaps.append(
+            {
+                "dataset": metric.dataset,
+                "kind": "trading_window",
+                "available_periods": available_dates,
+                "requested_periods": normalized["window"],
+            }
+        )
         warnings.append(
             f"Only {available_dates}/{normalized['window']} cached trade dates are "
             "available for the requested screening window."
         )
     if covered_count < universe_count and covered_count:
-        missing.append(f"{metric.dataset}.universe_coverage")
+        coverage_gaps.append(
+            {
+                "dataset": metric.dataset,
+                "kind": "universe_coverage",
+                "covered": covered_count,
+                "expected": universe_count,
+                "missing_count": universe_count - covered_count,
+            }
+        )
         warnings.append(
             f"Screening metric coverage is {covered_count}/{universe_count} "
             "stocks in the requested ordinary-stock universe."
         )
     if complete_window_count < covered_count:
+        coverage_gaps.append(
+            {
+                "dataset": metric.dataset,
+                "kind": "incomplete_windows",
+                "complete_window_count": complete_window_count,
+                "incomplete_window_count": (
+                    covered_count - complete_window_count
+                ),
+                "eligible_rank_count": len(eligible_values),
+            }
+        )
         warnings.append(
             f"{covered_count - complete_window_count} covered stocks have fewer "
             "cached observations than the requested window."
@@ -410,6 +489,15 @@ def build_tw_screening_snapshot(
             covered_count - complete_window_count,
             0,
         ),
+        "incomplete_window_count": max(
+            covered_count - complete_window_count,
+            0,
+        ),
+        "eligible_rank_count": len(eligible_values),
+        "excluded_incomplete_count": max(
+            covered_count - len(eligible_values),
+            0,
+        ),
         "missing_count": max(universe_count - covered_count, 0),
         "coverage_ratio": (
             round(covered_count / universe_count, 6)
@@ -427,6 +515,7 @@ def build_tw_screening_snapshot(
         "cache_policy": "read_only_no_refresh",
         "as_of": latest_date,
         "missing": missing,
+        "coverage_gaps": coverage_gaps,
         "warnings": warnings,
     }
     ranking = {
@@ -439,6 +528,13 @@ def build_tw_screening_snapshot(
         "frequency": metric.frequency,
         "sort_order": normalized["sort_order"],
         "tie_policy": "competition_rank_then_stock_id",
+        "require_complete_window": normalized[
+            "require_complete_window"
+        ],
+        "min_observed_periods": normalized["min_observed_periods"],
+        "incomplete_window_policy": normalized[
+            "incomplete_window_policy"
+        ],
         "window": {
             "requested_trade_days": normalized["window"],
             "available_trade_days": available_dates,
@@ -455,14 +551,34 @@ def build_tw_screening_snapshot(
             "offset": offset,
             "limit": limit,
             "returned_count": len(selected_values),
-            "total_ranked_count": covered_count,
-            "has_more": offset + len(selected_values) < covered_count,
+            "total_ranked_count": len(eligible_values),
+            "covered_count": covered_count,
+            "has_more": (
+                offset + len(selected_values) < len(eligible_values)
+            ),
         },
         "rows": rows,
+        "incomplete_rows": (
+            [
+                {
+                    "stock_id": stock_id,
+                    "value": value,
+                    "unit": metric.unit,
+                    "observed_periods": observed_periods.get(stock_id, 0),
+                    "requested_periods": normalized["window"],
+                    "window_complete": False,
+                }
+                for stock_id, value in incomplete_values[:limit]
+            ]
+            if normalized["incomplete_window_policy"]
+            == "separate_section"
+            else []
+        ),
         "as_of": latest_date,
         "generated_at": generated.isoformat(),
         "cache_policy": "read_only_no_refresh",
         "missing": missing,
+        "coverage_gaps": coverage_gaps,
         "warnings": warnings,
     }
     freshness = {
@@ -475,6 +591,7 @@ def build_tw_screening_snapshot(
         "cache_policy": "read_only_no_refresh",
         "is_current": status == "latest_completed_session",
         "missing": missing,
+        "coverage_gaps": coverage_gaps,
         "warnings": warnings,
     }
     return {

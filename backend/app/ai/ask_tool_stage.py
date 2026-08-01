@@ -217,7 +217,10 @@ def execute_tool_stages(
         and payload.allow_external_fetch
         and query_plan.get("realtime_policy") != "cache_only"
         and current_freshness
-        and current_freshness.get("refresh_recommended")
+        and (
+            current_freshness.get("refresh_recommended")
+            or continuation_selected
+        )
         and query_plan.get("external_refresh_allowed", True)
     ):
         tool_session = progress.run_tool_session(

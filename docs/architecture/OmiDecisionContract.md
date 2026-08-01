@@ -109,7 +109,7 @@ fill plan 與 error 不得分叉。
 
 Consumer 不得指定 SQL、內部 Python function、任意 provider URL 或無界 backfill。
 `/api/ai/tools` 是 public request schema 與 capability catalog 的真相來源，
-目前 registry v1 共 38 個 capabilities，並包含
+目前 registry v3 共 55 個 capabilities，並包含
 `x-omi-capability-registry-version` 與 `x-omi-capabilities`。Repo MCP
 `tools/list` 從此 endpoint 取得 schema，只添加 adapter-local
 `include_raw`；backend 無法連線時才使用相容 fallback schema。
@@ -186,9 +186,9 @@ continuation 與 error；evidence 使用明確的 bounded projection：
   },
   "execution": {
     "selection": {
-      "version": "omi.capability.selection.v1"
+      "version": "omi.capability.selection.v2"
     },
-    "capability_catalog_version": "omi.capability.registry.v1",
+    "capability_catalog_version": "omi.capability.registry.v3",
     "query_plan": {},
     "tool_plan": {},
     "tool_runs": [],

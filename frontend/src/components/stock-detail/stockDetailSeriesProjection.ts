@@ -288,32 +288,37 @@ export function buildEarningsSeries(rows: FinancialMetricQuarterlyRead[], view: 
 
     return sortedRows.map<EarningsSeriesPoint>((row) => {
       const previous = byPeriod.get(`${row.fiscal_year - 1}Q${row.quarter}`);
+      const periodScope = row.period_scope ?? (row.quarter === 4 ? "annual" : "ytd");
+      const monthsCovered = row.months_covered ?? row.quarter * 3;
+      const comparable =
+        row.normalization_status === "normalized" &&
+        previous?.normalization_status === "normalized";
 
       return {
         period: row.period,
-        label: row.period,
+        label:
+          periodScope === "annual"
+            ? `${row.period} · FY`
+            : `${row.period} · ${monthsCovered}M YTD`,
         fiscalYear: row.fiscal_year,
         quarter: row.quarter,
-        eps: row.eps,
-        previousEps: previous?.eps ?? null,
-        growthPct: revenueGrowth(row.eps, previous?.eps ?? null),
-        roe: row.roe,
-        roa: row.roa,
+        eps: row.single_quarter_eps ?? row.raw_eps ?? row.eps,
+        previousEps: comparable
+          ? previous?.single_quarter_eps ?? previous?.raw_eps ?? previous?.eps ?? null
+          : null,
+        growthPct: comparable
+          ? revenueGrowth(
+              row.single_quarter_eps ?? row.raw_eps ?? row.eps,
+              previous?.single_quarter_eps ?? previous?.raw_eps ?? previous?.eps ?? null
+            )
+          : null,
+        roe: row.normalization_status === "normalized" ? row.roe : null,
+        roa: row.normalization_status === "normalized" ? row.roa : null,
         periodCount: 1,
       };
     });
   }
 
-  const groups = new Map<
-    number,
-    {
-      eps: number;
-      previousEps: number;
-      periodCount: number;
-      roe: number | null;
-      roa: number | null;
-    }
-  >();
   const rowsByYear = new Map<number, FinancialMetricQuarterlyRead[]>();
 
   sortedRows.forEach((row) => {
@@ -322,36 +327,37 @@ export function buildEarningsSeries(rows: FinancialMetricQuarterlyRead[], view: 
     rowsByYear.set(row.fiscal_year, list);
   });
 
-  Array.from(rowsByYear.entries()).forEach(([year, yearRows]) => {
-    const previousRows = rowsByYear.get(year - 1) ?? [];
-    const quarterSet = new Set(yearRows.map((row) => row.quarter));
-    const previousComparableRows = previousRows.filter((row) => quarterSet.has(row.quarter));
-    const latestRow = yearRows[yearRows.length - 1];
-
-    groups.set(year, {
-      eps: yearRows.reduce((sum, row) => sum + (row.eps ?? 0), 0),
-      previousEps: previousComparableRows.reduce((sum, row) => sum + (row.eps ?? 0), 0),
-      periodCount: yearRows.filter((row) => row.eps !== null && row.eps !== undefined).length,
-      roe: latestRow?.roe ?? null,
-      roa: latestRow?.roa ?? null,
-    });
-  });
-
-  return Array.from(groups.entries()).map<EarningsSeriesPoint>(([year, group]) => {
-    const eps = group.periodCount ? group.eps : null;
-    const previousEps = group.previousEps || null;
+  return Array.from(rowsByYear.entries()).map<EarningsSeriesPoint>(([year, yearRows]) => {
+    const selectedRow = yearRows.find((row) => row.quarter === 4) ?? yearRows[yearRows.length - 1];
+    const periodScope =
+      selectedRow?.period_scope ?? (selectedRow?.quarter === 4 ? "annual" : "ytd");
+    const monthsCovered =
+      selectedRow?.months_covered ?? (selectedRow ? selectedRow.quarter * 3 : null);
+    const previousRow = (rowsByYear.get(year - 1) ?? []).find(
+      (row) => row.quarter === selectedRow?.quarter
+    );
+    const comparable =
+      selectedRow?.normalization_status === "normalized" &&
+      previousRow?.normalization_status === "normalized";
+    const eps = selectedRow?.raw_eps ?? selectedRow?.eps ?? null;
+    const previousEps = comparable
+      ? previousRow?.raw_eps ?? previousRow?.eps ?? null
+      : null;
 
     return {
       period: String(year),
-      label: String(year),
+      label:
+        periodScope === "annual"
+          ? String(year)
+          : `${year} · ${monthsCovered ?? "?"}M YTD`,
       fiscalYear: year,
       quarter: null,
       eps,
       previousEps,
-      growthPct: revenueGrowth(eps, previousEps),
-      roe: group.roe,
-      roa: group.roa,
-      periodCount: group.periodCount,
+      growthPct: comparable ? revenueGrowth(eps, previousEps) : null,
+      roe: selectedRow?.normalization_status === "normalized" ? selectedRow.roe : null,
+      roa: selectedRow?.normalization_status === "normalized" ? selectedRow.roa : null,
+      periodCount: selectedRow ? 1 : 0,
     };
   });
 }

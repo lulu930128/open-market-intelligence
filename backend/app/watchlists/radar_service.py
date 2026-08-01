@@ -8,6 +8,11 @@ from numbers import Real
 from sqlalchemy.orm import Session
 
 from app.watchlists import ranking_service
+from app.watchlists.radar_rule_contract import (
+    V1_BUCKET_PRIORITY_BASES,
+    V1_HIGH_MOVE_PCT_THRESHOLD,
+    V1_TECHNICAL_SIGNAL_WEIGHTS,
+)
 
 
 ALLOWED_RADAR_MODES = {
@@ -21,7 +26,7 @@ ALLOWED_RADAR_MODES = {
     "momentum",
     "all",
 }
-HIGH_MOVE_PCT_THRESHOLD = 7.0
+HIGH_MOVE_PCT_THRESHOLD = V1_HIGH_MOVE_PCT_THRESHOLD
 LEGACY_LIMIT_MOVE_BUCKET = "limit_move"
 SURGE_MODE_BUCKETS = {
     LEGACY_LIMIT_MOVE_BUCKET,
@@ -399,54 +404,7 @@ HIGH_MOMENTUM_SIGNAL_KEYS = {
     "bollinger_breakout",
     "volume_price_up",
 }
-TECHNICAL_SIGNAL_WEIGHTS = {
-    "cross_below_ma60": 4.2,
-    "donchian_breakdown": 3.5,
-    "structure_support_break": 3.6,
-    "bollinger_breakdown": 3.2,
-    "cross_below_ma20": 3.0,
-    "volume_price_down": 2.8,
-    "ema_bearish_cross": 2.6,
-    "adx_bear_trend": 2.5,
-    "macd_negative": 2.3,
-    "roc_negative": 2.2,
-    "rsi_overheated": 2.1,
-    "kd_bearish_cross": 2.1,
-    "kd_overbought": 2.0,
-    "atr_high_volatility": 2.2,
-    "atr_expanding": 1.8,
-    "mfi_outflow": 2.0,
-    "rsi_weak": 1.8,
-    "cross_above_ma60": 3.8,
-    "donchian_breakout": 3.2,
-    "structure_resistance_breakout": 3.3,
-    "bollinger_breakout": 3.0,
-    "volume_price_up": 2.8,
-    "cross_above_ma20": 2.6,
-    "ema_bullish_cross": 2.5,
-    "adx_bull_trend": 2.4,
-    "macd_positive": 2.2,
-    "roc_positive": 2.1,
-    "kd_bullish_cross": 2.0,
-    "mfi_inflow": 2.0,
-    "rsi_bull_zone": 1.8,
-    "volume_expansion": 1.7,
-    "volume_above_ma5": 1.5,
-    "bollinger_squeeze": 1.4,
-    "near_support": 1.1,
-    "near_resistance": 1.1,
-    "kd_oversold": 1.0,
-    "above_ma5": 0.8,
-    "below_ma5": 0.8,
-    "above_ma20": 1.4,
-    "below_ma20": 1.4,
-    "above_ma60": 1.8,
-    "below_ma60": 2.0,
-    "ma5_above_ma20": 1.2,
-    "ma5_below_ma20": 1.2,
-    "ma20_above_ma60": 1.0,
-    "ma20_below_ma60": 1.0,
-}
+TECHNICAL_SIGNAL_WEIGHTS = V1_TECHNICAL_SIGNAL_WEIGHTS
 BUCKET_CONFIRMATION_KEYS = {
     "limit_down_liquidity": RISK_SIGNAL_KEYS,
     "selloff_risk": RISK_SIGNAL_KEYS,
@@ -874,33 +832,7 @@ def _priority_score(
     score = int(row.get("score", 0) or 0)
     signal_count = int(row.get("signal_count", 0) or 0)
 
-    bucket_base = {
-        "limit_move": 100,
-        "limit_down_liquidity": 105,
-        "selloff_risk": 102,
-        "limit_up_lock": 100,
-        "surge_up": 96,
-        "support_break": 94,
-        "volume_down": 90,
-        "bearish_momentum": 86,
-        "overheated": 84,
-        "volatility_risk": 88,
-        "breakout_high": 82,
-        "trend_reclaim": 78,
-        "volume_up": 72,
-        "limit_up_move": 100,
-        "limit_down_move": 100,
-        "risk": 90,
-        "breakout": 80,
-        "volume": 70,
-        "compression_watch": 68,
-        "pullback": 65,
-        "momentum": 60,
-        "watch": 40,
-        "quiet": 10,
-        "no_data": 0,
-        "error": 0,
-    }.get(bucket, 0)
+    bucket_base = V1_BUCKET_PRIORITY_BASES.get(bucket, 0)
     urgency_bonus = {"high": 20, "medium": 10, "low": 0}.get(urgency, 0)
     change_bonus = abs(change_pct) * 2 if change_pct is not None else 0
     stale_penalty = 15 if stale else 0
@@ -1709,6 +1641,28 @@ def build_watchlist_radar_from_ranking(
     mode: str = "action",
     max_results: int = 30,
 ) -> dict:
+    radar, _universe_items = build_watchlist_radar_bundle_from_ranking(
+        ranking=ranking,
+        include_children=include_children,
+        mode=mode,
+        max_results=max_results,
+    )
+    return radar
+
+
+def build_watchlist_radar_bundle_from_ranking(
+    *,
+    ranking: dict,
+    include_children: bool = True,
+    mode: str = "action",
+    max_results: int = 30,
+) -> tuple[dict, list[dict]]:
+    """Build the public v1 projection and the complete v2 calculation universe.
+
+    The v1 mode filter and ``max_results`` limit are presentation concerns.  Radar
+    v2 research must evaluate every row returned by the bounded ranking
+    calculation before that projection is applied.
+    """
     mode = mode.lower().strip()
     if mode not in ALLOWED_RADAR_MODES:
         raise ValueError(
@@ -1740,7 +1694,7 @@ def build_watchlist_radar_from_ranking(
         item["rank"] = index
     _assign_technical_grades(results)
 
-    return {
+    radar = {
         "group_id": ranking.get("group_id"),
         "include_children": include_children,
         "mode": mode,
@@ -1759,6 +1713,7 @@ def build_watchlist_radar_from_ranking(
         "buckets": _bucket_summary(matched_items, mode=mode),
         "results": results,
     }
+    return radar, items
 
 
 def get_watchlist_group_radar(
@@ -1776,6 +1731,39 @@ def get_watchlist_group_radar(
     intraday_limit: int = 30,
     intraday_overlay_cache: dict[str, dict | None] | None = None,
 ) -> dict:
+    radar, _universe_items = get_watchlist_group_radar_bundle(
+        db=db,
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        mode=mode,
+        max_results=max_results,
+        ma_windows=ma_windows,
+        volume_ma_windows=volume_ma_windows,
+        calculation_limit=calculation_limit,
+        volume_ratio_threshold=volume_ratio_threshold,
+        use_intraday=use_intraday,
+        intraday_limit=intraday_limit,
+        intraday_overlay_cache=intraday_overlay_cache,
+    )
+    return radar
+
+
+def get_watchlist_group_radar_bundle(
+    db: Session,
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = "action",
+    max_results: int = 30,
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
+    calculation_limit: int = 100,
+    volume_ratio_threshold: float | None = None,
+    use_intraday: bool = False,
+    intraday_limit: int = 30,
+    intraday_overlay_cache: dict[str, dict | None] | None = None,
+) -> tuple[dict, list[dict]]:
     ranking = ranking_service.get_watchlist_group_latest_ranking(
         db=db,
         group_id=group_id,
@@ -1792,11 +1780,11 @@ def get_watchlist_group_radar(
         intraday_overlay_cache=intraday_overlay_cache,
     )
 
-    radar = build_watchlist_radar_from_ranking(
+    radar, universe_items = build_watchlist_radar_bundle_from_ranking(
         ranking=ranking,
         include_children=include_children,
         mode=mode,
         max_results=max_results,
     )
     radar["group_id"] = radar.get("group_id") or group_id
-    return radar
+    return radar, universe_items

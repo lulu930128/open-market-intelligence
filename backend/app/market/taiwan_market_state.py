@@ -122,6 +122,29 @@ def _validated_quality_status(
     return "ready"
 
 
+def _trade_value_quality_status(
+    *,
+    cumulative_trade_value: int | None,
+    previous_trade_value: int | None,
+    out_of_order: bool,
+    finalized: bool,
+    is_estimate: bool,
+) -> str:
+    if cumulative_trade_value is None:
+        return "missing"
+    if cumulative_trade_value < 0:
+        return "invalid_value"
+    if (
+        not finalized
+        and previous_trade_value is not None
+        and cumulative_trade_value < previous_trade_value
+    ):
+        return "invalid_value"
+    if out_of_order and not finalized:
+        return "out_of_order"
+    return "estimated" if is_estimate else "ready"
+
+
 def persist_taiwan_market_minute_state(
     db: Session,
     *,
@@ -141,11 +164,16 @@ def persist_taiwan_market_minute_state(
         index_id = str(item.get("index_id") or INDEX_ID_BY_MARKET.get(market) or "").upper()
         if market not in SUPPORTED_MARKETS or not index_id:
             continue
-        breadth = item.get("breadth") if isinstance(item.get("breadth"), dict) else None
-        if not breadth:
-            skipped.append(f"{index_id}:missing_breadth")
-            continue
-        trade_date = _as_trade_date(breadth.get("trade_date") or item.get("time"))
+        breadth = (
+            item.get("breadth")
+            if isinstance(item.get("breadth"), dict)
+            else {}
+        )
+        trade_date = _as_trade_date(
+            breadth.get("trade_date")
+            or item.get("time")
+            or payload.get("as_of")
+        )
         if trade_date is None:
             skipped.append(f"{index_id}:missing_trade_date")
             continue
@@ -198,19 +226,54 @@ def persist_taiwan_market_minute_state(
             if latest_prior is not None
             else None
         )
-        quality_status = _validated_quality_status(
+        out_of_order = (
+            existing is None
+            and latest_any is not None
+            and _row_minute_at(latest_any) > minute_at
+        )
+        breadth_quality_status = _validated_quality_status(
             raw_status=raw_quality_status,
             breadth=breadth,
             cumulative_trade_value=cumulative_trade_value,
             previous_trade_value=previous_trade_value,
-            out_of_order=(
-                existing is None
-                and latest_any is not None
-                and _row_minute_at(latest_any) > minute_at
-            ),
+            out_of_order=out_of_order,
             finalized=finalized,
         )
-        official_flag = quality_status == "ready" and breadth_scope == "full_market"
+        quote_quality_status = (
+            "ready" if _as_float(item.get("close")) is not None else "missing"
+        )
+        trade_value_is_estimate = bool(
+            breadth.get("trade_value_is_estimate")
+            if breadth.get("trade_value_is_estimate") is not None
+            else item.get("trade_value_is_estimate")
+        )
+        trade_value_quality_status = _trade_value_quality_status(
+            cumulative_trade_value=cumulative_trade_value,
+            previous_trade_value=previous_trade_value,
+            out_of_order=out_of_order,
+            finalized=finalized,
+            is_estimate=trade_value_is_estimate,
+        )
+        component_statuses = {
+            quote_quality_status,
+            breadth_quality_status,
+            trade_value_quality_status,
+        }
+        if component_statuses <= {"ready"}:
+            quality_status = "ready"
+        elif trade_value_quality_status in {
+            "invalid_value",
+            "out_of_order",
+        }:
+            quality_status = trade_value_quality_status
+        elif component_statuses & {"ready", "estimated"}:
+            quality_status = "partial"
+        else:
+            quality_status = "missing"
+        official_flag = (
+            breadth_quality_status == "ready"
+            and breadth_scope == "full_market"
+        )
         session_status = (
             "final"
             if finalized and official_flag
@@ -224,8 +287,10 @@ def persist_taiwan_market_minute_state(
             "trade_date": trade_date,
             "minute_at": minute_at,
             "session_status": session_status,
-            "breadth_status": quality_status,
+            "quote_quality_status": quote_quality_status,
+            "breadth_status": breadth_quality_status,
             "breadth_scope": breadth_scope,
+            "trade_value_quality_status": trade_value_quality_status,
             "quality_status": quality_status,
             "index_value": _as_float(item.get("close")),
             "index_change": _as_float(item.get("change")),
@@ -240,6 +305,27 @@ def persist_taiwan_market_minute_state(
             "missing_count": _as_int(breadth.get("missing_count")),
             "cumulative_trade_value": cumulative_trade_value,
             "estimated_full_day_trade_value": _as_int(item.get("estimated_trade_value")),
+            "trade_value_semantics": (
+                breadth.get("trade_value_semantics")
+                or item.get("trade_value_semantics")
+                or (
+                    "official_cumulative_trade_value"
+                    if cumulative_trade_value is not None
+                    and not trade_value_is_estimate
+                    else None
+                )
+            ),
+            "trade_value_confidence": (
+                breadth.get("trade_value_confidence")
+                or item.get("trade_value_confidence")
+                or (
+                    "high"
+                    if cumulative_trade_value is not None
+                    and not trade_value_is_estimate
+                    else None
+                )
+            ),
+            "trade_value_is_estimate": trade_value_is_estimate,
             "source": str(breadth.get("source") or item.get("source") or "unknown"),
             "source_category": "official_public" if official_flag else "normalized_cache",
             "source_url": breadth.get("source_url") or item.get("source_url"),
@@ -263,6 +349,9 @@ def persist_taiwan_market_minute_state(
                 "trade_date": trade_date.isoformat(),
                 "minute_at": minute_at.isoformat(),
                 "session_status": session_status,
+                "quote_quality_status": quote_quality_status,
+                "breadth_status": breadth_quality_status,
+                "trade_value_quality_status": trade_value_quality_status,
                 "quality_status": quality_status,
             }
         )
@@ -295,9 +384,17 @@ def _complete_minute_groups(
     return groups
 
 
+def _has_usable_trade_value(row: TaiwanMarketMinuteState) -> bool:
+    status = str(row.trade_value_quality_status or "unknown").strip().lower()
+    return row.cumulative_trade_value is not None and (
+        status in {"ready", "estimated"}
+        or status == "unknown"
+    )
+
+
 def _combined_trade_value(rows_by_market: dict[str, TaiwanMarketMinuteState]) -> int | None:
     if any(
-        row.quality_status != "ready"
+        not _has_usable_trade_value(row)
         for market, row in rows_by_market.items()
         if market in SUPPORTED_MARKETS
     ):
@@ -312,38 +409,101 @@ def _combined_trade_value(rows_by_market: dict[str, TaiwanMarketMinuteState]) ->
     return sum(int(value) for value in values if value is not None)
 
 
+def _trade_value_authority_status(
+    rows_by_market: dict[str, TaiwanMarketMinuteState],
+) -> str:
+    usable_rows = [
+        row
+        for market, row in rows_by_market.items()
+        if market in SUPPORTED_MARKETS and _has_usable_trade_value(row)
+    ]
+    if not usable_rows:
+        return "unavailable"
+    estimated_count = sum(bool(row.trade_value_is_estimate) for row in usable_rows)
+    if estimated_count == len(usable_rows):
+        return "estimated"
+    if estimated_count:
+        return "mixed"
+    return "official"
+
+
 def _baseline_payload(
     current_value: int | None,
     values: list[int],
     days: int,
     *,
     dates: list[str] | None = None,
+    authorities: list[str] | None = None,
 ) -> dict[str, Any]:
     selected = values[-days:]
     selected_dates = (dates or [])[-len(selected) :] if selected else []
+    selected_authorities = (
+        (authorities or [])[-len(selected) :] if selected else []
+    )
+    sample_complete = len(selected) >= days
     baseline = int(median(selected)) if selected else None
-    ratio = current_value / baseline if current_value is not None and baseline not in {None, 0} else None
+    ratio = (
+        current_value / baseline
+        if sample_complete
+        and current_value is not None
+        and baseline not in {None, 0}
+        else None
+    )
+    authority_set = {value for value in selected_authorities if value}
+    authority_status = (
+        next(iter(authority_set))
+        if len(authority_set) == 1
+        else "mixed"
+        if authority_set
+        else "unavailable"
+    )
+    remaining_sessions = max(days - len(selected), 0)
     return {
+        "status": "ready" if sample_complete else "warming_up",
+        "readiness_status": "ready" if sample_complete else "warming_up",
         "requested_days": days,
+        "required_sample_days": days,
         "sample_days": len(selected),
+        "available_sample_days": len(selected),
+        "remaining_sample_days": remaining_sessions,
+        "expected_ready_after_sessions": remaining_sessions,
+        "next_fill": None if sample_complete else "scheduler_accumulation",
+        "backfill_status": (
+            "not_required"
+            if sample_complete
+            else "unavailable_no_trusted_historical_minute_provider"
+        ),
         "sample_status": (
             "complete"
-            if len(selected) >= days
+            if sample_complete
             else "provisional"
             if selected
             else "empty"
         ),
+        "authority_status": authority_status,
         "samples": [
             {
                 "trade_date": selected_dates[index]
                 if index < len(selected_dates)
                 else None,
                 "cumulative_trade_value": value,
+                "authority_status": (
+                    selected_authorities[index]
+                    if index < len(selected_authorities)
+                    else "unavailable"
+                ),
             }
             for index, value in enumerate(selected)
         ],
         "median_cumulative_trade_value": baseline,
         "pace_ratio": ratio,
+        "pace_ratio_status": (
+            "calculated"
+            if ratio is not None
+            else "insufficient_history"
+            if not sample_complete
+            else "current_or_baseline_unavailable"
+        ),
     }
 
 
@@ -370,6 +530,8 @@ def read_taiwan_market_volume_state(
             "available_cumulative_trade_value": None,
             "trade_value_available": False,
             "trade_value_complete": False,
+            "trade_value_coverage_status": "missing",
+            "trade_value_authority_status": "unavailable",
             "trade_value_status": "missing",
             "included_markets": [],
             "missing_markets": ["TWSE", "TPEX"],
@@ -377,6 +539,11 @@ def read_taiwan_market_volume_state(
             "trade_value_estimate_method": "not_estimated",
             "same_time_baseline_5d": _baseline_payload(None, [], 5),
             "same_time_baseline_20d": _baseline_payload(None, [], 20),
+            "baseline_readiness_status": "warming_up",
+            "available_sample_days": 0,
+            "expected_5d_ready_after_sessions": 5,
+            "expected_20d_ready_after_sessions": 20,
+            "next_fill": "scheduler_accumulation",
             "field_status": {
                 "current_cumulative_trade_value": {
                     "status": "missing",
@@ -417,8 +584,7 @@ def read_taiwan_market_volume_state(
         market
         for market in ("TWSE", "TPEX")
         if market in selected_rows
-        and selected_rows[market].cumulative_trade_value is not None
-        and selected_rows[market].quality_status == "ready"
+        and _has_usable_trade_value(selected_rows[market])
     ]
     missing_markets = [
         market for market in ("TWSE", "TPEX") if market not in available_markets
@@ -429,6 +595,20 @@ def read_taiwan_market_volume_state(
             for market in available_markets
         )
         if available_markets
+        else None
+    )
+    trade_value_uses_estimate = any(
+        bool(selected_rows[market].trade_value_is_estimate)
+        for market in available_markets
+    )
+    official_current_value = (
+        current_value
+        if current_value is not None and not trade_value_uses_estimate
+        else None
+    )
+    estimated_current_value = (
+        current_value
+        if current_value is not None and trade_value_uses_estimate
         else None
     )
 
@@ -460,6 +640,7 @@ def read_taiwan_market_volume_state(
         rows_by_date[row.trade_date].append(row)
     historical_values: list[int] = []
     historical_dates: list[str] = []
+    historical_authorities: list[str] = []
     comparison_time = selected_minute.time()
     for trade_date_value in sorted(rows_by_date):
         groups = _complete_minute_groups(rows_by_date[trade_date_value])
@@ -471,12 +652,17 @@ def read_taiwan_market_volume_state(
         ]
         if not candidates:
             continue
-        value = _combined_trade_value(groups[max(candidates)])
+        selected_history_rows = groups[max(candidates)]
+        value = _combined_trade_value(selected_history_rows)
         if value is not None:
             historical_values.append(value)
             historical_dates.append(trade_date_value.isoformat())
+            historical_authorities.append(
+                _trade_value_authority_status(selected_history_rows)
+            )
     historical_values = historical_values[-max(lookback_days, 20) :]
     historical_dates = historical_dates[-max(lookback_days, 20) :]
+    historical_authorities = historical_authorities[-max(lookback_days, 20) :]
 
     market_payloads = []
     for market in ("TWSE", "TPEX"):
@@ -496,7 +682,13 @@ def read_taiwan_market_volume_state(
                 "unchanged_count": row.unchanged_count,
                 "total_count": row.total_count,
                 "session_status": row.session_status,
+                "quote_quality_status": row.quote_quality_status,
+                "breadth_quality_status": row.breadth_status,
+                "trade_value_quality_status": row.trade_value_quality_status,
                 "quality_status": row.quality_status,
+                "trade_value_semantics": row.trade_value_semantics,
+                "trade_value_confidence": row.trade_value_confidence,
+                "trade_value_is_estimate": row.trade_value_is_estimate,
                 "source": row.source,
                 "source_category": row.source_category,
                 "official_flag": row.official_flag,
@@ -506,6 +698,11 @@ def read_taiwan_market_volume_state(
     warnings: list[str] = []
     if current_value is None:
         warnings.append("TWSE and TPEX cumulative trade value are not both available at the selected minute.")
+    elif trade_value_uses_estimate:
+        warnings.append(
+            "Combined cumulative trade value includes provider-derived estimates; "
+            "inspect market-level semantics before using it as an official value."
+        )
     if len(historical_values) < 5:
         warnings.append(
             "Fewer than 5 prior sessions are available at the same minute; volume pace remains provisional."
@@ -516,6 +713,22 @@ def read_taiwan_market_volume_state(
         )
     session_statuses = {row.session_status for row in selected_rows.values()}
     session_status = "final" if session_statuses == {"final"} else "provisional"
+    trade_value_coverage_status = (
+        "complete"
+        if current_value is not None
+        else "partial"
+        if available_current_value is not None
+        else "missing"
+    )
+    trade_value_authority_status = _trade_value_authority_status(selected_rows)
+    trade_value_status = (
+        f"{trade_value_authority_status}_complete"
+        if trade_value_coverage_status == "complete"
+        else trade_value_coverage_status
+    )
+    baseline_readiness_status = (
+        "ready" if len(historical_values) >= 20 else "warming_up"
+    )
     field_status = {
         "current_cumulative_trade_value": {
             "status": "available" if current_value is not None else "missing",
@@ -559,20 +772,32 @@ def read_taiwan_market_volume_state(
         "comparison_minute": selected_minute.strftime("%H:%M"),
         "calculation_basis": "TWSE+TPEX cumulative trade value compared with prior sessions at or before the same minute",
         "current_cumulative_trade_value": current_value,
+        "official_cumulative_trade_value": official_current_value,
+        "estimated_cumulative_trade_value": estimated_current_value,
+        "current_trade_value_semantics": (
+            "best_available_combined_includes_estimate"
+            if trade_value_uses_estimate
+            else "official_combined_cumulative_trade_value"
+            if current_value is not None
+            else "unavailable"
+        ),
         "available_cumulative_trade_value": available_current_value,
         "trade_value_available": available_current_value is not None,
         "trade_value_complete": current_value is not None,
-        "trade_value_status": (
-            "complete"
-            if current_value is not None
-            else "partial"
-            if available_current_value is not None
-            else "missing"
-        ),
+        "trade_value_coverage_status": trade_value_coverage_status,
+        "trade_value_authority_status": trade_value_authority_status,
+        "trade_value_status": trade_value_status,
         "included_markets": available_markets,
         "missing_markets": missing_markets,
-        "trade_value_estimate": None,
-        "trade_value_estimate_method": "not_estimated",
+        "trade_value_estimate": estimated_current_value,
+        "trade_value_estimate_method": (
+            "sum_market_estimates"
+            if estimated_current_value is not None
+            else "not_estimated"
+        ),
+        "trade_value_estimate_confidence": (
+            "medium" if estimated_current_value is not None else None
+        ),
         "previous_minute_cumulative_trade_value": previous_value,
         "one_minute_trade_value_change": one_minute_change,
         "field_status": field_status,
@@ -581,12 +806,21 @@ def read_taiwan_market_volume_state(
             historical_values,
             5,
             dates=historical_dates,
+            authorities=historical_authorities,
         ),
         "same_time_baseline_20d": _baseline_payload(
             current_value,
             historical_values,
             20,
             dates=historical_dates,
+            authorities=historical_authorities,
+        ),
+        "baseline_readiness_status": baseline_readiness_status,
+        "available_sample_days": len(historical_values),
+        "expected_5d_ready_after_sessions": max(5 - len(historical_values), 0),
+        "expected_20d_ready_after_sessions": max(20 - len(historical_values), 0),
+        "next_fill": (
+            None if baseline_readiness_status == "ready" else "scheduler_accumulation"
         ),
         "history_trade_dates": historical_dates,
         "markets": market_payloads,

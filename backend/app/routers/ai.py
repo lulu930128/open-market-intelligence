@@ -234,7 +234,27 @@ def ask_omi(
     except watchlist_service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        message = str(exc)
+        field = (
+            message.split(" must", 1)[0]
+            if message.startswith("selection.")
+            and " must" in message
+            else None
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": (
+                    "INVALID_FIELD"
+                    if "field" in message.casefold()
+                    else "INVALID_PARAMETER"
+                ),
+                "message": message,
+                "field": field,
+                "retryable": False,
+                "request_valid": False,
+            },
+        ) from exc
     except ai_llm.OpenAILLMError as exc:
         _raise_llm_http_error(exc)
 

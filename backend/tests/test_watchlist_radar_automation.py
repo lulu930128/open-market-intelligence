@@ -182,7 +182,7 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
             },
         )
 
-    def test_automation_evaluates_previous_snapshot_and_saves_today(self) -> None:
+    def test_automation_leaves_previous_v1_snapshot_frozen_and_saves_v2(self) -> None:
         group = self.add_group()
         source_id, raw_result_id = self.add_source()
         self.save_snapshot(
@@ -225,8 +225,8 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
 
         with patch.object(
             radar_automation.radar_service,
-            "get_watchlist_group_radar",
-            return_value=today_radar,
+            "get_watchlist_group_radar_bundle",
+            return_value=(today_radar, today_radar["results"]),
         ) as get_radar:
             result = radar_automation.run_watchlist_radar_automation(
                 db=self.db,
@@ -238,8 +238,11 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["saved_count"], 1)
         self.assertEqual(result["evaluated_count"], 1)
-        self.assertEqual(self.db.query(WatchlistRadarOutcome).count(), 1)
+        self.assertEqual(self.db.query(WatchlistRadarOutcome).count(), 0)
         self.assertEqual(self.db.query(WatchlistRadarSnapshotRun).count(), 2)
+        self.assertEqual(result["legacy_v1_coverage"]["status"], "frozen")
+        self.assertFalse(result["legacy_v1_coverage"]["write_enabled"])
+        self.assertEqual(result["results"][0]["radar_v1"]["status"], "frozen")
         get_radar.assert_called_once()
 
     def test_automation_defaults_to_all_active_groups(self) -> None:
@@ -251,11 +254,16 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
         def fake_radar(**kwargs):
             group_id = int(kwargs["group_id"])
             called_group_ids.append(group_id)
-            return self.radar_payload(group_id=group_id, trade_date="2026-07-07", results=[])
+            radar = self.radar_payload(
+                group_id=group_id,
+                trade_date="2026-07-07",
+                results=[],
+            )
+            return radar, radar["results"]
 
         with patch.object(
             radar_automation.radar_service,
-            "get_watchlist_group_radar",
+            "get_watchlist_group_radar_bundle",
             side_effect=fake_radar,
         ):
             result = radar_automation.run_watchlist_radar_automation(
@@ -280,8 +288,8 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
 
         with patch.object(
             radar_automation.radar_service,
-            "get_watchlist_group_radar",
-            return_value=stale_radar,
+            "get_watchlist_group_radar_bundle",
+            return_value=(stale_radar, stale_radar["results"]),
         ):
             result = radar_automation.run_watchlist_radar_automation(
                 db=self.db,
@@ -296,7 +304,7 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["snapshot_status"], "stale")
         self.assertEqual(self.db.query(WatchlistRadarSnapshotRun).count(), 0)
 
-    def test_automation_reports_existing_snapshot_without_false_save(self) -> None:
+    def test_existing_v1_snapshot_does_not_suppress_v2_persistence(self) -> None:
         group = self.add_group()
         radar = self.radar_payload(
             group_id=group.id,
@@ -311,8 +319,8 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
 
         with patch.object(
             radar_automation.radar_service,
-            "get_watchlist_group_radar",
-            return_value=radar,
+            "get_watchlist_group_radar_bundle",
+            return_value=(radar, radar["results"]),
         ):
             result = radar_automation.run_watchlist_radar_automation(
                 db=self.db,
@@ -321,11 +329,11 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["saved_count"], 0)
-        self.assertEqual(result["existing_count"], 1)
+        self.assertEqual(result["saved_count"], 1)
+        self.assertEqual(result["existing_count"], 0)
         self.assertEqual(result["coverage"]["status"], "complete")
-        self.assertEqual(result["results"][0]["snapshot_status"], "existing")
-        self.assertEqual(self.db.query(WatchlistRadarSnapshotRun).count(), 1)
+        self.assertEqual(result["results"][0]["snapshot_status"], "persisted")
+        self.assertEqual(self.db.query(WatchlistRadarSnapshotRun).count(), 2)
 
     def test_partial_outcome_rows_still_require_evaluation(self) -> None:
         group = self.add_group()
@@ -366,7 +374,7 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
             )
         )
 
-    def test_automation_fetches_current_intraday_before_outcome_evaluation(self) -> None:
+    def test_automation_does_not_evaluate_v1_even_with_intraday_data(self) -> None:
         group = self.add_group()
         self.save_snapshot(
             group_id=group.id,
@@ -409,11 +417,11 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
                     )
                 )
             self.db.commit()
-            return today_radar
+            return today_radar, today_radar["results"]
 
         with patch.object(
             radar_automation.radar_service,
-            "get_watchlist_group_radar",
+            "get_watchlist_group_radar_bundle",
             side_effect=fake_radar,
         ):
             result = radar_automation.run_watchlist_radar_automation(
@@ -424,13 +432,11 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["evaluated_count"], 1)
-        self.assertEqual(result["results"][0]["evaluated_snapshots"][0]["hit_count"], 1)
-        outcome = self.db.query(WatchlistRadarOutcome).one()
-        self.assertEqual(outcome.outcome_trade_date, date(2026, 7, 7))
-        self.assertEqual(outcome.outcome_close_price, 103.0)
+        self.assertEqual(result["evaluated_count"], 0)
+        self.assertEqual(self.db.query(WatchlistRadarOutcome).count(), 0)
+        self.assertEqual(result["legacy_v1_coverage"]["status"], "frozen")
 
-    def test_automation_reports_pending_outcomes_as_partial_success(self) -> None:
+    def test_legacy_pending_outcomes_do_not_block_active_v2_coverage(self) -> None:
         group = self.add_group()
         self.save_snapshot(
             group_id=group.id,
@@ -453,8 +459,8 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
 
         with patch.object(
             radar_automation.radar_service,
-            "get_watchlist_group_radar",
-            return_value=today_radar,
+            "get_watchlist_group_radar_bundle",
+            return_value=(today_radar, today_radar["results"]),
         ):
             result = radar_automation.run_watchlist_radar_automation(
                 db=self.db,
@@ -462,9 +468,12 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
                 evaluate_before_date=date(2026, 7, 7),
             )
 
-        self.assertEqual(result["status"], "partial_success")
-        self.assertEqual(result["coverage"]["pending_evaluation_count"], 1)
-        self.assertFalse(result["coverage"]["reconciliation_complete"])
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["coverage"]["pending_evaluation_count"], 0)
+        self.assertTrue(result["coverage"]["reconciliation_complete"])
+        self.assertEqual(result["legacy_v1_coverage"]["status"], "frozen")
+        self.assertTrue(result["legacy_v1_coverage"]["reconciliation_complete"])
+        self.assertFalse(result["legacy_v1_coverage"]["write_enabled"])
 
 
 if __name__ == "__main__":

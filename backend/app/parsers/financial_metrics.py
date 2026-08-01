@@ -93,11 +93,12 @@ def _base_record(
     fiscal_year: int,
     quarter: int,
 ) -> dict:
-    released_at = parse_date(first_value(row, ["出表日期", "Date", "report_date", "released_at"]))
+    report_date = parse_date(first_value(row, ["report_date"]))
+    released_at = parse_date(first_value(row, ["公告日期", "發布日期", "released_at"]))
     return {
         "source_id": raw_result.source_id,
         "raw_result_id": raw_result.id,
-        "report_date": released_at,
+        "report_date": report_date,
         "released_at": released_at,
         "filed_at": parse_date(first_value(row, ["申報日期", "公告申報日期", "filed_at"])),
         "fiscal_year": fiscal_year,
@@ -127,8 +128,9 @@ def _merge_if_present(record: dict, key: str, value) -> None:
 
 
 def _apply_income_fields(record: dict, row: dict) -> None:
-    released_at = parse_date(first_value(row, ["出表日期", "Date", "released_at"]))
-    _merge_if_present(record, "report_date", released_at)
+    report_date = parse_date(first_value(row, ["report_date"]))
+    released_at = parse_date(first_value(row, ["公告日期", "發布日期", "released_at"]))
+    _merge_if_present(record, "report_date", report_date)
     _merge_if_present(record, "released_at", released_at)
     _merge_if_present(record, "filed_at", parse_date(first_value(row, ["申報日期", "公告申報日期", "filed_at"])))
     _merge_if_present(record, "stock_name", first_value(row, ["公司名稱", "CompanyName"]))
@@ -179,8 +181,9 @@ def _apply_income_fields(record: dict, row: dict) -> None:
 
 
 def _apply_balance_fields(record: dict, row: dict) -> None:
-    released_at = parse_date(first_value(row, ["出表日期", "Date", "released_at"]))
-    _merge_if_present(record, "report_date", released_at)
+    report_date = parse_date(first_value(row, ["report_date"]))
+    released_at = parse_date(first_value(row, ["公告日期", "發布日期", "released_at"]))
+    _merge_if_present(record, "report_date", report_date)
     _merge_if_present(record, "released_at", released_at)
     _merge_if_present(record, "filed_at", parse_date(first_value(row, ["申報日期", "公告申報日期", "filed_at"])))
     _merge_if_present(record, "stock_name", first_value(row, ["公司名稱", "CompanyName"]))

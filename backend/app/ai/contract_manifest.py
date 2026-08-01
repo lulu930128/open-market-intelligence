@@ -26,6 +26,10 @@ def public_contract_manifest() -> dict[str, Any]:
         "selection_version": public_contract.CAPABILITY_SELECTION_VERSION,
         "targets": public_contract.target_catalog(),
         "capabilities": capability_contract.capability_catalog(),
+        "capability_schema_versions": {
+            spec.capability_id: spec.schema_version
+            for spec in capability_contract.CAPABILITY_SPECS
+        },
     }
     return {
         **payload,

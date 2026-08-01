@@ -233,7 +233,10 @@ def _institution_category(name: str | None) -> str | None:
 
     compact = text.replace(" ", "")
 
-    if "合計" in compact or compact in {"總計", "三大法人"}:
+    if (
+        ("三大法人" in compact and "合計" in compact)
+        or compact in {"合計", "總計", "三大法人"}
+    ):
         return "total"
     if "外資自營商" in compact and "不含" not in compact:
         return "foreign_dealer"
@@ -366,6 +369,7 @@ def parse_institutional_amount_summary(payload: Any, *, fallback_trade_date: dat
                 "法人名稱",
                 "InstitutionalInvestors",
                 "institutional_investors",
+                "Investor",
                 "name",
             ),
         )

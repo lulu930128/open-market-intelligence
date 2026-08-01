@@ -48,6 +48,7 @@ from app.us_market.schemas import (
     USWatchlistRankingRead,
 )
 from app.watchlists.schemas import WatchlistGroupRadarRead
+from app.routers import us_corporate_events
 from app.us_market.service import (
     USMarketConfigurationError,
     USStockNotFoundError,
@@ -95,6 +96,7 @@ from app.us_market.service import (
 
 
 router = APIRouter()
+router.include_router(us_corporate_events.router)
 
 
 def _fetch_error(exc: Exception) -> HTTPException:

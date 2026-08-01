@@ -27,6 +27,10 @@ from app.observability.source_health_contract import (
     summarize_source_health,
 )
 from app.us_market.sources import normalize_us_symbol
+from app.us_market.trading_calendar import (
+    is_us_daily_price_finalized,
+    us_daily_price_finalization_time,
+)
 
 
 DAILY_PROVIDER_ORDER = ("yahoo_chart", "alphavantage")
@@ -44,6 +48,9 @@ class USSourceHealthEntry:
     latest_fetched_at: datetime | None = None
     expected_data_date: date | None = None
     freshness_lag_days: int | None = None
+    latest_row_finalized: bool | None = None
+    latest_finalized_data_date: date | None = None
+    finalization_expected_at: datetime | None = None
     source_url: str | None = None
     data_quality: str = "unknown"
     reason: str = ""
@@ -63,6 +70,17 @@ class USSourceHealthEntry:
             "latest_fetched_at": self.latest_fetched_at.isoformat() if self.latest_fetched_at else None,
             "expected_data_date": self.expected_data_date.isoformat() if self.expected_data_date else None,
             "freshness_lag_days": self.freshness_lag_days,
+            "latest_row_finalized": self.latest_row_finalized,
+            "latest_finalized_data_date": (
+                self.latest_finalized_data_date.isoformat()
+                if self.latest_finalized_data_date
+                else None
+            ),
+            "finalization_expected_at": (
+                self.finalization_expected_at.isoformat()
+                if self.finalization_expected_at
+                else None
+            ),
             "source_url": self.source_url,
             "data_quality": self.data_quality,
             "reason": self.reason,
@@ -153,21 +171,110 @@ def _daily_price_entries(
         query = db.query(USDailyPrice).filter(USDailyPrice.provider == provider)
         if symbol is not None:
             query = query.filter(USDailyPrice.symbol == symbol)
+
+        row_count = query.count()
+        order_by = (
+            USDailyPrice.trade_date.desc(),
+            USDailyPrice.fetched_at.desc(),
+            USDailyPrice.id.desc(),
+        )
+        latest = _latest_or_none(query, *order_by)
+
+        if latest is None:
+            entries.append(
+                USSourceHealthEntry(
+                    resource="daily_price",
+                    provider=provider,
+                    target=target,
+                    status="empty",
+                    ok=False,
+                    row_count=row_count,
+                    expected_data_date=expected_daily_price_date,
+                    data_quality="empty",
+                    reason="No local rows are available for this provider/resource.",
+                )
+            )
+            continue
+
+        latest_row_finalized = is_us_daily_price_finalized(
+            trade_date=latest.trade_date,
+            fetched_at=latest.fetched_at,
+        )
+        finalization_expected_at = us_daily_price_finalization_time(latest.trade_date)
+        latest_finalized_data_date = latest.trade_date if latest_row_finalized else None
+
+        if not latest_row_finalized:
+            older_candidates = (
+                query.filter(USDailyPrice.trade_date < latest.trade_date)
+                .order_by(*order_by)
+                .limit(100)
+                .all()
+            )
+            for candidate in older_candidates:
+                if is_us_daily_price_finalized(
+                    trade_date=candidate.trade_date,
+                    fetched_at=candidate.fetched_at,
+                ):
+                    latest_finalized_data_date = candidate.trade_date
+                    break
+
+            entries.append(
+                USSourceHealthEntry(
+                    resource="daily_price",
+                    provider=provider,
+                    target=target,
+                    status="partial",
+                    ok=False,
+                    row_count=row_count,
+                    latest_data_date=latest.trade_date,
+                    latest_fetched_at=latest.fetched_at,
+                    expected_data_date=expected_daily_price_date,
+                    freshness_lag_days=_freshness_lag(
+                        expected_daily_price_date,
+                        latest_finalized_data_date,
+                    ),
+                    latest_row_finalized=False,
+                    latest_finalized_data_date=latest_finalized_data_date,
+                    finalization_expected_at=finalization_expected_at,
+                    source_url=latest.source_url,
+                    data_quality="partial",
+                    reason=(
+                        f"Latest local row for {latest.trade_date.isoformat()} was fetched "
+                        f"before its daily finalization time "
+                        f"{finalization_expected_at.isoformat()}; the row is excluded "
+                        "from completed daily data."
+                    ),
+                )
+            )
+            continue
+
+        status_value, ok, data_quality, reason = _status_for(
+            row_count=row_count,
+            latest_data_date=latest.trade_date,
+            expected_data_date=expected_daily_price_date,
+            freshness_required=True,
+        )
         entries.append(
-            _entry_from_query(
-                query=query,
+            USSourceHealthEntry(
                 resource="daily_price",
                 provider=provider,
                 target=target,
-                latest_data_attr="trade_date",
-                latest_fetched_attr="fetched_at",
+                status=status_value,
+                ok=ok,
+                row_count=row_count,
+                latest_data_date=latest.trade_date,
+                latest_fetched_at=latest.fetched_at,
                 expected_data_date=expected_daily_price_date,
-                freshness_required=True,
-                order_by=(
-                    USDailyPrice.trade_date.desc(),
-                    USDailyPrice.fetched_at.desc(),
-                    USDailyPrice.id.desc(),
+                freshness_lag_days=_freshness_lag(
+                    expected_daily_price_date,
+                    latest.trade_date,
                 ),
+                latest_row_finalized=True,
+                latest_finalized_data_date=latest.trade_date,
+                finalization_expected_at=finalization_expected_at,
+                source_url=latest.source_url,
+                data_quality=data_quality,
+                reason=reason,
             )
         )
 
@@ -298,7 +405,7 @@ def _macro_entry(db: Session, *, series_id: str | None) -> USSourceHealthEntry:
 def _summary(entries: list[USSourceHealthEntry]) -> dict[str, int]:
     return summarize_source_health(
         entries,
-        counted_statuses=("empty", "stale", "error"),
+        counted_statuses=("empty", "stale", "partial", "error"),
     )
 
 

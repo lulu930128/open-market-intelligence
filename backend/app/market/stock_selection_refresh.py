@@ -37,6 +37,8 @@ ProgressCallback = Callable[[int | None, int | None, str | None], None]
 CancellationCheck = Callable[[], bool]
 SessionFactory = Callable[[], Session]
 SHAREHOLDING_NO_CHANGE_COOLDOWN = timedelta(hours=1)
+_FAILED_STEP_STATUSES = {"error", "failed", "failure", "timeout", "cancelled"}
+_PARTIAL_STEP_STATUSES = {"partial", "partial_success", "completed_with_error"}
 
 
 def expected_daily_price_date(*, include_today: bool | None = None) -> date | None:
@@ -87,6 +89,45 @@ def _changed_row_count(result: dict) -> int:
     return 0
 
 
+def _result_error_messages(result: dict[str, Any], *, limit: int = 5) -> list[str]:
+    messages: list[str] = []
+
+    def add(value: Any) -> None:
+        message = str(value or "").strip()
+        if message and message not in messages:
+            messages.append(message[:1_000])
+
+    for key in ("error_message", "error"):
+        add(result.get(key))
+    nested_results = result.get("results")
+    if isinstance(nested_results, dict):
+        nested_items = list(nested_results.values())
+    elif isinstance(nested_results, list):
+        nested_items = nested_results
+    else:
+        nested_items = []
+    for item in nested_items:
+        if len(messages) >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status in _FAILED_STEP_STATUSES or item.get("error_message") or item.get("error"):
+            add(item.get("error_message") or item.get("error"))
+    if not messages and str(result.get("status") or "").strip().lower() in _FAILED_STEP_STATUSES:
+        add(result.get("message"))
+    return messages[:limit]
+
+
+def _step_provider(key: str, result: dict[str, Any]) -> str | None:
+    provider = str(result.get("provider") or "").strip()
+    if provider:
+        return provider
+    if key == TAIWAN_REFRESH_SHAREHOLDING_DISTRIBUTION:
+        return "tdcc"
+    return None
+
+
 def _run_refresh_step(
     *,
     key: str,
@@ -102,21 +143,29 @@ def _run_refresh_step(
 
     try:
         result = action()
-        status = _step_status(result)
+        status = _step_status(result).strip().lower()
         changed_rows = _changed_row_count(result)
+        error_messages = _result_error_messages(result)
+        refresh_outcome = (
+            "failed"
+            if status in _FAILED_STEP_STATUSES
+            else "partial"
+            if status in _PARTIAL_STEP_STATUSES
+            else "skipped"
+            if status == "skipped" or status.startswith("skipped_")
+            else "updated"
+            if changed_rows > 0
+            else "unchanged"
+        )
         results[key] = {
             "label": label,
             "status": status,
-            "refresh_outcome": (
-                "updated"
-                if changed_rows > 0
-                else "skipped"
-                if status == "skipped"
-                else "unchanged"
-            ),
+            "refresh_outcome": refresh_outcome,
             "changed_row_count": changed_rows,
             "result": result,
-            "error_message": None,
+            "provider": _step_provider(key, result),
+            "error_message": error_messages[0] if error_messages else None,
+            "error_messages": error_messages,
         }
     except Exception as exc:
         results[key] = {
@@ -125,7 +174,13 @@ def _run_refresh_step(
             "refresh_outcome": "failed",
             "changed_row_count": 0,
             "result": None,
+            "provider": (
+                "tdcc"
+                if key == TAIWAN_REFRESH_SHAREHOLDING_DISTRIBUTION
+                else None
+            ),
             "error_message": str(exc),
+            "error_messages": [str(exc)],
         }
 
     if progress is not None:
@@ -143,6 +198,7 @@ def _record_shareholding_refresh_outcome(
     detail: dict[str, Any] = {
         "refresh_outcome": outcome,
         "changed_row_count": int(result.get("changed_row_count") or 0),
+        "error_message": result.get("error_message"),
     }
     if outcome == "unchanged":
         detail["next_eligible_refresh_at"] = (
@@ -159,7 +215,8 @@ def _record_shareholding_refresh_outcome(
             target=stock_id,
             status=(
                 "failed"
-                if str(result.get("status") or "").lower() == "error"
+                if str(result.get("status") or "").lower()
+                in _FAILED_STEP_STATUSES
                 else "success"
             ),
             event_type=(
@@ -427,9 +484,23 @@ def refresh_selected_stock_data(
             cancelled = True
             break
 
-    error_count = sum(1 for result in results.values() if result["status"] == "error")
-    skipped_count = sum(1 for result in results.values() if result["status"] == "skipped")
-    completed_count = len(results) - error_count - skipped_count
+    error_count = sum(
+        1
+        for result in results.values()
+        if str(result.get("status") or "").lower() in _FAILED_STEP_STATUSES
+    )
+    partial_count = sum(
+        1
+        for result in results.values()
+        if str(result.get("status") or "").lower() in _PARTIAL_STEP_STATUSES
+    )
+    skipped_count = sum(
+        1
+        for result in results.values()
+        if str(result.get("status") or "").lower() == "skipped"
+        or str(result.get("status") or "").lower().startswith("skipped_")
+    )
+    completed_count = len(results) - error_count - partial_count - skipped_count
     refreshed_count = sum(
         1 for result in results.values() if result["refresh_outcome"] == "updated"
     )
@@ -440,19 +511,46 @@ def refresh_selected_stock_data(
         int(result["changed_row_count"]) for result in results.values()
     )
 
+    failed_steps = [
+        {
+            "dataset": step_key,
+            "label": result.get("label"),
+            "provider": result.get("provider"),
+            "target": stock_id,
+            "status": result.get("status"),
+            "refresh_outcome": result.get("refresh_outcome"),
+            "error_message": result.get("error_message"),
+            "retryable": True,
+        }
+        for step_key, result in results.items()
+        if result.get("refresh_outcome") in {"failed", "partial"}
+    ][:5]
+
     if cancelled:
         status = "timeout"
     elif error_count == len(results):
         status = "error"
-    elif error_count:
+    elif error_count or partial_count:
         status = "partial_success"
     elif completed_count == 0:
         status = "skipped"
     else:
         status = "success"
 
+    refresh_outcome = (
+        "failed"
+        if status in {"error", "timeout"}
+        else "partial"
+        if status == "partial_success"
+        else "updated"
+        if refreshed_count
+        else "skipped"
+        if status == "skipped"
+        else "unchanged"
+    )
     return {
         "status": status,
+        "refresh_outcome": refresh_outcome,
         "message": (
             "Selected stock data refresh stopped at the wall-clock deadline."
             if cancelled
@@ -471,10 +569,15 @@ def refresh_selected_stock_data(
         "refreshed_count": refreshed_count,
         "refreshed_count_semantics": "datasets_with_inserted_or_updated_rows",
         "completed_count": completed_count,
+        "partial_count": partial_count,
         "unchanged_count": unchanged_count,
         "changed_row_count": changed_row_count,
         "skipped_count": skipped_count,
         "error_count": error_count,
+        "error_message": (
+            failed_steps[0].get("error_message") if failed_steps else None
+        ),
+        "failed_steps": failed_steps,
         "cancelled": cancelled,
         "results": results,
     }

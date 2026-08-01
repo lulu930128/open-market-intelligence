@@ -13,7 +13,9 @@ import ProfessionalChartPanel, {
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  indicatorCategoryGroups,
   professionalIndicatorCategoryGroups,
+  type IndicatorCategoryGroup,
   type IndicatorParameters,
   type IndicatorKey,
   type IndicatorSettings,
@@ -114,6 +116,7 @@ import type {
   TaiwanStockQuoteDepthPreviewMode,
 } from "@/types/market";
 import {
+  type CSSProperties,
   type ReactNode,
   useCallback,
   useEffect,
@@ -189,6 +192,27 @@ function overlayMatchesChartLatest(
 }
 
 const indexTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
+const tpexTodayUnsupportedIndicators = new Set<IndicatorKey>([
+  "adLine",
+  "cmf",
+  "mfi",
+  "obv",
+  "pvt",
+  "volume",
+  "volumeProfile",
+  "vwap",
+  "vwma",
+]);
+const tpexTodayIndicatorGroups: IndicatorCategoryGroup[] = indicatorCategoryGroups
+  .map((group) => ({
+    ...group,
+    options: group.options.filter(
+      (option) =>
+        option.status !== "available" ||
+        !tpexTodayUnsupportedIndicators.has(option.key)
+    ),
+  }))
+  .filter((group) => group.options.length > 0);
 const indexProducts = new Map([
   [
     "TAIEX",
@@ -219,9 +243,12 @@ function stockSignalToneClass(tone: StockSignalTone) {
   return "omi-signal-chip-neutral";
 }
 
-function technicalMetricBarWidth(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "0%";
-  return `${Math.max(0, Math.min(100, Math.abs(value)))}%`;
+function technicalMetricBarStyle(value: number | null | undefined): CSSProperties {
+  const scale =
+    value === null || value === undefined || Number.isNaN(value)
+      ? 0
+      : Math.max(0, Math.min(100, Math.abs(value))) / 100;
+  return { "--omi-technical-bar-scale": scale } as CSSProperties;
 }
 
 function technicalMetricBarClass(value: number | null | undefined) {
@@ -264,7 +291,7 @@ function TechnicalMetricBar({
       <div className="h-2 bg-omi-surface-muted">
         <div
           className={`omi-technical-bar h-2 ${technicalMetricBarClass(metricValue)}`}
-          style={{ width: technicalMetricBarWidth(metricValue) }}
+          style={technicalMetricBarStyle(metricValue)}
         />
       </div>
     </div>
@@ -335,6 +362,7 @@ export default function StockDetailPanel({
       dataPanelMessage,
       financialMetric,
       financialMetricHistory,
+      financialContract,
       institutional,
       institutionalHoldingRatio,
       institutionalHistory,
@@ -675,6 +703,29 @@ export default function StockDetailPanel({
   const canUseFocusedKLine = currentChartReady && chartData.length > 0;
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
   const todayStats = useMemo(() => summarizeIntradayPoints(todayTrend), [todayTrend]);
+  const isTpexTodayKLine =
+    indexProduct?.indexId === "TPEX" && effectiveTimeframe === "today";
+  const tpexTodayChartData = useMemo(
+    () =>
+      isTpexTodayKLine
+        ? aggregateProfessionalIntradayBars(todayTrend, 1, {
+            discardOpeningReferencePrice: todayPreviousClose,
+            includePostCloseSnapshot: true,
+            includeVolume: false,
+            priceOnly: true,
+          })
+        : [],
+    [isTpexTodayKLine, todayPreviousClose, todayTrend]
+  );
+  const tpexTodayIndicators = useMemo(() => {
+    const next = { ...chartIndicators };
+
+    for (const key of tpexTodayUnsupportedIndicators) {
+      next[key] = false;
+    }
+
+    return next;
+  }, [chartIndicators]);
   const professionalIsIntraday = isProfessionalIntradayTimeframe(professionalTimeframe);
   const emptyProfessionalIndicatorData = useMemo<StockIndicatorPoint[]>(() => [], []);
   const emptyProfessionalBenchmarkData = useMemo<ChartPoint[]>(() => [], []);
@@ -1315,7 +1366,7 @@ export default function StockDetailPanel({
                   ))}
                 </div>
 
-                {effectiveTimeframe === "today" ? (
+                {effectiveTimeframe === "today" && !isTpexTodayKLine ? (
                   <div className="relative">
                     <button
                       type="button"
@@ -1364,12 +1415,30 @@ export default function StockDetailPanel({
                       </button>
                       {indicatorMenuOpen ? (
                         <TechnicalIndicatorMenu
-                          indicators={chartIndicators}
-                          activeTemplate={activeIndicatorTemplate}
+                          indicators={
+                            isTpexTodayKLine
+                              ? tpexTodayIndicators
+                              : chartIndicators
+                          }
+                          activeTemplate={
+                            isTpexTodayKLine ? null : activeIndicatorTemplate
+                          }
                           onApplyTemplate={applyIndicatorTemplate}
                           onToggleIndicator={toggleChartIndicator}
-                          supplementalMarkerOptions={corporateEventMenuOptions}
-                          onToggleSupplementalMarker={toggleCorporateEventMarker}
+                          groups={
+                            isTpexTodayKLine
+                              ? tpexTodayIndicatorGroups
+                              : undefined
+                          }
+                          supplementalMarkerOptions={
+                            isTpexTodayKLine ? [] : corporateEventMenuOptions
+                          }
+                          onToggleSupplementalMarker={
+                            isTpexTodayKLine
+                              ? undefined
+                              : toggleCorporateEventMarker
+                          }
+                          showTemplates={!isTpexTodayKLine}
                           includeParameters
                           parameters={indicatorParameters}
                           onUpdateParameter={updateIndicatorParameter}
@@ -1377,29 +1446,31 @@ export default function StockDetailPanel({
                         />
                       ) : null}
                     </div>
-                    <button
-                      type="button"
-                      data-testid="stock-detail-expand"
-                      disabled={!canUseFocusedKLine}
-                      onClick={() => {
-                        setIndicatorMenuOpen(false);
-                        setProfessionalTimeframe(effectiveTimeframe as ChartTimeframe);
-                        setChartFocusMode((value) => !value);
-                      }}
-                      className={[
-                        "h-8 border px-3 text-sm font-semibold transition",
-                        chartFocusMode
-                          ? "border-omi-control bg-omi-control text-omi-text-inverse hover:bg-omi-control-muted"
-                          : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control hover:text-omi-text-strong",
-                        !canUseFocusedKLine
-                          ? "cursor-not-allowed border-omi-border-subtle bg-omi-surface-subtle text-omi-text-inverse-muted hover:border-omi-border-subtle hover:text-omi-text-inverse-muted"
-                          : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                    >
-                      {chartFocusMode ? t("stockDetail.overview") : t("stockDetail.expand")}
-                    </button>
+                    {effectiveTimeframe !== "today" ? (
+                      <button
+                        type="button"
+                        data-testid="stock-detail-expand"
+                        disabled={!canUseFocusedKLine}
+                        onClick={() => {
+                          setIndicatorMenuOpen(false);
+                          setProfessionalTimeframe(effectiveTimeframe as ChartTimeframe);
+                          setChartFocusMode((value) => !value);
+                        }}
+                        className={[
+                          "h-8 border px-3 text-sm font-semibold transition",
+                          chartFocusMode
+                            ? "border-omi-control bg-omi-control text-omi-text-inverse hover:bg-omi-control-muted"
+                            : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control hover:text-omi-text-strong",
+                          !canUseFocusedKLine
+                            ? "cursor-not-allowed border-omi-border-subtle bg-omi-surface-subtle text-omi-text-inverse-muted hover:border-omi-border-subtle hover:text-omi-text-inverse-muted"
+                            : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                      >
+                        {chartFocusMode ? t("stockDetail.overview") : t("stockDetail.expand")}
+                      </button>
+                    ) : null}
                   </div>
                 )}
               </div>
@@ -1511,7 +1582,11 @@ export default function StockDetailPanel({
               }
               benchmarkLabel={benchmarkLabel}
               eventMarkers={professionalCorporateEventMarkers}
-              volumePanelLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
+              volumePanelLabel={
+                isIndexProduct
+                  ? t("chart.kline.tradeValueYi")
+                  : t("chart.kline.volumeShares")
+              }
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
               drawingTool={chartDrawingTool}
               drawings={chartDrawings}
@@ -1532,6 +1607,34 @@ export default function StockDetailPanel({
                 future: chartDrawingHistory.future.length,
               }}
             />
+          ) : isTpexTodayKLine ? (
+            tpexTodayChartData.length > 0 ? (
+              <div
+                data-testid="tpex-today-kline"
+                data-point-count={tpexTodayChartData.length}
+              >
+                <StockKLineChart
+                  chartData={tpexTodayChartData}
+                  indicatorData={emptyProfessionalIndicatorData}
+                  label={timeframeLabel(t, effectiveTimeframe)}
+                  indicators={tpexTodayIndicators}
+                  indicatorParameters={indicatorParameters}
+                  benchmarkData={emptyProfessionalBenchmarkData}
+                  revealKey={`${stockId}:${effectiveTimeframe}`}
+                  latestPreviousClose={todayPreviousClose}
+                  timeLabelFormatter={formatDateTime}
+                />
+              </div>
+            ) : (
+              <EmptyDataState
+                message={t("stockDetail.loadingFrame", {
+                  label: timeframeLabel(t, effectiveTimeframe),
+                })}
+                tone="loading"
+                busy
+                className="m-4"
+              />
+            )
           ) : effectiveTimeframe === "today" ? (
             <IntradayTrendChart
               points={todayTrend}
@@ -1554,7 +1657,11 @@ export default function StockDetailPanel({
               benchmarkLabel={benchmarkLabel}
               eventMarkers={chartCorporateEventMarkers}
               revealKey={`${stockId}:${effectiveTimeframe}`}
-              volumePanelLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
+              volumePanelLabel={
+                isIndexProduct
+                  ? t("chart.kline.tradeValueYi")
+                  : t("chart.kline.volumeShares")
+              }
               volumeTooltipLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
               volumeValueFormatter={isIndexProduct ? formatTradeValueYi : undefined}
@@ -1814,10 +1921,6 @@ export default function StockDetailPanel({
                             tone={row.tone}
                           />
                         ))}
-                      <OvernightImpactPanel
-                        report={displayOvernightImpact}
-                        loadState={displayOvernightImpactLoadState}
-                      />
                       <div className="mt-3 border-t border-omi-border-subtle pt-3">
                         <div className="omi-technical-market flex items-start justify-between gap-4 text-xs">
                           <div>
@@ -1843,6 +1946,10 @@ export default function StockDetailPanel({
                       </div>
                     </div>
                   </details>
+                  <OvernightImpactPanel
+                    report={displayOvernightImpact}
+                    loadState={displayOvernightImpactLoadState}
+                  />
                 </>
               ) : (
                 <>
@@ -1951,6 +2058,7 @@ export default function StockDetailPanel({
                   earningsView={earningsView}
                   financialMetric={financialMetric}
                   financialMetricHistory={financialMetricHistory}
+                  financialContract={financialContract}
                   institutionalHoldingRatio={institutionalHoldingRatio}
                   institutionalHistory={institutionalHistory}
                   institutionalHoverDate={institutionalHoverDate}

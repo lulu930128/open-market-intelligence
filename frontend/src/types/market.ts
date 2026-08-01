@@ -268,6 +268,81 @@ export type WatchlistRadarItemRead = {
   context_score: number;
   stale: boolean;
   error_message: string | null;
+  radar_v2?: WatchlistRadarV2EvaluationRead | null;
+};
+
+export type WatchlistRadarV2EvaluationRead = {
+  rule_version: string;
+  rule_config_hash: string;
+  feature_version: string;
+  feature_config_hash: string;
+  direction: -1 | 0 | 1 | number;
+  direction_score: number;
+  evidence_score: number;
+  within_family_conflict_score: number;
+  cross_family_conflict_score: number;
+  timeframe_conflict_score: number;
+  conflict_score: number;
+  risk_score: number;
+  confidence_score: number;
+  priority_score: number;
+  context_alignment_score: number;
+  primary_bucket: string;
+  urgency: string;
+  evidence_grade: "strong" | "medium" | "weak" | "insufficient" | string;
+  instrument_regime: string;
+  instrument_regime_clarity: number;
+  market_regime: string;
+  market_regime_clarity: number;
+  combined_regime_clarity: number;
+  volatility_state: string;
+  data_status: string;
+  freshness_status: string;
+  data_quality_score: number;
+  state_tags: string[];
+  risk_tags: string[];
+  family_scores: Record<string, Record<string, unknown>>;
+  signal_contributions: Array<Record<string, unknown>>;
+  limitations: Array<Record<string, unknown>>;
+};
+
+export type WatchlistRadarEngineRead = {
+  active_version: string;
+  active_config_hash?: string | null;
+  shadow_version: string;
+  shadow_config_hash: string;
+  mode: "shadow" | string;
+  rollback_version: string;
+  technical_direction_owner: string;
+  legacy_status?: string;
+  legacy_frozen_at?: string | null;
+};
+
+export type WatchlistRadarV2ReadinessRead = {
+  operational_status: string;
+  validation_status: "verified" | "blocked" | "unverified" | string;
+  backtest_status: string;
+  latest_backtest_id?: number | null;
+  completed_backtest_count: number;
+  outcome_count: number;
+  finalized_outcome_count: number;
+  pending_outcome_count: number;
+  limitations: Array<Record<string, unknown>>;
+};
+
+export type WatchlistRadarV2SummaryRead = {
+  evaluated_count: number;
+  universe_evaluated_count: number;
+  universe_scope: string;
+  direction_changed_count: number;
+  bucket_changed_count: number;
+  conflict_count: number;
+  insufficient_count: number;
+  market_regime: string;
+  market_regime_clarity: number;
+  market_limitations: Array<Record<string, unknown>>;
+  market_snapshot?: Record<string, unknown>;
+  readiness?: WatchlistRadarV2ReadinessRead | null;
 };
 
 export type WatchlistGroupRadarRead = {
@@ -291,10 +366,12 @@ export type WatchlistGroupRadarRead = {
   stale_stock_count: number;
   buckets: WatchlistRadarBucketRead[];
   results: WatchlistRadarItemRead[];
-  cache_status?: "computed" | "snapshot";
+  cache_status?: "computed" | "snapshot" | "v2_snapshot" | "frozen_v1_snapshot";
   snapshot_id?: number | null;
   snapshot_date?: string | null;
   calculated_at?: string | null;
+  radar_engine?: WatchlistRadarEngineRead | null;
+  radar_v2_summary?: WatchlistRadarV2SummaryRead | null;
 };
 
 export type WatchlistRadarSnapshotRead = {
@@ -390,6 +467,37 @@ export type WatchlistRadarOutcomeSummaryRead = {
   avg_max_adverse_pct: number | null;
   bucket_summaries: WatchlistRadarOutcomeBucketSummaryRead[];
   items: WatchlistRadarOutcomeItemRead[];
+  data_limitations: string[];
+};
+
+export type WatchlistRadarV2OutcomeItemRead = {
+  evaluation_id: number | null;
+  stock_id: string;
+  stock_name: string | null;
+  source_rank: number | null;
+  status: string;
+  summary_state: string;
+  horizon_end_trade_date: string | null;
+  signal_close_return_pct: number | null;
+  signal_mfe_pct: number | null;
+  signal_mae_pct: number | null;
+  outcome_quality: string;
+  limitations: Array<Record<string, unknown>>;
+};
+
+export type WatchlistRadarV2OutcomeSummaryRead = {
+  status: string;
+  group_id: number;
+  mode: string;
+  snapshot_date: string | null;
+  horizon_trading_days: number;
+  rule_version: string;
+  outcome_contract_version: string;
+  total_count: number;
+  finalized_count: number;
+  pending_count: number;
+  summary_state_counts: Record<string, number>;
+  items: WatchlistRadarV2OutcomeItemRead[];
   data_limitations: string[];
 };
 
@@ -902,6 +1010,24 @@ export type TaiwanStockQuoteDepthFreshness = {
 
 export type TaiwanStockQuoteDepthPreviewMode = "preopen" | "live";
 
+export type TaiwanStockQuoteVolumeReconciliationRead = {
+  reference_dataset: string;
+  reference_source: string | null;
+  reference_trade_date: string | null;
+  reference_volume_shares: number | null;
+  reference_volume_scope: string;
+  snapshot_trade_date: string | null;
+  snapshot_volume_shares: number | null;
+  snapshot_volume_scope: string;
+  difference_shares: number | null;
+  difference_pct: number | null;
+  difference_semantics: string;
+  tolerance_pct: number | null;
+  status: "scope_different" | "not_comparable" | "mismatch" | string;
+  reason: string | null;
+  decision_usable: boolean;
+};
+
 export type TaiwanStockQuoteDepthRead = {
   stock_id: string;
   stock_name: string | null;
@@ -923,6 +1049,32 @@ export type TaiwanStockQuoteDepthRead = {
   change: number | null;
   change_pct: number | null;
   total_volume_lots: number | null;
+  cumulative_volume_lots?: number | null;
+  cumulative_volume_shares?: number | null;
+  last_trade_volume_lots?: number | null;
+  last_trade_volume_shares?: number | null;
+  lot_size?: number;
+  volume_unit?: string;
+  canonical_volume_unit?: string;
+  provider_volume_unit?: string;
+  volume_semantics?: string;
+  volume_scope?: string;
+  volume_source?: string;
+  volume_source_field?: string;
+  volume_status?: string;
+  provider_volume_available?: boolean;
+  last_trade_volume_semantics?: string;
+  last_trade_volume_source_field?: string;
+  last_trade_volume_status?: string;
+  official_daily_volume_shares?: number | null;
+  official_daily_volume_trade_date?: string | null;
+  official_daily_volume_source?: string | null;
+  official_daily_volume_scope?: string;
+  volume_includes_odd_lot?: boolean | null;
+  volume_includes_after_hours?: boolean | null;
+  volume_includes_closing_auction?: boolean | null;
+  volume_reconciliation?: TaiwanStockQuoteVolumeReconciliationRead | null;
+  volume_decision_usable?: boolean;
   best_bid_price: number | null;
   best_bid_size_lots: number | null;
   best_ask_price: number | null;
@@ -934,6 +1086,22 @@ export type TaiwanStockQuoteDepthRead = {
   bid_levels: TaiwanStockQuoteDepthLevel[];
   ask_levels: TaiwanStockQuoteDepthLevel[];
   depth_available: boolean;
+  auction_book_available?: boolean;
+  auction_book_status?: string;
+  auction_book_time?: string | null;
+  auction_best_bid?: number | null;
+  auction_best_ask?: number | null;
+  auction_indicative_available?: boolean;
+  auction_indicative_status?: string;
+  auction_indicative_source?: string | null;
+  auction_phase?: string | null;
+  auction_event_time?: string | null;
+  indicative_match_available?: boolean;
+  indicative_match_price?: number | null;
+  indicative_match_volume_lots?: number | null;
+  indicative_match_price_source_field?: string | null;
+  indicative_match_volume_source_field?: string | null;
+  indicative_match_status_source_field?: string | null;
   freshness: TaiwanStockQuoteDepthFreshness;
 };
 
@@ -2105,8 +2273,13 @@ export type USDailyPriceRefreshResultRead = {
   provider: string;
   symbol: string;
   fetched_count: number;
+  eligible_count: number;
+  skipped_count: number;
   inserted_count: number;
   updated_count: number;
+  expected_trade_date: string | null;
+  latest_eligible_trade_date: string | null;
+  warnings: string[];
   message: string;
 };
 
@@ -2538,6 +2711,137 @@ export type FinancialMetricQuarterlyRead = {
   book_value_per_share: number | null;
   roe: number | null;
   roa: number | null;
+  period_scope?: "ytd" | "annual" | "unknown" | string | null;
+  months_covered?: number | null;
+  flow_semantics?: string | null;
+  eps_semantics?: string | null;
+  raw_eps?: number | null;
+  single_quarter_eps?: number | null;
+  adjusted_eps_ytd?: number | null;
+  ttm_eps?: number | null;
+  source_restated_status?: string | null;
+  share_basis_status?: string | null;
+  date_semantics_status?: string | null;
+  normalization_status?: string | null;
+  valuation_status?: string | null;
+  decision_usable?: boolean | null;
+  normalization_warnings?: string[];
   created_at: string;
   updated_at: string;
+};
+
+export type TaiwanFinancialQualityRead = {
+  freshness: string;
+  continuity: string;
+  semantic_validity: string;
+  decision_usable: boolean;
+  issues: string[];
+  revenue_continuity: {
+    status?: string;
+    observed_from?: string | null;
+    observed_to?: string | null;
+    missing_periods?: string[];
+    duplicate_periods?: string[];
+    decision_usable?: boolean;
+    issues?: string[];
+  };
+};
+
+export type TaiwanFinancialNormalizedFactRead = {
+  source_fact_id: string;
+  period: string;
+  period_scope: string;
+  period_end: string;
+  metric_code: string;
+  normalized_value: number | string;
+  normalized_unit: string;
+  adjustment_factor: number | string;
+  comparison_basis_id: string;
+  normalization_status: string;
+  normalization_version: string;
+  normalization_mode: string;
+  decision_usable: boolean;
+  action_ids: string[];
+  issue_codes: string[];
+  known_at: string;
+};
+
+export type TaiwanFinancialSingleQuarterEpsRead = {
+  metric_code: string;
+  period: string;
+  period_end: string;
+  value: number | string;
+  unit: string;
+  status: string;
+  comparison_basis_id: string;
+  normalization_version: string;
+  input_fact_ids: string[];
+  action_ids: string[];
+  issue_codes: string[];
+  known_at: string;
+};
+
+export type TaiwanFinancialContractRead = {
+  contract_version: "omi.financial.v1" | string;
+  target: {
+    market: string;
+    stock_id: string;
+  };
+  as_of: string;
+  mode: "current_comparable" | "as_reported_as_of" | string;
+  as_reported: Record<string, unknown>;
+  normalized: {
+    status?: string;
+    facts?: TaiwanFinancialNormalizedFactRead[];
+    comparison_basis_id?: string | null;
+    normalization_version?: string | null;
+  };
+  derived: {
+    status?: string;
+    single_quarter_eps?: TaiwanFinancialSingleQuarterEpsRead[];
+    annual_reconciliations?: Array<{
+      fiscal_year: number;
+      annual_value: number | string | null;
+      discrete_sum: number | string | null;
+      difference: number | string | null;
+      status: string;
+      input_fact_ids: string[];
+      issue_codes: string[];
+    }>;
+    ttm_eps?: number | string | null;
+    ttm_eps_exact?: number | string | null;
+    ttm_eps_status?: string;
+    ttm_periods?: string[];
+  };
+  valuation: {
+    status?: string;
+    pe_ttm?: number | string | null;
+    pe_ttm_exact?: number | string | null;
+    price?: number | string | null;
+    price_as_of?: string | null;
+    price_basis?: string | null;
+    price_resolution_status?: string | null;
+    expected_price_trade_date?: string | null;
+    price_trade_date?: string | null;
+    price_source?: string | null;
+    price_source_id?: number | null;
+    price_source_reliability?: string | null;
+    price_raw_result_id?: number | null;
+    financial_basis?: string | null;
+    decision_usable?: boolean;
+  };
+  basis_assessment?: {
+    assessment_type: string;
+    outcome: string;
+    effective_date: string;
+    issue_code: string;
+    rationale: string;
+    resolution_requirements: string[];
+    evidence_package_hash: string;
+    known_at: string | null;
+    reviewed_at: string | null;
+    reviewed_by: string;
+  } | null;
+  quality: TaiwanFinancialQualityRead;
+  source_refs: Array<Record<string, unknown>>;
 };

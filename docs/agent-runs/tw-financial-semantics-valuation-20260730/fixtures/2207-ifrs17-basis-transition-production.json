@@ -1,0 +1,111 @@
+{
+  "package_version": "omi.tw-financial-basis-assessment.v1",
+  "package_id": "2207-ifrs17-basis-transition-production-20260801",
+  "approval_scope": "production",
+  "review_status": "approved",
+  "reviewer": "omi-financial-semantics-production-review-20260801",
+  "reviewed_at": "2026-08-01T11:30:35+08:00",
+  "known_at": "2026-05-15T09:41:04+08:00",
+  "stock_id": "2207",
+  "normalization_mode": "current_comparable",
+  "assessment_type": "accounting_basis_transition",
+  "outcome": "blocked",
+  "effective_date": "2026-01-01",
+  "issue_code": "accounting_basis_transition_incomplete_comparatives",
+  "rationale": "Hotai Motor is a mixed-industry consolidated group whose Hotai Insurance subsidiary adopted IFRS 17 from 2026-01-01. The official 2026Q1 report retrospectively restates the 2025Q1 comparative group results. The original 2025Q1 report shows parent-attributable net income of 4,307,781 thousand and basic EPS of 7.73 using 557,103 thousand weighted-average shares. The restated 2025Q1 comparative shows parent-attributable net income of 3,974,710 thousand and basic EPS of 7.13 using the same 557,103 thousand shares. The difference is therefore an accounting-basis restatement, not a share-count adjustment. Existing 2025Q2, Q3, and annual EPS facts remain from the pre-IFRS-17 group reporting basis and cannot be combined with the restated 2025Q1 and 2026Q1 facts to produce a current-comparable TTM EPS or PE.",
+  "resolution_requirements": [
+    "official_restated_2025Q2_discrete_and_ytd_basic_eps",
+    "official_restated_2025Q3_discrete_and_ytd_basic_eps",
+    "official_restated_2025_annual_basic_eps",
+    "ifrs17_comparable_period_lineage",
+    "confirmed_mixed_industry_consolidation_scope"
+  ],
+  "evidence_source_name": "MOPS Official Filing iXBRL",
+  "documents": [
+    {
+      "document_id": "202501_2207_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2207&SYEAR=2025&SSEASON=1&REPORT_ID=C",
+      "description": "MOPS official 2207 2025Q1 consolidated Inline XBRL on the pre-IFRS-17 group reporting basis; current-period basic EPS is 7.73.",
+      "content_hash": "40969228135365801cc8d932732351cd608955c23b56f3d947b6d041e74a86e8",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202502_2207_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2207&SYEAR=2025&SSEASON=2&REPORT_ID=C",
+      "description": "MOPS official 2207 2025Q2 consolidated Inline XBRL on the pre-IFRS-17 group reporting basis; discrete basic EPS is 7.10 and YTD basic EPS is 14.83.",
+      "content_hash": "cb2225b367e117c2b65d96030a0aa4dc5d4f14c80b9bb6261e3aa479cc25c250",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202503_2207_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2207&SYEAR=2025&SSEASON=3&REPORT_ID=C",
+      "description": "MOPS official 2207 2025Q3 consolidated Inline XBRL on the pre-IFRS-17 group reporting basis; discrete basic EPS is 10.03 and YTD basic EPS is 24.86.",
+      "content_hash": "d02cfe1ea804e97d35d693ae36b59eb040ea74712ce223edb3f4fbc18b149785",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202504_2207_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2207&SYEAR=2025&SSEASON=4&REPORT_ID=C",
+      "description": "MOPS official 2207 2025 annual consolidated Inline XBRL on the pre-IFRS-17 group reporting basis; annual basic EPS is 33.93.",
+      "content_hash": "514f60ad7e54af9f72886d9829513db1e47b1a3d123705a8ef7cdaa85e436cf4",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202601_2207_AI1.ixbrl",
+      "url": "https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2207&SYEAR=2026&SSEASON=1&REPORT_ID=C",
+      "description": "MOPS official 2207 2026Q1 consolidated Inline XBRL; current basic EPS is 7.95 and the retrospectively restated 2025Q1 comparative basic EPS is 7.13.",
+      "content_hash": "3fa6c227270babab61fa5686fb710b5a2389f750354d711a27b115c7b679189a",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202501_2207_AI1.pdf-binary",
+      "url": "https://doc.twse.com.tw/server-java/t57sb01?step=1&colorchg=1&co_id=2207&year=114&mtype=A",
+      "description": "MOPS official 2207 2025Q1 consolidated PDF. Page 54 reports parent-attributable net income of 4,307,781 thousand, 557,103 thousand weighted-average shares, and basic EPS of 7.73.",
+      "content_hash": "c6f54c7922a8a2838ebaf0ff3ee3a92e8be107f967a68e9d9c3d0a6ea4eb190b",
+      "content_hash_status": "verified_source_bytes"
+    },
+    {
+      "document_id": "202601_2207_AI1.pdf-binary",
+      "url": "https://doc.twse.com.tw/server-java/t57sb01?step=1&colorchg=1&co_id=2207&year=115&mtype=A",
+      "description": "MOPS official 2207 2026Q1 consolidated PDF. Page 11 reports current basic EPS of 7.95 and restated comparative basic EPS of 7.13; pages 16-17 state that Hotai Insurance adopted IFRS 17 from 2026-01-01 and retrospectively restated all periods presented; page 73 reports restated comparative parent-attributable net income of 3,974,710 thousand using the same 557,103 thousand weighted-average shares.",
+      "content_hash": "f40534d4044cf73dc2c436ccb72c3cedbebfa9511f8e6fcc29b8149f749e1c5b",
+      "content_hash_status": "verified_source_bytes"
+    }
+  ],
+  "observations": [
+    {
+      "observation_code": "insurance_subsidiary_ifrs17_group_restatement",
+      "description": "The official transition note states that Hotai Insurance adopted IFRS 17 from 2026-01-01 and retrospectively applied the standard to every reporting period presented in the 2026Q1 consolidated report.",
+      "document_ids": [
+        "202601_2207_AI1.pdf-binary"
+      ]
+    },
+    {
+      "observation_code": "basic_eps_accounting_basis_conflict_same_share_count",
+      "description": "The original and restated 2025Q1 EPS notes both use 557,103 thousand weighted-average shares, while parent-attributable net income changes from 4,307,781 to 3,974,710 thousand and basic EPS changes from 7.73 to 7.13. This directly rules out share scaling as the cause.",
+      "document_ids": [
+        "202501_2207_AI1.ixbrl",
+        "202601_2207_AI1.ixbrl",
+        "202501_2207_AI1.pdf-binary",
+        "202601_2207_AI1.pdf-binary"
+      ]
+    },
+    {
+      "observation_code": "ifrs17_transition_material_to_group_equity",
+      "description": "The 2026Q1 consolidated statement of changes in equity reports a 725,510 thousand total 2025-01-01 IFRS 17 transition increase, of which 725,426 thousand is attributable to owners of the parent.",
+      "document_ids": [
+        "202601_2207_AI1.pdf-binary"
+      ]
+    },
+    {
+      "observation_code": "restated_ttm_inputs_incomplete",
+      "description": "The available 2026Q1 filing supplies a restated 2025Q1 comparative, but no same-basis restated 2025Q2 discrete/YTD, Q3 discrete/YTD, or annual EPS facts. Pre-transition 2025 filings therefore remain as-reported evidence only and cannot form a current-comparable TTM series.",
+      "document_ids": [
+        "202502_2207_AI1.ixbrl",
+        "202503_2207_AI1.ixbrl",
+        "202504_2207_AI1.ixbrl",
+        "202601_2207_AI1.pdf-binary"
+      ]
+    }
+  ]
+}

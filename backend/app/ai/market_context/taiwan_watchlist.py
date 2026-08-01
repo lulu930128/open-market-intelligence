@@ -11,6 +11,7 @@ from app.ai.market_context.taiwan_projection import (
     _latest_date_string,
     _with_evidence_passport,
 )
+from app.watchlists import radar_active_v2_service
 
 
 _WATCHLIST_CONTEXT_RESOURCES = ("institutional", "margin", "revenue", "financial")
@@ -65,6 +66,72 @@ def _compact_watchlist_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_radar_v2(value: Any) -> dict[str, Any] | None:
+    evaluation = value if isinstance(value, dict) else None
+    if evaluation is None:
+        return None
+    compact = {
+        key: evaluation.get(key)
+        for key in (
+            "rule_version",
+            "rule_config_hash",
+            "direction",
+            "direction_score",
+            "evidence_score",
+            "confidence_score",
+            "conflict_score",
+            "risk_score",
+            "priority_score",
+            "primary_bucket",
+            "urgency",
+            "evidence_grade",
+            "instrument_regime",
+            "market_regime",
+            "data_status",
+            "freshness_status",
+            "data_quality_score",
+        )
+        if key in evaluation
+    }
+    compact["limitations"] = list(evaluation.get("limitations") or [])[:8]
+    return compact
+
+
+def _compact_radar_item(row: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: row.get(key)
+        for key in (
+            "rank",
+            "stock_id",
+            "stock_name",
+            "bucket",
+            "bucket_label",
+            "urgency",
+            "action_label",
+            "reason",
+            "trade_date",
+            "close",
+            "change_pct",
+            "score",
+            "status",
+            "signal_labels",
+            "matched_signal_keys",
+            "primary_signal_label",
+            "stale",
+            "priority_score",
+            "technical_evidence_score",
+            "technical_grade",
+            "direction",
+            "risk_label",
+        )
+        if key in row
+    }
+    radar_v2 = _compact_radar_v2(row.get("radar_v2"))
+    if radar_v2 is not None:
+        compact["radar_v2"] = radar_v2
+    return compact
+
+
 def _compact_radar(radar: dict[str, Any], *, limit: int) -> dict[str, Any]:
     return {
         key: radar.get(key)
@@ -81,34 +148,19 @@ def _compact_radar(radar: dict[str, Any], *, limit: int) -> dict[str, Any]:
             "is_current",
             "current_stock_count",
             "stale_stock_count",
+            "cache_status",
+            "snapshot_id",
+            "snapshot_date",
+            "calculated_at",
+            "data_limitations",
             "buckets",
+            "radar_engine",
+            "radar_v2_summary",
         )
         if key in radar
     } | {
         "results": [
-            {
-                key: row.get(key)
-                for key in (
-                    "rank",
-                    "stock_id",
-                    "stock_name",
-                    "bucket",
-                    "bucket_label",
-                    "urgency",
-                    "action_label",
-                    "reason",
-                    "trade_date",
-                    "close",
-                    "change_pct",
-                    "score",
-                    "status",
-                    "signal_labels",
-                    "matched_signal_keys",
-                    "primary_signal_label",
-                    "stale",
-                )
-                if key in row
-            }
+            _compact_radar_item(row)
             for row in (radar.get("results") or [])[:limit]
             if isinstance(row, dict)
         ]
@@ -313,13 +365,20 @@ def read_watchlist_context(
         limit=limit,
         use_intraday=False,
     )
-    radar = dependencies.radar_service.build_watchlist_radar_from_ranking(
-        ranking=ranking,
-        include_children=include_children,
-        mode=radar_mode,
-        max_results=max(1, min(int(radar_limit or 12), 200)),
+    base_radar, calculation_universe = (
+        dependencies.radar_service.build_watchlist_radar_bundle_from_ranking(
+            ranking=ranking,
+            include_children=include_children,
+            mode=radar_mode,
+            max_results=max(1, min(int(radar_limit or 12), 200)),
+        )
     )
-    radar["group_id"] = group_id
+    base_radar["group_id"] = group_id
+    radar = radar_active_v2_service.build_radar_v2_active_projection_from_db(
+        db=db,
+        radar=base_radar,
+        universe_items=calculation_universe,
+    )
     results = ranking.get("results", [])
     missing = []
     warnings = [

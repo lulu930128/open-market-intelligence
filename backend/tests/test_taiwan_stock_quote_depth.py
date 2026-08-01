@@ -9,6 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     Base,
+    MarketDailyPrice,
+    RawFetchResult,
+    SourceRegistry,
     StockMaster,
     TaiwanQuoteContractSnapshot,
     TaiwanStockQuoteSnapshot,
@@ -62,6 +65,7 @@ def sample_payload(*, stock_id: str = "2330", channel: str = "tse_2330.tw") -> d
                 "h": "2420",
                 "l": "2375",
                 "v": "49540",
+                "tv": "750",
                 "b": "2410_2405_2400_2395_2390_",
                 "g": "978_1150_1399_599_924_",
                 "a": "2415_2420_2425_2430_2435_",
@@ -131,8 +135,20 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertEqual(result["freshness"]["status"], "live")
         self.assertEqual(result["freshness"]["age_seconds"], 30)
         self.assertEqual(result["freshness"]["fetch_age_seconds"], 0)
-        self.assertEqual(result["quote_time"].isoformat(), "2026-06-30T09:05:42+08:00")
-        self.assertEqual(result["snapshot_time"], result["quote_time"])
+        self.assertEqual(
+            result["quote_time"].isoformat(),
+            "2026-06-30T09:05:12+08:00",
+        )
+        self.assertEqual(
+            result["snapshot_time"].isoformat(),
+            "2026-06-30T09:05:42+08:00",
+        )
+        self.assertEqual(
+            result["quote_time_basis"],
+            "provider_exchange_event_time",
+        )
+        self.assertEqual(result["event_age_seconds"], 30)
+        self.assertIsNone(result["network_latency_ms"])
         self.assertEqual(
             result["provider_event_time"].isoformat(),
             "2026-06-30T09:05:12+08:00",
@@ -167,6 +183,18 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         )
         self.assertEqual(result["depth_volume_unit"], "lots")
         self.assertEqual(result["depth_order_count_status"], "not_provided")
+        self.assertEqual(result["total_volume_lots"], 49_540)
+        self.assertEqual(result["cumulative_volume_lots"], 49_540)
+        self.assertEqual(result["cumulative_volume_shares"], 49_540_000)
+        self.assertEqual(result["last_trade_volume_lots"], 750)
+        self.assertEqual(result["last_trade_volume_shares"], 750_000)
+        self.assertEqual(result["volume_source_field"], "v")
+        self.assertEqual(result["last_trade_volume_source_field"], "tv")
+        self.assertEqual(result["volume_reconciliation"]["status"], "not_comparable")
+        self.assertEqual(
+            result["volume_reconciliation"]["reason"],
+            "official_daily_volume_not_available",
+        )
         self.assertEqual(
             result["ohlc_summary"]["semantics"],
             "current_session_to_date",
@@ -176,6 +204,74 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].stock_id, "2330")
         self.assertEqual(rows[0].quote_time.isoformat(), "2026-06-30T09:05:12")
+        self.assertEqual(rows[0].total_volume_lots, 49_540)
+        self.assertEqual(rows[0].last_trade_volume_lots, 750)
+        public_payload = TaiwanStockQuoteDepthRead.model_validate(result)
+        self.assertEqual(public_payload.last_trade_volume_lots, 750)
+
+    def test_quote_volume_keeps_same_day_official_daily_total_cross_scope(
+        self,
+    ) -> None:
+        source = SourceRegistry(
+            source_name="TWSE OpenAPI Daily Trading",
+            source_type="api",
+            category="market_daily_price",
+            priority=10,
+            reliability_level="official",
+        )
+        self.db.add(source)
+        self.db.flush()
+        raw_result = RawFetchResult(
+            source_id=source.id,
+            method="GET",
+        )
+        self.db.add(raw_result)
+        self.db.flush()
+        self.db.add(
+            MarketDailyPrice(
+                source_id=source.id,
+                raw_result_id=raw_result.id,
+                trade_date=datetime(2026, 6, 30).date(),
+                stock_id="2330",
+                stock_name="TSMC",
+                trade_volume=49_540_000,
+                close_price=2410,
+            )
+        )
+        self.db.commit()
+        now = datetime(2026, 6, 30, 13, 34, 0, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 5, 34, 0, tzinfo=timezone.utc)
+        payload = sample_payload()
+        payload["msgArray"][0]["t"] = "13:30:00"
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertEqual(result["official_daily_volume_shares"], 49_540_000)
+        self.assertEqual(
+            result["official_daily_volume_source"],
+            "TWSE OpenAPI Daily Trading",
+        )
+        self.assertEqual(
+            result["volume_reconciliation"]["status"],
+            "scope_different",
+        )
+        self.assertEqual(result["volume_reconciliation"]["difference_shares"], 0)
+        self.assertEqual(
+            result["volume_reconciliation"]["reason"],
+            "provider_and_official_volume_scopes_differ",
+        )
+        self.assertFalse(result["volume_decision_usable"])
 
     def test_fixed_slot_capture_is_idempotent_and_replay_is_read_only(self) -> None:
         first_now = datetime(2026, 6, 30, 8, 50, 2, tzinfo=TAIWAN_TZ)
@@ -331,6 +427,8 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertFalse(result["price_available"])
         self.assertFalse(result["last_trade_available"])
         self.assertIsNone(result["last_trade_price"])
+        self.assertIsNone(result["last_trade_volume_lots"])
+        self.assertIsNone(result["cumulative_volume_lots"])
         self.assertTrue(result["auction_book_available"])
         self.assertEqual(result["auction_book_status"], "depth_only")
         self.assertEqual(
@@ -357,6 +455,63 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertIsNone(result["indicative_ask"])
         self.assertFalse(result["indicative_price_available"])
         self.assertFalse(result["official_close_available"])
+
+    def test_preopen_parses_official_mis_indicative_match_fields(self) -> None:
+        now = datetime(2026, 6, 30, 8, 45, 0, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 0, 45, 0, tzinfo=timezone.utc)
+        payload = sample_payload()
+        payload["msgArray"][0].update(
+            {
+                "t": "08:45:00",
+                "z": "-",
+                "o": "-",
+                "h": "-",
+                "l": "-",
+                "v": "0",
+                "tv": "750",
+                "ts": "1",
+                "pz": "2412.50",
+                "ps": "2046",
+            }
+        )
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertEqual(
+            result["quote_semantics"],
+            "preopen_indicative_match_and_depth",
+        )
+        self.assertEqual(
+            result["auction_book_status"],
+            "depth_and_indicative_match",
+        )
+        self.assertTrue(result["auction_indicative_available"])
+        self.assertEqual(result["auction_indicative_status"], "available")
+        self.assertEqual(result["auction_indicative_source"], "twse_mis_quote_depth")
+        self.assertTrue(result["indicative_match_available"])
+        self.assertEqual(result["indicative_match_price"], 2412.5)
+        self.assertEqual(result["indicative_match_volume_lots"], 2_046)
+        self.assertEqual(result["indicative_match_price_source_field"], "pz")
+        self.assertEqual(result["indicative_match_volume_source_field"], "ps")
+        self.assertEqual(result["indicative_match_status_source_field"], "ts")
+        self.assertFalse(result["last_trade_available"])
+        self.assertIsNone(result["last_trade_volume_lots"])
+        self.assertIsNone(result["cumulative_volume_lots"])
+
+        public_payload = TaiwanStockQuoteDepthRead.model_validate(result)
+        self.assertEqual(public_payload.indicative_match_price, 2412.5)
+        self.assertEqual(public_payload.indicative_match_volume_lots, 2_046)
         self.assertEqual(
             result["official_close_status"],
             "not_available_yet",

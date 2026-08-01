@@ -48,9 +48,14 @@ OMI AI 的輸出應優先是結構化決策輔助，而不是單句方向。
 
 所有 consumer 應使用 backend 回傳的 answer contract：
 
-- ChatGPT/MCP 優先讀 `analysis.human_answer` 與 `result.data.slots`。
+- ChatGPT/MCP 優先讀 canonical `answer`、`evidence.data` 與
+  `evidence.capability_status`；`analysis.human_answer` 只作 legacy
+  compatibility fallback。
 - Kuro 預設使用 summary/compact payload，語音化核心 slot，不展開大量原始資料。
-- Frontend 用 slots 決定 completeness、警告、disabled/loading/expandable state，不把 slot status 解讀成市場建議。
+- Frontend 以 `evidence.capability_status` 作 readiness 唯一權威，決定
+  completeness、警告、disabled/loading/expandable state；舊
+  `result.data.slots`／`evidence.slots` 只作相容 fallback，不把 readiness
+  解讀成市場建議。
 
 需要更多資料時，consumer 應提高 `market_data_params.payload_level` 或調整 bounded params 重新詢問 backend，不應在 adapter 或 UI 自行補資料。
 

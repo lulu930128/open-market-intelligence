@@ -238,6 +238,36 @@ class AiSupplementalContextTests(unittest.TestCase):
             ["target.identity", "diagnostics.capabilities"],
         )
 
+    def test_capability_inventory_terms_do_not_become_market_capabilities(self) -> None:
+        response = ai_ask.ask(
+            db=self.db,
+            payload=AiAskRequest(
+                contract_version="omi.decision.v4",
+                question=(
+                    "請盤點法人、融資、技術面、量能、排行能力目前是否可用"
+                ),
+                target={"type": "capability_status"},
+                output="evidence_only",
+            ),
+            server_policy=ai_ask.AiAskServerPolicy(),
+        )
+
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(
+            response["execution"]["selection"]["required"],
+            ["target.identity", "diagnostics.capabilities"],
+        )
+        self.assertEqual(
+            response["execution"]["selection"]["unsupported_capabilities"],
+            [],
+        )
+        self.assertFalse(
+            any(
+                str(item).startswith("capability:chips.")
+                for item in response["limitations"]["missing"]
+            )
+        )
+
     def test_v4_data_freshness_does_not_inherit_chips_or_decision_output(self) -> None:
         response = ai_ask.ask(
             db=self.db,

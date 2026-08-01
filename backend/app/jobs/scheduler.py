@@ -42,13 +42,21 @@ from app.market.broker_branch_market_refresh import (
 )
 from app.market.market_chips import normalize_market_chip_index_ids
 from app.market.taiwan_market_state import persist_taiwan_market_minute_state
+from app.market.taiwan_index_minute import (
+    persist_taiwan_index_minute_snapshots,
+)
 from app.market.indices import (
     TAIWAN_INDEX_RECONCILIATION_END_TIME,
     TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS,
+    get_cached_taiwan_intraday_stock_rows,
     get_market_index_summary,
     is_taiwan_index_live_refresh_window,
     market_index_summary_needs_reconciliation,
     refresh_market_index_summary,
+)
+from app.market.source_health import build_taiwan_source_health
+from app.market.tw_intraday_state import (
+    persist_taiwan_intraday_stock_states,
 )
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_BROKER_BRANCH,
@@ -70,6 +78,10 @@ from app.market.tw_futures import (
 )
 from app.observability.provider_health import record_provider_event
 from app.settings.refresh_execution import resolve_market_refresh_interval_seconds
+from app.us_market.corporate_events import (
+    USCorporateEventConfigurationError,
+    refresh_us_corporate_events,
+)
 from app.watchlists import radar_automation
 
 
@@ -1124,11 +1136,26 @@ def collect_taiwan_market_index_summary() -> None:
             finalized=False,
             now=now,
         )
+        index_minute_persistence = persist_taiwan_index_minute_snapshots(
+            db,
+            payload=payload,
+            now=now,
+        )
+        stock_state_persistence = persist_taiwan_intraday_stock_states(
+            db,
+            rows=get_cached_taiwan_intraday_stock_rows(),
+            now=now,
+        )
         logger.debug(
-            "Taiwan market index summary cache refreshed as_of=%s indices=%s minute_rows=%s.",
+            "Taiwan market index summary cache refreshed as_of=%s indices=%s "
+            "minute_rows=%s index_minute_rows=%s stock_state_rows=%s.",
             payload.get("as_of"),
             len(payload.get("indices") or []),
             persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
+            index_minute_persistence.get("inserted_count", 0)
+            + index_minute_persistence.get("updated_count", 0),
+            stock_state_persistence.get("inserted_count", 0)
+            + stock_state_persistence.get("updated_count", 0),
         )
     except Exception:
         db.rollback()
@@ -1179,6 +1206,39 @@ def reconcile_taiwan_market_index_summary(
 
 def reconcile_taiwan_market_index_summary_startup() -> None:
     reconcile_taiwan_market_index_summary(allow_late=True)
+
+
+def sync_taiwan_source_health() -> None:
+    db = SessionLocal()
+    try:
+        build_taiwan_source_health(
+            db,
+            sync_snapshots=True,
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Taiwan source-health snapshot sync failed.")
+    finally:
+        db.close()
+
+
+def _add_taiwan_source_health_sync_job(scheduler: Any) -> bool:
+    if not settings.enable_taiwan_source_health_scheduler:
+        return False
+    scheduler.add_job(
+        sync_taiwan_source_health,
+        trigger="interval",
+        seconds=max(
+            int(settings.scheduler_taiwan_source_health_interval_seconds),
+            30,
+        ),
+        id="taiwan_source_health_snapshot_sync",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()) + timedelta(seconds=10),
+    )
+    return True
 
 
 def _add_taiwan_market_index_collector_job(scheduler: Any) -> bool:
@@ -1356,6 +1416,60 @@ def _add_taiwan_corporate_event_refresh_job(scheduler: Any) -> bool:
         coalesce=True,
         max_instances=1,
         next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
+def refresh_us_corporate_event_calendar() -> None:
+    if not str(settings.alphavantage_api_key or "").strip():
+        logger.info(
+            "Skipped scheduled US corporate-event refresh because "
+            "ALPHAVANTAGE_API_KEY is not configured."
+        )
+        return
+
+    db = SessionLocal()
+    try:
+        result = refresh_us_corporate_events(db=db)
+        logger.info(
+            "Scheduled US corporate-event refresh completed events=%s "
+            "inserted=%s updated=%s requests=%s/%s.",
+            result.get("valid_count"),
+            result.get("inserted_count"),
+            result.get("updated_count"),
+            result.get("request_count"),
+            result.get("request_limit"),
+        )
+    except USCorporateEventConfigurationError:
+        db.rollback()
+        logger.info(
+            "Skipped scheduled US corporate-event refresh because the provider "
+            "is not configured."
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Scheduled US corporate-event refresh failed.")
+    finally:
+        db.close()
+
+
+def _add_us_corporate_event_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_us_corporate_event_scheduler:
+        return False
+
+    interval_hours = max(
+        int(settings.scheduler_us_corporate_event_refresh_hours),
+        1,
+    )
+    scheduler.add_job(
+        refresh_us_corporate_event_calendar,
+        trigger="interval",
+        hours=interval_hours,
+        id="us_corporate_event_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()) + timedelta(seconds=10),
     )
     return True
 
@@ -1659,6 +1773,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_market_calendar_scheduler
         and not settings.enable_tw_disposition_scheduler
         and not settings.enable_tw_corporate_event_scheduler
+        and not settings.enable_us_corporate_event_scheduler
         and not settings.enable_tw_broker_branch_scheduler
         and not settings.enable_taiwan_market_index_scheduler
         and not settings.enable_taiwan_quote_contract_scheduler
@@ -1742,6 +1857,9 @@ def start_scheduler() -> Any | None:
     taiwan_corporate_event_refresh_enabled = (
         _add_taiwan_corporate_event_refresh_job(scheduler)
     )
+    us_corporate_event_refresh_enabled = _add_us_corporate_event_refresh_job(
+        scheduler
+    )
     taiwan_corporate_event_history_refresh_enabled = (
         _add_taiwan_corporate_event_history_refresh_job(scheduler)
     )
@@ -1750,6 +1868,9 @@ def start_scheduler() -> Any | None:
     )
     watchlist_radar_snapshot_enabled = _add_watchlist_radar_auto_snapshot_job(scheduler)
     taiwan_market_index_collector_enabled = _add_taiwan_market_index_collector_job(
+        scheduler
+    )
+    taiwan_source_health_sync_enabled = _add_taiwan_source_health_sync_job(
         scheduler
     )
     taiwan_quote_contract_snapshot_enabled = (
@@ -1778,6 +1899,14 @@ def start_scheduler() -> Any | None:
         max(TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS // 60, 5),
         TAIWAN_INDEX_RECONCILIATION_END_TIME.strftime("%H:%M"),
         taiwan_market_index_collector_enabled,
+    )
+    logger.info(
+        "Taiwan source-health snapshot sync interval=%ss enabled=%s.",
+        max(
+            int(settings.scheduler_taiwan_source_health_interval_seconds),
+            30,
+        ),
+        taiwan_source_health_sync_enabled,
     )
     logger.info(
         "Taiwan quote contract fixed-slot snapshots=%s symbols=%s max_symbols=%s "
@@ -1810,6 +1939,12 @@ def start_scheduler() -> Any | None:
         settings.scheduler_tw_corporate_event_refresh_time,
         settings.timezone,
         taiwan_corporate_event_refresh_enabled,
+    )
+    logger.info(
+        "US corporate-event refresh interval=%sh enabled=%s provider_configured=%s.",
+        max(int(settings.scheduler_us_corporate_event_refresh_hours), 1),
+        us_corporate_event_refresh_enabled,
+        bool(str(settings.alphavantage_api_key or "").strip()),
     )
     logger.info(
         "Taiwan corporate-event history reconciliation=%s %s %s enabled=%s.",

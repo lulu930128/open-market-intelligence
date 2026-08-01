@@ -123,6 +123,9 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(points[1]["trade_value_status"], "estimated")
         self.assertTrue(points[1]["is_partial"])
         self.assertFalse(points[1]["finalized"])
+        self.assertEqual(points[0]["bar_type"], "regular_interval")
+        self.assertTrue(points[0]["indicator_eligible"])
+        self.assertFalse(points[1]["indicator_eligible"])
         self.assertEqual(metadata["canonical_volume_unit"], "shares")
         self.assertEqual(metadata["cumulative_volume_shares"], 1_500)
         self.assertEqual(metadata["cumulative_volume_lots"], 1.5)
@@ -135,6 +138,43 @@ class IntradayContractRemediationTests(unittest.TestCase):
             metadata["partial_bar_policy"],
             "exclude_partial_bars_from_indicators",
         )
+        self.assertEqual(
+            metadata["indicator_policy"],
+            "finalized_regular_interval_or_closing_auction_only",
+        )
+
+    def test_taiwan_intraday_contract_marks_close_and_irregular_points(self) -> None:
+        points, metadata = _enrich_intraday_contract(
+            [
+                {
+                    "time": "2026-07-27T13:25:00+08:00",
+                    "close": 100.0,
+                    "volume": 2_000,
+                },
+                {
+                    "time": "2026-07-27T13:30:00+08:00",
+                    "close": 101.0,
+                    "volume": 0,
+                },
+                {
+                    "time": "2026-07-27T13:30:17+08:00",
+                    "close": 101.0,
+                    "volume": 0,
+                },
+            ],
+            interval="1m",
+            source="yahoo_finance_chart",
+            now=datetime.fromisoformat("2026-07-27T14:00:00+08:00"),
+        )
+
+        self.assertEqual(points[0]["bar_type"], "closing_auction")
+        self.assertTrue(points[0]["indicator_eligible"])
+        self.assertEqual(points[1]["bar_type"], "official_close_marker")
+        self.assertFalse(points[1]["indicator_eligible"])
+        self.assertEqual(points[1]["market_event"], "official_close")
+        self.assertEqual(points[2]["bar_type"], "provider_irregular")
+        self.assertFalse(points[2]["indicator_eligible"])
+        self.assertEqual(metadata["indicator_eligible_point_count"], 1)
 
     def test_index_intraday_projection_preserves_actual_five_second_interval(self) -> None:
         projected = _compact_single_intraday_series(
@@ -940,6 +980,67 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertIsNone(result["volume"])
         self.assertEqual(result["volume_status"], "not_provided")
 
+    def test_taiwan_index_current_session_excludes_previous_session_fields(self) -> None:
+        result = _compact_index_quote(
+            index_id="TPEX",
+            index_snapshot={
+                "time": "2026-07-30",
+                "as_of": "2026-07-30T13:30:00+08:00",
+                "open": 320.0,
+                "high": 324.0,
+                "low": 318.0,
+                "close": 322.74,
+                "trade_value": 174_150_558_495,
+                "source": "tpex_openapi_daily_trading_index",
+            },
+            intraday={
+                "source": "twse_mis_intraday",
+                "previous_close": 322.74,
+                "points": [
+                    {
+                        "time": "2026-07-31T09:00:00+08:00",
+                        "price": 344.0,
+                        "open": 343.5,
+                        "high": 344.5,
+                        "low": 343.0,
+                    },
+                    {
+                        "time": "2026-07-31T10:00:00+08:00",
+                        "price": 345.6,
+                        "open": 344.0,
+                        "high": 346.0,
+                        "low": 344.0,
+                    },
+                ],
+            },
+            calendar_status={
+                "market": "tw",
+                "timezone": "Asia/Taipei",
+                "checked_at": "2026-07-31T10:00:10+08:00",
+                "date": "2026-07-31",
+                "is_trading_day": True,
+                "phase": "regular",
+                "previous_trading_day": "2026-07-30",
+                "session": {"open_time": "09:00", "close_time": "13:30"},
+            },
+        )
+
+        self.assertEqual(result["trade_date"], "2026-07-31")
+        self.assertEqual(result["selected_candidate"], "intraday_last_trade")
+        self.assertEqual(result["open_price"], 343.5)
+        self.assertEqual(result["high_price"], 346.0)
+        self.assertEqual(result["low_price"], 343.0)
+        self.assertIsNone(result["trade_value"])
+        self.assertEqual(result["trade_value_status"], "not_provided")
+        self.assertEqual(result["session_reconciliation_status"], "separated")
+        self.assertEqual(result["current_session"]["trade_date"], "2026-07-31")
+        self.assertEqual(result["previous_session"]["trade_date"], "2026-07-30")
+        self.assertEqual(result["previous_session"]["low_price"], 318.0)
+        self.assertEqual(
+            result["previous_session"]["trade_value"],
+            174_150_558_495,
+        )
+
     def test_taiwan_index_closing_auction_keeps_official_close_pending(self) -> None:
         result = _compact_index_quote(
             index_id="TAIEX",
@@ -1044,6 +1145,13 @@ class IntradayContractRemediationTests(unittest.TestCase):
             confirmed["official_close_price"],
             confirmed["high_price"],
         )
+        auction = confirmed["components"]["auction"]
+        self.assertEqual(auction["status"], "not_applicable")
+        self.assertEqual(
+            auction["unavailable_reason_code"],
+            "CASH_INDEX_NO_ORDER_BOOK_AUCTION",
+        )
+        self.assertFalse(auction["refresh_recommended"])
 
     def test_display_price_prefers_current_intraday_over_stale_depth_quote(self) -> None:
         result = _market_live_summary(
@@ -1573,6 +1681,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
     def test_disposition_contract_marks_batch_auction_and_advances_next_batch(self) -> None:
         quote = {
             "last_price": 288.0,
+            "last_trade_available": True,
             "best_bid_price": 287.5,
             "best_ask_price": 289.0,
             "quote_time": "2026-07-20T09:02:00+08:00",
@@ -1594,6 +1703,22 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(quote["last_trade_price"], 288.0)
         self.assertEqual(quote["indicative_bid"], 287.5)
         self.assertEqual(quote["next_batch_time"], "2026-07-20T09:42:00+08:00")
+
+    def test_disposition_contract_does_not_invent_unavailable_last_trade(self) -> None:
+        quote = {
+            "last_price": 288.0,
+            "price": 288.0,
+            "last_trade_available": False,
+            "quote_time": "2026-07-20T08:55:00+08:00",
+        }
+
+        _apply_disposition_quote_contract(
+            quote,
+            {"is_active": False},
+        )
+
+        self.assertFalse(quote["last_trade_available"])
+        self.assertIsNone(quote["last_trade_price"])
 
     def test_disposition_points_drop_repeated_poll_snapshots(self) -> None:
         points = [

@@ -295,12 +295,18 @@ def refresh_us_watchlist_daily_prices(
             "group_id": group_id,
             "symbol_count": 0,
             "fetched_count": 0,
+            "eligible_count": 0,
+            "skipped_count": 0,
+            "partial_symbol_count": 0,
             "inserted_count": 0,
             "updated_count": 0,
             "errors": [],
         }
 
     fetched_count = 0
+    eligible_count = 0
+    skipped_count = 0
+    partial_symbol_count = 0
     inserted_count = 0
     updated_count = 0
     errors: list[dict[str, str]] = []
@@ -314,6 +320,10 @@ def refresh_us_watchlist_daily_prices(
                 adjusted=adjusted,
             )
             fetched_count += result["fetched_count"]
+            eligible_count += int(result.get("eligible_count", result["fetched_count"]))
+            skipped_count += int(result.get("skipped_count", 0))
+            if result.get("status") == "partial_success":
+                partial_symbol_count += 1
             inserted_count += result["inserted_count"]
             updated_count += result["updated_count"]
         except USMarketConfigurationError:
@@ -333,10 +343,17 @@ def refresh_us_watchlist_daily_prices(
             time.sleep(sleep_seconds)
 
     return {
-        "status": "partial_success" if errors else "success",
+        "status": (
+            "partial_success"
+            if errors or partial_symbol_count
+            else "success"
+        ),
         "group_id": group_id,
         "symbol_count": total,
         "fetched_count": fetched_count,
+        "eligible_count": eligible_count,
+        "skipped_count": skipped_count,
+        "partial_symbol_count": partial_symbol_count,
         "inserted_count": inserted_count,
         "updated_count": updated_count,
         "errors": errors,

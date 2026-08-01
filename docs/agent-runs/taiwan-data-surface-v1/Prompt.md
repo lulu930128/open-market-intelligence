@@ -46,6 +46,9 @@
 ## 交付項目
 
 - 任務文件與 Taiwan Data Surface v1 contract design。
+- `OMI 台股 Reference Implementation 問題修正、欄位擴充與驗收規格 v1.0`
+  所定義的 P0 全部項目與 P1 核心項目；採 additive、versioned contract，
+  不以 capability-specific 補丁取代共用 resolver。
 - Canonical capability manifest／registry version／digest 與 public metadata。
 - Capability-scoped typed parameter contract，以及 target+market applicability validation。
 - Taiwan screening service、ranking／coverage capabilities 與第一批 bounded metrics。
@@ -53,6 +56,23 @@
 - Taiwan market aggregate 與 event capabilities。
 - Repo MCP 與 standalone OMI_search schema parity，不增加市場邏輯。
 - Compatibility、cross-market regression、safe validation 與 live HTTP/MCP smoke evidence。
+
+## Reference Contract 收斂範圍
+
+- Phase 1：唯一 canonical capability status、release/applicability/availability
+  分離、evidence-only mode lock、request-level parameter rejection、selected 與
+  background quality 隔離。
+- Phase 2：quote/daily volume reconciliation、TWSE/TPEX market aggregate coverage、
+  margin null semantics、screening complete-window eligibility、sector sample scope
+  與 index contribution reconciliation。
+- Phase 3：required-first response projection、全域 units、RFC3339 timezone、
+  capability-owned source refs、manifest limit provenance 與 intraday bar markers。
+- Phase 4：在不新增不必要資料表的前提下補齊 TW `company.profile`、
+  normalized `corporate.actions`、event instrument filters、schema version 與
+  golden fixtures。
+- P3 的 `market.coverage_summary`、`data.reconciliation`、
+  `data.release_calendar` 只有在 P0/P1 驗收穩定後才進入；不阻塞 reference
+  contract 核心定版。
 
 ## 完成條件
 
