@@ -71,11 +71,7 @@ DEFAULT_SOURCES = [
         "source_name": TPEX_DAILY_QUOTES_SOURCE_NAME,
         "source_type": "api",
         "category": "market_data",
-        "endpoint_url": (
-            "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes"
-            "?date={latest_market_trade_date_roc_yyy_mm_dd}"
-            "&response=json"
-        ),
+        "endpoint_url": "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes",
         "enabled": True,
         "fetch_interval_minutes": 1440,
         "priority": 40,

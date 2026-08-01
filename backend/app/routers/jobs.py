@@ -14,6 +14,7 @@ from app.jobs.job_types import (
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
 )
 from app.jobs.schemas import JobRunRead
+from app.stocks.bootstrap import BOOTSTRAP_JOB_TYPE, run_stock_master_bootstrap_job
 
 
 router = APIRouter()
@@ -55,6 +56,9 @@ def _request_dict(job: Any) -> dict[str, Any]:
 def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
     request = _request_dict(job)
     job_type = job.job_type
+
+    if job_type == BOOTSTRAP_JOB_TYPE:
+        return run_stock_master_bootstrap_job, (True,), request
 
     if job_type == "market.twse_daily_price_backfill":
         return (

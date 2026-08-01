@@ -51,25 +51,14 @@ fails with an actionable message instead of producing an unusable archive.
 Generated Python bytecode and `__pycache__` directories are removed after the
 packaged-runtime smoke test so stale local ABI artifacts do not enter the zip.
 
-By default the package creates a lightweight seed database from the local
-`data/open_market_intelligence.db`. The seed only includes `source_registry` and
-`stock_master`, so first-run stock search and watchlist add flows can resolve
-symbols such as `2330` without bundling the full local history database.
+The package never copies `data/open_market_intelligence.db`, a personal
+watchlist, or a stock-master seed from the build machine. On the first launch
+of an empty installation, the backend enqueues one bounded bootstrap job that
+fetches Taiwan symbols from official TWSE and TPEx sources. The API and UI can
+start while that job is running, and provider failures remain visible in job
+and source logs.
 
-To build a package with no stock master seed:
-
-```powershell
-.\Installer\package.ps1 -SkipStockMasterSeed
-```
-
-To include the current local SQLite database as a full seed database:
-
-```powershell
-.\Installer\package.ps1 -IncludeSeedData
-```
-
-`-IncludeSeedData` can make the zip very large and may include local watchlists.
-Use it only for packages that are safe to share.
+`LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md` are included in every package.
 
 ## Runtime layout
 

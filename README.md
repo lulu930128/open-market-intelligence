@@ -5,6 +5,7 @@
 [![CI](https://github.com/lulu930128/open-market-intelligence/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lulu930128/open-market-intelligence/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/lulu930128/open-market-intelligence/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/lulu930128/open-market-intelligence/actions/workflows/codeql.yml)
 [![Release](https://img.shields.io/github/v/release/lulu930128/open-market-intelligence?display_name=tag)](https://github.com/lulu930128/open-market-intelligence/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **目前正式版：OMI 4.0。**
 
@@ -196,6 +197,8 @@ if (-not (Test-Path .env.local)) {
 
 完成後回到 repo root 執行 `.\Start-OMI-Launcher.cmd`。
 
+第一次啟動空白資料庫時，backend 會排入一次有界的台股代號初始化工作，從 TWSE／TPEx 官方來源建立本機 `stock_master`。Repository 與 Windows 安裝包都不包含開發者的 SQLite、watchlist 或股票代號 seed；若 provider 暫時失敗，應用仍會啟動，錯誤會保留在更新工作與來源紀錄中。
+
 </details>
 
 <details>
@@ -246,6 +249,7 @@ npm run dev
 | 參與貢獻 | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | 安全回報 | [`SECURITY.md`](SECURITY.md) |
 | 使用支援 | [`SUPPORT.md`](SUPPORT.md) |
+| 開源授權 | [`LICENSE`](LICENSE)、[`NOTICE`](NOTICE)、[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) |
 
 ### 安全驗證
 
@@ -329,3 +333,7 @@ Open Market Intelligence/
 ## 免責聲明
 
 OMI 僅供研究、資料整理、技術位階推演與決策輔助。市場資料可能延遲、不完整或因第三方 provider 變更而失效。任何分析、情境、價位或風險條件都不構成投資建議；使用者仍需自行判斷並承擔交易風險。
+
+## 授權
+
+OMI 由盧星豪以 [Apache License 2.0](LICENSE) 開源。第三方相依套件仍依各自授權提供；OMI 所抓取的市場與 provider 資料不因本專案採 Apache-2.0 而改變其原始權利或使用條款，詳見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -40,6 +40,7 @@ function getJobMarket(jobType: string): "tw" | "us" | "jp" | "kr" | "crypto" | "
   if (
     jobType.startsWith("market.") ||
     jobType.startsWith("watchlist.") ||
+    jobType === "system.stock_master_bootstrap" ||
     jobType === "scheduler.market_daily_refresh" ||
     jobType === "scheduler.market_chip_daily_refresh" ||
     jobType === "scheduler.taiwan_derivatives_refresh"
@@ -163,6 +164,9 @@ function getEffectiveStatus(job: JobRunRead) {
   const resultStatus = getResultObject(job)?.status;
 
   if (job.status === "success" && typeof resultStatus === "string") {
+    if (resultStatus === "partial") return "partial_success";
+    if (resultStatus === "failed") return "error";
+    if (resultStatus === "completed" || resultStatus === "ready") return "success";
     return resultStatus;
   }
 

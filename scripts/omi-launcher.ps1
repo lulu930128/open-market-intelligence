@@ -63,7 +63,7 @@ public sealed class OmiTaskbarCreatedListener : NativeWindow, IDisposable
 $script:RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $script:BackendDir = Join-Path $script:RepoRoot "backend"
 $script:FrontendDir = Join-Path $script:RepoRoot "frontend"
-$script:TrayIconPath = Join-Path $script:RepoRoot "ATRI-MyDearMoments.ico"
+$script:TrayIconPath = Join-Path $script:RepoRoot "OMI.ico"
 $script:AppDisplayName = "OMI_search"
 $script:TrayIcon = $null
 $script:ActivationEventName = "OpenMarketIntelligenceLauncherActivate"
@@ -411,70 +411,10 @@ function Initialize-ServiceEnvironment {
     Write-LauncherLog "Service environment initialized. backend=$($script:BackendBaseUrl) frontend=$($script:DashboardUrl) proxy_path=$($script:ApiProxyPath) backend_reload=$($script:BackendReload)"
 }
 
-function Invoke-StockMasterSeed {
-    param([Parameter(Mandatory = $true)][string]$SeedDatabasePath)
-
-    $seedScriptPath = Join-Path $script:RepoRoot "scripts\stock-master-seed.py"
-
-    if (-not (Test-Path -LiteralPath $SeedDatabasePath)) {
-        Write-LauncherLog "No packaged stock master seed database found at $SeedDatabasePath"
-        return
-    }
-
-    if (-not (Test-Path -LiteralPath $seedScriptPath)) {
-        Write-LauncherLog "Stock master seed script was not found: $seedScriptPath" "WARN"
-        return
-    }
-
-    if (-not (Test-Path -LiteralPath $script:PackagedPython)) {
-        Write-LauncherLog "Packaged Python runtime was not found: $($script:PackagedPython)" "WARN"
-        return
-    }
-
-    Write-LauncherLog "Applying stock master seed if needed. seed=$SeedDatabasePath target=$($script:DatabasePath)"
-
-    $arguments = @(
-        $seedScriptPath,
-        "apply",
-        "--seed-db",
-        $SeedDatabasePath,
-        "--target-db",
-        $script:DatabasePath,
-        "--require-stock",
-        "2330"
-    )
-
-    try {
-        $output = & $script:PackagedPython @arguments 2>&1
-        $exitCode = $LASTEXITCODE
-
-        foreach ($line in $output) {
-            Write-LauncherLog "stock-master-seed: $line"
-        }
-
-        if ($exitCode -ne 0) {
-            Write-LauncherLog "Stock master seed exited with code $exitCode." "WARN"
-        }
-    }
-    catch {
-        Write-LauncherLog "Stock master seed failed: $($_.Exception.Message)" "WARN"
-    }
-}
-
 function Initialize-ReleaseEnvironment {
     if (-not $script:IsPackagedRelease) {
         return
     }
-
-    $seedDatabasePath = Join-Path $script:RepoRoot "data\open_market_intelligence.db"
-
-    if ((-not (Test-Path -LiteralPath $script:DatabasePath)) -and
-        (Test-Path -LiteralPath $seedDatabasePath)) {
-        Write-LauncherLog "Copying seed database to app data. source=$seedDatabasePath target=$($script:DatabasePath)"
-        Copy-Item -LiteralPath $seedDatabasePath -Destination $script:DatabasePath -Force
-    }
-
-    Invoke-StockMasterSeed -SeedDatabasePath $seedDatabasePath
 
     $env:APP_ENV = "production"
     $env:DATABASE_URL = ConvertTo-SqliteUrl $script:DatabasePath

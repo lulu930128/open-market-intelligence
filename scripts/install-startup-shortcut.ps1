@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $launcherScript = Join-Path $repoRoot "scripts\omi-launcher.ps1"
-$iconPath = Join-Path $repoRoot "ATRI-MyDearMoments.ico"
+$iconPath = Join-Path $repoRoot "OMI.ico"
 $startupFolder = [Environment]::GetFolderPath("Startup")
 $shortcutPath = Join-Path $startupFolder "Open Market Intelligence Launcher.lnk"
 $powershellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"

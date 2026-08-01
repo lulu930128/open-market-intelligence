@@ -954,6 +954,7 @@ export const zhTW = {
       failed: "失敗 {count}",
     },
     types: {
+      "system.stock_master_bootstrap": "首次台股代號初始化",
       "market.stock_selection_refresh": "自選股資料更新",
       "watchlist.group_daily_price_refresh_latest": "自選股日線補齊",
       "watchlist.group_daily_price_backfill": "自選股歷史日線",

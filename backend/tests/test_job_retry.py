@@ -15,9 +15,39 @@ from app.jobs import backfill_tasks
 from app.jobs import service as job_service
 from app.market import monthly_revenue_history_backfill, stock_selection_refresh
 from app.routers.jobs import _parse_date, _retry_config
+from app.stocks.bootstrap import BOOTSTRAP_JOB_TYPE, run_stock_master_bootstrap_job
 
 
 class JobRetryTests(unittest.TestCase):
+    def test_retry_config_recreates_stock_master_bootstrap_task(self) -> None:
+        request = {
+            "reason": "empty_stock_master",
+            "markets": ["TWSE", "TPEX"],
+            "provider_policy": "official_bounded",
+        }
+        job = SimpleNamespace(
+            id=11,
+            job_type=BOOTSTRAP_JOB_TYPE,
+            status="error",
+            target="TWSE,TPEX",
+            progress_current=2,
+            progress_total=6,
+            message=None,
+            error_message="provider unavailable",
+            request_json=json.dumps(request),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, retried_request = _retry_config(job)
+
+        self.assertIs(task, run_stock_master_bootstrap_job)
+        self.assertEqual(task_args, (True,))
+        self.assertEqual(retried_request, request)
+
     def test_monthly_revenue_backfill_targets_latest_released_period_not_latest_cache(self) -> None:
         with patch.object(
             monthly_revenue_history_backfill,

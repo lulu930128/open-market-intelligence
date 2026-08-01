@@ -49,6 +49,11 @@ SUMMARY_COUNT_KEYS = (
     "fetched_count",
     "skipped_existing_count",
     "skipped_count",
+    "stock_count",
+    "created_source_count",
+    "source_attempt_count",
+    "source_success_count",
+    "source_error_count",
 )
 FAILED_RESULT_ITEM_LIMIT = 4
 

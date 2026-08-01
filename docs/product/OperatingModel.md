@@ -20,6 +20,12 @@ OMI 採本機優先資料模型，`data/open_market_intelligence.db` 是本機�
 
 Read path 預設要輕量。昂貴 refresh、付費或稀缺 quota、報告寫入、AI memory 寫入與發送/發布行為必須有明確 policy 或使用者確認。
 
+## 開源與發行模型
+
+OMI 原始碼以 Apache License 2.0 開源，NOTICE 著作權人為盧星豪。Windows 發行包不得夾帶 build machine 的 SQLite、watchlist、token、log 或股票主檔 seed；空白安裝首次啟動時，由 backend 建立可追蹤、有明確來源與請求次數上限的 TWSE／TPEx 股票代號 bootstrap job。
+
+第三方相依套件保留各自授權。市場與 provider 回傳資料不因 OMI 採 Apache-2.0 而被重新授權；發行與文件必須保留這個邊界。
+
 ## 市場模型
 
 台股是主線市場，資料模型、UI pattern、AI decision contract 與驗證標準先以台股為基準。

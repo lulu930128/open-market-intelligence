@@ -4,9 +4,10 @@ type: software
 title: Open Market Intelligence
 abstract: A local-first, Taiwan-first market intelligence and evidence-driven decision research workbench.
 authors:
-  - name: lulu930128
+  - name: 盧星豪
 version: 4.0.1
 date-released: 2026-08-01
+license: Apache-2.0
 repository-code: https://github.com/lulu930128/open-market-intelligence
 url: https://github.com/lulu930128/open-market-intelligence
 keywords:

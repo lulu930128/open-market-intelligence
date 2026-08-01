@@ -1,8 +1,6 @@
 param(
     [string]$Version = "",
     [string]$PythonVersion = "3.13.9",
-    [switch]$IncludeSeedData,
-    [switch]$SkipStockMasterSeed,
     [switch]$SkipFrontendBuild
 )
 
@@ -229,28 +227,15 @@ function Copy-AppFiles {
     Copy-RequiredFile -Source (Join-Path $repoRoot "alembic.ini") -Destination (Join-Path $packageRoot "alembic.ini")
     Copy-RequiredFile -Source $versionFile -Destination (Join-Path $packageRoot "VERSION")
     Copy-RequiredFile -Source (Join-Path $repoRoot "Start-OMI-Launcher.cmd") -Destination (Join-Path $packageRoot "Start-OMI-Launcher.cmd")
-    Copy-RequiredFile -Source (Join-Path $repoRoot "ATRI-MyDearMoments.ico") -Destination (Join-Path $packageRoot "ATRI-MyDearMoments.ico")
+    Copy-RequiredFile -Source (Join-Path $repoRoot "OMI.ico") -Destination (Join-Path $packageRoot "OMI.ico")
+    Copy-RequiredFile -Source (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $packageRoot "LICENSE")
+    Copy-RequiredFile -Source (Join-Path $repoRoot "NOTICE") -Destination (Join-Path $packageRoot "NOTICE")
+    Copy-RequiredFile -Source (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md") -Destination (Join-Path $packageRoot "THIRD_PARTY_NOTICES.md")
 
     Copy-Directory -Source (Join-Path $repoRoot "scripts") -Destination (Join-Path $packageRoot "scripts")
 
     $dataTarget = Join-Path $packageRoot "data"
     New-Item -ItemType Directory -Force -Path $dataTarget | Out-Null
-
-    if ($IncludeSeedData) {
-        Copy-RequiredFile `
-            -Source (Join-Path $repoRoot "data\open_market_intelligence.db") `
-            -Destination (Join-Path $dataTarget "open_market_intelligence.db")
-    }
-
-    $seedDescription = if ($IncludeSeedData) {
-        "- The package includes the current local SQLite database as seed data."
-    }
-    elseif (-not $SkipStockMasterSeed) {
-        "- The package includes a lightweight stock master seed so stock search works on first launch."
-    }
-    else {
-        "- No seed database is included. Users must import or sync market data before searching stocks."
-    }
 
     @"
 Open Market Intelligence 4.0 - Taiwan-first Research Workbench
@@ -273,51 +258,14 @@ Runtime and data:
 - Logs and the writable SQLite database are stored under:
   %LOCALAPPDATA%\Open Market Intelligence
 - The package folder itself is treated as read-only application files.
-$seedDescription
+- No local database or personal watchlist is included in the package.
+- On the first launch, the backend creates a bounded job that fetches Taiwan
+  stock symbols from official TWSE and TPEx sources. Provider failures remain
+  visible in the job and source logs and do not block the application startup.
 
 If Windows blocks the script, right click Start-OMI-Launcher.cmd and choose Run anyway,
 or run it from PowerShell after unblocking the downloaded zip.
 "@ | Set-Content -LiteralPath (Join-Path $packageRoot "README-FIRST.txt") -Encoding UTF8
-}
-
-function New-StockMasterSeedData {
-    param([Parameter(Mandatory = $true)][string]$PythonExe)
-
-    if ($IncludeSeedData) {
-        Write-Host "Full seed database requested; skipping lightweight stock master seed."
-        return
-    }
-
-    if ($SkipStockMasterSeed) {
-        Write-Host "Lightweight stock master seed disabled."
-        return
-    }
-
-    $sourceDb = Join-Path $repoRoot "data\open_market_intelligence.db"
-    $targetDb = Join-Path $packageRoot "data\open_market_intelligence.db"
-    $seedScript = Join-Path $repoRoot "scripts\stock-master-seed.py"
-
-    if (-not (Test-Path -LiteralPath $sourceDb)) {
-        throw "Missing source database for stock master seed: $sourceDb"
-    }
-
-    if (-not (Test-Path -LiteralPath $seedScript)) {
-        throw "Missing stock master seed script: $seedScript"
-    }
-
-    Invoke-Logged `
-        -FilePath $PythonExe `
-        -Arguments @(
-            $seedScript,
-            "create",
-            "--source-db",
-            $sourceDb,
-            "--target-db",
-            $targetDb,
-            "--require-stock",
-            "2330"
-        ) `
-        -WorkingDirectory $repoRoot
 }
 
 function Write-ReleaseManifest {
@@ -328,8 +276,8 @@ function Write-ReleaseManifest {
         build_time = (Get-Date).ToString("o")
         commit = Get-GitCommit
         python_version = $PythonVersion
-        include_seed_data = [bool]$IncludeSeedData
-        stock_master_seed = [bool]((-not $IncludeSeedData) -and (-not $SkipStockMasterSeed))
+        includes_local_database = $false
+        stock_master_bootstrap = "official_sources_on_first_run"
         frontend_mode = "next-standalone"
         backend_mode = "python-embeddable"
     }
@@ -383,7 +331,6 @@ Build-FrontendStandalone
 Copy-AppFiles
 $pythonExe = Ensure-PythonRuntime
 $nodeExe = Copy-NodeRuntime
-New-StockMasterSeedData -PythonExe $pythonExe
 Write-ReleaseManifest
 Test-PackagedRuntime -PythonExe $pythonExe -NodeExe $nodeExe
 Remove-PackageCaches
@@ -400,5 +347,5 @@ $zipInfo = Get-Item -LiteralPath $zipPath
     Package = $zipInfo.FullName
     SizeMB = [math]::Round($zipInfo.Length / 1MB, 2)
     Version = $Version
-    IncludeSeedData = [bool]$IncludeSeedData
+    IncludesLocalDatabase = $false
 }

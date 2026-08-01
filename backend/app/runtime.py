@@ -16,6 +16,7 @@ from app.db.session import SessionLocal
 from app.jobs import scheduler as job_scheduler, service as job_service
 from app.config import settings
 from app.runtime_lock import ProcessFileLock
+from app.stocks.bootstrap import enqueue_stock_master_bootstrap_if_needed
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class RuntimeCoordinator:
             self.scheduler = job_scheduler.start_scheduler()
             await start_crypto_auto_refresh()
             await start_crypto_realtime_collectors()
+            self._enqueue_stock_master_bootstrap()
             self.started = True
         except Exception:
             logger.exception("Runtime startup failed; cleaning up started components.")
@@ -139,6 +141,22 @@ class RuntimeCoordinator:
             logger.warning(
                 "Marked %s interrupted queued/running jobs as error.",
                 interrupted_count,
+            )
+
+    def _enqueue_stock_master_bootstrap(self) -> None:
+        try:
+            job_id, created = enqueue_stock_master_bootstrap_if_needed()
+        except Exception:
+            logger.exception(
+                "Failed to inspect or enqueue the first-run stock master bootstrap."
+            )
+            return
+
+        if job_id is not None:
+            logger.info(
+                "First-run stock master bootstrap %s. job_id=%s",
+                "queued" if created else "deduped",
+                job_id,
             )
 
 

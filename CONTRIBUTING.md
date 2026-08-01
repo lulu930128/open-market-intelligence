@@ -34,6 +34,10 @@
 - 資料問題要保留 stale、partial、missing、provider failure、來源與日期，不得以零值或合成資料掩蓋缺口。
 - 若修改 public API、AI answer contract 或市場 schema，請同步檢查 frontend、MCP 與外部 consumer 相容性。
 
+## 貢獻授權
+
+除非你在提交時明確以書面標示其他安排，任何有意提交並納入本專案的貢獻，均依 [Apache License 2.0](LICENSE) 授權，且不附加額外條件。提交前請確認你有權提供相關程式碼、文件與素材；不要提交來源或再授權權利不明的內容。
+
 ## 投資與資料責任
 
 提交內容不得暗示保證報酬或自動下單。研究輸出應包含 evidence、進場／失效條件、風險處理、反證與資料限制。

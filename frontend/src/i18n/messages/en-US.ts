@@ -948,6 +948,7 @@ export const enUS = {
       failed: "Failed {count}",
     },
     types: {
+      "system.stock_master_bootstrap": "First-run Taiwan symbol setup",
       "market.stock_selection_refresh": "Watchlist data refresh",
       "watchlist.group_daily_price_refresh_latest": "Watchlist daily bar refresh",
       "watchlist.group_daily_price_backfill": "Watchlist historical daily bars",

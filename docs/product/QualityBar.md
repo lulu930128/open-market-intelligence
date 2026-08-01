@@ -31,6 +31,8 @@ AI 回答要能被檢查與反駁。結論必須連到 evidence、技術位階�
 
 資料刷新必須 bounded：有明確 target、range、timeout、來源、結果摘要與錯誤狀態。
 
+正式發行包不得包含開發者的本機 SQLite、私人 watchlist、secret、log 或市場資料 cache。首次安裝所需的股票代號必須由 backend 從公開記錄的官方來源有界取得，且 provider failure 不得阻塞應用啟動或被隱藏。
+
 ## 架構品質
 
 市場邏輯留在 backend。Frontend、MCP、Kuro 與其他 consumer 不應重做 backend 的資料整併、freshness 或 AI reasoning。

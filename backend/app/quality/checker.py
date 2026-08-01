@@ -376,6 +376,30 @@ def _check_tpex_table_payload(raw_text: str, parser_type: str) -> DataQualityRes
             message=f"TPEx payload is not valid JSON: {exc}.",
         )
 
+    if parser_type == "tpex_daily_quotes" and isinstance(payload, list):
+        rows = [row for row in payload if isinstance(row, dict)]
+        if not rows:
+            return DataQualityResult(
+                status="warning",
+                check_name="tpex_empty",
+                message="TPEx OpenAPI payload contains no rows.",
+                row_count=0,
+            )
+
+        return DataQualityResult(
+            status="valid",
+            check_name="tpex_openapi_payload",
+            message="TPEx OpenAPI list payload is valid.",
+            row_count=len(rows),
+            detail_json=json.dumps(
+                {
+                    "parser_type": parser_type,
+                    "sample_fields": sorted(rows[0].keys())[:8],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
     if not isinstance(payload, dict):
         return DataQualityResult(
             status="error",

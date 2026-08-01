@@ -30,6 +30,10 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 "app.runtime.start_crypto_realtime_collectors",
                 new=AsyncMock(),
             ) as start_collectors,
+            patch(
+                "app.runtime.enqueue_stock_master_bootstrap_if_needed",
+                return_value=(None, False),
+            ) as enqueue_stock_master_bootstrap,
         ):
             coordinator = RuntimeCoordinator(
                 schema_lock=schema_lock,
@@ -48,6 +52,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         start_scheduler.assert_called_once_with()
         start_auto_refresh.assert_awaited_once_with()
         start_collectors.assert_awaited_once_with()
+        enqueue_stock_master_bootstrap.assert_called_once_with()
         self.assertEqual(coordinator.scheduler, "scheduler")
         self.assertTrue(coordinator.background_leader)
         self.assertTrue(coordinator.started)
@@ -66,6 +71,10 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 "app.runtime.start_crypto_realtime_collectors",
                 new=AsyncMock(),
             ) as start_collectors,
+            patch(
+                "app.runtime.enqueue_stock_master_bootstrap_if_needed",
+                return_value=(None, False),
+            ) as enqueue_stock_master_bootstrap,
             patch("app.runtime.stop_crypto_realtime_collectors", new=AsyncMock()) as stop_collectors,
             patch("app.runtime.stop_crypto_auto_refresh", new=AsyncMock()) as stop_auto_refresh,
             patch("app.runtime.job_scheduler.stop_scheduler") as stop_scheduler,
@@ -84,6 +93,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         start_scheduler.assert_not_called()
         start_auto_refresh.assert_not_awaited()
         start_collectors.assert_not_awaited()
+        enqueue_stock_master_bootstrap.assert_not_called()
         stop_collectors.assert_not_awaited()
         stop_auto_refresh.assert_not_awaited()
         stop_scheduler.assert_not_called()

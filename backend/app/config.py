@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     timezone: str = "Asia/Taipei"
     job_worker_max_concurrency: int = 1
     job_dedupe_active: bool = True
+    enable_stock_master_bootstrap: bool = True
 
     technical_ma_windows: str = "5,20,60"
     technical_volume_ma_windows: str = "5,20"

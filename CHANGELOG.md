@@ -6,7 +6,9 @@
 
 ### Changed
 
-- 後續變更將從 OMI 4.0 產品基線延伸。
+- 將專案正式以 Apache License 2.0 開源，著作權人為盧星豪，並補齊 NOTICE、貢獻與第三方資料授權邊界。
+- Windows 發行包不再包含本機 SQLite 或股票主檔 seed；空白安裝首次啟動時改由 backend 以可追蹤、有界的官方 TWSE／TPEx refresh 建立股票代號。
+- 將 launcher 與安裝捷徑圖示由 `ATRI-MyDearMoments.ico` 改名為 `OMI.ico`。
 
 ## [4.0.1] - 2026-08-01
 

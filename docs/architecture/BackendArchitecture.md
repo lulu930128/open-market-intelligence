@@ -27,6 +27,7 @@ frontend / MCP / Kuro -> backend HTTP API only
 - `backend/app/main.py` 只建立 FastAPI app、middleware、exception handler 與 route registry。
 - `backend/app/runtime.py` 擁有 startup/shutdown lifecycle。每個 process 先以 `schema.lock` 序列化 Alembic upgrade；正常啟動只使用 migration，不呼叫 `Base.metadata.create_all()`。
 - 各 API process 以 `background.lock` 非阻塞競選背景 ownership；只有 leader 執行 interrupted-job recovery、scheduler、Crypto auto-refresh 與 realtime collectors，follower 保持可服務 API。shutdown 只停止並釋放本 process 實際持有的元件與 lock。
+- 空白 `stock_master` 只由 background leader 排入一次 `system.stock_master_bootstrap` job；job 先註冊預設 source catalog，再以有界的 TWSE／TPEx 官方來源建立本機代號。這個工作不得阻塞 API startup，既有非空主檔不得被首次安裝流程覆寫，失敗必須保留在 job 與 source fetch log。
 - `backend/app/routers/` 只負責 HTTP schema、參數、status code 與 service dispatch。跨市場共用的 error/job pattern 放在 `market_family_helpers.py`。
 - 大型 router 可依 route family 拆成 subrouter，例如 Taiwan index 與 futures routes 分別由 `tw_market_indices.py`、`tw_market_futures.py` 擁有；原 router 應 include subrouter 並保留既有 handler import seam。
 - Router 不擁有 SQLAlchemy transaction，不直接呼叫 `commit()`、`rollback()` 或 `flush()`；transaction recovery 與 job persistence 留在 service/domain owner。
