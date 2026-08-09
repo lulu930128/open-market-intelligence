@@ -2254,6 +2254,12 @@ def _build_freshness_by_capability(
     quote_freshness = _quote_freshness_domain(quote)
     intraday_resource = _intraday_bar_freshness_resource(intraday_bars)
     cross_market = _cross_market_freshness_domain(overnight_impact)
+    cross_market_relations = _canonical_cross_market_freshness_domain(
+        overnight_impact
+    )
+    cross_market_parity = _cross_market_parity_freshness_domain(
+        overnight_impact
+    )
     output = {
         "target.identity": {
             "status": "current",
@@ -2283,6 +2289,14 @@ def _build_freshness_by_capability(
             "dataset": "us_overnight_tw_impact",
             "refresh_recommended": cross_market.get("status")
             in {"missing", "partial", "stale", "unavailable"},
+        },
+        "cross_market.relations": {
+            **cross_market_relations,
+            "dataset": "cross_market_relation_context",
+        },
+        "cross_market.parity": {
+            **cross_market_parity,
+            "dataset": "adr_parity",
         },
     }
     for capability_id, resource in CAPABILITY_FRESHNESS_RESOURCES.items():
@@ -2365,6 +2379,55 @@ def _cross_market_freshness_domain(overnight_impact: dict[str, Any] | None) -> d
             "missing": ["us_overnight_tw_impact"],
             "resources": [],
         }
+    context = overnight_impact.get("cross_market_context")
+    if isinstance(context, dict):
+        canonical = _canonical_cross_market_freshness_domain(
+            overnight_impact
+        )
+        missing = list(
+            dict.fromkeys(
+                [
+                    *(
+                        overnight_impact.get("missing")
+                        if isinstance(overnight_impact.get("missing"), list)
+                        else []
+                    ),
+                    *canonical.get("missing", []),
+                ]
+            )
+        )
+        warnings = list(
+            dict.fromkeys(
+                [
+                    *(
+                        overnight_impact.get("warnings")
+                        if isinstance(overnight_impact.get("warnings"), list)
+                        else []
+                    ),
+                    *canonical.get("warnings", []),
+                ]
+            )
+        )
+        status = str(canonical.get("status") or "unknown")
+        return {
+            **canonical,
+            "missing": missing,
+            "warnings": warnings,
+            "resources": [
+                {
+                    "resource": "us_overnight_tw_impact",
+                    "label": "US overnight impact",
+                    "status": status,
+                    "ok": bool(canonical.get("is_current")),
+                    "latest": canonical.get("latest"),
+                    "expected": canonical.get("expected"),
+                    "reason": (
+                        "Canonical cross-market context owns overnight "
+                        "freshness and decision usability."
+                    ),
+                }
+            ],
+        }
     missing = overnight_impact.get("missing") if isinstance(overnight_impact.get("missing"), list) else []
     warnings = overnight_impact.get("warnings") if isinstance(overnight_impact.get("warnings"), list) else []
     status = "current" if not missing else "partial"
@@ -2386,6 +2449,95 @@ def _cross_market_freshness_domain(overnight_impact: dict[str, Any] | None) -> d
                 "reason": "Cross-market context derived from mapped US/ADR/index evidence.",
             }
         ],
+    }
+
+
+def _canonical_cross_market_freshness_domain(
+    overnight_impact: dict[str, Any] | None,
+) -> dict[str, Any]:
+    context = (
+        overnight_impact.get("cross_market_context")
+        if isinstance(overnight_impact, dict)
+        else None
+    )
+    if not isinstance(context, dict):
+        return {
+            "status": "unavailable",
+            "is_current": False,
+            "decision_usable": False,
+            "latest": None,
+            "expected": None,
+            "refresh_recommended": False,
+            "missing": ["cross_market_context"],
+            "warnings": [],
+            "limitations": ["canonical_context_unavailable"],
+        }
+    raw_status = str(context.get("status") or "unknown")
+    decision_usable = bool(context.get("decision_usable"))
+    status = (
+        "current"
+        if raw_status == "ready" and decision_usable
+        else "partial"
+        if raw_status == "ready"
+        else raw_status
+    )
+    freshness = (
+        context.get("freshness")
+        if isinstance(context.get("freshness"), dict)
+        else {}
+    )
+    return {
+        "status": status,
+        "context_status": raw_status,
+        "is_current": status == "current" and decision_usable,
+        "decision_usable": decision_usable,
+        "latest": context.get("as_of"),
+        "expected": freshness.get("expected_adr_trade_date"),
+        "refresh_recommended": status in {"missing", "partial", "stale", "unavailable"},
+        "missing": list(context.get("missing") or []),
+        "warnings": list(context.get("warnings") or []),
+        "limitations": list(context.get("limitations") or []),
+        "snapshot_id": context.get("snapshot_id"),
+        "methodology_version": context.get("methodology_version"),
+        "relation_snapshot_version": context.get("relation_snapshot_version"),
+    }
+
+
+def _cross_market_parity_freshness_domain(
+    overnight_impact: dict[str, Any] | None,
+) -> dict[str, Any]:
+    parity = (
+        overnight_impact.get("adr_parity")
+        if isinstance(overnight_impact, dict)
+        else None
+    )
+    if not isinstance(parity, dict):
+        return {
+            "status": "not_applicable",
+            "is_current": False,
+            "decision_usable": False,
+            "latest": None,
+            "expected": None,
+            "refresh_recommended": False,
+            "missing": [],
+            "warnings": [],
+            "limitations": ["no_approved_direct_adr_relation"],
+        }
+    raw_status = str(parity.get("status") or "unknown")
+    is_current = bool(parity.get("is_current"))
+    return {
+        "status": "current" if raw_status == "ready" and is_current else raw_status,
+        "parity_status": raw_status,
+        "is_current": is_current,
+        "decision_usable": raw_status == "ready" and is_current,
+        "latest": parity.get("adr_trade_date"),
+        "expected": parity.get("expected_adr_trade_date"),
+        "refresh_recommended": raw_status in {"missing", "partial", "stale"},
+        "missing": list(parity.get("missing") or []),
+        "warnings": list(parity.get("warnings") or []),
+        "limitations": list(
+            (parity.get("mapping_resolution") or {}).get("limitations") or []
+        ),
     }
 
 

@@ -442,6 +442,7 @@ def _decision(response: dict[str, Any], readiness: dict[str, Any]) -> dict[str, 
     sections = _dict(contract.get("sections"))
     return {
         "intent": _decision_intent(response),
+        "context": deepcopy(_dict(contract.get("context"))),
         "action_plan": _list(sections.get("action_plan")),
         "scenarios": _list(sections.get("scenarios")),
         "counter_evidence": _list(sections.get("counter_evidence")),

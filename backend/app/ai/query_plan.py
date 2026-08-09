@@ -335,6 +335,7 @@ INTENT_DOMAINS = {
     "quote": ("quote",),
     "regulation": ("regulation",),
     "broker_branch": ("broker_branch",),
+    "cross_market": ("cross_market",),
     "market_breadth": ("breadth",),
     "trend_view": ("chart", "technical"),
     "entry_decision": ("quote", "chart", "technical"),

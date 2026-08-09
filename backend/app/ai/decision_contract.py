@@ -93,6 +93,59 @@ def _freshness_summary(freshness_result: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _cross_market_context_summary(
+    human_answer: dict[str, Any],
+) -> dict[str, Any] | None:
+    context = human_answer.get("cross_market_context")
+    if not isinstance(context, dict) or not context:
+        return None
+    coverage = context.get("coverage")
+    if not isinstance(coverage, dict):
+        coverage = {}
+    return {
+        "kind": context.get("kind") or "cross_market_decision_context_v1",
+        "role": (
+            human_answer.get("context_role")
+            or context.get("role")
+            or "confirmation_or_counter_evidence"
+        ),
+        "ranking_effect": (
+            human_answer.get("ranking_effect")
+            or context.get("ranking_effect")
+            or "none"
+        ),
+        "technical_score_effect": (
+            human_answer.get("technical_score_effect")
+            or context.get("technical_score_effect")
+            or "none"
+        ),
+        "status": context.get("status"),
+        "decision_usable": context.get("decision_usable") is True,
+        "stance": context.get("stance"),
+        "confidence": context.get("confidence"),
+        "title": context.get("title"),
+        "as_of": context.get("as_of"),
+        "decision_at": context.get("decision_at"),
+        "snapshot_id": context.get("snapshot_id"),
+        "methodology_version": context.get("methodology_version"),
+        "relation_snapshot_version": context.get("relation_snapshot_version"),
+        "coverage": {
+            key: coverage.get(key)
+            for key in (
+                "configured_signal_count",
+                "available_signal_count",
+                "decision_usable_signal_count",
+                "coverage_ratio",
+                "excluded_by_reason",
+            )
+            if key in coverage
+        },
+        "missing": _text_list(context.get("missing"), limit=8),
+        "warnings": _text_list(context.get("warnings"), limit=8),
+        "limitations": _text_list(context.get("limitations"), limit=8),
+    }
+
+
 def build_decision_contract(
     *,
     question_intent: str,
@@ -117,6 +170,7 @@ def build_decision_contract(
     data_limits = _text_list(human_answer.get("data_limits"), limit=6)
     missing_keys = _text_list(missing, limit=12)
     warning_texts = _text_list(warnings, limit=12)
+    cross_market_context = _cross_market_context_summary(human_answer)
 
     sections = {
         "summary": summary,
@@ -126,6 +180,10 @@ def build_decision_contract(
         "risks": risks,
         "data_limits": data_limits,
     }
+
+    context = {}
+    if cross_market_context is not None:
+        context["cross_market"] = cross_market_context
 
     return {
         "kind": DECISION_CONTRACT_KIND,
@@ -137,6 +195,7 @@ def build_decision_contract(
         "headline": headline,
         "text": text,
         "sections": sections,
+        "context": context,
         "readiness": {
             "answer_ready": bool(answer_ready),
             "decision_ready": bool(
@@ -150,6 +209,7 @@ def build_decision_contract(
             "has_data_limits": bool(data_limits),
             "has_missing": bool(missing_keys),
             "has_warnings": bool(warning_texts),
+            "has_context": bool(context),
         },
         "blocked_sections": list(dict.fromkeys(blocked_sections or [])),
         "freshness": _freshness_summary(freshness_result),

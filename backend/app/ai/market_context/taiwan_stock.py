@@ -519,6 +519,7 @@ def _stock_decision_evidence(
     latest_financial: Any,
     technical_reports: dict[str, Any],
     calendar_status: dict[str, Any] | None = None,
+    overnight_impact: dict[str, Any] | None = None,
     missing: list[str],
     source_refs: list[dict[str, str]],
 ) -> dict[str, Any]:
@@ -529,6 +530,7 @@ def _stock_decision_evidence(
         latest_financial=latest_financial,
         technical_reports=technical_reports,
         calendar_status=calendar_status,
+        overnight_impact=overnight_impact,
         missing=missing,
         source_refs=source_refs,
     )
@@ -1671,6 +1673,7 @@ def read_stock_context(
         latest_financial=latest_financial,
         technical_reports=technical_reports,
         calendar_status=market_calendar_status,
+        overnight_impact=overnight_impact,
         missing=missing,
         source_refs=source_refs,
     )

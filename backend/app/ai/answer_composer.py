@@ -103,6 +103,8 @@ CAPABILITY_ANSWER_DOMAINS: dict[str, str] = {
     "fundamentals.revenue": "fundamentals",
     "fundamentals.financials": "fundamentals",
     "cross_market.overnight": "cross_market",
+    "cross_market.relations": "cross_market",
+    "cross_market.parity": "cross_market",
     "market.cross_market": "cross_market",
 }
 
@@ -176,6 +178,7 @@ decision_evidence_risk_lines = answer_evidence.decision_evidence_risk_lines
 decision_evidence_data_lines = answer_evidence.decision_evidence_data_lines
 
 build_position_decision_consumer_answer = answer_question.build_position_decision_consumer_answer
+build_cross_market_consumer_answer = answer_question.build_cross_market_consumer_answer
 build_question_aware_consumer_answer = answer_question.build_question_aware_consumer_answer
 
 
@@ -1564,6 +1567,23 @@ def build_consumer_human_answer(
             missing=missing,
             warnings=warnings,
             summary_limit=summary_limit,
+            response_preferences=response_preferences,
+        )
+
+    if question_intent == "cross_market":
+        answer = build_cross_market_consumer_answer(
+            target=target,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            summary_limit=summary_limit,
+            response_preferences=response_preferences,
+        )
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
             response_preferences=response_preferences,
         )
 

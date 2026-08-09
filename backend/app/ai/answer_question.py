@@ -135,6 +135,165 @@ def build_position_decision_consumer_answer(
     return answer
 
 
+def build_cross_market_consumer_answer(
+    *,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    summary_limit: int = SUMMARY_LIMIT_DEFAULT,
+    response_preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    decision_evidence = (
+        analysis_digest.get("decision_evidence")
+        if isinstance(analysis_digest.get("decision_evidence"), dict)
+        else {}
+    )
+    context = (
+        decision_evidence.get("cross_market")
+        if isinstance(decision_evidence.get("cross_market"), dict)
+        else {}
+    )
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    target_label = (
+        text_value(target.get("label"))
+        or text_value(target.get("id"))
+        or target_fallback_label(response_preferences)
+    )
+    status = text_value(context.get("status")) or "missing"
+    usable = context.get("decision_usable") is True and status == "ready"
+    context_stance = text_value(context.get("stance")) or "unknown"
+    stance = context_stance if usable else "insufficient_data"
+    confidence = text_value(context.get("confidence")) or "low"
+    if not usable:
+        confidence = "low"
+
+    if english:
+        direction = {
+            "supportive": "supportive",
+            "adverse": "adverse",
+            "neutral": "near neutral",
+            "unknown": "unresolved",
+        }.get(context_stance, context_stance)
+        headline = (
+            f"{target_label} cross-market context is {direction}; technical ranking is unchanged"
+            if usable
+            else f"{target_label} cross-market context is {status} and cannot support a directional call"
+        )
+        policy_line = (
+            "Use this as confirmation or counter-evidence only; it does not change the technical score, Radar rank, or trade action."
+        )
+    elif japanese:
+        direction = {
+            "supportive": "支援的",
+            "adverse": "逆風",
+            "neutral": "中立付近",
+            "unknown": "未確定",
+        }.get(context_stance, context_stance)
+        headline = (
+            f"{target_label} のクロスマーケット情報は{direction}。テクニカル順位は変更しません"
+            if usable
+            else f"{target_label} のクロスマーケット情報は {status} で、方向判断には利用できません"
+        )
+        policy_line = (
+            "確認または反証としてのみ使用し、テクニカルスコア、Radar 順位、売買行動は変更しません。"
+        )
+    else:
+        direction = {
+            "supportive": "偏支撐",
+            "adverse": "偏逆風",
+            "neutral": "接近中性",
+            "unknown": "方向未定",
+        }.get(context_stance, context_stance)
+        headline = (
+            f"{target_label} 跨市場脈絡{direction}；技術排名維持不變"
+            if usable
+            else f"{target_label} 跨市場脈絡目前為 {status}，不足以判斷方向"
+        )
+        policy_line = (
+            "僅作確認或反證，不改變技術分數、Radar 排名或直接形成買賣動作。"
+        )
+
+    summary: list[str] = []
+    title = text_value(context.get("title"))
+    if title:
+        summary.append(title)
+    coverage = context.get("coverage") if isinstance(context.get("coverage"), dict) else {}
+    usable_count = coverage.get("decision_usable_signal_count")
+    configured_count = coverage.get("configured_signal_count")
+    as_of = text_value(context.get("as_of"))
+    if usable_count is not None or configured_count is not None or as_of:
+        if english:
+            summary.append(
+                f"Coverage {usable_count if usable_count is not None else '-'}/{configured_count if configured_count is not None else '-'}"
+                + (f"; data through {as_of}" if as_of else "")
+                + "."
+            )
+        elif japanese:
+            summary.append(
+                f"利用可能 {usable_count if usable_count is not None else '-'}/{configured_count if configured_count is not None else '-'}"
+                + (f"、データ日 {as_of}" if as_of else "")
+                + "。"
+            )
+        else:
+            summary.append(
+                f"可用訊號 {usable_count if usable_count is not None else '-'}/{configured_count if configured_count is not None else '-'}"
+                + (f"；資料日 {as_of}" if as_of else "")
+                + "。"
+            )
+    summary.append(policy_line)
+
+    context_warnings = list(context.get("warnings") or [])
+    context_missing = list(context.get("missing") or [])
+    context_limitations = list(context.get("limitations") or [])
+    data_limits = generic_data_limits(
+        missing=[*missing, *context_missing],
+        warnings=[*warnings, *context_warnings],
+        response_preferences=response_preferences,
+    )
+    if not usable:
+        if english:
+            data_limits.insert(0, f"Cross-market status is {status}; direction is withheld.")
+        elif japanese:
+            data_limits.insert(0, f"クロスマーケット状態は {status} のため、方向判断を保留します。")
+        else:
+            data_limits.insert(0, f"跨市場狀態為 {status}，暫不形成方向判斷。")
+
+    counter_evidence = []
+    if usable and context_stance == "adverse" and title:
+        counter_evidence.append(title)
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "cross_market_context_summary",
+        "source": "decision_evidence.cross_market",
+        "intent": "cross_market",
+        "headline": headline,
+        "stance": stance,
+        "stance_label": stance_label(stance, response_preferences),
+        "confidence": confidence,
+        "confidence_label": confidence_label(confidence, response_preferences),
+        "summary": list(dict.fromkeys(summary))[:summary_limit],
+        "action_plan": [],
+        "scenarios": [],
+        "counter_evidence": counter_evidence,
+        "risks": [],
+        "data_limits": list(dict.fromkeys(data_limits))[:3],
+        "detail": "\n".join(summary),
+        "cross_market_context": context or None,
+        "context_role": "confirmation_or_counter_evidence",
+        "ranking_effect": "none",
+        "technical_score_effect": "none",
+        "limitations": context_limitations,
+    }
+    answer["text"] = consumer_text(
+        answer,
+        summary_limit=summary_limit,
+        response_preferences=response_preferences,
+    )
+    return answer
+
+
 def build_question_aware_consumer_answer(
     *,
     question_intent: str,
@@ -231,7 +390,15 @@ def build_question_aware_consumer_answer(
         response_preferences=response_preferences,
     )
     if english:
-        return answer_question_locales.build_english_question_answer(context)
-    if japanese:
-        return answer_question_locales.build_japanese_question_answer(context)
-    return answer_question_locales.build_chinese_question_answer(context)
+        answer = answer_question_locales.build_english_question_answer(context)
+    elif japanese:
+        answer = answer_question_locales.build_japanese_question_answer(context)
+    else:
+        answer = answer_question_locales.build_chinese_question_answer(context)
+    cross_market = decision_evidence.get("cross_market")
+    if isinstance(cross_market, dict) and cross_market:
+        answer["cross_market_context"] = cross_market
+        answer["context_role"] = "confirmation_or_counter_evidence"
+        answer["ranking_effect"] = "none"
+        answer["technical_score_effect"] = "none"
+    return answer

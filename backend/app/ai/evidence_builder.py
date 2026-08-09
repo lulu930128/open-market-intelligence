@@ -549,6 +549,76 @@ def decision_confidence_factors(
     }
 
 
+def cross_market_decision_evidence(
+    overnight_impact: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Project canonical cross-market context into AI decision evidence.
+
+    Cross-market evidence is deliberately contextual.  It may confirm or
+    contradict the technical thesis, but it never mutates the technical score,
+    price levels, Radar rank, or trading action by itself.
+    """
+
+    if not isinstance(overnight_impact, dict):
+        return {}
+    context = overnight_impact.get("cross_market_context")
+    if not isinstance(context, dict):
+        return {}
+    summary = context.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+    coverage = context.get("coverage")
+    if not isinstance(coverage, dict):
+        coverage = {}
+    signals = context.get("signals")
+    if not isinstance(signals, list):
+        signals = []
+
+    compact_signals = []
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        compact_signals.append(
+            {
+                "signal_id": signal.get("signal_id"),
+                "relation_id": signal.get("relation_id"),
+                "bucket": signal.get("bucket"),
+                "relation_type": signal.get("relation_type"),
+                "direction": signal.get("direction"),
+                "status": signal.get("status"),
+                "decision_usable": signal.get("decision_usable") is True,
+                "contribution": signal.get("contribution"),
+                "excluded_reason": signal.get("excluded_reason"),
+            }
+        )
+
+    return {
+        "kind": "cross_market_decision_context_v1",
+        "role": "confirmation_or_counter_evidence",
+        "ranking_effect": "none",
+        "technical_score_effect": "none",
+        "status": context.get("status") or "unknown",
+        "decision_usable": context.get("decision_usable") is True,
+        "as_of": context.get("as_of"),
+        "decision_at": context.get("decision_at"),
+        "stance": summary.get("stance") or "unknown",
+        "score": summary.get("score"),
+        "confidence": summary.get("confidence") or "low",
+        "title": summary.get("title"),
+        "reason_codes": list(summary.get("reason_codes") or []),
+        "coverage": coverage,
+        "signals": compact_signals,
+        "methodology_version": context.get("methodology_version"),
+        "relation_snapshot_version": context.get("relation_snapshot_version"),
+        "snapshot_id": context.get("snapshot_id"),
+        "freshness": dict(context.get("freshness") or {}),
+        "missing": list(context.get("missing") or []),
+        "warnings": list(context.get("warnings") or []),
+        "limitations": list(context.get("limitations") or []),
+        "source_refs": list(context.get("source_refs") or []),
+    }
+
+
 def build_stock_decision_evidence(
     *,
     latest_daily: Any,
@@ -557,6 +627,7 @@ def build_stock_decision_evidence(
     latest_financial: Any,
     technical_reports: dict[str, Any],
     calendar_status: dict[str, Any] | None = None,
+    overnight_impact: dict[str, Any] | None = None,
     missing: list[str],
     source_refs: list[dict[str, str]],
 ) -> dict[str, Any]:
@@ -578,7 +649,7 @@ def build_stock_decision_evidence(
         fundamentals=fundamentals,
         missing=missing,
     )
-    return {
+    evidence = {
         "kind": "stock_decision_evidence_v1",
         "data_quality": decision_data_quality(
             latest_daily=latest_daily,
@@ -590,3 +661,7 @@ def build_stock_decision_evidence(
         "fundamentals": fundamentals,
         "confidence_factors": confidence_factors,
     }
+    cross_market = cross_market_decision_evidence(overnight_impact)
+    if cross_market:
+        evidence["cross_market"] = cross_market
+    return evidence

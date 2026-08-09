@@ -168,6 +168,8 @@ CAPABILITY_IDS = [
     "fundamentals.revenue",
     "fundamentals.financials",
     "cross_market.overnight",
+    "cross_market.relations",
+    "cross_market.parity",
     "company.profile",
     "corporate.actions",
     "market.short_volume",

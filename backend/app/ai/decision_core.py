@@ -297,6 +297,17 @@ BROKER_BRANCH_QUERY_HINTS = (
     "分點買賣方",
     "主力買賣",
 )
+CROSS_MARKET_QUERY_HINTS = (
+    "跨市場",
+    "美股影響",
+    "美股隔夜",
+    "隔夜影響",
+    "ADR",
+    "adr parity",
+    "cross market",
+    "cross-market",
+    "overnight impact",
+)
 QUOTE_ONLY_HINTS = (
     "latest quote",
     "latest price",
@@ -683,6 +694,16 @@ def infer_question_intent(
         for hint in BROKER_BRANCH_QUERY_HINTS
     ):
         return "broker_branch"
+    if contains_hint(question, CROSS_MARKET_QUERY_HINTS) and not any(
+        re.search(
+            rf"{re.escape(negation)}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
+            question,
+            flags=re.IGNORECASE,
+        )
+        for negation in NEGATION_TERMS
+        for hint in CROSS_MARKET_QUERY_HINTS
+    ):
+        return "cross_market"
     if contains_hint(question, MARKET_BREADTH_QUERY_HINTS):
         return "market_breadth"
     if contains_hint(question, REGULATION_QUERY_HINTS):
@@ -721,6 +742,7 @@ def infer_question_intents(
     intents = [primary]
     intent_hints = (
         ("broker_branch", BROKER_BRANCH_QUERY_HINTS),
+        ("cross_market", CROSS_MARKET_QUERY_HINTS),
         ("market_breadth", MARKET_BREADTH_QUERY_HINTS),
         ("regulation", REGULATION_QUERY_HINTS),
         ("quote", QUOTE_ONLY_HINTS),
@@ -827,6 +849,7 @@ def understand_question(
         POSITION_CONTEXT_HINTS,
         FRESHNESS_HINTS,
         BROKER_BRANCH_QUERY_HINTS,
+        CROSS_MARKET_QUERY_HINTS,
     ):
         hint_matches.extend(matched_hints(question, hints))
 

@@ -339,6 +339,7 @@ def _build_position_decision_consumer_answer(
 
 
 QUESTION_INTENT_STAGE_LABELS = {
+    "cross_market": "跨市場脈絡判讀",
     "entry_decision": "進場問題",
     "exit_decision": "出場問題",
     "risk_check": "風險檢查",

@@ -634,6 +634,112 @@ def english_trend_view_with_levels(
     return headline, summary[:summary_limit], action_plan, risks[:2]
 
 
+def _cross_market_decision_context(
+    decision_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    value = decision_evidence.get("cross_market")
+    return value if isinstance(value, dict) else {}
+
+
+def _cross_market_summary_line(
+    context: dict[str, Any],
+    *,
+    english: bool,
+    japanese: bool,
+) -> str | None:
+    if context.get("decision_usable") is not True:
+        return None
+    stance = text_value(context.get("stance")) or "unknown"
+    if stance not in {"supportive", "neutral"}:
+        return None
+    title = text_value(context.get("title"))
+    as_of = text_value(context.get("as_of"))
+    if english:
+        direction = "supports" if stance == "supportive" else "is neutral to"
+        line = f"Cross-market context {direction} the technical thesis"
+        if title:
+            line += f": {title}"
+        if as_of:
+            line += f" (data through {as_of})"
+        return line + "; confirmation only, with no technical-score effect."
+    if japanese:
+        direction = "テクニカル見通しを支援" if stance == "supportive" else "テクニカル見通しに対して中立"
+        line = f"クロスマーケット情報は{direction}"
+        if title:
+            line += f"：{title}"
+        if as_of:
+            line += f"（データ日 {as_of}）"
+        return line + "。確認情報としてのみ使用し、テクニカルスコアは変更しません。"
+    direction = "偏支撐" if stance == "supportive" else "接近中性"
+    line = f"跨市場脈絡{direction}"
+    if title:
+        line += f"：{title}"
+    if as_of:
+        line += f"（資料日 {as_of}）"
+    return line + "；僅作確認，不改變技術分數。"
+
+
+def _cross_market_risk_line(
+    context: dict[str, Any],
+    *,
+    english: bool,
+    japanese: bool,
+) -> str | None:
+    if (
+        context.get("decision_usable") is not True
+        or text_value(context.get("stance")) != "adverse"
+    ):
+        return None
+    title = text_value(context.get("title"))
+    as_of = text_value(context.get("as_of"))
+    if english:
+        line = "Cross-market counter-evidence is adverse"
+        if title:
+            line += f": {title}"
+        if as_of:
+            line += f" (data through {as_of})"
+        return line + "; treat it as a risk check, not an automatic technical reversal."
+    if japanese:
+        line = "クロスマーケットの反証は逆風"
+        if title:
+            line += f"：{title}"
+        if as_of:
+            line += f"（データ日 {as_of}）"
+        return line + "。リスク確認として扱い、テクニカル判断を自動反転しません。"
+    line = "跨市場反證偏逆風"
+    if title:
+        line += f"：{title}"
+    if as_of:
+        line += f"（資料日 {as_of}）"
+    return line + "；視為風險檢查，不自動翻轉技術判斷。"
+
+
+def _cross_market_data_limit_line(
+    context: dict[str, Any],
+    *,
+    english: bool,
+    japanese: bool,
+) -> str | None:
+    if not context:
+        return None
+    status = text_value(context.get("status")) or "unknown"
+    if context.get("decision_usable") is True and status == "ready":
+        return None
+    if english:
+        return (
+            f"Cross-market context is {status} and is not decision-usable; "
+            "preserve its missing, freshness, and relation limits instead of inferring direction."
+        )
+    if japanese:
+        return (
+            f"クロスマーケット情報は {status} で判断利用不可です。欠落、鮮度、関係性の制約を保持し、"
+            "方向を推測しないでください。"
+        )
+    return (
+        f"跨市場脈絡目前為 {status}，不可用於決策；須保留缺漏、新鮮度與關係限制，不推測方向。"
+    )
+
+
 def decision_evidence_summary_lines(
     decision_evidence: dict[str, Any],
     response_preferences: dict[str, Any] | None = None,
@@ -722,6 +828,13 @@ def decision_evidence_summary_lines(
         else text_list(indicator_quality.get("warnings"), limit=1)
     )
     lines.extend(warnings)
+    cross_market_line = _cross_market_summary_line(
+        _cross_market_decision_context(decision_evidence),
+        english=english,
+        japanese=japanese,
+    )
+    if cross_market_line:
+        lines.insert(0, cross_market_line)
     return lines[:2]
 
 
@@ -735,6 +848,13 @@ def decision_evidence_risk_lines(
     japanese = response_is_japanese(response_preferences)
     if english or japanese:
         lines: list[str] = []
+        cross_market_line = _cross_market_risk_line(
+            _cross_market_decision_context(decision_evidence),
+            english=english,
+            japanese=japanese,
+        )
+        if cross_market_line:
+            lines.append(cross_market_line)
         volatility = (
             decision_evidence.get("recent_volatility")
             if isinstance(decision_evidence.get("recent_volatility"), dict)
@@ -796,6 +916,13 @@ def decision_evidence_risk_lines(
         else {}
     )
     negatives = text_list(factors.get("negative"), limit=3)
+    cross_market_line = _cross_market_risk_line(
+        _cross_market_decision_context(decision_evidence),
+        english=False,
+        japanese=False,
+    )
+    if cross_market_line:
+        negatives.insert(0, cross_market_line)
     return negatives[:2]
 
 
@@ -808,6 +935,13 @@ def decision_evidence_data_lines(
     english = response_is_english(response_preferences)
     japanese = response_is_japanese(response_preferences)
     lines: list[str] = []
+    cross_market_line = _cross_market_data_limit_line(
+        _cross_market_decision_context(decision_evidence),
+        english=english,
+        japanese=japanese,
+    )
+    if cross_market_line:
+        lines.append(cross_market_line)
     market_session = (
         decision_evidence.get("market_session")
         if isinstance(decision_evidence.get("market_session"), dict)
