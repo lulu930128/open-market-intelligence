@@ -2,6 +2,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster, WatchlistGroup, WatchlistItem
+from app.stocks.instruments import normalize_taiwan_instrument_type
 from app.stocks.service import ensure_stock_from_market_daily
 from app.watchlists.schemas import (
     WatchlistGroupCreate,
@@ -286,6 +287,11 @@ def _item_to_dict(
         "group_id": item.group_id,
         "stock_id": item.stock_id,
         "stock_name": stock.stock_name if stock else None,
+        "market": stock.market if stock else None,
+        "instrument_type": normalize_taiwan_instrument_type(
+            stock.instrument_type if stock else None,
+            stock_id=item.stock_id,
+        ),
         "note": item.note,
         "priority": item.priority,
         "tags": item.tags,

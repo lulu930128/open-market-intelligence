@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    MarketDailyPrice,
     RadarBacktestRun,
     RadarOutcomePath,
     RadarRuleConfig,
@@ -16,6 +17,7 @@ from app.db.models import (
     RadarWatchlistProjection,
     WatchlistRadarSnapshotRun,
 )
+from app.market.trading_calendar import next_taiwan_trading_day
 from app.watchlists.radar_rule_contract import (
     RADAR_V1_FROZEN_AT,
     RADAR_V1_LIFECYCLE_STATUS,
@@ -71,6 +73,21 @@ def _outcome_limitation_objects(value: str | None) -> list[dict[str, Any]]:
                 }
             )
     return normalized
+
+
+def _outcome_horizon_dates(
+    signal_trade_date: date,
+    horizon_trading_days: int,
+) -> list[date]:
+    dates: list[date] = []
+    current = signal_trade_date
+    for _ in range(max(int(horizon_trading_days), 0)):
+        current = next_taiwan_trading_day(
+            current,
+            include_value=False,
+        )
+        dates.append(current)
+    return dates
 
 
 def ensure_rule_config(
@@ -597,6 +614,9 @@ def get_radar_v2_outcome_summary(
             "total_count": 0,
             "finalized_count": 0,
             "pending_count": 0,
+            "latest_available_trade_date": None,
+            "last_reconciled_at": None,
+            "pending_reason_counts": {},
             "summary_state_counts": {},
             "items": [],
             "data_limitations": ["active_radar_v2_snapshot_not_available"],
@@ -646,7 +666,66 @@ def get_radar_v2_outcome_summary(
         else []
     )
     by_evaluation = {row.evaluation_id: row for row in outcome_rows}
+    stock_ids = sorted({row.stock_id for row in observations})
+    latest_available_trade_date = db.query(
+        func.max(MarketDailyPrice.trade_date)
+    ).scalar()
+    expected_dates_by_evaluation: dict[int, list[date]] = {}
+    for observation in observations:
+        if observation.evaluation_id is None:
+            continue
+        outcome = by_evaluation.get(observation.evaluation_id)
+        signal_trade_date = (
+            outcome.signal_trade_date
+            if outcome is not None
+            else observation.snapshot_date
+        )
+        expected_dates_by_evaluation[int(observation.evaluation_id)] = (
+            _outcome_horizon_dates(
+                signal_trade_date,
+                horizon_trading_days,
+            )
+        )
+    expected_dates = sorted(
+        {
+            trade_date
+            for dates in expected_dates_by_evaluation.values()
+            for trade_date in dates
+        }
+    )
+    available_daily_bars = {
+        (str(stock_id), trade_date)
+        for stock_id, trade_date in (
+            db.query(
+                MarketDailyPrice.stock_id,
+                MarketDailyPrice.trade_date,
+            )
+            .filter(MarketDailyPrice.stock_id.in_(stock_ids))
+            .filter(MarketDailyPrice.trade_date.in_(expected_dates))
+            .filter(MarketDailyPrice.open_price.is_not(None))
+            .filter(MarketDailyPrice.high_price.is_not(None))
+            .filter(MarketDailyPrice.low_price.is_not(None))
+            .filter(MarketDailyPrice.close_price.is_not(None))
+            .filter(MarketDailyPrice.open_price > 0)
+            .filter(MarketDailyPrice.high_price > 0)
+            .filter(MarketDailyPrice.low_price > 0)
+            .filter(MarketDailyPrice.close_price > 0)
+            .distinct()
+            .all()
+            if stock_ids and expected_dates
+            else []
+        )
+    }
+    last_reconciled_at = max(
+        (
+            outcome.evaluated_at
+            for outcome in outcome_rows
+            if outcome.evaluated_at is not None
+        ),
+        default=None,
+    )
     summary_state_counts: dict[str, int] = {}
+    pending_reason_counts: dict[str, int] = {}
     items: list[dict[str, Any]] = []
     for observation in observations:
         outcome = by_evaluation.get(observation.evaluation_id)
@@ -657,6 +736,39 @@ def get_radar_v2_outcome_summary(
         summary_state_counts[summary_state] = (
             summary_state_counts.get(summary_state, 0) + 1
         )
+        horizon_dates = expected_dates_by_evaluation.get(
+            int(observation.evaluation_id)
+            if observation.evaluation_id is not None
+            else -1,
+            [],
+        )
+        horizon_end_trade_date = (
+            outcome.horizon_end_trade_date
+            if outcome is not None
+            else horizon_dates[-1]
+            if horizon_dates
+            else None
+        )
+        pending_reason: str | None = None
+        if status == "pending":
+            if (
+                horizon_end_trade_date is not None
+                and latest_available_trade_date is not None
+                and horizon_end_trade_date
+                > latest_available_trade_date
+            ):
+                pending_reason = "not_due"
+            elif horizon_dates and all(
+                (observation.stock_id, trade_date)
+                in available_daily_bars
+                for trade_date in horizon_dates
+            ):
+                pending_reason = "ready_to_reconcile"
+            else:
+                pending_reason = "awaiting_daily_bar"
+            pending_reason_counts[pending_reason] = (
+                pending_reason_counts.get(pending_reason, 0) + 1
+            )
         if len(items) >= max(0, min(int(item_limit), 200)):
             continue
         items.append(
@@ -667,11 +779,8 @@ def get_radar_v2_outcome_summary(
                 "source_rank": observation.source_rank,
                 "status": status,
                 "summary_state": summary_state,
-                "horizon_end_trade_date": (
-                    outcome.horizon_end_trade_date
-                    if outcome is not None
-                    else None
-                ),
+                "horizon_end_trade_date": horizon_end_trade_date,
+                "pending_reason": pending_reason,
                 "signal_close_return_pct": (
                     outcome.signal_close_return_pct
                     if outcome is not None
@@ -706,9 +815,21 @@ def get_radar_v2_outcome_summary(
         for observation in observations
     )
     finalized_count = max(0, total_count - pending_count)
+    all_pending_not_due = bool(pending_count) and (
+        pending_reason_counts.get("not_due", 0) == pending_count
+    )
+    data_limitations: list[str] = []
+    if pending_reason_counts.get("not_due"):
+        data_limitations.append("pending_outcomes_not_due")
+    if pending_reason_counts.get("awaiting_daily_bar"):
+        data_limitations.append("pending_outcomes_awaiting_daily_bars")
+    if pending_reason_counts.get("ready_to_reconcile"):
+        data_limitations.append("pending_outcomes_ready_to_reconcile")
     return {
         "status": (
-            "not_evaluated"
+            "not_due"
+            if all_pending_not_due
+            else "not_evaluated"
             if not outcome_rows
             else "pending"
             if pending_count
@@ -725,13 +846,14 @@ def get_radar_v2_outcome_summary(
         "total_count": total_count,
         "finalized_count": finalized_count,
         "pending_count": pending_count,
+        "latest_available_trade_date": latest_available_trade_date,
+        "last_reconciled_at": last_reconciled_at,
+        "pending_reason_counts": dict(
+            sorted(pending_reason_counts.items())
+        ),
         "summary_state_counts": dict(sorted(summary_state_counts.items())),
         "items": items,
-        "data_limitations": (
-            ["pending_outcomes_require_future_final_daily_bars"]
-            if pending_count
-            else []
-        ),
+        "data_limitations": data_limitations,
     }
 
 

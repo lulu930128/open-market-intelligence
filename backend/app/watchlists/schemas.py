@@ -84,6 +84,8 @@ class WatchlistItemRead(BaseModel):
     group_id: int
     stock_id: str
     stock_name: str | None = None
+    market: str | None = None
+    instrument_type: str = "unknown"
 
     note: str | None = None
     priority: int
@@ -510,6 +512,7 @@ class WatchlistRadarV2OutcomeItemRead(BaseModel):
     status: str
     summary_state: str
     horizon_end_trade_date: date | None = None
+    pending_reason: str | None = None
     signal_close_return_pct: float | None = None
     signal_mfe_pct: float | None = None
     signal_mae_pct: float | None = None
@@ -528,6 +531,9 @@ class WatchlistRadarV2OutcomeSummaryRead(BaseModel):
     total_count: int
     finalized_count: int
     pending_count: int
+    latest_available_trade_date: date | None = None
+    last_reconciled_at: datetime | None = None
+    pending_reason_counts: dict[str, int] = Field(default_factory=dict)
     summary_state_counts: dict[str, int] = Field(default_factory=dict)
     items: list[WatchlistRadarV2OutcomeItemRead] = Field(default_factory=list)
     data_limitations: list[str] = Field(default_factory=list)

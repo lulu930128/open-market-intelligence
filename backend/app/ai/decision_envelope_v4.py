@@ -2091,8 +2091,13 @@ def _compact_to_required_core(
                 "dataset",
                 "latest",
                 "is_current",
+                "current_for_requested_session",
+                "is_complete",
                 "release_status",
                 "coverage_status",
+                "oldest_as_of",
+                "newest_as_of",
+                "mixed_as_of",
                 "refresh_recommended",
                 "canonical_status_ref",
             )
@@ -2118,6 +2123,7 @@ def _compact_to_required_core(
     )
     execution = _dict(envelope.get("execution"))
     selection_contract = _dict(execution.get("selection"))
+    query_plan_contract = _dict(execution.get("query_plan"))
     reconciliation = _dict(execution.get("refresh_reconciliation"))
     reconciliation_capabilities = _dict(
         reconciliation.get("capabilities")
@@ -2134,6 +2140,18 @@ def _compact_to_required_core(
                 "max_response_bytes",
             )
             if key in selection_contract
+        },
+        "query_plan": {
+            key: deepcopy(query_plan_contract[key])
+            for key in (
+                "reader_profile",
+                "target_type",
+                "question_intent",
+                "question_intents",
+                "requested_domains",
+                "excluded_domains",
+            )
+            if key in query_plan_contract
         },
         "capability_catalog_version": execution.get(
             "capability_catalog_version"
@@ -2164,6 +2182,15 @@ def _compact_to_required_core(
             for key in (
                 "version",
                 "attempted",
+                "tool_run_attempted",
+                "primary_reader_attempted",
+                "provider_fetch_requested",
+                "provider_fetch_attempted",
+                "cache_hit",
+                "refresh_requested",
+                "refresh_allowed",
+                "request_policy_observed",
+                "not_attempted_reason",
                 "attempt_count",
                 "remaining_action_count",
                 "remaining_action_ids",
@@ -2176,6 +2203,14 @@ def _compact_to_required_core(
             key: deepcopy(item[key])
             for key in (
                 "attempted",
+                "tool_run_attempted",
+                "primary_reader_attempted",
+                "provider_fetch_requested",
+                "provider_fetch_attempted",
+                "cache_hit",
+                "refresh_requested",
+                "refresh_allowed",
+                "not_attempted_reason",
                 "tool_succeeded",
                 "tool_statuses",
                 "refresh_outcomes",
@@ -2195,6 +2230,7 @@ def _compact_to_required_core(
             and isinstance(item, dict)
             and (
                 item.get("attempted") is True
+                or item.get("primary_reader_attempted") is True
                 or item.get("remaining_fill_action")
             )
         )
@@ -2580,6 +2616,9 @@ def _fit_budget(
             "latest_event_status",
             "latest_event_severity",
             "checked_at",
+            "snapshot_age_seconds",
+            "snapshot_is_stale",
+            "snapshot_lifecycle",
         )
         for sample_limit in (20, 5, 0):
             sampled_entries = [
@@ -2661,6 +2700,7 @@ def _fit_budget(
     if _json_bytes(envelope) > max_bytes and brief_projection:
         execution = _dict(envelope.get("execution"))
         selection_contract = _dict(execution.get("selection"))
+        query_plan_contract = _dict(execution.get("query_plan"))
         reconciliation = _dict(execution.get("refresh_reconciliation"))
         envelope["execution"] = {
             "selection": {
@@ -2682,6 +2722,18 @@ def _fit_budget(
                 )
                 if key in selection_contract
             },
+            "query_plan": {
+                key: deepcopy(query_plan_contract[key])
+                for key in (
+                    "reader_profile",
+                    "target_type",
+                    "question_intent",
+                    "question_intents",
+                    "requested_domains",
+                    "excluded_domains",
+                )
+                if key in query_plan_contract
+            },
             "capability_catalog_version": execution.get(
                 "capability_catalog_version"
             ),
@@ -2690,6 +2742,15 @@ def _fit_budget(
                 for key in (
                     "version",
                     "attempted",
+                    "tool_run_attempted",
+                    "primary_reader_attempted",
+                    "provider_fetch_requested",
+                    "provider_fetch_attempted",
+                    "cache_hit",
+                    "refresh_requested",
+                    "refresh_allowed",
+                    "request_policy_observed",
+                    "not_attempted_reason",
                     "attempt_count",
                     "remaining_action_count",
                     "remaining_action_ids",
@@ -2697,7 +2758,7 @@ def _fit_budget(
                 if key in reconciliation
             },
         }
-        mark_field("execution.query_plan")
+        mark_field("execution.query_plan.nonessential_fields")
         mark_field("execution.tool_plan")
         mark_field("execution.tool_runs")
         mark_field("execution.reasoning_steps")
@@ -3279,6 +3340,7 @@ def build(
             fill_plan=fill_plan,
             tool_runs=tool_runs,
             scope_type=scope_type,
+            request_policy=_dict(execution.get("policy")),
         )
     )
     canonical["execution"] = execution

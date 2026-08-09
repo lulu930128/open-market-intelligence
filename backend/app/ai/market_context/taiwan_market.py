@@ -20,7 +20,18 @@ from app.ai.market_payload_contract import (
     payload_level as _payload_level,
 )
 from app.db.models import StockMaster
+from app.market.taiwan_index_minute import read_taiwan_index_minute_series
 from app.market.taiwan_industries import normalize_tw_industry_label
+from app.market.trading_calendar import (
+    is_taiwan_trading_day,
+    previous_taiwan_trading_day,
+    taiwan_market_session_phase,
+    taiwan_now,
+)
+from app.market.tw_market_breadth_contract import (
+    TW_MARKET_BREADTH_STOCK_STATE_VERSION,
+    TW_MARKET_BREADTH_VERSION,
+)
 
 
 class MarketService(Protocol):
@@ -411,6 +422,22 @@ def _json_scalar(value: Any) -> Any:
     return isoformat() if callable(isoformat) else value
 
 
+def _date_iso(value: Any) -> str | None:
+    scalar = _json_scalar(value)
+    if scalar is None:
+        return None
+    text = str(scalar).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        try:
+            return date.fromisoformat(text).isoformat()
+        except ValueError:
+            return text
+
+
 def _json_event_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
@@ -676,7 +703,9 @@ def _market_breadth_from_index_summary(
             continue
 
         scope = str(raw_breadth.get("scope") or "local_dataset")
-        breadth = {key: _json_scalar(value) for key, value in raw_breadth.items()}
+        breadth = {
+            key: _json_event_value(value) for key, value in raw_breadth.items()
+        }
         breadth["market"] = str(raw_breadth.get("market") or market).upper()
         breadth["index_id"] = index_id
         breadth["scope"] = scope
@@ -773,6 +802,18 @@ def _market_breadth_from_index_summary(
     component_scopes = {
         str(item.get("scope") or "local_dataset") for item in breadth_by_market.values()
     }
+    component_versions = {
+        str(item.get("version") or "legacy_unverified")
+        for item in breadth_by_market.values()
+    }
+    component_state_versions = {
+        str(item.get("state_contract_version") or "legacy_unverified")
+        for item in breadth_by_market.values()
+    }
+    component_price_semantics = {
+        str(item.get("price_semantics") or "legacy_unverified")
+        for item in breadth_by_market.values()
+    }
 
     def _sum_count(key: str) -> int:
         return sum(int(item.get(key) or 0) for item in breadth_by_market.values())
@@ -798,12 +839,90 @@ def _market_breadth_from_index_summary(
         if item.get("trade_date")
     }
     status = (
-        "ready"
-        if not missing_markets
-        and component_statuses == {"ready"}
-        and len(trade_dates) <= 1
-        else "partial"
+        "pending"
+        if not missing_markets and component_statuses == {"pending"}
+        else (
+            "ready"
+            if not missing_markets
+            and component_statuses == {"ready"}
+            and len(trade_dates) <= 1
+            else "partial"
+        )
     )
+    market_sessions = {
+        str(item.get("market_session") or "unknown")
+        for item in breadth_by_market.values()
+    }
+    market_session = (
+        next(iter(market_sessions)) if len(market_sessions) == 1 else "mixed"
+    )
+    snapshot_as_of = _latest_timestamp(
+        [
+            item.get("snapshot_as_of") or item.get("as_of")
+            for item in breadth_by_market.values()
+        ]
+    )
+    auction_components = {
+        market: dict(item["auction_breadth"])
+        for market, item in breadth_by_market.items()
+        if isinstance(item.get("auction_breadth"), dict)
+    }
+    auction_statuses = {
+        str(item.get("status") or "unavailable")
+        for item in auction_components.values()
+    }
+    auction_breadth = None
+    if auction_components:
+        auction_coverage_count = sum(
+            int(item.get("coverage_count") or 0)
+            for item in auction_components.values()
+        )
+        auction_universe_count = sum(
+            int(item.get("universe_count") or 0)
+            for item in auction_components.values()
+        )
+        auction_breadth = {
+            "market": "TW",
+            "status": (
+                "provisional"
+                if "provisional" in auction_statuses
+                else "unavailable"
+                if "unavailable" in auction_statuses
+                else "not_applicable"
+            ),
+            "market_session": market_session,
+            "scope": (
+                next(iter(component_scopes))
+                if len(component_scopes) == 1
+                else "mixed"
+            ),
+            "as_of": _latest_timestamp(
+                [item.get("as_of") for item in auction_components.values()]
+            ),
+            "advance_count": sum(
+                int(item.get("advance_count") or 0)
+                for item in auction_components.values()
+            ),
+            "decline_count": sum(
+                int(item.get("decline_count") or 0)
+                for item in auction_components.values()
+            ),
+            "unchanged_count": sum(
+                int(item.get("unchanged_count") or 0)
+                for item in auction_components.values()
+            ),
+            "coverage_count": auction_coverage_count,
+            "universe_count": auction_universe_count,
+            "unknown_count": max(
+                auction_universe_count - auction_coverage_count,
+                0,
+            ),
+            "price_semantics": "auction_indicative",
+            "is_provisional": "provisional" in auction_statuses,
+            "decision_usable": False,
+            "source": "twse_mis_pz_ts",
+            "markets": auction_components,
+        }
     trade_value_included_markets = [
         market
         for market, item in breadth_by_market.items()
@@ -843,10 +962,42 @@ def _market_breadth_from_index_summary(
     ) = _coverage_ratio(coverage_count, universe_count)
     breadth = {
         "market": "TW",
-        "scope": "full_market" if component_scopes == {"full_market"} else "mixed",
+        "version": (
+            next(iter(component_versions))
+            if len(component_versions) == 1
+            else "mixed"
+        ),
+        "state_contract_version": (
+            next(iter(component_state_versions))
+            if len(component_state_versions) == 1
+            else "mixed"
+        ),
+        "scope": (
+            next(iter(component_scopes)) if len(component_scopes) == 1 else "mixed"
+        ),
         "label": "台股上市櫃市場廣度" if not missing_markets else "台股市場廣度（部分市場）",
         "trade_date": next(iter(trade_dates)) if len(trade_dates) == 1 else None,
-        "as_of": _json_scalar(summary.get("as_of")) if isinstance(summary, dict) else None,
+        "as_of": snapshot_as_of,
+        "snapshot_as_of": snapshot_as_of,
+        "market_session": market_session,
+        "price_semantics": (
+            next(iter(component_price_semantics))
+            if len(component_price_semantics) == 1
+            else "mixed"
+        ),
+        "decision_usable": bool(
+            status == "ready"
+            and component_versions == {TW_MARKET_BREADTH_VERSION}
+            and component_state_versions
+            == {TW_MARKET_BREADTH_STOCK_STATE_VERSION}
+            and all(
+                item.get("decision_usable") is True
+                for item in breadth_by_market.values()
+            )
+        ),
+        "is_provisional": any(
+            bool(item.get("is_provisional")) for item in breadth_by_market.values()
+        ),
         "source": "app.market.indices.summary",
         "status": status,
         "advance_count": advance_count,
@@ -903,6 +1054,7 @@ def _market_breadth_from_index_summary(
         "included_markets": list(breadth_by_market),
         "missing_markets": missing_markets,
         "markets": breadth_by_market,
+        "auction_breadth": auction_breadth,
         "market_completion_ratio": market_completion_ratio,
         "close_reconciliation": {
             "status": (
@@ -1003,7 +1155,25 @@ def _market_indices_capability(
     *,
     db: Session,
     dependencies: TaiwanMarketDependencies,
+    generated_at: datetime | None = None,
 ) -> dict[str, Any]:
+    checked_at = generated_at or (
+        dependencies.now()
+        if callable(getattr(dependencies, "now", None))
+        else datetime.now(timezone.utc)
+    )
+    local_now = taiwan_now(checked_at)
+    session_phase = taiwan_market_session_phase(checked_at)
+    active_index_session = session_phase in {"regular", "closing_auction"}
+    expected_completed_date = (
+        local_now.date()
+        if session_phase == "post_close"
+        and is_taiwan_trading_day(local_now.date())
+        else previous_taiwan_trading_day(
+            local_now.date(),
+            include_value=session_phase == "market_closed",
+        )
+    )
     try:
         summary = dependencies.get_market_index_summary(
             db,
@@ -1055,42 +1225,215 @@ def _market_indices_capability(
             and close != change
         ):
             change_pct = change / (close - change) * 100
+        official_as_of = _json_scalar(
+            item.get("as_of")
+            or item.get("quote_time")
+            or item.get("trade_date")
+            or item.get("date")
+        )
+        trade_date = _date_iso(
+            item.get("trade_date") or item.get("date") or official_as_of
+        )
+        live_series: dict[str, Any] = {}
+        if active_index_session and hasattr(db, "query"):
+            live_series = read_taiwan_index_minute_series(
+                db,
+                index_id=index_id,
+                trade_date=local_now.date(),
+            )
+        live_points = (
+            live_series.get("points")
+            if isinstance(live_series.get("points"), list)
+            else []
+        )
+        latest_live = live_points[-1] if live_points else None
+        live_time = (
+            str(latest_live.get("time") or "")
+            if isinstance(latest_live, dict)
+            else ""
+        )
+        try:
+            parsed_live_time = datetime.fromisoformat(
+                live_time.replace("Z", "+00:00")
+            )
+            if parsed_live_time.tzinfo is None:
+                parsed_live_time = parsed_live_time.replace(tzinfo=timezone.utc)
+            live_age_seconds = max(
+                int(
+                    (
+                        checked_at.astimezone(timezone.utc)
+                        - parsed_live_time.astimezone(timezone.utc)
+                    ).total_seconds()
+                ),
+                0,
+            )
+        except (TypeError, ValueError):
+            live_age_seconds = None
+        live_current = bool(
+            latest_live
+            and live_series.get("trade_date") == local_now.date().isoformat()
+            and live_age_seconds is not None
+            and live_age_seconds <= 240
+        )
+        previous_close = live_series.get("previous_close")
+        live_value = (
+            latest_live.get("price")
+            if isinstance(latest_live, dict)
+            else None
+        )
+        live_change = (
+            float(live_value) - float(previous_close)
+            if isinstance(live_value, (int, float))
+            and isinstance(previous_close, (int, float))
+            else None
+        )
+        live_change_pct = (
+            live_change / float(previous_close) * 100
+            if live_change is not None and previous_close
+            else None
+        )
+        completed_date_current = str(trade_date or "") == (
+            expected_completed_date.isoformat()
+        )
+        current_for_requested_session = (
+            live_current
+            if active_index_session
+            else completed_date_current
+            if session_phase in {"post_close", "market_closed"}
+            else False
+        )
+        selected_value = live_value if live_current else close
+        selected_as_of = live_time if live_current else official_as_of or trade_date
         items.append(
             {
                 "index_id": index_id,
                 "name": item.get("name") or item.get("label") or label,
                 "market": str(item.get("market") or market).upper(),
                 "close": close,
-                "change": change,
-                "change_pct": change_pct,
-                "trade_date": _json_scalar(
-                    item.get("trade_date")
-                    or item.get("date")
-                    or item.get("as_of")
+                "official_close": {
+                    "value": close,
+                    "change": change,
+                    "change_pct": change_pct,
+                    "trade_date": trade_date,
+                    "as_of": official_as_of,
+                    "source": item.get("source")
+                    or summary.get("source")
+                    or "market_index_summary",
+                },
+                "live_snapshot": (
+                    {
+                        "value": live_value,
+                        "change": live_change,
+                        "change_pct": live_change_pct,
+                        "event_time": live_time or None,
+                        "age_seconds": live_age_seconds,
+                        "source": live_series.get("source"),
+                        "coverage_status": live_series.get("coverage_status"),
+                        "is_partial": live_series.get("is_partial") is True,
+                    }
+                    if latest_live
+                    else None
                 ),
-                "source": item.get("source")
-                or summary.get("source")
-                or "market_index_summary",
+                "value": selected_value,
+                "latest_value": selected_value,
+                "change": live_change if live_current else change,
+                "change_pct": live_change_pct if live_current else change_pct,
+                "trade_date": (
+                    local_now.date().isoformat() if live_current else trade_date
+                ),
+                "event_time": live_time if live_current else None,
+                "as_of": selected_as_of,
+                "quote_semantics": (
+                    "current_session_index_snapshot"
+                    if live_current
+                    else "official_previous_close"
+                    if session_phase in {
+                        "preopen_pending",
+                        "preopen",
+                        "regular",
+                        "closing_auction",
+                    }
+                    else "official_session_close"
+                ),
+                "current_for_requested_session": current_for_requested_session,
+                "decision_usable": current_for_requested_session,
+                "source": (
+                    live_series.get("source")
+                    if live_current
+                    else item.get("source")
+                    or summary.get("source")
+                    or "market_index_summary"
+                ),
                 "freshness": item.get("freshness")
                 or item.get("quote_status")
                 or {},
             }
         )
-    as_of = _latest_timestamp(
-        [
-            str(item.get("trade_date"))
-            for item in items
-            if item.get("trade_date")
-        ]
+    selected_as_of_values = [
+        str(item.get("as_of")) for item in items if item.get("as_of")
+    ]
+    official_dates = {
+        str(_dict.get("trade_date"))
+        for item in items
+        if isinstance((_dict := item.get("official_close")), dict)
+        and _dict.get("trade_date")
+    }
+    current_count = sum(
+        item.get("current_for_requested_session") is True for item in items
     )
-    status = "ready" if len(items) == 2 else "partial" if items else "missing"
+    is_complete = len(items) == 2
+    if active_index_session:
+        status = (
+            "ready"
+            if current_count == 2
+            else "partial"
+            if current_count or len(official_dates) > 1
+            else "latest_completed_session"
+            if is_complete
+            else "missing"
+        )
+    elif session_phase in {"post_close", "market_closed"}:
+        status = (
+            "ready"
+            if is_complete and current_count == 2
+            else "partial"
+            if items
+            else "missing"
+        )
+    else:
+        status = (
+            "partial"
+            if len(official_dates) > 1
+            else "latest_completed_session"
+            if is_complete
+            else "partial"
+            if items
+            else "missing"
+        )
+    as_of = _latest_timestamp(selected_as_of_values)
     return {
         "kind": "tw_market_indices",
         "status": status,
         "as_of": as_of,
+        "oldest_as_of": min(selected_as_of_values) if selected_as_of_values else None,
+        "newest_as_of": max(selected_as_of_values) if selected_as_of_values else None,
+        "mixed_as_of": len(set(selected_as_of_values)) > 1,
+        "mixed_trade_dates": len(official_dates) > 1,
+        "market_session": session_phase,
+        "current_for_requested_session": current_count == 2,
+        "is_current": current_count == 2,
+        "is_complete": is_complete,
+        "coverage_status": "complete" if is_complete else "partial" if items else "missing",
+        "observation_mix": sorted(
+            {
+                str(item.get("quote_semantics"))
+                for item in items
+                if item.get("quote_semantics")
+            }
+        ),
         "count": len(items),
         "items": items,
-        "source": "market_index_summary",
+        "source": "market_index_summary+taiwan_index_minute_snapshot",
         "missing": (
             []
             if len(items) == 2
@@ -1102,7 +1445,16 @@ def _market_indices_capability(
                 )
             ]
         ),
-        "warnings": [],
+        "warnings": (
+            ["Taiwan market indices contain mixed official trade dates."]
+            if len(official_dates) > 1
+            else [
+                "Current-session Taiwan index snapshots are unavailable; "
+                "official completed-session closes are retained as reference."
+            ]
+            if active_index_session and current_count < 2
+            else []
+        ),
     }
 
 
@@ -1892,15 +2244,49 @@ def _aggregate_freshness(
     dataset: str,
 ) -> dict[str, Any]:
     status = str(payload.get("status") or "missing")
+    current_for_requested_session = (
+        bool(payload.get("current_for_requested_session"))
+        if "current_for_requested_session" in payload
+        else status == "ready"
+    )
+    is_complete = (
+        bool(payload.get("is_complete"))
+        if "is_complete" in payload
+        else status == "ready"
+    )
+    latest = (
+        payload.get("newest_as_of")
+        or payload.get("as_of")
+        or payload.get("trade_date")
+    )
     return {
         "capability": capability_id,
         "dataset": dataset,
         "status": status,
-        "is_current": status == "ready",
-        "latest": payload.get("as_of") or payload.get("trade_date"),
-        "event_time_basis": "taiwan_completed_trade_date",
-        "refresh_recommended": status
-        in {"missing", "stale", "unavailable"},
+        "is_current": current_for_requested_session,
+        "current_for_requested_session": current_for_requested_session,
+        "is_complete": is_complete,
+        "latest": latest,
+        "oldest_as_of": payload.get("oldest_as_of"),
+        "newest_as_of": payload.get("newest_as_of") or latest,
+        "mixed_as_of": bool(payload.get("mixed_as_of")),
+        "mixed_trade_dates": bool(payload.get("mixed_trade_dates")),
+        "requested_session": payload.get("market_session"),
+        "as_of_semantics": (
+            "current_requested_session"
+            if current_for_requested_session
+            else "latest_completed_session_reference"
+        ),
+        "event_time_basis": (
+            "index_quote_or_completed_trade_date"
+            if capability_id == "market.indices"
+            else "taiwan_completed_trade_date"
+        ),
+        "refresh_recommended": (
+            status in {"missing", "stale", "unavailable"}
+            or not current_for_requested_session
+            and payload.get("market_session") in {"regular", "closing_auction"}
+        ),
         "missing": list(payload.get("missing") or []),
         "warnings": list(payload.get("warnings") or []),
     }
@@ -2086,7 +2472,16 @@ def read_market_overview(
         market_aggregates["indices"] = _market_indices_capability(
             db=db,
             dependencies=dependencies,
+            generated_at=generated_at,
         )
+        if any(
+            isinstance(item, dict) and item.get("live_snapshot")
+            for item in market_aggregates["indices"].get("items") or []
+        ):
+            _append_source_ref_once(
+                source_refs,
+                {"type": "table", "name": "taiwan_index_minute_snapshot"},
+            )
         market_aggregates["freshness_by_capability"][
             "market.indices"
         ] = _aggregate_freshness(
@@ -2220,6 +2615,16 @@ def read_market_overview(
             warnings.append(
                 "Taiwan market breadth is partial; missing full-market coverage for "
                 f"{', '.join(market.upper() for market in missing_markets)}."
+            )
+        elif market_breadth.get("status") == "pending":
+            warnings.append(
+                "Regular-session Taiwan market breadth is pending; auction "
+                "indicative prices are not actual trades."
+            )
+        else:
+            warnings.append(
+                "Taiwan market breadth is partial; conclusions must be limited "
+                "to the reported scope and coverage."
             )
 
     if latest_trade_date is None:

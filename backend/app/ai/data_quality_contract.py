@@ -472,6 +472,19 @@ def _market_halt_event_for_gap(
     return None
 
 
+def _is_expected_market_session_boundary(
+    previous: datetime,
+    current: datetime,
+    *,
+    market: str,
+) -> bool:
+    normalized_market = market.strip().upper()
+    return (
+        normalized_market in {"TW", "TAIWAN"}
+        and current.date() > previous.date()
+    )
+
+
 def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
     points = _series_points(value)
     timestamps = [parsed for point in points if (parsed := _point_time(point))]
@@ -481,6 +494,7 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
     duplicate_count = 0
     non_monotonic_count = 0
     recognized_session_gap_count = 0
+    overnight_session_gap_count = 0
     market_halt_gap_count = 0
     market_event_refs: list[str] = []
     observed_seconds: list[float] = []
@@ -495,7 +509,15 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
             non_monotonic_count += 1
             continue
         if expected_seconds and delta > expected_seconds * 3:
-            if _is_known_jp_lunch_gap(previous, current, market=market):
+            if _is_expected_market_session_boundary(
+                previous,
+                current,
+                market=market,
+            ):
+                recognized_session_gap_count += 1
+                overnight_session_gap_count += 1
+                continue
+            elif _is_known_jp_lunch_gap(previous, current, market=market):
                 recognized_session_gap_count += 1
                 continue
             elif _is_known_taiwan_closing_auction_gap(
@@ -559,12 +581,21 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
         "non_monotonic_count": non_monotonic_count,
         "gap_count": gap_count,
         "recognized_session_gap_count": recognized_session_gap_count,
+        "overnight_session_gap_count": overnight_session_gap_count,
         "market_halt_gap_count": market_halt_gap_count,
-        "gap_reason": "market_halt" if market_halt_gap_count else None,
+        "gap_reason": (
+            "market_halt"
+            if market_halt_gap_count
+            else "session_boundary"
+            if overnight_session_gap_count
+            else None
+        ),
         "market_event_refs": market_event_refs,
         "session_gap_evidence": (
             "market_event"
             if market_halt_gap_count
+            else "trading_day_boundary"
+            if overnight_session_gap_count
             else
             "closing_auction_or_official_close"
             if market.upper() in {"TW", "TAIWAN"}
@@ -1888,6 +1919,8 @@ def apply_quality_contract(
         "not_applicable": [],
         "valid_empty": [],
         "coverage_gaps": [],
+        "facts_unusable": [],
+        "decision_unusable": [],
         "warnings": [],
     }
     for capability_id, item in capability_status.items():
@@ -1915,6 +1948,10 @@ def apply_quality_contract(
                     "coverage_status": coverage_status,
                 }
             )
+        if item.get("facts_usable") is False:
+            freshness_categories["facts_unusable"].append(capability_id)
+        elif item.get("decision_usable") is False:
+            freshness_categories["decision_unusable"].append(capability_id)
         for warning in item.get("warning_codes") or []:
             marker = {
                 "capability": capability_id,
@@ -1948,13 +1985,49 @@ def apply_quality_contract(
         selected_freshness["coverage_gaps"] = deepcopy(
             freshness_categories["coverage_gaps"]
         )
+        selected_freshness["facts_unusable"] = list(
+            freshness_categories["facts_unusable"]
+        )
+        selected_freshness["decision_unusable"] = list(
+            freshness_categories["decision_unusable"]
+        )
         selected_freshness["refresh_recommended"] = bool(
             freshness_categories["missing"]
             or freshness_categories["stale"]
         )
+        temporal_status = (
+            "stale"
+            if freshness_categories["stale"]
+            else "unknown"
+            if freshness_categories["missing"]
+            else "current"
+        )
+        availability_status = (
+            "missing" if freshness_categories["missing"] else "available"
+        )
+        completeness_status = (
+            "partial"
+            if freshness_categories["coverage_gaps"]
+            else "complete"
+        )
+        usability_status = (
+            "blocked"
+            if freshness_categories["facts_unusable"]
+            else "limited"
+            if freshness_categories["decision_unusable"]
+            else "usable"
+        )
+        selected_freshness["temporal_status"] = temporal_status
+        selected_freshness["temporal_is_current"] = temporal_status == "current"
+        selected_freshness["availability_status"] = availability_status
+        selected_freshness["completeness_status"] = completeness_status
+        selected_freshness["usability_status"] = usability_status
         selected_freshness["is_current"] = not bool(
             freshness_categories["missing"]
             or freshness_categories["stale"]
+            or freshness_categories["facts_unusable"]
+            or freshness_categories["decision_unusable"]
+            or freshness_categories["coverage_gaps"]
         )
         selected_freshness["status"] = (
             "missing"
@@ -1962,10 +2035,12 @@ def apply_quality_contract(
             else "partial"
             if freshness_categories["stale"]
             or freshness_categories["coverage_gaps"]
+            or freshness_categories["facts_unusable"]
+            or freshness_categories["decision_unusable"]
             else "current"
         )
         selected_freshness["is_current_semantics"] = (
-            "selected_required_capabilities_current"
+            "selected_required_capabilities_fully_usable_and_current"
         )
         selected_freshness["release_current"] = not bool(
             freshness_categories["pending_release"]

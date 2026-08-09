@@ -140,7 +140,7 @@ class CrossMarketRelationMigrationTests(unittest.TestCase):
                 relation_unique_constraints,
             )
 
-            command.downgrade(config, "20260731_0049")
+            command.downgrade(config, "20260804_0051")
             engine = create_engine(database_url)
             try:
                 inspector = inspect(engine)
@@ -151,6 +151,7 @@ class CrossMarketRelationMigrationTests(unittest.TestCase):
                 self.assertFalse(
                     inspector.has_table("cross_market_signal_snapshot")
                 )
+                self.assertTrue(inspector.has_table("dispatch_schedule_run"))
             finally:
                 engine.dispose()
 

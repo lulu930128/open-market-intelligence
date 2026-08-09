@@ -440,21 +440,34 @@ def _decision(response: dict[str, Any], readiness: dict[str, Any]) -> dict[str, 
     analysis = _dict(response.get("analysis"))
     contract = _dict(analysis.get("decision_contract"))
     sections = _dict(contract.get("sections"))
+    decision_required = readiness.get("decision_required") is True
     return {
         "intent": _decision_intent(response),
         "context": deepcopy(_dict(contract.get("context"))),
-        "action_plan": _list(sections.get("action_plan")),
-        "scenarios": _list(sections.get("scenarios")),
-        "counter_evidence": _list(sections.get("counter_evidence")),
-        "risks": _list(sections.get("risks")),
-        "data_limits": _list(sections.get("data_limits")),
-        "price_levels": deepcopy(
-            _dict(analysis.get("technical_levels"))
-            or _dict(analysis.get("price_level_validation"))
+        "action_plan": (
+            _list(sections.get("action_plan")) if decision_required else []
         ),
-        "position": deepcopy(
-            _dict(analysis.get("position_decision"))
-            or _dict(analysis.get("position_math"))
+        "scenarios": _list(sections.get("scenarios")) if decision_required else [],
+        "counter_evidence": (
+            _list(sections.get("counter_evidence")) if decision_required else []
+        ),
+        "risks": _list(sections.get("risks")) if decision_required else [],
+        "data_limits": _list(sections.get("data_limits")),
+        "price_levels": (
+            deepcopy(
+                _dict(analysis.get("technical_levels"))
+                or _dict(analysis.get("price_level_validation"))
+            )
+            if decision_required
+            else {}
+        ),
+        "position": (
+            deepcopy(
+                _dict(analysis.get("position_decision"))
+                or _dict(analysis.get("position_math"))
+            )
+            if decision_required
+            else {}
         ),
         "blocked_sections": readiness["blocked_sections"],
     }

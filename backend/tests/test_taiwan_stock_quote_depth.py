@@ -113,6 +113,32 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(resolve_taiwan_stock_quote_phase(datetime.fromisoformat(value)), expected)
 
+    def test_0800_returns_today_pending_empty_frame_without_provider_fetch(self) -> None:
+        now = datetime(2026, 6, 30, 8, 0, 0, tzinfo=TAIWAN_TZ)
+
+        with patch("app.market.quote_depth.http_get") as http_get:
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        http_get.assert_not_called()
+        self.assertEqual(result["session_phase"], "closed_waiting_preopen")
+        self.assertEqual(result["market_calendar_phase"], "preopen_pending")
+        self.assertEqual(result["instrument_phase"], "awaiting_preopen")
+        self.assertEqual(result["presentation_trade_date"].isoformat(), "2026-06-30")
+        self.assertEqual(result["presentation_session_state"], "today_pending")
+        self.assertIsNone(result["trade_date"])
+        self.assertIsNone(result["last_price"])
+        self.assertIsNone(result["previous_close"])
+        self.assertIsNone(result["open_price"])
+        self.assertIsNone(result["high_price"])
+        self.assertIsNone(result["low_price"])
+        self.assertIsNone(result["change"])
+        self.assertIsNone(result["change_pct"])
+        self.assertIsNone(result["total_volume_lots"])
+
     def test_live_quote_depth_parses_mis_levels_and_persists_snapshot(self) -> None:
         now = datetime(2026, 6, 30, 9, 5, 42, tzinfo=TAIWAN_TZ)
         fetched_at = datetime(2026, 6, 30, 1, 5, 42, tzinfo=timezone.utc)
@@ -292,6 +318,10 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
                 "best_bid_price": 2410.0,
                 "best_ask_price": 2415.0,
                 "auction_indicative_available": True,
+                "auction_indicative_status": "available",
+                "indicative_match_available": True,
+                "indicative_match_price": 2412.5,
+                "indicative_match_volume_lots": 2_046,
                 "freshness": {
                     "status": "live",
                     "is_live": True,
@@ -359,15 +389,21 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
             first_now.isoformat(),
         )
         self.assertTrue(projected_quote["auction_book_available"])
-        self.assertEqual(projected_quote["auction_book_status"], "depth_only")
+        self.assertEqual(
+            projected_quote["auction_book_status"],
+            "depth_and_indicative_match",
+        )
         self.assertEqual(projected_quote["auction_best_bid"], 2410.0)
         self.assertEqual(projected_quote["auction_best_ask"], 2415.0)
-        self.assertFalse(projected_quote["auction_indicative_available"])
+        self.assertTrue(projected_quote["auction_indicative_available"])
+        self.assertTrue(projected_quote["indicative_match_available"])
+        self.assertEqual(projected_quote["indicative_match_price"], 2412.5)
+        self.assertEqual(projected_quote["indicative_match_volume_lots"], 2_046)
         self.assertIsNone(projected_quote["indicative_bid"])
         self.assertIsNone(projected_quote["indicative_ask"])
         self.assertEqual(
             projected_quote["replay_projection"],
-            "current_public_contract",
+            "captured_public_contract_preserved",
         )
         self.assertIn("08:30", replay["missing_slots"])
 
@@ -515,6 +551,123 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertEqual(
             result["official_close_status"],
             "not_available_yet",
+        )
+
+    def test_0900_keeps_085955_trial_snapshot_as_preopen_auction(self) -> None:
+        now = datetime(2026, 6, 30, 9, 0, 0, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 1, 0, 0, tzinfo=timezone.utc)
+        payload = sample_payload()
+        payload["msgArray"][0].update(
+            {
+                "t": "08:59:55",
+                "z": "-",
+                "o": "-",
+                "h": "-",
+                "l": "-",
+                "v": "0",
+                "ts": "1",
+                "pz": "2385",
+                "ps": "2113",
+            }
+        )
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertEqual(result["market_calendar_phase"], "regular")
+        self.assertEqual(result["instrument_phase"], "preopen_auction")
+        self.assertEqual(result["session_phase"], "preopen_auction")
+        self.assertTrue(result["auction_indicative_available"])
+        self.assertEqual(result["indicative_match_price"], 2385.0)
+        self.assertFalse(result["last_trade_available"])
+
+    def test_missing_z_reuses_confirmed_same_session_trade_with_original_time(self) -> None:
+        first_now = datetime(2026, 6, 30, 9, 3, 0, tzinfo=TAIWAN_TZ)
+        first_fetched_at = datetime(2026, 6, 30, 1, 3, 0, tzinfo=timezone.utc)
+        first_payload = sample_payload()
+        first_payload["msgArray"][0].update({"t": "09:03:00", "z": "2405", "v": "1000"})
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=first_fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(first_payload),
+            ),
+        ):
+            get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=first_now,
+            )
+
+        _QUOTE_DEPTH_CACHE.clear()
+        reset_twse_mis_quote_depth_guard()
+        second_now = datetime(2026, 6, 30, 9, 5, 0, tzinfo=TAIWAN_TZ)
+        second_fetched_at = datetime(2026, 6, 30, 1, 5, 0, tzinfo=timezone.utc)
+        second_payload = sample_payload()
+        second_payload["msgArray"][0].update({"t": "09:05:00", "z": "-", "v": "3141"})
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=second_fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(second_payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=second_now,
+            )
+
+        self.assertTrue(result["actual_trade_occurred"])
+        self.assertTrue(result["last_trade_available"])
+        self.assertTrue(result["actual_trade_price_cached"])
+        self.assertEqual(result["actual_trade_price_source"], "same_session_snapshot_z")
+        self.assertEqual(result["last_price"], 2405.0)
+        self.assertEqual(result["last_trade_price"], 2405.0)
+        self.assertEqual(
+            result["last_trade_time"].isoformat(),
+            "2026-06-30T09:03:00+08:00",
+        )
+
+    def test_z_without_positive_volume_is_not_actual_trade(self) -> None:
+        now = datetime(2026, 6, 30, 9, 5, 0, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 1, 5, 0, tzinfo=timezone.utc)
+        payload = sample_payload()
+        payload["msgArray"][0].update(
+            {"t": "09:05:00", "z": "2405", "tv": "-", "v": "0", "ts": "0"}
+        )
+
+        with (
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(payload),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertFalse(result["actual_trade_occurred"])
+        self.assertFalse(result["last_trade_available"])
+        self.assertIsNone(result["last_price"])
+        self.assertEqual(
+            result["actual_trade_reason_code"],
+            "ACTUAL_TRADE_EVIDENCE_MISSING",
         )
 
     def test_closing_auction_does_not_relabel_last_trade_as_official_close(

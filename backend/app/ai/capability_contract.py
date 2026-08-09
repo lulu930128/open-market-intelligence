@@ -320,6 +320,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "score_unit",
             "market_status",
             "session_phase",
+            "presentation_trade_date",
+            "presentation_session_state",
+            "presentation_session_transition_at",
+            "market_calendar_phase",
+            "instrument_phase",
+            "observation_reason_code",
+            "observation_semantics",
+            "actual_trade_occurred",
+            "actual_trade_price_cached",
+            "actual_trade_price_source",
+            "actual_trade_price_as_of",
             "quote_semantics",
             "is_historical",
             "requested_trade_date",
@@ -468,6 +479,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "score_unit",
             "market_status",
             "session_phase",
+            "presentation_trade_date",
+            "presentation_session_state",
+            "presentation_session_transition_at",
+            "market_calendar_phase",
+            "instrument_phase",
+            "observation_reason_code",
+            "observation_semantics",
+            "actual_trade_occurred",
+            "actual_trade_price_cached",
+            "actual_trade_price_source",
+            "actual_trade_price_as_of",
             "quote_semantics",
             "is_historical",
             "requested_trade_date",
@@ -626,6 +648,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "refresh_possible_now",
             "refresh_recommended",
             "session_phase",
+            "market_calendar_phase",
+            "instrument_phase",
+            "observation_reason_code",
             "auction_time",
             "best_bid",
             "best_ask",
@@ -658,6 +683,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "refresh_possible_now",
             "refresh_recommended",
             "session_phase",
+            "market_calendar_phase",
+            "instrument_phase",
+            "observation_reason_code",
             "auction_time",
             "best_bid",
             "best_ask",
@@ -822,8 +850,34 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "canonical_volume_unit",
             "provider_volume_unit",
             "volume_conversion",
+            "volume_scope",
+            "bar_volume_sum_shares",
+            "bar_volume_sum_lots",
+            "bar_volume_trade_date",
+            "bar_volume_latest_time",
+            "bar_volume_scope",
+            "bar_volume_provider",
+            "window_volume_sum_shares",
+            "window_volume_sum_lots",
+            "window_volume_scope",
+            "window_trade_date_count",
+            "session_cumulative_volume_shares",
+            "session_cumulative_volume_lots",
+            "session_cumulative_volume_trade_date",
+            "session_cumulative_volume_source",
+            "session_cumulative_volume_source_field",
+            "session_cumulative_volume_event_time",
+            "session_cumulative_volume_status",
             "cumulative_volume_shares",
             "cumulative_volume_lots",
+            "cumulative_volume_trade_date",
+            "cumulative_volume_source",
+            "cumulative_volume_source_field",
+            "cumulative_volume_event_time",
+            "cumulative_volume_status",
+            "unallocated_volume_shares",
+            "unallocated_volume_lots",
+            "volume_reconciliation",
             "cumulative_trade_value",
             "available_cumulative_trade_value",
             "estimated_cumulative_trade_value",
@@ -832,6 +886,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "approx_vwap",
             "vwap_method",
             "vwap_confidence",
+            "vwap_volume_scope",
             "bar_close_time",
             "elapsed_seconds",
             "finalized",
@@ -923,8 +978,34 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "canonical_volume_unit",
             "provider_volume_unit",
             "volume_conversion",
+            "volume_scope",
+            "bar_volume_sum_shares",
+            "bar_volume_sum_lots",
+            "bar_volume_trade_date",
+            "bar_volume_latest_time",
+            "bar_volume_scope",
+            "bar_volume_provider",
+            "window_volume_sum_shares",
+            "window_volume_sum_lots",
+            "window_volume_scope",
+            "window_trade_date_count",
+            "session_cumulative_volume_shares",
+            "session_cumulative_volume_lots",
+            "session_cumulative_volume_trade_date",
+            "session_cumulative_volume_source",
+            "session_cumulative_volume_source_field",
+            "session_cumulative_volume_event_time",
+            "session_cumulative_volume_status",
             "cumulative_volume_shares",
             "cumulative_volume_lots",
+            "cumulative_volume_trade_date",
+            "cumulative_volume_source",
+            "cumulative_volume_source_field",
+            "cumulative_volume_event_time",
+            "cumulative_volume_status",
+            "unallocated_volume_shares",
+            "unallocated_volume_lots",
+            "volume_reconciliation",
             "cumulative_trade_value",
             "available_cumulative_trade_value",
             "estimated_cumulative_trade_value",
@@ -933,6 +1014,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "approx_vwap",
             "vwap_method",
             "vwap_confidence",
+            "vwap_volume_scope",
             "bar_type",
             "synthetic",
             "indicator_eligible",
@@ -1722,7 +1804,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="market.breadth",
-        schema_version="tw.market.breadth.v1",
+        schema_version="tw.market.breadth.v2",
         domain="breadth",
         slot="market_breadth",
         scopes=ALL_MARKET_SCOPES,
@@ -1731,6 +1813,16 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "as_of",
             "trade_date",
             "status",
+            "version",
+            "state_contract_version",
+            "market_session",
+            "price_semantics",
+            "decision_usable",
+            "is_provisional",
+            "snapshot_as_of",
+            "oldest_price_as_of",
+            "newest_price_as_of",
+            "auction_breadth",
             "label",
             "advance",
             "advance_count",
@@ -1791,6 +1883,16 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "as_of",
             "trade_date",
             "status",
+            "version",
+            "state_contract_version",
+            "market_session",
+            "price_semantics",
+            "decision_usable",
+            "is_provisional",
+            "snapshot_as_of",
+            "oldest_price_as_of",
+            "newest_price_as_of",
+            "auction_breadth",
             "label",
             "advance",
             "advance_count",
@@ -1845,6 +1947,16 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "kind",
             "status",
             "as_of",
+            "oldest_as_of",
+            "newest_as_of",
+            "mixed_as_of",
+            "mixed_trade_dates",
+            "market_session",
+            "current_for_requested_session",
+            "is_current",
+            "is_complete",
+            "coverage_status",
+            "observation_mix",
             "count",
             "items",
             "source",
@@ -1854,6 +1966,16 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         default_fields=(
             "status",
             "as_of",
+            "oldest_as_of",
+            "newest_as_of",
+            "mixed_as_of",
+            "mixed_trade_dates",
+            "market_session",
+            "current_for_requested_session",
+            "is_current",
+            "is_complete",
+            "coverage_status",
+            "observation_mix",
             "count",
             "items",
             "source",
@@ -4957,6 +5079,24 @@ def _canonical_intraday_value(value: Any) -> Any:
         "canonical_volume_unit",
         "provider_volume_unit",
         "volume_conversion",
+        "volume_scope",
+        "bar_volume_sum_shares",
+        "bar_volume_sum_lots",
+        "bar_volume_trade_date",
+        "bar_volume_latest_time",
+        "bar_volume_scope",
+        "bar_volume_provider",
+        "window_volume_sum_shares",
+        "window_volume_sum_lots",
+        "window_volume_scope",
+        "window_trade_date_count",
+        "session_cumulative_volume_shares",
+        "session_cumulative_volume_lots",
+        "session_cumulative_volume_trade_date",
+        "session_cumulative_volume_source",
+        "session_cumulative_volume_source_field",
+        "session_cumulative_volume_event_time",
+        "session_cumulative_volume_status",
         "volume_shares",
         "volume_lots",
         "volume_contracts",
@@ -4966,6 +5106,14 @@ def _canonical_intraday_value(value: Any) -> Any:
         "cumulative_volume_contracts",
         "cumulative_volume_shares",
         "cumulative_volume_lots",
+        "cumulative_volume_trade_date",
+        "cumulative_volume_source",
+        "cumulative_volume_source_field",
+        "cumulative_volume_event_time",
+        "cumulative_volume_status",
+        "unallocated_volume_shares",
+        "unallocated_volume_lots",
+        "volume_reconciliation",
         "cumulative_trade_value",
         "available_cumulative_trade_value",
         "estimated_cumulative_trade_value",
@@ -4989,6 +5137,7 @@ def _canonical_intraday_value(value: Any) -> Any:
         "approx_vwap",
         "vwap_method",
         "vwap_confidence",
+        "vwap_volume_scope",
         "aggregation_method",
         "source_point_count",
         "aggregated_point_count",
@@ -5508,13 +5657,7 @@ def _fill_resolution_without_operation(
             else "scheduler_owned",
         )
     if refresh_strategy == "reader_fetch":
-        return (
-            "already_attempted",
-            "reader_fetch_on_primary_request",
-        ) if capability_id == "intraday.bars" and payload_included else (
-            "deferred_action",
-            "reader_fetch_on_primary_request",
-        )
+        return "already_attempted", "reader_fetch_on_primary_request"
     if refresh_strategy == "cache_only":
         return "deferred_action", "cache_only"
     if capability_id == "market.volume_state":
@@ -5887,7 +6030,18 @@ def build_refresh_reconciliation(
     fill_plan: dict[str, Any],
     tool_runs: list[dict[str, Any]],
     scope_type: str,
+    request_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy = request_policy if isinstance(request_policy, dict) else {}
+    refresh_requested = bool(
+        policy.get("allow_external_fetch")
+        or policy.get("allow_market_cache_refresh")
+    )
+    refresh_allowed = bool(
+        policy.get("can_external_fetch")
+        and str(selection.get("realtime_policy") or "prefer_live")
+        != "cache_only"
+    )
     selected = list(
         dict.fromkeys(
             [
@@ -6014,6 +6168,22 @@ def build_refresh_reconciliation(
             str(attempt.get("operation_status") or "")
             for attempt in related_attempts
         ]
+        tool_run_attempted = bool(related_attempts)
+        provider_fetch_requested = any(
+            attempt.get("external_fetch") is True
+            for attempt in related_attempts
+        )
+        provider_fetch_attempted = any(
+            attempt.get("external_fetch") is True
+            and str(attempt.get("operation_status") or "")
+            not in {"blocked", "skipped", "not_attempted"}
+            for attempt in related_attempts
+        )
+        cache_hit = any(
+            str(attempt.get("refresh_outcome") or "")
+            in {"cache_hit", "cached", "served_from_cache"}
+            for attempt in related_attempts
+        )
         usable_evidence_available = bool(
             manifest_item.get("payload_included") is True
             and manifest_item.get("status_class") in {"ready", "limited"}
@@ -6064,12 +6234,31 @@ def build_refresh_reconciliation(
             else (resolution_detail or {}).get("reason")
             or "no_resolution_recorded"
         )
+        primary_reader_attempted = bool(
+            related_attempts
+            or capability in already_attempted_by_capability
+        )
+        not_attempted_reason = (
+            None
+            if tool_run_attempted
+            else "primary_reader_completed_without_tracked_provider_fetch"
+            if primary_reader_attempted
+            else "refresh_policy_denied"
+            if refresh_requested and not refresh_allowed
+            else "refresh_not_requested"
+            if not refresh_requested
+            else str(unresolved_reason or "no_executable_tool_run")
+        )
         capability_outcomes[capability] = {
-            "attempted": bool(related_attempts),
-            "primary_reader_attempted": bool(
-                related_attempts
-                or capability in already_attempted_by_capability
-            ),
+            "attempted": tool_run_attempted,
+            "tool_run_attempted": tool_run_attempted,
+            "primary_reader_attempted": primary_reader_attempted,
+            "provider_fetch_requested": provider_fetch_requested,
+            "provider_fetch_attempted": provider_fetch_attempted,
+            "cache_hit": cache_hit,
+            "refresh_requested": refresh_requested,
+            "refresh_allowed": refresh_allowed,
+            "not_attempted_reason": not_attempted_reason,
             "attempt_count": len(related_attempts),
             "attempt_indexes": indexes,
             "tool_succeeded": tool_succeeded,
@@ -6112,9 +6301,45 @@ def build_refresh_reconciliation(
             ),
         }
 
+    primary_reader_attempted = any(
+        outcome.get("primary_reader_attempted") is True
+        for outcome in capability_outcomes.values()
+    )
+    provider_fetch_requested = any(
+        outcome.get("provider_fetch_requested") is True
+        for outcome in capability_outcomes.values()
+    )
+    provider_fetch_attempted = any(
+        outcome.get("provider_fetch_attempted") is True
+        for outcome in capability_outcomes.values()
+    )
+    cache_hit = any(
+        outcome.get("cache_hit") is True
+        for outcome in capability_outcomes.values()
+    )
+    not_attempted_reason = (
+        None
+        if attempts
+        else "primary_reader_completed_without_tracked_provider_fetch"
+        if primary_reader_attempted
+        else "refresh_policy_denied"
+        if refresh_requested and not refresh_allowed
+        else "refresh_not_requested"
+        if not refresh_requested
+        else "no_executable_tool_run"
+    )
     return {
         "version": "omi.refresh.reconciliation.v1",
         "attempted": bool(attempts),
+        "tool_run_attempted": bool(attempts),
+        "primary_reader_attempted": primary_reader_attempted,
+        "provider_fetch_requested": provider_fetch_requested,
+        "provider_fetch_attempted": provider_fetch_attempted,
+        "cache_hit": cache_hit,
+        "refresh_requested": refresh_requested,
+        "refresh_allowed": refresh_allowed,
+        "request_policy_observed": bool(policy),
+        "not_attempted_reason": not_attempted_reason,
         "attempt_count": len(attempts),
         "attempts": attempts,
         "capabilities": capability_outcomes,

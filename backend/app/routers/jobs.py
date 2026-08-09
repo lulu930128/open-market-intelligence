@@ -13,6 +13,7 @@ from app.jobs.job_types import (
     TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
+    WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
 )
 from app.jobs.schemas import JobRunRead
 from app.stocks.bootstrap import BOOTSTRAP_JOB_TYPE, run_stock_master_bootstrap_job
@@ -319,6 +320,20 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 _parse_date(request.get("evaluate_before_date")) or date.today(),
                 int(request.get("evaluate_lookback_days", 10)),
                 bool(request.get("save_snapshots", True)),
+            ),
+            request,
+        )
+
+    if job_type == WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE:
+        group_ids = request.get("group_ids")
+        return (
+            backfill_tasks.run_watchlist_radar_outcome_reconcile_job,
+            (
+                _parse_int_list(group_ids) if group_ids else None,
+                str(request.get("modes") or "action"),
+                int(request.get("limit", 200)),
+                int(request.get("initialize_limit", 200)),
+                _parse_date(request.get("as_of_trade_date")),
             ),
             request,
         )

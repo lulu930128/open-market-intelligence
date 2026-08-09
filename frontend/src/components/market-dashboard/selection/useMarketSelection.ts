@@ -187,6 +187,8 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
           group,
           stockId: group ? null : current.taiwan.stockId,
           stockName: group ? null : current.taiwan.stockName,
+          market: group ? null : current.taiwan.market,
+          instrumentType: group ? "unknown" : current.taiwan.instrumentType,
           futuresSymbol: null,
         },
       }));
@@ -198,7 +200,13 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
   );
 
   const selectTaiwanStock = useCallback(
-    (stockId: string, stockName: string | null, radarMode: WatchlistRadarMode) => {
+    (
+      stockId: string,
+      stockName: string | null,
+      market: string | null | undefined,
+      instrumentType: string | null | undefined,
+      radarMode: WatchlistRadarMode
+    ) => {
       const normalizedStockId = stockId.trim();
       if (!normalizedStockId) return;
 
@@ -208,6 +216,8 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
           ...current.taiwan,
           stockId: normalizedStockId,
           stockName,
+          market: market ?? null,
+          instrumentType: instrumentType?.trim().toLowerCase() || "unknown",
           futuresSymbol: null,
         },
       }));
@@ -232,6 +242,8 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
           ...current.taiwan,
           stockId: null,
           stockName: null,
+          market: null,
+          instrumentType: "unknown",
           futuresSymbol: normalized,
         },
       }));
@@ -412,9 +424,14 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
     }));
   }, []);
 
-  const reconcileTaiwanExplorer = useCallback((tree: WatchlistGroupNode[]) => {
-    setSelection((current) => reconcileTaiwanExplorerSelection(current, tree));
-  }, []);
+  const reconcileTaiwanExplorer = useCallback(
+    (tree: WatchlistGroupNode[], items: InitialMarketSelectionOptions["taiwanItems"]) => {
+      setSelection((current) =>
+        reconcileTaiwanExplorerSelection(current, tree, items)
+      );
+    },
+    []
+  );
 
   const reconcileUsExplorer = useCallback(
     (tree: USWatchlistGroupNode[], items: USWatchlistItemRead[]) => {
@@ -444,6 +461,8 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
     selectedGroup: selection.taiwan.group,
     selectedStockId: selection.taiwan.stockId,
     selectedStockName: selection.taiwan.stockName,
+    selectedStockMarket: selection.taiwan.market,
+    selectedInstrumentType: selection.taiwan.instrumentType,
     selectedFuturesSymbol: selection.taiwan.futuresSymbol,
     selectedUsGroupId: selection.us.groupId,
     selectedUsGroup: selection.us.group,

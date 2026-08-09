@@ -352,6 +352,93 @@ def _build_tw_futures_compact(
     else:
         data_quality_status = "ready"
 
+    source_health_entries = [
+        {
+            "market": "tw",
+            "resource": "futures_quote",
+            "target": symbol,
+            "provider": raw_quote.get("provider") or raw_quote.get("source"),
+            "status": quote_status,
+            "ok": quote_status == "ready",
+            "latest_observed_at": raw_quote.get("quote_time"),
+            "storage": "request_context",
+        },
+        {
+            "market": "tw",
+            "resource": "futures_daily_bar",
+            "target": symbol,
+            "provider": (latest_daily or {}).get("provider")
+            or (latest_daily or {}).get("source"),
+            "status": daily_status,
+            "ok": daily_status == "ready",
+            "latest_observed_at": (latest_daily or {}).get("trade_date"),
+            "storage": "request_context",
+        },
+    ]
+    if intraday_chart is not None:
+        source_health_entries.append(
+            {
+                "market": "tw",
+                "resource": "futures_intraday_bar",
+                "target": symbol,
+                "provider": intraday_chart.get("provider")
+                or intraday_chart.get("source"),
+                "status": intraday_status,
+                "ok": intraday_status == "ready",
+                "latest_observed_at": intraday_chart.get("to_date"),
+                "storage": "request_context",
+            }
+        )
+    source_health_status_counts: dict[str, int] = {}
+    for entry in source_health_entries:
+        entry_status = str(entry.get("status") or "unknown")
+        source_health_status_counts[entry_status] = (
+            source_health_status_counts.get(entry_status, 0) + 1
+        )
+    source_health_problem_count = sum(
+        entry.get("ok") is not True for entry in source_health_entries
+    )
+    source_health_status = (
+        "ready"
+        if source_health_entries and source_health_problem_count == 0
+        else "partial"
+        if source_health_entries
+        else "missing"
+    )
+    source_health_as_of = max(
+        (
+            str(entry.get("latest_observed_at"))
+            for entry in source_health_entries
+            if entry.get("latest_observed_at")
+        ),
+        default=None,
+    )
+    source_health = {
+        "kind": "tw_futures_request_source_health",
+        "status": source_health_status,
+        "as_of": source_health_as_of,
+        "scope": {"market": "tw", "target": symbol},
+        "summary": {
+            "entry_count": len(source_health_entries),
+            "ok_count": len(source_health_entries) - source_health_problem_count,
+            "problem_count": source_health_problem_count,
+            "status_counts": source_health_status_counts,
+        },
+        "entries": source_health_entries,
+        "returned_count": len(source_health_entries),
+        "truncated": False,
+        "is_partial": source_health_problem_count > 0,
+        "freshness": {
+            "status": "current"
+            if source_health_status == "ready"
+            else source_health_status,
+            "is_current": source_health_status == "ready",
+            "as_of": source_health_as_of,
+            "event_time_basis": "request_context_observation_time",
+        },
+        "warnings": [],
+    }
+
     quote = {
         key: raw_quote.get(key)
         for key in (
@@ -480,6 +567,14 @@ def _build_tw_futures_compact(
             as_of=(derivatives or {}).get("as_of"),
             missing_key="taifex_derivatives_context",
         ),
+        "source_health": _futures_slot(
+            status=source_health_status,
+            capability="tw_futures_request_source_health",
+            payload_ref="source_health",
+            payload_level_value=payload_level_value,
+            as_of=source_health_as_of,
+            priority="core",
+        ),
         "data_quality": _futures_slot(
             status=data_quality_status,
             capability="data_quality_and_freshness",
@@ -524,6 +619,7 @@ def _build_tw_futures_compact(
             for key in ("status", "as_of", "coverage", "latest", "windows")
         },
         "derivatives": _compact_derivatives_summary(derivatives),
+        "source_health": source_health,
         "freshness_by_domain": {
             "quote": quote_domain_freshness,
             "chart": daily_status,
@@ -534,6 +630,7 @@ def _build_tw_futures_compact(
             "options_sentiment": options_status,
             "market_chip_trend": trend_status,
             "derivatives": derivatives_status,
+            "source_health": source_health["freshness"],
         },
         "slots": slots,
     }

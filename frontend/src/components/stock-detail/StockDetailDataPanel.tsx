@@ -37,6 +37,7 @@ import {
   toRevenueYi,
   valueTone,
 } from "@/components/stock-detail/StockDetailDataViews";
+import EarningsDataGuideDialog from "@/components/stock-detail/EarningsDataGuideDialog";
 import type {
   BranchTableSide,
   DataPanelTab,
@@ -60,7 +61,7 @@ import type {
   TaiwanFinancialContractRead,
 } from "@/types/market";
 import { useT } from "@/i18n";
-import type { Dispatch, SetStateAction } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 
 type StockDetailDataPanelProps = {
   activeDataTab: DataPanelTab;
@@ -144,6 +145,7 @@ export default function StockDetailDataPanel({
   stockId,
 }: StockDetailDataPanelProps) {
   const t = useT();
+  const [earningsGuideOpen, setEarningsGuideOpen] = useState(false);
   const selectedStockId = stockId;
   const lotUnit = t("stockDetail.dataPanel.units.lots");
 
@@ -948,69 +950,55 @@ export default function StockDetailDataPanel({
 
     return (
       <div className="space-y-5">
-        <div className="flex items-center justify-between border-b border-omi-border-subtle pb-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-omi-border-subtle pb-2">
           <span className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
             Earnings
           </span>
-          <div className="flex overflow-hidden border border-omi-control text-sm font-semibold">
-            {[
-              { key: "quarterly", label: t("stockDetail.dataPanel.views.quarterly") },
-              { key: "yearly", label: t("stockDetail.dataPanel.views.yearly") },
-            ].map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => setEarningsView(item.key as EarningsView)}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-haspopup="dialog"
+              aria-expanded={earningsGuideOpen}
+              data-testid="earnings-data-guide-trigger"
+              onClick={() => setEarningsGuideOpen(true)}
+              className={[
+                "group inline-flex h-8 items-center gap-2 border bg-omi-surface px-3 text-xs font-semibold transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-omi-accent active:translate-y-px",
+                financialContractReady
+                  ? "border-omi-border text-omi-text-muted hover:border-omi-success-border hover:text-omi-text-strong"
+                  : "border-omi-warning-border text-omi-warning-strong hover:bg-omi-warning-soft",
+              ].join(" ")}
+            >
+              <span
+                aria-hidden="true"
                 className={[
-                  "h-8 w-12 border-r border-omi-control last:border-r-0",
-                  earningsView === item.key
-                    ? "bg-omi-control-muted text-omi-text-inverse"
-                    : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
+                  "h-1.5 w-1.5",
+                  financialContractReady ? "bg-omi-success" : "bg-omi-warning",
                 ].join(" ")}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="border border-omi-warning-border bg-omi-warning-soft px-3 py-2 text-xs leading-5 text-omi-warning-strong">
-          <div>{t("stockDetail.dataPanel.earningsSemanticsWarning")}</div>
-          {currentFinancialContract?.quality.revenue_continuity.missing_periods
-            ?.length ? (
-            <div className="mt-1">
-              {t("stockDetail.dataPanel.revenueContinuityWarning", {
-                periods:
-                  currentFinancialContract.quality.revenue_continuity.missing_periods.join(
-                    ", "
-                  ),
-              })}
+              />
+              {t("stockDetail.dataPanel.earningsGuide.button")}
+            </button>
+            <div className="flex overflow-hidden border border-omi-control text-sm font-semibold">
+              {[
+                { key: "quarterly", label: t("stockDetail.dataPanel.views.quarterly") },
+                { key: "yearly", label: t("stockDetail.dataPanel.views.yearly") },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => setEarningsView(item.key as EarningsView)}
+                  className={[
+                    "h-8 w-12 border-r border-omi-control transition-colors duration-200 last:border-r-0 focus-visible:relative focus-visible:z-10 focus-visible:outline-2 focus-visible:outline-omi-accent active:translate-y-px",
+                    earningsView === item.key
+                      ? "bg-omi-control-muted text-omi-text-inverse"
+                      : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
+                  ].join(" ")}
+                >
+                  {item.label}
+                </button>
+              ))}
             </div>
-          ) : null}
-        </div>
-
-        {currentFinancialContract ? (
-          <div
-            className={[
-              "border px-3 py-2 text-xs leading-5",
-              financialContractReady
-                ? "border-omi-success-border bg-omi-success-soft text-omi-success-strong"
-                : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
-            ].join(" ")}
-          >
-            {financialContractReady
-              ? t("stockDetail.dataPanel.financialContractReady", {
-                  version: currentFinancialContract.contract_version,
-                })
-              : t("stockDetail.dataPanel.financialContractBlocked", {
-                  version: currentFinancialContract.contract_version,
-                  status:
-                    currentFinancialContract.normalized.status ??
-                    currentFinancialContract.derived.status ??
-                    "blocked",
-                })}
           </div>
-        ) : null}
+        </div>
 
         {financialContractReady ? (
           <div
@@ -1059,37 +1047,6 @@ export default function StockDetailDataPanel({
                 </div>
               ))}
             </div>
-
-            <div className="break-all text-[11px] leading-5 text-omi-text-muted">
-              {t("stockDetail.dataPanel.financial.comparisonBasis", {
-                basis:
-                  currentFinancialContract.normalized.comparison_basis_id ?? "-",
-              })}
-            </div>
-            {currentFinancialContract.valuation.status === "ready" ? (
-              <div className="break-all text-[11px] leading-5 text-omi-text-muted">
-                <div>
-                  {t("stockDetail.dataPanel.financial.valuationPrice", {
-                    price: formatPrice(
-                      financialDecimal(currentFinancialContract.valuation.price)
-                    ),
-                    date: formatDate(
-                      currentFinancialContract.valuation.price_trade_date
-                    ),
-                    source:
-                      currentFinancialContract.valuation.price_source ?? "-",
-                  })}
-                </div>
-                <div>
-                  {t("stockDetail.dataPanel.financial.valuationPriceBasis", {
-                    basis:
-                      currentFinancialContract.valuation.price_basis ?? "-",
-                    asOf:
-                      currentFinancialContract.valuation.price_as_of ?? "-",
-                  })}
-                </div>
-              </div>
-            ) : null}
 
             <div className="overflow-x-auto border border-omi-border-subtle">
               <div className="min-w-[620px]">
@@ -1173,6 +1130,14 @@ export default function StockDetailDataPanel({
             </div>
           ))}
         </div>
+
+        {earningsGuideOpen ? (
+          <EarningsDataGuideDialog
+            contract={currentFinancialContract}
+            financialContractReady={financialContractReady}
+            onClose={() => setEarningsGuideOpen(false)}
+          />
+        ) : null}
       </div>
     );
   }

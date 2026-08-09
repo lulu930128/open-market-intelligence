@@ -72,6 +72,7 @@ class RuntimeCoordinator:
                 return
 
             self._mark_interrupted_jobs()
+            self._reconcile_dispatch_runs()
 
             self.scheduler = job_scheduler.start_scheduler()
             await start_crypto_auto_refresh()
@@ -141,6 +142,41 @@ class RuntimeCoordinator:
             logger.warning(
                 "Marked %s interrupted queued/running jobs as error.",
                 interrupted_count,
+            )
+
+    def _reconcile_dispatch_runs(self) -> None:
+        if not (
+            settings.enable_dispatch_scheduler
+            and settings.dispatch_scheduler_v2_enabled
+        ):
+            return
+
+        from app.dispatch import schedule_runs, service as dispatch_service
+
+        db = SessionLocal()
+        try:
+            initialized_count = schedule_runs.initialize_next_runs(db)
+            result = dispatch_service.reconcile_schedule_runs(db=db)
+        finally:
+            db.close()
+
+        if initialized_count or any(
+            result.get(key)
+            for key in (
+                "processed_count",
+                "recovered_count",
+                "unknown_count",
+                "error_count",
+            )
+        ):
+            logger.info(
+                "Dispatch startup reconciliation initialized=%s processed=%s "
+                "recovered=%s unknown=%s errors=%s.",
+                initialized_count,
+                result.get("processed_count", 0),
+                result.get("recovered_count", 0),
+                result.get("unknown_count", 0),
+                result.get("error_count", 0),
             )
 
     def _enqueue_stock_master_bootstrap(self) -> None:

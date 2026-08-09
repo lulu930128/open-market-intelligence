@@ -29,6 +29,14 @@ export type MarketCalendarSession = {
   is_after_close: boolean;
 };
 
+export type MarketCalendarPresentationSession = {
+  trade_date: string;
+  state: string;
+  is_current_trading_day: boolean;
+  rollover_time: string;
+  next_transition_at: string;
+};
+
 export type MarketCalendarMarketStatus = {
   market: MarketCode | string;
   timezone: string;
@@ -41,6 +49,7 @@ export type MarketCalendarMarketStatus = {
   previous_trading_day: string;
   next_trading_day: string;
   session: MarketCalendarSession;
+  presentation_session?: MarketCalendarPresentationSession | null;
   release_windows: Record<string, MarketCalendarReleaseWindow>;
   calendar_source?: string | null;
   calendar_verified_years?: number[];

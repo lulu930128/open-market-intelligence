@@ -217,6 +217,12 @@ class DispatchDelivery(Base):
     request_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_id: Mapped[str | None] = mapped_column(
+        String(240),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -251,6 +257,65 @@ class DispatchSchedule(Base):
     scope_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     request_json: Mapped[str] = mapped_column(Text)
 
+    next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    calendar_mode: Mapped[str] = mapped_column(
+        String(30),
+        default="weekdays",
+        index=True,
+    )
+    catchup_mode: Mapped[str] = mapped_column(
+        String(30),
+        default="latest_only",
+        index=True,
+    )
+    misfire_policy: Mapped[str] = mapped_column(
+        String(20),
+        default="catch_up",
+        index=True,
+    )
+    misfire_grace_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    max_retries: Mapped[int] = mapped_column(Integer, default=2)
+    retry_interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    readiness_profile: Mapped[str] = mapped_column(
+        String(40),
+        default="generic",
+        index=True,
+    )
+    readiness_policy: Mapped[str] = mapped_column(
+        String(30),
+        default="immediate",
+        index=True,
+    )
+    readiness_deadline_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    readiness_retry_interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
+
+    last_queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_skipped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_status: Mapped[str] = mapped_column(
+        String(30),
+        default="never_run",
+        index=True,
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
     last_run_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -273,6 +338,123 @@ class DispatchSchedule(Base):
     recipient_group: Mapped[DispatchRecipientGroup | None] = relationship(
         back_populates="schedules",
     )
+    runs: Mapped[list["DispatchScheduleRun"]] = relationship(
+        back_populates="schedule",
+    )
+
+
+class DispatchScheduleRun(Base):
+    __tablename__ = "dispatch_schedule_run"
+    __table_args__ = (
+        UniqueConstraint(
+            "schedule_id",
+            "scheduled_slot_key",
+            name="uq_dispatch_schedule_run_scheduled_slot",
+        ),
+        Index(
+            "ix_dispatch_schedule_run_action_due",
+            "status",
+            "next_action_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_token: Mapped[str] = mapped_column(
+        String(36),
+        unique=True,
+        index=True,
+    )
+    schedule_id: Mapped[int] = mapped_column(
+        ForeignKey("dispatch_schedule.id"),
+        nullable=False,
+        index=True,
+    )
+    retry_of_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dispatch_schedule_run.id"),
+        nullable=True,
+        index=True,
+    )
+    trigger_type: Mapped[str] = mapped_column(
+        String(20),
+        default="scheduled",
+        index=True,
+    )
+    scheduled_for: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    scheduled_slot_key: Mapped[str | None] = mapped_column(
+        String(80),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(30),
+        default="claimed",
+        index=True,
+    )
+    schedule_snapshot_json: Mapped[str] = mapped_column(Text)
+    readiness_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    readiness_check_count: Mapped[int] = mapped_column(Integer, default=0)
+    delivery_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_delivery_attempts: Mapped[int] = mapped_column(Integer, default=1)
+    next_action_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    error_code: Mapped[str | None] = mapped_column(
+        String(80),
+        nullable=True,
+        index=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dispatch_delivery.id"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    job_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_run.id"),
+        nullable=True,
+        index=True,
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    sending_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    skipped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+    schedule: Mapped[DispatchSchedule] = relationship(back_populates="runs")
+    delivery: Mapped[DispatchDelivery | None] = relationship()
+    job_run: Mapped[JobRun | None] = relationship()
 
 
 class AiMemory(Base):
@@ -1944,6 +2126,35 @@ class TaiwanMarketMinuteState(Base):
     minute_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
     session_status: Mapped[str] = mapped_column(String(30), index=True)
+    breadth_session_phase: Mapped[str] = mapped_column(
+        String(30),
+        default="unknown",
+        index=True,
+    )
+    breadth_contract_version: Mapped[str] = mapped_column(
+        String(80),
+        default="legacy_unverified",
+        index=True,
+    )
+    breadth_decision_usable: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        index=True,
+    )
+    breadth_is_provisional: Mapped[bool] = mapped_column(Boolean, default=True)
+    breadth_snapshot_as_of: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    breadth_oldest_price_as_of: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    breadth_newest_price_as_of: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     quote_quality_status: Mapped[str] = mapped_column(
         String(30),
         default="unknown",
@@ -2015,6 +2226,54 @@ class TaiwanIntradayStockState(Base):
     trade_date: Mapped[date] = mapped_column(Date, index=True)
     event_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        index=True,
+    )
+    snapshot_as_of: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    price_as_of: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    price_semantics: Mapped[str] = mapped_column(
+        String(40),
+        default="legacy_unverified",
+        index=True,
+    )
+    price_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    has_actual_trade: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        index=True,
+    )
+    indicative_match_available: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
+    indicative_match_price: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    indicative_match_volume_lots: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    session_phase: Mapped[str] = mapped_column(
+        String(30),
+        default="unknown",
+        index=True,
+    )
+    state_contract_version: Mapped[str] = mapped_column(
+        String(80),
+        default="tw.intraday_stock_state.v1",
+        index=True,
+    )
+    decision_usable: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
         index=True,
     )
 
@@ -3104,6 +3363,217 @@ class StockMaster(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanEtfProfile(Base):
+    __tablename__ = "taiwan_etf_profile"
+
+    __table_args__ = (
+        UniqueConstraint("stock_id", name="uq_taiwan_etf_profile_stock_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    market: Mapped[str] = mapped_column(String(20), default="TWSE", index=True)
+    report_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    fund_short_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    fund_name: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    fund_name_en: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    fund_type: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    benchmark_name: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    is_customized_index: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    investment_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    has_performance_benchmark: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    performance_benchmark_name: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    has_foreign_components: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    tax_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    established_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    listed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fund_manager: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    issued_units: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    custodian: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    issuer_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+
+    source: Mapped[str] = mapped_column(String(80), default="twse_openapi", index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanEtfNavDaily(Base):
+    __tablename__ = "taiwan_etf_nav_daily"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_id",
+            "nav_date",
+            name="uq_taiwan_etf_nav_daily_stock_date",
+        ),
+        Index(
+            "ix_taiwan_etf_nav_daily_stock_date",
+            "stock_id",
+            "nav_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    nav_date: Mapped[date] = mapped_column(Date, index=True)
+    issuer_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    fund_name: Mapped[str | None] = mapped_column(String(320), nullable=True)
+
+    nav: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    previous_nav: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    nav_change: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    nav_change_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    close_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    premium_discount_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+
+    benchmark_name: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    benchmark_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    benchmark_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    benchmark_previous_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    benchmark_change: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    benchmark_change_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+
+    source: Mapped[str] = mapped_column(String(80), default="mops", index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanEtfPcfSnapshot(Base):
+    __tablename__ = "taiwan_etf_pcf_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_id",
+            "effective_date",
+            name="uq_taiwan_etf_pcf_snapshot_stock_date",
+        ),
+        Index(
+            "ix_taiwan_etf_pcf_snapshot_stock_date",
+            "stock_id",
+            "effective_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    effective_date: Mapped[date] = mapped_column(Date, index=True)
+    reference_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    fund_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    fund_name: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(480), nullable=True)
+    name_en: Mapped[str | None] = mapped_column(String(480), nullable=True)
+    total_net_assets: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    issued_units: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    unit_nav: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    creation_unit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    estimated_creation_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    estimated_cash_component: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    unit_change: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    actual_cash_component: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    redemption_method: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    source: Mapped[str] = mapped_column(String(80), default="yuanta_etfs", index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class TaiwanEtfPcfComponent(Base):
+    __tablename__ = "taiwan_etf_pcf_component"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            "order_index",
+            name="uq_taiwan_etf_pcf_component_snapshot_order",
+        ),
+        Index(
+            "ix_taiwan_etf_pcf_component_snapshot_asset",
+            "snapshot_id",
+            "asset_type",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("taiwan_etf_pcf_snapshot.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_section: Mapped[str] = mapped_column(String(40), index=True)
+    asset_type: Mapped[str] = mapped_column(String(40), index=True)
+    symbol: Mapped[str] = mapped_column(String(80), index=True)
+    name: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    name_en: Mapped[str | None] = mapped_column(String(480), nullable=True)
+    contract_month: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    weight_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    cash_in_lieu: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    minimum_creation: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class TaiwanEtfInavSnapshot(Base):
+    __tablename__ = "taiwan_etf_inav_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_id",
+            "observed_at",
+            name="uq_taiwan_etf_inav_snapshot_stock_time",
+        ),
+        Index(
+            "ix_taiwan_etf_inav_snapshot_stock_time",
+            "stock_id",
+            "observed_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    fund_short_name: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    investment_area: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    estimated_nav: Mapped[Decimal] = mapped_column(Numeric(20, 6))
+    nav_change: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    market_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    price_change: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    premium_discount_pct: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 6), nullable=True
+    )
+
+    source: Mapped[str] = mapped_column(String(80), default="yuanta_etfs", index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
 
 
 class StockProfile(Base):

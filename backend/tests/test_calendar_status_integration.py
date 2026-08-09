@@ -805,8 +805,10 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             added = scheduler._add_watchlist_radar_auto_snapshot_job(fake_scheduler)
 
         self.assertTrue(added)
-        self.assertEqual(fake_scheduler.add_job.call_count, 2)
-        cron_call, reconcile_call = fake_scheduler.add_job.call_args_list
+        self.assertEqual(fake_scheduler.add_job.call_count, 3)
+        cron_call, reconcile_call, outcome_reconcile_call = (
+            fake_scheduler.add_job.call_args_list
+        )
         kwargs = cron_call.kwargs
         self.assertIs(
             cron_call.args[0],
@@ -827,6 +829,64 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             reconcile_call.kwargs["id"],
             "watchlist_radar_auto_snapshot_reconcile",
         )
+        self.assertIs(
+            outcome_reconcile_call.args[0],
+            scheduler.enqueue_watchlist_radar_outcome_reconcile,
+        )
+        self.assertEqual(
+            outcome_reconcile_call.kwargs["trigger"],
+            "interval",
+        )
+        self.assertEqual(
+            outcome_reconcile_call.kwargs["minutes"],
+            30,
+        )
+        self.assertEqual(
+            outcome_reconcile_call.kwargs["id"],
+            "watchlist_radar_v2_outcome_reconcile",
+        )
+
+    def test_watchlist_radar_outcome_reconcile_queues_without_trading_day_gate(
+        self,
+    ) -> None:
+        fake_db = SimpleNamespace(close=Mock())
+        coverage = {
+            "status": "pending",
+            "group_ids": [1],
+            "modes": ["action"],
+            "latest_available_trade_date": date(2026, 8, 7),
+            "due_count": 26,
+            "oldest_due_trade_date": date(2026, 8, 6),
+        }
+        with (
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler.radar_automation,
+                "get_watchlist_radar_v2_outcome_due_coverage",
+                return_value=coverage,
+            ),
+            patch.object(
+                scheduler.job_service,
+                "enqueue_job",
+                return_value=(SimpleNamespace(id=88), True),
+            ) as enqueue,
+            patch.object(
+                scheduler,
+                "build_taiwan_calendar_status",
+            ) as calendar_status,
+        ):
+            scheduler.enqueue_watchlist_radar_outcome_reconcile()
+
+        calendar_status.assert_not_called()
+        self.assertEqual(
+            enqueue.call_args.kwargs["job_type"],
+            "watchlist.radar_v2.outcome_reconcile",
+        )
+        self.assertEqual(
+            enqueue.call_args.kwargs["task_args"][-1],
+            date(2026, 8, 7),
+        )
+        fake_db.close.assert_called_once_with()
 
     def test_watchlist_radar_reconciliation_respects_configured_time(self) -> None:
         timezone = ZoneInfo("Asia/Taipei")

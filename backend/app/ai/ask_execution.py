@@ -52,10 +52,27 @@ def _market_data_params(
     params["external_fetch_allowed"] = bool(
         can_external_fetch and realtime_policy != "cache_only"
     )
+    refresh_policy = (
+        policy.get("refresh_policy")
+        if isinstance(policy, dict)
+        and isinstance(policy.get("refresh_policy"), dict)
+        else payload.refresh_policy
+        if isinstance(payload.refresh_policy, dict)
+        else {}
+    )
+    params.setdefault(
+        "fallback_to_cached",
+        bool(refresh_policy.get("fallback_to_cached", True)),
+    )
     return params
 
 
-def _include_tw_intraday(payload: AiAskRequest, *, policy: dict[str, Any] | None = None) -> bool:
+def _include_tw_intraday(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+    allow_persisted_cache: bool = True,
+) -> bool:
     can_external_fetch = (
         bool(policy.get("can_external_fetch"))
         if isinstance(policy, dict)
@@ -63,10 +80,25 @@ def _include_tw_intraday(payload: AiAskRequest, *, policy: dict[str, Any] | None
     )
     market_data_params = payload.market_data_params if isinstance(payload.market_data_params, dict) else {}
     cache_only = str(payload.realtime_policy or "") == "cache_only"
-    if "include_intraday" in market_data_params:
-        return bool(market_data_params.get("include_intraday")) and (
-            can_external_fetch or cache_only
+    refresh_policy = (
+        policy.get("refresh_policy")
+        if isinstance(policy, dict)
+        and isinstance(policy.get("refresh_policy"), dict)
+        else payload.refresh_policy
+        if isinstance(payload.refresh_policy, dict)
+        else {}
+    )
+    cached_fallback_allowed = allow_persisted_cache and bool(
+        market_data_params.get(
+            "fallback_to_cached",
+            refresh_policy.get("fallback_to_cached", True),
         )
+    )
+    reader_allowed = bool(
+        can_external_fetch or cache_only or cached_fallback_allowed
+    )
+    if "include_intraday" in market_data_params:
+        return bool(market_data_params.get("include_intraday")) and reader_allowed
 
     query_plan = (
         policy.get("query_plan")
@@ -79,15 +111,14 @@ def _include_tw_intraday(payload: AiAskRequest, *, policy: dict[str, Any] | None
         if value
     }
     if "intraday.bars" in selected_capabilities:
-        return bool(can_external_fetch or cache_only)
+        return reader_allowed
 
     return decision_core.include_tw_intraday(
         question=payload.question,
         requested_horizon=payload.analysis_horizon,
         strategy_profile=payload.strategy_profile,
         allow_external_fetch=(
-            can_external_fetch
-            or cache_only
+            reader_allowed
         ),
     )
 
@@ -245,7 +276,11 @@ def _read_market_context(
         return "omi.read_market_overview", tools.read_market_overview(
             db=db,
             limit=payload.market_limit,
-            include_intraday=_include_tw_intraday(payload, policy=policy),
+            include_intraday=_include_tw_intraday(
+                payload,
+                policy=policy,
+                allow_persisted_cache=False,
+            ),
             market_data_params=_market_data_params(payload, policy=policy),
         )
     reference = REGIONAL_MARKET_REFERENCES.get(market)
@@ -307,7 +342,11 @@ def _build_market_context_brief(
         return "omi.generate_market_brief", reports.build_market_brief(
             db=db,
             limit=payload.market_limit,
-            include_intraday=_include_tw_intraday(payload, policy=policy),
+            include_intraday=_include_tw_intraday(
+                payload,
+                policy=policy,
+                allow_persisted_cache=False,
+            ),
             analysis_horizon=payload.analysis_horizon,
             market_data_params=_market_data_params(payload, policy=policy),
             response_preferences=_response_preferences(payload),

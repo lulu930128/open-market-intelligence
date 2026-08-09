@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
-from email.utils import parseaddr
+from datetime import datetime, timedelta
+from email.utils import make_msgid, parseaddr
 import json
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -10,9 +10,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import DispatchDelivery, DispatchRecipientGroup, DispatchSchedule, utc_now
+from app.db.models import (
+    DispatchDelivery,
+    DispatchRecipientGroup,
+    DispatchSchedule,
+    DispatchScheduleRun,
+    utc_now,
+)
 from app.dispatch import templates
 from app.dispatch.mail_sender import SmtpMailSender
+from app.dispatch.schedule_time import utc_db_value
 from app.dispatch.schemas import (
     DispatchPreviewRequest,
     DispatchRecipientGroupCreate,
@@ -296,6 +303,7 @@ def serialize_delivery(delivery: DispatchDelivery) -> dict[str, Any]:
         "request": request if isinstance(request, dict) else {},
         "result": result if isinstance(result, dict) else None,
         "error_message": delivery.error_message,
+        "message_id": delivery.message_id,
         "sent_at": delivery.sent_at,
         "created_at": delivery.created_at,
         "updated_at": delivery.updated_at,
@@ -318,6 +326,22 @@ def serialize_schedule(schedule: DispatchSchedule) -> dict[str, Any]:
         "scope_type": schedule.scope_type,
         "scope_id": schedule.scope_id,
         "request": request if isinstance(request, dict) else {},
+        "next_run_at": schedule.next_run_at,
+        "calendar_mode": schedule.calendar_mode,
+        "catchup_mode": schedule.catchup_mode,
+        "misfire_policy": schedule.misfire_policy,
+        "misfire_grace_minutes": schedule.misfire_grace_minutes,
+        "max_retries": schedule.max_retries,
+        "retry_interval_seconds": schedule.retry_interval_seconds,
+        "readiness_profile": schedule.readiness_profile,
+        "readiness_policy": schedule.readiness_policy,
+        "readiness_deadline_minutes": schedule.readiness_deadline_minutes,
+        "readiness_retry_interval_seconds": schedule.readiness_retry_interval_seconds,
+        "last_queued_at": schedule.last_queued_at,
+        "last_sent_at": schedule.last_sent_at,
+        "last_skipped_at": schedule.last_skipped_at,
+        "last_status": schedule.last_status,
+        "archived_at": schedule.archived_at,
         "last_run_key": schedule.last_run_key,
         "last_run_at": schedule.last_run_at,
         "last_success_at": schedule.last_success_at,
@@ -401,6 +425,9 @@ def delete_recipient_group(db: Session, group_id: int) -> dict[str, Any]:
             {
                 DispatchSchedule.recipient_group_id: None,
                 DispatchSchedule.enabled: False,
+                DispatchSchedule.next_run_at: None,
+                DispatchSchedule.last_status: "error",
+                DispatchSchedule.last_error_message: "Recipient group was deleted.",
                 DispatchSchedule.updated_at: utc_now(),
             },
             synchronize_session=False,
@@ -499,13 +526,19 @@ def create_delivery(
     *,
     payload: DispatchSendRequest,
     preview: dict[str, Any],
-    recipient_group: DispatchRecipientGroup,
+    recipient_group: DispatchRecipientGroup | None,
+    recipients_override: list[str] | None = None,
+    commit: bool = True,
 ) -> DispatchDelivery:
-    if not recipient_group.enabled:
+    if recipient_group is not None and not recipient_group.enabled and recipients_override is None:
         raise DispatchValidationError(f"Recipient group is disabled: {recipient_group.name}")
-    recipients = normalize_emails(_from_json(recipient_group.emails_json) or [])
+    recipients = normalize_emails(
+        recipients_override
+        if recipients_override is not None
+        else _from_json(recipient_group.emails_json if recipient_group else None) or []
+    )
     delivery = DispatchDelivery(
-        recipient_group_id=recipient_group.id,
+        recipient_group_id=recipient_group.id if recipient_group else None,
         template_key=str(preview["template_key"]),
         scope_type=str(preview["scope_type"]),
         scope_id=preview.get("scope_id"),
@@ -519,8 +552,14 @@ def create_delivery(
         request_json=_to_json(payload.model_dump()),
     )
     db.add(delivery)
-    db.commit()
-    db.refresh(delivery)
+    db.flush()
+    delivery.message_id = make_msgid(
+        idstring=f"omi-dispatch-{delivery.id}",
+        domain="omi.local",
+    )
+    if commit:
+        db.commit()
+        db.refresh(delivery)
     return delivery
 
 
@@ -550,41 +589,135 @@ def attach_job_to_delivery(db: Session, *, delivery_id: int, job_run_id: int) ->
     return serialize_delivery(delivery)
 
 
-def send_delivery(db: Session, delivery_id: int) -> dict[str, Any]:
+def send_delivery(
+    db: Session,
+    delivery_id: int,
+    *,
+    schedule_run_id: int | None = None,
+) -> dict[str, Any]:
     delivery = get_delivery(db, delivery_id)
+    if delivery.status == "success":
+        return serialize_delivery(delivery)
+    run = (
+        db.query(DispatchScheduleRun)
+        .filter(DispatchScheduleRun.id == schedule_run_id)
+        .first()
+        if schedule_run_id is not None
+        else db.query(DispatchScheduleRun)
+        .filter(DispatchScheduleRun.delivery_id == delivery_id)
+        .first()
+    )
     recipients = _from_json(delivery.recipients_json)
     recipient_list = recipients if isinstance(recipients, list) else []
+
+    try:
+        sender = SmtpMailSender.from_settings()
+    except Exception as exc:
+        delivery.status = "error"
+        delivery.error_message = str(exc)
+        delivery.result_json = _to_json(
+            {
+                "status": "error",
+                "error_code": "SMTP_CONFIGURATION_ERROR",
+                "error_message": str(exc),
+            }
+        )
+        delivery.updated_at = utc_now()
+        if run is not None:
+            run.status = "error"
+            run.retryable = False
+            run.error_code = "SMTP_CONFIGURATION_ERROR"
+            run.error_message = str(exc)
+            run.next_action_at = None
+            run.updated_at = utc_now()
+            if run.trigger_type == "scheduled":
+                run.schedule.last_status = "error"
+                run.schedule.last_error_at = utc_now()
+                run.schedule.last_error_message = str(exc)
+        db.commit()
+        raise
+
+    if delivery.message_id is None:
+        delivery.message_id = make_msgid(
+            idstring=f"omi-dispatch-{delivery.id}",
+            domain="omi.local",
+        )
     delivery.status = "sending"
     delivery.updated_at = utc_now()
+    if run is not None:
+        run.status = "sending"
+        run.sending_at = utc_now()
+        run.retryable = False
+        run.error_code = None
+        run.error_message = None
+        run.updated_at = utc_now()
     db.commit()
 
     try:
-        result = SmtpMailSender.from_settings().send(
+        result = sender.send(
             recipients=recipient_list,
             subject=delivery.subject,
             body_text=delivery.body_text or "",
             body_html=delivery.body_html or "",
+            message_id=delivery.message_id,
         )
     except Exception as exc:
-        delivery.status = "error"
+        delivery.status = "unknown"
         delivery.error_message = str(exc)
-        delivery.result_json = _to_json({"status": "error", "error_message": str(exc)})
+        delivery.result_json = _to_json(
+            {
+                "status": "unknown",
+                "error_code": "DELIVERY_RESULT_UNKNOWN",
+                "error_message": str(exc),
+                "message_id": delivery.message_id,
+            }
+        )
         delivery.updated_at = utc_now()
+        if run is not None:
+            run.status = "error"
+            run.retryable = False
+            run.error_code = "DELIVERY_RESULT_UNKNOWN"
+            run.error_message = str(exc)
+            run.next_action_at = None
+            run.updated_at = utc_now()
+            if run.trigger_type == "scheduled":
+                run.schedule.last_status = "error"
+                run.schedule.last_error_at = utc_now()
+                run.schedule.last_error_message = (
+                    "SMTP delivery result is unknown; automatic retry is disabled."
+                )
         db.commit()
         raise
 
     delivery.status = "success"
     delivery.error_message = None
     delivery.sent_at = utc_now()
-    delivery.result_json = _to_json({"status": "success", **result})
+    delivery.result_json = _to_json(
+        {"status": "success", "message_id": delivery.message_id, **result}
+    )
     delivery.updated_at = utc_now()
+    if run is not None:
+        run.status = "success"
+        run.retryable = False
+        run.error_code = None
+        run.error_message = None
+        run.next_action_at = None
+        run.sent_at = delivery.sent_at
+        run.updated_at = utc_now()
+        if run.trigger_type == "scheduled":
+            run.schedule.last_status = "success"
+            run.schedule.last_sent_at = delivery.sent_at
+            run.schedule.last_success_at = delivery.sent_at
+            run.schedule.last_error_at = None
+            run.schedule.last_error_message = None
+            run.schedule.updated_at = utc_now()
     db.commit()
     db.refresh(delivery)
     return serialize_delivery(delivery)
 
 
 def list_schedules(db: Session, *, enabled: bool | None = None) -> list[dict[str, Any]]:
-    query = db.query(DispatchSchedule)
+    query = db.query(DispatchSchedule).filter(DispatchSchedule.archived_at.is_(None))
     if enabled is not None:
         query = query.filter(DispatchSchedule.enabled.is_(enabled))
     rows = query.order_by(
@@ -620,6 +753,8 @@ def _schedule_request_from_schedule(schedule: DispatchSchedule) -> DispatchSendR
 
 
 def create_schedule(db: Session, payload: DispatchScheduleCreate) -> dict[str, Any]:
+    from app.dispatch import schedule_runs
+
     get_recipient_group(db=db, group_id=payload.recipient_group_id)
     send_time = _normalize_send_time(payload.send_time)
     day_of_week = _normalize_day_of_week(payload.day_of_week)
@@ -637,8 +772,26 @@ def create_schedule(db: Session, payload: DispatchScheduleCreate) -> dict[str, A
         scope_type=request.scope_type,
         scope_id=None if request.scope_id is None else str(request.scope_id),
         request_json=_to_json(_preview_request_dict(request)) or "{}",
+        calendar_mode=payload.calendar_mode,
+        catchup_mode=payload.catchup_mode,
+        misfire_policy=payload.misfire_policy,
+        misfire_grace_minutes=payload.misfire_grace_minutes,
+        max_retries=payload.max_retries,
+        retry_interval_seconds=payload.retry_interval_seconds,
+        readiness_profile=payload.readiness_profile,
+        readiness_policy=payload.readiness_policy,
+        readiness_deadline_minutes=payload.readiness_deadline_minutes,
+        readiness_retry_interval_seconds=payload.readiness_retry_interval_seconds,
+        last_status="never_run",
     )
     db.add(schedule)
+    db.flush()
+    next_run = schedule_runs.compute_schedule_next_run(
+        schedule,
+        after=utc_now(),
+        inclusive=True,
+    )
+    schedule.next_run_at = utc_db_value(next_run) if next_run else None
     db.commit()
     db.refresh(schedule)
     return serialize_schedule(schedule)
@@ -649,6 +802,8 @@ def update_schedule(
     schedule_id: int,
     payload: DispatchScheduleUpdate,
 ) -> dict[str, Any]:
+    from app.dispatch import schedule_runs
+
     schedule = get_schedule(db=db, schedule_id=schedule_id)
     update_data = payload.model_dump(exclude_unset=True)
 
@@ -667,6 +822,20 @@ def update_schedule(
         schedule.day_of_week = _normalize_day_of_week(str(update_data["day_of_week"]))
     if "timezone" in update_data and update_data["timezone"] is not None:
         schedule.timezone = _normalize_timezone(str(update_data["timezone"]))
+    for field in (
+        "calendar_mode",
+        "catchup_mode",
+        "misfire_policy",
+        "misfire_grace_minutes",
+        "max_retries",
+        "retry_interval_seconds",
+        "readiness_profile",
+        "readiness_policy",
+        "readiness_deadline_minutes",
+        "readiness_retry_interval_seconds",
+    ):
+        if field in update_data and update_data[field] is not None:
+            setattr(schedule, field, update_data[field])
 
     request_data = _from_json(schedule.request_json) or {}
     for field in PREVIEW_REQUEST_FIELDS:
@@ -678,6 +847,19 @@ def update_schedule(
     schedule.scope_type = request.scope_type
     schedule.scope_id = None if request.scope_id is None else str(request.scope_id)
     schedule.request_json = _to_json(_preview_request_dict(request)) or "{}"
+    if {
+        "enabled",
+        "send_time",
+        "day_of_week",
+        "timezone",
+        "calendar_mode",
+    }.intersection(update_data):
+        next_run = schedule_runs.compute_schedule_next_run(
+            schedule,
+            after=utc_now(),
+            inclusive=True,
+        )
+        schedule.next_run_at = utc_db_value(next_run) if next_run else None
     schedule.updated_at = utc_now()
     db.commit()
     db.refresh(schedule)
@@ -686,14 +868,410 @@ def update_schedule(
 
 def delete_schedule(db: Session, schedule_id: int) -> dict[str, Any]:
     schedule = get_schedule(db=db, schedule_id=schedule_id)
-    db.delete(schedule)
+    schedule.enabled = False
+    schedule.next_run_at = None
+    schedule.archived_at = utc_now()
+    schedule.updated_at = utc_now()
     db.commit()
     return {"id": schedule_id, "deleted": True}
 
 
+def _send_request_from_run_snapshot(snapshot: dict[str, Any]) -> DispatchSendRequest:
+    request_data = snapshot.get("request")
+    request_data = request_data if isinstance(request_data, dict) else {}
+    request = _schedule_request_from_data(request_data)
+    recipient_group = snapshot.get("recipient_group")
+    recipient_group = recipient_group if isinstance(recipient_group, dict) else {}
+    group_id = recipient_group.get("id")
+    if group_id is None:
+        raise DispatchValidationError("The schedule run snapshot has no recipient group.")
+    return DispatchSendRequest(
+        **_preview_request_dict(request),
+        recipient_group_id=int(group_id),
+    )
+
+
+def _mark_run_queue_error(
+    db: Session,
+    *,
+    run_id: int,
+    exc: Exception,
+) -> None:
+    from app.dispatch import schedule_runs
+
+    db.rollback()
+    run = schedule_runs.get_schedule_run(db, run_id)
+    run.delivery_attempt_count += 1
+    retryable = (
+        isinstance(exc, (ConnectionError, TimeoutError))
+        and run.delivery_attempt_count < run.max_delivery_attempts
+    )
+    run.status = "retry_wait" if retryable else "error"
+    run.retryable = retryable
+    run.error_code = "DELIVERY_QUEUE_TRANSIENT" if retryable else "DELIVERY_QUEUE_FAILED"
+    run.error_message = str(exc)
+    run.next_action_at = (
+        utc_db_value(
+            utc_now()
+            + timedelta(
+                seconds=max(int(run.schedule.retry_interval_seconds), 10)
+            )
+        )
+        if retryable
+        else None
+    )
+    if run.trigger_type == "scheduled":
+        run.schedule.last_status = run.status
+        run.schedule.last_error_at = utc_now()
+        run.schedule.last_error_message = str(exc)
+    run.updated_at = utc_now()
+    db.commit()
+
+
+def queue_schedule_run(
+    db: Session,
+    *,
+    run_id: int,
+    submit_task: bool = True,
+) -> dict[str, Any]:
+    from app.dispatch import schedule_runs
+    from app.dispatch.tasks import run_dispatch_schedule_run_job
+
+    run = schedule_runs.get_schedule_run(db, run_id)
+    if run.status not in {"claimed", "retry_wait"}:
+        raise DispatchValidationError(
+            f"Dispatch schedule run id={run_id} cannot be queued from status={run.status}."
+        )
+    snapshot = _from_json(run.schedule_snapshot_json)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    payload = _send_request_from_run_snapshot(snapshot)
+    recipient_snapshot = snapshot.get("recipient_group")
+    recipient_snapshot = recipient_snapshot if isinstance(recipient_snapshot, dict) else {}
+    recipients = recipient_snapshot.get("recipients")
+    recipient_list = recipients if isinstance(recipients, list) else []
+    recipient_group = (
+        db.query(DispatchRecipientGroup)
+        .filter(DispatchRecipientGroup.id == payload.recipient_group_id)
+        .first()
+    )
+
+    try:
+        preview = build_preview(db=db, payload=payload)
+        delivery = create_delivery(
+            db=db,
+            payload=payload,
+            preview=preview,
+            recipient_group=recipient_group,
+            recipients_override=recipient_list,
+            commit=False,
+        )
+        job = job_service.create_job_record(
+            db=db,
+            job_type="dispatch.mail_delivery",
+            target=str(delivery.id),
+            request={"delivery_id": delivery.id, "schedule_run_id": run.id},
+            progress_total=1,
+            message="Queued scheduled mail dispatch.",
+        )
+        db.flush()
+        delivery.job_run_id = job.id
+        run.delivery_id = delivery.id
+        run.job_run_id = job.id
+        run.delivery_attempt_count += 1
+        run.status = "queued"
+        run.queued_at = utc_now()
+        run.next_action_at = None
+        run.retryable = False
+        run.error_code = None
+        run.error_message = None
+        run.updated_at = utc_now()
+        if run.trigger_type == "scheduled":
+            schedule = run.schedule
+            schedule.last_run_key = run.scheduled_slot_key
+            schedule.last_run_at = utc_now()
+            schedule.last_queued_at = utc_now()
+            schedule.last_status = "queued"
+            schedule.last_error_at = None
+            schedule.last_error_message = None
+            schedule.last_delivery_id = delivery.id
+            schedule.last_job_run_id = job.id
+            schedule.updated_at = utc_now()
+        db.commit()
+        db.refresh(delivery)
+        db.refresh(job)
+        db.refresh(run)
+    except Exception as exc:
+        _mark_run_queue_error(db, run_id=run_id, exc=exc)
+        raise
+
+    if submit_task:
+        try:
+            job_service.submit_job_task(
+                run_dispatch_schedule_run_job,
+                job.id,
+                run.id,
+                delivery.id,
+            )
+        except Exception as exc:
+            job_service.fail_job(db, job.id, error_message=f"Failed to submit job: {exc}")
+            run = schedule_runs.get_schedule_run(db, run.id)
+            can_retry = run.delivery_attempt_count < run.max_delivery_attempts
+            run.status = "retry_wait" if can_retry else "error"
+            run.retryable = can_retry
+            run.error_code = "JOB_SUBMIT_FAILED" if can_retry else "DELIVERY_RETRY_EXHAUSTED"
+            run.error_message = str(exc)
+            run.next_action_at = (
+                utc_db_value(
+                    utc_now()
+                    + timedelta(
+                        seconds=max(int(run.schedule.retry_interval_seconds), 10)
+                    )
+                )
+                if can_retry
+                else None
+            )
+            run.updated_at = utc_now()
+            db.commit()
+
+    return {
+        "status": run.status,
+        "run": schedule_runs.serialize_run(run),
+        "schedule": serialize_schedule(run.schedule),
+        "job": job_service.serialize_job(job),
+        "delivery": serialize_delivery(delivery),
+    }
+
+
+def process_schedule_run(
+    db: Session,
+    *,
+    run_id: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    from app.dispatch import schedule_runs
+
+    readiness = schedule_runs.evaluate_run_readiness(db, run_id=run_id, now=now)
+    if readiness["action"] == "queue":
+        return queue_schedule_run(db, run_id=run_id)
+    return {
+        "status": readiness["run"]["status"],
+        "run": readiness["run"],
+    }
+
+
+def _resubmit_queued_schedule_run(db: Session, *, run: DispatchScheduleRun) -> dict[str, Any]:
+    from app.dispatch import schedule_runs
+    from app.dispatch.tasks import run_dispatch_schedule_run_job
+
+    if run.delivery is None or run.delivery.status not in {"queued", "error"}:
+        raise DispatchValidationError(
+            f"Dispatch schedule run id={run.id} has no safely resubmittable delivery."
+        )
+    if run.delivery_attempt_count >= run.max_delivery_attempts:
+        run.status = "error"
+        run.retryable = False
+        run.error_code = "DELIVERY_RETRY_EXHAUSTED"
+        run.error_message = "The configured delivery retry limit was exhausted before SMTP started."
+        run.next_action_at = None
+        run.updated_at = utc_now()
+        db.commit()
+        raise DispatchValidationError(run.error_message)
+    delivery = run.delivery
+    job = job_service.create_job_record(
+        db=db,
+        job_type="dispatch.mail_delivery",
+        target=str(delivery.id),
+        request={"delivery_id": delivery.id, "schedule_run_id": run.id, "resubmitted": True},
+        progress_total=1,
+        message="Requeued scheduled mail dispatch after interrupted handoff.",
+    )
+    db.flush()
+    delivery.status = "queued"
+    delivery.error_message = None
+    delivery.job_run_id = job.id
+    delivery.updated_at = utc_now()
+    run.job_run_id = job.id
+    run.delivery_attempt_count += 1
+    run.status = "queued"
+    run.queued_at = utc_now()
+    run.next_action_at = None
+    run.retryable = False
+    run.error_code = None
+    run.error_message = None
+    run.updated_at = utc_now()
+    if run.trigger_type == "scheduled":
+        run.schedule.last_status = "queued"
+        run.schedule.last_queued_at = utc_now()
+        run.schedule.last_job_run_id = job.id
+        run.schedule.updated_at = utc_now()
+    db.commit()
+    db.refresh(job)
+    try:
+        job_service.submit_job_task(
+            run_dispatch_schedule_run_job,
+            job.id,
+            run.id,
+            delivery.id,
+        )
+    except Exception as exc:
+        job_service.fail_job(db, job.id, error_message=f"Failed to submit job: {exc}")
+        run = schedule_runs.get_schedule_run(db, run.id)
+        can_retry = run.delivery_attempt_count < run.max_delivery_attempts
+        run.status = "retry_wait" if can_retry else "error"
+        run.retryable = can_retry
+        run.error_code = "JOB_SUBMIT_FAILED" if can_retry else "DELIVERY_RETRY_EXHAUSTED"
+        run.error_message = str(exc)
+        run.next_action_at = (
+            utc_db_value(
+                utc_now() + timedelta(seconds=max(int(run.schedule.retry_interval_seconds), 10))
+            )
+            if can_retry
+            else None
+        )
+        run.updated_at = utc_now()
+        db.commit()
+    return {
+        "status": run.status,
+        "run": schedule_runs.serialize_run(run),
+        "job": job_service.serialize_job(job),
+        "delivery": serialize_delivery(delivery),
+    }
+
+
+def reconcile_schedule_runs(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    from app.dispatch import schedule_runs
+
+    current = now or utc_now()
+    current_db = utc_db_value(current)
+    stale_before = utc_db_value(
+        current - timedelta(minutes=max(int(settings.scheduler_dispatch_stale_claim_minutes), 1))
+    )
+    reconcile_limit = max(int(limit or settings.scheduler_dispatch_claim_limit), 1)
+    actionable = (
+        db.query(DispatchScheduleRun)
+        .filter(
+            DispatchScheduleRun.status.in_({"claimed", "waiting_data", "retry_wait"}),
+            DispatchScheduleRun.next_action_at.isnot(None),
+            DispatchScheduleRun.next_action_at <= current_db,
+        )
+        .order_by(DispatchScheduleRun.next_action_at.asc(), DispatchScheduleRun.id.asc())
+        .limit(reconcile_limit)
+        .all()
+    )
+    stale = (
+        db.query(DispatchScheduleRun)
+        .filter(
+            DispatchScheduleRun.status.in_({"queued", "sending"}),
+            DispatchScheduleRun.updated_at <= stale_before,
+        )
+        .order_by(DispatchScheduleRun.updated_at.asc(), DispatchScheduleRun.id.asc())
+        .limit(reconcile_limit)
+        .all()
+    )
+    processed: list[int] = []
+    recovered: list[int] = []
+    unknown: list[int] = []
+    errors: list[dict[str, Any]] = []
+
+    for run in stale:
+        if run.status == "sending":
+            run.status = "error"
+            run.retryable = False
+            run.error_code = "DELIVERY_RESULT_UNKNOWN_AFTER_RESTART"
+            run.error_message = (
+                "The process stopped while SMTP delivery was in progress; automatic retry is disabled."
+            )
+            run.next_action_at = None
+            if run.delivery is not None:
+                run.delivery.status = "unknown"
+                run.delivery.error_message = run.error_message
+                run.delivery.updated_at = utc_now()
+            if run.trigger_type == "scheduled":
+                run.schedule.last_status = "error"
+                run.schedule.last_error_at = utc_now()
+                run.schedule.last_error_message = run.error_message
+            run.updated_at = utc_now()
+            db.commit()
+            unknown.append(run.id)
+            continue
+
+        job = run.job_run
+        if run.delivery is not None and run.delivery.status == "success":
+            run.status = "success"
+            run.sent_at = run.delivery.sent_at
+            run.retryable = False
+            run.error_code = None
+            run.error_message = None
+            run.updated_at = utc_now()
+            if run.trigger_type == "scheduled":
+                run.schedule.last_status = "success"
+                run.schedule.last_sent_at = run.delivery.sent_at
+                run.schedule.last_success_at = run.delivery.sent_at
+            db.commit()
+            recovered.append(run.id)
+        elif job is None or job.status == "error":
+            run.status = "retry_wait"
+            run.retryable = True
+            run.error_code = "JOB_INTERRUPTED_BEFORE_SMTP"
+            run.error_message = "The queued worker was interrupted before SMTP delivery started."
+            run.next_action_at = current_db
+            run.updated_at = utc_now()
+            db.commit()
+            actionable.append(run)
+
+    seen: set[int] = set()
+    for listed_run in actionable:
+        if listed_run.id in seen:
+            continue
+        seen.add(listed_run.id)
+        try:
+            run = schedule_runs.get_schedule_run(db, listed_run.id)
+            if run.status == "retry_wait" and run.delivery_id is not None:
+                _resubmit_queued_schedule_run(db, run=run)
+                recovered.append(run.id)
+            else:
+                if run.status == "retry_wait":
+                    run.status = "claimed"
+                    run.next_action_at = current_db
+                    run.updated_at = utc_now()
+                    db.commit()
+                process_schedule_run(db, run_id=run.id, now=current)
+                processed.append(run.id)
+        except Exception as exc:
+            errors.append({"run_id": listed_run.id, "error_message": str(exc)})
+
+    return {
+        "status": "success" if not errors else "partial_success",
+        "processed_count": len(processed),
+        "recovered_count": len(recovered),
+        "unknown_count": len(unknown),
+        "error_count": len(errors),
+        "processed_run_ids": processed,
+        "recovered_run_ids": recovered,
+        "unknown_run_ids": unknown,
+        "errors": errors,
+    }
+
+
 def run_schedule_now(db: Session, schedule_id: int) -> dict[str, Any]:
+    if not settings.dispatch_scheduler_v2_enabled:
+        schedule = get_schedule(db=db, schedule_id=schedule_id)
+        return _trigger_schedule(db=db, schedule=schedule, run_key=f"manual:{utc_now().isoformat()}")
+
+    from app.dispatch import schedule_runs
+
     schedule = get_schedule(db=db, schedule_id=schedule_id)
-    return _trigger_schedule(db=db, schedule=schedule, run_key=f"manual:{utc_now().isoformat()}")
+    run = schedule_runs.create_manual_run(
+        db,
+        schedule=schedule,
+        force_immediate=True,
+    )
+    return process_schedule_run(db, run_id=run.id)
 
 
 def _mark_schedule_error(
@@ -750,6 +1328,48 @@ def _trigger_schedule(
 
 
 def enqueue_due_schedules(db: Session, *, now: datetime | None = None) -> dict[str, Any]:
+    if settings.dispatch_scheduler_v2_enabled:
+        from app.dispatch import schedule_runs
+
+        claim = schedule_runs.claim_due_schedule_runs(db, now=now)
+        queued: list[dict[str, Any]] = []
+        waiting: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = list(claim.get("errors") or [])
+        for run_id in claim["claimed_run_ids"]:
+            try:
+                result = process_schedule_run(db, run_id=run_id, now=now)
+                if result["status"] in {"queued", "retry_wait"} and result.get("delivery"):
+                    queued.append(
+                        {
+                            "schedule_id": result["run"]["schedule_id"],
+                            "run_id": run_id,
+                            "run_key": result["run"].get("scheduled_slot_key"),
+                            "delivery_id": result["delivery"]["id"],
+                            "job_run_id": result["job"]["id"],
+                        }
+                    )
+                elif result["status"] == "waiting_data":
+                    waiting.append(
+                        {
+                            "schedule_id": result["run"]["schedule_id"],
+                            "run_id": run_id,
+                        }
+                    )
+            except Exception as exc:
+                errors.append({"run_id": run_id, "error_message": str(exc)})
+        return {
+            "status": "success" if not errors else "partial_success",
+            "checked_count": claim["checked_count"],
+            "queued_count": len(queued),
+            "waiting_count": len(waiting),
+            "skipped_count": claim["skipped_count"],
+            "error_count": len(errors),
+            "conflict_count": claim["conflict_count"],
+            "queued": queued,
+            "waiting": waiting,
+            "errors": errors,
+        }
+
     schedules = db.query(DispatchSchedule).filter(DispatchSchedule.enabled.is_(True)).all()
     queued: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []

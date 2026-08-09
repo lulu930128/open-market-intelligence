@@ -135,6 +135,33 @@ class MarketCalendarStatusTests(unittest.TestCase):
         self.assertTrue(auction["session"]["is_polling_window"])
         self.assertEqual(closed["phase"], "post_close")
 
+    def test_taiwan_status_exposes_0800_presentation_rollover(self) -> None:
+        timezone = ZoneInfo("Asia/Taipei")
+        before = build_taiwan_calendar_status(
+            now=datetime(2026, 6, 30, 7, 59, 59, tzinfo=timezone),
+        )
+        after = build_taiwan_calendar_status(
+            now=datetime(2026, 6, 30, 8, 0, 0, tzinfo=timezone),
+        )
+
+        self.assertEqual(
+            before["presentation_session"]["trade_date"],
+            "2026-06-29",
+        )
+        self.assertEqual(
+            before["presentation_session"]["state"],
+            "previous_session",
+        )
+        self.assertEqual(
+            after["presentation_session"]["trade_date"],
+            "2026-06-30",
+        )
+        self.assertEqual(after["presentation_session"]["state"], "today_pending")
+        self.assertEqual(
+            after["presentation_session"]["next_transition_at"],
+            "2026-06-30T08:30:00+08:00",
+        )
+
     def test_us_status_reports_holiday_and_next_trading_day(self) -> None:
         timezone = ZoneInfo("America/New_York")
 

@@ -54,11 +54,14 @@ class SmtpMailSender:
         subject: str,
         body_text: str,
         body_html: str,
+        message_id: str | None = None,
     ) -> EmailMessage:
         message = EmailMessage()
         message["From"] = formataddr((self.from_name, self.from_email))
         message["To"] = recipient
         message["Subject"] = subject
+        if message_id:
+            message["Message-ID"] = message_id
         message.set_content(body_text)
         message.add_alternative(body_html, subtype="html")
         return message
@@ -70,7 +73,8 @@ class SmtpMailSender:
         subject: str,
         body_text: str,
         body_html: str,
-    ) -> dict[str, int]:
+        message_id: str | None = None,
+    ) -> dict[str, int | str]:
         recipient_list = [recipient.strip() for recipient in recipients if recipient.strip()]
         if not recipient_list:
             raise ValueError("No recipients configured for dispatch.")
@@ -91,8 +95,15 @@ class SmtpMailSender:
                         subject=subject,
                         body_text=body_text,
                         body_html=body_html,
+                        message_id=message_id,
                     )
                 )
                 sent_count += 1
 
-        return {"sent_count": sent_count, "requested_count": len(recipient_list)}
+        result: dict[str, int | str] = {
+            "sent_count": sent_count,
+            "requested_count": len(recipient_list),
+        }
+        if message_id:
+            result["message_id"] = message_id
+        return result

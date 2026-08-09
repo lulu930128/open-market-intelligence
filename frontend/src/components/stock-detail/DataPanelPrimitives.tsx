@@ -8,6 +8,8 @@ import {
 import type { DataPanelTab } from "@/components/stock-detail/stockDetailTypes";
 import type { ReactNode } from "react";
 
+export type DataPanelSurfaceTab = DataPanelTab | "etf";
+
 export function MetricRow({
   label,
   value,
@@ -40,7 +42,18 @@ export function ChipMetricBlock({
   );
 }
 
-export function DataTabIcon({ type }: { type: DataPanelTab }) {
+export function DataTabIcon({ type }: { type: DataPanelSurfaceTab }) {
+  if (type === "etf") {
+    return (
+      <svg viewBox="0 0 20 20" className="h-5 w-5" aria-hidden="true">
+        <path
+          d="M3 3h14v4H3V3Zm0 5h6v4H3V8Zm7 0h7v4h-7V8ZM3 13h14v4H3v-4Z"
+          fill="currentColor"
+        />
+      </svg>
+    );
+  }
+
   if (type === "institutional") {
     return (
       <svg viewBox="0 0 20 20" className="h-5 w-5" aria-hidden="true">
@@ -100,17 +113,19 @@ export function DataTabButton({
   active,
   onClick,
 }: {
-  tab: { key: DataPanelTab; label: string };
+  tab: { key: DataPanelSurfaceTab; label: string };
   active: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       data-data-tab={tab.key}
       onClick={onClick}
       className={[
-        "omi-data-tab flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-omi-border-subtle text-sm font-semibold transition last:border-r-0",
+        "omi-data-tab flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-omi-border-subtle text-sm font-semibold transition last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-omi-accent",
         active
           ? "omi-data-tab-active bg-omi-surface text-omi-text-strong"
           : "bg-omi-surface-subtle text-omi-text-muted hover:bg-omi-surface hover:text-omi-text",

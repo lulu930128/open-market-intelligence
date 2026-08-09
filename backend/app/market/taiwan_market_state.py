@@ -8,7 +8,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import TaiwanMarketMinuteState, utc_now
-from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import (
+    TAIWAN_TZ,
+    normalize_taiwan_session_phase,
+    taiwan_market_session_phase,
+)
 
 
 SUPPORTED_MARKETS = {"TWSE", "TPEX"}
@@ -145,6 +149,82 @@ def _trade_value_quality_status(
     return "estimated" if is_estimate else "ready"
 
 
+def _eligible_session_trade_value(
+    *,
+    item: dict[str, Any],
+    breadth: dict[str, Any],
+    trade_date: date,
+    finalized: bool,
+    minute_at: datetime,
+) -> dict[str, Any]:
+    raw_phase = breadth.get("market_session") or "unknown"
+    session_phase = normalize_taiwan_session_phase(raw_phase)
+    if session_phase == "unknown":
+        session_phase = taiwan_market_session_phase(minute_at)
+    if session_phase in {"preopen", "preopen_pending"}:
+        return {
+            "value": None,
+            "is_estimate": False,
+            "semantics": None,
+            "confidence": None,
+            "source": None,
+            "reason": "preopen_has_no_actual_session_trade_value",
+        }
+
+    breadth_value = _as_int(breadth.get("trade_value"))
+    if breadth_value is not None:
+        is_estimate = bool(breadth.get("trade_value_is_estimate"))
+        return {
+            "value": breadth_value,
+            "is_estimate": is_estimate,
+            "semantics": breadth.get("trade_value_semantics")
+            or (
+                "estimated_cumulative_trade_value"
+                if is_estimate
+                else "official_cumulative_trade_value"
+            ),
+            "confidence": breadth.get("trade_value_confidence")
+            or ("medium" if is_estimate else "high"),
+            "source": "breadth",
+            "reason": None,
+        }
+
+    item_trade_date = _as_trade_date(item.get("time") or item.get("trade_date"))
+    item_value = _as_int(item.get("trade_value"))
+    if (
+        item_value is not None
+        and item_trade_date == trade_date
+        and (
+            finalized
+            or session_phase in {"regular", "closing_auction", "post_close"}
+        )
+    ):
+        is_estimate = bool(item.get("trade_value_is_estimate"))
+        return {
+            "value": item_value,
+            "is_estimate": is_estimate,
+            "semantics": item.get("trade_value_semantics")
+            or (
+                "estimated_cumulative_trade_value"
+                if is_estimate
+                else "official_cumulative_trade_value"
+            ),
+            "confidence": item.get("trade_value_confidence")
+            or ("medium" if is_estimate else "high"),
+            "source": "market_index_summary",
+            "reason": None,
+        }
+
+    return {
+        "value": None,
+        "is_estimate": False,
+        "semantics": None,
+        "confidence": None,
+        "source": None,
+        "reason": "current_session_trade_value_unavailable",
+    }
+
+
 def persist_taiwan_market_minute_state(
     db: Session,
     *,
@@ -190,11 +270,26 @@ def persist_taiwan_market_minute_state(
         )
         raw_quality_status = str(breadth_status.get("status") or "unknown")
         breadth_scope = str(breadth.get("scope") or "") or None
-        cumulative_trade_value = _as_int(
-            breadth.get("trade_value")
-            if breadth.get("trade_value") is not None
-            else item.get("trade_value")
+        breadth_session_phase = str(
+            breadth.get("market_session") or "unknown"
         )
+        breadth_contract_version = str(
+            breadth.get("version") or "legacy_unverified"
+        )
+        breadth_decision_usable = bool(breadth.get("decision_usable"))
+        breadth_is_provisional = bool(
+            breadth.get("is_provisional")
+            if breadth.get("is_provisional") is not None
+            else not finalized
+        )
+        trade_value_contract = _eligible_session_trade_value(
+            item=item,
+            breadth=breadth,
+            trade_date=trade_date,
+            finalized=finalized,
+            minute_at=minute_at,
+        )
+        cumulative_trade_value = trade_value_contract["value"]
         existing = (
             db.query(TaiwanMarketMinuteState)
             .filter(TaiwanMarketMinuteState.market == market)
@@ -242,11 +337,7 @@ def persist_taiwan_market_minute_state(
         quote_quality_status = (
             "ready" if _as_float(item.get("close")) is not None else "missing"
         )
-        trade_value_is_estimate = bool(
-            breadth.get("trade_value_is_estimate")
-            if breadth.get("trade_value_is_estimate") is not None
-            else item.get("trade_value_is_estimate")
-        )
+        trade_value_is_estimate = bool(trade_value_contract["is_estimate"])
         trade_value_quality_status = _trade_value_quality_status(
             cumulative_trade_value=cumulative_trade_value,
             previous_trade_value=previous_trade_value,
@@ -287,6 +378,22 @@ def persist_taiwan_market_minute_state(
             "trade_date": trade_date,
             "minute_at": minute_at,
             "session_status": session_status,
+            "breadth_session_phase": breadth_session_phase,
+            "breadth_contract_version": breadth_contract_version,
+            "breadth_decision_usable": breadth_decision_usable,
+            "breadth_is_provisional": breadth_is_provisional,
+            "breadth_snapshot_as_of": _as_taiwan_datetime(
+                breadth.get("snapshot_as_of") or breadth.get("as_of"),
+                naive_is_local=True,
+            ),
+            "breadth_oldest_price_as_of": _as_taiwan_datetime(
+                breadth.get("oldest_price_as_of"),
+                naive_is_local=True,
+            ),
+            "breadth_newest_price_as_of": _as_taiwan_datetime(
+                breadth.get("newest_price_as_of"),
+                naive_is_local=True,
+            ),
             "quote_quality_status": quote_quality_status,
             "breadth_status": breadth_quality_status,
             "breadth_scope": breadth_scope,
@@ -305,26 +412,8 @@ def persist_taiwan_market_minute_state(
             "missing_count": _as_int(breadth.get("missing_count")),
             "cumulative_trade_value": cumulative_trade_value,
             "estimated_full_day_trade_value": _as_int(item.get("estimated_trade_value")),
-            "trade_value_semantics": (
-                breadth.get("trade_value_semantics")
-                or item.get("trade_value_semantics")
-                or (
-                    "official_cumulative_trade_value"
-                    if cumulative_trade_value is not None
-                    and not trade_value_is_estimate
-                    else None
-                )
-            ),
-            "trade_value_confidence": (
-                breadth.get("trade_value_confidence")
-                or item.get("trade_value_confidence")
-                or (
-                    "high"
-                    if cumulative_trade_value is not None
-                    and not trade_value_is_estimate
-                    else None
-                )
-            ),
+            "trade_value_semantics": trade_value_contract["semantics"],
+            "trade_value_confidence": trade_value_contract["confidence"],
             "trade_value_is_estimate": trade_value_is_estimate,
             "source": str(breadth.get("source") or item.get("source") or "unknown"),
             "source_category": "official_public" if official_flag else "normalized_cache",
@@ -349,6 +438,9 @@ def persist_taiwan_market_minute_state(
                 "trade_date": trade_date.isoformat(),
                 "minute_at": minute_at.isoformat(),
                 "session_status": session_status,
+                "breadth_session_phase": breadth_session_phase,
+                "breadth_contract_version": breadth_contract_version,
+                "breadth_decision_usable": breadth_decision_usable,
                 "quote_quality_status": quote_quality_status,
                 "breadth_status": breadth_quality_status,
                 "trade_value_quality_status": trade_value_quality_status,

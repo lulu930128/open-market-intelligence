@@ -24,6 +24,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             patch("app.runtime.run_database_migrations") as run_migrations,
             patch("app.runtime.SessionLocal", return_value=fake_db),
             patch("app.runtime.job_service.mark_interrupted_jobs", return_value=2) as mark_interrupted,
+            patch.object(RuntimeCoordinator, "_reconcile_dispatch_runs") as reconcile_dispatch,
             patch("app.runtime.job_scheduler.start_scheduler", return_value="scheduler") as start_scheduler,
             patch("app.runtime.start_crypto_auto_refresh", new=AsyncMock()) as start_auto_refresh,
             patch(
@@ -48,6 +49,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         run_migrations.assert_called_once_with()
         background_lock.acquire.assert_called_once_with(timeout_seconds=0)
         mark_interrupted.assert_called_once_with(fake_db)
+        reconcile_dispatch.assert_called_once_with()
         fake_db.close.assert_called_once_with()
         start_scheduler.assert_called_once_with()
         start_auto_refresh.assert_awaited_once_with()
@@ -138,6 +140,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             patch("app.runtime.run_database_migrations"),
             patch("app.runtime.SessionLocal", return_value=fake_db),
             patch("app.runtime.job_service.mark_interrupted_jobs", return_value=0),
+            patch.object(RuntimeCoordinator, "_reconcile_dispatch_runs"),
             patch("app.runtime.job_scheduler.start_scheduler", return_value="scheduler"),
             patch("app.runtime.start_crypto_auto_refresh", new=AsyncMock()),
             patch(

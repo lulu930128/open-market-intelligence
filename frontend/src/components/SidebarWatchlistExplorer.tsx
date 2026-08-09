@@ -57,7 +57,12 @@ type Props = {
   selectedCryptoInstrumentKey?: string | null;
   selectedResourceInstrumentKey?: string | null;
   onSelectGroup: (group: WatchlistGroupNode | null) => void;
-  onSelectStock: (stockId: string, stockName: string | null) => void;
+  onSelectStock: (
+    stockId: string,
+    stockName: string | null,
+    market?: string | null,
+    instrumentType?: string | null
+  ) => void;
   onSelectFutures?: (symbol: string) => void;
   onSelectCryptoInstrument?: (base: CryptoBaseAsset, instrumentKey: string) => void;
   onSelectResourceInstrument?: (instrument: ResourceMarketInstrument) => void;
@@ -1987,14 +1992,24 @@ export default function SidebarWatchlistExplorer({
                   onMouseDown={(event) => {
                     if (event.button !== 0) return;
                     if (item.kind === "index") {
-                      onSelectStock(item.stockId, item.stockName);
+                      onSelectStock(
+                        item.stockId,
+                        item.stockName,
+                        item.note === "TPEx" ? "TPEx" : "TWSE",
+                        "index"
+                      );
                     } else {
                       onSelectFutures?.(item.symbol);
                     }
                   }}
                   onClick={() => {
                     if (item.kind === "index") {
-                      onSelectStock(item.stockId, item.stockName);
+                      onSelectStock(
+                        item.stockId,
+                        item.stockName,
+                        item.note === "TPEx" ? "TPEx" : "TWSE",
+                        "index"
+                      );
                     } else {
                       onSelectFutures?.(item.symbol);
                     }
@@ -2115,11 +2130,21 @@ export default function SidebarWatchlistExplorer({
                     if (event.button !== 0 || isNestedInteractiveTarget(event.target)) {
                       return;
                     }
-                    onSelectStock(item.stock_id, item.stock_name);
+                    onSelectStock(
+                      item.stock_id,
+                      item.stock_name,
+                      item.market,
+                      item.instrument_type
+                    );
                   }}
                   onClick={(event) => {
                     if (isNestedInteractiveTarget(event.target)) return;
-                    onSelectStock(item.stock_id, item.stock_name);
+                    onSelectStock(
+                      item.stock_id,
+                      item.stock_name,
+                      item.market,
+                      item.instrument_type
+                    );
                   }}
                 >
                   {stockDropBefore ? (

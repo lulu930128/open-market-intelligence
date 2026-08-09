@@ -214,6 +214,15 @@ def source_health_snapshot_to_dict(
         "latest_event_status": snapshot.latest_event_status,
         "latest_event_severity": snapshot.latest_event_severity,
         "latest_event_message": snapshot.latest_event_message,
+        "latest_event_scope": "historical_provider_event",
+        "historical_latest_event_at": (
+            snapshot.latest_event_at.isoformat()
+            if snapshot.latest_event_at
+            else None
+        ),
+        "historical_latest_event_status": snapshot.latest_event_status,
+        "historical_latest_event_severity": snapshot.latest_event_severity,
+        "historical_latest_event_message": snapshot.latest_event_message,
         "recent_event_count": snapshot.recent_event_count,
         "recent_error_count": snapshot.recent_error_count,
         "consecutive_error_count": snapshot.consecutive_error_count,
@@ -453,6 +462,22 @@ def enrich_source_health_entries(
                 "latest_event_severity": latest_event.get("severity") if latest_event else None,
                 "latest_event_message": (
                     latest_event.get("error_message") or latest_event.get("message")
+                    if latest_event
+                    else None
+                ),
+                "latest_event_scope": "historical_provider_event",
+                "historical_latest_event_at": (
+                    latest_event.get("event_time") if latest_event else None
+                ),
+                "historical_latest_event_status": (
+                    latest_event.get("status") if latest_event else None
+                ),
+                "historical_latest_event_severity": (
+                    latest_event.get("severity") if latest_event else None
+                ),
+                "historical_latest_event_message": (
+                    latest_event.get("error_message")
+                    or latest_event.get("message")
                     if latest_event
                     else None
                 ),

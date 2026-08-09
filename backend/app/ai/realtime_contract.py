@@ -10,6 +10,7 @@ from app.market.calendar_status import (
     build_taiwan_calendar_status,
     build_us_calendar_status,
 )
+from app.market.trading_calendar import normalize_taiwan_session_phase
 
 
 LIVE_MAX_AGE_SECONDS = 180
@@ -33,9 +34,21 @@ OPEN_MARKET_STATUSES = {
 ACTIVE_SESSION_STATUSES = {
     "open",
     "regular",
+    "regular_live",
+    "preopen",
+    "preopen_auction",
     "pre_market",
     "after_hours",
     "closing_auction",
+}
+INTERVAL_SECONDS = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1_800,
+    "60m": 3_600,
+    "1h": 3_600,
 }
 COMPLETED_SESSION_PHASES = {
     "daily_close",
@@ -230,6 +243,48 @@ def _has_observation(value: Any, *, depth: int = 0) -> bool:
     return False
 
 
+def _interval_seconds(value: Any, *, depth: int = 0) -> int | None:
+    if depth > 6:
+        return None
+    if isinstance(value, dict):
+        for key in ("effective_interval_seconds", "interval_seconds"):
+            parsed = _first_int(value, key)
+            if parsed:
+                return parsed
+        for key in (
+            "effective_interval",
+            "interval",
+            "bar_interval",
+            "source_interval",
+        ):
+            normalized = str(value.get(key) or "").strip().casefold()
+            if normalized in INTERVAL_SECONDS:
+                return INTERVAL_SECONDS[normalized]
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                parsed = _interval_seconds(child, depth=depth + 1)
+                if parsed:
+                    return parsed
+    elif isinstance(value, list):
+        for child in value[-100:]:
+            if isinstance(child, (dict, list)):
+                parsed = _interval_seconds(child, depth=depth + 1)
+                if parsed:
+                    return parsed
+    return None
+
+
+def _is_intraday_bar_observation(value: Any, interval_seconds: int | None) -> bool:
+    if interval_seconds is None or interval_seconds >= 86_400:
+        return False
+    if not isinstance(value, dict):
+        return False
+    kind = str(value.get("kind") or "").casefold()
+    if "intraday" in kind or "bar" in kind:
+        return True
+    return any(key in value for key in ("points", "bars", "series"))
+
+
 def _age_seconds(now: datetime, observed_at: datetime | None) -> int | None:
     if observed_at is None:
         return None
@@ -359,7 +414,14 @@ def classify_observation(
         "session_phase",
         "session",
     )
+    canonical_session_phase = (
+        normalize_taiwan_session_phase(session_phase)
+        if market_key
+        in {"tw", "taiwan", "tw_stock", "tw_index", "tw_futures"}
+        else str(session_phase or "").strip().casefold().replace("-", "_")
+    )
     quote_semantics = _first_text(value, "quote_semantics")
+    instrument_phase = _first_text(value, "instrument_phase")
     explicit_status = _first_text(value, "freshness_status", "status")
     freshness_status = _freshness_text(value, "freshness_status", "status")
     explicit_live = _first_bool(value, "is_live", "is_realtime") is True
@@ -370,6 +432,11 @@ def classify_observation(
         or str(quote_semantics or "").casefold().startswith("historical_")
     )
     has_observation = _has_observation(value)
+    interval_seconds = _interval_seconds(value)
+    intraday_bar_observation = _is_intraday_bar_observation(
+        value,
+        interval_seconds,
+    )
     continuous = market_key in CONTINUOUS_MARKETS
     expected_provider_delay_seconds = (
         _first_int(value, "expected_provider_delay_seconds")
@@ -437,7 +504,7 @@ def classify_observation(
                 reason = "Continuous-market snapshot is older than the delayed window."
         else:
             normalized_market_status = str(market_status or "").casefold()
-            normalized_session_phase = str(session_phase or "").casefold()
+            normalized_session_phase = canonical_session_phase
             normalized_semantics = str(quote_semantics or "").casefold()
             market_open = (
                 normalized_market_status in OPEN_MARKET_STATUSES
@@ -478,8 +545,32 @@ def classify_observation(
                 or event_at is None
                 and explicitly_completed
             )
+            active_observation = active_session and not (
+                explicitly_completed and event_at is None
+            )
             if (
-                active_session
+                active_observation
+                and intraday_bar_observation
+                and event_age_seconds is not None
+                and event_age_seconds
+                <= max(
+                    LIVE_MAX_AGE_SECONDS,
+                    int(interval_seconds or 0)
+                    + DELAYED_EXCESS_TOLERANCE_SECONDS,
+                )
+            ):
+                state = "live"
+                observation_mode = (
+                    "current_partial_bar"
+                    if _first_bool(value, "is_partial", "bar_is_partial") is True
+                    else "current_interval_bar"
+                )
+                reason = (
+                    "Current-session intraday bar is within its interval-aware "
+                    "observation window."
+                )
+            elif (
+                active_observation
                 and (
                     explicit_live
                     or explicit_status == "live"
@@ -492,7 +583,7 @@ def classify_observation(
                 observation_mode = "live_quote"
                 reason = "Quote belongs to the active session and is within the live window."
             elif (
-                active_session
+                active_observation
                 and event_age_seconds is not None
                 and event_age_seconds <= delayed_window_seconds
             ):
@@ -502,7 +593,7 @@ def classify_observation(
                     "Active-session observation is within the declared provider "
                     "delay window."
                 )
-            elif not active_session and completed_session:
+            elif not active_observation and completed_session:
                 state = "latest_completed_session"
                 observation_mode = "session_close"
                 reason = "Market is not live; value represents the latest completed session."
@@ -532,11 +623,51 @@ def classify_observation(
     intraday_research_usable = bool(
         has_observation and state in {"live", "delayed"}
     )
+    normalized_instrument_phase = str(instrument_phase or "").casefold()
+    auction_observation = bool(
+        normalized_instrument_phase
+        in {
+            "preopen_auction",
+            "opening_auction_delayed",
+            "closing_auction",
+            "closing_auction_delayed",
+        }
+        or _first_bool(
+            value,
+            "auction_indicative_available",
+            "indicative_match_available",
+        )
+        is True
+        or "indicative" in str(quote_semantics or "").casefold()
+    )
+    explicit_actual_price_usable = _first_bool(
+        value,
+        "price_decision_usable",
+        "last_trade_available",
+        "actual_trade_price_available",
+    )
+    observed_price_available = bool(
+        isinstance(value, dict)
+        and any(
+            value.get(key) is not None
+            for key in ("last_trade_price", "last_price", "latest_price", "price")
+        )
+    )
+    actual_price_usable = bool(
+        explicit_actual_price_usable
+        if explicit_actual_price_usable is not None
+        else observed_price_available or intraday_bar_observation
+    )
     execution_grade_usable = bool(
-        state == "live" and policy_satisfied
+        state == "live"
+        and policy_satisfied
+        and actual_price_usable
+        and not auction_observation
     )
     refresh_possible_now = (
-        continuous or str(market_status).casefold() in OPEN_MARKET_STATUSES
+        continuous
+        or str(market_status).casefold() in OPEN_MARKET_STATUSES
+        or canonical_session_phase in OPEN_MARKET_STATUSES
     )
     refresh_recommended = (
         state in {"stale", "unavailable"}
@@ -570,6 +701,8 @@ def classify_observation(
             else "unusable"
         ),
         "execution_grade_usable": execution_grade_usable,
+        "price_decision_usable": actual_price_usable and not auction_observation,
+        "auction_research_usable": auction_observation and intraday_research_usable,
         "decision_usable": facts_usable and policy_satisfied,
         "refresh_recommended": refresh_recommended,
         "refresh_possible_now": refresh_possible_now,
@@ -577,6 +710,12 @@ def classify_observation(
         "market": market_name,
         "market_status": market_status,
         "session_phase": session_phase,
+        "canonical_session_phase": canonical_session_phase or None,
+        "instrument_phase": instrument_phase,
+        "observation_kind": (
+            "intraday_bar" if intraday_bar_observation else "quote_snapshot"
+        ),
+        "effective_interval_seconds": interval_seconds,
         "quote_semantics": quote_semantics,
         "is_historical": historical,
         "event_time": event_at.isoformat() if event_at else None,

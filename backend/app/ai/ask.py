@@ -119,8 +119,13 @@ def _include_tw_intraday(
     payload: AiAskRequest,
     *,
     policy: dict[str, Any] | None = None,
+    allow_persisted_cache: bool = True,
 ) -> bool:
-    return ask_execution._include_tw_intraday(payload, policy=policy)
+    return ask_execution._include_tw_intraday(
+        payload,
+        policy=policy,
+        allow_persisted_cache=allow_persisted_cache,
+    )
 
 
 _normalize_text = scope_resolution._normalize_text

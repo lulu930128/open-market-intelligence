@@ -329,6 +329,42 @@ class TaiwanMarketStateTests(unittest.TestCase):
             "missing",
         )
 
+    def test_preopen_does_not_reuse_index_daily_trade_value(self) -> None:
+        trade_date = date(2026, 8, 4)
+        as_of = datetime(2026, 8, 4, 8, 59, tzinfo=TAIWAN_TZ)
+        payload = {
+            "as_of": as_of.isoformat(),
+            "indices": [
+                {
+                    "index_id": "TAIEX",
+                    "market": "TWSE",
+                    "time": trade_date.isoformat(),
+                    "close": 23_500.0,
+                    "trade_value": 450_000_000_000,
+                    "breadth": {
+                        "market": "TWSE",
+                        "trade_date": trade_date.isoformat(),
+                        "market_session": "preopen_auction",
+                        "scope": "full_market",
+                        "advance_count": 1,
+                        "decline_count": 1,
+                        "unchanged_count": 1,
+                        "total_count": 3,
+                    },
+                    "breadth_status": {"status": "ready"},
+                }
+            ],
+        }
+
+        persist_taiwan_market_minute_state(self.db, payload=payload, now=as_of)
+
+        row = self.db.query(TaiwanMarketMinuteState).one()
+        state = read_taiwan_market_volume_state(self.db)
+        self.assertIsNone(row.cumulative_trade_value)
+        self.assertEqual(row.trade_value_quality_status, "missing")
+        self.assertIsNone(state["current_cumulative_trade_value"])
+        self.assertFalse(state["trade_value_available"])
+
 
 if __name__ == "__main__":
     unittest.main()

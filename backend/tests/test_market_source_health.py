@@ -118,6 +118,14 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         self.assertEqual(entries["market_daily_price"]["status"], "stale")
         self.assertEqual(entries["market_daily_price"]["latest_event_id"], event.id)
         self.assertEqual(entries["market_daily_price"]["latest_event_status"], "error")
+        self.assertEqual(
+            entries["market_daily_price"]["latest_event_scope"],
+            "historical_provider_event",
+        )
+        self.assertEqual(
+            entries["market_daily_price"]["historical_latest_event_status"],
+            "error",
+        )
         self.assertEqual(entries["market_daily_price"]["recent_error_count"], 1)
         self.assertEqual(entries["market_daily_price"]["expected_data_date"], "2026-06-15")
         self.assertEqual(entries["institutional_trade_daily"]["status"], "stale")
@@ -317,6 +325,97 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         )
         self.assertEqual(entries["market_intraday_bar_1m"]["status"], "current")
         self.assertEqual(entries["market_intraday_bar_1m"]["age_seconds"], 60)
+
+    def test_realtime_source_health_uses_presentation_session_before_open(self) -> None:
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+            )
+        )
+        self.db.add(
+            TaiwanStockQuoteSnapshot(
+                provider="twse_mis",
+                market="TWSE",
+                stock_id="2330",
+                stock_name="TSMC",
+                session_phase="post_close",
+                trade_date=date(2026, 8, 6),
+                quote_time=datetime(
+                    2026,
+                    8,
+                    6,
+                    13,
+                    30,
+                    tzinfo=ZoneInfo("Asia/Taipei"),
+                ),
+                source="twse_mis_stock_info",
+                fetched_at=datetime(2026, 8, 6, 5, 31, tzinfo=timezone.utc),
+            )
+        )
+        self.db.add(
+            MarketIntradayBar(
+                provider="yahoo_finance_chart",
+                stock_id="2330",
+                market="TWSE",
+                interval="1m",
+                bar_time=datetime(
+                    2026,
+                    8,
+                    6,
+                    13,
+                    30,
+                    tzinfo=ZoneInfo("Asia/Taipei"),
+                ),
+                close_price=1200.0,
+                source="yahoo_finance_chart",
+            )
+        )
+        self.db.commit()
+
+        with patch(
+            "app.market.source_health.get_market_index_summary",
+            return_value={"as_of": "2026-08-06T13:30:00+08:00", "indices": []},
+        ):
+            before_rollover = build_taiwan_source_health(
+                self.db,
+                stock_id="2330",
+                now=datetime(2026, 8, 7, 7, 59, tzinfo=ZoneInfo("Asia/Taipei")),
+            )
+            after_rollover = build_taiwan_source_health(
+                self.db,
+                stock_id="2330",
+                now=datetime(2026, 8, 7, 8, 5, tzinfo=ZoneInfo("Asia/Taipei")),
+            )
+
+        before_entries = {
+            entry["resource"]: entry for entry in before_rollover["entries"]
+        }
+        after_entries = {
+            entry["resource"]: entry for entry in after_rollover["entries"]
+        }
+        self.assertEqual(
+            before_entries["taiwan_stock_quote_snapshot"]["expected_data_date"],
+            "2026-08-06",
+        )
+        self.assertEqual(
+            before_entries["taiwan_stock_quote_snapshot"]["status"],
+            "available",
+        )
+        self.assertEqual(
+            after_entries["taiwan_stock_quote_snapshot"]["expected_data_date"],
+            "2026-08-07",
+        )
+        self.assertEqual(
+            after_entries["taiwan_stock_quote_snapshot"]["status"],
+            "pending",
+        )
+        self.assertEqual(
+            after_entries["market_intraday_bar_1m"]["status"],
+            "pending",
+        )
 
     def test_minute_state_health_is_partial_when_latest_minute_misses_tpex(self) -> None:
         minute_at = datetime(2026, 7, 22, 13, 30, tzinfo=ZoneInfo("Asia/Taipei"))

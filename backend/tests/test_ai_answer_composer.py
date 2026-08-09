@@ -155,6 +155,8 @@ class AiAnswerComposerTests(unittest.TestCase):
                 "kind": "market_brief_digest",
                 "breadth": {
                     "label": "上市全市場廣度",
+                    "status": "ready",
+                    "decision_usable": True,
                     "advance_count": 88,
                     "decline_count": 971,
                     "unchanged_count": 12,
@@ -174,6 +176,57 @@ class AiAnswerComposerTests(unittest.TestCase):
         self.assertIn("上漲 88、下跌 971", answer["text"])
         self.assertIn("跌停 84", answer["text"])
         self.assertEqual(answer["action_plan"], [])
+
+    def test_partial_market_breadth_caps_confidence_and_exposes_limit(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="market_breadth",
+            target={"type": "market", "market": "TW", "label": "台股"},
+            analysis_digest={
+                "kind": "market_brief_digest",
+                "breadth": {
+                    "status": "partial",
+                    "decision_usable": False,
+                    "scope": "mixed",
+                    "advance_count": 1_199,
+                    "decline_count": 591,
+                    "unchanged_count": 131,
+                    "unknown_count": 38,
+                },
+            },
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertEqual(answer["stance"], "insufficient_data")
+        self.assertEqual(answer["confidence"], "low")
+        self.assertIn("已覆蓋部分偏強", answer["headline"])
+        self.assertTrue(answer["data_limits"])
+        self.assertIn("decision-usable", answer["data_limits"][0])
+
+    def test_pending_market_breadth_does_not_turn_auction_into_stance(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="market_breadth",
+            target={"type": "market", "market": "TW", "label": "台股"},
+            analysis_digest={
+                "kind": "market_brief_digest",
+                "breadth": {
+                    "status": "pending",
+                    "decision_usable": False,
+                    "market_session": "preopen",
+                    "advance_count": 0,
+                    "decline_count": 0,
+                    "unchanged_count": 0,
+                },
+            },
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertEqual(answer["stance"], "insufficient_data")
+        self.assertEqual(answer["confidence"], "low")
+        self.assertIn("尚待正式開盤", answer["headline"])
+        self.assertTrue(answer["data_limits"])
+        self.assertIn("試撮參考價", answer["data_limits"][0])
 
     def test_market_breadth_answer_localizes_missing_counts_without_python_none(self) -> None:
         answer = answer_composer.build_consumer_human_answer(

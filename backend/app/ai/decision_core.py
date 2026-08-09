@@ -350,6 +350,24 @@ NEGATION_TERMS = (
     "排除",
     "without",
     "except",
+    "不做",
+    "不進行",
+    "不判斷",
+    "禁止",
+    "不用",
+    "不考慮",
+    "no ",
+)
+DECISION_CONTEXT_EXCLUSION_PATTERNS = (
+    "欄位退場",
+    "功能退場",
+    "資料退場",
+    "欄位是否退場",
+    "功能是否退場",
+    "field retirement",
+    "feature retirement",
+    "risk field",
+    "風險欄位",
 )
 MARKET_BREADTH_QUERY_HINTS = (
     "market breadth",
@@ -555,6 +573,8 @@ class QuestionUnderstanding:
     analysis_horizon_source: str
     intents: tuple[str, ...] = ()
     matched_hints: tuple[str, ...] = ()
+    raw_matched_hints: tuple[str, ...] = ()
+    negated_hints: tuple[str, ...] = ()
 
     def as_policy_payload(self) -> dict[str, object]:
         return {
@@ -565,12 +585,66 @@ class QuestionUnderstanding:
             "analysis_horizon": self.analysis_horizon,
             "analysis_horizon_source": self.analysis_horizon_source,
             "matched_hints": list(self.matched_hints),
+            "raw_matched_hints": list(self.raw_matched_hints),
+            "negated_hints": list(self.negated_hints),
         }
 
 
 def contains_hint(question: str, hints: tuple[str, ...]) -> bool:
     lowered = question.lower()
     return any(hint.lower() in lowered for hint in hints)
+
+
+def contains_non_negated_hint(
+    question: str,
+    hints: tuple[str, ...],
+    *,
+    window: int = 40,
+) -> bool:
+    lowered = question.casefold()
+    clause_separators = "，,。；;!?！？\n"
+    for hint in hints:
+        normalized_hint = hint.casefold()
+        start = 0
+        while True:
+            index = lowered.find(normalized_hint, start)
+            if index < 0:
+                break
+            context_start = max(index - window, 0)
+            context_end = min(index + len(normalized_hint) + window, len(lowered))
+            context = lowered[context_start:context_end]
+            if any(
+                pattern.casefold() in context
+                for pattern in DECISION_CONTEXT_EXCLUSION_PATTERNS
+            ) or (
+                any(marker in context for marker in ("欄位", "功能", "field", "feature"))
+                and any(marker in context for marker in ("退場", "retirement"))
+            ):
+                start = index + max(len(normalized_hint), 1)
+                continue
+            clause_start = max(
+                (lowered.rfind(separator, 0, index) for separator in clause_separators),
+                default=-1,
+            )
+            prefix = lowered[max(clause_start + 1, context_start):index]
+            negated = False
+            for negation in NEGATION_TERMS:
+                normalized_negation = negation.casefold()
+                negation_index = prefix.rfind(normalized_negation)
+                if negation_index < 0:
+                    continue
+                if (
+                    normalized_negation == "不要"
+                    and negation_index > 0
+                    and prefix[negation_index - 1] == "要"
+                ):
+                    continue
+                negated = True
+                break
+            if not negated:
+                return True
+            start = index + max(len(normalized_hint), 1)
+    return False
 
 
 def matched_hints(question: str, hints: tuple[str, ...], *, limit: int = 6) -> tuple[str, ...]:
@@ -596,7 +670,7 @@ def conversation_ui_ask_intent(conversation_context: dict[str, Any] | None) -> s
 
 
 def looks_like_analysis_request(question: str) -> bool:
-    return contains_hint(question, ANALYSIS_HINTS) or contains_hint(
+    return contains_non_negated_hint(question, ANALYSIS_HINTS) or contains_non_negated_hint(
         question,
         ("結論", "分析目前標的", "分析目前目標"),
     )
@@ -637,21 +711,24 @@ def extract_position_entry_price(question: str) -> tuple[float | None, str | Non
 
 def infer_position_context(question: str) -> PositionContext:
     entry_price, entry_price_source = extract_position_entry_price(question)
-    has_position_context = entry_price is not None or contains_hint(question, POSITION_CONTEXT_HINTS)
+    has_position_context = entry_price is not None or contains_non_negated_hint(
+        question,
+        POSITION_CONTEXT_HINTS,
+    )
 
-    if contains_hint(question, STOP_LOSS_HINTS):
+    if contains_non_negated_hint(question, STOP_LOSS_HINTS):
         decision_topic = "stop_loss"
-    elif contains_hint(question, TAKE_PROFIT_HINTS):
+    elif contains_non_negated_hint(question, TAKE_PROFIT_HINTS):
         decision_topic = "take_profit"
-    elif contains_hint(question, EXIT_ACTION_HINTS):
+    elif contains_non_negated_hint(question, EXIT_ACTION_HINTS):
         decision_topic = "exit"
-    elif contains_hint(question, HOLD_DECISION_HINTS):
+    elif contains_non_negated_hint(question, HOLD_DECISION_HINTS):
         decision_topic = "hold"
-    elif contains_hint(question, EXIT_DECISION_HINTS):
+    elif contains_non_negated_hint(question, EXIT_DECISION_HINTS):
         decision_topic = "exit"
-    elif contains_hint(question, ENTRY_DECISION_HINTS):
+    elif contains_non_negated_hint(question, ENTRY_DECISION_HINTS):
         decision_topic = "entry"
-    elif contains_hint(question, RISK_DECISION_HINTS):
+    elif contains_non_negated_hint(question, RISK_DECISION_HINTS):
         decision_topic = "risk"
     else:
         decision_topic = "position" if has_position_context else "none"
@@ -684,25 +761,9 @@ def infer_question_intent(
         return "trend_view"
     if ui_ask_intent in UI_RISK_INTENTS and looks_like_analysis_request(question):
         return "risk_check"
-    if contains_hint(question, BROKER_BRANCH_QUERY_HINTS) and not any(
-        re.search(
-            rf"{re.escape(negation)}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
-            question,
-            flags=re.IGNORECASE,
-        )
-        for negation in NEGATION_TERMS
-        for hint in BROKER_BRANCH_QUERY_HINTS
-    ):
+    if contains_non_negated_hint(question, BROKER_BRANCH_QUERY_HINTS):
         return "broker_branch"
-    if contains_hint(question, CROSS_MARKET_QUERY_HINTS) and not any(
-        re.search(
-            rf"{re.escape(negation)}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
-            question,
-            flags=re.IGNORECASE,
-        )
-        for negation in NEGATION_TERMS
-        for hint in CROSS_MARKET_QUERY_HINTS
-    ):
+    if contains_non_negated_hint(question, CROSS_MARKET_QUERY_HINTS):
         return "cross_market"
     if contains_hint(question, MARKET_BREADTH_QUERY_HINTS):
         return "market_breadth"
@@ -713,13 +774,13 @@ def infer_question_intent(
         or requested_us_trade_date(question) is not None
     ):
         return "quote"
-    if contains_hint(question, RISK_PRIORITY_HINTS):
+    if contains_non_negated_hint(question, RISK_PRIORITY_HINTS):
         return "risk_check"
-    if contains_hint(question, ENTRY_DECISION_HINTS):
+    if contains_non_negated_hint(question, ENTRY_DECISION_HINTS):
         return "entry_decision"
-    if contains_hint(question, EXIT_DECISION_HINTS):
+    if contains_non_negated_hint(question, EXIT_DECISION_HINTS):
         return "exit_decision"
-    if contains_hint(question, RISK_DECISION_HINTS):
+    if contains_non_negated_hint(question, RISK_DECISION_HINTS):
         return "risk_check"
     if contains_hint(question, TREND_VIEW_HINTS):
         return "trend_view"
@@ -759,7 +820,7 @@ def infer_question_intents(
             and not looks_like_analysis_request(question)
         ):
             continue
-        if intent != primary and contains_hint(question, hints):
+        if intent != primary and contains_non_negated_hint(question, hints):
             intents.append(intent)
     return tuple(dict.fromkeys(intents))
 
@@ -840,7 +901,7 @@ def understand_question(
         requested_horizon=requested_horizon,
         strategy_profile=strategy_profile,
     )
-    hint_matches: list[str] = []
+    raw_hint_matches: list[str] = []
     for hints in (
         ENTRY_DECISION_HINTS,
         EXIT_DECISION_HINTS,
@@ -851,10 +912,20 @@ def understand_question(
         BROKER_BRANCH_QUERY_HINTS,
         CROSS_MARKET_QUERY_HINTS,
     ):
-        hint_matches.extend(matched_hints(question, hints))
+        raw_hint_matches.extend(matched_hints(question, hints))
+
+    raw_matches = tuple(dict.fromkeys(raw_hint_matches))[:8]
+    effective_matches = tuple(
+        hint
+        for hint in raw_matches
+        if contains_non_negated_hint(question, (hint,))
+    )
+    negated_matches = tuple(
+        hint for hint in raw_matches if hint not in effective_matches
+    )
 
     confidence = "high" if intent != "general" else "medium"
-    if intent == "general" and not hint_matches:
+    if intent == "general" and not effective_matches:
         confidence = "low"
 
     return QuestionUnderstanding(
@@ -865,5 +936,7 @@ def understand_question(
         analysis_horizon=horizon,
         analysis_horizon_source=horizon_source,
         intents=intents,
-        matched_hints=tuple(dict.fromkeys(hint_matches))[:8],
+        matched_hints=effective_matches,
+        raw_matched_hints=raw_matches,
+        negated_hints=negated_matches,
     )

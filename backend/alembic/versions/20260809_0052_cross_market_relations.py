@@ -17,7 +17,7 @@ from alembic import op
 
 
 revision: str = "20260809_0052"
-down_revision: str | Sequence[str] | None = "20260731_0049"
+down_revision: str | Sequence[str] | None = "20260804_0051"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

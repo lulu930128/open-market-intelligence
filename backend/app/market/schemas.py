@@ -33,6 +33,14 @@ class MarketCalendarSessionRead(BaseModel):
     is_after_close: bool
 
 
+class MarketCalendarPresentationSessionRead(BaseModel):
+    trade_date: date
+    state: str
+    is_current_trading_day: bool
+    rollover_time: str
+    next_transition_at: datetime
+
+
 class MarketCalendarMarketStatusRead(BaseModel):
     market: str
     timezone: str
@@ -45,6 +53,7 @@ class MarketCalendarMarketStatusRead(BaseModel):
     previous_trading_day: date
     next_trading_day: date
     session: MarketCalendarSessionRead
+    presentation_session: MarketCalendarPresentationSessionRead | None = None
     release_windows: dict[str, MarketCalendarReleaseWindowRead] = Field(default_factory=dict)
     calendar_source: str | None = None
     calendar_verified_years: list[int] = Field(default_factory=list)
@@ -462,6 +471,8 @@ class MarketOhlcChartRead(BaseModel):
     points: list[MarketDailyChartRead]
     backfill: dict | None = None
     intraday_overlay: dict[str, Any] | None = None
+    data_quality: str = "ok"
+    warnings: list[str] = Field(default_factory=list)
     latest_data_date: date | None = None
     expected_data_date: date | None = None
     freshness_status: str = "missing"
@@ -496,10 +507,20 @@ class ChartDrawingSnapshotRead(BaseModel):
 
 class MarketBreadthRead(BaseModel):
     market: str
+    version: str | None = None
+    state_contract_version: str | None = None
+    status: str | None = None
+    market_session: str | None = None
+    price_semantics: str | None = None
+    decision_usable: bool = False
+    is_provisional: bool = False
     scope: str | None = None
     label: str | None = None
     trade_date: date | None = None
     as_of: datetime | None = None
+    snapshot_as_of: datetime | None = None
+    oldest_price_as_of: datetime | None = None
+    newest_price_as_of: datetime | None = None
     advance_count: int
     decline_count: int
     unchanged_count: int
@@ -508,11 +529,18 @@ class MarketBreadthRead(BaseModel):
     limit_down_count: int | None = None
     trade_value: int | None = None
     coverage_count: int | None = None
+    classified_count: int | None = None
+    coverage_ratio: float | None = None
+    universe_definition: dict[str, Any] | None = None
     unknown_count: int | None = None
     message_count: int | None = None
     missing_count: int | None = None
     warnings: list[str] = Field(default_factory=list)
     source: str | None = None
+    trade_value_is_estimate: bool = False
+    trade_value_semantics: str | None = None
+    trade_value_confidence: str | None = None
+    auction_breadth: dict[str, Any] | None = None
 
 
 class MarketBreadthStatusRead(BaseModel):
@@ -520,6 +548,8 @@ class MarketBreadthStatusRead(BaseModel):
     status: str
     scope: str | None = None
     source: str | None = None
+    market_session: str | None = None
+    decision_usable: bool = False
     reason: str | None = None
     warnings: list[str] = Field(default_factory=list)
 
@@ -731,6 +761,35 @@ class IntradayTrendPointRead(BaseModel):
     open: float | None = None
     high: float | None = None
     low: float | None = None
+    close: float | None = None
+    session: str | None = None
+    bar_type: str | None = None
+    source_event_type: str | None = None
+    market_event: str | None = None
+    finalized: bool | None = None
+    is_partial: bool | None = None
+    display_eligible: bool | None = None
+    indicator_eligible: bool | None = None
+    price_semantics: str | None = None
+    volume_status: str | None = None
+    trade_value_status: str | None = None
+
+
+class IntradayTrendCapabilitiesRead(BaseModel):
+    supports_volume: bool = True
+    supports_vwap: bool = True
+    supports_price_limit: bool = True
+    supports_quote_depth: bool = True
+
+
+class IntradayCurrentObservationRead(BaseModel):
+    value: float | None = None
+    observed_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    price_semantics: str = "unavailable"
+    provider: str | None = None
+    freshness_status: str = "unknown"
+    decision_usable: bool = False
 
 
 class IntradayTrendRead(BaseModel):
@@ -738,6 +797,20 @@ class IntradayTrendRead(BaseModel):
     symbol: str | None = None
     source: str
     source_provenance: dict[str, Any] | None = None
+    provider: str | None = None
+    price_provider: str | None = None
+    volume_provider: str | None = None
+    source_components: list[dict[str, Any]] = Field(default_factory=list)
+    interval: str | None = None
+    source_interval: str | None = None
+    effective_interval: str | None = None
+    source_point_count: int | None = None
+    trade_date: date | None = None
+    coverage_status: str | None = None
+    is_partial: bool = False
+    volume_unit: str | None = None
+    volume_semantics: str | None = None
+    warnings: list[str] = Field(default_factory=list)
     previous_close: float | None = None
     point_count: int
     trading_mode: str = "continuous"
@@ -746,6 +819,27 @@ class IntradayTrendRead(BaseModel):
     disposition_start_date: date | None = None
     disposition_end_date: date | None = None
     effective_match_count: int | None = None
+    bar_contract_version: str | None = None
+    bar_type_counts: dict[str, int] = Field(default_factory=dict)
+    partial_bar_count: int = 0
+    finalized_bar_count: int = 0
+    indicator_eligible_count: int = 0
+    post_close_summary_count: int = 0
+    history_price_source: str | None = None
+    latest_history_time: datetime | None = None
+    latest_history_price: float | None = None
+    latest_actual_trade_time: datetime | None = None
+    latest_actual_trade_price: float | None = None
+    current_price_source: str | None = None
+    lag_seconds: float | None = None
+    current_trade_available: bool = False
+    current_trade_unavailable_reason: str | None = None
+    current_price_applied_to_history: bool = False
+    capabilities: IntradayTrendCapabilitiesRead = Field(
+        default_factory=IntradayTrendCapabilitiesRead
+    )
+    current_observation: IntradayCurrentObservationRead | None = None
+    observations: list[IntradayCurrentObservationRead] = Field(default_factory=list)
     points: list[IntradayTrendPointRead]
 
 
@@ -797,6 +891,14 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     source_url: str | None = None
     exchange_channel: str | None = None
     session_phase: str
+    presentation_trade_date: date | None = None
+    presentation_session_state: str = "completed"
+    presentation_session_transition_at: datetime | None = None
+    market_calendar_phase: str = "unknown"
+    instrument_phase: str = "unknown"
+    observation_reason_code: str | None = None
+    actual_trade_reason_code: str | None = None
+    observation_semantics: str = "unavailable"
     market_status: str
     phase_label: str
     timezone: str | None = None
@@ -878,6 +980,10 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     last_trade_price: float | None = None
     last_trade_time: datetime | None = None
     last_trade_is_current_session: bool
+    actual_trade_occurred: bool = False
+    actual_trade_price_cached: bool = False
+    actual_trade_price_source: str | None = None
+    actual_trade_price_as_of: datetime | None = None
     last_trade_before_auction: bool = False
     auction_book_available: bool = False
     auction_book_status: str = "unavailable"
@@ -999,6 +1105,20 @@ class MarketIntradayChartPointRead(BaseModel):
     finalized: bool = False
 
 
+class MarketIntradayVolumeReconciliationRead(BaseModel):
+    status: str = "unavailable"
+    trade_date: date | None = None
+    exchange_cumulative_shares: int | None = None
+    bar_volume_sum_shares: int | None = None
+    difference_shares: int | None = None
+    difference_lots: float | None = None
+    difference_pct: float | None = None
+    exchange_event_time: datetime | None = None
+    bar_latest_time: datetime | None = None
+    time_skew_seconds: int | None = None
+    reason: str | None = None
+
+
 class MarketIntradayChartRead(BaseModel):
     stock_id: str
     symbol: str | None = None
@@ -1029,8 +1149,37 @@ class MarketIntradayChartRead(BaseModel):
     canonical_volume_unit: str = "shares"
     provider_volume_unit: str = "unknown"
     volume_conversion: str = "unknown"
+    volume_semantics: str = "latest_trade_date_interval_bar_sum_fallback"
+    volume_scope: str = "latest_trade_date_interval_bar_sum"
+    bar_volume_sum_shares: int | None = None
+    bar_volume_sum_lots: float | None = None
+    bar_volume_trade_date: date | None = None
+    bar_volume_latest_time: datetime | None = None
+    bar_volume_scope: str = "latest_trade_date_interval_bar_sum"
+    bar_volume_provider: str | None = None
+    window_volume_sum_shares: int | None = None
+    window_volume_sum_lots: float | None = None
+    window_volume_scope: str = "query_window_interval_bar_sum"
+    window_trade_date_count: int = 0
+    session_cumulative_volume_shares: int | None = None
+    session_cumulative_volume_lots: int | None = None
+    session_cumulative_volume_trade_date: date | None = None
+    session_cumulative_volume_source: str | None = None
+    session_cumulative_volume_source_field: str | None = None
+    session_cumulative_volume_event_time: datetime | None = None
+    session_cumulative_volume_status: str = "unavailable"
     cumulative_volume_shares: int | None = None
     cumulative_volume_lots: float | None = None
+    cumulative_volume_trade_date: date | None = None
+    cumulative_volume_source: str | None = None
+    cumulative_volume_source_field: str | None = None
+    cumulative_volume_event_time: datetime | None = None
+    cumulative_volume_status: str = "unavailable"
+    unallocated_volume_shares: int | None = None
+    unallocated_volume_lots: float | None = None
+    volume_reconciliation: MarketIntradayVolumeReconciliationRead = Field(
+        default_factory=MarketIntradayVolumeReconciliationRead
+    )
     cumulative_trade_value: int | None = None
     available_cumulative_trade_value: int | None = None
     estimated_cumulative_trade_value: int | None = None
@@ -1040,6 +1189,7 @@ class MarketIntradayChartRead(BaseModel):
     approx_vwap: float | None = None
     vwap_method: str = "unavailable"
     vwap_confidence: str = "unavailable"
+    vwap_volume_scope: str = "latest_trade_date_interval_bars"
     partial_bar_count: int = 0
     indicator_eligible_point_count: int = 0
     partial_bar_policy: str = "exclude_partial_bars_from_indicators"

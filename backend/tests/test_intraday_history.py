@@ -145,6 +145,37 @@ class MarketIntradayHistoryTests(unittest.TestCase):
         self.assertEqual(result["point_count"], 1)
         self.assertEqual(result["points"][0]["close"], 101)
 
+    def test_history_keeps_multi_day_points_but_scopes_session_metrics(self) -> None:
+        payload = {
+            "stock_id": "2330",
+            "symbol": "2330.TW",
+            "source": "yahoo_finance_chart",
+            "source_url": "https://example.test/chart",
+            "points": [
+                point(12, 0, 100, 10_000, days_ago=1),
+                point(13, 0, 100, 20_000, days_ago=1),
+                point(9, 0, 200, 1_000),
+                point(9, 1, 200, 2_000),
+            ],
+        }
+
+        with patch.object(intraday, "_fetch_yahoo_intraday", return_value=payload):
+            result = intraday.get_market_intraday_history(
+                self.db,
+                stock_id="2330",
+                interval="1m",
+                range_value="5d",
+            )
+
+        expected_trade_date = datetime.now(intraday.TAIPEI_TZ).date().isoformat()
+        self.assertEqual(result["point_count"], 4)
+        self.assertEqual(result["window_trade_date_count"], 2)
+        self.assertEqual(result["window_volume_sum_shares"], 33_000)
+        self.assertEqual(result["bar_volume_trade_date"], expected_trade_date)
+        self.assertEqual(result["bar_volume_sum_shares"], 3_000)
+        self.assertEqual(result["cumulative_volume_shares"], 3_000)
+        self.assertAlmostEqual(result["approx_vwap"], 200.0)
+
     def test_five_minute_history_overlays_current_local_one_minute_aggregate(self) -> None:
         one_minute_payload = {
             "stock_id": "2330",

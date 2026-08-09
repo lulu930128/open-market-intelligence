@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { StateSurface } from "@/components/LoadingPlaceholders";
-import type { IntradayTrendPoint } from "@/types/market";
+import type { IntradayPriceDiagnostics, IntradayTrendPoint } from "@/types/market";
 import { useT, type TranslationFunction } from "@/i18n";
 import {
   TAIWAN_SESSION_END_MINUTES,
@@ -25,6 +25,8 @@ type Props = {
   priceLimitEnabled?: boolean;
   totalVolume?: number | null;
   volumeLabel?: string;
+  priceDiagnostics?: IntradayPriceDiagnostics | null;
+  tradeDate?: string | null;
 };
 
 type IntradayInterval = 1 | 5 | 15;
@@ -152,6 +154,9 @@ function formatSource(t: TranslationFunction, value: string) {
   }
   if (value === "twse_mis_snapshot") {
     return t("stockDetail.intraday.sources.twseSnapshot");
+  }
+  if (value === "tpex_index_5s_twse_mis_snapshot") {
+    return t("stockDetail.intraday.sources.tpexIndexSnapshot");
   }
   if (value === "naver_index_time") {
     return t("stockDetail.intraday.sources.naverIndex");
@@ -425,12 +430,20 @@ function labelPosition(
 function aggregateIntradayPoints(
   points: IntradayTrendPoint[],
   interval: IntradayInterval,
-  session: IntradaySessionConfig
+  session: IntradaySessionConfig,
+  tradeDate?: string | null
 ) {
   const regularPoints = points.filter((point) => {
+    const displayEligible =
+      point.display_eligible !== null && point.display_eligible !== undefined
+        ? point.display_eligible
+        : point.indicator_eligible !== false || point.bar_type === "official_close_marker";
     return (
       validNumber(point.price) &&
-      session.isRegularSessionPoint(point.time)
+      (!tradeDate || point.time.slice(0, 10) === tradeDate) &&
+      session.isRegularSessionPoint(point.time) &&
+      point.bar_type !== "post_close_summary" &&
+      displayEligible
     );
   });
 
@@ -483,6 +496,14 @@ function aggregateIntradayPoints(
         low: lows.length > 0 ? Math.min(...lows) : last.price,
         cumulative_volume: last.cumulative_volume ?? null,
         trade_value: last.trade_value ?? null,
+        bar_type: last.bar_type,
+        source_event_type: last.source_event_type,
+        market_event: last.market_event,
+        display_eligible: true,
+        indicator_eligible: bucketPoints.every(
+          (point) => point.indicator_eligible !== false
+        ),
+        price_semantics: last.price_semantics,
       };
     });
 }
@@ -556,7 +577,8 @@ function calculateRsi(values: number[], period: number) {
 }
 
 function enrichIntradayPoints(points: IntradayTrendPoint[]): IntradayChartPoint[] {
-  const closes = points.map((point) => point.price);
+  const indicatorPoints = points.filter((point) => point.indicator_eligible !== false);
+  const closes = indicatorPoints.map((point) => point.price);
   const emaFast = calculateEma(closes, 5);
   const emaSlow = calculateEma(closes, 20);
   const rsi = calculateRsi(closes, 14);
@@ -574,7 +596,23 @@ function enrichIntradayPoints(points: IntradayTrendPoint[]): IntradayChartPoint[
   let cumulativeVolume = 0;
   let latestVwap: number | null = null;
 
-  return points.map((point, index) => {
+  let indicatorIndex = 0;
+  return points.map((point) => {
+    if (point.indicator_eligible === false) {
+      return {
+        ...point,
+        vwap: null,
+        twap: null,
+        emaFast: null,
+        emaSlow: null,
+        rsi: null,
+        macd: null,
+        macdSignal: null,
+        macdHistogram: null,
+      };
+    }
+    const index = indicatorIndex;
+    indicatorIndex += 1;
     cumulativePrice += point.price;
 
     const volume = validNumber(point.volume) && point.volume > 0 ? point.volume : 0;
@@ -670,6 +708,8 @@ export default function IntradayTrendChart({
   priceLimitEnabled = true,
   totalVolume,
   volumeLabel,
+  priceDiagnostics,
+  tradeDate,
 }: Props) {
   const chartId = useId();
   const t = useT();
@@ -682,8 +722,10 @@ export default function IntradayTrendChart({
   const revealCoverRef = useRef<HTMLDivElement | null>(null);
 
   const data = useMemo(() => {
-    return enrichIntradayPoints(aggregateIntradayPoints(points, interval, session));
-  }, [points, interval, session]);
+    return enrichIntradayPoints(
+      aggregateIntradayPoints(points, interval, session, tradeDate)
+    );
+  }, [points, interval, session, tradeDate]);
 
   const safeHoverIndex =
     hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
@@ -741,7 +783,11 @@ export default function IntradayTrendChart({
 
   if (data.length < 2) {
     return (
-      <div className="border border-omi-border-subtle bg-omi-surface p-4">
+      <div
+        className="border border-omi-border-subtle bg-omi-surface p-4"
+        data-testid="intraday-trend-empty"
+        data-rendered-point-count={data.length}
+      >
         <StateSurface
           title={t("stockDetail.intraday.insufficient")}
           tone="empty"
@@ -752,17 +798,20 @@ export default function IntradayTrendChart({
   }
 
   const width = 1000;
+  const showVolume =
+    indicators.volume &&
+    data.some((point) => validNumber(point.volume) && point.volume > 0);
   const indicatorHeight = 48;
   const indicatorGap = 14;
   const paddingLeft = 84;
   const paddingRight = 90;
   const priceTop = 30;
-  const priceHeight = 260;
+  const priceHeight = showVolume ? 260 : 300;
   const priceBottom = priceTop + priceHeight;
-  const volumeTop = 322;
-  const volumeHeight = 62;
-  const labelY = 406;
-  const lowerPanelStartTop = 428;
+  const volumeTop = showVolume ? 322 : priceBottom;
+  const volumeHeight = showVolume ? 62 : 0;
+  const labelY = showVolume ? 406 : priceBottom + 26;
+  const lowerPanelStartTop = showVolume ? 428 : labelY + 22;
   const lowerPanelKeys: Array<"rsi" | "macd"> = [];
 
   if (indicators.rsi) lowerPanelKeys.push("rsi");
@@ -784,7 +833,7 @@ export default function IntradayTrendChart({
         (lowerPanelKeys.length - 1) * (indicatorHeight + indicatorGap) +
         indicatorHeight
       : volumeTop + volumeHeight;
-  const height = lowerPanelKeys.length > 0 ? indicatorBottom + 28 : 420;
+  const height = lowerPanelKeys.length > 0 ? indicatorBottom + 28 : showVolume ? 420 : 370;
   const usableWidth = width - paddingLeft - paddingRight;
   const latestPrice = data[data.length - 1]?.price ?? null;
   const change =
@@ -1005,7 +1054,12 @@ export default function IntradayTrendChart({
   const formatVolumeValue = session.volumeFormatter ?? formatLots;
 
   return (
-    <div className="border border-omi-border-subtle bg-omi-surface">
+    <div
+      className="border border-omi-border-subtle bg-omi-surface"
+      data-testid="intraday-trend-chart"
+      data-rendered-point-count={data.length}
+      data-volume-rendered={showVolume ? "true" : "false"}
+    >
       <div className="flex min-h-16 items-start justify-between gap-4 border-b border-omi-border-subtle px-4 py-3">
         <div>
           <div className="text-sm font-semibold text-omi-text">
@@ -1026,6 +1080,27 @@ export default function IntradayTrendChart({
                   updatedAt,
                 }
               )}
+            </div>
+          ) : null}
+          {priceDiagnostics ? (
+            <div
+              className={[
+                "mt-1 text-xs",
+                priceDiagnostics.current_trade_available
+                  ? "text-omi-success-strong"
+                  : "text-omi-warning-strong",
+              ].join(" ")}
+              data-testid="intraday-current-price-status"
+            >
+              {priceDiagnostics.current_trade_available
+                ? t("stockDetail.intraday.currentTradeAvailable", {
+                    time: priceDiagnostics.latest_actual_trade_time?.slice(11, 19) ?? "-",
+                    lag: Math.round(priceDiagnostics.lag_seconds ?? 0),
+                  })
+                : t("stockDetail.intraday.currentTradeUnavailable", {
+                    reason:
+                      priceDiagnostics.current_trade_unavailable_reason ?? "UNKNOWN",
+                  })}
             </div>
           ) : null}
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1053,7 +1128,12 @@ export default function IntradayTrendChart({
           </div>
         </div>
 
-        <div className="grid shrink-0 grid-cols-2 gap-x-8 gap-y-2 text-right sm:grid-cols-4">
+        <div
+          className={[
+            "grid shrink-0 grid-cols-2 gap-x-8 gap-y-2 text-right",
+            showVolume ? "sm:grid-cols-4" : "sm:grid-cols-3",
+          ].join(" ")}
+        >
           <div>
             <span className="text-xs text-omi-text-subtle">
               {t("stockDetail.intraday.previousClose")}
@@ -1078,14 +1158,16 @@ export default function IntradayTrendChart({
               {formatPrice(rangeHigh?.value)}
             </div>
           </div>
-          <div>
-            <span className="text-xs text-omi-text-subtle">
-              {volumeLabel ?? t("stockDetail.intraday.volumeLots")}
-            </span>
-            <div className="mt-1 text-base font-bold text-omi-text">
-              {formatVolumeValue(displayedVolume)}
+          {showVolume ? (
+            <div>
+              <span className="text-xs text-omi-text-subtle">
+                {volumeLabel ?? t("stockDetail.intraday.volumeLots")}
+              </span>
+              <div className="mt-1 text-base font-bold text-omi-text">
+                {formatVolumeValue(displayedVolume)}
+              </div>
             </div>
-          </div>
+          ) : null}
         </div>
       </div>
 
@@ -1395,7 +1477,7 @@ export default function IntradayTrendChart({
           />
         </g>
 
-        {indicators.volume
+        {showVolume
           ? data.map((point, index) => {
               const volume = point.volume ?? 0;
               const volumeY = getVolumeY(volume);
@@ -1403,6 +1485,7 @@ export default function IntradayTrendChart({
 
               return (
                 <rect
+                  data-volume-bar="true"
                   key={`${point.time}-${index}`}
                   x={getPointX(point) - barWidth / 2}
                   y={volumeY}
@@ -1414,7 +1497,7 @@ export default function IntradayTrendChart({
             })
           : null}
 
-        {indicators.volume ? (
+        {showVolume ? (
           <line
             x1={paddingLeft}
             x2={chartAreaRight}

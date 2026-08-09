@@ -52,10 +52,12 @@ class FakeResponse:
 class MarketIndexDailyStatTests(unittest.TestCase):
     def setUp(self) -> None:
         indices.reset_twse_mis_breadth_guard()
+        indices._FINAL_INDEX_DAILY_OHLC_CACHE.clear()
         self.db = make_session()
 
     def tearDown(self) -> None:
         indices.reset_twse_mis_breadth_guard()
+        indices._FINAL_INDEX_DAILY_OHLC_CACHE.clear()
         self.db.close()
 
     def test_taiex_daily_ohlc_uses_persisted_official_trade_value(self) -> None:
@@ -459,6 +461,118 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(overlay["status"], "unavailable")
         self.assertEqual(overlay["merged_date_count"], 0)
         self.assertEqual(overlay["missing_dates"], ["2026-06-15"])
+
+    def test_tpex_daily_ohlc_uses_official_5s_values_when_yahoo_is_stale(
+        self,
+    ) -> None:
+        self.db.add(
+            MarketIndexDailyStat(
+                index_id="TPEX",
+                market="TPEX",
+                trade_date=date(2026, 6, 15),
+                trade_volume=100,
+                trade_value=200,
+                transaction_count=300,
+                close_value=391.37,
+                price_change=7.62,
+                source="tpex_openapi_daily_trading_index",
+            )
+        )
+        self.db.commit()
+        yahoo_points = [
+            yahoo_point(date(2026, 6, 11), 380.0),
+            yahoo_point(date(2026, 6, 12), 383.75),
+        ]
+        official_ohlc = {
+            "open": 383.72,
+            "high": 391.96,
+            "low": 378.50,
+            "close": 391.37,
+        }
+
+        with (
+            patch.object(
+                indices,
+                "_fetch_yahoo_index_points",
+                return_value=(yahoo_points, {}, timezone(timedelta(hours=8))),
+            ),
+            patch.object(indices, "datetime", FixedDateTime),
+            patch.object(
+                indices,
+                "_fetch_twse_index_5s_ohlc",
+                return_value=official_ohlc,
+            ),
+        ):
+            payload = indices.get_market_index_ohlc_chart_data(
+                index_id="TPEX",
+                timeframe="daily",
+                bars=3,
+                db=self.db,
+            )
+
+        latest = payload["points"][-1]
+        self.assertEqual(latest["time"], date(2026, 6, 15))
+        self.assertEqual(latest["open"], 383.72)
+        self.assertEqual(latest["high"], 391.96)
+        self.assertEqual(latest["low"], 378.50)
+        self.assertEqual(latest["close"], 391.37)
+        self.assertEqual(payload["data_quality"], "ok")
+        self.assertEqual(
+            payload["backfill"]["official_ohlc_overlay"]["status"],
+            "success",
+        )
+
+    def test_tpex_daily_ohlc_omits_missing_official_bar_instead_of_synthesizing(
+        self,
+    ) -> None:
+        self.db.add(
+            MarketIndexDailyStat(
+                index_id="TPEX",
+                market="TPEX",
+                trade_date=date(2026, 6, 15),
+                trade_volume=100,
+                trade_value=200,
+                transaction_count=300,
+                close_value=391.37,
+                price_change=7.62,
+                source="tpex_openapi_daily_trading_index",
+            )
+        )
+        self.db.commit()
+        yahoo_points = [
+            yahoo_point(date(2026, 6, 11), 380.0),
+            yahoo_point(date(2026, 6, 12), 383.75),
+        ]
+
+        with (
+            patch.object(
+                indices,
+                "_fetch_yahoo_index_points",
+                return_value=(yahoo_points, {}, timezone(timedelta(hours=8))),
+            ),
+            patch.object(indices, "datetime", FixedDateTime),
+            patch.object(
+                indices,
+                "_fetch_twse_index_5s_ohlc",
+                side_effect=RuntimeError("provider unavailable"),
+            ),
+            patch.object(indices, "observe_provider_fallback"),
+        ):
+            payload = indices.get_market_index_ohlc_chart_data(
+                index_id="TPEX",
+                timeframe="daily",
+                bars=3,
+                db=self.db,
+            )
+
+        self.assertEqual(payload["to_date"], date(2026, 6, 12))
+        self.assertNotIn(date(2026, 6, 15), [point["time"] for point in payload["points"]])
+        self.assertEqual(payload["data_quality"], "unavailable")
+        self.assertTrue(payload["warnings"])
+        self.assertEqual(
+            payload["backfill"]["official_ohlc_overlay"]["missing_dates"],
+            ["2026-06-15"],
+        )
 
     def test_current_month_index_stat_refresh_updates_existing_same_day_row(self) -> None:
         self.db.add(
@@ -952,6 +1066,48 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(result["points"][0]["price"], 44571.76)
         self.assertEqual(result["points"][-1]["price"], 44999.90)
 
+    def test_official_index_ohlc_excludes_opening_reference_and_uses_closing_summary(
+        self,
+    ) -> None:
+        official = {
+            "previous_close": 383.75,
+            "is_partial": False,
+            "source_provenance": {"closing_summary_value": 391.37},
+            "points": [
+                {"time": "2026-08-06T09:00:00+08:00", "price": 383.75},
+                {"time": "2026-08-06T09:00:05+08:00", "price": 383.72},
+                {"time": "2026-08-06T10:00:00+08:00", "price": 391.96},
+                {"time": "2026-08-06T11:00:00+08:00", "price": 378.50},
+                {"time": "2026-08-06T13:30:00+08:00", "price": 391.27},
+            ],
+        }
+
+        with patch.object(
+            indices,
+            "_fetch_twse_index_5s_intraday",
+            return_value=official,
+        ) as fetch_intraday:
+            result = indices._fetch_twse_index_5s_ohlc(
+                indices.INDEX_CONFIG_BY_ID["TPEX"],
+                date(2026, 8, 6),
+            )
+            cached_result = indices._fetch_twse_index_5s_ohlc(
+                indices.INDEX_CONFIG_BY_ID["TPEX"],
+                date(2026, 8, 6),
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "open": 383.72,
+                "high": 391.96,
+                "low": 378.50,
+                "close": 391.37,
+            },
+        )
+        self.assertEqual(cached_result, result)
+        fetch_intraday.assert_called_once()
+
     def test_summary_overlay_uses_newer_official_index_snapshot(self) -> None:
         taipei = timezone(timedelta(hours=8))
         trade_date = date(2026, 7, 20)
@@ -977,9 +1133,13 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         official = {
             "source": "twse_index_5s",
             "previous_close": 42671.27,
+            "coverage_status": "current_session_series",
+            "is_partial": False,
             "points": [
                 {"time": "2026-07-20T09:00:00+08:00", "price": 42671.27},
                 {"time": "2026-07-20T09:00:05+08:00", "price": 42793.15},
+                {"time": "2026-07-20T10:00:00+08:00", "price": 43084.51},
+                {"time": "2026-07-20T11:00:00+08:00", "price": 41967.75},
                 {"time": "2026-07-20T13:30:00+08:00", "price": 42449.70},
             ],
         }
@@ -1016,6 +1176,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 "t": "09:05:00",
                 "y": "100.00",
                 "z": "101.00",
+                "v": "1",
                 "u": "110.00",
                 "w": "90.00",
             },
@@ -1025,6 +1186,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 "t": "09:05:00",
                 "y": "100.00",
                 "z": "90.00",
+                "v": "1",
                 "u": "110.00",
                 "w": "90.00",
             },
@@ -1034,6 +1196,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 "t": "09:05:00",
                 "y": "100.00",
                 "z": "100.00",
+                "v": "1",
                 "u": "110.00",
                 "w": "90.00",
             },
@@ -1043,6 +1206,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 "t": "09:05:00",
                 "y": "100.00",
                 "z": "-",
+                "v": "0",
                 "h": "99.00",
                 "l": "95.00",
             },
@@ -1052,6 +1216,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 "t": "09:05:00",
                 "y": "100.00",
                 "z": "-",
+                "v": "0",
                 "h": "105.00",
                 "l": "95.00",
             },
@@ -1070,14 +1235,14 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["label"], "上市即時廣度（註冊範圍）")
         self.assertEqual(payload["trade_date"], date(2026, 7, 9))
         self.assertEqual(payload["advance_count"], 1)
-        self.assertEqual(payload["decline_count"], 2)
+        self.assertEqual(payload["decline_count"], 1)
         self.assertEqual(payload["unchanged_count"], 1)
         self.assertEqual(payload["limit_up_count"], 0)
         self.assertEqual(payload["limit_down_count"], 1)
-        self.assertEqual(payload["coverage_count"], 4)
+        self.assertEqual(payload["coverage_count"], 3)
         self.assertEqual(payload["message_count"], 5)
         self.assertEqual(payload["missing_count"], 496)
-        self.assertEqual(payload["unknown_count"], 497)
+        self.assertEqual(payload["unknown_count"], 498)
         self.assertEqual(
             payload["universe_definition"]["missing_quote_policy"],
             "unknown_not_unchanged",
@@ -1085,7 +1250,8 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertFalse(
             payload["universe_definition"]["official_full_market"]
         )
-        self.assertIsNone(payload["trade_value"])
+        self.assertEqual(payload["trade_value"], 291_000)
+        self.assertTrue(payload["trade_value_is_estimate"])
         self.assertTrue(payload["warnings"])
 
     def test_resolve_market_breadth_prefers_live_when_daily_source_is_stale(self) -> None:
@@ -1283,9 +1449,12 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["source"], "yahoo_finance_chart_twse_mis_snapshot")
         self.assertEqual(payload["previous_close"], 46255.26)
         self.assertEqual(payload["point_count"], 2)
-        self.assertEqual(payload["points"][-1]["time"], "2026-06-26T09:48:25+08:00")
+        self.assertEqual(payload["points"][-1]["time"], "2026-06-26T09:48:00+08:00")
         self.assertEqual(payload["points"][-1]["price"], 45430.31)
-        self.assertEqual(payload["points"][-1]["volume"], 4_911_549)
+        self.assertIsNone(payload["points"][-1]["volume"])
+        self.assertEqual(payload["source_point_count"], 2)
+        self.assertEqual(payload["effective_interval"], "1m")
+        self.assertFalse(payload["capabilities"]["supports_volume"])
 
     def test_index_intraday_returns_mis_snapshot_when_yahoo_has_no_points(self) -> None:
         yahoo_payload = {
@@ -1354,7 +1523,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["source"], yahoo_payload["source"])
         self.assertEqual(payload["previous_close"], yahoo_payload["previous_close"])
         self.assertEqual(payload["point_count"], 1)
-        self.assertEqual(payload["points"][0]["time"], "2026-06-26T09:40:10+08:00")
+        self.assertEqual(payload["points"][0]["time"], "2026-06-26T09:40:00+08:00")
         self.assertEqual(payload["points"][0]["price"], 45605.52)
         self.assertEqual(payload["bar_contract_version"], "tw.intraday.bars.v2")
         self.assertEqual(payload["points"][0]["volume_status"], "not_provided")

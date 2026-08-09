@@ -120,12 +120,18 @@ function taiwanCalendarStatusRefreshKey(
 }
 
 export function useTaiwanDataPanel({
+  autoRefreshEnabled = true,
+  enabled = true,
+  includeFundamentals = true,
   isIndexProduct,
   onDailyPricesChanged,
   stockId,
   subresourceRefreshSeconds,
   t,
 }: {
+  autoRefreshEnabled?: boolean;
+  enabled?: boolean;
+  includeFundamentals?: boolean;
   isIndexProduct: boolean;
   onDailyPricesChanged?: () => void;
   stockId: string | null;
@@ -252,7 +258,7 @@ export function useTaiwanDataPanel({
     resolvedKeysRef.current.clear();
     branchSummaryCacheRef.current.clear();
 
-    if (!stockId || isIndexProduct) {
+    if (!enabled || !stockId || isIndexProduct) {
       const timer = window.setTimeout(() => {
         setInstitutional(null);
         setInstitutionalHistory([]);
@@ -309,10 +315,12 @@ export function useTaiwanDataPanel({
               `/api/market/margin/${requestedStockId}/latest`,
               { ensure_daily: false }
             ),
-            fetchOptional<MonthlyRevenueRead>(
-              `/api/market/revenue/${requestedStockId}/latest`,
-              { ensure_latest: false }
-            ),
+            includeFundamentals
+              ? fetchOptional<MonthlyRevenueRead>(
+                  `/api/market/revenue/${requestedStockId}/latest`,
+                  { ensure_latest: false }
+                )
+              : Promise.resolve(null),
             fetchOptional<StockMasterRead>(`/api/stocks/${requestedStockId}`),
           ]);
         if (cancelled) return;
@@ -335,7 +343,7 @@ export function useTaiwanDataPanel({
       cancelled = true;
       window.clearTimeout(resetTimer);
     };
-  }, [isIndexProduct, stockId]);
+  }, [enabled, includeFundamentals, isIndexProduct, stockId]);
 
   function dataTabHasCurrentData(tab: DataPanelTab, targetStockId = stockId) {
     if (!targetStockId) return false;
@@ -449,7 +457,8 @@ export function useTaiwanDataPanel({
       skipProviderWhenCurrent?: boolean;
     }
   ) {
-    if (!stockId) return;
+    if (!enabled || !stockId) return;
+    if (!includeFundamentals && (tab === "revenue" || tab === "earnings")) return;
 
     const targetStockId = stockId;
     const targetBranchDays = tab === "branch" ? branchDays : 1;
@@ -939,7 +948,7 @@ export function useTaiwanDataPanel({
   }
 
   useEffect(() => {
-    if (!stockId || isIndexProduct) return;
+    if (!autoRefreshEnabled || !enabled || !stockId || isIndexProduct) return;
 
     const requestKey = dataPanelCacheKey(stockId, activeDataTab, branchDays);
     const cachedBranchSummary =
@@ -996,7 +1005,15 @@ export function useTaiwanDataPanel({
     return () => window.clearTimeout(timer);
     // refreshDataTab intentionally captures the current data snapshot for cache validation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDataTab, branchDays, isIndexProduct, stockId, taiwanCalendarStatus]);
+  }, [
+    activeDataTab,
+    autoRefreshEnabled,
+    branchDays,
+    enabled,
+    isIndexProduct,
+    stockId,
+    taiwanCalendarStatus,
+  ]);
 
   return {
     actions: {

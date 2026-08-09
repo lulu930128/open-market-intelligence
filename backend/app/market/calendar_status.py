@@ -34,6 +34,7 @@ from app.market.trading_calendar import (
     is_taiwan_trading_day,
     next_taiwan_trading_day,
     previous_taiwan_trading_day,
+    taiwan_presentation_session,
     taiwan_market_holiday_name,
 )
 from app.market.exchange_calendar_cache import market_calendar_cache_metadata
@@ -320,6 +321,7 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         close_time=TAIWAN_SESSION_CLOSE_TIME,
         closing_auction_time=TAIWAN_CLOSING_AUCTION_TIME,
     )
+    presentation_session = taiwan_presentation_session(local_now)
 
     release_windows = {
         key: _release_window(
@@ -406,6 +408,17 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
                 "closing_auction",
             },
             "is_after_close": phase == "post_close",
+        },
+        "presentation_session": {
+            "trade_date": _json_value(presentation_session["trade_date"]),
+            "state": presentation_session["state"],
+            "is_current_trading_day": presentation_session[
+                "is_current_trading_day"
+            ],
+            "rollover_time": presentation_session["rollover_time"],
+            "next_transition_at": _json_value(
+                presentation_session["next_transition_at"]
+            ),
         },
         "release_windows": release_windows,
         **_calendar_contract(

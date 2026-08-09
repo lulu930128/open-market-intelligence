@@ -53,6 +53,8 @@ function seededTaiwanWatchlistItems() {
       group_id: 7,
       stock_id: "2330",
       stock_name: "台積電",
+      market: "TWSE",
+      instrument_type: "stock",
       note: null,
       priority: 0,
       tags: "core",
@@ -65,6 +67,8 @@ function seededTaiwanWatchlistItems() {
       group_id: 8,
       stock_id: "2303",
       stock_name: "聯電",
+      market: "TWSE",
+      instrument_type: "stock",
       note: null,
       priority: 0,
       tags: null,
@@ -77,6 +81,8 @@ function seededTaiwanWatchlistItems() {
       group_id: 7,
       stock_id: "9999",
       stock_name: "停用測試股",
+      market: "TWSE",
+      instrument_type: "stock",
       note: null,
       priority: 0,
       tags: null,
@@ -591,6 +597,161 @@ function stockMasterResponse(stockId: string) {
   };
 }
 
+function nextSessionPlanResponse(stockId: string) {
+  return {
+    kind: "tw_stock_next_session_plan",
+    version: "tw_next_session_plan_v1",
+    market: "TWSE",
+    stock_id: stockId,
+    stock_name: stockId === "2303" ? "United Microelectronics" : "TSMC",
+    instrument_type: "stock",
+    currency: "TWD",
+    price_unit: "TWD_per_share",
+    status: "ready",
+    generated_at: "2026-06-15T16:00:00+08:00",
+    as_of_trade_date: "2026-06-15",
+    target_trade_date: "2026-06-16",
+    target_session_state: "upcoming",
+    as_of_close: 138,
+    methodology: {
+      id: "tw_next_session_sma_transition",
+      version: "1.0.0",
+      price_series: "raw_unadjusted_completed_daily_close",
+      candidate_price_semantics: "hypothetical_target_session_close",
+      transition_formula: "mean(last_N_minus_1_completed_closes)",
+      projected_ma_formula: "(sum(last_N_minus_1_closes)+candidate_close)/N",
+      comparison_rule:
+        "candidate_close_gte_transition_price_iff_candidate_close_gte_projected_ma",
+    },
+    freshness: {
+      status: "current",
+      expected_trade_date: "2026-06-15",
+      latest_trade_date: "2026-06-15",
+      calendar_day_lag: 0,
+      trading_day_lag: 0,
+      release_time: "15:15",
+      release_timezone: "Asia/Taipei",
+      checked_at: "2026-06-15T16:00:00+08:00",
+    },
+    history: {
+      requested_limit: 250,
+      raw_row_count: 80,
+      distinct_trade_date_count: 80,
+      duplicate_trade_date_count: 0,
+      valid_close_count: 80,
+      first_trade_date: "2026-02-20",
+      latest_trade_date: "2026-06-15",
+      source_ids: [1],
+      max_gap_days: 10,
+    },
+    readiness: {
+      status: "ready",
+      decision_usable: true,
+      reason_codes: [],
+      available_level_keys: ["ma20_transition", "ma60_transition"],
+      missing_level_keys: [],
+    },
+    levels: [
+      {
+        key: "ma20_transition",
+        period: 20,
+        transition_price: 142,
+        current_ma: 143,
+        projected_ma_if_flat: 141.8,
+        drift_if_flat: -1.2,
+        dropped_close: 162,
+        as_of_close_relation: "below",
+        role_at_as_of_close: "reclaim",
+        move_from_as_of_close_pct: 2.9,
+        required_close_count: 19,
+        available_close_count: 19,
+        window_start_date: "2026-05-19",
+        window_end_date: "2026-06-15",
+        candidate_price_semantics: "hypothetical_target_session_close",
+        comparison_rule:
+          "candidate_close_gte_transition_price_means_candidate_close_gte_projected_ma",
+      },
+      {
+        key: "ma60_transition",
+        period: 60,
+        transition_price: 150,
+        current_ma: 151,
+        projected_ma_if_flat: 149.8,
+        drift_if_flat: -1.2,
+        dropped_close: 210,
+        as_of_close_relation: "below",
+        role_at_as_of_close: "reclaim",
+        move_from_as_of_close_pct: 8.7,
+        required_close_count: 59,
+        available_close_count: 59,
+        window_start_date: "2026-03-20",
+        window_end_date: "2026-06-15",
+        candidate_price_semantics: "hypothetical_target_session_close",
+        comparison_rule:
+          "candidate_close_gte_transition_price_means_candidate_close_gte_projected_ma",
+      },
+    ],
+    known_range: {
+      period: 20,
+      support: 128.5,
+      resistance: 184.78,
+      previous_session_low: 136,
+      previous_session_high: 141,
+      previous_session_close: 138,
+      window_start_date: "2026-05-19",
+      window_end_date: "2026-06-15",
+      method: "last_20_completed_session_high_low_including_as_of",
+    },
+    scenario_zones: [
+      {
+        key: "below_both",
+        lower_bound: null,
+        upper_bound: 142,
+        lower_bound_rule: null,
+        upper_bound_rule: "exclusive",
+        at_or_above_level_keys: [],
+        below_level_keys: ["ma20_transition", "ma60_transition"],
+      },
+      {
+        key: "between_transition_levels",
+        lower_bound: 142,
+        upper_bound: 150,
+        lower_bound_rule: "inclusive",
+        upper_bound_rule: "exclusive",
+        at_or_above_level_keys: ["ma20_transition"],
+        below_level_keys: ["ma60_transition"],
+      },
+      {
+        key: "at_or_above_both",
+        lower_bound: 150,
+        upper_bound: null,
+        lower_bound_rule: "inclusive",
+        upper_bound_rule: null,
+        at_or_above_level_keys: ["ma20_transition", "ma60_transition"],
+        below_level_keys: [],
+      },
+    ],
+    corporate_action_adjustment: {
+      status: "not_applied",
+      event_check: "not_performed",
+      price_series: "raw_unadjusted_completed_daily_close",
+    },
+    missing: [],
+    warning_codes: [],
+    warnings: [],
+    limitation_codes: [
+      "conditional_level_not_price_forecast",
+      "corporate_action_adjustment_not_applied",
+      "transition_price_not_tick_rounded",
+    ],
+    limitations: [],
+    source_refs: [
+      { type: "table", name: "market_daily_price" },
+      { type: "derived", name: "app.market.next_session_plan" },
+    ],
+  };
+}
+
 function corporateEventHistoryResponse(stockId: string) {
   const event = (
     eventId: string,
@@ -776,6 +937,7 @@ function intradayResponse(stockId: string) {
     stock_id: stockId,
     symbol: stockId,
     source: "playwright.fixture",
+    trade_date: "2026-06-15",
     previous_close: previousClose,
     point_count: 2,
     points: [
@@ -792,6 +954,31 @@ function intradayResponse(stockId: string) {
         accumulated_volume: 3_000,
       },
     ],
+    history_price_source: "playwright.fixture",
+    latest_history_time: "2026-06-15T09:30:00+08:00",
+    latest_history_price: latestPrice,
+    latest_actual_trade_time: "2026-06-15T09:30:00+08:00",
+    latest_actual_trade_price: latestPrice,
+    current_price_source: "twse_mis_snapshot_z",
+    lag_seconds: 0,
+    current_trade_available: true,
+    current_trade_unavailable_reason: null,
+    current_price_applied_to_history: true,
+    capabilities: {
+      supports_volume: true,
+      supports_vwap: true,
+      supports_price_limit: true,
+      supports_quote_depth: true,
+    },
+    current_observation: {
+      value: latestPrice,
+      observed_at: "2026-06-15T09:30:00+08:00",
+      confirmed_at: "2026-06-15T09:30:00+08:00",
+      price_semantics: "actual_trade",
+      provider: "playwright.fixture",
+      freshness_status: "current",
+      decision_usable: true,
+    },
   };
 }
 
@@ -895,6 +1082,30 @@ function quoteDepthResponse(stockId: string) {
       message: `Live quote for ${stockId}`,
       source_error: null,
     },
+  };
+}
+
+function emptyQuoteReplayResponse(stockId: string) {
+  const requiredSlots = ["08:30", "08:50", "08:55", "08:58", "08:59"];
+  return {
+    kind: "taiwan_quote_contract_replay",
+    stock_id: stockId,
+    trade_date: null,
+    timezone: "UTC+08:00",
+    required_slots: requiredSlots,
+    required_count: requiredSlots.length,
+    captured_count: 0,
+    coverage_ratio: 0,
+    complete: false,
+    missing_slots: requiredSlots,
+    snapshots: requiredSlots.map((captureSlot) => ({
+      capture_slot: captureSlot,
+      status: "missing",
+      quote: null,
+    })),
+    source: "taiwan_quote_contract_snapshot",
+    replay_semantics: "persisted_fixed_slot_evidence_projected_to_current_public_contract",
+    read_path_side_effects: false,
   };
 }
 
@@ -1101,6 +1312,7 @@ function emptyRadarResponse(path: string, mode = "action") {
             mode: "active",
             rollback_version: "radar_v1.0",
             technical_direction_owner: "backend",
+            cross_market_context_mode: "display_only",
             legacy_status: "frozen",
             legacy_frozen_at: "2026-08-01",
           },
@@ -1124,6 +1336,18 @@ function emptyRadarResponse(path: string, mode = "action") {
               finalized_outcome_count: 0,
               pending_outcome_count: 0,
               limitations: [],
+            },
+            cross_market_context: {
+              enabled: true,
+              mode: "display_only",
+              snapshot_count: 0,
+              decision_usable_count: 0,
+              status_counts: {},
+              snapshot_ids: [],
+              methodology_versions: [],
+              relation_snapshot_versions: [],
+              ranking_effect: "none",
+              missing_count: 0,
             },
           },
         }
@@ -1200,8 +1424,41 @@ function seededRadarResponse(url: URL, label: string) {
         primary_signal_key: "fixture",
         primary_signal_label: label,
         indicator_snapshot: {},
-        context_snapshot: {},
-        context_signals: [],
+        context_snapshot:
+          stockId === "2330"
+            ? {
+                cross_market: {
+                  status: "ready",
+                  decision_usable: true,
+                  snapshot_id: "cmctx:2330:e2e",
+                  methodology_version: "cross_market.relation_context.v2",
+                  relation_snapshot_version: "relation_registry:42:v1",
+                  coverage: { coverage_ratio: 1 },
+                  limitations: ["latest_local_cache_projection_not_materialized_snapshot"],
+                },
+              }
+            : {},
+        context_signals:
+          stockId === "2330"
+            ? [
+                {
+                  key: "cross_market_context",
+                  source: "跨市場",
+                  label: "外部順風",
+                  tone: "positive",
+                  stance: "confirm",
+                  value_label: "+3.50%",
+                  description: "ADR parity supportive",
+                  context_status: "ready",
+                  snapshot_id: "cmctx:2330:e2e",
+                  methodology_version: "cross_market.relation_context.v2",
+                  relation_snapshot_version: "relation_registry:42:v1",
+                  coverage: { coverage_ratio: 1 },
+                  limitations: ["latest_local_cache_projection_not_materialized_snapshot"],
+                  decision_usable: true,
+                },
+              ]
+            : [],
         context_summary: label,
         context_score: 0,
         stale: false,
@@ -1223,6 +1480,10 @@ function radarV2OutcomeSummary(snapshotDate: string, status = "evaluated") {
     total_count: 1,
     finalized_count: status === "evaluated" ? 1 : 0,
     pending_count: status === "pending" ? 1 : 0,
+    latest_available_trade_date: "2026-06-14",
+    last_reconciled_at: "2026-06-14T10:30:00Z",
+    pending_reason_counts:
+      status === "pending" ? { awaiting_daily_bar: 1 } : {},
     summary_state_counts: {
       [status === "pending" ? "pending" : "close_confirmed"]: 1,
     },
@@ -1248,7 +1509,14 @@ function radarV2OutcomeItem(
     signal_mfe_pct: state === "reversed" ? 0 : 3,
     signal_mae_pct: state === "reversed" ? -4 : -1,
     outcome_quality: "final",
-    limitations: [],
+    pending_reason: null,
+    limitations:
+      rank === 1
+        ? [
+            { code: "entry_proxy_not_execution" },
+            { code: "daily_ohlc_path_unordered" },
+          ]
+        : [],
   };
 }
 
@@ -1280,6 +1548,9 @@ function noRadarV2OutcomeSummary() {
     total_count: 0,
     finalized_count: 0,
     pending_count: 0,
+    latest_available_trade_date: null,
+    last_reconciled_at: null,
+    pending_reason_counts: {},
     summary_state_counts: {},
     items: [],
     data_limitations: [],
@@ -1914,11 +2185,54 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     if (path.includes("/market/indices/TAIEX/intraday")) {
       await fulfillJson(route, {
         stock_id: "TAIEX",
+        symbol: "^TWII",
+        source: "twse_index_5s_twse_mis_snapshot",
         trade_date: "2026-06-15",
-        reference_price: 849,
-        latest_price: 861,
         previous_close: 849,
-        points: [],
+        interval: "1m",
+        source_interval: "5s",
+        effective_interval: "1m",
+        source_point_count: 3_242,
+        point_count: 2,
+        capabilities: {
+          supports_volume: false,
+          supports_vwap: false,
+          supports_price_limit: false,
+          supports_quote_depth: false,
+        },
+        current_observation: {
+          value: 861,
+          observed_at: "2026-06-15T13:30:00+08:00",
+          confirmed_at: "2026-06-15T13:33:00+08:00",
+          price_semantics: "official_index_close",
+          provider: "playwright.fixture",
+          freshness_status: "post_close_final",
+          decision_usable: true,
+        },
+        points: [
+          {
+            time: "2026-06-15T09:00:00+08:00",
+            price: 850,
+            volume: null,
+            open: 850,
+            high: 850,
+            low: 850,
+            bar_type: "regular_interval",
+            display_eligible: true,
+            indicator_eligible: true,
+          },
+          {
+            time: "2026-06-15T13:30:00+08:00",
+            price: 861,
+            volume: null,
+            open: 861,
+            high: 861,
+            low: 861,
+            bar_type: "official_close_marker",
+            display_eligible: true,
+            indicator_eligible: true,
+          },
+        ],
       });
       return;
     }
@@ -1967,8 +2281,31 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     }
 
     const taiwanQuoteDepthMatch = path.match(/\/market\/quote-depth\/([^/]+)$/);
+    const taiwanQuoteReplayMatch = path.match(
+      /\/market\/quote-depth\/([^/]+)\/replay$/
+    );
+    if (taiwanQuoteReplayMatch) {
+      await fulfillJson(
+        route,
+        emptyQuoteReplayResponse(decodeURIComponent(taiwanQuoteReplayMatch[1]))
+      );
+      return;
+    }
     if (taiwanQuoteDepthMatch) {
       await fulfillJson(route, quoteDepthResponse(decodeURIComponent(taiwanQuoteDepthMatch[1])));
+      return;
+    }
+
+    const taiwanNextSessionPlanMatch = path.match(
+      /\/market\/technical\/([^/]+)\/next-session-plan$/
+    );
+    if (taiwanNextSessionPlanMatch) {
+      await fulfillJson(
+        route,
+        nextSessionPlanResponse(
+          decodeURIComponent(taiwanNextSessionPlanMatch[1])
+        )
+      );
       return;
     }
 
@@ -3251,9 +3588,33 @@ test.describe("OMI dashboard smoke", () => {
 
   test("Taiwan index professional chart shell renders", async ({ page }) => {
     await mockOmiApi(page);
-    await page.goto("/?stock_id=TAIEX", { waitUntil: "domcontentloaded" });
+    await page.goto("/?market=tw&stock_id=TAIEX", { waitUntil: "domcontentloaded" });
 
     await expect(page.getByRole("heading", { name: "TAIEX 加權指數" })).toBeVisible();
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-stock-id",
+      "TAIEX"
+    );
+    const todayTimeframe = page.getByTestId("timeframe-today");
+    await expect(async () => {
+      await todayTimeframe.click();
+      await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/, {
+        timeout: 750,
+      });
+    }).toPass({ timeout: 5_000 });
+    const todaySurface = page.getByTestId("today-intraday-surface");
+    const todayChart = todaySurface.getByTestId("intraday-trend-chart");
+    await expect(todaySurface).toBeVisible();
+    await expect(todayChart).toHaveAttribute("data-rendered-point-count", "2");
+    await expect(todayChart).toHaveAttribute("data-volume-rendered", "false");
+    await expect(page.getByTestId("today-header-price")).toContainText("861");
+    expect(await todayChart.locator("svg *").count()).toBeLessThan(500);
+    await page.getByTestId("chart-indicator-menu-toggle").click();
+    const todayIndicatorMenu = page.getByTestId("intraday-indicator-menu");
+    await expect(todayIndicatorMenu.locator('[data-indicator-option="volume"]')).toHaveCount(0);
+    await expect(todayIndicatorMenu.locator('[data-indicator-option="vwap"]')).toHaveCount(0);
+    await page.getByTestId("chart-indicator-menu-toggle").click();
+    await page.getByTestId("timeframe-daily").click();
     await expect(page.getByRole("button", { name: "放大" }).first()).toBeEnabled();
     await page.getByRole("button", { name: "放大" }).first().click();
 
@@ -3304,6 +3665,21 @@ test.describe("OMI dashboard smoke", () => {
                     source_url: "https://www.sec.gov/example",
                     verified_on: "2026-07-22",
                   },
+                  mapping_resolution: {
+                    selected_source: "registry",
+                    registry_status: "ready",
+                    shadow_status: "match",
+                    shadow_differences: [],
+                    relation_id: 42,
+                    relation_version: 1,
+                    relation_valid_from: "2026-07-22",
+                    relation_valid_to: null,
+                    relation_verified_at: "2026-07-22T00:00:00Z",
+                    evidence_ids: [84],
+                    registry_schema_version: "cross_market.relation_registry.v1",
+                    warnings: [],
+                    limitations: [],
+                  },
                   formula: "adr_close_usd * usd_twd / local_shares_per_adr",
                   adr_close_usd: 200,
                   adr_trade_date: "2026-06-05",
@@ -3331,6 +3707,102 @@ test.describe("OMI dashboard smoke", () => {
                   warnings: [],
                   source_refs: [],
                   freshness: {},
+                },
+                cross_market_context: {
+                  kind: "cross_market_target_context",
+                  schema_version: "cross_market.context.v1",
+                  target: {
+                    market: "TW",
+                    instrument_type: "stock",
+                    canonical_symbol: "TW:2330",
+                    provider_symbol: "2330",
+                    exchange: "TWSE",
+                    currency: "TWD",
+                  },
+                  status: "ready",
+                  decision_usable: true,
+                  as_of: "2026-06-05",
+                  decision_at: "2026-06-08T12:00:00Z",
+                  methodology_version: "cross_market.relation_context.v2",
+                  relation_snapshot_version: "relation_registry:42:v1",
+                  snapshot_id: "cmctx:fixture",
+                  summary: {
+                    stance: "supportive",
+                    score: 30,
+                    confidence: "high",
+                    title: "ADR 隱含價高於台股對齊基準",
+                    reason_codes: ["direct_adr_parity"],
+                  },
+                  direct_equivalents: [],
+                  signals: [
+                    {
+                      signal_id: "adr_parity:TW:2330:42:1",
+                      relation_id: 42,
+                      relation_version: 1,
+                      source: {
+                        market: "US",
+                        instrument_type: "adr",
+                        canonical_symbol: "US:TSM",
+                        provider_symbol: "TSM",
+                        exchange: "NYSE",
+                        currency: "USD",
+                      },
+                      target: {
+                        market: "TW",
+                        instrument_type: "stock",
+                        canonical_symbol: "TW:2330",
+                        provider_symbol: "2330",
+                        exchange: "TWSE",
+                        currency: "TWD",
+                      },
+                      bucket: "direct_equivalent",
+                      relation_type: "same_equity_dr",
+                      calculation: {
+                        kind: "adr_implied_gap",
+                        implied_gap_pct: 30,
+                      },
+                      direction: "supportive",
+                      configured_weight: 1,
+                      quality_multiplier: 1,
+                      effective_weight: 1,
+                      normalized_weight: 1,
+                      contribution: 30,
+                      status: "ready",
+                      decision_usable: true,
+                      confidence_tier: "A",
+                      freshness: {},
+                      evidence_refs: ["cross_market_relation_evidence:84"],
+                      source_refs: [],
+                      warnings: [],
+                      limitations: [
+                        "latest_local_cache_projection_not_materialized_snapshot",
+                      ],
+                      excluded_reason: null,
+                    },
+                  ],
+                  bucket_scores: { direct_equivalent: 30 },
+                  coverage: {
+                    configured_signal_count: 1,
+                    available_signal_count: 1,
+                    decision_usable_signal_count: 1,
+                    configured_weight: 1,
+                    available_weight: 1,
+                    decision_usable_weight: 1,
+                    coverage_ratio: 1,
+                    excluded_by_reason: {},
+                  },
+                  freshness: { read_path_provider_refresh: false },
+                  missing: [],
+                  warnings: [],
+                  limitations: [
+                    "latest_local_cache_projection_not_materialized_snapshot",
+                  ],
+                  source_refs: [],
+                  evidence_passport: {
+                    relation_ids: [42],
+                    evidence_ids: [84],
+                    mapping_source: "registry",
+                  },
                 },
                 fx_flow_context: {
                   kind: "tw_fx_foreign_flow_context",
@@ -3443,6 +3915,27 @@ test.describe("OMI dashboard smoke", () => {
     });
     await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
 
+    const crossMarket = page.getByTestId("cross-market-context-strip");
+    const crossMarketToggle = page.getByTestId("cross-market-context-toggle");
+    const crossMarketDetails = page.getByTestId("cross-market-context-details");
+    await expect(crossMarket).toBeVisible();
+    await expect(crossMarket).not.toHaveAttribute("open", "");
+    await expect(crossMarketDetails).toBeHidden();
+    await expect(crossMarketToggle).toContainText("跨市場脈絡");
+    await expect(crossMarketToggle).toContainText("外部相對支撐");
+    await expect(crossMarketToggle).toContainText("+30.00%");
+    await expect(crossMarketToggle).toContainText("可用");
+
+    await crossMarketToggle.click();
+
+    await expect(crossMarket).toHaveAttribute("open", "");
+    await expect(crossMarketDetails).toBeVisible();
+    await expect(crossMarket).toContainText("TSM · 直接等價");
+    await expect(crossMarket).toContainText("可用 1/1");
+    await expect(crossMarket).toContainText("已審核 Registry");
+    await expect(crossMarket).toContainText("relation_registry:42:v1");
+    await expect(crossMarket).toContainText("尚非可回放的 point-in-time snapshot");
+
     const parity = page.getByTestId("adr-parity-strip");
     const parityToggle = page.getByTestId("adr-parity-toggle");
     const parityDetails = page.getByTestId("adr-parity-details");
@@ -3483,6 +3976,153 @@ test.describe("OMI dashboard smoke", () => {
     await expect(fxFlow).toContainText("不代表台幣升貶單向造成外資買賣");
   });
 
+  test("Taiwan overnight context renders noncausal proxy residual", async ({ page }) => {
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) =>
+        path.endsWith("/market/overnight-impact/2330")
+          ? {
+              body: {
+                kind: "us_overnight_tw_impact",
+                stock_id: "2330",
+                stock_name: "台積電",
+                as_of: "2026-08-07",
+                generated_at: "2026-08-09T13:00:00Z",
+                stance: "neutral",
+                title: "Fixture proxy context",
+                summary: "Fixture proxy context",
+                score: 0,
+                weighted_change_pct: 0,
+                confidence: "medium",
+                tw_mapping: null,
+                adr_parity: null,
+                cross_market_context: {
+                  kind: "cross_market_target_context",
+                  schema_version: "cross_market.context.v1",
+                  target: {
+                    market: "TW",
+                    instrument_type: "stock",
+                    canonical_symbol: "TW:2330",
+                    provider_symbol: "2330",
+                    exchange: "TWSE",
+                    currency: "TWD",
+                  },
+                  status: "ready",
+                  decision_usable: true,
+                  as_of: "2026-08-07",
+                  decision_at: "2026-08-09T13:00:00Z",
+                  methodology_version: "cross_market.relation_context.v2",
+                  relation_snapshot_version: "relation_registry:77:v1",
+                  snapshot_id: "cmctx:proxy-fixture",
+                  summary: {
+                    stance: "adverse",
+                    score: -0.24,
+                    confidence: "medium",
+                    title: "產業 proxy residual 偏弱",
+                    reason_codes: ["industry_peer_residual_negative"],
+                  },
+                  direct_equivalents: [],
+                  signals: [
+                    {
+                      signal_id: "proxy_residual:TW:2330:77:v1",
+                      relation_id: 77,
+                      relation_version: 1,
+                      source: {
+                        market: "US",
+                        instrument_type: "stock",
+                        canonical_symbol: "US:MU",
+                        provider_symbol: "MU",
+                        exchange: "NASDAQ",
+                        currency: "USD",
+                      },
+                      target: {
+                        market: "TW",
+                        instrument_type: "stock",
+                        canonical_symbol: "TW:2330",
+                        provider_symbol: "2330",
+                        exchange: "TWSE",
+                        currency: "TWD",
+                      },
+                      bucket: "industry_peer",
+                      relation_type: "industry_peer",
+                      relation_subtype: "dram_memory_cycle_proxy",
+                      event_context: "unresolved",
+                      calculation: {
+                        kind: "benchmark_residual",
+                        raw_return_pct: 5,
+                        benchmark_return_pct: 6,
+                        excess_return_pct: -1,
+                      },
+                      direction: "adverse",
+                      configured_weight: 0.4,
+                      quality_multiplier: 0.6,
+                      effective_weight: 0.24,
+                      normalized_weight: 1,
+                      contribution: -0.24,
+                      status: "ready",
+                      decision_usable: true,
+                      confidence_tier: "C",
+                      freshness: {},
+                      evidence_refs: ["cross_market_relation_evidence:88"],
+                      source_refs: [],
+                      warnings: ["event_context_unresolved"],
+                      limitations: [
+                        "industry_proxy_not_company_causality",
+                        "event_context_unresolved",
+                      ],
+                      excluded_reason: null,
+                    },
+                  ],
+                  bucket_scores: { industry_peer: -0.24 },
+                  coverage: {
+                    configured_signal_count: 1,
+                    available_signal_count: 1,
+                    decision_usable_signal_count: 1,
+                    configured_weight: 0.4,
+                    available_weight: 0.4,
+                    decision_usable_weight: 0.4,
+                    coverage_ratio: 1,
+                    excluded_by_reason: {},
+                  },
+                  freshness: { read_path_provider_refresh: false },
+                  missing: [],
+                  warnings: ["event_context_unresolved"],
+                  limitations: [
+                    "industry_proxy_not_company_causality",
+                    "event_context_unresolved",
+                  ],
+                  source_refs: [],
+                  evidence_passport: {
+                    relation_ids: [77],
+                    evidence_ids: [88],
+                    mapping_source: "registry",
+                  },
+                },
+                fx_flow_context: null,
+                factors: [],
+                baskets: [],
+                missing: [],
+                warnings: [],
+                source_refs: [],
+                freshness: {},
+                evidence_passport: {},
+              },
+            }
+          : null,
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    const context = page.getByTestId("cross-market-context-strip");
+    const toggle = page.getByTestId("cross-market-context-toggle");
+    await expect(toggle).toContainText("外部相對壓力");
+    await expect(toggle).toContainText("-1.00%");
+    await toggle.click();
+    await expect(context).toContainText("MU · 同業代理（非因果）");
+    await expect(context).toContainText("來源 +5.00%");
+    await expect(context).toContainText("基準 +6.00%");
+    await expect(context).toContainText("Residual -1.00%");
+    await expect(context).toContainText("不代表兩家公司有供應、客戶或持股關係");
+  });
+
   test("Taiwan professional mode stays focused when selecting another security", async ({
     page,
   }) => {
@@ -3512,11 +4152,30 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByTestId("market-tape-tw")).toBeHidden();
   });
 
-  test("TPEX today reuses the ordinary K-line chart with one-minute candles", async ({
+  test("TPEX today uses the shared intraday surface without post-close pollution", async ({
     page,
   }) => {
+    const tpexSummary = marketIndexSummaryResponse(103);
+    tpexSummary.indices[0] = {
+      ...tpexSummary.indices[0],
+      index_id: "TPEX",
+      label: "櫃買指數",
+      short_label: "TPEX",
+      market: "TPEX",
+      symbol: "^TWOII",
+      breadth: {
+        advance_count: 4,
+        decline_count: 3,
+        unchanged_count: 1,
+        total_count: 8,
+        trade_value: 120_000_000_000,
+      },
+    };
     await mockOmiApi(page, {
       apiResponder: ({ path }) => {
+        if (path.endsWith("/market/indices/summary")) {
+          return { body: tpexSummary };
+        }
         if (path.endsWith("/market/indices/TPEX/ohlc")) {
           return { body: ohlcResponse("TPEX") };
         }
@@ -3546,50 +4205,49 @@ test.describe("OMI dashboard smoke", () => {
               symbol: "^TWOII",
               source: "tpex_index_5s_twse_mis_snapshot",
               trade_date: "2026-06-15",
-              reference_price: 100,
-              latest_price: 101,
               previous_close: 100,
-              point_count: 8,
+              interval: "1m",
+              source_interval: "5s",
+              effective_interval: "1m",
+              source_point_count: 9,
+              point_count: 4,
+              capabilities: {
+                supports_volume: false,
+                supports_vwap: false,
+                supports_price_limit: false,
+                supports_quote_depth: false,
+              },
+              current_observation: {
+                value: 103,
+                observed_at: "2026-06-15T13:30:00+08:00",
+                confirmed_at: "2026-06-15T13:33:00+08:00",
+                price_semantics: "official_index_close",
+                provider: "playwright.fixture",
+                freshness_status: "post_close_final",
+                decision_usable: true,
+              },
               points: [
                 {
                   time: "2026-06-15T09:00:00+08:00",
-                  price: 100,
-                  volume: null,
-                  open: 100,
-                  high: 100,
-                  low: 100,
-                },
-                {
-                  time: "2026-06-15T09:00:05+08:00",
-                  price: 101,
-                  volume: null,
-                  open: 101,
-                  high: 101,
-                  low: 101,
-                },
-                {
-                  time: "2026-06-15T09:00:30+08:00",
                   price: 102,
                   volume: null,
-                  open: 102,
+                  open: 101,
                   high: 102,
-                  low: 102,
+                  low: 101,
+                  bar_type: "regular_interval",
+                  display_eligible: true,
+                  indicator_eligible: true,
                 },
                 {
                   time: "2026-06-15T09:01:00+08:00",
-                  price: 102,
+                  price: 100,
                   volume: null,
                   open: 102,
                   high: 102,
-                  low: 102,
-                },
-                {
-                  time: "2026-06-15T09:01:30+08:00",
-                  price: 100,
-                  volume: null,
-                  open: 100,
-                  high: 100,
                   low: 100,
+                  bar_type: "regular_interval",
+                  display_eligible: true,
+                  indicator_eligible: true,
                 },
                 {
                   time: "2026-06-15T09:02:00+08:00",
@@ -3598,22 +4256,20 @@ test.describe("OMI dashboard smoke", () => {
                   open: 101,
                   high: 101,
                   low: 101,
+                  bar_type: "regular_interval",
+                  display_eligible: true,
+                  indicator_eligible: true,
                 },
                 {
                   time: "2026-06-15T13:30:00+08:00",
-                  price: 100,
-                  volume: null,
-                  open: 100,
-                  high: 100,
-                  low: 100,
-                },
-                {
-                  time: "2026-06-15T13:33:00+08:00",
                   price: 103,
-                  volume: 1_000_000,
-                  open: 101,
-                  high: 999,
-                  low: 1,
+                  volume: null,
+                  open: 103,
+                  high: 103,
+                  low: 103,
+                  bar_type: "official_close_marker",
+                  display_eligible: true,
+                  indicator_eligible: true,
                 },
               ],
             },
@@ -3626,21 +4282,126 @@ test.describe("OMI dashboard smoke", () => {
       waitUntil: "domcontentloaded",
     });
 
-    await page.getByRole("button", { name: "今日", exact: true }).click();
+    const todayTimeframe = page.getByTestId("timeframe-today");
+    await todayTimeframe.click();
+    await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/);
 
-    const chart = page.getByTestId("tpex-today-kline");
+    const chart = page.getByTestId("today-intraday-surface");
     await expect(chart).toBeVisible();
     await expect(chart).toHaveAttribute("data-point-count", "4");
-    await expect(chart).toContainText("2026/06/15 13:30");
-    await expect(chart).toContainText("103");
+    await expect(chart.getByTestId("intraday-trend-chart")).toHaveAttribute(
+      "data-rendered-point-count",
+      "4"
+    );
+    await expect(chart.getByTestId("intraday-trend-chart")).toHaveAttribute(
+      "data-volume-rendered",
+      "false"
+    );
+    await expect(page.getByTestId("today-header-price")).toContainText("103");
+    expect(await chart.locator("svg *").count()).toBeLessThan(500);
+    await expect(chart).toContainText("13:30");
+    await expect(chart).not.toContainText("2026/06/14");
     await expect(chart).not.toContainText("999");
+    await expect(chart).toContainText("櫃買 5 秒走勢 + MIS 收盤確認");
+    await expect(page.getByTestId("index-detail-open")).toContainText("101");
+    await expect(page.getByTestId("index-detail-open")).not.toContainText("100");
+    await expect(page.getByTestId("market-tape-tpex-breadth-ratio")).toContainText("50");
+    await expect(page.getByTestId("market-tape-tpex-breadth-coverage")).toContainText("8/8");
     await expect(page.getByTestId("professional-chart-panel")).toHaveCount(0);
     await expect(page.getByTestId("stock-detail-expand")).toHaveCount(0);
 
     await page.getByTestId("chart-indicator-menu-toggle").click();
-    const indicatorMenu = page.getByTestId("technical-indicator-menu");
+    const indicatorMenu = page.getByTestId("intraday-indicator-menu");
     await expect(indicatorMenu).toBeVisible();
     await expect(indicatorMenu.locator('[data-indicator-option="volume"]')).toHaveCount(0);
+    await expect(indicatorMenu.locator('[data-indicator-option="vwap"]')).toHaveCount(0);
+    await expect(indicatorMenu.locator('[data-indicator-option="twap"]')).toHaveCount(1);
+  });
+
+  test("TPEX snapshot-only fallback settles as unavailable instead of loading forever", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/indices/TPEX/ohlc")) {
+          return { body: ohlcResponse("TPEX") };
+        }
+        if (path.endsWith("/market/indices/TPEX/contributions")) {
+          return {
+            body: {
+              index_id: "TPEX",
+              market: "TPEX",
+              source: "playwright.fixture",
+              method: "fixture",
+              as_of: "2026-06-15T13:33:00+08:00",
+              trade_date: "2026-06-15",
+              index_close: 103,
+              index_change: 3,
+              total_market_value: null,
+              positive: [],
+              negative: [],
+            },
+          };
+        }
+        if (path.endsWith("/market/indices/TPEX/intraday")) {
+          return {
+            body: {
+              stock_id: "TPEX",
+              symbol: "^TWOII",
+              source: "twse_mis_index_snapshot",
+              trade_date: "2026-06-15",
+              coverage_status: "single_snapshot",
+              is_partial: true,
+              previous_close: 100,
+              point_count: 1,
+              capabilities: {
+                supports_volume: false,
+                supports_vwap: false,
+                supports_price_limit: false,
+                supports_quote_depth: false,
+              },
+              current_observation: {
+                value: 103,
+                observed_at: "2026-06-15T13:30:00+08:00",
+                confirmed_at: "2026-06-15T13:33:00+08:00",
+                price_semantics: "official_index_close",
+                provider: "playwright.fixture",
+                freshness_status: "post_close_final",
+                decision_usable: true,
+              },
+              warnings: ["Only a post-close snapshot is available."],
+              points: [
+                {
+                  time: "2026-06-15T13:30:00+08:00",
+                  price: 103,
+                  volume: null,
+                  open: 103,
+                  high: 103,
+                  low: 103,
+                  bar_type: "official_close_marker",
+                  display_eligible: true,
+                  indicator_eligible: true,
+                },
+              ],
+            },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=TPEX", {
+      waitUntil: "domcontentloaded",
+    });
+
+    await page.getByTestId("timeframe-today").click();
+
+    const empty = page.getByTestId("today-intraday-surface");
+    await expect(empty).toBeVisible();
+    await expect(empty.getByTestId("intraday-trend-empty")).toHaveAttribute(
+      "data-rendered-point-count",
+      "1"
+    );
+    await expect(empty.locator('[aria-busy="true"]')).toHaveCount(0);
   });
 
   test("Taiwan stock detail ignores stale chart and quote responses after selection changes", async ({
@@ -3692,12 +4453,22 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByTestId("quote-volume-official")).toContainText("12,300 張");
     await expect(page.getByTestId("quote-volume-status")).toHaveText("口徑不同");
     await expect(page.getByTestId("quote-depth-bid-empty")).toContainText("目前無有效買價");
+    await expect(page.getByTestId("quote-depth-mode-replay")).toBeDisabled();
+    await expect(page.getByTestId("quote-depth-replay-coverage")).toHaveText(
+      "目前標的無試撮快照"
+    );
     await expect
       .poll(async () => {
-        const bookBox = await page.getByTestId("quote-depth-book").boundingBox();
-        const volumeBox = await page.getByTestId("quote-volume-summary").boundingBox();
-        if (!bookBox || !volumeBox) return false;
-        return volumeBox.y >= bookBox.y + bookBox.height;
+        const bookBox = await page.getByTestId("quote-depth-book-column").boundingBox();
+        const summaryBox = await page
+          .getByTestId("quote-depth-summary-column")
+          .boundingBox();
+        if (!bookBox || !summaryBox) return false;
+        return (
+          Math.abs(bookBox.y - summaryBox.y) <= 1 &&
+          summaryBox.x >= bookBox.x + bookBox.width &&
+          bookBox.width > summaryBox.width
+        );
       })
       .toBe(true);
     await expect
@@ -3712,7 +4483,195 @@ test.describe("OMI dashboard smoke", () => {
     await page.waitForTimeout(1_000);
     await expect(stockDetail).toHaveAttribute("data-chart-stock-id", "2303");
     await expect(quoteDepthPanel).toContainText("52.4");
+    await page.getByTestId("timeframe-today").click();
+    const stockTodayChart = page
+      .getByTestId("today-intraday-surface")
+      .getByTestId("intraday-trend-chart");
+    await expect(stockTodayChart).toBeVisible();
+    await expect(stockTodayChart).toHaveAttribute("data-volume-rendered", "true");
+    await expect(page.getByTestId("intraday-current-price-status")).toContainText(
+      "MIS 成交 09:30:00"
+    );
     expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan quote depth replays only persisted auction snapshots", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const liveQuote = quoteDepthResponse("2330");
+    const auctionQuote = {
+      ...liveQuote,
+      session_phase: "preopen_auction",
+      instrument_phase: "preopen_auction",
+      phase_label: "試撮",
+      quote_time: "2026-06-15T08:59:55+08:00",
+      fetched_at: "2026-06-15T08:59:56+08:00",
+      last_price: null,
+      change: null,
+      change_pct: null,
+      total_volume_lots: null,
+      indicative_match_available: true,
+      indicative_match_price: 1_010,
+      indicative_match_volume_lots: 2_046,
+      indicative_match_price_source_field: "pz",
+      indicative_match_volume_source_field: "ps",
+      freshness: {
+        ...liveQuote.freshness,
+        status: "snapshot",
+        is_live: false,
+        message: "Captured auction snapshot",
+      },
+    };
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/quote-depth/2330/replay")) {
+          return {
+            body: {
+              kind: "taiwan_quote_contract_replay",
+              stock_id: "2330",
+              trade_date: "2026-06-15",
+              timezone: "UTC+08:00",
+              required_slots: ["08:59", "09:00"],
+              required_count: 2,
+              captured_count: 1,
+              coverage_ratio: 0.5,
+              complete: false,
+              missing_slots: ["09:00"],
+              snapshots: [
+                {
+                  capture_slot: "08:59",
+                  status: "captured",
+                  scheduled_at: "2026-06-15T08:59:00+08:00",
+                  captured_at: "2026-06-15T08:59:56+08:00",
+                  quote_time: "2026-06-15T08:59:55+08:00",
+                  freshness_status: "snapshot",
+                  refresh_outcome: "updated",
+                  error: null,
+                  quote: auctionQuote,
+                },
+                { capture_slot: "09:00", status: "missing", quote: null },
+              ],
+              source: "taiwan_quote_contract_snapshot",
+              replay_semantics:
+                "persisted_fixed_slot_evidence_projected_to_current_public_contract",
+              read_path_side_effects: false,
+            },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const panel = page.getByTestId("quote-depth-panel");
+    await expect(page.getByTestId("quote-depth-mode-replay")).toBeEnabled();
+    await expect(page.getByTestId("quote-depth-replay-coverage")).toContainText(
+      "1/2 slots"
+    );
+    await page.getByTestId("quote-depth-mode-replay").click();
+    await expect(panel).toContainText("試撮快照 08:59");
+    await expect(panel).toContainText("保存回放");
+    await expect(page.getByTestId("quote-auction-price")).toContainText("1,010");
+    await expect
+      .poll(async () => {
+        const bookBox = await page.getByTestId("quote-depth-book-column").boundingBox();
+        const auctionBox = await page
+          .getByTestId("quote-depth-summary-column")
+          .boundingBox();
+        if (!bookBox || !auctionBox) return false;
+        return (
+          Math.abs(bookBox.y - auctionBox.y) <= 1 &&
+          auctionBox.x >= bookBox.x + bookBox.width &&
+          bookBox.width > auctionBox.width
+        );
+      })
+      .toBe(true);
+
+    await page.setViewportSize({ width: 900, height: 900 });
+    await expect
+      .poll(async () => {
+        const bookBox = await page.getByTestId("quote-depth-book-column").boundingBox();
+        const auctionBox = await page
+          .getByTestId("quote-depth-summary-column")
+          .boundingBox();
+        if (!bookBox || !auctionBox) return false;
+        return auctionBox.y >= bookBox.y + bookBox.height;
+      })
+      .toBe(true);
+
+    await page.getByTestId("quote-depth-mode-live").click();
+    await expect(panel).toContainText("Regular");
+    await expect(panel).not.toContainText("保存回放");
+  });
+
+  test("Taiwan intermediate desktop keeps Technical directly reachable", async ({ page }) => {
+    await page.setViewportSize({ width: 1256, height: 900 });
+    await mockOmiApi(page);
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const jump = page.getByTestId("technical-compact-jump");
+    const technical = page.getByTestId("stock-detail-secondary-panel");
+    await expect(jump).toBeVisible();
+    await expect(jump).toContainText("Technical");
+    await jump.click();
+    await expect(technical).toBeInViewport();
+  });
+
+  test("Taiwan next-session levels render between technical evidence and Overnight", async ({
+    page,
+  }) => {
+    await mockOmiApi(page);
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const technicalContext = page.getByTestId("tw-technical-context");
+    const plan = page.getByTestId("tw-next-session-plan");
+    const overnightEyebrow = page.getByText("Overnight", { exact: true }).last();
+
+    await expect(plan).toBeVisible();
+    await expect(plan).toHaveAttribute("data-decision-usable", "true");
+    await expect(plan.getByTestId("tw-next-session-plan-status")).toHaveText(
+      "可使用"
+    );
+    await expect(plan.getByTestId("tw-next-session-level-ma20")).toContainText(
+      "142"
+    );
+    await expect(plan.getByTestId("tw-next-session-level-ma60")).toContainText(
+      "150"
+    );
+    await expect(
+      plan.getByTestId("tw-next-session-zone-between_transition_levels")
+    ).toContainText("142 – 150");
+    await expect(overnightEyebrow).toBeVisible();
+
+    const planHandle = await plan.elementHandle();
+    const overnightHandle = await overnightEyebrow.elementHandle();
+    expect(planHandle).not.toBeNull();
+    expect(overnightHandle).not.toBeNull();
+    expect(
+      await technicalContext.evaluate(
+        (contextNode, planNode) =>
+          Boolean(
+            contextNode.compareDocumentPosition(planNode as Node) &
+              Node.DOCUMENT_POSITION_FOLLOWING
+          ),
+        planHandle
+      )
+    ).toBe(true);
+    expect(
+      await plan.evaluate(
+        (planNode, overnightNode) =>
+          Boolean(
+            planNode.compareDocumentPosition(overnightNode as Node) &
+              Node.DOCUMENT_POSITION_FOLLOWING
+          ),
+        overnightHandle
+      )
+    ).toBe(true);
   });
 
   test("Taiwan daily technical panel routes signal chips to evidence or source data", async ({
@@ -3977,6 +4936,209 @@ test.describe("OMI dashboard smoke", () => {
     await expect(technicalContext).toHaveAttribute("open", "");
     await expect(technicalContext).toContainText("法人籌碼");
     expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan earnings keeps guidance in a centered contract dialog", async ({ page }) => {
+    const financialRows = [
+      [2025, 1, "2025Q1", 13.95],
+      [2025, 2, "2025Q2", 29.31],
+      [2025, 3, "2025Q3", 46.75],
+      [2025, 4, "2025Q4", 66.26],
+      [2026, 1, "2026Q1", 22.08],
+    ].map(([fiscalYear, quarter, period, eps], index) => ({
+      id: index + 1,
+      source_id: 1,
+      raw_result_id: index + 1,
+      report_date: `${fiscalYear}-${
+        ({ 1: "03-31", 2: "06-30", 3: "09-30", 4: "12-31" } as const)[
+          Number(quarter) as 1 | 2 | 3 | 4
+        ]
+      }`,
+      released_at: null,
+      filed_at: null,
+      fiscal_year: fiscalYear,
+      quarter,
+      period,
+      stock_id: "2330",
+      stock_name: "台積電",
+      market: "TWSE",
+      revenue: null,
+      gross_profit: null,
+      operating_income: null,
+      net_income: null,
+      net_income_attributable_parent: null,
+      eps,
+      total_assets: null,
+      total_equity: null,
+      parent_equity: null,
+      book_value_per_share: null,
+      roe: null,
+      roa: null,
+      period_scope: Number(quarter) === 4 ? "annual" : "ytd",
+      months_covered: Number(quarter) * 3,
+      flow_semantics: "source_reported",
+      eps_semantics: "source_reported_ytd_or_annual",
+      raw_eps: eps,
+      single_quarter_eps: null,
+      adjusted_eps_ytd: eps,
+      ttm_eps: null,
+      source_restated_status: "official",
+      share_basis_status: "normalized",
+      date_semantics_status: "valid",
+      normalization_status: "ready",
+      valuation_status: "ready",
+      decision_usable: true,
+      normalization_warnings: [],
+      created_at: "2026-05-15T13:30:00+08:00",
+      updated_at: "2026-05-15T13:30:00+08:00",
+    }));
+    const singleQuarterValues = [13.95, 15.36, 17.44, 19.51, 22.08];
+    const normalizedFacts = financialRows.map((row, index) => ({
+      source_fact_id: `2330-${row.period}`,
+      period: row.period,
+      period_scope: row.period_scope,
+      period_end: row.report_date,
+      metric_code: "basic_eps",
+      normalized_value: row.eps,
+      normalized_unit: "TWD_per_share",
+      adjustment_factor: 1,
+      comparison_basis_id: "2330-official-presentation-basis-through-2026Q1",
+      normalization_status: "unchanged",
+      normalization_version: "tw-financial-normalization-v1",
+      normalization_mode: "current_comparable",
+      decision_usable: true,
+      action_ids: [],
+      issue_codes: [],
+      known_at: "2026-05-15T13:30:00+08:00",
+      singleQuarterValue: singleQuarterValues[index],
+    }));
+
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/financials/2330/history")) {
+          return { body: financialRows };
+        }
+        if (path.endsWith("/market/financials/2330/contract")) {
+          return {
+            body: {
+              contract_version: "omi.financial.v1",
+              target: { market: "TW", stock_id: "2330" },
+              as_of: "2026-08-07T13:30:00+08:00",
+              mode: "current_comparable",
+              as_reported: { status: "available" },
+              normalized: {
+                status: "ready",
+                facts: normalizedFacts.map((fact) =>
+                  Object.fromEntries(
+                    Object.entries(fact).filter(([key]) => key !== "singleQuarterValue")
+                  )
+                ),
+                comparison_basis_id:
+                  "2330-official-presentation-basis-through-2026Q1",
+                normalization_version: "tw-financial-normalization-v1",
+              },
+              derived: {
+                status: "ready",
+                single_quarter_eps: normalizedFacts.map((fact) => ({
+                  metric_code: "basic_eps",
+                  period: fact.period,
+                  period_end: fact.period_end,
+                  value: fact.singleQuarterValue,
+                  unit: "TWD_per_share",
+                  status: "ready",
+                  comparison_basis_id: fact.comparison_basis_id,
+                  normalization_version: fact.normalization_version,
+                  input_fact_ids: [fact.source_fact_id],
+                  action_ids: [],
+                  issue_codes: [],
+                  known_at: fact.known_at,
+                })),
+                annual_reconciliations: [],
+                ttm_eps: 74.39,
+                ttm_eps_exact: "74.39",
+                ttm_eps_status: "ready",
+                ttm_periods: ["2025Q2", "2025Q3", "2025Q4", "2026Q1"],
+              },
+              valuation: {
+                status: "ready",
+                pe_ttm: 31.86,
+                pe_ttm_exact: "31.86",
+                price: 2370,
+                price_as_of: "2026-08-07T13:30:00+08:00",
+                price_basis: "latest_completed_daily_close:market_daily_price",
+                price_resolution_status: "ready",
+                expected_price_trade_date: "2026-08-07",
+                price_trade_date: "2026-08-07",
+                price_source: "TWSE OpenAPI Daily Trading",
+                decision_usable: true,
+              },
+              basis_assessment: null,
+              quality: {
+                freshness: "current",
+                continuity: "complete",
+                semantic_validity: "valid",
+                decision_usable: true,
+                issues: [],
+                revenue_continuity: {
+                  status: "complete",
+                  missing_periods: [],
+                  duplicate_periods: [],
+                  decision_usable: true,
+                  issues: [],
+                },
+              },
+              source_refs: [
+                {
+                  type: "table",
+                  name: "tw_financial_normalized_fact",
+                  source_name: "MOPS official filings",
+                  source_reliability: "official",
+                  filing_id: "2330-2026Q1",
+                },
+                {
+                  type: "table",
+                  name: "market_daily_price",
+                  source_name: "TWSE OpenAPI Daily Trading",
+                  source_reliability: "official",
+                  raw_result_id: 2370,
+                },
+              ],
+            },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    const dataPanel = page.getByTestId("tw-stock-detail-data-panel");
+    const earningsTab = dataPanel.locator('[data-data-tab="earnings"]');
+    await earningsTab.click();
+    await expect(earningsTab).toHaveClass(/omi-data-tab-active/);
+    await expect(page.getByTestId("financial-normalized-summary")).toBeVisible();
+    await expect(page.getByTestId("earnings-data-guide-trigger")).toBeVisible();
+    await expect(
+      page.getByText("EPS 為來源揭露的年初至今累計或全年值")
+    ).toHaveCount(0);
+
+    await page.getByTestId("earnings-data-guide-trigger").click();
+    const dialog = page.getByTestId("earnings-data-guide-dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("盈餘資料說明");
+    await expect(dialog).toContainText("可進行同基準比較");
+    await expect(dialog).toContainText(
+      "EPS 為來源揭露的年初至今累計或全年值"
+    );
+    await expect(dialog).toContainText("2330-official-presentation-basis-through-2026Q1");
+    await expect(dialog).toContainText("TWSE OpenAPI Daily Trading");
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByTestId("earnings-data-guide-trigger")).toBeFocused();
   });
 
   test("Taiwan professional chart syncs local drawings and preserves clear undo history", async ({
@@ -5488,8 +6650,22 @@ test.describe("OMI dashboard smoke", () => {
 
   test("Taiwan radar uses v2 outcome history without v1 writes", async ({ page }) => {
     const pageErrors: string[] = [];
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    const reconcileJob = {
+      ...completedRefreshJob(),
+      id: 901,
+      job_type: "watchlist.radar_v2.outcome_reconcile",
+      target: "group:7",
+      result: {
+        status: "success",
+        finalized_count: 4,
+        remaining_due_count: 0,
+        error_count: 0,
+      },
+    };
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await mockOmiApi(page, {
+      apiRequests,
       taiwanWatchlistTree: seededTaiwanWatchlistTree(),
       taiwanWatchlistItems: seededTaiwanWatchlistItems(),
       taiwanRankingRows: seededTaiwanRankingRows(),
@@ -5507,11 +6683,26 @@ test.describe("OMI dashboard smoke", () => {
         "2026-06-13": radarV2OutcomeDetailSummary("2026-06-13"),
         "2026-06-14": radarV2OutcomeDetailSummary("2026-06-14"),
       },
+      apiResponder: ({ method, path }) => {
+        if (
+          method === "POST" &&
+          /\/(?:wl|watchlists)\/groups\/7\/radar\/v2\/outcomes\/reconcile$/.test(path)
+        ) {
+          return { body: reconcileJob };
+        }
+        if (path.endsWith("/jobs/901")) {
+          return { body: reconcileJob };
+        }
+        return null;
+      },
     });
     await page.goto("/", { waitUntil: "domcontentloaded" });
 
     await page.locator('[data-watchlist-group-id="7"]').click();
     await expect(page.getByTestId("watchlist-radar-result-2330")).toBeVisible();
+    await expect(
+      page.getByTestId("watchlist-radar-context-2330-cross_market_context")
+    ).toContainText("外部順風");
     await expect(page.getByTestId("watchlist-radar-v2-outcome-summary")).toHaveCount(0);
     const radarHeaderButtons = page
       .getByTestId("watchlist-radar-controls")
@@ -5550,6 +6741,31 @@ test.describe("OMI dashboard smoke", () => {
     await expect(
       page.getByTestId("watchlist-radar-v2-history-item-30-7030")
     ).toContainText("方向反轉");
+    const firstOutcome = page.getByTestId("watchlist-radar-v2-history-item-1-7001");
+    await expect(firstOutcome).toContainText("T+1 收盤變動");
+    await expect(firstOutcome).toContainText("最大不利幅度");
+    await expect(firstOutcome.locator(".text-omi-danger")).toContainText("1.00%");
+    await expect(firstOutcome).toContainText("資料限制 2 項");
+    await expect(firstOutcome.getByText("entry_proxy_not_execution")).not.toBeVisible();
+
+    const reconcileResponse = page.waitForResponse((candidate) =>
+      /\/(?:wl|watchlists)\/groups\/7\/radar\/v2\/outcomes\/reconcile$/.test(
+        new URL(candidate.url()).pathname
+      )
+    );
+    await page.getByTestId("watchlist-radar-history-reconcile").click();
+    const completedReconcileResponse = await reconcileResponse;
+    const reconcileUrl = new URL(completedReconcileResponse.url());
+    expect(reconcileUrl.searchParams.get("mode")).toBe("action");
+    expect(reconcileUrl.searchParams.get("limit")).toBe("200");
+    await expect.poll(
+      () =>
+        apiRequests.filter((request) => request.path.endsWith("/jobs/901"))
+          .length
+    ).toBeGreaterThan(0);
+    await expect(page.getByTestId("watchlist-radar-history-reconcile")).toHaveText(
+      "檢查結果"
+    );
     await expect(page.getByTestId("watchlist-radar-history-dialog")).toBeVisible();
     expect(pageErrors).toEqual([]);
   });
@@ -5840,6 +7056,341 @@ test.describe("OMI dashboard smoke", () => {
     await staleResponse;
     await expect(samsungRow).toContainText("77,700");
     await expect(samsungRow).toContainText("+3.60%");
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan ETF selection renders the ETF work surface and bounded refresh", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    const timestamp = "2026-08-09T12:00:00+08:00";
+    const baseOverview = {
+      stock_id: "0050",
+      stock_name: "元大台灣50",
+      market: "TWSE",
+      instrument_type: "etf",
+      status: "missing",
+      capabilities: {
+        price_chart: true,
+        technical_analysis: true,
+        quote_depth: true,
+        institutional_flow: true,
+        broker_branch: true,
+        etf_profile: true,
+        daily_close_nav: true,
+        intraday_estimated_nav: true,
+        pcf: true,
+        component_exposure: true,
+        holdings: false,
+        company_revenue: false,
+        company_financials: false,
+      },
+      profile: null,
+      daily_nav: null,
+      pcf: null,
+      intraday_nav: null,
+      freshness: {
+        status: "missing",
+        timezone: "Asia/Taipei",
+        nav_release_time: "21:00",
+        expected_nav_date: "2026-08-07",
+        latest_nav_date: null,
+        nav_is_current: false,
+        profile_report_date: null,
+        expected_pcf_date: "2026-08-10",
+        latest_pcf_date: null,
+        pcf_status: "missing",
+        expected_inav_date: "2026-08-07",
+        latest_inav_at: null,
+        inav_status: "missing",
+        inav_age_seconds: null,
+        session_phase: "market_closed",
+        refresh_recommended: true,
+        checked_at: timestamp,
+      },
+      sources: [],
+      warnings: ["尚無 ETF 基本資料 cache。"],
+      refresh: null,
+    };
+    const refreshedOverview = {
+      ...baseOverview,
+      status: "current",
+      profile: {
+        report_date: "2026-08-08",
+        fund_short_name: "元大台灣50",
+        fund_name: "元大台灣卓越50證券投資信託基金",
+        fund_name_en: "Yuanta Taiwan Top 50 ETF",
+        fund_type: "國內成分證券指數股票型基金",
+        benchmark_name: "臺灣50指數",
+        is_customized_index: false,
+        investment_scope: "股票投資",
+        has_performance_benchmark: true,
+        performance_benchmark_name: "臺灣50指數",
+        has_foreign_components: false,
+        tax_id: "00938563",
+        established_date: "2003-06-25",
+        listed_date: "2003-06-30",
+        fund_manager: "測試經理人",
+        issued_units: 1_234_000,
+        custodian: "測試銀行",
+        issuer_name: "元大投信",
+        source: "twse_openapi",
+        source_url: "https://openapi.twse.com.tw/v1/opendata/t187ap47_L",
+        fetched_at: timestamp,
+      },
+      daily_nav: {
+        nav_date: "2026-08-07",
+        issuer_name: "元大投信",
+        fund_name: "元大台灣50",
+        nav: 102.76,
+        previous_nav: 103.04,
+        nav_change: -0.28,
+        nav_change_pct: -0.27,
+        close_price: 102.85,
+        premium_discount_pct: 0.09,
+        benchmark_name: "臺灣50指數",
+        benchmark_date: "2026-08-07",
+        benchmark_close: 41098.32,
+        benchmark_previous_close: 41212.45,
+        benchmark_change: -114.13,
+        benchmark_change_pct: -0.28,
+        source: "mops",
+        source_url: "https://mopsov.twse.com.tw/mops/web/ajax_t78sb35",
+        fetched_at: timestamp,
+      },
+      pcf: {
+        effective_date: "2026-08-10",
+        reference_date: "2026-08-07",
+        fund_id: "1066",
+        fund_name: "元大台灣50",
+        full_name: "元大台灣卓越50證券投資信託基金",
+        name_en: "Yuanta/P-shares Taiwan Top 50 ETF",
+        total_net_assets: 2_305_206_923_456,
+        issued_units: 22_433_000_000,
+        unit_nav: 102.76,
+        creation_unit: 500_000,
+        estimated_creation_value: 51_379_818,
+        estimated_cash_component: 51_496,
+        unit_change: 0,
+        actual_cash_component: 52_052,
+        redemption_method: "in_kind",
+        component_count: 2,
+        components: [
+          {
+            source_section: "in_kind",
+            asset_type: "stock",
+            symbol: "2330",
+            name: "台積電",
+            name_en: "Taiwan Semiconductor Manufacturing Co.",
+            contract_month: null,
+            quantity: 18_000,
+            weight_pct: null,
+            cash_in_lieu: "N",
+            minimum_creation: true,
+            order_index: 0,
+          },
+          {
+            source_section: "in_kind",
+            asset_type: "stock",
+            symbol: "1216",
+            name: "統一",
+            name_en: "UNI-PRESIDENT ENTERPRISES CORP.",
+            contract_month: null,
+            quantity: 2_581,
+            weight_pct: null,
+            cash_in_lieu: "N",
+            minimum_creation: true,
+            order_index: 1,
+          },
+        ],
+        source_updated_at: "2026-08-07T07:47:38Z",
+        source: "yuanta_etfs",
+        source_url: "https://www.yuantaetfs.com/tradeInfo/pcf/0050",
+        fetched_at: timestamp,
+      },
+      intraday_nav: {
+        observed_at: "2026-08-07T05:31:00Z",
+        fund_short_name: "元大台灣50",
+        investment_area: "D",
+        estimated_nav: 102.76,
+        nav_change: -0.28,
+        market_price: 102.85,
+        price_change: -0.45,
+        premium_discount_pct: 0.087583,
+        source: "yuanta_etfs",
+        source_url: "https://www.yuantaetfs.com/tradeInfo/comparison/0050/realtime",
+        fetched_at: timestamp,
+      },
+      freshness: {
+        ...baseOverview.freshness,
+        status: "current",
+        latest_nav_date: "2026-08-07",
+        nav_is_current: true,
+        profile_report_date: "2026-08-08",
+        latest_pcf_date: "2026-08-10",
+        pcf_status: "current",
+        latest_inav_at: "2026-08-07T05:31:00Z",
+        inav_status: "closed",
+        inav_age_seconds: null,
+        refresh_recommended: false,
+      },
+      warnings: [],
+      refresh: {
+        requested_resources: [
+          "profile",
+          "daily_close_nav",
+          "pcf",
+          "intraday_estimated_nav",
+        ],
+        refreshed_resources: [
+          "profile",
+          "daily_close_nav",
+          "pcf",
+          "intraday_estimated_nav",
+        ],
+        request_count: 8,
+        target_nav_date: "2026-08-07",
+        target_pcf_date: "2026-08-10",
+        inav_observed_at: "2026-08-07T05:31:00Z",
+        errors: {},
+      },
+    };
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      apiRequests,
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: [
+        {
+          id: 500,
+          group_id: 7,
+          stock_id: "0050",
+          stock_name: "元大台灣50",
+          market: "TWSE",
+          instrument_type: "etf",
+          note: null,
+          priority: 0,
+          tags: "ETF",
+          enabled: true,
+          created_at: timestamp,
+          updated_at: timestamp,
+        },
+      ],
+      apiResponder: ({ method, path }) => {
+        if (path.endsWith("/market/etfs/0050/overview")) {
+          return { body: baseOverview };
+        }
+        if (method === "POST" && path.endsWith("/market/etfs/0050/refresh")) {
+          return { body: refreshedOverview };
+        }
+        if (path.endsWith("/market/institutional/0050/holding-ratios")) {
+          return {
+            status: 404,
+            body: { detail: "ETF institutional holding ratios unavailable" },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&group_id=7&stock_id=0050", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const panel = page.getByTestId("tw-etf-data-panel");
+    const dataPanel = page.getByTestId("tw-stock-detail-data-panel");
+    const chipsTab = dataPanel.locator('[data-data-tab="chips"]');
+    const institutionalTab = dataPanel.locator('[data-data-tab="institutional"]');
+    const branchTab = dataPanel.locator('[data-data-tab="branch"]');
+    const etfTab = dataPanel.locator('[data-data-tab="etf"]');
+    await expect(panel).toBeVisible();
+    await expect(chipsTab).toBeVisible();
+    await expect(institutionalTab).toBeVisible();
+    await expect(branchTab).toBeVisible();
+    await expect(etfTab).toBeVisible();
+    await expect(etfTab).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toContainText("102.7600");
+    await expect(panel).toContainText("+0.09%");
+    await expect(panel).toContainText("臺灣50指數");
+    await expect(panel).toContainText("盤中 iNAV 已接入");
+    await expect(panel).toContainText("PCF 成分籃子");
+    await expect(panel).toContainText("台積電");
+    await expect(page.getByText("營收資料", { exact: false })).toHaveCount(0);
+    await expect(dataPanel.locator('[data-data-tab="revenue"]')).toHaveCount(0);
+    await expect(dataPanel.locator('[data-data-tab="earnings"]')).toHaveCount(0);
+    expect(
+      apiRequests.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/market/etfs/0050/refresh")
+      )
+    ).toHaveLength(1);
+    expect(
+      apiRequests.find(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/market/etfs/0050/refresh")
+      )?.body
+    ).toEqual({
+      refresh_profile: true,
+      refresh_nav: true,
+      refresh_pcf: true,
+      refresh_inav: true,
+    });
+
+    expect(
+      apiRequests.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/market/selection-refresh/0050")
+      )
+    ).toHaveLength(0);
+
+    await chipsTab.click();
+    await expect(chipsTab).toHaveAttribute("aria-selected", "true");
+    await expect(panel).toHaveCount(0);
+    await expect
+      .poll(
+        () =>
+          apiRequests.filter(
+            (request) =>
+              request.method === "POST" &&
+              request.path.endsWith("/market/selection-refresh/0050") &&
+              request.search.includes("profile=chips")
+          ).length
+      )
+      .toBe(1);
+
+    await institutionalTab.click();
+    await expect(institutionalTab).toHaveAttribute("aria-selected", "true");
+    await expect
+      .poll(() =>
+        apiRequests.some((request) =>
+          request.path.endsWith("/market/institutional/0050/history")
+        )
+      )
+      .toBe(true);
+
+    await branchTab.click();
+    await expect(branchTab).toHaveAttribute("aria-selected", "true");
+    await expect
+      .poll(() =>
+        apiRequests.some((request) =>
+          request.path.endsWith("/market/broker-branches/0050/daily")
+        )
+      )
+      .toBe(true);
+
+    expect(
+      apiRequests.filter(
+        (request) =>
+          request.path.includes("/market/revenue/0050") ||
+          request.path.includes("/market/financials/0050")
+      )
+    ).toHaveLength(0);
+
+    await etfTab.click();
+    await expect(etfTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("tw-etf-data-panel")).toBeVisible();
     expect(pageErrors).toEqual([]);
   });
 });

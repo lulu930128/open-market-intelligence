@@ -13,17 +13,21 @@ import ProfessionalChartPanel, {
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
-  indicatorCategoryGroups,
   professionalIndicatorCategoryGroups,
-  type IndicatorCategoryGroup,
   type IndicatorParameters,
   type IndicatorKey,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
 import type { ChartDrawingTool } from "@/components/LightweightKLineChart";
+import NextSessionPlanPanel from "@/components/stock-detail/NextSessionPlanPanel";
 import StockDetailDataPanel from "@/components/stock-detail/StockDetailDataPanel";
+import TaiwanETFDataPanel from "@/components/stock-detail/TaiwanETFDataPanel";
 import QuoteDepthPanel from "@/components/stock-detail/QuoteDepthPanel";
-import { dataPanelTabs } from "@/components/stock-detail/StockDetailPanelConstants";
+import {
+  dataPanelTabs,
+  etfDataPanelTabs,
+} from "@/components/stock-detail/StockDetailPanelConstants";
+import type { DataPanelSurfaceTab } from "@/components/stock-detail/DataPanelPrimitives";
 import {
   buildChipDateGroups,
   buildEarningsSeries,
@@ -51,6 +55,7 @@ import {
 } from "@/components/stock-detail/corporateEventChartMarkers";
 import { useChartDrawingPersistence } from "@/components/stock-detail/useChartDrawingPersistence";
 import { useTaiwanDetailContext } from "@/components/stock-detail/useTaiwanDetailContext";
+import { useTaiwanNextSessionPlan } from "@/components/stock-detail/useTaiwanNextSessionPlan";
 import { useTaiwanDataPanel } from "@/components/stock-detail/useTaiwanDataPanel";
 import { useTaiwanQuoteDepth } from "@/components/stock-detail/useTaiwanQuoteDepth";
 import { useTaiwanStockChartData } from "@/components/stock-detail/useTaiwanStockChartData";
@@ -127,6 +132,8 @@ import {
 type Props = {
   stockId: string | null;
   stockName: string | null;
+  stockMarket?: string | null;
+  instrumentType?: string | null;
   initialChartData?: ChartPoint[];
   initialChartIntradayOverlay?: OhlcIntradayOverlay | null;
   initialIndicatorData?: StockIndicatorPoint[];
@@ -192,27 +199,6 @@ function overlayMatchesChartLatest(
 }
 
 const indexTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
-const tpexTodayUnsupportedIndicators = new Set<IndicatorKey>([
-  "adLine",
-  "cmf",
-  "mfi",
-  "obv",
-  "pvt",
-  "volume",
-  "volumeProfile",
-  "vwap",
-  "vwma",
-]);
-const tpexTodayIndicatorGroups: IndicatorCategoryGroup[] = indicatorCategoryGroups
-  .map((group) => ({
-    ...group,
-    options: group.options.filter(
-      (option) =>
-        option.status !== "available" ||
-        !tpexTodayUnsupportedIndicators.has(option.key)
-    ),
-  }))
-  .filter((group) => group.options.length > 0);
 const indexProducts = new Map([
   [
     "TAIEX",
@@ -301,6 +287,8 @@ function TechnicalMetricBar({
 export default function StockDetailPanel({
   stockId,
   stockName,
+  stockMarket = null,
+  instrumentType = null,
   initialChartData = [],
   initialChartIntradayOverlay = null,
   initialIndicatorData = [],
@@ -343,11 +331,29 @@ export default function StockDetailPanel({
   const [revenueView, setRevenueView] = useState<RevenueView>("monthly");
   const [revenueYear, setRevenueYear] = useState<number | null>(null);
   const [earningsView, setEarningsView] = useState<EarningsView>("quarterly");
+  const [etfDataTabSelection, setEtfDataTabSelection] = useState<{
+    stockId: string;
+    tab: DataPanelSurfaceTab;
+  } | null>(null);
   const indexProduct = stockId ? indexProducts.get(stockId) ?? null : null;
   const isIndexProduct = indexProduct !== null;
+  const normalizedInstrumentType =
+    instrumentType?.trim().toLowerCase() ?? "unknown";
+  const instrumentTypeResolved =
+    normalizedInstrumentType !== "" && normalizedInstrumentType !== "unknown";
+  const isEtfProduct = normalizedInstrumentType === "etf";
+  const selectedEtfDataTab =
+    isEtfProduct && etfDataTabSelection?.stockId === stockId
+      ? etfDataTabSelection.tab
+      : "etf";
   const indexId = indexProduct?.indexId ?? null;
   const indexMarket = indexProduct?.market ?? null;
-  const { quoteDepth, loadState: quoteDepthLoadState } = useTaiwanQuoteDepth({
+  const {
+    quoteDepth,
+    quoteReplay,
+    loadState: quoteDepthLoadState,
+    replayLoadState: quoteReplayLoadState,
+  } = useTaiwanQuoteDepth({
     enabled: !isIndexProduct,
     stockId,
   });
@@ -379,12 +385,30 @@ export default function StockDetailPanel({
       setStockInfo,
     },
   } = useTaiwanDataPanel({
+    autoRefreshEnabled:
+      instrumentTypeResolved &&
+      (!isEtfProduct || selectedEtfDataTab !== "etf"),
+    includeFundamentals: instrumentTypeResolved && !isEtfProduct,
     isIndexProduct,
     onDailyPricesChanged,
     stockId,
     subresourceRefreshSeconds: taiwanSubresourceRefreshSeconds,
     t,
   });
+  const visibleDataPanelTabs = isEtfProduct ? etfDataPanelTabs : dataPanelTabs;
+  const activeDataSurfaceTab = isEtfProduct ? selectedEtfDataTab : activeDataTab;
+  const selectDataSurfaceTab = useCallback(
+    (tab: DataPanelSurfaceTab) => {
+      if (isEtfProduct) {
+        if (!stockId) return;
+        setEtfDataTabSelection({ stockId, tab });
+      }
+      if (tab !== "etf") {
+        selectDataTab(tab);
+      }
+    },
+    [isEtfProduct, selectDataTab, stockId]
+  );
   const {
     indexContributionLoadState,
     indexContributions,
@@ -400,9 +424,17 @@ export default function StockDetailPanel({
     isIndexProduct,
     stockId,
   });
+  const {
+    loadState: nextSessionPlanLoadState,
+    plan: nextSessionPlan,
+  } = useTaiwanNextSessionPlan({
+    enabled: !isIndexProduct && !isEtfProduct,
+    stockId,
+    stockName,
+  });
   const chartDrawingRemoteMarket = isIndexProduct
     ? indexProduct.market
-    : stockInfo?.market ?? null;
+    : stockInfo?.market ?? stockMarket;
   const {
     state: {
       activeSelectedDrawingId: activeSelectedChartDrawingId,
@@ -432,8 +464,8 @@ export default function StockDetailPanel({
   const dataStatusContextLabel = stockId
     ? `${stockId}${dataStatusDisplayName ? ` ${dataStatusDisplayName}` : ""}`
     : t("watchlist.noGroupSelected");
-  const dataStatusContextKey = `tw:${isIndexProduct ? "index" : "stock"}:${stockId ?? "unknown"}`;
-  const dataStatusSource = isIndexProduct ? "台股指數" : "台股個股";
+  const dataStatusContextKey = `tw:${isIndexProduct ? "index" : isEtfProduct ? "etf" : "stock"}:${stockId ?? "unknown"}`;
+  const dataStatusSource = isIndexProduct ? "台股指數" : isEtfProduct ? "台股 ETF" : "台股個股";
 
   const publishDetailDataStatus = useCallback(
     ({
@@ -468,19 +500,21 @@ export default function StockDetailPanel({
     useTaiwanCorporateEventChartHistory({
       contextKey: dataStatusContextKey,
       contextLabel: dataStatusContextLabel,
-      enabled: !isIndexProduct && corporateEventMarkersEnabled,
+      enabled: !isIndexProduct && !isEtfProduct && corporateEventMarkersEnabled,
       fallback: stockInfo?.event_history,
       market: currentStockInfoMarket,
       stockId: currentStockInfoId,
     });
   const corporateEventMenuOptions = useMemo(
     () =>
-      isIndexProduct
+      isIndexProduct || isEtfProduct
         ? []
         : [corporateEventMarkerOption(corporateEventMarkersEnabled, t)],
-    [corporateEventMarkersEnabled, isIndexProduct, t]
+    [corporateEventMarkersEnabled, isEtfProduct, isIndexProduct, t]
   );
-  const dispositionStatus = !isIndexProduct ? stockInfo?.disposition ?? null : null;
+  const dispositionStatus = !isIndexProduct && !isEtfProduct
+    ? stockInfo?.disposition ?? null
+    : null;
   const dispositionVisible = Boolean(
     dispositionStatus?.is_disposition &&
       (dispositionStatus.status === "active" || dispositionStatus.status === "upcoming")
@@ -490,10 +524,10 @@ export default function StockDetailPanel({
       !dispositionStatus.is_disposition &&
       dispositionStatus.cache_status !== "current"
   );
-  const upcomingCorporateEvents = !isIndexProduct
+  const upcomingCorporateEvents = !isIndexProduct && !isEtfProduct
     ? stockInfo?.upcoming_events?.results ?? []
     : [];
-  const historicalCorporateEvents = !isIndexProduct
+  const historicalCorporateEvents = !isIndexProduct && !isEtfProduct
     ? stockInfo?.event_history?.results ?? []
     : [];
   const corporateEventSourceUncertain = Boolean(
@@ -566,8 +600,12 @@ export default function StockDetailPanel({
       professionalIntradayFallbackActive,
       professionalIntradayInterval,
       professionalIntradayStockId,
+      todayCapabilities,
+      todayCurrentObservation,
       todayPreviousClose,
+      todayPriceDiagnostics,
       todaySource,
+      todayTradeDate,
       todayTrend,
       todayUpdatedAt,
     },
@@ -702,30 +740,26 @@ export default function StockDetailPanel({
     chartTimeframe === effectiveTimeframe;
   const canUseFocusedKLine = currentChartReady && chartData.length > 0;
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
-  const todayStats = useMemo(() => summarizeIntradayPoints(todayTrend), [todayTrend]);
-  const isTpexTodayKLine =
-    indexProduct?.indexId === "TPEX" && effectiveTimeframe === "today";
-  const tpexTodayChartData = useMemo(
+  const latestTodayDisplayPrice = finiteNumber(todayCurrentObservation?.value)
+    ? todayCurrentObservation.value
+    : latestToday?.price ?? null;
+  const todayStats = useMemo(
     () =>
-      isTpexTodayKLine
-        ? aggregateProfessionalIntradayBars(todayTrend, 1, {
-            discardOpeningReferencePrice: todayPreviousClose,
-            includePostCloseSnapshot: true,
-            includeVolume: false,
-            priceOnly: true,
-          })
-        : [],
-    [isTpexTodayKLine, todayPreviousClose, todayTrend]
+      summarizeIntradayPoints(todayTrend, {
+        tradeDate: todayTradeDate,
+      }),
+    [todayTradeDate, todayTrend]
   );
-  const tpexTodayIndicators = useMemo(() => {
-    const next = { ...chartIndicators };
-
-    for (const key of tpexTodayUnsupportedIndicators) {
-      next[key] = false;
-    }
-
-    return next;
-  }, [chartIndicators]);
+  const todayIndicatorOptions = intradayIndicatorOptions.filter((option) => {
+    if (option.key === "volume") return todayCapabilities.supports_volume;
+    if (option.key === "vwap") return todayCapabilities.supports_vwap;
+    return true;
+  });
+  const todayIntradayIndicators = {
+    ...intradayIndicators,
+    volume: intradayIndicators.volume && todayCapabilities.supports_volume,
+    vwap: intradayIndicators.vwap && todayCapabilities.supports_vwap,
+  };
   const professionalIsIntraday = isProfessionalIntradayTimeframe(professionalTimeframe);
   const emptyProfessionalIndicatorData = useMemo<StockIndicatorPoint[]>(() => [], []);
   const emptyProfessionalBenchmarkData = useMemo<ChartPoint[]>(() => [], []);
@@ -822,7 +856,7 @@ export default function StockDetailPanel({
   const latestProfessionalChart = professionalChartData[professionalChartData.length - 1] ?? null;
   const latestClose =
     effectiveTimeframe === "today"
-      ? latestToday?.price ?? null
+      ? latestTodayDisplayPrice
       : latestCurrentIndicator?.close ?? latestChart?.close ?? null;
   const dailyPreviousClose =
     latestCurrentIndicator?.close !== null &&
@@ -848,16 +882,16 @@ export default function StockDetailPanel({
       ? latestChart.close - chartPreviousClose
       : null;
   const latestChange =
-    effectiveTimeframe === "today" && latestToday && todayReferenceClose
-      ? latestToday.price - todayReferenceClose
+    effectiveTimeframe === "today" && latestTodayDisplayPrice !== null && todayReferenceClose
+      ? latestTodayDisplayPrice - todayReferenceClose
       : latestCurrentIndicator?.change ?? chartChange;
   const latestChangePct =
-    effectiveTimeframe === "today" && latestToday && todayReferenceClose
-      ? ((latestToday.price - todayReferenceClose) / todayReferenceClose) * 100
+    effectiveTimeframe === "today" && latestTodayDisplayPrice !== null && todayReferenceClose
+      ? ((latestTodayDisplayPrice - todayReferenceClose) / todayReferenceClose) * 100
       : latestCurrentIndicator?.change_pct ?? chartChangePct;
   const professionalLatestClose =
     chartFocusMode && professionalIsIntraday
-      ? latestProfessionalChart?.close ?? latestToday?.price ?? latestClose
+      ? latestProfessionalChart?.close ?? latestTodayDisplayPrice ?? latestClose
       : latestClose;
   const professionalDrawingContext = useMemo(
     () => ({
@@ -868,12 +902,12 @@ export default function StockDetailPanel({
     [currentStockInfoMarket, professionalTimeframe, stockId]
   );
   const professionalLatestChange =
-    chartFocusMode && professionalIsIntraday && latestToday && todayReferenceClose
-      ? latestToday.price - todayReferenceClose
+    chartFocusMode && professionalIsIntraday && latestTodayDisplayPrice !== null && todayReferenceClose
+      ? latestTodayDisplayPrice - todayReferenceClose
       : latestChange;
   const professionalLatestChangePct =
-    chartFocusMode && professionalIsIntraday && latestToday && todayReferenceClose
-      ? ((latestToday.price - todayReferenceClose) / todayReferenceClose) * 100
+    chartFocusMode && professionalIsIntraday && latestTodayDisplayPrice !== null && todayReferenceClose
+      ? ((latestTodayDisplayPrice - todayReferenceClose) / todayReferenceClose) * 100
       : latestChangePct;
   const professionalHeaderLimitStatus = isIndexProduct
     ? null
@@ -897,8 +931,10 @@ export default function StockDetailPanel({
   const volumeRatioPct = volumeRatio === null ? null : (volumeRatio - 1) * 100;
   const totalInstitutionalNet = institutional?.total_institutional_net ?? null;
   const displayTime =
-    effectiveTimeframe === "today" && latestToday
-      ? formatDateTime(latestToday.time)
+    effectiveTimeframe === "today" && todayCurrentObservation?.observed_at
+      ? formatDateTime(todayCurrentObservation.observed_at)
+      : effectiveTimeframe === "today" && latestToday
+        ? formatDateTime(latestToday.time)
       : effectiveTimeframe === "today"
         ? "-"
         : latestCurrentIndicator?.time ?? latestChart?.time ?? "-";
@@ -1102,7 +1138,7 @@ export default function StockDetailPanel({
         target.open = true;
       }
       if (dataTabTarget) {
-        selectDataTab(dataTabTarget);
+        selectDataSurfaceTab(dataTabTarget);
       }
 
       window.requestAnimationFrame(() => {
@@ -1121,7 +1157,7 @@ export default function StockDetailPanel({
         }
       });
     },
-    [selectDataTab]
+    [selectDataSurfaceTab]
   );
   const technicalSourceReady =
     effectiveTimeframe === "today" ? todayTrend.length > 0 : currentChartReady;
@@ -1315,6 +1351,7 @@ export default function StockDetailPanel({
 
             <div className="flex items-start gap-5">
               <div
+                data-testid={effectiveTimeframe === "today" ? "today-header-price" : undefined}
                 className={`flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-right ${priceLimitTone(
                   headerLimitStatus,
                   latestChange
@@ -1347,6 +1384,7 @@ export default function StockDetailPanel({
                     <button
                       key={item}
                       type="button"
+                      data-testid={`timeframe-${item}`}
                       onClick={() => {
                         setTimeframe(item);
                         setIndicatorMenuOpen(false);
@@ -1366,21 +1404,26 @@ export default function StockDetailPanel({
                   ))}
                 </div>
 
-                {effectiveTimeframe === "today" && !isTpexTodayKLine ? (
+                {effectiveTimeframe === "today" ? (
                   <div className="relative">
                     <button
                       type="button"
+                      data-testid="chart-indicator-menu-toggle"
                       onClick={() => setIndicatorMenuOpen((value) => !value)}
                       className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                     >
                       {t("stockDetail.indicators")}
                     </button>
                     {indicatorMenuOpen ? (
-                      <div className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
+                      <div
+                        data-testid="intraday-indicator-menu"
+                        className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg"
+                      >
                         <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("stockDetail.displayItems")}</div>
-                        {intradayIndicatorOptions.map((option) => (
+                        {todayIndicatorOptions.map((option) => (
                           <label
                             key={option.key}
+                            data-indicator-option={option.key}
                             className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-omi-surface-subtle"
                           >
                             <input
@@ -1415,30 +1458,19 @@ export default function StockDetailPanel({
                       </button>
                       {indicatorMenuOpen ? (
                         <TechnicalIndicatorMenu
-                          indicators={
-                            isTpexTodayKLine
-                              ? tpexTodayIndicators
-                              : chartIndicators
-                          }
+                          indicators={chartIndicators}
                           activeTemplate={
-                            isTpexTodayKLine ? null : activeIndicatorTemplate
+                            activeIndicatorTemplate
                           }
                           onApplyTemplate={applyIndicatorTemplate}
                           onToggleIndicator={toggleChartIndicator}
-                          groups={
-                            isTpexTodayKLine
-                              ? tpexTodayIndicatorGroups
-                              : undefined
-                          }
                           supplementalMarkerOptions={
-                            isTpexTodayKLine ? [] : corporateEventMenuOptions
+                            corporateEventMenuOptions
                           }
                           onToggleSupplementalMarker={
-                            isTpexTodayKLine
-                              ? undefined
-                              : toggleCorporateEventMarker
+                            toggleCorporateEventMarker
                           }
-                          showTemplates={!isTpexTodayKLine}
+                          showTemplates
                           includeParameters
                           parameters={indicatorParameters}
                           onUpdateParameter={updateIndicatorParameter}
@@ -1446,8 +1478,7 @@ export default function StockDetailPanel({
                         />
                       ) : null}
                     </div>
-                    {effectiveTimeframe !== "today" ? (
-                      <button
+                    <button
                         type="button"
                         data-testid="stock-detail-expand"
                         disabled={!canUseFocusedKLine}
@@ -1469,8 +1500,7 @@ export default function StockDetailPanel({
                           .join(" ")}
                       >
                         {chartFocusMode ? t("stockDetail.overview") : t("stockDetail.expand")}
-                      </button>
-                    ) : null}
+                    </button>
                   </div>
                 )}
               </div>
@@ -1607,45 +1637,25 @@ export default function StockDetailPanel({
                 future: chartDrawingHistory.future.length,
               }}
             />
-          ) : isTpexTodayKLine ? (
-            tpexTodayChartData.length > 0 ? (
-              <div
-                data-testid="tpex-today-kline"
-                data-point-count={tpexTodayChartData.length}
-              >
-                <StockKLineChart
-                  chartData={tpexTodayChartData}
-                  indicatorData={emptyProfessionalIndicatorData}
-                  label={timeframeLabel(t, effectiveTimeframe)}
-                  indicators={tpexTodayIndicators}
-                  indicatorParameters={indicatorParameters}
-                  benchmarkData={emptyProfessionalBenchmarkData}
-                  revealKey={`${stockId}:${effectiveTimeframe}`}
-                  latestPreviousClose={todayPreviousClose}
-                  timeLabelFormatter={formatDateTime}
-                />
-              </div>
-            ) : (
-              <EmptyDataState
-                message={t("stockDetail.loadingFrame", {
-                  label: timeframeLabel(t, effectiveTimeframe),
-                })}
-                tone="loading"
-                busy
-                className="m-4"
-              />
-            )
           ) : effectiveTimeframe === "today" ? (
-            <IntradayTrendChart
-              points={todayTrend}
-              previousClose={todayPreviousClose}
-              label={timeframeLabel(t, effectiveTimeframe)}
-              source={todaySource}
-              indicators={intradayIndicators}
-              revealKey={`${stockId}:${effectiveTimeframe}`}
-              refreshIntervalMs={TAIWAN_INTRADAY_REFRESH_MS}
-              updatedAt={todayUpdatedAt}
-            />
+            <div
+              data-testid="today-intraday-surface"
+              data-point-count={todayTrend.length}
+            >
+              <IntradayTrendChart
+                points={todayTrend}
+                previousClose={todayPreviousClose}
+                label={timeframeLabel(t, effectiveTimeframe)}
+                source={todaySource}
+                indicators={todayIntradayIndicators}
+                revealKey={`${stockId}:${effectiveTimeframe}`}
+                refreshIntervalMs={TAIWAN_INTRADAY_REFRESH_MS}
+                updatedAt={todayUpdatedAt}
+                priceLimitEnabled={todayCapabilities.supports_price_limit}
+                priceDiagnostics={todayPriceDiagnostics}
+                tradeDate={todayTradeDate}
+              />
+            </div>
           ) : currentChartReady ? (
             <StockKLineChart
               chartData={chartData}
@@ -1679,11 +1689,36 @@ export default function StockDetailPanel({
           )}
         </div>
 
+        {!chartFocusMode && !isIndexProduct ? (
+          <button
+            type="button"
+            data-testid="technical-compact-jump"
+            onClick={() => {
+              document
+                .getElementById("tw-stock-technical-panel")
+                ?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+            className="flex w-full items-center justify-between gap-3 border border-omi-border-subtle bg-omi-surface px-4 py-3 text-left xl:hidden"
+          >
+            <span className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
+              Technical
+            </span>
+            <span className="min-w-0 truncate text-sm font-semibold text-omi-text-strong">
+              {technicalStatus}
+            </span>
+            <span aria-hidden="true" className="text-omi-text-muted">
+              ↓
+            </span>
+          </button>
+        ) : null}
+
         {!chartFocusMode && !isIndexProduct && !showTechnicalLoading ? (
           <div className="min-w-0 border-x border-t border-omi-border-subtle bg-omi-surface">
             <QuoteDepthPanel
               quoteDepth={quoteDepth}
+              quoteReplay={quoteReplay}
               loadState={quoteDepthLoadState}
+              replayLoadState={quoteReplayLoadState}
               quoteDepthPreviewMode={quoteDepthPreviewMode}
             />
           </div>
@@ -1708,7 +1743,9 @@ export default function StockDetailPanel({
 
       {!chartFocusMode ? (
       <aside
-        className="flex min-w-0 flex-col border border-omi-border-subtle bg-omi-surface"
+        id="tw-stock-technical-panel"
+        data-testid="stock-detail-secondary-panel"
+        className="flex min-w-0 scroll-mt-4 flex-col border border-omi-border-subtle bg-omi-surface"
       >
         {isIndexProduct ? (
           <IndexListPanel
@@ -1946,6 +1983,10 @@ export default function StockDetailPanel({
                       </div>
                     </div>
                   </details>
+                  <NextSessionPlanPanel
+                    plan={nextSessionPlan}
+                    loadState={nextSessionPlanLoadState}
+                  />
                   <OvernightImpactPanel
                     report={displayOvernightImpact}
                     loadState={displayOvernightImpactLoadState}
@@ -1966,6 +2007,11 @@ export default function StockDetailPanel({
                       />
                     ))}
                   </div>
+
+                  <NextSessionPlanPanel
+                    plan={nextSessionPlan}
+                    loadState={nextSessionPlanLoadState}
+                  />
 
                   <OvernightImpactPanel
                     report={displayOvernightImpact}
@@ -2012,79 +2058,91 @@ export default function StockDetailPanel({
               className="h-2 border-b border-omi-border-subtle bg-omi-surface-muted shadow-[var(--omi-shadow-surface-inset)]"
             />
 
-            <div className="flex border-b border-omi-border-subtle">
-              {dataPanelTabs.map((tab) => (
+            <div
+              role="tablist"
+              aria-label={t("stockDetail.data")}
+              className="flex border-b border-omi-border-subtle"
+            >
+              {visibleDataPanelTabs.map((tab) => (
                 <DataTabButton
                   key={tab.key}
                   tab={{ ...tab, label: t(`stockDetail.tabs.${tab.key}`) }}
-                  active={activeDataTab === tab.key}
-                  onClick={() => selectDataTab(tab.key)}
+                  active={activeDataSurfaceTab === tab.key}
+                  onClick={() => selectDataSurfaceTab(tab.key)}
                 />
               ))}
             </div>
 
-            <div className="px-5 py-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                {t("stockDetail.data")}
-              </div>
-              <div className="mt-1 flex items-end justify-between gap-4">
-                <div>
-                  <div className="text-lg font-bold text-omi-text-strong">
-                    {t(`stockDetail.tabs.${activeDataTab}`)} {t("stockDetail.data")}
-                  </div>
+            {isEtfProduct && activeDataSurfaceTab === "etf" ? (
+              <TaiwanETFDataPanel
+                stockId={stockId}
+                stockName={stockName}
+                market={stockMarket}
+              />
+            ) : (
+              <div role="tabpanel" className="px-5 py-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
+                  {t("stockDetail.data")}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void refreshDataTab(activeDataTab)}
-                  disabled={dataPanelLoading !== null}
-                  className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:cursor-wait disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
-                >
-                  {dataPanelLoading === activeDataTab
-                    ? t("stockDetail.dataPanel.refreshing")
-                    : t("stockDetail.dataPanel.refresh")}
-                </button>
-              </div>
+                <div className="mt-1 flex items-end justify-between gap-4">
+                  <div>
+                    <div className="text-lg font-bold text-omi-text-strong">
+                      {t(`stockDetail.tabs.${activeDataTab}`)} {t("stockDetail.data")}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void refreshDataTab(activeDataTab)}
+                    disabled={dataPanelLoading !== null}
+                    className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:cursor-wait disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
+                  >
+                    {dataPanelLoading === activeDataTab
+                      ? t("stockDetail.dataPanel.refreshing")
+                      : t("stockDetail.dataPanel.refresh")}
+                  </button>
+                </div>
 
-              <div className="mt-4">
-                <StockDetailDataPanel
-                  activeDataTab={activeDataTab}
-                  branchDays={branchDays}
-                  branchTableSide={branchTableSide}
-                  brokerBranchSummary={brokerBranchSummary}
-                  chipCoverage={chipCoverage}
-                  dataPanelLoading={dataPanelLoading}
-                  dataPanelMessage={dataPanelMessage}
-                  earningsSeries={earningsSeries}
-                  earningsView={earningsView}
-                  financialMetric={financialMetric}
-                  financialMetricHistory={financialMetricHistory}
-                  financialContract={financialContract}
-                  institutionalHoldingRatio={institutionalHoldingRatio}
-                  institutionalHistory={institutionalHistory}
-                  institutionalHoverDate={institutionalHoverDate}
-                  institutionalSeries={institutionalSeries}
-                  largeHolderLots={largeHolderLots}
-                  margin={margin}
-                  monthlyRevenue={monthlyRevenue}
-                  monthlyRevenueHistory={monthlyRevenueHistory}
-                  revenueSeries={revenueSeries}
-                  revenueView={revenueView}
-                  revenueYear={revenueYear}
-                  setBranchDays={setBranchDays}
-                  setBranchTableSide={setBranchTableSide}
-                  setEarningsView={setEarningsView}
-                  setInstitutionalHoverDate={setInstitutionalHoverDate}
-                  setLargeHolderLots={setLargeHolderLots}
-                  setRevenueView={setRevenueView}
-                  setRevenueYear={setRevenueYear}
-                  setSmallHolderLots={setSmallHolderLots}
-                  shareholding={shareholding}
-                  shareholdingSeries={shareholdingSeries}
-                  smallHolderLots={smallHolderLots}
-                  stockId={stockId}
-                />
+                <div className="mt-4">
+                  <StockDetailDataPanel
+                    activeDataTab={activeDataTab}
+                    branchDays={branchDays}
+                    branchTableSide={branchTableSide}
+                    brokerBranchSummary={brokerBranchSummary}
+                    chipCoverage={chipCoverage}
+                    dataPanelLoading={dataPanelLoading}
+                    dataPanelMessage={dataPanelMessage}
+                    earningsSeries={earningsSeries}
+                    earningsView={earningsView}
+                    financialMetric={financialMetric}
+                    financialMetricHistory={financialMetricHistory}
+                    financialContract={financialContract}
+                    institutionalHoldingRatio={institutionalHoldingRatio}
+                    institutionalHistory={institutionalHistory}
+                    institutionalHoverDate={institutionalHoverDate}
+                    institutionalSeries={institutionalSeries}
+                    largeHolderLots={largeHolderLots}
+                    margin={margin}
+                    monthlyRevenue={monthlyRevenue}
+                    monthlyRevenueHistory={monthlyRevenueHistory}
+                    revenueSeries={revenueSeries}
+                    revenueView={revenueView}
+                    revenueYear={revenueYear}
+                    setBranchDays={setBranchDays}
+                    setBranchTableSide={setBranchTableSide}
+                    setEarningsView={setEarningsView}
+                    setInstitutionalHoverDate={setInstitutionalHoverDate}
+                    setLargeHolderLots={setLargeHolderLots}
+                    setRevenueView={setRevenueView}
+                    setRevenueYear={setRevenueYear}
+                    setSmallHolderLots={setSmallHolderLots}
+                    shareholding={shareholding}
+                    shareholdingSeries={shareholdingSeries}
+                    smallHolderLots={smallHolderLots}
+                    stockId={stockId}
+                  />
+                </div>
               </div>
-            </div>
+            )}
           </div>
         ) : null}
 

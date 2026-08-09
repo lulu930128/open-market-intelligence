@@ -214,7 +214,15 @@ class Settings(BaseSettings):
     dispatch_smtp_use_ssl: bool = False
     dispatch_smtp_timeout_seconds: int = 30
     enable_dispatch_scheduler: bool = True
+    dispatch_scheduler_v2_enabled: bool = True
     scheduler_dispatch_tick_interval_seconds: int = 60
+    scheduler_dispatch_claim_limit: int = 100
+    scheduler_dispatch_reconcile_interval_seconds: int = 300
+    scheduler_dispatch_stale_claim_minutes: int = 5
+    scheduler_dispatch_default_misfire_grace_minutes: int = 15
+    scheduler_dispatch_default_retry_interval_seconds: int = 300
+    scheduler_dispatch_default_max_retries: int = 2
+    scheduler_dispatch_default_readiness_deadline_minutes: int = 60
 
     finmind_token: str | None = None
     alphavantage_api_key: str | None = None

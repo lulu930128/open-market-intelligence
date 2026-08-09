@@ -339,6 +339,7 @@ export function IndexDetailDataPanel({
           label={t("stockDetail.dataViews.indexDetail.open")}
           value={formatPrice(open)}
           tone={valueTone(open !== null && reference !== null ? open - reference : null)}
+          testId="index-detail-open"
         />
         <IndexMetricCard
           label={t("stockDetail.dataViews.indexDetail.high")}
@@ -475,6 +476,8 @@ export function IndexDetailDataPanel({
         <div>
           {index?.breadth_status?.status === "failed"
             ? t("dashboard.marketIndex.breadthFailed")
+            : index?.breadth_status?.status === "pending"
+              ? t("dashboard.marketIndex.breadthPending")
             : index?.breadth_status?.status === "partial"
               ? t("dashboard.marketIndex.breadthPartial")
               : breadth?.source
@@ -484,6 +487,22 @@ export function IndexDetailDataPanel({
             : t("stockDetail.dataViews.indexDetail.breadthPending")}
         </div>
         {breadthCoverageText ? <div>{breadthCoverageText}</div> : null}
+        {breadth?.snapshot_as_of || breadth?.as_of ? (
+          <div>
+            {t("dashboard.marketIndex.breadthUpdated", {
+              asOf: formatDateTime(breadth.snapshot_as_of ?? breadth.as_of),
+            })}
+          </div>
+        ) : null}
+        {breadth?.auction_breadth?.status === "provisional" ? (
+          <div>
+            {t("dashboard.marketIndex.auctionProvisional", {
+              advance: breadth.auction_breadth.advance_count,
+              decline: breadth.auction_breadth.decline_count,
+              unchanged: breadth.auction_breadth.unchanged_count,
+            })}
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -493,13 +512,18 @@ export function IndexMetricCard({
   label,
   value,
   tone = "text-omi-text",
+  testId,
 }: {
   label: string;
   value: string;
   tone?: string;
+  testId?: string;
 }) {
   return (
-    <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+    <div
+      className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2"
+      data-testid={testId}
+    >
       <div className="text-xs font-semibold text-omi-text-muted">{label}</div>
       <div className={`mt-1 text-base font-bold ${tone}`}>{value}</div>
     </div>

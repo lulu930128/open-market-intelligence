@@ -150,6 +150,18 @@ flowchart TB
 - MCP／Kuro adapter 保持 thin，只呼叫 backend API，不直接讀寫 OMI database。
 - Schema 變更走 Alembic migration；本機 SQLite 不以刪除重建處理一般升級。
 
+## 可靠派報與定時執行
+
+OMI 的派報排程由 backend 擁有。每個正式時段先建立具唯一鍵的 schedule run，再保存當次排程、內容需求與收件快照，之後才交給背景工作產生 delivery 與 SMTP 寄送。這能避免多個 scheduler tick 或重啟恢復時重複消耗同一個時段。
+
+- `next_run_at` 以 UTC 保存，顯示與規則仍使用排程指定的 IANA timezone；DST 不存在時段會順延到第一個有效分鐘，重複時段固定採第一個 fold。
+- 預設 catch-up 是 `latest_only`，避免停機後一次補寄大量過時報告；可另設逾時寬限與 skip policy。
+- Readiness profile 與 policy 由 backend 判斷並留下 structured evidence。`waiting_data`、`skipped`、stale、missing 與 provider failure 不會被 UI 隱藏。
+- Queue 成功不等於寄送成功。只有 SMTP 完成後才更新 `last_sent_at`；若程序在 `sending` 中斷，結果標成 unknown 並禁止自動重寄，避免收件人收到重複郵件。
+- 啟動與週期 reconciliation 只恢復尚未進入 SMTP 的安全 handoff，並重用既有 delivery；run history 保留 scheduled、manual 與 manual retry lineage。
+
+SMTP 憑證只放在本機 `.env`。設定範例見 `.env.example`；不要把真實帳號、收件地址、app password、資料庫或寄送 log 提交到 repository。
+
 ## 快速啟動
 
 ### 系統需求

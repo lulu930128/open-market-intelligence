@@ -208,6 +208,12 @@ def _calendar_date(value: Any) -> date | None:
 
 
 def _expected_observation_date(calendar_status: dict[str, Any]) -> date | None:
+    presentation = calendar_status.get("presentation_session")
+    if isinstance(presentation, dict):
+        presentation_trade_date = _calendar_date(presentation.get("trade_date"))
+        if presentation_trade_date is not None:
+            return presentation_trade_date
+
     current_date = _calendar_date(calendar_status.get("date"))
     if (
         current_date is not None
@@ -243,6 +249,15 @@ def _realtime_observation_status(
         and expected_data_date is not None
         and latest_data_date < expected_data_date
     ):
+        if phase in {"preopen_pending", "preopen"}:
+            return (
+                "pending",
+                False,
+                "pending",
+                "The presentation session has rolled forward, but current-session "
+                "realtime observations are not expected until the preopen/live window.",
+                age_seconds,
+            )
         return (
             "stale",
             False,
@@ -506,7 +521,11 @@ def _market_breadth_entries(
             if isinstance(item.get("breadth_status"), dict)
             else {}
         )
-        observed_at = _taiwan_observed_at(item.get("as_of")) or summary_as_of
+        observed_at = (
+            _taiwan_observed_at(breadth.get("snapshot_as_of"))
+            or _taiwan_observed_at(breadth.get("as_of"))
+            or summary_as_of
+        )
         latest_data_date = _calendar_date(breadth.get("trade_date"))
         raw_status = str(breadth_status.get("status") or "failed")
         age_seconds = (
@@ -517,6 +536,18 @@ def _market_breadth_entries(
         if not breadth:
             status_value, ok, data_quality = "empty", False, "empty"
             reason = "Cached index summary does not contain market breadth."
+        elif (
+            latest_data_date
+            and expected_data_date
+            and latest_data_date < expected_data_date
+            and str(calendar_status.get("phase") or "unknown")
+            in {"preopen_pending", "preopen"}
+        ):
+            status_value, ok, data_quality = "pending", False, "pending"
+            reason = (
+                "The presentation session has rolled forward, but current-session "
+                "market breadth is still pending."
+            )
         elif latest_data_date and expected_data_date and latest_data_date < expected_data_date:
             status_value, ok, data_quality = "stale", False, "stale"
             reason = (
@@ -531,6 +562,12 @@ def _market_breadth_entries(
             reason = str(
                 breadth_status.get("reason")
                 or "Cached market breadth has partial constituent coverage."
+            )
+        elif raw_status == "pending":
+            status_value, ok, data_quality = "pending", False, "pending"
+            reason = str(
+                breadth_status.get("reason")
+                or "Regular-session market breadth is pending."
             )
         else:
             status_value, ok, data_quality = "error", False, "error"

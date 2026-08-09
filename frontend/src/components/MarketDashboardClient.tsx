@@ -108,6 +108,7 @@ import { getJpMarketIndexConfig } from "@/lib/jpMarketIndices";
 import { usAssetTypeLabel, useT } from "@/i18n";
 import type {
   ChartPoint,
+  JobRunRead,
   JPStockMasterRead,
   JPWatchlistGroupNode,
   JPWatchlistItemRead,
@@ -324,6 +325,8 @@ export default function MarketDashboardClient({
     selectedGroup,
     selectedStockId,
     selectedStockName,
+    selectedStockMarket,
+    selectedInstrumentType,
     selectedFuturesSymbol,
     selectedUsGroupId,
     selectedUsGroup,
@@ -388,6 +391,7 @@ export default function MarketDashboardClient({
       outcomeHistoryOpen: radarOutcomeHistoryOpen,
       outcomeHistoryLoadState: radarOutcomeHistoryLoadState,
       outcomeDetailLoadState: radarOutcomeDetailLoadState,
+      outcomeReconcileLoadState: radarOutcomeReconcileLoadState,
       selectedOutcomeSnapshotId: selectedRadarOutcomeSnapshotId,
     },
     actions: taiwanRadarActions,
@@ -401,6 +405,7 @@ export default function MarketDashboardClient({
         ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
         : null,
     onError: handleTaiwanRadarError,
+    onReconcileResult: handleTaiwanRadarReconcileResult,
   });
   const {
     state: {
@@ -723,6 +728,8 @@ export default function MarketDashboardClient({
     const title =
       kind === "radar"
         ? t("radar.loadError")
+        : kind === "reconcile"
+          ? t("radar.v2.outcomes.reconcileError")
         : t("radar.v2.outcomes.loadError");
     const source =
       kind === "radar"
@@ -735,15 +742,55 @@ export default function MarketDashboardClient({
         ? "radar"
         : kind === "history"
           ? "radar-outcome-history"
+          : kind === "reconcile"
+            ? "radar-outcome-reconcile"
           : "radar-outcome";
+    const statusKey = `tw:watchlist:${groupId}:${contextSuffix}`;
 
     emitDashboardDataStatus({
       market: "tw",
       title,
       message: apiErrorMessage(error, title),
       source,
-      contextKey: `tw:watchlist:${groupId}:${contextSuffix}`,
+      contextKey: statusKey,
       contextLabel: twWatchlistContextLabel,
+      dedupeKey:
+        kind === "reconcile"
+          ? `tw:watchlist:${groupId}:radar-outcome-reconcile`
+          : undefined,
+    });
+  }
+
+  function handleTaiwanRadarReconcileResult(job: JobRunRead, groupId: number) {
+    const result =
+      job.result && typeof job.result === "object" && !Array.isArray(job.result)
+        ? (job.result as Record<string, unknown>)
+        : {};
+    const remainingDue =
+      typeof result.remaining_due_count === "number"
+        ? result.remaining_due_count
+        : 0;
+    const finalized =
+      typeof result.finalized_count === "number" ? result.finalized_count : 0;
+    const partial = remainingDue > 0 || result.status === "partial_success";
+    const statusKey = `tw:watchlist:${groupId}:radar-outcome-reconcile`;
+
+    emitDashboardDataStatus({
+      market: "tw",
+      level: partial ? "warning" : "success",
+      title: partial
+        ? t("radar.v2.outcomes.reconcilePartialTitle")
+        : t("radar.v2.outcomes.reconcileSuccessTitle"),
+      message: partial
+        ? t("radar.v2.outcomes.reconcilePartial", {
+            finalized,
+            remaining: remainingDue,
+          })
+        : t("radar.v2.outcomes.reconcileSuccess", { finalized }),
+      source: t("radar.v2.outcomes.title"),
+      contextKey: statusKey,
+      contextLabel: twWatchlistContextLabel,
+      dedupeKey: statusKey,
     });
   }
 
@@ -944,8 +991,20 @@ export default function MarketDashboardClient({
     resetTaiwanGroupAnalysis();
   }
 
-  function onTaiwanStockChange(stockId: string, stockName: string | null) {
-    marketSelection.selectTaiwanStock(stockId, stockName, radarMode);
+  function onTaiwanStockChange(
+    stockId: string,
+    stockName: string | null,
+    market?: string | null,
+    instrumentType?: string | null
+  ) {
+    const watchlistItem = watchlistItems.find((item) => item.stock_id === stockId);
+    marketSelection.selectTaiwanStock(
+      stockId,
+      stockName,
+      market ?? watchlistItem?.market ?? null,
+      instrumentType ?? watchlistItem?.instrument_type ?? "unknown",
+      radarMode
+    );
   }
 
   function onTaiwanFuturesChange(symbol: string) {
@@ -1303,6 +1362,7 @@ export default function MarketDashboardClient({
         v2OutcomeHistoryOpen={radarOutcomeHistoryOpen}
         v2OutcomeHistoryLoadState={radarOutcomeHistoryLoadState}
         v2OutcomeDetailLoadState={radarOutcomeDetailLoadState}
+        v2OutcomeReconcileLoadState={radarOutcomeReconcileLoadState}
         selectedV2OutcomeSnapshotDate={selectedRadarOutcomeSnapshotId}
         getModeHref={(nextMode) =>
           dashboardHref({
@@ -1320,7 +1380,7 @@ export default function MarketDashboardClient({
         }}
         onOpenV2OutcomeHistory={taiwanRadarActions.openOutcomeHistory}
         onCloseV2OutcomeHistory={taiwanRadarActions.closeOutcomeHistory}
-        onReloadV2OutcomeHistory={taiwanRadarActions.reloadOutcomeHistory}
+        onReconcileV2OutcomeHistory={taiwanRadarActions.reconcileOutcomeHistory}
         onSelectV2OutcomeSnapshot={taiwanRadarActions.selectOutcomeSnapshot}
         onSelectStock={onTaiwanStockChange}
       />
@@ -1770,9 +1830,9 @@ export default function MarketDashboardClient({
                 if (activeMarket !== "tw") return;
                 onTaiwanGroupChange(group);
               }}
-              onSelectStock={(stockId, stockName) => {
+              onSelectStock={(stockId, stockName, market, instrumentType) => {
                 if (activeMarket !== "tw") return;
-                onTaiwanStockChange(stockId, stockName);
+                onTaiwanStockChange(stockId, stockName, market, instrumentType);
               }}
               onSelectFutures={(symbol) => {
                 if (activeMarket !== "tw") return;
@@ -1788,7 +1848,7 @@ export default function MarketDashboardClient({
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setWatchlistTree(nextTree);
                 setWatchlistItems(nextItems);
-                marketSelection.reconcileTaiwanExplorer(nextTree);
+                marketSelection.reconcileTaiwanExplorer(nextTree, nextItems);
               }}
               onChanged={(nextGroupId) => {
                 if (activeMarket !== "tw") return;
@@ -1823,6 +1883,8 @@ export default function MarketDashboardClient({
                   <StockDetailPanel
                     stockId={selectedStockId}
                     stockName={selectedStockName}
+                    stockMarket={selectedStockMarket}
+                    instrumentType={selectedInstrumentType}
                     initialChartData={initialChartData}
                     initialChartIntradayOverlay={initialChartIntradayOverlay}
                     initialIndicatorData={initialIndicatorData}

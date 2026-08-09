@@ -56,6 +56,55 @@ class AiRealtimeContractTests(unittest.TestCase):
         self.assertTrue(result["decision_usable"])
         self.assertFalse(result["refresh_recommended"])
 
+    def test_taiwan_preopen_auction_quote_is_live_under_require_live(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "latest_price": 1_105.0,
+                "quote_time": "2026-07-24T08:59:40+08:00",
+                "market_status": "preopen_auction",
+                "session_phase": "preopen_auction",
+                "quote_semantics": "indicative_match_price",
+                "is_live": True,
+            },
+            market="TW",
+            realtime_policy="require_live",
+            now=datetime(2026, 7, 24, 1, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "live")
+        self.assertEqual(result["canonical_session_phase"], "preopen")
+        self.assertTrue(result["policy_satisfied"])
+        self.assertTrue(result["decision_usable"])
+        self.assertTrue(result["facts_usable"])
+        self.assertTrue(result["auction_research_usable"])
+        self.assertFalse(result["price_decision_usable"])
+        self.assertFalse(result["execution_grade_usable"])
+
+    def test_recent_one_minute_bar_is_current_without_stream_flag(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "kind": "tw_intraday_history",
+                "interval": "1m",
+                "market_status": "open",
+                "session_phase": "regular_live",
+                "points": [
+                    {
+                        "time": "2026-07-24T09:59:00+08:00",
+                        "price": 1_105.0,
+                    }
+                ],
+            },
+            market="TW",
+            realtime_policy="require_live",
+            now=datetime(2026, 7, 24, 2, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "live")
+        self.assertEqual(result["observation_kind"], "intraday_bar")
+        self.assertEqual(result["effective_interval_seconds"], 60)
+        self.assertEqual(result["canonical_session_phase"], "regular")
+        self.assertTrue(result["policy_satisfied"])
+
     def test_open_us_quote_with_current_event_is_live(self) -> None:
         event_time = self.now - timedelta(seconds=20)
         result = realtime_contract.classify_observation(

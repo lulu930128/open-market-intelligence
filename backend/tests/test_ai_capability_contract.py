@@ -17,6 +17,106 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def test_stock_cross_market_capabilities_share_canonical_lineage(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": [
+                    "cross_market.overnight",
+                    "cross_market.relations",
+                    "cross_market.parity",
+                ]
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            target_market="TW",
+            question_intent="cross_market",
+        )
+        context = {
+            "schema_version": "cross_market.context.v1",
+            "status": "ready",
+            "decision_usable": True,
+            "as_of": "2026-08-08",
+            "decision_at": "2026-08-09T01:00:00Z",
+            "methodology_version": "cross_market.direct_parity.v1",
+            "relation_snapshot_version": "relation_registry:42:v1",
+            "snapshot_id": "cmctx:2330:test",
+            "summary": {
+                "stance": "supportive",
+                "score": 3.5,
+                "confidence": "high",
+                "title": "ADR parity supportive",
+                "reason_codes": ["direct_adr_parity"],
+            },
+            "signals": [
+                {
+                    "relation_id": 42,
+                    "bucket": "direct_equivalent",
+                    "status": "ready",
+                    "decision_usable": True,
+                }
+            ],
+            "coverage": {"coverage_ratio": 1.0},
+            "warnings": [],
+            "limitations": ["direct_equivalent_only_phase_2"],
+        }
+        parity = {
+            "kind": "adr_parity",
+            "status": "ready",
+            "is_current": True,
+            "stock_id": "2330",
+            "mapping": {"adr_symbol": "TSM", "local_shares_per_adr": 5},
+            "mapping_resolution": {"relation_id": 42, "relation_version": 1},
+            "adr_trade_date": "2026-08-08",
+            "implied_gap_pct": 3.5,
+            "missing": [],
+            "warnings": [],
+        }
+        overnight = {
+            "kind": "us_overnight_tw_impact",
+            "as_of": "2026-08-08",
+            "stance": "risk_on",
+            "context_status": "ready",
+            "decision_usable": True,
+            "summary": "ADR parity supportive",
+            "signals": context["signals"],
+            "coverage": context["coverage"],
+            "methodology_version": context["methodology_version"],
+            "relation_snapshot_version": context["relation_snapshot_version"],
+            "snapshot_id": context["snapshot_id"],
+            "limitations": context["limitations"],
+            "source": "app.market.cross_market.context",
+            "freshness": {"status": "current"},
+            "warnings": [],
+            "cross_market_context": context,
+            "adr_parity": parity,
+        }
+        response = {
+            "target": {"type": "tw_stock", "id": "2330", "market": "TW"},
+            "freshness": {"status": "current", "is_current": True},
+            "result": {"data": {"compact": {"cross_market": overnight}}},
+        }
+
+        projected, unavailable = capability_contract.project_selected_data(
+            response=response,
+            selection=selection,
+        )
+
+        self.assertEqual(unavailable, [])
+        self.assertEqual(
+            projected["cross_market.overnight"]["snapshot_id"],
+            "cmctx:2330:test",
+        )
+        self.assertEqual(
+            projected["cross_market.relations"]["relation_snapshot_version"],
+            "relation_registry:42:v1",
+        )
+        self.assertEqual(
+            projected["cross_market.parity"]["mapping_resolution"]["relation_id"],
+            42,
+        )
+
     def test_market_sample_ranking_projects_sample_scope_and_units(self) -> None:
         selection = capability_contract.normalize_selection(
             selection={"include": ["market.sample_ranking"]},
@@ -190,6 +290,34 @@ class AiCapabilityContractTests(unittest.TestCase):
             self.assertIn(field, spec.fields)
             self.assertIn(field, spec.default_fields)
 
+    def test_quote_capabilities_publish_opening_handoff_fields(self) -> None:
+        snapshot = capability_contract.CAPABILITIES["quote.snapshot"]
+        auction = capability_contract.CAPABILITIES["quote.auction"]
+
+        for field in (
+            "presentation_trade_date",
+            "presentation_session_state",
+            "presentation_session_transition_at",
+            "market_calendar_phase",
+            "instrument_phase",
+            "observation_reason_code",
+            "observation_semantics",
+            "actual_trade_occurred",
+            "actual_trade_price_cached",
+            "actual_trade_price_source",
+            "actual_trade_price_as_of",
+        ):
+            self.assertIn(field, snapshot.fields)
+            self.assertIn(field, snapshot.default_fields)
+
+        for field in (
+            "market_calendar_phase",
+            "instrument_phase",
+            "observation_reason_code",
+        ):
+            self.assertIn(field, auction.fields)
+            self.assertIn(field, auction.default_fields)
+
     def test_volume_contract_fields_survive_capability_projection(self) -> None:
         intraday = capability_contract.CAPABILITIES["intraday.bars"]
         daily = capability_contract.CAPABILITIES["daily.ohlcv"]
@@ -201,6 +329,23 @@ class AiCapabilityContractTests(unittest.TestCase):
             "volume_event_time",
             "volume_semantics",
             "volume_status",
+            "bar_volume_sum_shares",
+            "bar_volume_sum_lots",
+            "bar_volume_trade_date",
+            "bar_volume_latest_time",
+            "bar_volume_scope",
+            "session_cumulative_volume_shares",
+            "session_cumulative_volume_lots",
+            "session_cumulative_volume_trade_date",
+            "session_cumulative_volume_source",
+            "session_cumulative_volume_source_field",
+            "session_cumulative_volume_event_time",
+            "session_cumulative_volume_status",
+            "cumulative_volume_source",
+            "cumulative_volume_status",
+            "unallocated_volume_shares",
+            "unallocated_volume_lots",
+            "volume_reconciliation",
             "currency",
             "price_unit",
             "market_events",
@@ -303,6 +448,21 @@ class AiCapabilityContractTests(unittest.TestCase):
                             "multiplier": 1000,
                         },
                         "trade_value_unit": "TWD",
+                        "bar_volume_sum_shares": 3_012_567,
+                        "bar_volume_sum_lots": 3_012.567,
+                        "bar_volume_trade_date": "2026-08-06",
+                        "session_cumulative_volume_shares": 3_091_000,
+                        "session_cumulative_volume_lots": 3_091,
+                        "session_cumulative_volume_source": "twse_mis",
+                        "session_cumulative_volume_status": "time_skew",
+                        "cumulative_volume_shares": 3_091_000,
+                        "cumulative_volume_source": "twse_mis",
+                        "cumulative_volume_status": "time_skew",
+                        "unallocated_volume_shares": 78_433,
+                        "volume_reconciliation": {
+                            "status": "time_skew",
+                            "difference_shares": 78_433,
+                        },
                         "points": [
                             {
                                 "time": "2026-07-29T13:30:00+08:00",
@@ -321,6 +481,11 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(canonical["provider_volume_unit"], "lots")
         self.assertEqual(canonical["volume_conversion"]["multiplier"], 1000)
         self.assertEqual(canonical["trade_value_unit"], "TWD")
+        self.assertEqual(canonical["bar_volume_sum_shares"], 3_012_567)
+        self.assertEqual(canonical["session_cumulative_volume_shares"], 3_091_000)
+        self.assertEqual(canonical["cumulative_volume_source"], "twse_mis")
+        self.assertEqual(canonical["unallocated_volume_shares"], 78_433)
+        self.assertEqual(canonical["volume_reconciliation"]["status"], "time_skew")
 
     def test_selection_keeps_mandatory_truth_and_bounded_fields(self) -> None:
         selection = capability_contract.normalize_selection(
@@ -917,6 +1082,19 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
         outcome = reconciliation["capabilities"]["intraday.bars"]
         self.assertTrue(outcome["primary_reader_attempted"])
+        self.assertFalse(outcome["tool_run_attempted"])
+        self.assertFalse(outcome["provider_fetch_attempted"])
+        self.assertFalse(outcome["cache_hit"])
+        self.assertEqual(
+            outcome["not_attempted_reason"],
+            "primary_reader_completed_without_tracked_provider_fetch",
+        )
+        self.assertTrue(reconciliation["primary_reader_attempted"])
+        self.assertFalse(reconciliation["provider_fetch_attempted"])
+        self.assertEqual(
+            reconciliation["not_attempted_reason"],
+            "primary_reader_completed_without_tracked_provider_fetch",
+        )
         self.assertTrue(outcome["final_payload_present"])
         self.assertEqual(
             outcome["final_quality_issue"],
@@ -926,6 +1104,51 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(
             outcome["unresolved_reason"],
             "reader_fetch_on_primary_request",
+        )
+
+    def test_reconciliation_distinguishes_requested_refresh_from_policy_denial(self) -> None:
+        selection = {
+            "version": "omi.capability.selection.v2",
+            "required": ["daily.ohlcv"],
+            "optional": [],
+            "realtime_policy": "prefer_live",
+        }
+        manifest = {
+            "capabilities": [
+                {
+                    "capability": "daily.ohlcv",
+                    "status": "missing",
+                    "status_class": "blocked",
+                    "payload_included": False,
+                    "quality_issues": [],
+                }
+            ]
+        }
+        fill_plan = {
+            "actions": [],
+            "deferred_actions": [],
+            "unfillable_actions": [],
+            "already_attempted_actions": [],
+        }
+
+        reconciliation = capability_contract.build_refresh_reconciliation(
+            selection=selection,
+            manifest=manifest,
+            fill_plan=fill_plan,
+            tool_runs=[],
+            scope_type="stock",
+            request_policy={
+                "allow_external_fetch": True,
+                "can_external_fetch": False,
+            },
+        )
+
+        self.assertTrue(reconciliation["refresh_requested"])
+        self.assertFalse(reconciliation["refresh_allowed"])
+        self.assertFalse(reconciliation["provider_fetch_attempted"])
+        self.assertEqual(
+            reconciliation["not_attempted_reason"],
+            "refresh_policy_denied",
         )
 
     def test_tw_quote_and_intraday_use_reader_fetch_not_fill_operations(

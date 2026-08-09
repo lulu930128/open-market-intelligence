@@ -187,6 +187,54 @@ EXPECTED_SYSTEM_HEALTH_CONTRACTS = {
 
 
 class APIContractInventoryTests(unittest.TestCase):
+    def test_market_intraday_volume_contract_is_additive_and_explicit(self) -> None:
+        schema = app.openapi()
+        chart_properties = schema["components"]["schemas"][
+            "MarketIntradayChartRead"
+        ]["properties"]
+        for field in (
+            "bar_volume_sum_shares",
+            "bar_volume_sum_lots",
+            "bar_volume_trade_date",
+            "bar_volume_latest_time",
+            "bar_volume_scope",
+            "session_cumulative_volume_shares",
+            "session_cumulative_volume_lots",
+            "session_cumulative_volume_trade_date",
+            "session_cumulative_volume_source",
+            "session_cumulative_volume_source_field",
+            "session_cumulative_volume_event_time",
+            "session_cumulative_volume_status",
+            "cumulative_volume_shares",
+            "cumulative_volume_lots",
+            "cumulative_volume_source",
+            "cumulative_volume_status",
+            "unallocated_volume_shares",
+            "unallocated_volume_lots",
+            "volume_reconciliation",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, chart_properties)
+
+        reconciliation = schema["components"]["schemas"][
+            "MarketIntradayVolumeReconciliationRead"
+        ]["properties"]
+        for field in (
+            "status",
+            "trade_date",
+            "exchange_cumulative_shares",
+            "bar_volume_sum_shares",
+            "difference_shares",
+            "difference_lots",
+            "difference_pct",
+            "exchange_event_time",
+            "bar_latest_time",
+            "time_skew_seconds",
+            "reason",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, reconciliation)
+
     def test_openapi_operation_inventory_remains_stable(self) -> None:
         schema = app.openapi()
         methods = {"get", "post", "put", "patch", "delete"}
@@ -197,8 +245,23 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 362)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 361)
+        self.assertEqual(len(operations), 373)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 372)
+
+        self.assertIn(
+            (
+                "get",
+                "/api/market/technical/{stock_id}/next-session-plan",
+            ),
+            operations,
+        )
+
+        cross_market_operations = {
+            ("get", "/api/market/cross-market/relations/{stock_id}"),
+            ("get", "/api/market/cross-market/context/{stock_id}"),
+            ("post", "/api/market/cross-market/refresh"),
+        }
+        self.assertTrue(cross_market_operations.issubset(set(operations)))
 
         radar_v2_operations = {
             (
@@ -219,6 +282,10 @@ class APIContractInventoryTests(unittest.TestCase):
             ),
             (
                 "post",
+                "/api/watchlists/groups/{group_id}/radar/v2/outcomes/reconcile",
+            ),
+            (
+                "post",
                 "/api/watchlists/groups/{group_id}/radar/v2/backtests",
             ),
             (
@@ -227,6 +294,13 @@ class APIContractInventoryTests(unittest.TestCase):
             ),
         }
         self.assertTrue(radar_v2_operations.issubset(set(operations)))
+        dispatch_v2_operations = {
+            ("get", "/api/dispatch/schedules/{schedule_id}/runs"),
+            ("post", "/api/dispatch/schedules/{schedule_id}/runs"),
+            ("get", "/api/dispatch/schedule-runs/{run_id}"),
+            ("post", "/api/dispatch/schedule-runs/{run_id}/retry"),
+        }
+        self.assertTrue(dispatch_v2_operations.issubset(set(operations)))
 
     def test_system_health_contracts_are_exposed(self) -> None:
         schema = app.openapi()

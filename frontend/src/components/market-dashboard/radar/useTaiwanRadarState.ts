@@ -1,8 +1,10 @@
 "use client";
 
 import { fetchJson } from "@/lib/api";
+import { requestBackfillJob } from "@/lib/jobs";
 import { getTaiwanMarketRefreshState } from "@/lib/taiwanMarketTime";
 import type {
+  JobRunRead,
   WatchlistGroupRadarRead,
   WatchlistRadarMode,
   WatchlistRadarV2OutcomeSummaryRead,
@@ -10,7 +12,11 @@ import type {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type TaiwanRadarLoadState = "idle" | "loading" | "success" | "error";
-export type TaiwanRadarErrorKind = "radar" | "outcome" | "history";
+export type TaiwanRadarErrorKind =
+  | "radar"
+  | "outcome"
+  | "history"
+  | "reconcile";
 
 type UseTaiwanRadarStateOptions = {
   active: boolean;
@@ -19,12 +25,14 @@ type UseTaiwanRadarStateOptions = {
   initialRadar: WatchlistGroupRadarRead | null;
   routeMode: WatchlistRadarMode | null;
   onError: (kind: TaiwanRadarErrorKind, error: unknown, groupId: number) => void;
+  onReconcileResult: (job: JobRunRead, groupId: number) => void;
 };
 
 const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_RADAR_MAX_RESULTS = 20;
 const WATCHLIST_RADAR_OUTCOME_ITEM_LIMIT = 200;
 const WATCHLIST_RADAR_TIMEOUT_MS = 60_000;
+const WATCHLIST_RADAR_RECONCILE_TIMEOUT_MS = 120_000;
 const WATCHLIST_ANALYSIS_PARAMS = {
   include_children: true,
   enabled_only: true,
@@ -67,6 +75,7 @@ export function useTaiwanRadarState({
   initialRadar,
   routeMode,
   onError,
+  onReconcileResult,
 }: UseTaiwanRadarStateOptions) {
   const [mode, setMode] = useState<WatchlistRadarMode>(initialMode);
   const [radar, setRadar] = useState<WatchlistGroupRadarRead | null>(initialRadar);
@@ -84,34 +93,42 @@ export function useTaiwanRadarState({
     useState<TaiwanRadarLoadState>("idle");
   const [outcomeDetailLoadState, setOutcomeDetailLoadState] =
     useState<TaiwanRadarLoadState>("idle");
+  const [outcomeReconcileLoadState, setOutcomeReconcileLoadState] =
+    useState<TaiwanRadarLoadState>("idle");
   const [selectedOutcomeSnapshotId, setSelectedOutcomeSnapshotId] =
     useState<string | null>(null);
   const radarRequestSeqRef = useRef(0);
   const outcomeRequestSeqRef = useRef(0);
   const historyRequestSeqRef = useRef(0);
   const outcomeDetailRequestSeqRef = useRef(0);
+  const outcomeReconcileRequestSeqRef = useRef(0);
   const modeRef = useRef(mode);
   const groupIdRef = useRef(groupId);
   const onErrorRef = useRef(onError);
+  const onReconcileResultRef = useRef(onReconcileResult);
   const selectedOutcomeSnapshotIdRef = useRef(selectedOutcomeSnapshotId);
   const previousGroupIdRef = useRef(groupId);
 
   useEffect(() => {
     groupIdRef.current = groupId;
     onErrorRef.current = onError;
+    onReconcileResultRef.current = onReconcileResult;
     selectedOutcomeSnapshotIdRef.current = selectedOutcomeSnapshotId;
   }, [
     groupId,
     onError,
+    onReconcileResult,
     selectedOutcomeSnapshotId,
   ]);
 
   const clearOutcomeHistory = useCallback(() => {
     historyRequestSeqRef.current += 1;
     outcomeDetailRequestSeqRef.current += 1;
+    outcomeReconcileRequestSeqRef.current += 1;
     setOutcomeHistory([]);
     setOutcomeHistoryLoadState("idle");
     setOutcomeDetailLoadState("idle");
+    setOutcomeReconcileLoadState("idle");
     setOutcomeHistoryOpen(false);
     setSelectedOutcomeSnapshotId(null);
     selectedOutcomeSnapshotIdRef.current = null;
@@ -122,6 +139,7 @@ export function useTaiwanRadarState({
     outcomeRequestSeqRef.current += 1;
     historyRequestSeqRef.current += 1;
     outcomeDetailRequestSeqRef.current += 1;
+    outcomeReconcileRequestSeqRef.current += 1;
     setRadar(null);
     setLoadState("idle");
     setOutcomeSummary(null);
@@ -129,6 +147,7 @@ export function useTaiwanRadarState({
     setOutcomeHistory([]);
     setOutcomeHistoryLoadState("idle");
     setOutcomeDetailLoadState("idle");
+    setOutcomeReconcileLoadState("idle");
     setOutcomeHistoryOpen(false);
     setSelectedOutcomeSnapshotId(null);
     selectedOutcomeSnapshotIdRef.current = null;
@@ -415,10 +434,43 @@ export function useTaiwanRadarState({
     setOutcomeHistoryOpen(false);
   }, []);
 
-  const reloadOutcomeHistory = useCallback(() => {
+  const reconcileOutcomeHistory = useCallback(async () => {
     const currentGroupId = groupIdRef.current;
-    if (currentGroupId !== null) {
-      void loadOutcomeHistory(currentGroupId);
+    if (currentGroupId === null) return;
+
+    const requestSeq = outcomeReconcileRequestSeqRef.current + 1;
+    outcomeReconcileRequestSeqRef.current = requestSeq;
+    const currentMode = modeRef.current;
+    setOutcomeReconcileLoadState("loading");
+
+    try {
+      const job = await requestBackfillJob(
+        `/api/watchlists/groups/${currentGroupId}/radar/v2/outcomes/reconcile`,
+        { method: "POST", body: "{}" },
+        {
+          mode: currentMode,
+          limit: WATCHLIST_RADAR_OUTCOME_ITEM_LIMIT,
+          initialize_limit: WATCHLIST_RADAR_OUTCOME_ITEM_LIMIT,
+        },
+        {
+          intervalMs: 750,
+          timeoutMs: WATCHLIST_RADAR_RECONCILE_TIMEOUT_MS,
+        }
+      );
+
+      if (outcomeReconcileRequestSeqRef.current !== requestSeq) return;
+
+      setOutcomeReconcileLoadState("success");
+      onReconcileResultRef.current(job, currentGroupId);
+      await loadOutcomeHistory(currentGroupId, {
+        mode: currentMode,
+        silent: true,
+      });
+    } catch (error) {
+      if (outcomeReconcileRequestSeqRef.current !== requestSeq) return;
+
+      setOutcomeReconcileLoadState("error");
+      onErrorRef.current("reconcile", error, currentGroupId);
     }
   }, [loadOutcomeHistory]);
 
@@ -474,6 +526,7 @@ export function useTaiwanRadarState({
       outcomeRequestSeqRef.current += 1;
       outcomeDetailRequestSeqRef.current += 1;
       historyRequestSeqRef.current += 1;
+      outcomeReconcileRequestSeqRef.current += 1;
     };
   }, []);
 
@@ -488,6 +541,7 @@ export function useTaiwanRadarState({
       outcomeHistoryOpen,
       outcomeHistoryLoadState,
       outcomeDetailLoadState,
+      outcomeReconcileLoadState,
       selectedOutcomeSnapshotId,
     },
     actions: {
@@ -496,7 +550,7 @@ export function useTaiwanRadarState({
       load,
       openOutcomeHistory,
       prepareCompanionLoad,
-      reloadOutcomeHistory,
+      reconcileOutcomeHistory,
       reset,
       selectOutcomeSnapshot,
     },

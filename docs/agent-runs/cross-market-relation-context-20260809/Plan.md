@@ -303,6 +303,139 @@ $env:PYTHONPATH=(Resolve-Path '.\backend').Path
 - `/api/ai/ask` 的 `omi.decision.v4`
 - MCP `omi.ask`
 
+## Consumer hardening 軌：M6.1／M1.1／M2.1／M4.1／M9.1
+
+這條工作軌補齊 Consumer Release 已暴露出的契約與資料生命週期缺口。施工順序固定為 M6.1 → M1.1 → M2.1 → M4.1 → M9.1；每一段驗收失敗就 stop-and-fix，不提前擴大 Radar ranking 能力。
+
+### M6.1：Capability scope 與 phantom unsupported
+
+#### 工作
+
+- 在 backend capability owner 建立明確 stock／market scope mapping；stock-level cross-market domain 只允許三個 stock capabilities。
+- 將 inferred-domain candidates 在 unsupported diagnostics 前依 target scope 過濾；保留 caller 顯式要求不適用 capability 時的 unsupported 回應。
+- 鎖住 default selection、required capability、readiness、quality 與 `data.freshness` 的一致性，避免被 phantom capability 誤判為 blocked。
+- Backend contract 穩定後才重生 repo 與 OMI_search public snapshots；snapshot 仍以完整 generated artifact 原子同步。
+
+#### 驗收
+
+- 2330／2408 stock request 的 selection 不含 `market.cross_market`，也不產生其 unsupported／unmet warning。
+- 顯式要求 `market.cross_market` 搭配 stock target 時仍回 machine-readable unsupported，不靜默吞掉 caller 錯誤。
+- `facts_usable`／`decision_usable` 只受實際 stale、missing、partial 或 provider failure 影響。
+
+#### 驗證
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path '.\backend').Path
+.\.venv\Scripts\python.exe -m pytest -q `
+  backend\tests\test_ai_capability_contract.py `
+  backend\tests\test_ai_decision_envelope.py `
+  backend\tests\test_ai_outward_contract.py `
+  backend\tests\test_ai_tool_boundaries.py
+```
+
+另以代表性 2330／2408 `/api/ai/ask` request 檢查 selected capabilities、unsupported diagnostics 與 freshness；不以只跑 helper unit test 代替 outward contract 驗收。
+
+### M1.1：Proxy relation 時間治理與 forward-only 修復
+
+#### 工作
+
+- 先重查實際 Alembic heads 與 dirty migration ownership；不得預留 revision number，也不得修改已套用的 `20260809_0052`。
+- 以新的 forward-only migration／maintenance transaction 處理已知 seed fingerprint：舊紀錄保留歷史，重新 review 後建立可稽核的新版本或 supersede 狀態。
+- 新 `verified_at`／`reviewed_at` 使用實際執行的 review 時點；不任意 backdate，也不宣稱修復前已可用。
+- Repair 僅接受完整 relation identity、舊時間、review state 與 evidence hash 都符合已知 seed；任何人工修改、重複 evidence 或狀態衝突都 fail closed。
+
+#### 驗收
+
+- 2408／MU 在新 review 可用時間之前仍不可見，之後可由 relation API、canonical context 與 outward evidence 一致讀取。
+- 重跑 upgrade 不重複建立 relation／evidence；downgrade 只在 disposable DB 驗證，不刪除 live data。
+- Audit trail 可說明舊 seed、修復 transaction、reviewer、實際時間與 supersede 關係。
+
+#### 驗證
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path '.\backend').Path
+.\.venv\Scripts\python.exe -m pytest -q `
+  backend\tests\test_cross_market_relation_migration.py `
+  backend\tests\test_cross_market_relation_store.py `
+  backend\tests\test_cross_market_point_in_time.py `
+  backend\tests\test_database_migrations.py
+```
+
+### M2.1：AI/tool bounded refresh orchestration
+
+#### 工作
+
+- AI 先讀 local cache 與 freshness；只有 request policy 明確允許 `allow_external_fetch` 時，才由 tool orchestration 呼叫既有 bounded refresh owner。
+- Refresh plan 同時涵蓋所需 US daily source、proxy benchmark 與 USD/TWD resource quote；`cache_only`、GET relation/context 與 Radar read path 永遠不 refresh。
+- 固定上限：最多 8 個來源、總 timeout 120 秒、symbol／resource dedupe、同 request coalescing 與 cooldown；不得寫 relation governance 或自動核准 candidate。
+- Provider partial failure 時回傳 stale local context、provider event 與 visible warning，不以 refresh failure 清空可用 cache。
+
+#### 驗收
+
+- `cache_only` 測試可證明零 provider call；`allow_external_fetch` 只執行 planner 列出的 bounded operations。
+- FX stale 時 planner 不只刷新 US daily；refresh 後重新建 evidence，仍保留 event time、fetched time、source health 與 remaining limitations。
+- Timeout、quota／cooldown、部分成功與全部失敗都有 deterministic status，不造成隱性重試風暴。
+
+#### 驗證
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path '.\backend').Path
+.\.venv\Scripts\python.exe -m pytest -q `
+  backend\tests\test_cross_market_context.py `
+  backend\tests\test_ai_tool_boundaries.py `
+  backend\tests\test_market_source_health.py
+```
+
+### M4.1：Materialized snapshot lifecycle
+
+#### 工作
+
+- Contract 明確區分 `projection_source=latest_local_cache` 與 `projection_source=materialized_snapshot`。
+- Materializer 寫入 immutable snapshot，包含 `snapshot_id`、`decision_at`、`materialized_at`、`materialized_by`、source cutoff、relation/methodology version 與 payload hash；相同 identity 重跑只能驗證同 hash，不得原地覆寫。
+- Materialized payload 移除或改寫 `latest_local_cache_projection_not_materialized_snapshot`，避免 snapshot 自我矛盾。
+- Ask／個股說明可讀既有 snapshot；Radar batch 只讀同批 materialized snapshots。任何 read path 都不臨時 materialize 或 refresh。
+
+#### 驗收
+
+- 同 stock／decision_at 的 Radar、個股說明、HTTP 與 MCP 可對帳同一 snapshot ID、hash、versions 與 freshness。
+- Replay 不讀取 source cutoff 之後才 available 的 relation、evidence、price 或 FX。
+- Live DB snapshot count 為零時明確回報 not materialized；不得把 latest cache 偽裝成 point-in-time snapshot。
+
+#### 驗證
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path '.\backend').Path
+.\.venv\Scripts\python.exe -m pytest -q `
+  backend\tests\test_cross_market_point_in_time.py `
+  backend\tests\test_cross_market_aggregation.py `
+  backend\tests\test_watchlist_radar_v2_cross_market.py `
+  backend\tests\test_ai_outward_contract.py
+```
+
+### M9.1：Outward、Frontend、runtime 與 rollback acceptance
+
+#### 工作
+
+- 以相同 request 對帳 backend HTTP 與 MCP `omi.ask` 的 capability selection、snapshot lineage、freshness、warnings 與 data limits。
+- 驗證 MCP live schema 的 include／required enums；若 ChatGPT host 保留舊 schema，記錄 reconnect／new-session 邊界，不在 adapter 加永久旁路。
+- 用 user-visible browser acceptance 檢查個股 `OVERNIGHT`、Radar display-only badge 與 stale／limited／provider failure 呈現。
+- 完成 feature flags off、legacy facade 與 disposable DB migration rollback drill；正式 runtime 需驗證 owner、PID replacement、listener、health、build identity 與代表性 outward behavior。
+
+#### 驗收
+
+- HTTP、MCP、個股頁與 Radar 對同一 sample 不再出現 phantom capability、時間線互斥或 materialization 語意矛盾。
+- Radar 開關前後 direction、priority、bucket、rank 與 universe 完全一致。
+- Rollback 不需刪除 live SQLite、不遺失 relation/evidence/snapshot audit trail，也不 broad-kill 非本任務 runtime。
+
+#### 驗證
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend
+.\scripts\run-safe-validation.ps1 -Profile frontend
+```
+
+再依 launcher 實際 selected ports 做 HTTP／MCP protocol smoke 與 browser acceptance；只有 source、runtime identity、outward behavior 三者都吻合才標記完成。
+
 ## Stop-and-fix 規則
 
 - Migration head、ORM 或 schema 與 worktree 其他修改衝突時，先停止並重排 revision；不得建立平行 head 或覆寫他人 migration。

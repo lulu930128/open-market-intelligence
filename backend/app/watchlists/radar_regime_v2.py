@@ -4,6 +4,7 @@ from copy import deepcopy
 from numbers import Real
 from typing import Any, Iterable, Mapping
 
+from app.market.tw_market_breadth_contract import TW_MARKET_BREADTH_VERSION
 from app.watchlists.radar_rule_contract import (
     RADAR_V2_REGIME_CONFIG,
     RADAR_V2_SCORING_CONFIG,
@@ -202,6 +203,14 @@ def classify_market_regime(
         }
 
     quality_status = str(market_snapshot.get("quality_status") or "unknown")
+    breadth_status = str(market_snapshot.get("breadth_status") or "unknown")
+    breadth_session_phase = str(
+        market_snapshot.get("breadth_session_phase") or "unknown"
+    )
+    breadth_contract_version = str(
+        market_snapshot.get("breadth_contract_version") or "legacy_unverified"
+    )
+    breadth_decision_usable = market_snapshot.get("breadth_decision_usable") is True
     breadth_scope = str(market_snapshot.get("breadth_scope") or "unknown")
     advance = _number(market_snapshot.get("advance_count"))
     decline = _number(market_snapshot.get("decline_count"))
@@ -228,6 +237,28 @@ def classify_market_regime(
         else None
     )
     limitations: list[dict[str, Any]] = []
+    if breadth_contract_version != TW_MARKET_BREADTH_VERSION:
+        limitations.append(
+            {
+                "code": "legacy_market_breadth_contract",
+                "breadth_contract_version": breadth_contract_version,
+            }
+        )
+    if breadth_status != "ready" or not breadth_decision_usable:
+        limitations.append(
+            {
+                "code": "market_breadth_not_decision_usable",
+                "breadth_status": breadth_status,
+                "breadth_decision_usable": breadth_decision_usable,
+            }
+        )
+    if breadth_session_phase in {"preopen", "preopen_pending"}:
+        limitations.append(
+            {
+                "code": "market_breadth_regular_session_pending",
+                "breadth_session_phase": breadth_session_phase,
+            }
+        )
     if quality_status not in set(rule["accepted_quality_statuses"]):
         limitations.append(
             {
@@ -260,6 +291,9 @@ def classify_market_regime(
             "market_quality_not_ready",
             "market_breadth_not_full_market",
             "insufficient_market_breadth_coverage",
+            "legacy_market_breadth_contract",
+            "market_breadth_not_decision_usable",
+            "market_breadth_regular_session_pending",
         }
         for limitation in limitations
     )

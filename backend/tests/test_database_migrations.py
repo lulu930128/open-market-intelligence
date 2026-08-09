@@ -156,6 +156,11 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("radar_outcome_event_link", table_names)
             self.assertIn("radar_backtest_run", table_names)
             self.assertIn("portfolio_holding", table_names)
+            self.assertIn("taiwan_etf_profile", table_names)
+            self.assertIn("taiwan_etf_nav_daily", table_names)
+            self.assertIn("taiwan_etf_pcf_snapshot", table_names)
+            self.assertIn("taiwan_etf_pcf_component", table_names)
+            self.assertIn("taiwan_etf_inav_snapshot", table_names)
             jp_master_columns = {
                 column["name"]
                 for column in inspect(engine).get_columns("jp_stock_master")

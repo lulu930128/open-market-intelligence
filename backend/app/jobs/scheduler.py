@@ -12,6 +12,7 @@ from app.jobs.job_types import (
     TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
+    WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
 )
 from app.jobs.taiwan_fundamental_scheduler import (
     add_taiwan_fundamental_refresh_jobs,
@@ -1667,6 +1668,69 @@ def reconcile_watchlist_radar_auto_snapshot() -> None:
     enqueue_watchlist_radar_auto_snapshot()
 
 
+def enqueue_watchlist_radar_outcome_reconcile() -> None:
+    group_ids = _split_csv(settings.scheduler_watchlist_radar_group_ids)
+    db = SessionLocal()
+    try:
+        coverage = (
+            radar_automation.get_watchlist_radar_v2_outcome_due_coverage(
+                db=db,
+                group_ids=group_ids or None,
+                modes=settings.scheduler_watchlist_radar_modes,
+            )
+        )
+        if not coverage["due_count"]:
+            logger.info(
+                "Skipped Radar v2 outcome reconciliation because no mature pending paths remain latest_available_trade_date=%s.",
+                coverage.get("latest_available_trade_date"),
+            )
+            return
+        request = {
+            "schedule": "watchlist_radar_v2_outcome_reconcile",
+            "group_ids": group_ids or None,
+            "modes": settings.scheduler_watchlist_radar_modes,
+            "limit": 200,
+            "initialize_limit": 200,
+            "as_of_trade_date": coverage.get(
+                "latest_available_trade_date"
+            ),
+            "due_count": coverage["due_count"],
+            "oldest_due_trade_date": coverage.get(
+                "oldest_due_trade_date"
+            ),
+        }
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type=WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
+            target=(
+                ",".join(group_ids) if group_ids else "all-active"
+            ),
+            request=request,
+            progress_total=max(
+                len(coverage["group_ids"]) * len(coverage["modes"]),
+                1,
+            ),
+            message="Queued Radar v2 outcome reconciliation by scheduler.",
+            task=backfill_tasks.run_watchlist_radar_outcome_reconcile_job,
+            task_args=(
+                group_ids or None,
+                settings.scheduler_watchlist_radar_modes,
+                200,
+                200,
+                coverage.get("latest_available_trade_date"),
+            ),
+        )
+        logger.info(
+            "Scheduled Radar v2 outcome reconciliation %s job_id=%s due_count=%s oldest_due=%s.",
+            "queued" if created else "deduped",
+            job.id,
+            coverage["due_count"],
+            coverage.get("oldest_due_trade_date"),
+        )
+    finally:
+        db.close()
+
+
 def _add_watchlist_radar_auto_snapshot_job(scheduler: Any) -> bool:
     if not settings.enable_watchlist_radar_scheduler:
         return False
@@ -1696,6 +1760,19 @@ def _add_watchlist_radar_auto_snapshot_job(scheduler: Any) -> bool:
         max_instances=1,
         next_run_time=datetime.now(_timezone()),
     )
+    scheduler.add_job(
+        enqueue_watchlist_radar_outcome_reconcile,
+        trigger="interval",
+        minutes=max(
+            int(settings.scheduler_watchlist_radar_reconcile_interval_minutes),
+            5,
+        ),
+        id="watchlist_radar_v2_outcome_reconcile",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
     return True
 
 
@@ -1706,11 +1783,18 @@ def enqueue_due_dispatch_schedules() -> None:
 
     try:
         result = dispatch_service.enqueue_due_schedules(db=db)
-        if result.get("queued_count") or result.get("error_count"):
+        if (
+            result.get("queued_count")
+            or result.get("waiting_count")
+            or result.get("skipped_count")
+            or result.get("error_count")
+        ):
             logger.info(
-                "Dispatch schedule tick checked=%s queued=%s errors=%s.",
+                "Dispatch schedule tick checked=%s queued=%s waiting=%s skipped=%s errors=%s.",
                 result.get("checked_count"),
                 result.get("queued_count"),
+                result.get("waiting_count", 0),
+                result.get("skipped_count", 0),
                 result.get("error_count"),
             )
     finally:
@@ -1731,6 +1815,45 @@ def _add_dispatch_schedule_tick_job(scheduler: Any) -> bool:
         coalesce=True,
         max_instances=1,
         next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
+def reconcile_dispatch_schedule_runs() -> None:
+    from app.dispatch import service as dispatch_service
+
+    db = SessionLocal()
+    try:
+        result = dispatch_service.reconcile_schedule_runs(db=db)
+        if any(
+            result.get(key)
+            for key in ("processed_count", "recovered_count", "unknown_count", "error_count")
+        ):
+            logger.info(
+                "Dispatch reconciliation processed=%s recovered=%s unknown=%s errors=%s.",
+                result.get("processed_count", 0),
+                result.get("recovered_count", 0),
+                result.get("unknown_count", 0),
+                result.get("error_count", 0),
+            )
+    finally:
+        db.close()
+
+
+def _add_dispatch_schedule_reconcile_job(scheduler: Any) -> bool:
+    if not (
+        settings.enable_dispatch_scheduler
+        and settings.dispatch_scheduler_v2_enabled
+    ):
+        return False
+    scheduler.add_job(
+        reconcile_dispatch_schedule_runs,
+        trigger="interval",
+        seconds=max(int(settings.scheduler_dispatch_reconcile_interval_seconds), 30),
+        id="dispatch_schedule_run_reconcile",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
     )
     return True
 
@@ -1882,6 +2005,7 @@ def start_scheduler() -> Any | None:
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
     taiwan_derivatives_refresh_enabled = _add_taiwan_derivatives_refresh_job(scheduler)
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
+    dispatch_schedule_reconcile_enabled = _add_dispatch_schedule_reconcile_job(scheduler)
     market_chip_margin_refresh_enabled = _add_market_chip_margin_refresh_job(
         scheduler
     )
@@ -1980,6 +2104,13 @@ def start_scheduler() -> Any | None:
         settings.scheduler_tw_revenue_refresh_time,
         settings.scheduler_tw_financial_refresh_time,
         taiwan_fundamental_refresh_enabled,
+    )
+    logger.info(
+        "Dispatch schedule v2=%s tick_interval=%ss reconcile_interval=%ss reconcile_enabled=%s.",
+        settings.dispatch_scheduler_v2_enabled,
+        max(int(settings.scheduler_dispatch_tick_interval_seconds), 10),
+        max(int(settings.scheduler_dispatch_reconcile_interval_seconds), 30),
+        dispatch_schedule_reconcile_enabled,
     )
     logger.info(
         "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays enabled=%s; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; taiwan_derivatives_refresh=%s %s %s enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",

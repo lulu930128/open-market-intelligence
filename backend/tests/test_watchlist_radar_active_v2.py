@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import inspect
 import unittest
 from unittest.mock import patch
@@ -24,7 +24,9 @@ from app.watchlists.radar_active_v2_service import (
 )
 from app.market.trading_calendar import next_taiwan_trading_day
 from app.watchlists.radar_rule_contract import (
+    RADAR_V2_ACTIVE_CONTRACT,
     RADAR_V2_ACTIVE_FEATURE_VERSION,
+    RADAR_V2_ACTIVE_RULE_CONFIG_HASH,
     RADAR_V2_ACTIVE_RULE_VERSION,
 )
 from app.watchlists.radar_v2_service import (
@@ -181,6 +183,12 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
         }
         self.assertEqual(
             methods_by_path["/groups/{group_id}/radar/v2/evaluate"],
+            {"POST"},
+        )
+        self.assertEqual(
+            methods_by_path[
+                "/groups/{group_id}/radar/v2/outcomes/reconcile"
+            ],
             {"POST"},
         )
         self.assertEqual(
@@ -547,6 +555,237 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
                 .count(),
                 0,
             )
+
+    def test_due_reconciliation_rotates_large_backlog_after_candidate_init(
+        self,
+    ) -> None:
+        active_contract = RADAR_V2_ACTIVE_CONTRACT
+        observed_at = datetime(2026, 8, 8, tzinfo=timezone.utc)
+
+        def add_evaluation(
+            db: Session,
+            *,
+            stock_id: str,
+            signal_trade_date: date,
+            snapshot_date: date,
+            source_rank: int,
+        ) -> RadarRuleEvaluation:
+            feature = RadarFeatureSnapshot(
+                market="TW",
+                stock_id=stock_id,
+                stock_name=stock_id,
+                signal_trade_date=signal_trade_date,
+                effective_at=observed_at,
+                available_at=observed_at,
+                source_available_at=observed_at,
+                observed_at=observed_at,
+                feature_basis="daily_final",
+                feature_version=RADAR_V2_ACTIVE_FEATURE_VERSION,
+                feature_config_hash=str(
+                    active_contract["feature_config_hash"]
+                ),
+                input_manifest_hash=f"manifest-{stock_id}",
+                data_status="current",
+                freshness_status="current",
+                close_price=100.0,
+                signal_atr=3.0,
+            )
+            db.add(feature)
+            db.flush()
+            evaluation = RadarRuleEvaluation(
+                feature_snapshot_id=feature.id,
+                rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+                rule_config_hash=RADAR_V2_ACTIVE_RULE_CONFIG_HASH,
+                stock_id=stock_id,
+                signal_trade_date=signal_trade_date,
+                direction=1,
+                primary_bucket="breakout_high",
+                decision_at=observed_at,
+                evaluated_at=observed_at,
+            )
+            db.add(evaluation)
+            db.flush()
+            db.add(
+                RadarUniverseObservation(
+                    group_id=7,
+                    mode="action",
+                    snapshot_date=snapshot_date,
+                    stock_id=stock_id,
+                    stock_name=stock_id,
+                    observation_status="observed_active",
+                    selected=True,
+                    evaluation_id=evaluation.id,
+                    source_rank=source_rank,
+                    universe_scope="calculation_universe",
+                    rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+                    rule_config_hash=RADAR_V2_ACTIVE_RULE_CONFIG_HASH,
+                    observed_at=observed_at,
+                )
+            )
+            return evaluation
+
+        with Session(self.engine) as db:
+            db.add(WatchlistGroup(id=7, group_name="Radar v2"))
+            db.flush()
+            old_evaluated_at = datetime(
+                2026, 8, 1, tzinfo=timezone.utc
+            )
+            for index in range(201):
+                stock_id = f"OLD{index:03d}"
+                evaluation = add_evaluation(
+                    db,
+                    stock_id=stock_id,
+                    signal_trade_date=date(2026, 7, 30),
+                    snapshot_date=date(2026, 7, 30),
+                    source_rank=index + 1,
+                )
+                db.add(
+                    RadarOutcomePath(
+                        evaluation_id=evaluation.id,
+                        stock_id=stock_id,
+                        signal_trade_date=date(2026, 7, 30),
+                        horizon_trading_days=1,
+                        horizon_end_trade_date=date(2026, 7, 31),
+                        outcome_contract_version=str(
+                            active_contract["outcome_contract_version"]
+                        ),
+                        outcome_config_hash=str(
+                            active_contract["outcome_config_hash"]
+                        ),
+                        status="pending",
+                        summary_state="pending",
+                        direction=1,
+                        reference_direction=1,
+                        reference_price=100.0,
+                        signal_atr=3.0,
+                        evaluated_at=old_evaluated_at,
+                    )
+                )
+
+            due_evaluation = add_evaluation(
+                db,
+                stock_id="DUE1",
+                signal_trade_date=date(2026, 8, 6),
+                snapshot_date=date(2026, 8, 6),
+                source_rank=1,
+            )
+            db.add(
+                RadarOutcomePath(
+                    evaluation_id=due_evaluation.id,
+                    stock_id="DUE1",
+                    signal_trade_date=date(2026, 8, 6),
+                    horizon_trading_days=1,
+                    horizon_end_trade_date=date(2026, 8, 7),
+                    outcome_contract_version=str(
+                        active_contract["outcome_contract_version"]
+                    ),
+                    outcome_config_hash=str(
+                        active_contract["outcome_config_hash"]
+                    ),
+                    status="pending",
+                    summary_state="pending",
+                    direction=1,
+                    reference_direction=1,
+                    reference_price=100.0,
+                    signal_atr=3.0,
+                    evaluated_at=datetime(
+                        2026, 8, 5, tzinfo=timezone.utc
+                    ),
+                )
+            )
+            db.add(
+                MarketDailyPrice(
+                    source_id=1,
+                    raw_result_id=1,
+                    trade_date=date(2026, 8, 7),
+                    stock_id="DUE1",
+                    stock_name="DUE1",
+                    open_price=100.0,
+                    high_price=104.0,
+                    low_price=99.0,
+                    close_price=103.0,
+                    trade_volume=1_000_000,
+                )
+            )
+
+            candidate_ids: list[int] = []
+            for index in range(83):
+                evaluation = add_evaluation(
+                    db,
+                    stock_id=f"NEW{index:03d}",
+                    signal_trade_date=date(2026, 8, 7),
+                    snapshot_date=date(2026, 8, 7),
+                    source_rank=index + 1,
+                )
+                candidate_ids.append(evaluation.id)
+            db.commit()
+
+            first = evaluate_pending_radar_v2_outcomes(
+                db=db,
+                evaluation_ids=candidate_ids,
+                group_id=7,
+                mode="action",
+                limit=200,
+                rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+                as_of_trade_date=date(2026, 8, 7),
+                now=datetime(2026, 8, 8, 1, tzinfo=timezone.utc),
+            )
+            self.assertEqual(first["initialized_evaluation_count"], 83)
+            self.assertEqual(first["attempted_path_count"], 200)
+            self.assertEqual(first["awaiting_daily_bar_count"], 200)
+            self.assertEqual(first["remaining_due_count"], 202)
+            not_due_summary = get_radar_v2_outcome_summary(
+                db=db,
+                group_id=7,
+                mode="action",
+                snapshot_date=date(2026, 8, 7),
+            )
+            ready_summary = get_radar_v2_outcome_summary(
+                db=db,
+                group_id=7,
+                mode="action",
+                snapshot_date=date(2026, 8, 6),
+            )
+            self.assertEqual(not_due_summary["status"], "not_due")
+            self.assertEqual(
+                not_due_summary["pending_reason_counts"],
+                {"not_due": 83},
+            )
+            self.assertEqual(
+                not_due_summary["items"][0]["horizon_end_trade_date"],
+                date(2026, 8, 10),
+            )
+            self.assertEqual(ready_summary["status"], "pending")
+            self.assertEqual(
+                ready_summary["pending_reason_counts"],
+                {"ready_to_reconcile": 1},
+            )
+
+            second = evaluate_pending_radar_v2_outcomes(
+                db=db,
+                evaluation_ids=candidate_ids,
+                group_id=7,
+                mode="action",
+                limit=200,
+                rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+                as_of_trade_date=date(2026, 8, 7),
+                now=datetime(2026, 8, 8, 2, tzinfo=timezone.utc),
+            )
+            due_path = (
+                db.query(RadarOutcomePath)
+                .filter(
+                    RadarOutcomePath.evaluation_id == due_evaluation.id
+                )
+                .filter(RadarOutcomePath.horizon_trading_days == 1)
+                .one()
+            )
+
+            self.assertEqual(second["initialized_evaluation_count"], 0)
+            self.assertEqual(second["attempted_path_count"], 200)
+            self.assertEqual(due_path.status, "evaluated")
+            self.assertEqual(due_path.horizon_end_trade_date, date(2026, 8, 7))
+            self.assertEqual(second["finalized_count"], 1)
+            self.assertEqual(second["remaining_due_count"], 201)
 
     def test_empty_active_scope_still_has_a_readable_snapshot(self) -> None:
         base = _base_radar(_source_item("1111", signal_keys=[], source_rank=1))

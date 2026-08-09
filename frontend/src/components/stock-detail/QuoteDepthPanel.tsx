@@ -9,10 +9,13 @@ import {
 } from "@/components/stock-detail/StockDetailDataViews";
 import { StateSurface } from "@/components/LoadingPlaceholders";
 import type {
+  TaiwanQuoteContractReplayRead,
+  TaiwanQuoteContractReplaySnapshotRead,
   TaiwanStockQuoteDepthLevel,
   TaiwanStockQuoteDepthPreviewMode,
   TaiwanStockQuoteDepthRead,
 } from "@/types/market";
+import { useMemo, useState } from "react";
 
 type QuoteDepthLoadState = "idle" | "loading" | "success" | "error";
 
@@ -20,10 +23,47 @@ type QuoteDepthPanelProps = {
   quoteDepth: TaiwanStockQuoteDepthRead | null;
   loadState: QuoteDepthLoadState;
   quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
+  quoteReplay?: TaiwanQuoteContractReplayRead | null;
+  replayLoadState?: "idle" | "loading" | "success" | "error";
 };
 
+type QuoteDepthViewMode = "live" | "replay";
+type QuoteDepthViewSelection = {
+  key: string;
+  mode: QuoteDepthViewMode;
+};
+
+function isAuctionReplaySnapshot(
+  snapshot: TaiwanQuoteContractReplaySnapshotRead
+) {
+  const quote = snapshot.quote;
+  return Boolean(
+    snapshot.status.startsWith("captured") &&
+      quote &&
+      (quote.session_phase === "preopen_auction" ||
+        quote.session_phase === "closing_auction" ||
+        quote.instrument_phase === "preopen_auction" ||
+        quote.instrument_phase === "opening_auction_delayed" ||
+        quote.instrument_phase === "closing_auction" ||
+        quote.instrument_phase === "closing_auction_delayed")
+  );
+}
+
+function isPreopenReplaySnapshot(
+  snapshot: TaiwanQuoteContractReplaySnapshotRead
+) {
+  const quote = snapshot.quote;
+  return Boolean(
+    snapshot.status.startsWith("captured") &&
+      quote &&
+      (quote.session_phase === "preopen_auction" ||
+        quote.instrument_phase === "preopen_auction" ||
+        quote.instrument_phase === "opening_auction_delayed")
+  );
+}
+
 function statusClass(status: string | undefined) {
-  if (status === "preview") {
+  if (status === "preview" || status === "replay") {
     return "border-sky-500/50 bg-sky-500/10 text-omi-text-strong";
   }
   if (status === "live" || status === "final_snapshot") {
@@ -392,6 +432,19 @@ function VolumeMetric({
   );
 }
 
+function hasQuoteVolumeSummary(quoteDepth: TaiwanStockQuoteDepthRead) {
+  if (quoteDepth.session_phase === "preopen_auction") return false;
+
+  const cumulativeLots = quoteDepth.cumulative_volume_lots ?? quoteDepth.total_volume_lots;
+  return (
+    isFiniteNumber(cumulativeLots) ||
+    isFiniteNumber(quoteDepth.last_trade_volume_lots) ||
+    isFiniteNumber(quoteDepth.official_daily_volume_shares) ||
+    quoteDepth.volume_status !== undefined ||
+    quoteDepth.volume_reconciliation !== undefined
+  );
+}
+
 function QuoteVolumeSummary({
   quoteDepth,
   isPreview,
@@ -399,24 +452,15 @@ function QuoteVolumeSummary({
   quoteDepth: TaiwanStockQuoteDepthRead;
   isPreview: boolean;
 }) {
-  if (quoteDepth.session_phase === "preopen_auction") return null;
+  if (!hasQuoteVolumeSummary(quoteDepth)) return null;
 
   const cumulativeLots = quoteDepth.cumulative_volume_lots ?? quoteDepth.total_volume_lots;
-  const hasVolumeContract =
-    isFiniteNumber(cumulativeLots) ||
-    isFiniteNumber(quoteDepth.last_trade_volume_lots) ||
-    isFiniteNumber(quoteDepth.official_daily_volume_shares) ||
-    quoteDepth.volume_status !== undefined ||
-    quoteDepth.volume_reconciliation !== undefined;
-
-  if (!hasVolumeContract) return null;
-
   const status = volumeSummaryStatus(quoteDepth, isPreview);
 
   return (
     <section
       aria-label="成交量摘要"
-      className="mt-3 overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
+      className="overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
       data-testid="quote-volume-summary"
     >
       <div className="flex items-center justify-between gap-3 border-b border-omi-border-subtle px-2.5 py-1.5 sm:px-3">
@@ -430,7 +474,7 @@ function QuoteVolumeSummary({
           {status.label}
         </span>
       </div>
-      <dl className="grid grid-cols-2 sm:grid-cols-3">
+      <dl className="grid grid-cols-2">
         <VolumeMetric
           label="最近一筆"
           sourceField={quoteDepth.last_trade_volume_source_field ?? "tv"}
@@ -443,13 +487,12 @@ function QuoteVolumeSummary({
           sourceField={quoteDepth.volume_source_field ?? "v"}
           value={formatVolumeValue(cumulativeLots, "張")}
           testId="quote-volume-cumulative"
-          className="sm:border-r sm:border-omi-border-subtle"
         />
         <VolumeMetric
           label="正式日量"
           value={formatOfficialVolumeValue(quoteDepth.official_daily_volume_shares)}
           testId="quote-volume-official"
-          className="col-span-2 border-t border-omi-border-subtle sm:col-span-1 sm:border-t-0"
+          className="col-span-2 border-t border-omi-border-subtle"
         />
       </dl>
       <div
@@ -490,7 +533,7 @@ function QuoteAuctionSummary({
   return (
     <section
       aria-label={`${phaseLabel}摘要`}
-      className="mt-3 overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
+      className="overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
       data-testid="quote-auction-summary"
     >
       <div className="flex items-center justify-between gap-3 border-b border-omi-border-subtle px-2.5 py-1.5 sm:px-3">
@@ -710,10 +753,58 @@ export default function QuoteDepthPanel({
   quoteDepth,
   loadState,
   quoteDepthPreviewMode = null,
+  quoteReplay = null,
+  replayLoadState = "idle",
 }: QuoteDepthPanelProps) {
+  const [viewSelection, setViewSelection] =
+    useState<QuoteDepthViewSelection | null>(null);
+  const replaySnapshot = useMemo(
+    () => {
+      const snapshots = [...(quoteReplay?.snapshots ?? [])].reverse();
+      return (
+        snapshots.find(isPreopenReplaySnapshot) ??
+        snapshots.find(isAuctionReplaySnapshot) ??
+        null
+      );
+    },
+    [quoteReplay]
+  );
+  const replayQuote = replaySnapshot?.quote ?? null;
+  const replayAvailable = replayQuote !== null;
+  const viewKey = `${quoteDepth?.stock_id ?? "empty"}:${quoteReplay?.trade_date ?? "none"}`;
+  const viewMode =
+    viewSelection?.key === viewKey ? viewSelection.mode : "live";
+
   const activePreviewMode = quoteDepthPreviewMode;
-  const displayQuoteDepth = applyQuoteDepthPreview(quoteDepth, activePreviewMode);
+  const replayDisplayQuote = replayQuote
+    ? {
+        ...replayQuote,
+        phase_label: `試撮快照 ${replaySnapshot?.capture_slot ?? ""}`.trim(),
+        freshness: {
+          ...replayQuote.freshness,
+          status: "replay",
+          is_live: false,
+          message: `保存快照回放 · ${quoteReplay?.trade_date ?? "-"} ${
+            replaySnapshot?.capture_slot ?? "-"
+          }`,
+        },
+      }
+    : null;
+  const displayQuoteDepth =
+    activePreviewMode === null && viewMode === "replay"
+      ? replayDisplayQuote
+      : applyQuoteDepthPreview(quoteDepth, activePreviewMode);
   const isPreview = activePreviewMode !== null;
+  const isReplay = activePreviewMode === null && viewMode === "replay";
+  const showAuctionSummary = Boolean(
+    displayQuoteDepth &&
+      (displayQuoteDepth.session_phase === "preopen_auction" ||
+        displayQuoteDepth.session_phase === "closing_auction")
+  );
+  const showVolumeSummary = Boolean(
+    displayQuoteDepth && hasQuoteVolumeSummary(displayQuoteDepth)
+  );
+  const showSummaryColumn = showAuctionSummary || showVolumeSummary;
   const status = displayQuoteDepth?.freshness.status;
   const phaseLabel = displayQuoteDepth?.phase_label ?? "五檔";
   const bidLevels = displayQuoteDepth?.bid_levels ?? [];
@@ -745,6 +836,11 @@ export default function QuoteDepthPanel({
         : "尚無五檔資料。");
   const isError = loadState === "error" && !displayQuoteDepth;
   const footerStatus = displayQuoteDepth?.freshness.is_stale || showDepth ? message : phaseLabel;
+  const observationTimeLabel = displayQuoteDepth?.quote_time
+    ? formatDateTime(displayQuoteDepth.quote_time)
+    : displayQuoteDepth?.presentation_trade_date
+      ? `交易日 ${displayQuoteDepth.presentation_trade_date}`
+      : "-";
 
   return (
     <div className="border-b border-omi-border-subtle px-5 py-3" data-testid="quote-depth-panel">
@@ -764,6 +860,11 @@ export default function QuoteDepthPanel({
                 預覽資料
               </span>
             ) : null}
+            {isReplay ? (
+              <span className="inline-flex items-center border border-omi-info bg-omi-info-soft px-2 py-0.5 text-[11px] font-bold text-omi-info-strong">
+                保存回放
+              </span>
+            ) : null}
             <span className="text-[11px] text-omi-text-muted">
               {sourceLabel(displayQuoteDepth?.source)}
             </span>
@@ -779,51 +880,112 @@ export default function QuoteDepthPanel({
         </div>
       </div>
 
-      {showDepth ? (
-        <div className="mt-3 grid grid-cols-2 gap-2" data-testid="quote-depth-book">
-          <DepthSide
-            levels={bidLevels}
-            maxSize={maxSize}
-            previousClose={displayQuoteDepth?.previous_close}
-            side="bid"
-          />
-          <DepthSide
-            levels={askLevels}
-            maxSize={maxSize}
-            previousClose={displayQuoteDepth?.previous_close}
-            side="ask"
-          />
+      {activePreviewMode === null ? (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-y border-omi-border-subtle py-2">
+          <div className="inline-flex border border-omi-border bg-omi-surface-subtle p-0.5">
+            <button
+              type="button"
+              data-testid="quote-depth-mode-live"
+              onClick={() => setViewSelection({ key: viewKey, mode: "live" })}
+              className={[
+                "h-7 px-2.5 text-xs font-semibold transition",
+                viewMode === "live"
+                  ? "bg-omi-control text-omi-text-inverse"
+                  : "text-omi-text-muted hover:bg-omi-surface",
+              ].join(" ")}
+            >
+              即時
+            </button>
+            <button
+              type="button"
+              data-testid="quote-depth-mode-replay"
+              disabled={!replayAvailable}
+              onClick={() => setViewSelection({ key: viewKey, mode: "replay" })}
+              className={[
+                "h-7 px-2.5 text-xs font-semibold transition",
+                viewMode === "replay"
+                  ? "bg-omi-control text-omi-text-inverse"
+                  : "text-omi-text-muted hover:bg-omi-surface",
+                !replayAvailable
+                  ? "cursor-not-allowed opacity-45 hover:bg-transparent"
+                  : "",
+              ].join(" ")}
+            >
+              試撮快照
+            </button>
+          </div>
+          <span className="text-[11px] text-omi-text-muted" data-testid="quote-depth-replay-coverage">
+            {replayLoadState === "loading"
+              ? "快照索引讀取中"
+              : replayAvailable
+                ? `${quoteReplay?.trade_date ?? "-"} · ${quoteReplay?.captured_count ?? 0}/${
+                    quoteReplay?.required_count ?? 0
+                  } slots`
+                : "目前標的無試撮快照"}
+          </span>
         </div>
-      ) : (
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <QuoteMetric label="Open" value={formatPrice(displayQuoteDepth?.open_price)} />
-          <QuoteMetric label="High" value={formatPrice(displayQuoteDepth?.high_price)} tone="text-omi-market-up" />
-          <QuoteMetric label="Low" value={formatPrice(displayQuoteDepth?.low_price)} tone="text-omi-market-down" />
-          <QuoteMetric label="Volume" value={formatLotUnits(displayQuoteDepth?.total_volume_lots)} />
+      ) : null}
+
+      <div
+        className={[
+          "mt-3 grid gap-3",
+          showSummaryColumn
+            ? "lg:grid-cols-[minmax(0,2fr)_minmax(13rem,1fr)] lg:items-start"
+            : "",
+        ].join(" ")}
+        data-testid="quote-depth-content"
+      >
+        <div className="min-w-0" data-testid="quote-depth-book-column">
+          {showDepth ? (
+            <div className="grid grid-cols-2 gap-2" data-testid="quote-depth-book">
+              <DepthSide
+                levels={bidLevels}
+                maxSize={maxSize}
+                previousClose={displayQuoteDepth?.previous_close}
+                side="bid"
+              />
+              <DepthSide
+                levels={askLevels}
+                maxSize={maxSize}
+                previousClose={displayQuoteDepth?.previous_close}
+                side="ask"
+              />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              <QuoteMetric label="Open" value={formatPrice(displayQuoteDepth?.open_price)} />
+              <QuoteMetric label="High" value={formatPrice(displayQuoteDepth?.high_price)} tone="text-omi-market-up" />
+              <QuoteMetric label="Low" value={formatPrice(displayQuoteDepth?.low_price)} tone="text-omi-market-down" />
+              <QuoteMetric label="Volume" value={formatLotUnits(displayQuoteDepth?.total_volume_lots)} />
+            </div>
+          )}
+
+          {!showDepth ? (
+            <StateSurface
+              title={message}
+              tone={isError ? "danger" : loadState === "loading" ? "loading" : "empty"}
+              busy={loadState === "loading"}
+              compact
+              className="mt-3"
+            />
+          ) : null}
         </div>
-      )}
 
-      {!showDepth ? (
-        <StateSurface
-          title={message}
-          tone={isError ? "danger" : loadState === "loading" ? "loading" : "empty"}
-          busy={loadState === "loading"}
-          compact
-          className="mt-3"
-        />
-      ) : null}
-
-      {displayQuoteDepth ? (
-        <QuoteAuctionSummary quoteDepth={displayQuoteDepth} isPreview={isPreview} />
-      ) : null}
-
-      {displayQuoteDepth ? (
-        <QuoteVolumeSummary quoteDepth={displayQuoteDepth} isPreview={isPreview} />
-      ) : null}
+        {showSummaryColumn && displayQuoteDepth ? (
+          <div className="min-w-0 space-y-3" data-testid="quote-depth-summary-column">
+            {showAuctionSummary ? (
+              <QuoteAuctionSummary quoteDepth={displayQuoteDepth} isPreview={isPreview} />
+            ) : null}
+            {showVolumeSummary ? (
+              <QuoteVolumeSummary quoteDepth={displayQuoteDepth} isPreview={isPreview} />
+            ) : null}
+          </div>
+        ) : null}
+      </div>
 
       {displayQuoteDepth ? (
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-omi-text-muted">
-          <span>{formatDateTime(displayQuoteDepth.quote_time)}</span>
+          <span>{observationTimeLabel}</span>
           <span className={displayQuoteDepth.freshness.is_stale ? "text-amber-200" : ""}>{footerStatus}</span>
         </div>
       ) : null}

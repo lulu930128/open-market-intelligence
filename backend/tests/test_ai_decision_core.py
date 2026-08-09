@@ -51,6 +51,41 @@ class AiDecisionCoreTests(unittest.TestCase):
             "market_breadth",
         )
 
+    def test_negated_trading_risk_language_does_not_create_decision_intent(self) -> None:
+        question = "只驗證資料新鮮度，不做任何交易、持倉或風險判斷。"
+
+        context = decision_core.infer_position_context(question)
+        intents = decision_core.infer_question_intents(question)
+
+        self.assertFalse(context.has_position_context)
+        self.assertEqual(context.decision_topic, "none")
+        self.assertEqual(intents[0], "data_freshness")
+        self.assertNotIn("risk_check", intents)
+        self.assertNotIn("entry_decision", intents)
+        self.assertNotIn("exit_decision", intents)
+        understanding = decision_core.understand_question(question=question)
+        self.assertNotIn("風險", understanding.matched_hints)
+        self.assertIn("風險", understanding.raw_matched_hints)
+        self.assertIn("風險", understanding.negated_hints)
+
+    def test_field_retirement_wording_does_not_create_exit_intent(self) -> None:
+        question = "auction 欄位開盤後是否退場？"
+
+        self.assertNotEqual(
+            decision_core.infer_question_intent(question),
+            "exit_decision",
+        )
+        self.assertNotIn(
+            "exit_decision",
+            decision_core.infer_question_intents(question),
+        )
+
+    def test_positive_risk_request_still_routes_to_risk(self) -> None:
+        self.assertEqual(
+            decision_core.infer_question_intent("請分析下跌風險與失效條件"),
+            "risk_check",
+        )
+
     def test_entry_question_understanding_handles_pullback_wording(self) -> None:
         understanding = decision_core.understand_question(
             question="以現在來說，2327 國巨適合買入嗎？如果要等回檔，價格大概看哪裡？",
@@ -278,6 +313,68 @@ class AiDecisionCoreTests(unittest.TestCase):
                 payload,
                 policy={
                     "can_external_fetch": False,
+                    "query_plan": {
+                        "selected_capabilities": ["intraday.bars"],
+                    },
+                },
+            )
+        )
+
+    def test_prefer_live_uses_persisted_tw_bars_when_external_fetch_is_denied(
+        self,
+    ) -> None:
+        payload = AiAskRequest(
+            question="TAIEX 即時走勢",
+            target={"type": "tw_index", "id": "TAIEX"},
+            realtime_policy="prefer_live",
+            allow_external_fetch=False,
+            refresh_policy={"fallback_to_cached": True},
+            selection={"include": ["intraday.bars"]},
+        )
+
+        self.assertFalse(
+            ai_ask._include_tw_intraday(
+                payload,
+                policy={
+                    "can_external_fetch": False,
+                    "refresh_policy": {"fallback_to_cached": True},
+                    "query_plan": {
+                        "selected_capabilities": ["intraday.bars"],
+                    },
+                },
+                allow_persisted_cache=False,
+            )
+        )
+
+        self.assertTrue(
+            ai_ask._include_tw_intraday(
+                payload,
+                policy={
+                    "can_external_fetch": False,
+                    "refresh_policy": {"fallback_to_cached": True},
+                    "query_plan": {
+                        "selected_capabilities": ["intraday.bars"],
+                    },
+                },
+            )
+        )
+
+    def test_prefer_live_respects_disabled_persisted_fallback(self) -> None:
+        payload = AiAskRequest(
+            question="TAIEX 即時走勢",
+            target={"type": "tw_index", "id": "TAIEX"},
+            realtime_policy="prefer_live",
+            allow_external_fetch=False,
+            refresh_policy={"fallback_to_cached": False},
+            selection={"include": ["intraday.bars"]},
+        )
+
+        self.assertFalse(
+            ai_ask._include_tw_intraday(
+                payload,
+                policy={
+                    "can_external_fetch": False,
+                    "refresh_policy": {"fallback_to_cached": False},
                     "query_plan": {
                         "selected_capabilities": ["intraday.bars"],
                     },

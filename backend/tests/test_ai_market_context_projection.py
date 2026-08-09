@@ -95,6 +95,9 @@ class AIMarketContextProjectionTests(unittest.TestCase):
                 "source": "twse_mis_quote_depth",
                 "provider": "twse_mis",
                 "session_phase": "preopen_auction",
+                "market_calendar_phase": "regular",
+                "instrument_phase": "preopen_auction",
+                "observation_reason_code": "PROVIDER_EVENT_PRECEDES_OPEN",
                 "trade_date": "2026-07-27",
                 "quote_time": "2026-07-27T11:00:00+08:00",
                 "last_trade_price": 2325.0,
@@ -146,6 +149,20 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             "not_provided",
         )
         self.assertTrue(quote["indicative_match_available"])
+        self.assertEqual(quote["market_calendar_phase"], "regular")
+        self.assertEqual(quote["instrument_phase"], "preopen_auction")
+        self.assertEqual(
+            quote["components"]["auction"]["market_calendar_phase"],
+            "regular",
+        )
+        self.assertEqual(
+            quote["components"]["auction"]["instrument_phase"],
+            "preopen_auction",
+        )
+        self.assertEqual(
+            quote["components"]["auction"]["observation_reason_code"],
+            "PROVIDER_EVENT_PRECEDES_OPEN",
+        )
         self.assertEqual(quote["indicative_match_price"], 2327.5)
         self.assertEqual(quote["indicative_match_volume_lots"], 2_046)
         self.assertEqual(
@@ -155,6 +172,15 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(
             quote["components"]["auction"]["indicative_match_volume_lots"],
             2_046,
+        )
+        self.assertEqual(quote["components"]["auction"]["status"], "current")
+        self.assertEqual(
+            quote["components"]["auction"]["applicability_status"],
+            "applicable",
+        )
+        self.assertNotEqual(
+            quote["components"]["auction"]["freshness"].get("reason_code"),
+            "SESSION_NOT_AUCTION",
         )
         self.assertEqual(quote["primary_provider"], "twse_mis")
         self.assertEqual(quote["selected_provider"], "twse_mis")
@@ -208,6 +234,15 @@ class AIMarketContextProjectionTests(unittest.TestCase):
                     "index_id": "TAIEX",
                     "breadth": {
                         "market": "TWSE",
+                        "version": "tw.market.breadth.v2",
+                        "state_contract_version": (
+                            "tw.market_breadth.stock_state.v2"
+                        ),
+                        "market_session": "post_close",
+                        "price_semantics": "official_session_close",
+                        "decision_usable": True,
+                        "is_provisional": False,
+                        "snapshot_as_of": "2026-07-22T13:30:00+08:00",
                         "scope": "full_market",
                         "trade_date": "2026-07-22",
                         "advance_count": 530,
@@ -225,6 +260,15 @@ class AIMarketContextProjectionTests(unittest.TestCase):
                     "index_id": "TPEX",
                     "breadth": {
                         "market": "TPEX",
+                        "version": "tw.market.breadth.v2",
+                        "state_contract_version": (
+                            "tw.market_breadth.stock_state.v2"
+                        ),
+                        "market_session": "post_close",
+                        "price_semantics": "official_session_close",
+                        "decision_usable": True,
+                        "is_provisional": False,
+                        "snapshot_as_of": "2026-07-22T13:30:00+08:00",
                         "scope": "full_market",
                         "trade_date": "2026-07-22",
                         "advance_count": 535,
@@ -252,6 +296,15 @@ class AIMarketContextProjectionTests(unittest.TestCase):
 
         self.assertIsNotNone(breadth)
         self.assertEqual(breadth["status"], "ready")
+        self.assertEqual(breadth["version"], "tw.market.breadth.v2")
+        self.assertEqual(
+            breadth["state_contract_version"],
+            "tw.market_breadth.stock_state.v2",
+        )
+        self.assertEqual(breadth["market_session"], "post_close")
+        self.assertEqual(breadth["price_semantics"], "official_session_close")
+        self.assertTrue(breadth["decision_usable"])
+        self.assertFalse(breadth["is_provisional"])
         self.assertEqual(breadth["included_markets"], ["TWSE", "TPEX"])
         self.assertEqual(breadth["advance_count"], 1065)
         self.assertEqual(breadth["decline_count"], 721)
@@ -282,6 +335,75 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(breadth["markets"]["TPEX"]["total_count"], 866)
         self.assertEqual(refs, [{"type": "derived", "name": "app.market.indices.summary"}])
 
+    def test_taiwan_market_breadth_keeps_preopen_auction_separate(self) -> None:
+        def component(index_id: str, market: str) -> dict:
+            return {
+                "index_id": index_id,
+                "breadth": {
+                    "market": market,
+                    "version": "tw.market.breadth.v2",
+                    "state_contract_version": (
+                        "tw.market_breadth.stock_state.v2"
+                    ),
+                    "scope": "registered_universe",
+                    "trade_date": "2026-08-04",
+                    "market_session": "preopen",
+                    "price_semantics": "actual_trade_only",
+                    "decision_usable": False,
+                    "is_provisional": True,
+                    "snapshot_as_of": "2026-08-04T08:55:00+08:00",
+                    "advance_count": 0,
+                    "decline_count": 0,
+                    "unchanged_count": 0,
+                    "coverage_count": 0,
+                    "unknown_count": 100,
+                    "total_count": 100,
+                    "auction_breadth": {
+                        "market": market,
+                        "status": "provisional",
+                        "market_session": "preopen",
+                        "as_of": "2026-08-04T08:55:00+08:00",
+                        "advance_count": 20,
+                        "decline_count": 10,
+                        "unchanged_count": 5,
+                        "coverage_count": 35,
+                        "universe_count": 100,
+                        "price_semantics": "auction_indicative",
+                        "decision_usable": False,
+                        "is_provisional": True,
+                    },
+                },
+                "breadth_status": {
+                    "status": "pending",
+                    "decision_usable": False,
+                },
+            }
+
+        breadth = taiwan_market._market_breadth_from_index_summary(
+            db=SimpleNamespace(),
+            dependencies=SimpleNamespace(
+                get_market_index_summary=lambda *_args, **_kwargs: {
+                    "indices": [
+                        component("TAIEX", "TWSE"),
+                        component("TPEX", "TPEX"),
+                    ]
+                }
+            ),
+            warnings=[],
+            source_refs=[],
+        )
+
+        self.assertEqual(breadth["status"], "pending")
+        self.assertFalse(breadth["decision_usable"])
+        self.assertEqual(breadth["advance_count"], 0)
+        self.assertEqual(breadth["decline_count"], 0)
+        auction = breadth["auction_breadth"]
+        self.assertEqual(auction["status"], "provisional")
+        self.assertEqual(auction["advance_count"], 40)
+        self.assertEqual(auction["decline_count"], 20)
+        self.assertEqual(auction["coverage_count"], 70)
+        self.assertFalse(auction["decision_usable"])
+
     def test_taiwan_market_indices_use_latest_available_trade_date(self) -> None:
         summary = {
             "source": "market_index_summary",
@@ -308,14 +430,134 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             dependencies=SimpleNamespace(
                 get_market_index_summary=lambda *_args, **_kwargs: summary
             ),
+            generated_at=datetime.fromisoformat("2026-07-29T14:00:00+08:00"),
         )
 
-        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["status"], "partial")
         self.assertEqual(result["as_of"], "2026-07-29")
+        self.assertTrue(result["is_complete"])
+        self.assertTrue(result["mixed_trade_dates"])
+        self.assertFalse(result["current_for_requested_session"])
         self.assertEqual(
             [item["index_id"] for item in result["items"]],
             ["TAIEX", "TPEX"],
         )
+
+    def test_taiwan_market_indices_select_current_snapshot_without_losing_close(self) -> None:
+        summary = {
+            "source": "market_index_summary",
+            "indices": [
+                {
+                    "index_id": "TAIEX",
+                    "market": "TWSE",
+                    "close": 24_000.0,
+                    "trade_date": "2026-07-28",
+                },
+                {
+                    "index_id": "TPEX",
+                    "market": "TPEX",
+                    "close": 267.0,
+                    "trade_date": "2026-07-28",
+                },
+            ],
+        }
+
+        def minute_series(_db, *, index_id, trade_date):
+            value = 24_100.0 if index_id == "TAIEX" else 268.0
+            return {
+                "source": "taiwan_index_minute_snapshot",
+                "trade_date": trade_date.isoformat(),
+                "coverage_status": "synthetic_partial",
+                "is_partial": True,
+                "previous_close": 24_000.0 if index_id == "TAIEX" else 267.0,
+                "points": [
+                    {
+                        "time": "2026-07-29T10:00:00+08:00",
+                        "price": value,
+                    }
+                ],
+            }
+
+        with patch.object(
+            taiwan_market,
+            "read_taiwan_index_minute_series",
+            side_effect=minute_series,
+        ):
+            result = taiwan_market._market_indices_capability(
+                db=SimpleNamespace(query=lambda *_args, **_kwargs: None),
+                dependencies=SimpleNamespace(
+                    get_market_index_summary=lambda *_args, **_kwargs: summary
+                ),
+                generated_at=datetime.fromisoformat(
+                    "2026-07-29T10:01:00+08:00"
+                ),
+            )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["current_for_requested_session"])
+        self.assertTrue(result["is_complete"])
+        self.assertEqual(result["observation_mix"], ["current_session_index_snapshot"])
+        self.assertEqual(result["items"][0]["latest_value"], 24_100.0)
+        self.assertEqual(result["items"][0]["close"], 24_000.0)
+        self.assertEqual(result["items"][0]["official_close"]["value"], 24_000.0)
+        self.assertTrue(result["items"][0]["live_snapshot"]["is_partial"])
+
+    def test_taiwan_market_indices_treat_post_close_timestamp_as_current_trade_date(
+        self,
+    ) -> None:
+        summary = {
+            "source": "market_index_summary",
+            "indices": [
+                {
+                    "index_id": "TAIEX",
+                    "market": "TWSE",
+                    "close": 43_360.66,
+                    "as_of": "2026-08-04T13:30:00+08:00",
+                },
+                {
+                    "index_id": "TPEX",
+                    "market": "TPEX",
+                    "close": 375.03,
+                    "as_of": "2026-08-04T13:30:00+08:00",
+                },
+            ],
+        }
+
+        result = taiwan_market._market_indices_capability(
+            db=SimpleNamespace(),
+            dependencies=SimpleNamespace(
+                get_market_index_summary=lambda *_args, **_kwargs: summary
+            ),
+            generated_at=datetime.fromisoformat("2026-08-04T19:50:00+08:00"),
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["current_for_requested_session"])
+        self.assertEqual(result["oldest_as_of"], "2026-08-04T13:30:00+08:00")
+        self.assertEqual(result["newest_as_of"], "2026-08-04T13:30:00+08:00")
+        self.assertEqual(result["items"][0]["trade_date"], "2026-08-04")
+        self.assertEqual(
+            result["items"][0]["official_close"]["as_of"],
+            "2026-08-04T13:30:00+08:00",
+        )
+
+    def test_aggregate_freshness_separates_temporal_currentness_from_coverage(self) -> None:
+        freshness = taiwan_market._aggregate_freshness(
+            "market.indices",
+            {
+                "status": "partial",
+                "market_session": "regular",
+                "current_for_requested_session": True,
+                "is_complete": False,
+                "as_of": "2026-07-29T10:00:00+08:00",
+            },
+            dataset="market_index_summary",
+        )
+
+        self.assertTrue(freshness["is_current"])
+        self.assertTrue(freshness["current_for_requested_session"])
+        self.assertFalse(freshness["is_complete"])
+        self.assertFalse(freshness["refresh_recommended"])
 
     def test_taiwan_market_breadth_keeps_partial_trade_value_visible(self) -> None:
         summary = {

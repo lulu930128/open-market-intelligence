@@ -17,8 +17,21 @@ export type DispatchDeliveryStatus =
   | "queued"
   | "sending"
   | "success"
+  | "unknown"
   | "error"
   | string;
+export type DispatchCalendarMode = "calendar_days" | "weekdays" | "tw_trading_days";
+export type DispatchCatchupMode = "latest_only" | "all_slots";
+export type DispatchMisfirePolicy = "catch_up" | "skip";
+export type DispatchReadinessProfile =
+  | "generic"
+  | "tw_preopen"
+  | "tw_post_close"
+  | "watchlist_radar";
+export type DispatchReadinessPolicy =
+  | "immediate"
+  | "wait_until_ready"
+  | "skip_if_incomplete";
 
 export type DispatchRecipientGroupRead = {
   id: number;
@@ -69,6 +82,22 @@ export type DispatchScheduleRead = {
   scope_type: DispatchScopeType;
   scope_id: string | null;
   request: Partial<DispatchPreviewRequest>;
+  next_run_at?: string | null;
+  calendar_mode?: DispatchCalendarMode;
+  catchup_mode?: DispatchCatchupMode;
+  misfire_policy?: DispatchMisfirePolicy;
+  misfire_grace_minutes?: number;
+  max_retries?: number;
+  retry_interval_seconds?: number;
+  readiness_profile?: DispatchReadinessProfile;
+  readiness_policy?: DispatchReadinessPolicy;
+  readiness_deadline_minutes?: number;
+  readiness_retry_interval_seconds?: number;
+  last_queued_at?: string | null;
+  last_sent_at?: string | null;
+  last_skipped_at?: string | null;
+  last_status?: string;
+  archived_at?: string | null;
   last_run_key: string | null;
   last_run_at: string | null;
   last_success_at: string | null;
@@ -88,6 +117,16 @@ export type DispatchScheduleWrite = DispatchPreviewRequest & {
   send_time: string;
   day_of_week: string;
   timezone?: string;
+  calendar_mode?: DispatchCalendarMode;
+  catchup_mode?: DispatchCatchupMode;
+  misfire_policy?: DispatchMisfirePolicy;
+  misfire_grace_minutes?: number;
+  max_retries?: number;
+  retry_interval_seconds?: number;
+  readiness_profile?: DispatchReadinessProfile;
+  readiness_policy?: DispatchReadinessPolicy;
+  readiness_deadline_minutes?: number;
+  readiness_retry_interval_seconds?: number;
 };
 
 export type DispatchPreviewRead = {
@@ -122,7 +161,38 @@ export type DispatchDeliveryRead = {
   request: Record<string, unknown>;
   result: Record<string, unknown> | null;
   error_message: string | null;
+  message_id?: string | null;
   sent_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DispatchScheduleRunRead = {
+  id: number;
+  run_token: string;
+  schedule_id: number;
+  schedule_name: string | null;
+  retry_of_run_id: number | null;
+  trigger_type: "scheduled" | "manual" | "manual_retry" | string;
+  scheduled_for: string;
+  scheduled_slot_key: string | null;
+  status: string;
+  schedule_snapshot: Record<string, unknown>;
+  readiness: Record<string, unknown> | null;
+  readiness_check_count: number;
+  delivery_attempt_count: number;
+  max_delivery_attempts: number;
+  next_action_at: string | null;
+  retryable: boolean;
+  error_code: string | null;
+  error_message: string | null;
+  delivery_id: number | null;
+  job_run_id: number | null;
+  claimed_at: string | null;
+  queued_at: string | null;
+  sending_at: string | null;
+  sent_at: string | null;
+  skipped_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -209,6 +279,27 @@ export function runDispatchSchedule(scheduleId: number) {
   return requestJson<DispatchSendRead>(`/api/dispatch/schedules/${scheduleId}/run`, {
     method: "POST",
   });
+}
+
+export function listDispatchScheduleRuns(scheduleId: number, limit = 50) {
+  return fetchJson<DispatchScheduleRunRead[]>(
+    `/api/dispatch/schedules/${scheduleId}/runs`,
+    { limit }
+  );
+}
+
+export function createDispatchScheduleRun(scheduleId: number) {
+  return requestJson<DispatchScheduleRunRead>(
+    `/api/dispatch/schedules/${scheduleId}/runs`,
+    { method: "POST" }
+  );
+}
+
+export function retryDispatchScheduleRun(runId: number) {
+  return requestJson<DispatchScheduleRunRead>(
+    `/api/dispatch/schedule-runs/${runId}/retry`,
+    { method: "POST" }
+  );
 }
 
 export function listDispatchDeliveries(limit = 20) {

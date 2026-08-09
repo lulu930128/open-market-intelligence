@@ -38,7 +38,10 @@ from app.watchlists.backfill_service import (
     backfill_watchlist_group_twse,
     refresh_watchlist_group_daily_prices,
 )
-from app.watchlists.radar_automation import run_watchlist_radar_automation
+from app.watchlists.radar_automation import (
+    reconcile_watchlist_radar_v2_outcomes,
+    run_watchlist_radar_automation,
+)
 
 
 def run_twse_daily_price_job(
@@ -454,7 +457,7 @@ def run_watchlist_group_refresh_latest_job(
 ) -> None:
     def worker(db: Session, progress: ProgressCallback):
         progress(0, 1, "Refreshing watchlist group daily prices.")
-        return refresh_watchlist_group_daily_prices(
+        refresh_result = refresh_watchlist_group_daily_prices(
             db=db,
             group_id=group_id,
             to_date=to_date,
@@ -468,6 +471,28 @@ def run_watchlist_group_refresh_latest_job(
             skip_existing_months=skip_existing_months,
             progress_callback=progress,
         )
+        reconcile_result = reconcile_watchlist_radar_v2_outcomes(
+            db=db,
+            group_ids=[group_id],
+            modes="action",
+            limit=200,
+            initialize_limit=200,
+        )
+        refresh_status = str(refresh_result.get("status") or "success")
+        reconcile_status = str(
+            reconcile_result.get("status") or "success"
+        )
+        combined_status = refresh_status
+        if refresh_status == "success" and reconcile_status in {
+            "partial_success",
+            "error",
+        }:
+            combined_status = "partial_success"
+        return {
+            **refresh_result,
+            "status": combined_status,
+            "radar_v2_outcome_reconcile": reconcile_result,
+        }
 
     run_tracked_job(job_id, worker)
 
@@ -501,6 +526,29 @@ def run_watchlist_radar_auto_snapshot_job(
             evaluate_before_date=evaluate_before_date,
             evaluate_lookback_days=evaluate_lookback_days,
             save_snapshots=save_snapshots,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_watchlist_radar_outcome_reconcile_job(
+    job_id: int,
+    group_ids: str | list[int] | None,
+    modes: str,
+    limit: int,
+    initialize_limit: int,
+    as_of_trade_date: date | None,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Reconciling Radar v2 outcomes.")
+        return reconcile_watchlist_radar_v2_outcomes(
+            db=db,
+            group_ids=group_ids,
+            modes=modes,
+            limit=limit,
+            initialize_limit=initialize_limit,
+            as_of_trade_date=as_of_trade_date,
             progress_callback=progress,
         )
 

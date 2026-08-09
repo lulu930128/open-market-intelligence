@@ -52,7 +52,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "66316c490be5a5ea2d8e423520cbdb1b4284b224a6855a3c5ae174c4d20c86e3"
+    "a86a7b72e416154733de9458d276a77230bd0cf1a52baafa741c4a2eee3dea36"
 )
 
 
@@ -619,6 +619,16 @@ class AIToolBoundaryTests(unittest.TestCase):
             compact["slots"]["options_sentiment"]["warnings"],
         )
         self.assertEqual(compact["slots"]["data_quality"]["status"], "partial")
+        self.assertEqual(compact["source_health"]["status"], "ready")
+        self.assertEqual(compact["source_health"]["summary"]["entry_count"], 2)
+        self.assertEqual(
+            {entry["resource"] for entry in compact["source_health"]["entries"]},
+            {"futures_quote", "futures_daily_bar"},
+        )
+        self.assertEqual(compact["slots"]["source_health"]["status"], "ready")
+        self.assertTrue(
+            compact["freshness_by_domain"]["source_health"]["is_current"]
+        )
 
     def test_futures_compact_preserves_intraday_contract_volume(self) -> None:
         compact = _build_tw_futures_compact(

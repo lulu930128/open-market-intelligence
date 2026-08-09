@@ -1,4 +1,5 @@
 import type { BranchTableSide, DataPanelTab } from "@/components/stock-detail/StockDetailDataViews";
+import type { DataPanelSurfaceTab } from "@/components/stock-detail/DataPanelPrimitives";
 
 export const dataPanelTabs: Array<{ key: DataPanelTab; label: string }> = [
   { key: "chips", label: "Chip flow" },
@@ -6,6 +7,13 @@ export const dataPanelTabs: Array<{ key: DataPanelTab; label: string }> = [
   { key: "branch", label: "Branches" },
   { key: "revenue", label: "Revenue" },
   { key: "earnings", label: "Earnings" },
+];
+
+export const etfDataPanelTabs: Array<{ key: DataPanelSurfaceTab; label: string }> = [
+  { key: "chips", label: "Chip flow" },
+  { key: "institutional", label: "Institutions" },
+  { key: "branch", label: "Branches" },
+  { key: "etf", label: "ETF data" },
 ];
 
 export const branchDayOptions: Array<{ label: string; days: number | null }> = [

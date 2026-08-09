@@ -31,6 +31,15 @@ SUMMARY_COUNT_KEYS = (
     "success_count",
     "saved_count",
     "evaluated_count",
+    "initialized_evaluation_count",
+    "initialized_path_count",
+    "due_count_before",
+    "attempted_evaluation_count",
+    "attempted_path_count",
+    "finalized_count",
+    "awaiting_daily_bar_count",
+    "unevaluable_count",
+    "remaining_due_count",
     "current_count",
     "refreshed_symbol_count",
     "complete_symbol_count",
@@ -386,7 +395,7 @@ def find_recent_successful_job(
     return query.order_by(JobRun.ended_at.desc(), JobRun.id.desc()).first()
 
 
-def create_job(
+def create_job_record(
     db: Session,
     job_type: str,
     target: str | None = None,
@@ -405,6 +414,26 @@ def create_job(
     )
 
     db.add(job)
+    return job
+
+
+def create_job(
+    db: Session,
+    *,
+    job_type: str,
+    target: str | None = None,
+    request: Any = None,
+    progress_total: int = 1,
+    message: str | None = "Queued.",
+) -> JobRun:
+    job = create_job_record(
+        db=db,
+        job_type=job_type,
+        target=target,
+        request=request,
+        progress_total=progress_total,
+        message=message,
+    )
     db.commit()
     db.refresh(job)
     return job

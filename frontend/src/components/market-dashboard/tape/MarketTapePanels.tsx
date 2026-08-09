@@ -25,6 +25,7 @@ import type {
   JPStockMasterRead,
   JPMarketSectorBreadthRead,
   KRStockMasterRead,
+  MarketBreadth,
   MarketIndexSnapshot,
   MarketIndexSummary,
   USCompanyProfileRead,
@@ -99,6 +100,20 @@ function taiwanBreadthLabel(t: TranslationFunction, index: MarketIndexSnapshot) 
   return t("dashboard.marketIndex.localDatasetBreadth");
 }
 
+function taiwanBreadthDisplayCounts(breadth: MarketBreadth | null | undefined) {
+  if (!breadth) {
+    return { classified: 0, unknown: 0 };
+  }
+  const classified =
+    breadth.coverage_count ??
+    breadth.classified_count ??
+    breadth.advance_count + breadth.decline_count + breadth.unchanged_count;
+  const unknown =
+    breadth.unknown_count ?? Math.max(breadth.total_count - classified, 0);
+
+  return { classified, unknown };
+}
+
 export function TaiwanMarketTape({
   summary,
   loadState,
@@ -126,10 +141,15 @@ export function TaiwanMarketTape({
           indices.map((index) => {
             const breadth = index.breadth;
             const breadthStatus = index.breadth_status?.status ?? "ready";
+            const breadthCounts = taiwanBreadthDisplayCounts(breadth);
             const advanceRatio =
-              breadth && breadth.total_count > 0
-                ? (breadth.advance_count / breadth.total_count) * 100
+              breadth &&
+              breadthCounts.classified > 0 &&
+              breadthStatus !== "pending"
+                ? (breadth.advance_count / breadthCounts.classified) * 100
                 : null;
+            const breadthAsOf = breadth?.snapshot_as_of ?? breadth?.as_of;
+            const auction = breadth?.auction_breadth;
 
             return (
               <div key={index.index_id} className="bg-omi-surface px-4 py-3">
@@ -181,9 +201,14 @@ export function TaiwanMarketTape({
                     <div className="text-omi-text-muted">
                       {taiwanBreadthLabel(t, index)}
                     </div>
-                    <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
+                    <div
+                      className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}
+                      data-testid={`market-tape-${index.index_id.toLowerCase()}-breadth-ratio`}
+                    >
                       {breadthStatus === "failed"
                         ? t("dashboard.marketIndex.breadthFailed")
+                        : breadthStatus === "pending"
+                          ? t("dashboard.marketIndex.breadthPending")
                         : advanceRatio === null
                           ? "-"
                         : t("dashboard.marketIndex.advancePct", {
@@ -195,6 +220,35 @@ export function TaiwanMarketTape({
                     </div>
                   </div>
                 </div>
+                {breadth ? (
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-omi-text-muted">
+                    <span
+                      data-testid={`market-tape-${index.index_id.toLowerCase()}-breadth-coverage`}
+                    >
+                      {t("dashboard.marketIndex.breadthCoverage", {
+                        coverage: breadthCounts.classified,
+                        total: breadth.total_count,
+                        unknown: breadthCounts.unknown,
+                      })}
+                    </span>
+                    {breadthAsOf ? (
+                      <span>
+                        {t("dashboard.marketIndex.breadthUpdated", {
+                          asOf: formatDashboardTime(new Date(breadthAsOf)),
+                        })}
+                      </span>
+                    ) : null}
+                    {auction?.status === "provisional" ? (
+                      <span>
+                        {t("dashboard.marketIndex.auctionProvisional", {
+                          advance: auction.advance_count,
+                          decline: auction.decline_count,
+                          unchanged: auction.unchanged_count,
+                        })}
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             );
           })

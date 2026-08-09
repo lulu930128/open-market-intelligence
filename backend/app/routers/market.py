@@ -59,6 +59,8 @@ from app.market.overnight_impact import (
     ensure_current_us_overnight_impact_report,
 )
 from app.market.technical_report import build_stock_technical_report
+from app.market.next_session_plan import build_tw_stock_next_session_plan
+from app.market.next_session_plan_schemas import TaiwanNextSessionPlanRead
 from app.market.broker_branch import (
     BrokerBranchFetchError,
     get_broker_branch_trade_summary,
@@ -80,6 +82,7 @@ from app.market.tw_corporate_events import (
     list_taiwan_corporate_events,
     refresh_taiwan_corporate_events,
 )
+from app.routers.tw_market_etfs import router as market_etfs_router
 from app.market.source_health import build_taiwan_source_health
 from app.market.chart_drawings import (
     ChartDrawingSnapshotNotFoundError,
@@ -176,6 +179,7 @@ from app.routers.tw_market_futures import (
 router = APIRouter()
 router.include_router(market_indices_router)
 router.include_router(market_futures_router)
+router.include_router(market_etfs_router)
 
 TAIWAN_DAILY_METRIC_CATEGORY_DATASET_KEYS = {
     TAIWAN_REFRESH_DAILY_PRICE: TAIWAN_DATASET_DAILY_PRICE,
@@ -1106,6 +1110,26 @@ def get_index_contract_replay(
             db=db,
             index_id=index_id,
             trade_date=trade_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/technical/{stock_id}/next-session-plan",
+    response_model=TaiwanNextSessionPlanRead,
+)
+def get_stock_next_session_plan(
+    stock_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        return build_tw_stock_next_session_plan(
+            db=db,
+            stock_id=stock_id,
         )
     except ValueError as exc:
         raise HTTPException(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
@@ -46,6 +46,7 @@ from app.db.models import StockProfile
 normalize_analysis_horizon = technical_analysis.normalize_analysis_horizon
 _technical_analysis_summary = technical_analysis._technical_analysis_summary
 _technical_price_levels = technical_analysis._technical_price_levels
+TAIPEI_TZ = timezone(timedelta(hours=8))
 
 
 @dataclass(frozen=True)
@@ -242,6 +243,7 @@ def _compact_intraday_bars(
         else {}
     )
     realtime_policy = str(params.get("realtime_policy") or "prefer_live")
+    cached_fallback_allowed = params.get("fallback_to_cached") is not False
     refresh_allowed = (
         realtime_policy != "cache_only"
         and params.get("external_fetch_allowed") is not False
@@ -259,6 +261,9 @@ def _compact_intraday_bars(
             "requested_interval": requested_interval,
             "payload_level": payload_level,
             "bar_limit": point_limit,
+            "provider_refresh_allowed": refresh_allowed,
+            "cached_fallback_allowed": cached_fallback_allowed,
+            "read_mode": "disabled",
             "series": {},
             "warnings": [],
         }
@@ -325,6 +330,9 @@ def _compact_intraday_bars(
     return {
         "kind": "intraday_bars",
         "enabled": True,
+        "provider_refresh_allowed": refresh_allowed,
+        "cached_fallback_allowed": cached_fallback_allowed,
+        "read_mode": "provider_refresh" if refresh_allowed else "persisted_cache",
         "intervals": list(intervals),
         "requested_interval": requested_interval,
         "range": "1d",
@@ -333,6 +341,436 @@ def _compact_intraday_bars(
         "series": series,
         "warnings": warnings,
     }
+
+
+def _contract_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=TAIPEI_TZ)
+    return parsed.astimezone(TAIPEI_TZ)
+
+
+def _contract_date_text(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.astimezone(TAIPEI_TZ).date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _non_negative_contract_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(Decimal(str(value)))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _intraday_interval_tolerance_seconds(series: dict[str, Any]) -> int:
+    interval = str(
+        series.get("effective_interval")
+        or series.get("interval")
+        or "1m"
+    ).strip().lower()
+    unit = interval[-1:] if interval else ""
+    try:
+        amount = int(interval[:-1])
+    except ValueError:
+        amount = 1
+    seconds = (
+        amount
+        if unit == "s"
+        else amount * 60
+        if unit == "m"
+        else amount * 3600
+        if unit == "h"
+        else 60
+    )
+    return max(seconds, 60)
+
+
+def _append_intraday_volume_warning(
+    intraday_bars: dict[str, Any],
+    series: dict[str, Any],
+    message: str,
+) -> None:
+    for target in (series, intraday_bars):
+        warnings = target.setdefault("warnings", [])
+        if isinstance(warnings, list) and message not in warnings:
+            warnings.append(message)
+
+
+def _apply_bar_volume_fallback(
+    series: dict[str, Any],
+    *,
+    status: str = "fallback_bar_sum",
+) -> None:
+    bar_shares = _non_negative_contract_int(series.get("bar_volume_sum_shares"))
+    series.update(
+        {
+            "cumulative_volume_shares": bar_shares,
+            "cumulative_volume_lots": (
+                bar_shares / 1000 if bar_shares is not None else None
+            ),
+            "cumulative_volume_trade_date": series.get("bar_volume_trade_date"),
+            "cumulative_volume_source": (
+                "intraday_bar_sum" if bar_shares is not None else None
+            ),
+            "cumulative_volume_source_field": (
+                "interval_bar.volume" if bar_shares is not None else None
+            ),
+            "cumulative_volume_event_time": series.get("bar_volume_latest_time"),
+            "cumulative_volume_status": status,
+        }
+    )
+
+
+def _apply_taiwan_intraday_volume_reconciliation(
+    *,
+    quote: dict[str, Any],
+    intraday_bars: dict[str, Any],
+    calendar_status: dict[str, Any],
+) -> None:
+    series_map = (
+        intraday_bars.get("series")
+        if isinstance(intraday_bars.get("series"), dict)
+        else {}
+    )
+    if not series_map:
+        return
+
+    quote_trade_date = _contract_date_text(quote.get("trade_date"))
+    exchange_event_time = _contract_datetime(
+        quote.get("event_time")
+        or quote.get("provider_event_time")
+        or quote.get("quote_time")
+    )
+    exchange_shares = _non_negative_contract_int(
+        quote.get("cumulative_volume_shares")
+    )
+    if exchange_shares is None:
+        exchange_lots = _non_negative_contract_int(
+            quote.get("cumulative_volume_lots")
+        )
+        exchange_shares = exchange_lots * 1000 if exchange_lots is not None else None
+    volume_source = str(quote.get("volume_source") or "").strip() or None
+    volume_source_field = (
+        str(quote.get("volume_source_field") or "").strip() or None
+    )
+    volume_scope = str(quote.get("volume_scope") or "").strip()
+    volume_status = str(quote.get("volume_status") or "").strip().lower()
+    freshness = quote.get("freshness") if isinstance(quote.get("freshness"), dict) else {}
+    freshness_status = str(freshness.get("status") or "unavailable")
+    quote_is_stale = freshness.get("is_stale") is True
+    phase_values = {
+        str(calendar_status.get("phase") or "").strip().lower(),
+        str(quote.get("session_phase") or "").strip().lower(),
+        str(quote.get("instrument_phase") or "").strip().lower(),
+    }
+    is_preopen = bool(
+        phase_values
+        & {
+            "preopen_pending",
+            "preopen",
+            "preopen_auction",
+            "opening_auction_delayed",
+        }
+    )
+    has_exchange_volume = bool(
+        exchange_shares is not None
+        and volume_source == "twse_mis"
+        and volume_source_field == "v"
+        and volume_scope == "regular_session_board_lot_cumulative"
+        and volume_status == "available"
+        and not is_preopen
+    )
+
+    for interval, series in series_map.items():
+        if not isinstance(series, dict):
+            continue
+        _apply_bar_volume_fallback(series)
+        bar_trade_date = _contract_date_text(series.get("bar_volume_trade_date"))
+        bar_latest_time = _contract_datetime(
+            series.get("bar_volume_latest_time") or series.get("to_time")
+        )
+        bar_shares = _non_negative_contract_int(series.get("bar_volume_sum_shares"))
+        base_reconciliation = {
+            "trade_date": bar_trade_date or quote_trade_date,
+            "exchange_cumulative_shares": exchange_shares,
+            "bar_volume_sum_shares": bar_shares,
+            "difference_shares": None,
+            "difference_lots": None,
+            "difference_pct": None,
+            "exchange_event_time": (
+                exchange_event_time.isoformat()
+                if exchange_event_time is not None
+                else None
+            ),
+            "bar_latest_time": (
+                bar_latest_time.isoformat() if bar_latest_time is not None else None
+            ),
+            "time_skew_seconds": None,
+        }
+
+        if is_preopen:
+            series.update(
+                {
+                    "session_cumulative_volume_shares": None,
+                    "session_cumulative_volume_lots": None,
+                    "session_cumulative_volume_trade_date": quote_trade_date,
+                    "session_cumulative_volume_source": None,
+                    "session_cumulative_volume_source_field": None,
+                    "session_cumulative_volume_event_time": None,
+                    "session_cumulative_volume_status": "unavailable",
+                    "cumulative_volume_shares": None,
+                    "cumulative_volume_lots": None,
+                    "cumulative_volume_trade_date": quote_trade_date,
+                    "cumulative_volume_source": None,
+                    "cumulative_volume_source_field": None,
+                    "cumulative_volume_event_time": None,
+                    "cumulative_volume_status": "unavailable",
+                    "unallocated_volume_shares": None,
+                    "unallocated_volume_lots": None,
+                    "volume_reconciliation": {
+                        **base_reconciliation,
+                        "status": "unavailable",
+                        "reason": "preopen_session_cumulative_unavailable",
+                    },
+                }
+            )
+            continue
+
+        if not has_exchange_volume:
+            series.update(
+                {
+                    "session_cumulative_volume_shares": None,
+                    "session_cumulative_volume_lots": None,
+                    "session_cumulative_volume_trade_date": quote_trade_date,
+                    "session_cumulative_volume_source": None,
+                    "session_cumulative_volume_source_field": None,
+                    "session_cumulative_volume_event_time": None,
+                    "session_cumulative_volume_status": "unavailable",
+                    "unallocated_volume_shares": None,
+                    "unallocated_volume_lots": None,
+                    "volume_reconciliation": {
+                        **base_reconciliation,
+                        "status": "unavailable",
+                        "reason": "exchange_cumulative_unavailable",
+                    },
+                }
+            )
+            continue
+
+        session_status = (
+            "stale"
+            if quote_is_stale
+            else "cached"
+            if freshness.get("source_error")
+            else freshness_status
+        )
+        series.update(
+            {
+                "session_cumulative_volume_shares": exchange_shares,
+                "session_cumulative_volume_lots": exchange_shares // 1000,
+                "session_cumulative_volume_trade_date": quote_trade_date,
+                "session_cumulative_volume_source": volume_source,
+                "session_cumulative_volume_source_field": volume_source_field,
+                "session_cumulative_volume_event_time": (
+                    exchange_event_time.isoformat()
+                    if exchange_event_time is not None
+                    else None
+                ),
+                "session_cumulative_volume_status": session_status,
+            }
+        )
+
+        if quote_trade_date and bar_trade_date and quote_trade_date != bar_trade_date:
+            series.update(
+                {
+                    "session_cumulative_volume_status": "date_mismatch",
+                    "cumulative_volume_status": "date_mismatch",
+                    "unallocated_volume_shares": None,
+                    "unallocated_volume_lots": None,
+                    "volume_reconciliation": {
+                        **base_reconciliation,
+                        "status": "date_mismatch",
+                        "reason": "trade_dates_do_not_match",
+                    },
+                }
+            )
+            _append_intraday_volume_warning(
+                intraday_bars,
+                series,
+                f"{interval} intraday volume date does not match the MIS quote date.",
+            )
+            continue
+
+        difference_shares = (
+            exchange_shares - bar_shares
+            if bar_shares is not None
+            else None
+        )
+        difference_pct = (
+            round((difference_shares / exchange_shares) * 100, 4)
+            if difference_shares is not None and exchange_shares > 0
+            else None
+        )
+        comparison = {
+            **base_reconciliation,
+            "difference_shares": difference_shares,
+            "difference_lots": (
+                difference_shares / 1000
+                if difference_shares is not None
+                else None
+            ),
+            "difference_pct": difference_pct,
+        }
+
+        if quote_is_stale:
+            series.update(
+                {
+                    "session_cumulative_volume_status": "stale",
+                    "cumulative_volume_status": "fallback_bar_sum",
+                    "unallocated_volume_shares": None,
+                    "unallocated_volume_lots": None,
+                    "volume_reconciliation": {
+                        **comparison,
+                        "status": "time_skew",
+                        "reason": "exchange_snapshot_stale",
+                    },
+                }
+            )
+            _append_intraday_volume_warning(
+                intraday_bars,
+                series,
+                f"{interval} MIS cumulative volume is stale; bar-sum fallback retained.",
+            )
+            continue
+
+        if exchange_event_time is None or bar_latest_time is None:
+            series.update(
+                {
+                    "session_cumulative_volume_status": "time_skew",
+                    "cumulative_volume_status": "fallback_bar_sum",
+                    "unallocated_volume_shares": None,
+                    "unallocated_volume_lots": None,
+                    "volume_reconciliation": {
+                        **comparison,
+                        "status": "unavailable",
+                        "reason": "comparison_timestamp_unavailable",
+                    },
+                }
+            )
+            continue
+
+        time_skew_seconds = int(
+            (exchange_event_time - bar_latest_time).total_seconds()
+        )
+        tolerance_seconds = _intraday_interval_tolerance_seconds(series)
+        comparison["time_skew_seconds"] = time_skew_seconds
+
+        if time_skew_seconds < -tolerance_seconds:
+            series.update(
+                {
+                    "session_cumulative_volume_status": "time_skew",
+                    "cumulative_volume_status": "fallback_bar_sum",
+                    "unallocated_volume_shares": None,
+                    "unallocated_volume_lots": None,
+                    "volume_reconciliation": {
+                        **comparison,
+                        "status": "time_skew",
+                        "reason": "exchange_event_older_than_bar_latest",
+                    },
+                }
+            )
+            _append_intraday_volume_warning(
+                intraday_bars,
+                series,
+                f"{interval} MIS cumulative volume is older than the latest bar; bar-sum fallback retained.",
+            )
+            continue
+
+        series.update(
+            {
+                "cumulative_volume_shares": exchange_shares,
+                "cumulative_volume_lots": exchange_shares // 1000,
+                "cumulative_volume_trade_date": quote_trade_date,
+                "cumulative_volume_source": volume_source,
+                "cumulative_volume_source_field": volume_source_field,
+                "cumulative_volume_event_time": exchange_event_time.isoformat(),
+                "cumulative_volume_status": (
+                    "time_skew"
+                    if time_skew_seconds < 0
+                    else session_status
+                ),
+            }
+        )
+
+        if abs(time_skew_seconds) > tolerance_seconds:
+            reconciliation_status = "time_skew"
+            reconciliation_reason = "exchange_event_newer_than_bar_latest"
+            unallocated_shares = None
+        elif time_skew_seconds < 0:
+            reconciliation_status = "time_skew"
+            reconciliation_reason = "bar_latest_slightly_after_exchange_event"
+            unallocated_shares = max(difference_shares or 0, 0)
+        elif difference_shares is None:
+            reconciliation_status = "unavailable"
+            reconciliation_reason = "bar_volume_sum_unavailable"
+            unallocated_shares = None
+        elif difference_shares == 0:
+            reconciliation_status = "matched"
+            reconciliation_reason = "exchange_and_bar_sum_match"
+            unallocated_shares = 0
+        elif difference_shares > 0:
+            reconciliation_status = "provider_partial"
+            reconciliation_reason = "opening_auction_or_provider_coverage_gap"
+            unallocated_shares = difference_shares
+        else:
+            reconciliation_status = "bar_sum_exceeds_exchange"
+            reconciliation_reason = "bar_sum_exceeds_exchange_snapshot"
+            unallocated_shares = 0
+
+        series.update(
+            {
+                "unallocated_volume_shares": unallocated_shares,
+                "unallocated_volume_lots": (
+                    unallocated_shares / 1000
+                    if unallocated_shares is not None
+                    else None
+                ),
+                "volume_reconciliation": {
+                    **comparison,
+                    "status": reconciliation_status,
+                    "reason": reconciliation_reason,
+                },
+            }
+        )
+        if unallocated_shares and series.get("approx_vwap") is not None:
+            series["vwap_confidence"] = "low"
+        if reconciliation_status != "matched":
+            _append_intraday_volume_warning(
+                intraday_bars,
+                series,
+                f"{interval} MIS session volume and interval-bar sum are not fully comparable ({reconciliation_status}).",
+            )
 
 
 def _apply_taiwan_current_price_contract(
@@ -608,6 +1046,7 @@ def read_stock_quote_context(
     requested_domains = set(requested_domain_values)
     excluded_domains = set(excluded_domain_values)
     external_fetch_allowed = params.get("external_fetch_allowed") is True
+    cached_fallback_allowed = params.get("fallback_to_cached") is not False
     requested_provider_values = (
         params.get("providers") if isinstance(params.get("providers"), list) else []
     )
@@ -713,11 +1152,20 @@ def read_stock_quote_context(
         "yahoo_chart",
         "yahoo_finance_chart",
     }
+    intraday_read_allowed = bool(
+        external_fetch_allowed
+        or str(params.get("realtime_policy") or "") == "cache_only"
+        or cached_fallback_allowed
+    )
     intraday_bars = _compact_intraday_bars(
         dependencies=dependencies,
         db=db,
         stock_id=normalized_stock_id,
-        include_intraday=intraday_requested and allow_intraday_fallback,
+        include_intraday=(
+            intraday_requested
+            and allow_intraday_fallback
+            and intraday_read_allowed
+        ),
         market_data_params=market_data_params,
         calendar_status=calendar_status,
     )
@@ -725,6 +1173,11 @@ def read_stock_quote_context(
         intraday_bars["warnings"] = [
             f"strict_provider={requested_provider} does not permit Yahoo intraday fallback."
         ]
+    _apply_taiwan_intraday_volume_reconciliation(
+        quote=quote,
+        intraday_bars=intraday_bars,
+        calendar_status=calendar_status,
+    )
     resolved_current_price = _apply_taiwan_current_price_contract(
         quote=quote,
         intraday_bars=intraday_bars,
@@ -864,7 +1317,7 @@ def read_stock_quote_context(
         "unchanged_dataset_count": len(unchanged_domains),
         "failed_dataset_count": len(failed_domains),
     }
-    if intraday_requested:
+    if intraday_requested and "intraday" in attempted_domains:
         provider_contract["provider_attempts"].append(
             {
                 "provider": (
@@ -888,6 +1341,26 @@ def read_stock_quote_context(
                 ),
             }
         )
+    provider_contract["cache_reads"] = (
+        [
+            {
+                "domain": "intraday",
+                "status": (
+                    "persisted_hit"
+                    if any(
+                        isinstance(item, dict) and item.get("cache_hit")
+                        for item in intraday_series.values()
+                    )
+                    else "persisted_miss"
+                ),
+                "provider_refresh_attempted": False,
+            }
+        ]
+        if intraday_requested
+        and intraday_bars.get("enabled")
+        and "intraday" not in attempted_domains
+        else []
+    )
 
     level = _payload_level(market_data_params)
     target = {

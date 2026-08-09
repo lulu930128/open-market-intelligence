@@ -423,6 +423,8 @@ class QueryPlanContractTests(unittest.TestCase):
         )
         breadth = {
             "label": "上市全市場廣度",
+            "status": "ready",
+            "decision_usable": True,
             "advance_count": 88,
             "decline_count": 971,
             "unchanged_count": 12,

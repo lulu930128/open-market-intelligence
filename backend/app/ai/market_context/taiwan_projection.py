@@ -25,6 +25,10 @@ from app.market.financial_metric_semantics import source_reported_financial_sema
 from app.market.live_snapshot import classify_market_snapshot
 from app.market.monthly_revenue_continuity import analyze_monthly_revenue_continuity
 from app.market.quote_volume import build_taiwan_quote_volume_contract
+from app.market.trading_calendar import (
+    normalize_taiwan_session_phase,
+    taiwan_session_is_auction,
+)
 
 
 def _now() -> datetime:
@@ -468,7 +472,12 @@ def _build_tw_market_slots(
         "market_breadth": _slot_envelope(
             status=(
                 str(breadth.get("status"))
-                if breadth.get("status") in {"partial", "stale", "failed"}
+                if breadth.get("status") in {
+                    "pending",
+                    "partial",
+                    "stale",
+                    "failed",
+                }
                 else _payload_slot_status(
                     breadth,
                     missing=[key for key in missing if key.startswith("market_breadth")],
@@ -1045,9 +1054,10 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         or quote.get("current_session_phase")
         or ""
     )
-    post_close = session_phase in {
+    canonical_session_phase = normalize_taiwan_session_phase(session_phase)
+    instrument_phase = str(quote.get("instrument_phase") or "").strip()
+    post_close = canonical_session_phase in {
         "post_close",
-        "post_close_snapshot",
         "market_closed",
     }
     depth_available = bool(quote.get("depth_available"))
@@ -1100,6 +1110,7 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
             else None
         ),
         "market_session_status": session_phase or None,
+        "canonical_session_phase": canonical_session_phase,
         "refresh_possible_now": not post_close,
         "refresh_recommended": bool(
             not depth_available and not post_close
@@ -1134,14 +1145,15 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
 
     cash_index = str(quote.get("instrument_type") or "") == "cash_index"
     auction_relevant = not cash_index and (
-        session_phase
+        instrument_phase
         in {
-            "preopen",
-            "preopen_pending",
+            "preopen_auction",
+            "opening_auction_delayed",
             "closing_auction",
-            "disposition_batch_auction",
-            "batch_auction",
+            "closing_auction_delayed",
         }
+        or taiwan_session_is_auction(canonical_session_phase)
+        or canonical_session_phase == "preopen_pending"
         or str(quote.get("trading_mode") or "")
         == "disposition_batch_auction"
     )
@@ -1205,6 +1217,9 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
             auction_relevant and not auction_available
         ),
         "session_phase": session_phase or None,
+        "market_calendar_phase": quote.get("market_calendar_phase"),
+        "instrument_phase": instrument_phase or None,
+        "observation_reason_code": quote.get("observation_reason_code"),
         "auction_time": _json_value(auction_time),
         "best_bid": quote.get("auction_best_bid"),
         "best_ask": quote.get("auction_best_ask"),
@@ -1433,6 +1448,21 @@ def _compact_quote_snapshot(
         "provider": quote_depth.get("provider"),
         "status": freshness.get("status") or quote_depth.get("session_phase") or "quote",
         "session_phase": quote_depth.get("session_phase"),
+        "presentation_trade_date": _json_value(
+            quote_depth.get("presentation_trade_date")
+        ),
+        "presentation_session_state": quote_depth.get(
+            "presentation_session_state"
+        ),
+        "presentation_session_transition_at": _json_value(
+            quote_depth.get("presentation_session_transition_at")
+        ),
+        "market_calendar_phase": quote_depth.get("market_calendar_phase"),
+        "instrument_phase": quote_depth.get("instrument_phase"),
+        "observation_reason_code": quote_depth.get(
+            "observation_reason_code"
+        ),
+        "observation_semantics": quote_depth.get("observation_semantics"),
         "market_status": quote_depth.get("market_status"),
         "phase_label": quote_depth.get("phase_label"),
         "trade_date": _json_value(quote_depth.get("trade_date")),
@@ -1475,6 +1505,18 @@ def _compact_quote_snapshot(
         ),
         "last_trade_before_auction": bool(
             quote_depth.get("last_trade_before_auction")
+        ),
+        "actual_trade_occurred": bool(
+            quote_depth.get("actual_trade_occurred")
+        ),
+        "actual_trade_price_cached": bool(
+            quote_depth.get("actual_trade_price_cached")
+        ),
+        "actual_trade_price_source": quote_depth.get(
+            "actual_trade_price_source"
+        ),
+        "actual_trade_price_as_of": _json_value(
+            quote_depth.get("actual_trade_price_as_of")
         ),
         "facts_usable_for_current_session": bool(
             last_trade_available
@@ -1781,8 +1823,58 @@ def _compact_intraday_history(
         "canonical_volume_unit": canonical_volume_unit,
         "provider_volume_unit": provider_volume_unit,
         "volume_conversion": history.get("volume_conversion"),
+        "volume_scope": history.get("volume_scope"),
+        "bar_volume_sum_shares": history.get("bar_volume_sum_shares"),
+        "bar_volume_sum_lots": history.get("bar_volume_sum_lots"),
+        "bar_volume_trade_date": _json_value(
+            history.get("bar_volume_trade_date")
+        ),
+        "bar_volume_latest_time": _json_value(
+            history.get("bar_volume_latest_time")
+        ),
+        "bar_volume_scope": history.get("bar_volume_scope"),
+        "bar_volume_provider": history.get("bar_volume_provider"),
+        "window_volume_sum_shares": history.get("window_volume_sum_shares"),
+        "window_volume_sum_lots": history.get("window_volume_sum_lots"),
+        "window_volume_scope": history.get("window_volume_scope"),
+        "window_trade_date_count": history.get("window_trade_date_count"),
+        "session_cumulative_volume_shares": history.get(
+            "session_cumulative_volume_shares"
+        ),
+        "session_cumulative_volume_lots": history.get(
+            "session_cumulative_volume_lots"
+        ),
+        "session_cumulative_volume_trade_date": _json_value(
+            history.get("session_cumulative_volume_trade_date")
+        ),
+        "session_cumulative_volume_source": history.get(
+            "session_cumulative_volume_source"
+        ),
+        "session_cumulative_volume_source_field": history.get(
+            "session_cumulative_volume_source_field"
+        ),
+        "session_cumulative_volume_event_time": _json_value(
+            history.get("session_cumulative_volume_event_time")
+        ),
+        "session_cumulative_volume_status": history.get(
+            "session_cumulative_volume_status"
+        ),
         "cumulative_volume_shares": history.get("cumulative_volume_shares"),
         "cumulative_volume_lots": history.get("cumulative_volume_lots"),
+        "cumulative_volume_trade_date": _json_value(
+            history.get("cumulative_volume_trade_date")
+        ),
+        "cumulative_volume_source": history.get("cumulative_volume_source"),
+        "cumulative_volume_source_field": history.get(
+            "cumulative_volume_source_field"
+        ),
+        "cumulative_volume_event_time": _json_value(
+            history.get("cumulative_volume_event_time")
+        ),
+        "cumulative_volume_status": history.get("cumulative_volume_status"),
+        "unallocated_volume_shares": history.get("unallocated_volume_shares"),
+        "unallocated_volume_lots": history.get("unallocated_volume_lots"),
+        "volume_reconciliation": history.get("volume_reconciliation"),
         "cumulative_trade_value": history.get("cumulative_trade_value"),
         "available_cumulative_trade_value": history.get(
             "available_cumulative_trade_value"
@@ -1796,6 +1888,7 @@ def _compact_intraday_history(
         "approx_vwap": history.get("approx_vwap"),
         "vwap_method": history.get("vwap_method"),
         "vwap_confidence": history.get("vwap_confidence"),
+        "vwap_volume_scope": history.get("vwap_volume_scope"),
         "partial_bar_count": history.get("partial_bar_count"),
         "indicator_eligible_point_count": history.get(
             "indicator_eligible_point_count"

@@ -2,11 +2,11 @@
 
 ## 目前狀態
 
-- 專案狀態：實作中。
-- 目前里程碑：Foundation Release（M0–M3）與 Consumer Release code slice（M4–M6）已完成；M9 的 live DB／HTTP／MCP／launcher adoption slice 已完成，user-visible browser acceptance 與 rollback drill 尚未完成；M7–M8 尚未開始。
-- Branch：`main`。
+- 專案狀態：Consumer hardening 計畫已建立，實作尚未開始。
+- 目前里程碑：M6.1 capability scope hardening；完成後依序進入 M1.1 temporal governance、M2.1 bounded refresh、M4.1 snapshot lifecycle、M9.1 outward/runtime acceptance。M7–M8 仍未開始。
+- Branch：`codex/tw-etf-foundation`（目前與本地 `main` 同指向 `60c5b38`；不因此混入其他 ETF 在途變更）。
 - Worktree：已有大量使用者／其他任務在途變更；本任務以 temporary detached worktree 隔離兩個 cross-market commits。正式 launcher 已重載 backend，live SQLite 已由 startup migration 前進至 `20260809_0055`；未呼叫 provider refresh。
-- 發布邊界：已建立 `188ea9e feat(cross-market): add relation context consumers` 與獨立 AI／outward commit `feat(ai): expose cross-market decision context`。未 push、未發布。
+- 發布邊界：OMI 已建立 `188ea9e feat(cross-market): add relation context consumers` 與 `60c5b38 feat(ai): expose cross-market decision context`；OMI_search public contract snapshot 已獨立 checkpoint 為 `90e3c85 chore(omi-search): sync OMI public contract snapshot`。均未 push、未發布。
 
 ## 2026-08-09 現況基線
 
@@ -152,6 +152,31 @@
 - Standalone OMI_search：protocol `2025-06-18`、session preserved、6 tools、`omi.ask isError=false`；`mode=full` 才承諾 human answer 與 decision context，`mode=data_only` 只承諾 evidence。
 - Live SQLite：Alembic `20260809_0055`，relation 5、evidence 6、signal snapshot 0；startup 同時套用其他在途 migrations，未執行 provider refresh。
 
+## 2026-08-09 Consumer hardening 診斷與計畫
+
+### 已確認問題
+
+- 2408／MU 並非「seed 不存在」：live DB 有 relation id 5 與兩筆 evidence。其 `verified_at=2026-08-09T12:00:00Z`，而測試 request 早於該 availability boundary；relation store 正確套用 `verified_at <= available_at`，因此回傳 `relation_registry:none`。問題是 seed 將固定未來時間當成 verification truth，不是讀取 filter 漏資料。
+- Stock scope 的 cross-market domain inference 會同時候選 `market.cross_market`；selection 雖可先濾掉，後段 diagnostics 又從未過濾 domain candidates 將它加回 unsupported，導致 2330／2408 outward quality 被 phantom capability 誤判 blocked。
+- MCP server-side live schema 已包含 `cross_market.relations` 與 `cross_market.parity` 的 include／required enum；剩餘邊界是 ChatGPT host 可能快取舊 tool schema，需要 reconnect，而不是再新增 adapter fallback。
+- USD/TWD live resource event 約落後 512,207 秒，超過 72 小時 stale threshold；現有 AI overnight refresh planner 只規劃 US daily price，沒有把 FX resource refresh 納入同一 bounded operation。
+- Live `cross_market_signal_snapshot` 筆數為 0。Materializer 與 Radar hook 已存在，但 Ask read path 尚未讀 materialized snapshot；目前若直接 materialize，payload 仍可能保留 `latest_local_cache_projection_not_materialized_snapshot` limitation，形成語意矛盾。
+
+### 計畫決策
+
+1. 先做 M6.1 scope fix，讓 outward blocked 語意回到真實資料限制，再處理資料補齊。
+2. 不修改已套用 `20260809_0052`；等目前 dirty migration graph 穩定後，從實際 Alembic head 建立 forward-only temporal governance revision，未知人工異動一律 fail closed。
+3. Refresh 留在 AI/tool orchestration，只有 `allow_external_fetch` 可觸發；GET、`cache_only`、Radar read path 繼續零 provider side effect。
+4. Snapshot 先收斂 immutable lifecycle 與 projection source，再讓 Ask／Radar／Frontend 對帳；latest cache 不冒充 point-in-time materialization。
+5. M9.1 完成前不宣稱 GPT／MCP／Frontend 端到端完善；M7／M8 gate 通過前不讓跨市場 context 影響 Radar 排名。
+
+### 本輪驗證基線
+
+- OMI_search generated snapshot：57 capabilities，digest `ff82494f4f50483649fb7a429ed28300443f6ce18bfe33fe3dae65d02231f3e9`，包含 overnight／relations／parity。
+- OMI_search unit／protocol tests：`28 passed`。
+- 先前針對目前行為的 focused regression：`26 passed`；證明現有測試可執行，但尚未鎖住上述 scope、temporal、refresh 與 materialization invariants。
+- 本輪只建立 snapshot checkpoint 與長專案文件，未執行 provider refresh、migration、runtime restart 或 live DB 寫入。
+
 ## 後續里程碑
 
 - M7：event policy、rolling beta/correlation/stability statistics、purged walk-forward 與 Radar ranking shadow。
@@ -165,7 +190,9 @@
 - Existing `context_alignment_score` 是可用接點，但其離散 stance 平均不足以直接代表已驗證 ranking feature。
 - 海外交易日、台股 next-session、FX 時點、ADR corporate action 與 provider availability 是主要 leakage／錯價風險。
 - Proxy relation 的 evidence 與 event context 不足時，最容易把相關性誤寫成因果；需以 taxonomy、reason code、review 與文案測試共同防守。
+- 目前 branch 同時有未提交的 `0050`／`0051`／`0054`／`0055` migrations，`0052` 的 down revision 也有在途調整；M1.1 不得先占用 revision number 或建立平行 head。
+- Repo 內的 `agents/omi_mcp_server/public_contract_snapshot.json` 來自目前 dirty capability contract，不能在 M6.1 完成前把整份 generated diff 當成本專案獨立 commit。
 
 ## 下一步
 
-目前 source-level Consumer Release、AI／outward contract 與正式 API/MCP runtime adoption 已完成。下一步只補 M9 的 user-visible browser acceptance 與 rollback drill；M7/M8 需要累積 point-in-time 樣本，不能以現有 fixture 或 latest-cache projection 結果提早放行 Radar ranking。
+先完成 M6.1：修正 stock／market capability scope 與 inferred-domain diagnostics，新增 2330／2408 outward regression。通過後才進入 M1.1 forward-only temporal governance；M7／M8 仍需累積 point-in-time 樣本，不能以現有 fixture 或 latest-cache projection 結果提早放行 Radar ranking。

@@ -16,6 +16,7 @@ from app.watchlists import (
 )
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
+from app.jobs.job_types import WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE
 from app.jobs.schemas import JobRunRead
 from app.settings.refresh_execution import resolve_observed_stock_refresh_interval_seconds
 from app.watchlists.schemas import (
@@ -815,6 +816,50 @@ def list_watchlist_group_radar_v2_outcomes(
         horizon_trading_days=horizon_trading_days,
         limit=limit,
     )
+
+
+@router.post(
+    "/groups/{group_id}/radar/v2/outcomes/reconcile",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def reconcile_watchlist_group_radar_v2_outcomes(
+    group_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    limit: int = Query(default=200, ge=1, le=1000),
+    initialize_limit: int = Query(default=200, ge=0, le=1000),
+    as_of_trade_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    service.get_group(db=db, group_id=group_id)
+    request = {
+        "group_ids": [group_id],
+        "modes": mode,
+        "limit": limit,
+        "initialize_limit": initialize_limit,
+        "as_of_trade_date": as_of_trade_date,
+        "trigger": "manual",
+    }
+    job, _created = job_service.enqueue_job(
+        db=db,
+        job_type=WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
+        target=str(group_id),
+        request=request,
+        progress_total=1,
+        message="Queued Radar v2 outcome reconciliation.",
+        task=backfill_tasks.run_watchlist_radar_outcome_reconcile_job,
+        task_args=(
+            [group_id],
+            mode,
+            limit,
+            initialize_limit,
+            as_of_trade_date,
+        ),
+    )
+    return job_service.serialize_job(job)
 
 
 @router.post(

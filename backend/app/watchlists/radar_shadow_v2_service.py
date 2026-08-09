@@ -5,10 +5,11 @@ from datetime import date, datetime, time, timezone
 import os
 from typing import Any, Mapping
 
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    MarketDailyPrice,
     RadarEvaluationEventLink,
     RadarFeatureSnapshot,
     RadarOutcomePath,
@@ -21,6 +22,7 @@ from app.db.models import (
     utc_now,
 )
 from app.market.trading_calendar import TAIWAN_TZ
+from app.market.tw_market_breadth_contract import TW_MARKET_BREADTH_VERSION
 from app.watchlists.radar_regime_v2 import (
     classify_instrument_regime,
     classify_market_regime,
@@ -197,6 +199,12 @@ def latest_market_regime_snapshot(
     latest_trade_date = (
         db.query(TaiwanMarketMinuteState.trade_date)
         .filter(
+            TaiwanMarketMinuteState.breadth_contract_version
+            == TW_MARKET_BREADTH_VERSION
+        )
+        .filter(TaiwanMarketMinuteState.breadth_decision_usable.is_(True))
+        .filter(TaiwanMarketMinuteState.breadth_status == "ready")
+        .filter(
             TaiwanMarketMinuteState.trade_date <= signal_trade_date
             if signal_trade_date is not None
             else True
@@ -211,6 +219,12 @@ def latest_market_regime_snapshot(
     rows = (
         db.query(TaiwanMarketMinuteState)
         .filter(TaiwanMarketMinuteState.trade_date == latest_trade_date)
+        .filter(
+            TaiwanMarketMinuteState.breadth_contract_version
+            == TW_MARKET_BREADTH_VERSION
+        )
+        .filter(TaiwanMarketMinuteState.breadth_decision_usable.is_(True))
+        .filter(TaiwanMarketMinuteState.breadth_status == "ready")
         .order_by(TaiwanMarketMinuteState.minute_at.desc())
         .all()
     )
@@ -253,6 +267,24 @@ def latest_market_regime_snapshot(
             if len(selected) == 2
             and all(row.quality_status == "ready" for row in selected)
             else "partial"
+        ),
+        "breadth_status": (
+            "ready"
+            if len(selected) == 2
+            and all(row.breadth_status == "ready" for row in selected)
+            else "partial"
+        ),
+        "breadth_session_phase": (
+            selected[0].breadth_session_phase
+            if all(
+                row.breadth_session_phase == selected[0].breadth_session_phase
+                for row in selected
+            )
+            else "mixed"
+        ),
+        "breadth_contract_version": TW_MARKET_BREADTH_VERSION,
+        "breadth_decision_usable": all(
+            row.breadth_decision_usable for row in selected
         ),
         "breadth_scope": (
             "full_market"
@@ -1868,20 +1900,194 @@ def evaluate_pending_radar_v2_outcomes(
     group_id: int | None = None,
     mode: str | None = None,
     limit: int = 200,
+    initialize_limit: int = 200,
     rule_version: str | None = None,
+    as_of_trade_date: date | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     from app.watchlists.radar_outcome_v2_service import (
         evaluate_radar_outcome_v2,
     )
 
-    candidate_ids = [int(value) for value in evaluation_ids or []]
+    attempt_at = now or utc_now()
+    bounded_limit = max(1, min(int(limit), 1000))
+    bounded_initialize_limit = max(0, min(int(initialize_limit), 1000))
+    candidate_ids = list(
+        dict.fromkeys(int(value) for value in evaluation_ids or [])
+    )
+    if evaluation_ids is None and bounded_initialize_limit:
+        discovery_contract = (
+            RADAR_V2_ACTIVE_CONTRACT
+            if rule_version == RADAR_V2_ACTIVE_CONTRACT["rule_version"]
+            else RADAR_V2_SHADOW_CONTRACT
+            if rule_version == RADAR_V2_SHADOW_CONTRACT["rule_version"]
+            else None
+        )
+        if discovery_contract is not None:
+            candidate_query = (
+                db.query(RadarUniverseObservation.evaluation_id)
+                .join(
+                    RadarRuleEvaluation,
+                    RadarRuleEvaluation.id
+                    == RadarUniverseObservation.evaluation_id,
+                )
+                .outerjoin(
+                    RadarOutcomePath,
+                    and_(
+                        RadarOutcomePath.evaluation_id
+                        == RadarRuleEvaluation.id,
+                        RadarOutcomePath.outcome_contract_version
+                        == str(
+                            discovery_contract[
+                                "outcome_contract_version"
+                            ]
+                        ),
+                        RadarOutcomePath.outcome_config_hash
+                        == str(
+                            discovery_contract["outcome_config_hash"]
+                        ),
+                    ),
+                )
+                .filter(
+                    RadarRuleEvaluation.rule_version == rule_version
+                )
+                .filter(
+                    RadarUniverseObservation.rule_version == rule_version
+                )
+            )
+            if group_id is not None:
+                candidate_query = candidate_query.filter(
+                    RadarUniverseObservation.group_id == group_id
+                )
+            if mode is not None:
+                candidate_query = candidate_query.filter(
+                    RadarUniverseObservation.mode == mode
+                )
+            candidate_ids = [
+                int(value)
+                for (value,) in (
+                    candidate_query.group_by(
+                        RadarUniverseObservation.evaluation_id
+                    )
+                    .having(
+                        func.count(
+                            func.distinct(
+                                RadarOutcomePath.horizon_trading_days
+                            )
+                        )
+                        < len(
+                            discovery_contract["outcome_config"][
+                                "horizons"
+                            ]
+                        )
+                    )
+                    .order_by(
+                        func.min(
+                            RadarUniverseObservation.snapshot_date
+                        ).asc(),
+                        RadarUniverseObservation.evaluation_id.asc(),
+                    )
+                    .limit(bounded_initialize_limit)
+                    .all()
+                )
+                if value is not None
+            ]
+    candidate_ids = candidate_ids[:bounded_initialize_limit]
+    evaluated: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    initialized_evaluation_ids: list[int] = []
+    initialized_path_count = 0
+
+    for evaluation_id in candidate_ids:
+        try:
+            evaluation = (
+                db.query(RadarRuleEvaluation)
+                .filter(RadarRuleEvaluation.id == evaluation_id)
+                .one()
+            )
+            contract = (
+                RADAR_V2_ACTIVE_CONTRACT
+                if evaluation.rule_version
+                == RADAR_V2_ACTIVE_CONTRACT["rule_version"]
+                else RADAR_V2_SHADOW_CONTRACT
+            )
+            configured_horizons = {
+                int(value)
+                for value in contract["outcome_config"]["horizons"]
+            }
+            existing_horizons = {
+                int(value)
+                for (value,) in (
+                    db.query(RadarOutcomePath.horizon_trading_days)
+                    .filter(
+                        RadarOutcomePath.evaluation_id == evaluation_id
+                    )
+                    .filter(
+                        RadarOutcomePath.outcome_contract_version
+                        == str(contract["outcome_contract_version"])
+                    )
+                    .filter(
+                        RadarOutcomePath.outcome_config_hash
+                        == str(contract["outcome_config_hash"])
+                    )
+                    .all()
+                )
+            }
+            missing_horizons = sorted(
+                configured_horizons - existing_horizons
+            )
+            if not missing_horizons:
+                continue
+            outcomes = evaluate_radar_outcome_v2(
+                db=db,
+                evaluation_id=evaluation_id,
+                horizons=missing_horizons,
+                commit=True,
+                now=attempt_at,
+                outcome_contract_version=str(
+                    contract["outcome_contract_version"]
+                ),
+                outcome_config_hash=str(
+                    contract["outcome_config_hash"]
+                ),
+                outcome_config=dict(contract["outcome_config"]),
+                contract_status=str(contract["status"]),
+            )
+        except Exception as exc:
+            db.rollback()
+            errors.append(
+                {
+                    "phase": "initialize",
+                    "evaluation_id": evaluation_id,
+                    "error_message": str(exc),
+                }
+            )
+            continue
+        initialized_evaluation_ids.append(evaluation_id)
+        initialized_path_count += len(outcomes)
+        evaluated.append(
+            {
+                "phase": "initialize",
+                "evaluation_id": evaluation_id,
+                "outcome_count": len(outcomes),
+                "horizons": missing_horizons,
+                "statuses": sorted(
+                    {str(outcome["status"]) for outcome in outcomes}
+                ),
+            }
+        )
+
+    latest_available_trade_date = as_of_trade_date or (
+        db.query(func.max(MarketDailyPrice.trade_date)).scalar()
+    )
     query = (
-        db.query(RadarOutcomePath.evaluation_id)
+        db.query(RadarOutcomePath)
         .join(
             RadarRuleEvaluation,
             RadarRuleEvaluation.id == RadarOutcomePath.evaluation_id,
         )
         .filter(RadarOutcomePath.status == "pending")
+        .filter(RadarOutcomePath.horizon_end_trade_date.is_not(None))
     )
     if rule_version is not None:
         query = query.filter(
@@ -1899,24 +2105,53 @@ def evaluate_pending_radar_v2_outcomes(
         )
     if mode is not None:
         query = query.filter(RadarUniverseObservation.mode == mode)
-    pending_ids = [
-        int(value)
-        for (value,) in (
-            query.order_by(
-                RadarOutcomePath.signal_trade_date.asc(),
-                RadarOutcomePath.evaluation_id.asc(),
-            )
-            .distinct()
-            .limit(max(1, min(limit, 1000)))
-            .all()
+    if rule_version == RADAR_V2_ACTIVE_CONTRACT["rule_version"]:
+        query = query.filter(
+            RadarOutcomePath.outcome_contract_version
+            == str(RADAR_V2_ACTIVE_CONTRACT["outcome_contract_version"])
+        ).filter(
+            RadarOutcomePath.outcome_config_hash
+            == str(RADAR_V2_ACTIVE_CONTRACT["outcome_config_hash"])
         )
-    ]
-    resolved_ids = list(
-        dict.fromkeys([*candidate_ids, *pending_ids])
-    )[: max(1, min(limit, 1000))]
-    evaluated: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-    for evaluation_id in resolved_ids:
+    elif rule_version == RADAR_V2_SHADOW_CONTRACT["rule_version"]:
+        query = query.filter(
+            RadarOutcomePath.outcome_contract_version
+            == str(RADAR_V2_SHADOW_CONTRACT["outcome_contract_version"])
+        ).filter(
+            RadarOutcomePath.outcome_config_hash
+            == str(RADAR_V2_SHADOW_CONTRACT["outcome_config_hash"])
+        )
+
+    due_query = query.filter(
+        RadarOutcomePath.horizon_end_trade_date
+        <= latest_available_trade_date
+    ) if latest_available_trade_date is not None else query.filter(False)
+    due_count_before = int(
+        due_query.with_entities(
+            func.count(func.distinct(RadarOutcomePath.id))
+        ).scalar()
+        or 0
+    )
+    due_rows = (
+        due_query.order_by(
+            RadarOutcomePath.evaluated_at.asc(),
+            RadarOutcomePath.horizon_end_trade_date.asc(),
+            RadarOutcomePath.id.asc(),
+        )
+        .distinct()
+        .limit(bounded_limit)
+        .all()
+    )
+    due_horizons_by_evaluation: dict[int, list[int]] = {}
+    selected_path_ids: list[int] = []
+    for row in due_rows:
+        selected_path_ids.append(int(row.id))
+        due_horizons_by_evaluation.setdefault(
+            int(row.evaluation_id), []
+        ).append(int(row.horizon_trading_days))
+
+    reconciled_evaluation_ids: list[int] = []
+    for evaluation_id, due_horizons in due_horizons_by_evaluation.items():
         try:
             evaluation = (
                 db.query(RadarRuleEvaluation)
@@ -1932,7 +2167,9 @@ def evaluate_pending_radar_v2_outcomes(
             outcomes = evaluate_radar_outcome_v2(
                 db=db,
                 evaluation_id=evaluation_id,
+                horizons=due_horizons,
                 commit=True,
+                now=attempt_at,
                 outcome_contract_version=str(
                     contract["outcome_contract_version"]
                 ),
@@ -1946,31 +2183,79 @@ def evaluate_pending_radar_v2_outcomes(
             db.rollback()
             errors.append(
                 {
+                    "phase": "reconcile",
                     "evaluation_id": evaluation_id,
                     "error_message": str(exc),
                 }
             )
             continue
+        reconciled_evaluation_ids.append(evaluation_id)
         evaluated.append(
             {
+                "phase": "reconcile",
                 "evaluation_id": evaluation_id,
                 "outcome_count": len(outcomes),
+                "horizons": due_horizons,
                 "statuses": sorted(
                     {str(outcome["status"]) for outcome in outcomes}
                 ),
             }
         )
+
+    attempted_rows = (
+        db.query(RadarOutcomePath)
+        .filter(RadarOutcomePath.id.in_(selected_path_ids))
+        .all()
+        if selected_path_ids
+        else []
+    )
+    finalized_count = sum(
+        row.status != "pending" for row in attempted_rows
+    )
+    awaiting_daily_bar_count = sum(
+        row.status == "pending" for row in attempted_rows
+    )
+    unevaluable_count = sum(
+        row.status == "unevaluable" for row in attempted_rows
+    )
+    remaining_due_count = int(
+        due_query.with_entities(
+            func.count(func.distinct(RadarOutcomePath.id))
+        ).scalar()
+        or 0
+    )
+    oldest_due_trade_date = (
+        due_query.with_entities(
+            func.min(RadarOutcomePath.horizon_end_trade_date)
+        ).scalar()
+        if remaining_due_count
+        else None
+    )
+    requested_evaluation_ids = set(initialized_evaluation_ids)
+    requested_evaluation_ids.update(reconciled_evaluation_ids)
     return {
         "status": (
             "partial_success"
-            if errors and evaluated
+            if (errors and evaluated) or (not errors and remaining_due_count)
             else "error"
             if errors
             else "success"
         ),
-        "requested_count": len(resolved_ids),
-        "evaluated_count": len(evaluated),
+        "requested_count": len(requested_evaluation_ids),
+        "evaluated_count": len(requested_evaluation_ids),
         "error_count": len(errors),
+        "latest_available_trade_date": latest_available_trade_date,
+        "due_before": latest_available_trade_date,
+        "initialized_evaluation_count": len(initialized_evaluation_ids),
+        "initialized_path_count": initialized_path_count,
+        "due_count_before": due_count_before,
+        "attempted_evaluation_count": len(reconciled_evaluation_ids),
+        "attempted_path_count": len(selected_path_ids),
+        "finalized_count": finalized_count,
+        "awaiting_daily_bar_count": awaiting_daily_bar_count,
+        "unevaluable_count": unevaluable_count,
+        "remaining_due_count": remaining_due_count,
+        "oldest_due_trade_date": oldest_due_trade_date,
         "evaluated": evaluated,
         "errors": errors,
     }

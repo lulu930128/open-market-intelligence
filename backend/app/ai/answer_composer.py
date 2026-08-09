@@ -1375,6 +1375,10 @@ def build_market_breadth_consumer_answer(
     unchanged = breadth.get("unchanged_count")
     limit_up = breadth.get("limit_up_count")
     limit_down = breadth.get("limit_down_count")
+    breadth_status = text_value(breadth.get("status")) or "unknown"
+    decision_usable = bool(
+        breadth.get("decision_usable") is True and breadth_status == "ready"
+    )
     directional_total = (
         advance + decline
         if isinstance(advance, int) and isinstance(decline, int)
@@ -1382,12 +1386,15 @@ def build_market_breadth_consumer_answer(
     )
     decline_ratio = decline / directional_total if directional_total else None
     advance_ratio = advance / directional_total if directional_total else None
-    if decline_ratio is not None and decline_ratio >= 0.6:
+    if breadth_status == "pending":
+        stance = "insufficient_data"
+        direction_key = "pending"
+    elif decline_ratio is not None and decline_ratio >= 0.6:
         stance = "bearish"
-        direction_key = "weak"
+        direction_key = "weak" if decision_usable else "limited_weak"
     elif advance_ratio is not None and advance_ratio >= 0.6:
         stance = "bullish"
-        direction_key = "strong"
+        direction_key = "strong" if decision_usable else "limited_strong"
     elif directional_total:
         stance = "mixed"
         direction_key = "mixed"
@@ -1418,6 +1425,9 @@ def build_market_breadth_consumer_answer(
             "strong": "clearly strong",
             "mixed": "mixed",
             "missing": "unavailable",
+            "pending": "pending the regular session",
+            "limited_weak": "weak within partial coverage",
+            "limited_strong": "strong within partial coverage",
         }[direction_key]
         headline = f"{label} breadth is {direction}"
         counts = f"Advancers {advance_text}, decliners {decline_text}, unchanged {unchanged_text}."
@@ -1428,6 +1438,9 @@ def build_market_breadth_consumer_answer(
             "strong": "明確に強い",
             "mixed": "まちまち",
             "missing": "データ不足",
+            "pending": "通常取引開始待ち",
+            "limited_weak": "一部範囲では弱い（データ不完全）",
+            "limited_strong": "一部範囲では強い（データ不完全）",
         }[direction_key]
         headline = f"{label}の市場の広がりは{direction}です"
         counts = f"上昇 {advance_text}、下落 {decline_text}、変わらず {unchanged_text}。"
@@ -1438,6 +1451,9 @@ def build_market_breadth_consumer_answer(
             "strong": "明顯偏強",
             "mixed": "多空分歧",
             "missing": "資料不足",
+            "pending": "尚待正式開盤",
+            "limited_weak": "已覆蓋部分偏弱（資料不完整）",
+            "limited_strong": "已覆蓋部分偏強（資料不完整）",
         }[direction_key]
         headline = f"{label}市場廣度{direction}"
         counts = f"上漲 {advance_text}、下跌 {decline_text}、持平 {unchanged_text}。"
@@ -1448,7 +1464,30 @@ def build_market_breadth_consumer_answer(
     scope_label = text_value(breadth.get("label"))
     if scope_label:
         summary.append(scope_label)
-    confidence = "high" if directional_total else "low"
+    contract_warnings = list(warnings)
+    if not decision_usable:
+        if english:
+            contract_warnings.append(
+                "Regular-session breadth is pending; auction indicative prices "
+                "are not actual trades."
+                if breadth_status == "pending"
+                else "Market breadth is not decision-usable; direction is limited "
+                "to the reported coverage."
+            )
+        elif japanese:
+            contract_warnings.append(
+                "通常取引の市場の広がりは開始待ちです。板寄せ参考値は実約定ではありません。"
+                if breadth_status == "pending"
+                else "市場の広がりは意思決定に使える状態ではなく、方向は取得範囲に限定されます。"
+            )
+        else:
+            contract_warnings.append(
+                "正式市場廣度資料尚待開盤；試撮參考價不可視為實際成交。"
+                if breadth_status == "pending"
+                else "市場廣度資料尚未達 decision-usable；方向只代表已覆蓋範圍。"
+            )
+        stance = "insufficient_data"
+    confidence = "high" if decision_usable and directional_total else "low"
     answer = {
         "kind": "consumer_market_answer",
         "style": "market_breadth_summary",
@@ -1465,7 +1504,7 @@ def build_market_breadth_consumer_answer(
         "risks": [],
         "data_limits": generic_data_limits(
             missing=missing,
-            warnings=warnings,
+            warnings=contract_warnings,
             response_preferences=response_preferences,
         ),
         "detail": "\n".join(summary),

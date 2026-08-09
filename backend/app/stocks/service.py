@@ -3,6 +3,10 @@ from sqlalchemy.orm import Session
 
 from app.db.models import MarketDailyPrice, SourceRegistry, StockMaster, StockProfile, utc_now
 from app.parsers.twse_common import normalize_text
+from app.stocks.instruments import (
+    TAIWAN_INSTRUMENT_ETF,
+    normalize_taiwan_instrument_type,
+)
 from app.stocks.schemas import StockMasterUpdate
 
 
@@ -76,10 +80,12 @@ def _upsert_stock_master_from_market_daily_row(
 
     stock.stock_name = stock_name or stock.stock_name
     stock.market = stock.market if stock.market != "unknown" else inferred_market
+    existing_type = normalize_taiwan_instrument_type(
+        stock.instrument_type,
+        stock_id=stock.stock_id,
+    )
     stock.instrument_type = (
-        stock.instrument_type
-        if stock.instrument_type != "unknown"
-        else inferred_type
+        inferred_type if existing_type == "unknown" else stock.instrument_type
     )
     stock.last_seen_at = utc_now()
     stock.is_active = True
@@ -162,10 +168,14 @@ def sync_stocks_from_market_daily(db: Session) -> dict:
 
         existing.stock_name = stock_name or existing.stock_name
         existing.market = existing.market if existing.market != "unknown" else _infer_market(source)
+        existing_type = normalize_taiwan_instrument_type(
+            existing.instrument_type,
+            stock_id=existing.stock_id,
+        )
         existing.instrument_type = (
-            existing.instrument_type
-            if existing.instrument_type != "unknown"
-            else _infer_instrument_type(stock_id, stock_name)
+            _infer_instrument_type(stock_id, stock_name)
+            if existing_type == "unknown"
+            else existing.instrument_type
         )
         existing.last_seen_at = utc_now()
         existing.is_active = True
@@ -196,7 +206,8 @@ def list_stocks(
         query = query.filter(StockMaster.market == market)
 
     if instrument_type is not None:
-        query = query.filter(StockMaster.instrument_type == instrument_type)
+        normalized_type = normalize_taiwan_instrument_type(instrument_type)
+        query = query.filter(func.lower(StockMaster.instrument_type) == normalized_type)
 
     if is_active is not None:
         query = query.filter(StockMaster.is_active.is_(is_active))
@@ -227,7 +238,7 @@ def search_stocks(
     ]
 
     if is_etf_keyword:
-        filters.append(StockMaster.instrument_type == "ETF")
+        filters.append(func.lower(StockMaster.instrument_type) == TAIWAN_INSTRUMENT_ETF)
 
     results = (
         db.query(StockMaster)

@@ -68,6 +68,18 @@ OMI 目前已具備三個可以承接跨市場關聯的表面：
 - 正式權重只由受控設定與人工 review 改變；statistics 或 LLM 最多產生候選，不直接寫入 production relation。
 - 現有 worktree 有大量其他在途修改；後續施工必須 localized，實作前重查 Alembic head 與重疊檔案，不覆寫使用者變更。
 
+## Consumer hardening 完善目標
+
+既有 Consumer Release 已讓個股頁、AI contract 與 MCP 看得到跨市場 context；下一段工作不是擴大功能面，而是先補齊以下可信度與生命週期 invariant：
+
+- Stock scope 只能推導 `cross_market.overnight`、`cross_market.relations`、`cross_market.parity`；market-only 的 `market.cross_market` 不得因 domain inference 被重新加入並造成 phantom unsupported／blocked。
+- Caller 明確要求不適用 capability 時仍要得到 machine-readable unsupported；只有系統自行推導的 scope-invalid capability 應在診斷前被排除。
+- 2408／MU 等 proxy relation 只有在可稽核的實際 review／verification 時點之後才可見；不得修改已套用 migration、任意回填過去時間，或把 migration 常數當成事實發生時間。
+- `cache_only` 與 GET/read path 永遠不觸發 provider；只有明確 `allow_external_fetch` 的 AI/tool orchestration 可執行 bounded refresh，且必須同時處理所需海外價格與 FX、保留 timeout／dedupe／source-health／partial-failure。
+- Latest-cache projection 與 materialized snapshot 必須是兩種明確語意；materialized payload 不得仍宣稱「not materialized」，snapshot 不可原地覆寫，且需保留 materialized time、owner、source cutoff 與 payload hash。
+- HTTP、MCP、Frontend 與 Kuro 只消費 backend-owned contract；host schema cache 可要求 reconnect，但 adapter 不新增相容旁路或市場邏輯。
+- 完善期間 Radar 仍是 display-only；任何 ranking、direction、priority、bucket 或 universe 影響都留在 M7／M8 的 point-in-time 與 walk-forward promotion gate 之後。
+
 ## 交付物
 
 - Canonical `cross_market.context.v1` domain contract 與 schema。
@@ -92,6 +104,9 @@ OMI 目前已具備三個可以承接跨市場關聯的表面：
 - `omi.decision.v4` 的 readiness 與 evidence 分離正確，summary／compact／full projection 不隱藏 stale、partial、limited 或 missing。
 - MCP 僅透過 backend API 取得 contract，沒有 DB import 或重算邏輯；Kuro 可用 structured fields 呈現，不依賴特定中文句子解析。
 - Bounded refresh、provider failure、relation evidence stale、benchmark missing、validity overlap 與 rollback 都有 regression 或 smoke evidence。
+- Stock scope 不再出現 phantom `market.cross_market`；2330／2408 的 blocked、stale 或 unavailable 只可由實際資料限制觸發。
+- Proxy relation 的 outward 可見時間與 audit trail 一致；forward-only 修復不改寫歷史、遇到人工異動或 seed fingerprint 不符時 fail closed。
+- Materialized snapshot 可由 Radar、個股說明與 outward contract 對帳，且 payload 的 projection source、materialization metadata、hash 與限制文字互相一致。
 - 正式 launcher runtime 能證明 API、Frontend 與代表性 outward request 採用新版本；不能只以 unit test 或 HTTP 200 宣稱完成。
 
 ## 參考文件

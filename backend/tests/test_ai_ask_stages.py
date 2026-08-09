@@ -591,6 +591,7 @@ class AiAskStagesTests(unittest.TestCase):
                 "has_data_limits": True,
                 "has_missing": True,
                 "has_warnings": True,
+                "has_context": False,
             },
         )
         self.assertFalse(decision_contract["freshness"]["is_current"])

@@ -4,9 +4,11 @@ from collections.abc import Callable, Sequence
 from datetime import date, timedelta
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    MarketDailyPrice,
     RadarOutcomePath,
     RadarUniverseObservation,
     WatchlistGroup,
@@ -87,6 +89,183 @@ def _resolve_group_ids(
         return parsed_group_ids
 
     return _active_group_ids(db)
+
+
+def get_watchlist_radar_v2_outcome_due_coverage(
+    *,
+    db: Session,
+    group_ids: str | Sequence[int | str] | None = None,
+    modes: str | Sequence[str] | None = "action",
+    as_of_trade_date: date | None = None,
+) -> dict[str, Any]:
+    resolved_group_ids = _resolve_group_ids(db=db, group_ids=group_ids)
+    resolved_modes = _normalize_modes(modes)
+    latest_available_trade_date = as_of_trade_date or db.query(
+        func.max(MarketDailyPrice.trade_date)
+    ).scalar()
+    query = (
+        db.query(RadarOutcomePath)
+        .join(
+            RadarUniverseObservation,
+            RadarUniverseObservation.evaluation_id
+            == RadarOutcomePath.evaluation_id,
+        )
+        .filter(
+            RadarUniverseObservation.group_id.in_(resolved_group_ids)
+        )
+        .filter(RadarUniverseObservation.mode.in_(resolved_modes))
+        .filter(
+            RadarUniverseObservation.rule_version
+            == RADAR_V2_ACTIVE_RULE_VERSION
+        )
+        .filter(
+            RadarUniverseObservation.rule_config_hash
+            == RADAR_V2_ACTIVE_RULE_CONFIG_HASH
+        )
+        .filter(RadarOutcomePath.status == "pending")
+    )
+    if latest_available_trade_date is not None:
+        query = query.filter(
+            RadarOutcomePath.horizon_end_trade_date
+            <= latest_available_trade_date
+        )
+    else:
+        query = query.filter(False)
+    due_count = int(
+        query.with_entities(
+            func.count(func.distinct(RadarOutcomePath.id))
+        ).scalar()
+        or 0
+    )
+    oldest_due_trade_date = (
+        query.with_entities(
+            func.min(RadarOutcomePath.horizon_end_trade_date)
+        ).scalar()
+        if due_count
+        else None
+    )
+    return {
+        "status": "pending" if due_count else "complete",
+        "group_ids": resolved_group_ids,
+        "modes": resolved_modes,
+        "latest_available_trade_date": latest_available_trade_date,
+        "due_count": due_count,
+        "oldest_due_trade_date": oldest_due_trade_date,
+    }
+
+
+def reconcile_watchlist_radar_v2_outcomes(
+    *,
+    db: Session,
+    group_ids: str | Sequence[int | str] | None = None,
+    modes: str | Sequence[str] | None = "action",
+    limit: int = 200,
+    initialize_limit: int = 200,
+    as_of_trade_date: date | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    resolved_group_ids = _resolve_group_ids(db=db, group_ids=group_ids)
+    resolved_modes = _normalize_modes(modes)
+    scopes = [
+        (group_id, mode)
+        for group_id in resolved_group_ids
+        for mode in resolved_modes
+    ]
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    aggregate_keys = (
+        "requested_count",
+        "evaluated_count",
+        "initialized_evaluation_count",
+        "initialized_path_count",
+        "due_count_before",
+        "attempted_evaluation_count",
+        "attempted_path_count",
+        "finalized_count",
+        "awaiting_daily_bar_count",
+        "unevaluable_count",
+        "remaining_due_count",
+    )
+    totals = {key: 0 for key in aggregate_keys}
+    latest_available_trade_date: date | None = as_of_trade_date
+    oldest_due_trade_date: date | None = None
+
+    for index, (group_id, mode) in enumerate(scopes, start=1):
+        if progress_callback is not None:
+            progress_callback(
+                index - 1,
+                max(len(scopes), 1),
+                f"Reconciling Radar v2 outcomes for group {group_id} ({mode}).",
+            )
+        result = radar_shadow_v2_service.evaluate_pending_radar_v2_outcomes(
+            db=db,
+            group_id=group_id,
+            mode=mode,
+            limit=limit,
+            initialize_limit=initialize_limit,
+            rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+            as_of_trade_date=as_of_trade_date,
+        )
+        result_row = {
+            "group_id": group_id,
+            "mode": mode,
+            **result,
+        }
+        results.append(result_row)
+        latest_available_trade_date = (
+            result.get("latest_available_trade_date")
+            or latest_available_trade_date
+        )
+        result_oldest_due = result.get("oldest_due_trade_date")
+        if result_oldest_due is not None and (
+            oldest_due_trade_date is None
+            or result_oldest_due < oldest_due_trade_date
+        ):
+            oldest_due_trade_date = result_oldest_due
+        for key in aggregate_keys:
+            totals[key] += int(result.get(key) or 0)
+        errors.extend(
+            {
+                "group_id": group_id,
+                "mode": mode,
+                **error,
+            }
+            for error in result.get("errors") or []
+        )
+
+    if progress_callback is not None:
+        progress_callback(
+            len(scopes),
+            max(len(scopes), 1),
+            "Radar v2 outcome reconciliation completed.",
+        )
+    if errors and totals["evaluated_count"]:
+        status = "partial_success"
+    elif errors:
+        status = "error"
+    elif totals["remaining_due_count"]:
+        status = "partial_success"
+    elif totals["evaluated_count"]:
+        status = "success"
+    else:
+        status = "skipped"
+    return {
+        "status": status,
+        "message": (
+            "Radar v2 outcome reconciliation still has mature pending paths."
+            if totals["remaining_due_count"]
+            else "Radar v2 outcome reconciliation completed."
+        ),
+        "group_ids": resolved_group_ids,
+        "modes": resolved_modes,
+        "latest_available_trade_date": latest_available_trade_date,
+        "due_before": latest_available_trade_date,
+        "oldest_due_trade_date": oldest_due_trade_date,
+        **totals,
+        "error_count": len(errors),
+        "results": results,
+        "errors": errors,
+    }
 
 
 def get_watchlist_radar_daily_coverage(

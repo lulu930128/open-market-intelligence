@@ -27,6 +27,7 @@ from app.ai.market_context import taiwan_stock
 from app.ai.market_context.taiwan_stock import _apply_disposition_quote_contract
 from app.ai.market_context.taiwan_projection import (
     _compact_index_quote,
+    _compact_intraday_history,
     _compact_quote_snapshot,
     _compact_single_intraday_series,
 )
@@ -127,8 +128,21 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertTrue(points[0]["indicator_eligible"])
         self.assertFalse(points[1]["indicator_eligible"])
         self.assertEqual(metadata["canonical_volume_unit"], "shares")
+        self.assertEqual(metadata["bar_volume_sum_shares"], 1_500)
+        self.assertEqual(metadata["bar_volume_sum_lots"], 1.5)
+        self.assertEqual(metadata["window_volume_sum_shares"], 1_500)
+        self.assertEqual(
+            metadata["bar_volume_scope"],
+            "latest_trade_date_interval_bar_sum",
+        )
+        self.assertEqual(
+            metadata["session_cumulative_volume_status"],
+            "fallback_bar_sum",
+        )
         self.assertEqual(metadata["cumulative_volume_shares"], 1_500)
         self.assertEqual(metadata["cumulative_volume_lots"], 1.5)
+        self.assertEqual(metadata["cumulative_volume_source"], "intraday_bar_sum")
+        self.assertEqual(metadata["cumulative_volume_status"], "fallback_bar_sum")
         self.assertIsNone(metadata["cumulative_trade_value"])
         self.assertEqual(metadata["available_cumulative_trade_value"], 100_000)
         self.assertEqual(metadata["trade_value_status"], "partial")
@@ -142,6 +156,301 @@ class IntradayContractRemediationTests(unittest.TestCase):
             metadata["indicator_policy"],
             "finalized_regular_interval_or_closing_auction_only",
         )
+
+    def test_taiwan_intraday_session_metrics_do_not_cross_trade_dates(self) -> None:
+        points, metadata = _enrich_intraday_contract(
+            [
+                {
+                    "time": "2026-08-05T12:00:00+08:00",
+                    "close": 100.0,
+                    "volume": 10_000,
+                },
+                {
+                    "time": "2026-08-05T13:00:00+08:00",
+                    "close": 100.0,
+                    "volume": 20_000,
+                },
+                {
+                    "time": "2026-08-06T09:00:00+08:00",
+                    "close": 200.0,
+                    "volume": 1_000,
+                },
+                {
+                    "time": "2026-08-06T09:01:00+08:00",
+                    "close": 200.0,
+                    "volume": 2_000,
+                },
+            ],
+            interval="1m",
+            source="yahoo_finance_chart",
+            now=datetime.fromisoformat("2026-08-06T09:01:30+08:00"),
+        )
+
+        self.assertEqual(len(points), 4)
+        self.assertEqual(metadata["window_trade_date_count"], 2)
+        self.assertEqual(metadata["window_volume_sum_shares"], 33_000)
+        self.assertEqual(metadata["bar_volume_trade_date"], "2026-08-06")
+        self.assertEqual(metadata["bar_volume_sum_shares"], 3_000)
+        self.assertEqual(metadata["cumulative_volume_shares"], 3_000)
+        self.assertEqual(metadata["estimated_cumulative_trade_value"], 600_000)
+        self.assertAlmostEqual(metadata["approx_vwap"], 200.0)
+        self.assertEqual(
+            metadata["vwap_volume_scope"],
+            "latest_trade_date_interval_bars",
+        )
+
+    def test_intraday_compact_projection_preserves_dual_volume_contract(self) -> None:
+        compact = _compact_intraday_history(
+            {
+                "interval": "1m",
+                "requested_interval": "1m",
+                "source_interval": "1m",
+                "effective_interval": "1m",
+                "range": "1d",
+                "provider": "nstock",
+                "source": "nstock_minute_stock_data",
+                "bar_volume_sum_shares": 3_012_567,
+                "bar_volume_sum_lots": 3_012.567,
+                "bar_volume_trade_date": "2026-08-06",
+                "bar_volume_latest_time": "2026-08-06T09:40:00+08:00",
+                "bar_volume_scope": "latest_trade_date_interval_bar_sum",
+                "bar_volume_provider": "nstock_minute_stock_data",
+                "window_volume_sum_shares": 3_012_567,
+                "window_volume_sum_lots": 3_012.567,
+                "window_volume_scope": "query_window_interval_bar_sum",
+                "window_trade_date_count": 1,
+                "session_cumulative_volume_status": "fallback_bar_sum",
+                "cumulative_volume_shares": 3_012_567,
+                "cumulative_volume_lots": 3_012.567,
+                "cumulative_volume_trade_date": "2026-08-06",
+                "cumulative_volume_source": "intraday_bar_sum",
+                "cumulative_volume_status": "fallback_bar_sum",
+                "vwap_volume_scope": "latest_trade_date_interval_bars",
+                "points": [
+                    {
+                        "time": "2026-08-06T09:40:00+08:00",
+                        "close": 2_850.0,
+                        "volume": 10_000,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(compact["bar_volume_sum_shares"], 3_012_567)
+        self.assertEqual(compact["bar_volume_trade_date"], "2026-08-06")
+        self.assertEqual(compact["cumulative_volume_source"], "intraday_bar_sum")
+        self.assertEqual(compact["window_trade_date_count"], 1)
+        self.assertEqual(
+            compact["vwap_volume_scope"],
+            "latest_trade_date_interval_bars",
+        )
+
+    def test_aligned_mis_volume_reconciles_without_mutating_points(self) -> None:
+        original_points = [
+            {
+                "time": "2026-08-06T09:40:00+08:00",
+                "volume_shares": 10_000,
+            }
+        ]
+        intraday_bars = {
+            "series": {
+                "1m": {
+                    "interval": "1m",
+                    "effective_interval": "1m",
+                    "bar_volume_sum_shares": 3_012_567,
+                    "bar_volume_sum_lots": 3_012.567,
+                    "bar_volume_trade_date": "2026-08-06",
+                    "bar_volume_latest_time": "2026-08-06T09:40:00+08:00",
+                    "approx_vwap": 2_848.44,
+                    "vwap_confidence": "medium",
+                    "points": [dict(point) for point in original_points],
+                    "warnings": [],
+                }
+            },
+            "warnings": [],
+        }
+        quote = {
+            "trade_date": "2026-08-06",
+            "event_time": "2026-08-06T09:39:56+08:00",
+            "session_phase": "regular_live",
+            "cumulative_volume_shares": 3_091_000,
+            "cumulative_volume_lots": 3_091,
+            "volume_source": "twse_mis",
+            "volume_source_field": "v",
+            "volume_scope": "regular_session_board_lot_cumulative",
+            "volume_status": "available",
+            "freshness": {"status": "live", "is_stale": False},
+        }
+
+        taiwan_stock._apply_taiwan_intraday_volume_reconciliation(
+            quote=quote,
+            intraday_bars=intraday_bars,
+            calendar_status={"phase": "regular"},
+        )
+
+        series = intraday_bars["series"]["1m"]
+        self.assertEqual(series["session_cumulative_volume_shares"], 3_091_000)
+        self.assertEqual(series["cumulative_volume_shares"], 3_091_000)
+        self.assertEqual(series["bar_volume_sum_shares"], 3_012_567)
+        self.assertEqual(series["unallocated_volume_shares"], 78_433)
+        self.assertEqual(series["unallocated_volume_lots"], 78.433)
+        self.assertEqual(series["volume_reconciliation"]["status"], "time_skew")
+        self.assertEqual(series["vwap_confidence"], "low")
+        self.assertEqual(series["points"], original_points)
+
+    def test_older_same_day_mis_does_not_override_newer_bar_sum(self) -> None:
+        intraday_bars = {
+            "series": {
+                "1m": {
+                    "interval": "1m",
+                    "effective_interval": "1m",
+                    "bar_volume_sum_shares": 121_447_000,
+                    "bar_volume_trade_date": "2026-08-06",
+                    "bar_volume_latest_time": "2026-08-06T13:30:00+08:00",
+                    "warnings": [],
+                }
+            },
+            "warnings": [],
+        }
+        quote = {
+            "trade_date": "2026-08-06",
+            "event_time": "2026-08-06T09:34:35+08:00",
+            "session_phase": "post_close_snapshot",
+            "cumulative_volume_shares": 53_962_000,
+            "cumulative_volume_lots": 53_962,
+            "volume_source": "twse_mis",
+            "volume_source_field": "v",
+            "volume_scope": "regular_session_board_lot_cumulative",
+            "volume_status": "available",
+            "freshness": {
+                "status": "official_close_pending",
+                "is_stale": False,
+            },
+        }
+
+        taiwan_stock._apply_taiwan_intraday_volume_reconciliation(
+            quote=quote,
+            intraday_bars=intraday_bars,
+            calendar_status={"phase": "post_close"},
+        )
+
+        series = intraday_bars["series"]["1m"]
+        self.assertEqual(series["session_cumulative_volume_shares"], 53_962_000)
+        self.assertEqual(series["session_cumulative_volume_status"], "time_skew")
+        self.assertEqual(series["cumulative_volume_shares"], 121_447_000)
+        self.assertEqual(series["cumulative_volume_source"], "intraday_bar_sum")
+        self.assertEqual(series["cumulative_volume_status"], "fallback_bar_sum")
+        self.assertEqual(series["volume_reconciliation"]["status"], "time_skew")
+
+    def test_preopen_volume_does_not_reuse_previous_session_bar_sum(self) -> None:
+        intraday_bars = {
+            "series": {
+                "1m": {
+                    "interval": "1m",
+                    "bar_volume_sum_shares": 50_000,
+                    "bar_volume_trade_date": "2026-08-05",
+                    "bar_volume_latest_time": "2026-08-05T13:30:00+08:00",
+                }
+            },
+            "warnings": [],
+        }
+
+        taiwan_stock._apply_taiwan_intraday_volume_reconciliation(
+            quote={
+                "trade_date": "2026-08-06",
+                "session_phase": "preopen_auction",
+                "cumulative_volume_shares": None,
+                "volume_status": "unavailable",
+                "freshness": {"status": "live", "is_stale": False},
+            },
+            intraday_bars=intraday_bars,
+            calendar_status={"phase": "preopen"},
+        )
+
+        series = intraday_bars["series"]["1m"]
+        self.assertIsNone(series["session_cumulative_volume_shares"])
+        self.assertIsNone(series["cumulative_volume_shares"])
+        self.assertEqual(series["cumulative_volume_status"], "unavailable")
+        self.assertEqual(
+            series["volume_reconciliation"]["reason"],
+            "preopen_session_cumulative_unavailable",
+        )
+
+    def test_intraday_volume_date_mismatch_preserves_both_evidence_dates(self) -> None:
+        intraday_bars = {
+            "series": {
+                "1m": {
+                    "interval": "1m",
+                    "bar_volume_sum_shares": 50_000,
+                    "bar_volume_trade_date": "2026-08-05",
+                    "bar_volume_latest_time": "2026-08-05T13:30:00+08:00",
+                }
+            },
+            "warnings": [],
+        }
+        taiwan_stock._apply_taiwan_intraday_volume_reconciliation(
+            quote={
+                "trade_date": "2026-08-06",
+                "event_time": "2026-08-06T09:10:00+08:00",
+                "session_phase": "regular_live",
+                "cumulative_volume_shares": 10_000,
+                "volume_source": "twse_mis",
+                "volume_source_field": "v",
+                "volume_scope": "regular_session_board_lot_cumulative",
+                "volume_status": "available",
+                "freshness": {"status": "live", "is_stale": False},
+            },
+            intraday_bars=intraday_bars,
+            calendar_status={"phase": "regular"},
+        )
+
+        series = intraday_bars["series"]["1m"]
+        self.assertEqual(series["bar_volume_trade_date"], "2026-08-05")
+        self.assertEqual(
+            series["session_cumulative_volume_trade_date"],
+            "2026-08-06",
+        )
+        self.assertEqual(series["cumulative_volume_shares"], 50_000)
+        self.assertEqual(series["cumulative_volume_status"], "date_mismatch")
+        self.assertEqual(
+            series["volume_reconciliation"]["status"],
+            "date_mismatch",
+        )
+
+    def test_aligned_bar_sum_exceeding_mis_remains_visible(self) -> None:
+        intraday_bars = {
+            "series": {
+                "1m": {
+                    "interval": "1m",
+                    "bar_volume_sum_shares": 54_070_000,
+                    "bar_volume_trade_date": "2026-08-06",
+                    "bar_volume_latest_time": "2026-08-06T09:34:00+08:00",
+                }
+            },
+            "warnings": [],
+        }
+        taiwan_stock._apply_taiwan_intraday_volume_reconciliation(
+            quote={
+                "trade_date": "2026-08-06",
+                "event_time": "2026-08-06T09:34:35+08:00",
+                "session_phase": "regular_live",
+                "cumulative_volume_shares": 53_962_000,
+                "volume_source": "twse_mis",
+                "volume_source_field": "v",
+                "volume_scope": "regular_session_board_lot_cumulative",
+                "volume_status": "available",
+                "freshness": {"status": "live", "is_stale": False},
+            },
+            intraday_bars=intraday_bars,
+            calendar_status={"phase": "regular"},
+        )
+
+        series = intraday_bars["series"]["1m"]
+        reconciliation = series["volume_reconciliation"]
+        self.assertEqual(series["cumulative_volume_shares"], 53_962_000)
+        self.assertEqual(reconciliation["status"], "bar_sum_exceeds_exchange")
+        self.assertEqual(reconciliation["difference_shares"], -108_000)
+        self.assertEqual(series["unallocated_volume_shares"], 0)
 
     def test_taiwan_intraday_contract_marks_close_and_irregular_points(self) -> None:
         points, metadata = _enrich_intraday_contract(
@@ -452,6 +761,27 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(
             official_publish_gap["recognized_session_gap_count"],
             1,
+        )
+
+    def test_taiwan_trading_day_boundary_is_not_missing_intraday_data(self) -> None:
+        continuity = _continuity_summary(
+            {
+                "interval": "1m",
+                "points": [
+                    {"time": "2026-08-03T13:30:00+08:00", "price": 100.0},
+                    {"time": "2026-08-04T09:00:00+08:00", "price": 101.0},
+                ],
+            },
+            market="TW",
+        )
+
+        self.assertEqual(continuity["status"], "continuous")
+        self.assertEqual(continuity["gap_count"], 0)
+        self.assertEqual(continuity["recognized_session_gap_count"], 1)
+        self.assertEqual(continuity["overnight_session_gap_count"], 1)
+        self.assertEqual(
+            continuity["session_gap_evidence"],
+            "trading_day_boundary",
         )
 
     def test_kr_market_halt_event_reclassifies_gap_without_hiding_provenance(
@@ -1388,8 +1718,65 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertFalse(contract["provider_fallback_used"])
         self.assertEqual(contract["provider_fallback_reason"], "strict_provider_unavailable")
         self.assertEqual(result["data"]["quote"]["status"], "unavailable")
-        self.assertEqual(result["data"]["compact"]["freshness_by_domain"]["intraday"], "unavailable")
+        self.assertEqual(
+            result["data"]["compact"]["freshness_by_domain"]["intraday"],
+            "unavailable",
+        )
         intraday_history.assert_not_called()
+
+    def test_prefer_live_without_external_fetch_reads_only_persisted_intraday(
+        self,
+    ) -> None:
+        quote_depth = unittest.mock.Mock(
+            side_effect=AssertionError("cache-only evidence must not call TWSE MIS")
+        )
+        intraday_history = unittest.mock.Mock(
+            return_value={
+                "interval": "1m",
+                "range": "1d",
+                "provider": "yahoo_finance_chart",
+                "source": "persisted_yahoo_chart",
+                "cached_count": 1,
+                "refreshed_count": 0,
+                "cache_status": "persisted_hit",
+                "cache_hit": True,
+                "to_time": "2026-07-20T13:17:00+08:00",
+                "points": [
+                    {
+                        "time": "2026-07-20T13:17:00+08:00",
+                        "close": 2335.0,
+                    }
+                ],
+            }
+        )
+        dependencies = self._quote_reader_dependencies(
+            quote_depth=quote_depth,
+            intraday_history=intraday_history,
+        )
+
+        result = taiwan_stock.read_stock_quote_context(
+            db=SimpleNamespace(),
+            stock_id="2330",
+            market_data_params={
+                "requested_domains": ["quote", "intraday"],
+                "realtime_policy": "prefer_live",
+                "external_fetch_allowed": False,
+                "fallback_to_cached": True,
+            },
+            dependencies=dependencies,
+        )
+
+        quote_depth.assert_not_called()
+        self.assertGreaterEqual(intraday_history.call_count, 1)
+        for call in intraday_history.call_args_list:
+            self.assertFalse(call.kwargs["refresh"])
+        intraday = result["data"]["intraday_bars"]
+        self.assertEqual(intraday["read_mode"], "persisted_cache")
+        self.assertFalse(intraday["provider_refresh_allowed"])
+        self.assertEqual(intraday["series"]["1m"]["cache_status"], "persisted_hit")
+        contract = result["data"]["provider_contract"]
+        self.assertEqual(contract["provider_attempts"], [])
+        self.assertEqual(contract["cache_reads"][0]["status"], "persisted_hit")
 
     def test_non_strict_provider_fallback_is_explicit_and_domain_scoped(self) -> None:
         def intraday_history(**kwargs):

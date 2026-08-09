@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session, aliased
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_payload_contract import bounded_int_param, payload_level, slot_envelope
 from app.db.models import SourceHealthSnapshot
-from app.observability.provider_health import ERROR_STATUSES, list_provider_events
+from app.observability.provider_health import (
+    ERROR_STATUSES,
+    list_provider_events,
+    source_health_snapshot_to_dict,
+)
 
 
 SOURCE_HEALTH_CURRENT_TTL = timedelta(hours=1)
@@ -87,39 +91,27 @@ def _snapshot_freshness(
 def _row_dict(
     row: SourceHealthSnapshot,
     *,
+    generated_at: datetime,
     event_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    fields = (
-        "market",
-        "resource",
-        "target",
-        "provider",
-        "status",
-        "ok",
-        "row_count",
-        "required",
-        "data_quality",
-        "latest_data_date",
-        "latest_data_key",
-        "latest_observed_at",
-        "expected_data_date",
-        "release_status",
-        "reason",
-        "latest_event_status",
-        "latest_event_severity",
-        "latest_event_message",
-        "recent_event_count",
-        "recent_error_count",
-        "consecutive_error_count",
-        "latest_event_at",
-        "checked_at",
-        "updated_at",
+    output = source_health_snapshot_to_dict(
+        row,
+        now=generated_at,
+        stale_after_seconds=int(SOURCE_HEALTH_CURRENT_TTL.total_seconds()),
     )
-    output = {
-        field: _json_value(getattr(row, field, None))
-        for field in fields
-    }
+    row_freshness = _snapshot_freshness(
+        checked_at=row.checked_at,
+        generated_at=generated_at,
+    )
     output["storage"] = "persisted_source_health_snapshot"
+    output["row_snapshot_freshness"] = row_freshness
+    output["snapshot_lifecycle"] = (
+        "historical_expired"
+        if row_freshness["status"] == "expired"
+        else "active_canonical_scope"
+        if str(row.target or "all") == "all"
+        else "active_target_specific"
+    )
     output["event_diagnostics"] = event_diagnostics or {
         "last_success_at": None,
         "last_error_at": None,
@@ -354,9 +346,25 @@ def read_unified_source_health_context(
         for status, count in matched_status_counts.items()
         if status in PROBLEM_STATUSES
     )
-    latest_checked_at = query.order_by(None).with_entities(
-        func.max(snapshot.checked_at)
-    ).scalar()
+    checked_at_range = query.order_by(None).with_entities(
+        func.min(snapshot.checked_at),
+        func.max(snapshot.checked_at),
+    ).one()
+    oldest_checked_at, latest_checked_at = checked_at_range
+    current_threshold = generated_at - SOURCE_HEALTH_CURRENT_TTL
+    expired_threshold = generated_at - SOURCE_HEALTH_EXPIRED_TTL
+    current_snapshot_count = query.filter(
+        snapshot.checked_at >= current_threshold
+    ).count()
+    expired_snapshot_count = query.filter(
+        snapshot.checked_at < expired_threshold
+    ).count()
+    stale_snapshot_count = max(
+        matched_entry_count
+        - current_snapshot_count
+        - expired_snapshot_count,
+        0,
+    )
     rows = (
         query.order_by(
             snapshot.market.asc(),
@@ -378,6 +386,7 @@ def read_unified_source_health_context(
     entries = [
         _row_dict(
             row,
+            generated_at=generated_at,
             event_diagnostics=event_diagnostics.get(_snapshot_key(row)),
         )
         for row in rows
@@ -415,10 +424,48 @@ def read_unified_source_health_context(
         )
         for entry in entries
     )
-    freshness = _snapshot_freshness(
+    age_bucket_count = sum(
+        count > 0
+        for count in (
+            current_snapshot_count,
+            stale_snapshot_count,
+            expired_snapshot_count,
+        )
+    )
+    aggregate_status = (
+        "missing"
+        if matched_entry_count == 0
+        else "mixed"
+        if age_bucket_count > 1
+        else "current"
+        if current_snapshot_count
+        else "stale"
+        if stale_snapshot_count
+        else "expired"
+    )
+    newest_freshness = _snapshot_freshness(
         checked_at=latest_checked_at,
         generated_at=generated_at,
     )
+    oldest_freshness = _snapshot_freshness(
+        checked_at=oldest_checked_at,
+        generated_at=generated_at,
+    )
+    freshness = {
+        "status": aggregate_status,
+        "is_current": aggregate_status == "current",
+        "is_complete": matched_entry_count == len(entries),
+        "oldest_checked_at": _json_value(oldest_checked_at),
+        "newest_checked_at": _json_value(latest_checked_at),
+        "oldest_age_seconds": oldest_freshness.get("age_seconds"),
+        "newest_age_seconds": newest_freshness.get("age_seconds"),
+        "mixed_snapshot_ages": age_bucket_count > 1,
+        "current_entry_count": current_snapshot_count,
+        "stale_entry_count": stale_snapshot_count,
+        "expired_entry_count": expired_snapshot_count,
+        "current_ttl_seconds": int(SOURCE_HEALTH_CURRENT_TTL.total_seconds()),
+        "expired_ttl_seconds": int(SOURCE_HEALTH_EXPIRED_TTL.total_seconds()),
+    }
     missing = [] if entries else ["source_health_snapshot"]
     warnings: list[str] = []
     if not entries:
@@ -428,7 +475,12 @@ def read_unified_source_health_context(
             "Unified source health contains "
             f"{matched_problem_count} matched non-current or failed entries."
         )
-    if freshness["status"] == "stale":
+    if freshness["status"] == "mixed":
+        warnings.append(
+            "Source-health snapshots have mixed ages; inspect each row's "
+            "row_snapshot_freshness before using the aggregate."
+        )
+    elif freshness["status"] == "stale":
         warnings.append(
             "Source-health snapshot is stale; checked_at is older than one hour."
         )
@@ -449,7 +501,7 @@ def read_unified_source_health_context(
         else str(freshness["status"])
         if freshness["status"] in {"stale", "expired"}
         else "partial"
-        if matched_problem_count
+        if matched_problem_count or freshness["status"] == "mixed"
         else "ready"
     )
     slots = {

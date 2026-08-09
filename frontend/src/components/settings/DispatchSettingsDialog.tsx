@@ -9,21 +9,28 @@ import {
   deleteDispatchRecipientGroup,
   listDispatchDeliveries,
   listDispatchRecipientGroups,
+  listDispatchScheduleRuns,
   listDispatchSchedules,
   listDispatchWatchlistGroups,
   previewDispatch,
   runDispatchSchedule,
+  retryDispatchScheduleRun,
   sendDispatch,
   updateDispatchSchedule,
   updateDispatchRecipientGroup,
   type DispatchContentDepth,
+  type DispatchCalendarMode,
+  type DispatchCatchupMode,
   type DispatchDeliveryRead,
   type DispatchMarket,
   type DispatchPreviewRead,
   type DispatchPreviewRequest,
   type DispatchRadarMode,
+  type DispatchReadinessPolicy,
+  type DispatchReadinessProfile,
   type DispatchRecipientGroupRead,
   type DispatchScheduleRead,
+  type DispatchScheduleRunRead,
   type DispatchScheduleWrite,
   type DispatchTemplateKey,
   type WatchlistGroupOption,
@@ -79,16 +86,25 @@ function formatDateTime(value: string | null) {
 
 function deliveryStatusClassName(status: DispatchDeliveryRead["status"]) {
   if (status === "success") return "text-omi-success";
-  if (status === "error") return "text-omi-danger";
+  if (status === "error" || status === "unknown") return "text-omi-danger";
   if (status === "sending" || status === "queued") return "text-omi-accent";
   return "text-omi-text-muted";
 }
 
 function scheduleStatusClassName(schedule: DispatchScheduleRead) {
   if (!schedule.enabled) return "text-omi-text-muted";
-  if (schedule.last_error_at) return "text-omi-danger";
-  if (schedule.last_success_at) return "text-omi-success";
+  if (schedule.last_status === "error" || schedule.last_error_at) return "text-omi-danger";
+  if (schedule.last_status === "success" || schedule.last_sent_at) return "text-omi-success";
   return "text-omi-accent";
+}
+
+function runStatusClassName(status: string) {
+  if (status === "success") return "text-omi-success";
+  if (status === "error" || status === "skipped") return "text-omi-danger";
+  if (["claimed", "waiting_data", "queued", "sending", "retry_wait"].includes(status)) {
+    return "text-omi-accent";
+  }
+  return "text-omi-text-muted";
 }
 
 function numberOrNull(value: unknown) {
@@ -98,6 +114,11 @@ function numberOrNull(value: unknown) {
 
 function toTextAreaValue(emails: string[]) {
   return emails.join("\n");
+}
+
+function readinessReason(run: DispatchScheduleRunRead) {
+  const value = run.readiness?.reason_message;
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 export default function DispatchSettingsDialog({
@@ -140,9 +161,29 @@ export default function DispatchSettingsDialog({
   const [scheduleTime, setScheduleTime] = useState("08:55");
   const [scheduleDayOfWeek, setScheduleDayOfWeek] = useState("mon-fri");
   const [scheduleEnabled, setScheduleEnabled] = useState(true);
+  const [scheduleCalendarMode, setScheduleCalendarMode] =
+    useState<DispatchCalendarMode>("weekdays");
+  const [scheduleCatchupMode, setScheduleCatchupMode] =
+    useState<DispatchCatchupMode>("latest_only");
+  const [scheduleMisfirePolicy, setScheduleMisfirePolicy] =
+    useState<"catch_up" | "skip">("catch_up");
+  const [scheduleMisfireGraceMinutes, setScheduleMisfireGraceMinutes] = useState(15);
+  const [scheduleMaxRetries, setScheduleMaxRetries] = useState(2);
+  const [scheduleRetryIntervalSeconds, setScheduleRetryIntervalSeconds] = useState(300);
+  const [scheduleReadinessProfile, setScheduleReadinessProfile] =
+    useState<DispatchReadinessProfile>("generic");
+  const [scheduleReadinessPolicy, setScheduleReadinessPolicy] =
+    useState<DispatchReadinessPolicy>("immediate");
+  const [scheduleReadinessDeadlineMinutes, setScheduleReadinessDeadlineMinutes] =
+    useState(60);
+  const [scheduleReadinessRetrySeconds, setScheduleReadinessRetrySeconds] =
+    useState(300);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [deletingScheduleId, setDeletingScheduleId] = useState<number | null>(null);
   const [runningScheduleId, setRunningScheduleId] = useState<number | null>(null);
+  const [scheduleRuns, setScheduleRuns] = useState<DispatchScheduleRunRead[]>([]);
+  const [scheduleRunsState, setScheduleRunsState] = useState<LoadState>("idle");
+  const [retryingRunId, setRetryingRunId] = useState<number | null>(null);
 
   const selectedRecipientGroup = useMemo(
     () =>
@@ -234,7 +275,33 @@ export default function DispatchSettingsDialog({
     setScheduleTime("08:55");
     setScheduleDayOfWeek("mon-fri");
     setScheduleEnabled(true);
+    setScheduleCalendarMode("weekdays");
+    setScheduleCatchupMode("latest_only");
+    setScheduleMisfirePolicy("catch_up");
+    setScheduleMisfireGraceMinutes(15);
+    setScheduleMaxRetries(2);
+    setScheduleRetryIntervalSeconds(300);
+    setScheduleReadinessProfile("generic");
+    setScheduleReadinessPolicy("immediate");
+    setScheduleReadinessDeadlineMinutes(60);
+    setScheduleReadinessRetrySeconds(300);
+    setScheduleRuns([]);
+    setScheduleRunsState("idle");
     setMessage(null);
+  }
+
+  async function refreshScheduleRuns(scheduleId: number) {
+    setScheduleRunsState("loading");
+    try {
+      setScheduleRuns(await listDispatchScheduleRuns(scheduleId, 30));
+      setScheduleRunsState("success");
+    } catch (error) {
+      setScheduleRunsState("error");
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("settings.dispatch.loadError"),
+      });
+    }
   }
 
   function editSchedule(schedule: DispatchScheduleRead) {
@@ -247,6 +314,18 @@ export default function DispatchSettingsDialog({
     setScheduleTime(schedule.send_time);
     setScheduleDayOfWeek(schedule.day_of_week);
     setScheduleEnabled(schedule.enabled);
+    setScheduleCalendarMode(schedule.calendar_mode ?? "weekdays");
+    setScheduleCatchupMode(schedule.catchup_mode ?? "latest_only");
+    setScheduleMisfirePolicy(schedule.misfire_policy ?? "catch_up");
+    setScheduleMisfireGraceMinutes(schedule.misfire_grace_minutes ?? 15);
+    setScheduleMaxRetries(schedule.max_retries ?? 2);
+    setScheduleRetryIntervalSeconds(schedule.retry_interval_seconds ?? 300);
+    setScheduleReadinessProfile(schedule.readiness_profile ?? "generic");
+    setScheduleReadinessPolicy(schedule.readiness_policy ?? "immediate");
+    setScheduleReadinessDeadlineMinutes(schedule.readiness_deadline_minutes ?? 60);
+    setScheduleReadinessRetrySeconds(
+      schedule.readiness_retry_interval_seconds ?? 300
+    );
     setSelectedRecipientGroupId(schedule.recipient_group_id);
     setTemplateKey(schedule.template_key);
     setContentDepth(request.content_depth ?? "standard");
@@ -267,6 +346,7 @@ export default function DispatchSettingsDialog({
 
     setPreview(null);
     setMessage(null);
+    void refreshScheduleRuns(schedule.id);
   }
 
   function buildPreviewRequest(): DispatchPreviewRequest | null {
@@ -362,6 +442,16 @@ export default function DispatchSettingsDialog({
       send_time: scheduleTime.trim(),
       day_of_week: scheduleDayOfWeek.trim() || "mon-fri",
       timezone: "Asia/Taipei",
+      calendar_mode: scheduleCalendarMode,
+      catchup_mode: scheduleCatchupMode,
+      misfire_policy: scheduleMisfirePolicy,
+      misfire_grace_minutes: scheduleMisfireGraceMinutes,
+      max_retries: scheduleMaxRetries,
+      retry_interval_seconds: scheduleRetryIntervalSeconds,
+      readiness_profile: scheduleReadinessProfile,
+      readiness_policy: scheduleReadinessPolicy,
+      readiness_deadline_minutes: scheduleReadinessDeadlineMinutes,
+      readiness_retry_interval_seconds: scheduleReadinessRetrySeconds,
     };
   }
 
@@ -538,6 +628,21 @@ export default function DispatchSettingsDialog({
       setScheduleTime(savedSchedule.send_time);
       setScheduleDayOfWeek(savedSchedule.day_of_week);
       setScheduleEnabled(savedSchedule.enabled);
+      setScheduleCalendarMode(savedSchedule.calendar_mode ?? "weekdays");
+      setScheduleCatchupMode(savedSchedule.catchup_mode ?? "latest_only");
+      setScheduleMisfirePolicy(savedSchedule.misfire_policy ?? "catch_up");
+      setScheduleMisfireGraceMinutes(savedSchedule.misfire_grace_minutes ?? 15);
+      setScheduleMaxRetries(savedSchedule.max_retries ?? 2);
+      setScheduleRetryIntervalSeconds(savedSchedule.retry_interval_seconds ?? 300);
+      setScheduleReadinessProfile(savedSchedule.readiness_profile ?? "generic");
+      setScheduleReadinessPolicy(savedSchedule.readiness_policy ?? "immediate");
+      setScheduleReadinessDeadlineMinutes(
+        savedSchedule.readiness_deadline_minutes ?? 60
+      );
+      setScheduleReadinessRetrySeconds(
+        savedSchedule.readiness_retry_interval_seconds ?? 300
+      );
+      await refreshScheduleRuns(savedSchedule.id);
       setMessage({ type: "success", text: t("settings.dispatch.scheduleSaved") });
     } catch (error) {
       setMessage({
@@ -581,6 +686,7 @@ export default function DispatchSettingsDialog({
       const result = await runDispatchSchedule(scheduleId);
       setDeliveries((current) => [result.delivery, ...current].slice(0, 20));
       setSchedules(await listDispatchSchedules());
+      await refreshScheduleRuns(scheduleId);
       setMessage({
         type: "success",
         text: t("settings.dispatch.scheduleRunQueued", { jobId: result.job.id }),
@@ -592,6 +698,53 @@ export default function DispatchSettingsDialog({
       });
     } finally {
       setRunningScheduleId(null);
+    }
+  }
+
+  async function toggleScheduleEnabled(schedule: DispatchScheduleRead) {
+    setMessage(null);
+    try {
+      const updated = await updateDispatchSchedule(schedule.id, {
+        enabled: !schedule.enabled,
+      });
+      setSchedules((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item))
+      );
+      if (editingScheduleId === updated.id) {
+        setScheduleEnabled(updated.enabled);
+      }
+      setMessage({
+        type: "success",
+        text: updated.enabled
+          ? t("settings.dispatch.scheduleResumed")
+          : t("settings.dispatch.schedulePaused"),
+      });
+    } catch (error) {
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("settings.saveError"),
+      });
+    }
+  }
+
+  async function retryScheduleRun(runId: number) {
+    if (!editingScheduleId) return;
+    setRetryingRunId(runId);
+    setMessage(null);
+    try {
+      await retryDispatchScheduleRun(runId);
+      await Promise.all([
+        refreshScheduleRuns(editingScheduleId),
+        listDispatchDeliveries(20).then(setDeliveries),
+      ]);
+      setMessage({ type: "success", text: t("settings.dispatch.retryQueued") });
+    } catch (error) {
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("settings.dispatch.sendError"),
+      });
+    } finally {
+      setRetryingRunId(null);
     }
   }
 
@@ -1030,10 +1183,10 @@ export default function DispatchSettingsDialog({
                 )}
               </section>
 
-              <section className="min-h-0 overflow-y-auto p-5">
+              <section className="min-h-0 min-w-0 overflow-y-auto p-5">
                 <div className="border-b border-omi-border-subtle pb-5">
                   <div className="flex items-start justify-between gap-3">
-                    <div>
+                    <div className="min-w-0">
                       <h3 className="text-sm font-black text-omi-text-strong">
                         {t("settings.dispatch.schedules")}
                       </h3>
@@ -1050,40 +1203,40 @@ export default function DispatchSettingsDialog({
                     </button>
                   </div>
 
-                  <div className="mt-4 grid gap-3">
-                    <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                  <div className="mt-4 grid min-w-0 gap-3">
+                    <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
                       {t("settings.dispatch.scheduleName")}
                       <input
                         value={scheduleName}
                         onChange={(event) => setScheduleName(event.target.value)}
-                        className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                        className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
                       />
                     </label>
-                    <div className="grid gap-3 sm:grid-cols-[112px_minmax(0,1fr)]">
-                      <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                    <div className="grid min-w-0 gap-3 sm:grid-cols-[112px_minmax(0,1fr)]">
+                      <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
                         {t("settings.dispatch.scheduleTime")}
                         <input
                           type="time"
                           value={scheduleTime}
                           onChange={(event) => setScheduleTime(event.target.value)}
-                          className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
                         />
                       </label>
-                      <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                      <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
                         {t("settings.dispatch.scheduleDayOfWeek")}
                         <input
                           value={scheduleDayOfWeek}
                           onChange={(event) => setScheduleDayOfWeek(event.target.value)}
-                          className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
                         />
                       </label>
                     </div>
-                    <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                    <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
                       {t("settings.dispatch.scheduleDescription")}
                       <input
                         value={scheduleDescription}
                         onChange={(event) => setScheduleDescription(event.target.value)}
-                        className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                        className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
                       />
                     </label>
                     <label className="flex min-h-9 items-center gap-2 border border-omi-border bg-omi-surface px-3 text-xs font-bold text-omi-text-muted">
@@ -1095,6 +1248,176 @@ export default function DispatchSettingsDialog({
                       />
                       {t("settings.dispatch.scheduleEnabled")}
                     </label>
+                    <details className="min-w-0 border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+                      <summary className="cursor-pointer text-xs font-black text-omi-text">
+                        {t("settings.dispatch.advancedPolicy")}
+                      </summary>
+                      <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.calendarMode")}
+                          <select
+                            value={scheduleCalendarMode}
+                            onChange={(event) =>
+                              setScheduleCalendarMode(
+                                event.target.value as DispatchCalendarMode
+                              )
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          >
+                            {(["calendar_days", "weekdays", "tw_trading_days"] as const).map(
+                              (value) => (
+                                <option key={value} value={value}>
+                                  {t(`settings.dispatch.calendarModes.${value}`)}
+                                </option>
+                              )
+                            )}
+                          </select>
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.catchupMode")}
+                          <select
+                            value={scheduleCatchupMode}
+                            onChange={(event) =>
+                              setScheduleCatchupMode(
+                                event.target.value as DispatchCatchupMode
+                              )
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          >
+                            <option value="latest_only">
+                              {t("settings.dispatch.catchupModes.latest_only")}
+                            </option>
+                            <option value="all_slots">
+                              {t("settings.dispatch.catchupModes.all_slots")}
+                            </option>
+                          </select>
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.misfirePolicy")}
+                          <select
+                            value={scheduleMisfirePolicy}
+                            onChange={(event) =>
+                              setScheduleMisfirePolicy(
+                                event.target.value as "catch_up" | "skip"
+                              )
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          >
+                            <option value="catch_up">
+                              {t("settings.dispatch.misfirePolicies.catch_up")}
+                            </option>
+                            <option value="skip">
+                              {t("settings.dispatch.misfirePolicies.skip")}
+                            </option>
+                          </select>
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.misfireGraceMinutes")}
+                          <input
+                            type="number"
+                            min={0}
+                            max={1440}
+                            value={scheduleMisfireGraceMinutes}
+                            onChange={(event) =>
+                              setScheduleMisfireGraceMinutes(Number(event.target.value))
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          />
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.readinessProfile")}
+                          <select
+                            value={scheduleReadinessProfile}
+                            onChange={(event) =>
+                              setScheduleReadinessProfile(
+                                event.target.value as DispatchReadinessProfile
+                              )
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          >
+                            {(["generic", "tw_preopen", "tw_post_close", "watchlist_radar"] as const).map(
+                              (value) => (
+                                <option key={value} value={value}>
+                                  {t(`settings.dispatch.readinessProfiles.${value}`)}
+                                </option>
+                              )
+                            )}
+                          </select>
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.readinessPolicy")}
+                          <select
+                            value={scheduleReadinessPolicy}
+                            onChange={(event) =>
+                              setScheduleReadinessPolicy(
+                                event.target.value as DispatchReadinessPolicy
+                              )
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          >
+                            {(["immediate", "wait_until_ready", "skip_if_incomplete"] as const).map(
+                              (value) => (
+                                <option key={value} value={value}>
+                                  {t(`settings.dispatch.readinessPolicies.${value}`)}
+                                </option>
+                              )
+                            )}
+                          </select>
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.readinessDeadlineMinutes")}
+                          <input
+                            type="number"
+                            min={0}
+                            max={1440}
+                            value={scheduleReadinessDeadlineMinutes}
+                            onChange={(event) =>
+                              setScheduleReadinessDeadlineMinutes(Number(event.target.value))
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          />
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.readinessRetrySeconds")}
+                          <input
+                            type="number"
+                            min={10}
+                            max={3600}
+                            value={scheduleReadinessRetrySeconds}
+                            onChange={(event) =>
+                              setScheduleReadinessRetrySeconds(Number(event.target.value))
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          />
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.maxRetries")}
+                          <input
+                            type="number"
+                            min={0}
+                            max={10}
+                            value={scheduleMaxRetries}
+                            onChange={(event) =>
+                              setScheduleMaxRetries(Number(event.target.value))
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          />
+                        </label>
+                        <label className="grid min-w-0 gap-1 text-xs font-bold text-omi-text-muted">
+                          {t("settings.dispatch.retryIntervalSeconds")}
+                          <input
+                            type="number"
+                            min={10}
+                            max={3600}
+                            value={scheduleRetryIntervalSeconds}
+                            onChange={(event) =>
+                              setScheduleRetryIntervalSeconds(Number(event.target.value))
+                            }
+                            className="h-9 min-w-0 w-full border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text outline-none focus:border-omi-accent"
+                          />
+                        </label>
+                      </div>
+                    </details>
                     <p className="text-xs leading-5 text-omi-text-muted">
                       {t("settings.dispatch.scheduleDayOfWeekHint")}
                     </p>
@@ -1122,7 +1445,7 @@ export default function DispatchSettingsDialog({
                     </div>
                   </div>
 
-                  <div className="mt-4 grid gap-2">
+                  <div className="mt-4 grid min-w-0 gap-2">
                     {schedules.length === 0 ? (
                       <StateSurface
                         title={t("settings.dispatch.noSchedules")}
@@ -1134,7 +1457,7 @@ export default function DispatchSettingsDialog({
                         <div
                           key={schedule.id}
                           className={[
-                            "grid grid-cols-[minmax(0,1fr)_auto] border bg-omi-surface-subtle",
+                            "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] overflow-hidden border bg-omi-surface-subtle",
                             editingScheduleId === schedule.id
                               ? "border-omi-accent"
                               : "border-omi-border-subtle",
@@ -1163,17 +1486,29 @@ export default function DispatchSettingsDialog({
                               >
                                 {!schedule.enabled
                                   ? t("settings.dispatch.scheduleDisabledLabel")
-                                  : schedule.last_error_at
-                                    ? t("settings.dispatch.status.error")
+                                  : schedule.last_status && schedule.last_status !== "never_run"
+                                    ? t(`settings.dispatch.status.${schedule.last_status}`)
                                     : t("settings.dispatch.scheduleEnabledLabel")}
                               </span>
                             </div>
-                            <div className="mt-2 text-xs leading-5 text-omi-text-muted">
-                              {schedule.last_success_at
-                                ? t("settings.dispatch.lastRun", {
-                                    time: formatDateTime(schedule.last_success_at),
-                                  })
-                                : t("settings.dispatch.neverRun")}
+                            <div className="mt-2 grid gap-0.5 text-xs leading-5 text-omi-text-muted">
+                              <div>
+                                {t("settings.dispatch.nextRun", {
+                                  time: formatDateTime(schedule.next_run_at ?? null),
+                                })}
+                              </div>
+                              <div>
+                                {t("settings.dispatch.lastQueued", {
+                                  time: formatDateTime(schedule.last_queued_at ?? null),
+                                })}
+                              </div>
+                              <div>
+                                {t("settings.dispatch.lastSent", {
+                                  time: formatDateTime(
+                                    schedule.last_sent_at ?? schedule.last_success_at
+                                  ),
+                                })}
+                              </div>
                             </div>
                             {schedule.last_error_message ? (
                               <div className="mt-1 break-words text-xs leading-5 text-omi-danger">
@@ -1181,20 +1516,114 @@ export default function DispatchSettingsDialog({
                               </div>
                             ) : null}
                           </button>
-                          <button
-                            type="button"
-                            disabled={runningScheduleId === schedule.id}
-                            className="m-2 h-8 self-start border border-omi-border bg-omi-surface px-2 text-xs font-bold text-omi-text-muted hover:border-omi-control disabled:cursor-not-allowed disabled:opacity-50"
-                            onClick={() => void runScheduleNow(schedule.id)}
-                          >
-                            {runningScheduleId === schedule.id
-                              ? t("settings.dispatch.sending")
-                              : t("settings.dispatch.runSchedule")}
-                          </button>
+                          <div className="m-2 grid self-start gap-2">
+                            <button
+                              type="button"
+                              disabled={runningScheduleId === schedule.id}
+                              className="h-8 border border-omi-border bg-omi-surface px-2 text-xs font-bold text-omi-text-muted hover:border-omi-control disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() => void runScheduleNow(schedule.id)}
+                            >
+                              {runningScheduleId === schedule.id
+                                ? t("settings.dispatch.sending")
+                                : t("settings.dispatch.runSchedule")}
+                            </button>
+                            <button
+                              type="button"
+                              className="h-8 border border-omi-border bg-omi-surface px-2 text-xs font-bold text-omi-text-muted hover:border-omi-control"
+                              onClick={() => void toggleScheduleEnabled(schedule)}
+                            >
+                              {schedule.enabled
+                                ? t("settings.dispatch.pauseSchedule")
+                                : t("settings.dispatch.resumeSchedule")}
+                            </button>
+                          </div>
                         </div>
                       ))
                     )}
                   </div>
+
+                  {editingScheduleId ? (
+                    <div className="mt-5 border-t border-omi-border-subtle pt-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <h4 className="text-xs font-black uppercase tracking-[0.12em] text-omi-text-muted">
+                          {t("settings.dispatch.runHistory")}
+                        </h4>
+                        <button
+                          type="button"
+                          className="h-7 border border-omi-border bg-omi-surface px-2 text-xs font-bold text-omi-text-muted hover:border-omi-control"
+                          onClick={() => void refreshScheduleRuns(editingScheduleId)}
+                        >
+                          {t("settings.dispatch.refresh")}
+                        </button>
+                      </div>
+                      <div className="mt-3 grid min-w-0 gap-2">
+                        {scheduleRunsState === "loading" ? (
+                          <div className="omi-skeleton h-20 w-full" />
+                        ) : scheduleRuns.length === 0 ? (
+                          <StateSurface
+                            title={t("settings.dispatch.noRunHistory")}
+                            tone="empty"
+                            compact
+                          />
+                        ) : (
+                          scheduleRuns.map((run) => (
+                            <div
+                              key={run.id}
+                              className="min-w-0 overflow-hidden border border-omi-border-subtle bg-omi-surface px-3 py-2"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-omi-text">
+                                    {t(`settings.dispatch.triggerTypes.${run.trigger_type}`)} · #{run.id}
+                                  </div>
+                                  <div className="mt-1 text-xs text-omi-text-muted">
+                                    {formatDateTime(run.scheduled_for)} · {t(
+                                      "settings.dispatch.attemptSummary",
+                                      {
+                                        readiness: run.readiness_check_count,
+                                        delivery: run.delivery_attempt_count,
+                                        maximum: run.max_delivery_attempts,
+                                      }
+                                    )}
+                                  </div>
+                                </div>
+                                <span
+                                  className={[
+                                    "shrink-0 text-xs font-black uppercase",
+                                    runStatusClassName(run.status),
+                                  ].join(" ")}
+                                >
+                                  {t(`settings.dispatch.status.${run.status}`)}
+                                </span>
+                              </div>
+                              {readinessReason(run) ? (
+                                <div className="mt-2 break-words text-xs leading-5 text-omi-text-muted">
+                                  {readinessReason(run)}
+                                </div>
+                              ) : null}
+                              {run.error_message ? (
+                                <div className="mt-1 break-words text-xs leading-5 text-omi-danger">
+                                  {run.error_code ? `${run.error_code}: ` : ""}
+                                  {run.error_message}
+                                </div>
+                              ) : null}
+                              {run.retryable &&
+                              ["error", "skipped", "cancelled"].includes(run.status) ? (
+                                <button
+                                  type="button"
+                                  disabled={retryingRunId === run.id}
+                                  className="mt-2 h-7 border border-omi-border bg-omi-surface px-2 text-xs font-bold text-omi-text-muted hover:border-omi-control disabled:opacity-50"
+                                  onClick={() => void retryScheduleRun(run.id)}
+                                >
+                                  {t("settings.dispatch.retryRun")}
+                                </button>
+                              ) : null}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="mt-5 flex items-center justify-between gap-3">
@@ -1219,7 +1648,7 @@ export default function DispatchSettingsDialog({
                     {t("settings.dispatch.refresh")}
                   </button>
                 </div>
-                <div className="mt-3 grid gap-2">
+                <div className="mt-3 grid min-w-0 gap-2">
                   {deliveries.length === 0 ? (
                     <StateSurface
                       title={t("settings.dispatch.noHistory")}
@@ -1230,9 +1659,9 @@ export default function DispatchSettingsDialog({
                     deliveries.map((delivery) => (
                       <div
                         key={delivery.id}
-                        className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2"
+                        className="min-w-0 overflow-hidden border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2"
                       >
-                        <div className="flex items-start justify-between gap-3">
+                        <div className="flex min-w-0 items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="truncate text-sm font-bold text-omi-text">
                               {delivery.subject}

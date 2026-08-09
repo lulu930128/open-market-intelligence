@@ -15,4 +15,7 @@ TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE = (
     "scheduler.tw_broker_branch_market_refresh"
 )
 WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE = "watchlist.scheduler.radar_snapshot"
+WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE = (
+    "watchlist.radar_v2.outcome_reconcile"
+)
 CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE = "cross_market.context_refresh"

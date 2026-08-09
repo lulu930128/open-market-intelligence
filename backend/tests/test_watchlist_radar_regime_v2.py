@@ -99,6 +99,10 @@ class WatchlistRadarRegimeV2Tests(unittest.TestCase):
         partial = classify_market_regime(
             market_snapshot={
                 "quality_status": "partial",
+                "breadth_status": "partial",
+                "breadth_session_phase": "regular",
+                "breadth_contract_version": "tw.market.breadth.v2",
+                "breadth_decision_usable": False,
                 "breadth_scope": "registered_universe",
                 "advance_count": 800,
                 "decline_count": 200,
@@ -109,6 +113,10 @@ class WatchlistRadarRegimeV2Tests(unittest.TestCase):
         ready = classify_market_regime(
             market_snapshot={
                 "quality_status": "ready",
+                "breadth_status": "ready",
+                "breadth_session_phase": "post_close",
+                "breadth_contract_version": "tw.market.breadth.v2",
+                "breadth_decision_usable": True,
                 "breadth_scope": "full_market",
                 "advance_count": 800,
                 "decline_count": 200,
@@ -126,6 +134,28 @@ class WatchlistRadarRegimeV2Tests(unittest.TestCase):
         self.assertEqual(ready["market_regime"], "risk_on")
         self.assertGreater(ready["market_regime_clarity"], 0.8)
 
+    def test_market_regime_rejects_preopen_or_legacy_breadth(self) -> None:
+        result = classify_market_regime(
+            market_snapshot={
+                "quality_status": "ready",
+                "breadth_status": "pending",
+                "breadth_session_phase": "preopen",
+                "breadth_contract_version": "legacy_unverified",
+                "breadth_decision_usable": False,
+                "breadth_scope": "full_market",
+                "advance_count": 900,
+                "decline_count": 100,
+                "total_count": 1000,
+                "index_change_pct": 2.0,
+            }
+        )
+
+        self.assertEqual(result["market_regime"], "insufficient")
+        self.assertEqual(result["market_regime_clarity"], 0)
+        codes = {item["code"] for item in result["limitations"]}
+        self.assertIn("legacy_market_breadth_contract", codes)
+        self.assertIn("market_breadth_regular_session_pending", codes)
+
     def test_instrument_and_market_regimes_remain_separate(self) -> None:
         instrument = classify_instrument_regime(
             indicator_snapshot={
@@ -139,6 +169,10 @@ class WatchlistRadarRegimeV2Tests(unittest.TestCase):
         market = classify_market_regime(
             market_snapshot={
                 "quality_status": "ready",
+                "breadth_status": "ready",
+                "breadth_session_phase": "post_close",
+                "breadth_contract_version": "tw.market.breadth.v2",
+                "breadth_decision_usable": True,
                 "breadth_scope": "full_market",
                 "advance_count": 200,
                 "decline_count": 800,

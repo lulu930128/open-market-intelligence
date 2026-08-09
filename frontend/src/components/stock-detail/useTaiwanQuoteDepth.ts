@@ -1,11 +1,16 @@
 "use client";
 
 import { fetchJson } from "@/lib/api";
+import { msUntilIsoTime } from "@/lib/marketCalendarStatus";
 import { TAIWAN_INTRADAY_REFRESH_MS } from "@/lib/taiwanMarketTime";
-import type { TaiwanStockQuoteDepthRead } from "@/types/market";
+import type {
+  TaiwanQuoteContractReplayRead,
+  TaiwanStockQuoteDepthRead,
+} from "@/types/market";
 import { useEffect, useRef, useState } from "react";
 
 type QuoteDepthLoadState = "idle" | "loading" | "success" | "error";
+type QuoteReplayLoadState = "idle" | "loading" | "success" | "error";
 
 const quoteDepthLivePhases = new Set([
   "preopen_auction",
@@ -13,10 +18,22 @@ const quoteDepthLivePhases = new Set([
   "closing_auction",
 ]);
 
-function quoteDepthRefreshDelayMs(quoteDepth: TaiwanStockQuoteDepthRead | null) {
-  return quoteDepth && quoteDepthLivePhases.has(quoteDepth.session_phase)
+export function quoteDepthRefreshDelayMs(
+  quoteDepth: TaiwanStockQuoteDepthRead | null,
+  now = new Date()
+) {
+  const regularDelay = quoteDepth && quoteDepthLivePhases.has(quoteDepth.session_phase)
     ? TAIWAN_INTRADAY_REFRESH_MS
     : 60_000;
+  const transitionAt = quoteDepth?.presentation_session_transition_at;
+  const transitionAtMs = transitionAt ? Date.parse(transitionAt) : Number.NaN;
+  const transitionDelay = msUntilIsoTime(transitionAt, now);
+
+  return Number.isFinite(transitionAtMs) &&
+    transitionAtMs > now.getTime() &&
+    transitionDelay !== null
+    ? Math.min(regularDelay, transitionDelay)
+    : regularDelay;
 }
 
 export function useTaiwanQuoteDepth({
@@ -28,6 +45,10 @@ export function useTaiwanQuoteDepth({
 }) {
   const [quoteDepth, setQuoteDepth] = useState<TaiwanStockQuoteDepthRead | null>(null);
   const [loadState, setLoadState] = useState<QuoteDepthLoadState>("idle");
+  const [quoteReplay, setQuoteReplay] =
+    useState<TaiwanQuoteContractReplayRead | null>(null);
+  const [replayLoadState, setReplayLoadState] =
+    useState<QuoteReplayLoadState>("idle");
   const activeStockIdRef = useRef(stockId);
 
   useEffect(() => {
@@ -39,6 +60,8 @@ export function useTaiwanQuoteDepth({
       const timer = window.setTimeout(() => {
         setQuoteDepth(null);
         setLoadState("idle");
+        setQuoteReplay(null);
+        setReplayLoadState("idle");
       }, 0);
       return () => window.clearTimeout(timer);
     }
@@ -48,6 +71,23 @@ export function useTaiwanQuoteDepth({
     let requestInFlight = false;
     let latestQuoteDepth: TaiwanStockQuoteDepthRead | null = null;
     const requestedStockId = stockId;
+
+    async function loadReplay() {
+      setQuoteReplay(null);
+      setReplayLoadState("loading");
+      try {
+        const replay = await fetchJson<TaiwanQuoteContractReplayRead>(
+          `/api/market/quote-depth/${requestedStockId}/replay`
+        );
+        if (cancelled || activeStockIdRef.current !== requestedStockId) return;
+        setQuoteReplay(replay);
+        setReplayLoadState("success");
+      } catch {
+        if (cancelled || activeStockIdRef.current !== requestedStockId) return;
+        setQuoteReplay(null);
+        setReplayLoadState("error");
+      }
+    }
 
     function clearRefreshTimer() {
       if (refreshTimer !== undefined) {
@@ -100,6 +140,7 @@ export function useTaiwanQuoteDepth({
     }
 
     void load(true).then(scheduleRefresh);
+    void loadReplay();
 
     return () => {
       cancelled = true;
@@ -109,6 +150,8 @@ export function useTaiwanQuoteDepth({
 
   return {
     quoteDepth,
+    quoteReplay,
     loadState,
+    replayLoadState,
   };
 }

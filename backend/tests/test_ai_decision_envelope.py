@@ -163,6 +163,29 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertNotIn("analysis", response)
         self.assertNotIn("result", response)
 
+    def test_v3_non_decision_intent_keeps_technical_evidence_out_of_decision(
+        self,
+    ) -> None:
+        source = _v2_response()
+        source["analysis"]["question_intent"] = "data_freshness"
+        source["analysis"]["decision_contract"]["intent"] = "data_freshness"
+
+        response = decision_envelope.build(source)
+
+        self.assertFalse(response["status"]["readiness"]["decision_required"])
+        self.assertEqual(response["decision"]["action_plan"], [])
+        self.assertEqual(response["decision"]["scenarios"], [])
+        self.assertEqual(response["decision"]["counter_evidence"], [])
+        self.assertEqual(response["decision"]["risks"], [])
+        self.assertEqual(response["decision"]["price_levels"], {})
+        self.assertEqual(response["decision"]["position"], {})
+        self.assertEqual(
+            response["evidence"]["result"]["data"]["compact"]["slots"][
+                "technical"
+            ]["status"],
+            "ready",
+        )
+
     def test_stale_required_domain_blocks_decision_and_marks_slots(self) -> None:
         response = _v2_response(
             freshness_by_domain={
@@ -1175,10 +1198,25 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         response["query_plan"]["selection"] = selection
         response["query_plan"]["target_type"] = "stock"
 
-        canonical = decision_envelope.for_requested_contract(
-            response,
-            requested_contract_version="omi.decision.v4",
-        )
+        with patch(
+            "app.ai.realtime_contract.build_taiwan_calendar_status",
+            return_value={
+                "date": "2026-07-31",
+                "is_trading_day": True,
+                "phase": "post_close",
+                "timezone": "Asia/Taipei",
+                "previous_trading_day": "2026-07-30",
+                "release_windows": {
+                    "market_daily_price": {
+                        "expected_trade_date": "2026-07-31",
+                    }
+                },
+            },
+        ):
+            canonical = decision_envelope.for_requested_contract(
+                response,
+                requested_contract_version="omi.decision.v4",
+            )
 
         quality = canonical["evidence"]["quality"]
         selected_freshness = canonical["evidence"]["data"][
@@ -1213,7 +1251,7 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertTrue(selected_freshness["is_current"])
         self.assertEqual(
             selected_freshness["is_current_semantics"],
-            "selected_required_capabilities_current",
+            "selected_required_capabilities_fully_usable_and_current",
         )
         self.assertEqual(quote_status["trade_date"], "2026-07-31")
         self.assertEqual(
@@ -2262,7 +2300,7 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertEqual(fill_plan["actions"], [])
         quote_deferred = next(
             item
-            for item in fill_plan["deferred_actions"]
+            for item in fill_plan["already_attempted_actions"]
             if item["capability"] == "quote.snapshot"
         )
         self.assertEqual(
@@ -2275,6 +2313,14 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         )
         self.assertFalse(quote_deferred["refresh_possible_now"])
         self.assertTrue(quote_deferred["refresh_requires_market_open"])
+        refresh = canonical["execution"]["refresh_reconciliation"]
+        quote_refresh = refresh["capabilities"]["quote.snapshot"]
+        self.assertTrue(quote_refresh["primary_reader_attempted"])
+        self.assertFalse(quote_refresh["provider_fetch_attempted"])
+        self.assertEqual(
+            quote_refresh["not_attempted_reason"],
+            "primary_reader_completed_without_tracked_provider_fetch",
+        )
         quote_manifest = next(
             item
             for item in canonical["evidence"]["manifest"]["capabilities"]
@@ -2412,6 +2458,15 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertEqual(quote_quality["status"], "stale")
         self.assertEqual(quote_quality["status_class"], "blocked")
         self.assertFalse(quote_quality["decision_usable"])
+        selected_freshness = canonical["evidence"]["data"]["data.freshness"]
+        self.assertNotEqual(selected_freshness["status"], "current")
+        self.assertFalse(selected_freshness["is_current"])
+        self.assertEqual(selected_freshness["temporal_status"], "stale")
+        self.assertEqual(selected_freshness["usability_status"], "blocked")
+        self.assertIn(
+            "quote.snapshot",
+            selected_freshness["facts_unusable"],
+        )
         quote_manifest = next(
             item
             for item in canonical["evidence"]["manifest"]["capabilities"]

@@ -26,7 +26,10 @@ import {
 import { timeframeLabel, type TranslationFunction } from "@/i18n";
 import type {
   ChartPoint,
+  IntradayCurrentObservation,
   IntradayHistoryResponse,
+  IntradayPriceDiagnostics,
+  IntradayTrendCapabilities,
   IntradayTrendPoint,
   IntradayTrendResponse,
   OhlcChartResponse,
@@ -42,6 +45,12 @@ const chartBarsByTimeframe: Record<ChartTimeframe, number> = {
   monthly: 132,
 };
 const dailyIndicatorLimit = 220;
+const defaultIntradayCapabilities: IntradayTrendCapabilities = {
+  supports_volume: true,
+  supports_vwap: true,
+  supports_price_limit: true,
+  supports_quote_depth: true,
+};
 
 type PublishDataStatus = (status: {
   level?: DataStatusLevel;
@@ -137,7 +146,14 @@ export function useTaiwanStockChartData({
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("unavailable");
+  const [todayTradeDate, setTodayTradeDate] = useState<string | null>(null);
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
+  const [todayCapabilities, setTodayCapabilities] =
+    useState<IntradayTrendCapabilities>(defaultIntradayCapabilities);
+  const [todayCurrentObservation, setTodayCurrentObservation] =
+    useState<IntradayCurrentObservation | null>(null);
+  const [todayPriceDiagnostics, setTodayPriceDiagnostics] =
+    useState<IntradayPriceDiagnostics | null>(null);
   const [professionalIntradayData, setProfessionalIntradayData] = useState<ChartPoint[]>([]);
   const [professionalIntradayStockId, setProfessionalIntradayStockId] =
     useState<string | null>(null);
@@ -193,7 +209,11 @@ export function useTaiwanStockChartData({
       setTodayTrend([]);
       setTodayPreviousClose(null);
       setTodaySource("unavailable");
+      setTodayTradeDate(null);
       setTodayUpdatedAt(null);
+      setTodayCapabilities(defaultIntradayCapabilities);
+      setTodayCurrentObservation(null);
+      setTodayPriceDiagnostics(null);
       setIndicatorData([]);
       setLoadState("idle");
       setErrorMessage(null);
@@ -230,6 +250,8 @@ export function useTaiwanStockChartData({
         setLoadState("loading");
         setErrorMessage(null);
         setTodayUpdatedAt(null);
+        setTodayCapabilities(defaultIntradayCapabilities);
+        setTodayCurrentObservation(null);
       }
 
       try {
@@ -243,10 +265,46 @@ export function useTaiwanStockChartData({
         setTodayTrend(today.points);
         setTodayPreviousClose(today.previous_close);
         setTodaySource(today.source);
+        setTodayTradeDate(today.trade_date ?? null);
+        setTodayCapabilities(today.capabilities ?? defaultIntradayCapabilities);
+        setTodayCurrentObservation(today.current_observation ?? null);
         const latestPoint = today.points[today.points.length - 1] ?? null;
-        setTodayUpdatedAt(latestPoint ? formatDateTime(latestPoint.time) : null);
+        setTodayUpdatedAt(
+          today.current_observation?.observed_at
+            ? formatDateTime(today.current_observation.observed_at)
+            : latestPoint
+              ? formatDateTime(latestPoint.time)
+              : null
+        );
+        setTodayPriceDiagnostics(
+          today.current_trade_available !== undefined ||
+            today.history_price_source !== undefined
+            ? {
+                history_price_source: today.history_price_source ?? null,
+                latest_history_time: today.latest_history_time ?? null,
+                latest_history_price: today.latest_history_price ?? null,
+                latest_actual_trade_time: today.latest_actual_trade_time ?? null,
+                latest_actual_trade_price: today.latest_actual_trade_price ?? null,
+                current_price_source: today.current_price_source ?? null,
+                lag_seconds: today.lag_seconds ?? null,
+                current_trade_available: today.current_trade_available ?? false,
+                current_trade_unavailable_reason:
+                  today.current_trade_unavailable_reason ?? null,
+                current_price_applied_to_history:
+                  today.current_price_applied_to_history ?? false,
+              }
+            : null
+        );
         setLoadState("success");
         setErrorMessage(null);
+        if (today.warnings?.length) {
+          publishDataStatus({
+            level: "warning",
+            title: timeframeLabel(tRef.current, "today"),
+            message: today.warnings.join("；"),
+            source: today.source,
+          });
+        }
       } catch (error) {
         if (cancelled) return;
         setLoadState("error");
@@ -551,6 +609,14 @@ export function useTaiwanStockChartData({
         setChartStockId(effectStockId);
         setChartTimeframe(requestedTimeframe);
         setLoadState("success");
+        if (ohlc.warnings?.length) {
+          publishDataStatus({
+            level: "warning",
+            title: timeframeLabel(tRef.current, requestedTimeframe),
+            message: ohlc.warnings.join("；"),
+            source: "index_ohlc",
+          });
+        }
 
         if (!isIndexProduct) {
           void maybeQueueChartHistoryBackfill(effectStockId, requestedTimeframe, ohlc);
@@ -640,7 +706,11 @@ export function useTaiwanStockChartData({
       professionalIntradayInterval,
       professionalIntradayStockId,
       todayPreviousClose,
+      todayCapabilities,
+      todayCurrentObservation,
+      todayPriceDiagnostics,
       todaySource,
+      todayTradeDate,
       todayTrend,
       todayUpdatedAt,
     },

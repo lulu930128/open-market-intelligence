@@ -241,13 +241,14 @@ def _market_overview_envelope_with_industry_codes() -> dict:
 
 
 class FakeSender:
-    def send(self, *, recipients, subject, body_text, body_html):
+    def send(self, *, recipients, subject, body_text, body_html, message_id=None):
         return {
             "sent_count": len(list(recipients)),
             "requested_count": len(list(recipients)),
             "subject": subject,
             "body_text_length": len(body_text),
             "body_html_length": len(body_html),
+            "message_id": message_id,
         }
 
 
@@ -299,6 +300,8 @@ class DispatchTests(unittest.TestCase):
                     template_key="market_overview",
                     scope_type="market",
                     scope_id="tw",
+                    readiness_policy="wait_until_ready",
+                    readiness_profile="tw_preopen",
                 ),
             )
 
@@ -594,8 +597,7 @@ class DispatchTests(unittest.TestCase):
     def test_due_schedule_queues_once_per_run_key(self) -> None:
         with dispatch_db_session() as db, patch.object(
             dispatch_service.job_service,
-            "enqueue_job",
-            side_effect=_fake_enqueue_job,
+            "submit_job_task",
         ):
             group = _recipient_group(db)
             schedule = dispatch_service.create_schedule(
@@ -612,6 +614,9 @@ class DispatchTests(unittest.TestCase):
                 ),
             )
             now = datetime(2026, 7, 1, 8, 55, tzinfo=ZoneInfo("Asia/Taipei"))
+            saved_schedule = dispatch_service.get_schedule(db=db, schedule_id=schedule["id"])
+            saved_schedule.next_run_at = now.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+            db.commit()
 
             first = dispatch_service.enqueue_due_schedules(db=db, now=now)
             second = dispatch_service.enqueue_due_schedules(db=db, now=now)
@@ -623,15 +628,14 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(first["error_count"], 0)
         self.assertEqual(second["queued_count"], 0)
         self.assertEqual(delivery_count, 1)
-        self.assertEqual(saved_schedule.last_run_key, "2026-07-01 08:55 Asia/Taipei")
+        self.assertEqual(saved_schedule.last_run_key, "2026-07-01T00:55:00Z")
         self.assertIsNotNone(saved_schedule.last_delivery_id)
         self.assertIsNotNone(saved_schedule.last_job_run_id)
 
     def test_run_schedule_now_queues_delivery_without_consuming_timed_run(self) -> None:
         with dispatch_db_session() as db, patch.object(
             dispatch_service.job_service,
-            "enqueue_job",
-            side_effect=_fake_enqueue_job,
+            "submit_job_task",
         ):
             group = _recipient_group(db)
             schedule = dispatch_service.create_schedule(
@@ -652,9 +656,17 @@ class DispatchTests(unittest.TestCase):
             saved_schedule = dispatch_service.get_schedule(db=db, schedule_id=schedule["id"])
 
         self.assertEqual(result["status"], "queued")
+        self.assertEqual(
+            result["run"]["schedule_snapshot"]["readiness"]["policy"],
+            "immediate",
+        )
+        self.assertEqual(
+            result["run"]["schedule_snapshot"]["manual_policy_override"],
+            "immediate",
+        )
         self.assertEqual(result["job"]["job_type"], "dispatch.mail_delivery")
         self.assertEqual(result["delivery"]["recipient_group_id"], group["id"])
-        self.assertTrue(saved_schedule.last_run_key.startswith("manual:"))
+        self.assertIsNone(saved_schedule.last_run_key)
 
 
 if __name__ == "__main__":

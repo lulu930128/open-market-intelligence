@@ -17,10 +17,10 @@ from app.db.models import (
     WatchlistItem,
     utc_now,
 )
-from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import TAIWAN_TZ, taiwan_market_session_phase
 
 
-INTRADAY_STATE_VERSION = "tw.intraday_stock_state.v1"
+INTRADAY_STATE_VERSION = "tw.intraday_stock_state.v2"
 INTRADAY_SCREENING_VERSION = "tw.screening.intraday.v2"
 HOT_GROUPS_VERSION = "tw.market.hot_groups.v1"
 GROUP_SNAPSHOT_VERSION = "tw.market.group_snapshot.v1"
@@ -220,8 +220,32 @@ def persist_taiwan_intraday_stock_states(
             trade_date=trade_date,
         )
         current_price = _number(raw.get("current_price"))
+        has_actual_trade = bool(
+            raw.get("has_actual_trade")
+            if raw.get("has_actual_trade") is not None
+            else current_price is not None
+        )
+        price_as_of = _aware_taipei(raw.get("price_as_of"))
+        if has_actual_trade and price_as_of is None:
+            price_as_of = event_time
+        price_semantics = str(
+            raw.get("price_semantics")
+            or ("actual_trade" if has_actual_trade else "unavailable")
+        )
+        price_source = str(raw.get("price_source") or "") or None
+        session_phase = str(
+            raw.get("market_session")
+            or raw.get("session_phase")
+            or taiwan_market_session_phase(event_time)
+        )
+        decision_usable = bool(
+            has_actual_trade
+            and current_price is not None
+            and price_as_of is not None
+            and session_phase in {"regular", "closing_auction", "post_close"}
+        )
         minute_time = event_time.replace(second=0, microsecond=0)
-        if current_price is not None:
+        if decision_usable:
             current_sample = {
                 "time": minute_time.isoformat(),
                 "price": current_price,
@@ -236,9 +260,9 @@ def persist_taiwan_intraday_stock_states(
             )[-32:]
 
         previous_close = _number(raw.get("previous_close"))
-        open_price = _number(raw.get("open_price"))
-        high_price = _number(raw.get("high_price"))
-        low_price = _number(raw.get("low_price"))
+        open_price = _number(raw.get("open_price")) if has_actual_trade else None
+        high_price = _number(raw.get("high_price")) if has_actual_trade else None
+        low_price = _number(raw.get("low_price")) if has_actual_trade else None
         session_key = (market, stock_id, trade_date)
         session_high_candidates = [
             value
@@ -271,7 +295,12 @@ def persist_taiwan_intraday_stock_states(
         if (
             existing is not None
             and _aware_taipei(existing.event_time) == event_time
+            and _aware_taipei(existing.price_as_of) == price_as_of
             and existing.current_price == current_price
+            and existing.price_semantics == price_semantics
+            and existing.has_actual_trade == has_actual_trade
+            and existing.session_phase == session_phase
+            and existing.state_contract_version == INTRADAY_STATE_VERSION
             and existing.cumulative_volume_lots == cumulative_volume_lots
             and existing.high_price == high_price
             and existing.low_price == low_price
@@ -289,14 +318,16 @@ def persist_taiwan_intraday_stock_states(
             else None
         )
         freshness_status = _freshness_status(
-            event_time,
+            price_as_of or event_time,
             now=checked_at,
         )
         quality_status = (
             "ready"
-            if current_price is not None and previous_close is not None
+            if decision_usable and previous_close is not None
             else "partial"
-            if current_price is not None
+            if has_actual_trade
+            else "pending"
+            if session_phase == "preopen"
             else "missing"
         )
         values = {
@@ -305,6 +336,23 @@ def persist_taiwan_intraday_stock_states(
             "stock_id": stock_id,
             "trade_date": trade_date,
             "event_time": event_time,
+            "snapshot_as_of": event_time,
+            "price_as_of": price_as_of,
+            "price_semantics": price_semantics,
+            "price_source": price_source,
+            "has_actual_trade": has_actual_trade,
+            "indicative_match_available": bool(
+                raw.get("indicative_match_available")
+            ),
+            "indicative_match_price": _number(
+                raw.get("indicative_match_price")
+            ),
+            "indicative_match_volume_lots": _int(
+                raw.get("indicative_match_volume_lots")
+            ),
+            "session_phase": session_phase,
+            "state_contract_version": INTRADAY_STATE_VERSION,
+            "decision_usable": decision_usable,
             "current_price": current_price,
             "previous_close": previous_close,
             "open_price": open_price,
@@ -357,7 +405,9 @@ def persist_taiwan_intraday_stock_states(
             "freshness_status": freshness_status,
             "quality_status": quality_status,
             "trade_value_semantics": (
-                "estimated_current_price_x_cumulative_volume_lots"
+                "estimated_actual_trade_price_x_cumulative_volume_lots"
+                if decision_usable and estimated_trade_value is not None
+                else "unavailable"
             ),
             "source": str(
                 raw.get("source")
@@ -438,6 +488,12 @@ def build_tw_intraday_screening_snapshot(
             StockMaster.stock_id == TaiwanIntradayStockState.stock_id,
         )
         .filter(TaiwanIntradayStockState.market.in_(markets))
+        .filter(
+            TaiwanIntradayStockState.state_contract_version
+            == INTRADAY_STATE_VERSION
+        )
+        .filter(TaiwanIntradayStockState.has_actual_trade.is_(True))
+        .filter(TaiwanIntradayStockState.decision_usable.is_(True))
         .filter(StockMaster.instrument_type == "stock")
         .filter(StockMaster.is_active.is_(True))
     )
@@ -554,6 +610,14 @@ def build_tw_intraday_screening_snapshot(
             "vwap_deviation_pct": state.vwap_deviation_pct,
             "order_book_imbalance": state.order_book_imbalance,
             "event_time": state.event_time,
+            "snapshot_as_of": state.snapshot_as_of,
+            "price_as_of": state.price_as_of,
+            "price_semantics": state.price_semantics,
+            "price_source": state.price_source,
+            "has_actual_trade": state.has_actual_trade,
+            "session_phase": state.session_phase,
+            "state_contract_version": state.state_contract_version,
+            "decision_usable": state.decision_usable,
             "price_snapshot_id": (
                 f"{state.market}:{state.stock_id}:{event_time.isoformat()}"
                 if event_time is not None
@@ -760,6 +824,12 @@ def build_tw_intraday_group_snapshots(
     latest_state_by_stock: dict[str, TaiwanIntradayStockState] = {}
     for stock, state in universe_rows:
         if state is None:
+            continue
+        if (
+            state.state_contract_version != INTRADAY_STATE_VERSION
+            or not state.has_actual_trade
+            or not state.decision_usable
+        ):
             continue
         stock_id = str(stock.stock_id)
         existing = latest_state_by_stock.get(stock_id)

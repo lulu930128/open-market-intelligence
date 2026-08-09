@@ -8,6 +8,7 @@ import {
 import {
   TAIWAN_SESSION_END_MINUTES,
   TAIWAN_SESSION_START_MINUTES,
+  getTaipeiDateKey,
   getTaipeiMinutesOfDay,
   isTaiwanRegularSessionPoint,
 } from "@/lib/taiwanMarketTime";
@@ -39,6 +40,7 @@ export function aggregateProfessionalIntradayBars(
     includePostCloseSnapshot?: boolean;
     includeVolume?: boolean;
     priceOnly?: boolean;
+    tradeDate?: string | null;
   } = {}
 ): ChartPoint[] {
   const buckets = new Map<number, IntradayTrendPoint[]>();
@@ -46,12 +48,27 @@ export function aggregateProfessionalIntradayBars(
     .filter((point) => finiteNumber(point.price))
     .slice()
     .sort((left, right) => intradayTimeMs(left.time) - intradayTimeMs(right.time));
-  const regularSessionPoints = sortedPoints.filter((point) =>
+  const pointDateKey = (point: IntradayTrendPoint) => {
+    const value = new Date(point.time);
+    return Number.isNaN(value.getTime()) ? null : getTaipeiDateKey(value);
+  };
+  const requestedTradeDate = options.tradeDate?.slice(0, 10) ?? null;
+  const targetTradeDate =
+    requestedTradeDate ??
+    [...sortedPoints]
+      .reverse()
+      .map(pointDateKey)
+      .find((value): value is string => value !== null) ??
+    null;
+  const scopedPoints = targetTradeDate
+    ? sortedPoints.filter((point) => pointDateKey(point) === targetTradeDate)
+    : [];
+  const regularSessionPoints = scopedPoints.filter((point) =>
     isTaiwanRegularSessionPoint(point.time)
   );
   const lastRegularPoint = regularSessionPoints[regularSessionPoints.length - 1] ?? null;
   const postCloseSnapshot = options.includePostCloseSnapshot
-    ? [...sortedPoints]
+    ? [...scopedPoints]
         .reverse()
         .find((point) => {
           const minutes = getTaipeiMinutesOfDay(point.time);
@@ -82,26 +99,28 @@ export function aggregateProfessionalIntradayBars(
     secondPoint !== null &&
     finiteNumber(options.discardOpeningReferencePrice) &&
     firstPoint.price === options.discardOpeningReferencePrice &&
-    firstMinutes === TAIWAN_SESSION_START_MINUTES &&
-    secondMinutes === TAIWAN_SESSION_START_MINUTES;
+    firstMinutes !== null &&
+    secondMinutes !== null &&
+    Math.floor(firstMinutes) === TAIWAN_SESSION_START_MINUTES &&
+    Math.floor(secondMinutes) === TAIWAN_SESSION_START_MINUTES;
   const aggregationPoints = shouldDiscardOpeningReference
     ? pointsWithClosingSnapshot.slice(1)
     : pointsWithClosingSnapshot;
 
   aggregationPoints.forEach((point) => {
-      const minutes = getTaipeiMinutesOfDay(point.time);
+    const minutes = getTaipeiMinutesOfDay(point.time);
 
-      if (minutes === null) return;
+    if (minutes === null) return;
 
-      const bucket =
-        TAIWAN_SESSION_START_MINUTES +
-        Math.floor((minutes - TAIWAN_SESSION_START_MINUTES) / intervalMinutes) *
-          intervalMinutes;
-      const current = buckets.get(bucket) ?? [];
+    const bucket =
+      TAIWAN_SESSION_START_MINUTES +
+      Math.floor((minutes - TAIWAN_SESSION_START_MINUTES) / intervalMinutes) *
+        intervalMinutes;
+    const current = buckets.get(bucket) ?? [];
 
-      current.push(point);
-      buckets.set(bucket, current);
-    });
+    current.push(point);
+    buckets.set(bucket, current);
+  });
 
   return Array.from(buckets.entries())
     .sort(([left], [right]) => left - right)
@@ -236,8 +255,52 @@ export function sumRecentInstitutionalNet(rows: InstitutionalTradeDailyRead[], r
   return values.reduce((total, value) => total + value, 0);
 }
 
-export function summarizeIntradayPoints(points: IntradayTrendPoint[]) {
-  const validPoints = points.filter((point) => point.price !== null && point.price !== undefined);
+export function summarizeIntradayPoints(
+  points: IntradayTrendPoint[],
+  options: {
+    discardOpeningReferencePrice?: number | null;
+    ignorePostCloseOhlc?: boolean;
+    tradeDate?: string | null;
+  } = {}
+) {
+  const requestedTradeDate = options.tradeDate?.slice(0, 10) ?? null;
+  const sortedPoints = points
+    .filter((point) => point.price !== null && point.price !== undefined)
+    .slice()
+    .sort((left, right) => intradayTimeMs(left.time) - intradayTimeMs(right.time));
+  const targetTradeDate =
+    requestedTradeDate ??
+    [...sortedPoints]
+      .reverse()
+      .map((point) => {
+        const value = new Date(point.time);
+        return Number.isNaN(value.getTime()) ? null : getTaipeiDateKey(value);
+      })
+      .find((value): value is string => value !== null) ??
+    null;
+  const scopedPoints = targetTradeDate
+    ? sortedPoints.filter((point) => {
+        const value = new Date(point.time);
+        return !Number.isNaN(value.getTime()) && getTaipeiDateKey(value) === targetTradeDate;
+      })
+    : [];
+  const firstPoint = scopedPoints[0] ?? null;
+  const secondPoint = scopedPoints[1] ?? null;
+  const shouldDiscardOpeningReference =
+    firstPoint !== null &&
+    secondPoint !== null &&
+    finiteNumber(options.discardOpeningReferencePrice) &&
+    firstPoint.price === options.discardOpeningReferencePrice &&
+    Math.floor(getTaipeiMinutesOfDay(firstPoint.time) ?? -1) ===
+      TAIWAN_SESSION_START_MINUTES &&
+    Math.floor(getTaipeiMinutesOfDay(secondPoint.time) ?? -1) ===
+      TAIWAN_SESSION_START_MINUTES;
+  const withoutOpeningReference = shouldDiscardOpeningReference
+    ? scopedPoints.slice(1)
+    : scopedPoints;
+  const validPoints = withoutOpeningReference.filter(
+    (point) => point.source_event_type !== "opening_reference"
+  );
 
   if (validPoints.length === 0) {
     return {
@@ -248,15 +311,30 @@ export function summarizeIntradayPoints(points: IntradayTrendPoint[]) {
     };
   }
 
-  const firstPoint = validPoints[0];
-  const highs = validPoints.map((point) => point.high ?? point.price);
-  const lows = validPoints.map((point) => point.low ?? point.price);
+  const sessionOpenPoint = validPoints[0];
+  const isPostClosePoint = (point: IntradayTrendPoint) => {
+    const minutes = getTaipeiMinutesOfDay(point.time);
+    return (
+      point.bar_type === "post_close_summary" ||
+      (minutes !== null && minutes > TAIWAN_SESSION_END_MINUTES)
+    );
+  };
+  const highs = validPoints.map((point) =>
+    options.ignorePostCloseOhlc && isPostClosePoint(point)
+      ? point.price
+      : point.high ?? point.price
+  );
+  const lows = validPoints.map((point) =>
+    options.ignorePostCloseOhlc && isPostClosePoint(point)
+      ? point.price
+      : point.low ?? point.price
+  );
   const volumes = validPoints
     .map((point) => point.volume)
     .filter((value): value is number => value !== null && value !== undefined);
 
   return {
-    open: firstPoint.open ?? firstPoint.price,
+    open: sessionOpenPoint.open ?? sessionOpenPoint.price,
     high: Math.max(...highs),
     low: Math.min(...lows),
     volume: volumes.length > 0 ? volumes.reduce((total, value) => total + value, 0) : null,

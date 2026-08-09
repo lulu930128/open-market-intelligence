@@ -670,6 +670,59 @@ class AiSupplementalContextTests(unittest.TestCase):
             any("expired" in warning.lower() for warning in result["warnings"])
         )
 
+    def test_unified_source_health_exposes_mixed_row_ages(self) -> None:
+        self.db.add_all(
+            [
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="quote",
+                    target="2330",
+                    provider="current-provider",
+                    status="ok",
+                    ok=True,
+                    checked_at=NOW - timedelta(minutes=5),
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="market_daily_price",
+                    target="all",
+                    provider="expired-provider",
+                    status="ok",
+                    ok=True,
+                    checked_at=NOW - timedelta(days=2),
+                ),
+            ]
+        )
+        self.db.commit()
+
+        result = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={"market": "tw", "limit": 20},
+            now=lambda: NOW,
+        )
+
+        freshness = result["data"]["freshness"]
+        entries = {
+            entry["provider"]: entry for entry in result["data"]["entries"]
+        }
+        self.assertEqual(freshness["status"], "mixed")
+        self.assertFalse(freshness["is_current"])
+        self.assertTrue(freshness["mixed_snapshot_ages"])
+        self.assertEqual(freshness["current_entry_count"], 1)
+        self.assertEqual(freshness["expired_entry_count"], 1)
+        self.assertEqual(
+            entries["current-provider"]["snapshot_lifecycle"],
+            "active_target_specific",
+        )
+        self.assertEqual(
+            entries["expired-provider"]["snapshot_lifecycle"],
+            "historical_expired",
+        )
+        self.assertGreater(
+            entries["expired-provider"]["snapshot_age_seconds"],
+            86_400,
+        )
+
     def test_unified_source_health_includes_bounded_event_and_fallback_diagnostics(self) -> None:
         self.db.add(
             SourceHealthSnapshot(
@@ -682,6 +735,10 @@ class AiSupplementalContextTests(unittest.TestCase):
                 recent_event_count=3,
                 recent_error_count=2,
                 consecutive_error_count=2,
+                latest_event_at=NOW - timedelta(hours=1),
+                latest_event_status="stale",
+                latest_event_severity="warning",
+                latest_event_message="historical stale event",
                 checked_at=NOW,
             )
         )
@@ -721,6 +778,12 @@ class AiSupplementalContextTests(unittest.TestCase):
         )
 
         entry = result["data"]["entries"][0]
+        self.assertEqual(entry["latest_event_scope"], "historical_provider_event")
+        self.assertEqual(entry["historical_latest_event_status"], "stale")
+        self.assertEqual(
+            entry["historical_latest_event_at"],
+            entry["latest_event_at"],
+        )
         self.assertEqual(entry["recent_error_count"], 2)
         self.assertEqual(entry["consecutive_error_count"], 2)
         self.assertEqual(

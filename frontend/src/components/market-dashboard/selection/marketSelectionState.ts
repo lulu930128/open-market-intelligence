@@ -51,6 +51,8 @@ export type MarketSelectionState = {
     group: WatchlistGroupNode | null;
     stockId: string | null;
     stockName: string | null;
+    market: string | null;
+    instrumentType: string;
     futuresSymbol: string | null;
   };
   us: {
@@ -207,6 +209,11 @@ export function createInitialMarketSelection(
   const usGroup = resolveInitialGroup(options.usTree, options.initialSelectedGroupId);
   const jpGroup = resolveInitialGroup(options.jpTree, options.initialSelectedGroupId);
   const krGroup = resolveInitialGroup(options.krTree, options.initialSelectedGroupId);
+  const initialTaiwanItem = options.initialSelectedStockId
+    ? options.taiwanItems.find(
+        (item) => item.stock_id === options.initialSelectedStockId
+      ) ?? null
+    : null;
 
   return {
     activeMarket: options.initialMarket,
@@ -220,6 +227,8 @@ export function createInitialMarketSelection(
       group: taiwanGroup,
       stockId: options.initialSelectedStockId,
       stockName: options.initialSelectedStockName,
+      market: initialTaiwanItem?.market ?? null,
+      instrumentType: initialTaiwanItem?.instrument_type ?? "unknown",
       futuresSymbol: options.initialSelectedFuturesSymbol,
     },
     us: {
@@ -289,6 +298,18 @@ export function applyDashboardRoute(
             ? null
             : stockItem?.stock_name ??
               (current.taiwan.stockId === route.stockId ? current.taiwan.stockName : null),
+        market:
+          route.futuresSymbol || !route.stockId
+            ? null
+            : stockItem?.market ??
+              (current.taiwan.stockId === route.stockId ? current.taiwan.market : null),
+        instrumentType:
+          route.futuresSymbol || !route.stockId
+            ? "unknown"
+            : stockItem?.instrument_type ??
+              (current.taiwan.stockId === route.stockId
+                ? current.taiwan.instrumentType
+                : "unknown"),
         futuresSymbol: route.futuresSymbol,
       },
     };
@@ -381,13 +402,27 @@ export function applyDashboardRoute(
 
 export function reconcileTaiwanExplorerSelection(
   current: MarketSelectionState,
-  tree: WatchlistGroupNode[]
+  tree: WatchlistGroupNode[],
+  items: WatchlistItemRead[]
 ) {
   const group =
     flattenGroupNodes(tree).find((candidate) => candidate.id === current.taiwan.groupId) ??
     null;
+  const item = current.taiwan.stockId
+    ? items.find((candidate) => candidate.stock_id === current.taiwan.stockId) ?? null
+    : null;
   return current.activeMarket === "tw" && group
-    ? { ...current, taiwan: { ...current.taiwan, group } }
+    ? {
+        ...current,
+        taiwan: {
+          ...current.taiwan,
+          group,
+          stockName: item?.stock_name ?? current.taiwan.stockName,
+          market: item?.market ?? current.taiwan.market,
+          instrumentType:
+            item?.instrument_type ?? current.taiwan.instrumentType,
+        },
+      }
     : current;
 }
 
