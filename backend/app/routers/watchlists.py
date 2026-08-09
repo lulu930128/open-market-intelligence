@@ -1010,6 +1010,7 @@ def persist_watchlist_group_radar_v2_active(
                 db=db,
                 radar=base_radar,
                 universe_items=calculation_universe,
+                materialize_cross_market_snapshots=True,
             )
         )
         persisted = radar_active_v2_service.persist_radar_v2_active(

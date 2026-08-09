@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     Base,
+    CrossMarketRelation,
+    CrossMarketRelationEvidence,
     MarketDailyPrice,
     RawFetchResult,
     ResourceQuoteSnapshot,
@@ -98,6 +101,67 @@ def add_fx(
         )
     )
     db.commit()
+
+
+def add_approved_adr_relation(
+    db: Session,
+    *,
+    ratio_denominator: int = 5,
+    source_url: str = "https://www.sec.gov/Archives/edgar/data/1046179/000162828026025362/tsm-20251231.htm",
+) -> CrossMarketRelation:
+    relation = CrossMarketRelation(
+        source_market="US",
+        source_instrument_type="adr",
+        source_canonical_symbol="US:TSM",
+        source_provider_symbol="TSM",
+        source_exchange="NYSE",
+        source_currency="USD",
+        target_market="TW",
+        target_instrument_type="stock",
+        target_canonical_symbol="TW:2330",
+        target_provider_symbol="2330",
+        target_exchange="TWSE",
+        target_currency="TWD",
+        relation_type="same_equity_dr",
+        relation_subtype="verified_adr",
+        bucket="direct_equivalent",
+        directionality="equivalent",
+        base_weight=Decimal("1"),
+        confidence_tier="A",
+        evidence_grade="official_primary",
+        ratio_numerator=Decimal("1"),
+        ratio_denominator=Decimal(str(ratio_denominator)),
+        listing_tier="primary",
+        valid_from=date(2026, 7, 22),
+        verified_at=datetime(2026, 7, 22, tzinfo=timezone.utc),
+        review_status="approved",
+        is_active=True,
+        version=1,
+        created_by="test",
+        reviewed_by="test",
+        reviewed_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        change_reason="test registry relation",
+    )
+    relation.evidence = [
+        CrossMarketRelationEvidence(
+            source_type="sec_filing",
+            source_grade="A",
+            source_label="TSMC 2025 Form 20-F",
+            source_url=source_url,
+            statement="One ADR represents common shares.",
+            verified_at=datetime(2026, 7, 22, tzinfo=timezone.utc),
+            content_hash="c" * 64,
+            is_primary=True,
+            review_status="approved",
+            created_by="test",
+            reviewed_by="test",
+            reviewed_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+    ]
+    db.add(relation)
+    db.commit()
+    db.refresh(relation)
+    return relation
 
 
 class AdrParityTests(unittest.TestCase):
@@ -192,6 +256,102 @@ class AdrParityTests(unittest.TestCase):
         self.assertEqual(report["remaining_gap_pct"], 4.0)
         self.assertEqual(report["comparison_mode"], "target_session_review")
         self.assertEqual(AdrParityRead.model_validate(report).mapping.adr_symbol, "TSM")
+
+    def test_matching_registry_mapping_becomes_primary_with_relation_lineage(self) -> None:
+        relation = add_approved_adr_relation(self.db)
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="TSM",
+                trade_date=date(2026, 8, 7),
+                close_price=200.0,
+            )
+        )
+        self.db.commit()
+        add_tw_daily(
+            self.db,
+            stock_id="2330",
+            trade_date=date(2026, 8, 7),
+            close_price=1000.0,
+        )
+        add_fx(
+            self.db,
+            event_time=datetime(2026, 8, 9, 0, tzinfo=timezone.utc),
+        )
+
+        report = build_adr_parity_report(
+            self.db,
+            "2330",
+            expected_adr_trade_date=date(2026, 8, 7),
+            generated_at=datetime(2026, 8, 9, 1, tzinfo=timezone.utc),
+        )
+
+        assert report is not None
+        resolution = report["mapping_resolution"]
+        self.assertEqual(resolution["selected_source"], "registry")
+        self.assertEqual(resolution["shadow_status"], "match")
+        self.assertEqual(resolution["relation_id"], relation.id)
+        self.assertEqual(resolution["relation_version"], 1)
+        self.assertEqual(resolution["evidence_ids"], [relation.evidence[0].id])
+        self.assertEqual(report["mapping"]["local_shares_per_adr"], 5)
+
+    def test_registry_shadow_mismatch_keeps_legacy_mapping_and_warns(self) -> None:
+        relation = add_approved_adr_relation(self.db, ratio_denominator=4)
+
+        report = build_adr_parity_report(
+            self.db,
+            "2330",
+            generated_at=datetime(2026, 8, 9, 1, tzinfo=timezone.utc),
+        )
+
+        assert report is not None
+        resolution = report["mapping_resolution"]
+        self.assertEqual(resolution["selected_source"], "legacy")
+        self.assertEqual(resolution["shadow_status"], "mismatch")
+        self.assertIn("local_shares_per_adr", resolution["shadow_differences"])
+        self.assertEqual(resolution["relation_id"], relation.id)
+        self.assertEqual(report["mapping"]["local_shares_per_adr"], 5)
+        self.assertIn("adr_mapping_registry_shadow_mismatch", report["warnings"])
+
+    def test_mapping_dual_read_respects_intraday_availability_cutoff(self) -> None:
+        relation = add_approved_adr_relation(self.db)
+        verified_at = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+        relation.evidence[0].verified_at = verified_at
+        self.db.commit()
+
+        before_verification = build_adr_parity_report(
+            self.db,
+            "2330",
+            generated_at=datetime(2026, 8, 9, 13, tzinfo=timezone.utc),
+            mapping_as_of=date(2026, 8, 9),
+            data_available_at=datetime(2026, 8, 9, 11, tzinfo=timezone.utc),
+        )
+        after_verification = build_adr_parity_report(
+            self.db,
+            "2330",
+            generated_at=datetime(2026, 8, 9, 13, tzinfo=timezone.utc),
+            mapping_as_of=date(2026, 8, 9),
+            data_available_at=datetime(2026, 8, 9, 13, tzinfo=timezone.utc),
+        )
+
+        assert before_verification is not None
+        assert after_verification is not None
+        self.assertEqual(
+            before_verification["mapping_resolution"]["selected_source"],
+            "legacy",
+        )
+        self.assertEqual(
+            before_verification["mapping_resolution"]["shadow_status"],
+            "legacy_only",
+        )
+        self.assertEqual(
+            after_verification["mapping_resolution"]["selected_source"],
+            "registry",
+        )
+        self.assertEqual(
+            after_verification["mapping_resolution"]["relation_id"],
+            relation.id,
+        )
 
     def test_report_can_invert_twd_usd_but_keeps_warning(self) -> None:
         self.db.add(

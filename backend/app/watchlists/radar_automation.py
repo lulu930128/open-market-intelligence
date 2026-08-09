@@ -512,6 +512,7 @@ def run_watchlist_radar_automation(
                         db=db,
                         radar=radar,
                         universe_items=v2_universe,
+                        materialize_cross_market_snapshots=True,
                     )
                 )
                 active_result = (

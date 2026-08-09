@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service
 from app.jobs.job_types import (
+    CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE,
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
@@ -333,6 +334,19 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 str(request.get("outputsize") or "compact"),
                 bool(request.get("adjusted", False)),
                 float(request.get("sleep_seconds", 12.0)),
+            ),
+            request,
+        )
+
+    if job_type == CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE:
+        return (
+            backfill_tasks.run_cross_market_context_refresh_job,
+            (
+                _parse_string_list(request.get("stock_ids")),
+                int(request.get("max_symbols", 8)),
+                str(request.get("provider") or "auto"),
+                str(request.get("outputsize") or "compact"),
+                int(request.get("max_runtime_seconds", 120)),
             ),
             request,
         )

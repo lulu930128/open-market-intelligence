@@ -9,8 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.ai.evidence_passport import build_evidence_passport
 from app.db.models import StockMaster, USDailyPrice, USWatchlistGroup, USWatchlistItem
-from app.market.adr_parity import build_adr_parity_report, get_adr_mapping
+from app.market.adr_parity import (
+    AdrMapping,
+    build_adr_parity_report,
+    get_adr_mapping,
+    resolve_adr_mapping,
+)
 from app.market.calendar_status import expected_us_trade_date
+from app.market.cross_market.context import build_cross_market_target_context
 from app.market.fx_flow_context import build_fx_flow_context
 from app.us_market import service as us_market_service
 
@@ -411,7 +417,12 @@ def _factor_weights_for_mapping(mapping: dict[str, Any]) -> tuple[dict[str, floa
     return factor_weights, basket_weights
 
 
-def _required_factor_symbols(mapping: dict[str, Any], *, max_symbols: int = 8) -> list[dict[str, Any]]:
+def _required_factor_symbols(
+    mapping: dict[str, Any],
+    *,
+    max_symbols: int = 8,
+    direct_mapping: AdrMapping | None = None,
+) -> list[dict[str, Any]]:
     factor_weights, _basket_weights = _factor_weights_for_mapping(mapping)
     limit = max(max_symbols, 1)
     ranked = sorted(
@@ -419,7 +430,9 @@ def _required_factor_symbols(mapping: dict[str, Any], *, max_symbols: int = 8) -
         key=lambda item: (-item[1], item[0]),
     )
     symbols: list[dict[str, Any]] = []
-    direct_mapping = get_adr_mapping(str(mapping.get("stock_id") or ""))
+    direct_mapping = direct_mapping or get_adr_mapping(
+        str(mapping.get("stock_id") or "")
+    )
     if direct_mapping is not None:
         symbols.append(
             {
@@ -459,7 +472,16 @@ def scan_us_overnight_impact_gaps(
         raise ValueError(f"Stock not found: {normalized_stock_id}")
 
     mapping = _resolve_tw_mapping(stock)
-    required_symbols = _required_factor_symbols(mapping, max_symbols=max_symbols)
+    adr_mapping_resolution = resolve_adr_mapping(
+        db,
+        normalized_stock_id,
+        as_of=date.today(),
+    )
+    required_symbols = _required_factor_symbols(
+        mapping,
+        max_symbols=max_symbols,
+        direct_mapping=adr_mapping_resolution.mapping,
+    )
     expected_trade_date = expected_us_daily_price_date()
     symbol_status: list[dict[str, Any]] = []
     refresh_symbols: list[str] = []
@@ -516,6 +538,7 @@ def scan_us_overnight_impact_gaps(
         "stock_id": normalized_stock_id,
         "stock_name": stock.stock_name,
         "mapping": mapping,
+        "adr_mapping_resolution": adr_mapping_resolution.as_payload(),
         "is_current": not refresh_symbols,
         "refresh_recommended": bool(refresh_symbols),
         "refresh_symbols": refresh_symbols,
@@ -733,6 +756,13 @@ def build_us_overnight_impact_report(
         normalized_stock_id,
         generated_at=generated_at,
     )
+    cross_market_context = build_cross_market_target_context(
+        db,
+        normalized_stock_id,
+        decision_at=generated_at,
+        expected_adr_trade_date=expected_trade_date,
+        adr_parity_payload=adr_parity,
+    ).model_dump(mode="json")
     stale_dates = [
         value
         for value in as_of_values
@@ -770,6 +800,7 @@ def build_us_overnight_impact_report(
     ]
     if adr_parity is not None:
         source_refs.extend(adr_parity.get("source_refs") or [])
+    source_refs.extend(cross_market_context.get("source_refs") or [])
     source_refs.extend(fx_flow_context.get("source_refs") or [])
     is_current = bool(as_of_values) and not stale_dates and not missing
     freshness = {
@@ -821,6 +852,22 @@ def build_us_overnight_impact_report(
         "confidence": reported_confidence,
         "tw_mapping": mapping,
         "adr_parity": adr_parity,
+        "cross_market_context": cross_market_context,
+        # Additive canonical facade fields. Legacy stance/factor/basket fields
+        # remain intact for existing consumers; new consumers can use these
+        # stable paths without unpacking presentation-oriented prose.
+        "context_status": cross_market_context.get("status"),
+        "decision_usable": cross_market_context.get("decision_usable"),
+        "signals": list(cross_market_context.get("signals") or []),
+        "bucket_scores": dict(cross_market_context.get("bucket_scores") or {}),
+        "coverage": dict(cross_market_context.get("coverage") or {}),
+        "methodology_version": cross_market_context.get("methodology_version"),
+        "relation_snapshot_version": cross_market_context.get(
+            "relation_snapshot_version"
+        ),
+        "snapshot_id": cross_market_context.get("snapshot_id"),
+        "limitations": list(cross_market_context.get("limitations") or []),
+        "source": "app.market.cross_market.context",
         "fx_flow_context": fx_flow_context,
         "factors": factors,
         "baskets": baskets,
@@ -847,11 +894,26 @@ def build_us_overnight_impact_report(
             "adr_implied_gap_pct": (
                 adr_parity.get("implied_gap_pct") if adr_parity is not None else None
             ),
+            "cross_market_context_status": cross_market_context.get("status"),
+            "cross_market_snapshot_id": cross_market_context.get("snapshot_id"),
+            "cross_market_relation_snapshot_version": cross_market_context.get(
+                "relation_snapshot_version"
+            ),
             "fx_flow_status": fx_flow_context.get("status"),
             "fx_flow_signal": fx_flow_context.get("signal"),
         },
         confidence=reported_confidence,
     )
+    report["evidence_passport"]["cross_market_context"] = {
+        "schema_version": cross_market_context.get("schema_version"),
+        "status": cross_market_context.get("status"),
+        "snapshot_id": cross_market_context.get("snapshot_id"),
+        "methodology_version": cross_market_context.get("methodology_version"),
+        "relation_snapshot_version": cross_market_context.get(
+            "relation_snapshot_version"
+        ),
+        "decision_usable": cross_market_context.get("decision_usable"),
+    }
     report["as_of"] = _json_value(report["as_of"])
     report["generated_at"] = _json_value(report["generated_at"])
     for item in factors + baskets:

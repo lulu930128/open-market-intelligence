@@ -16,6 +16,7 @@ from app.errors import (
 )
 from app.routers import (
     ai,
+    cross_market,
     crypto_market,
     dispatch,
     indicators,
@@ -107,6 +108,11 @@ app.include_router(crypto_market.router, prefix="/api/crypto-market", tags=["cry
 app.include_router(resource_market.router, prefix="/api/resource-market", tags=["resource-market"])
 app.include_router(dispatch.router, prefix="/api/dispatch", tags=["dispatch"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
+app.include_router(
+    cross_market.router,
+    prefix="/api/market/cross-market",
+    tags=["cross-market"],
+)
 app.include_router(indicators.router, prefix="/api/market/indicators", tags=["market-indicators"])
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])
 app.include_router(us_market.router, prefix="/api/us-market", tags=["us-market"])

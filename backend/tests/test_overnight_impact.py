@@ -210,6 +210,31 @@ class OvernightImpactTests(unittest.TestCase):
             any(basket["group_name"] == "半導體_GPU_ASIC" for basket in report["baskets"])
         )
         self.assertEqual(report["evidence_passport"]["target_kind"], "us_overnight_tw_impact")
+        context = report["cross_market_context"]
+        self.assertEqual(context["schema_version"], "cross_market.context.v1")
+        self.assertEqual(context["target"]["canonical_symbol"], "TW:2330")
+        self.assertEqual(
+            context["direct_equivalents"][0]["implied_gap_pct"],
+            report["adr_parity"]["implied_gap_pct"],
+        )
+        self.assertIn(
+            "latest_local_cache_projection_not_materialized_snapshot",
+            context["limitations"],
+        )
+        self.assertEqual(
+            report["evidence_passport"]["cross_market_context"]["snapshot_id"],
+            context["snapshot_id"],
+        )
+        self.assertEqual(report["signals"], context["signals"])
+        self.assertEqual(report["bucket_scores"], context["bucket_scores"])
+        self.assertEqual(report["coverage"], context["coverage"])
+        self.assertEqual(report["methodology_version"], context["methodology_version"])
+        self.assertEqual(
+            report["relation_snapshot_version"],
+            context["relation_snapshot_version"],
+        )
+        self.assertEqual(report["snapshot_id"], context["snapshot_id"])
+        self.assertEqual(report["limitations"], context["limitations"])
 
     def test_general_stock_uses_market_factors(self) -> None:
         add_stock(self.db, stock_id="1101", stock_name="台泥", industry="水泥工業")

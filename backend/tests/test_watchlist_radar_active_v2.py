@@ -300,6 +300,90 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
             RADAR_V2_ACTIVE_RULE_VERSION,
         )
 
+    def test_cross_market_context_is_display_only_and_preserves_ranking(self) -> None:
+        baseline_item = _source_item(
+            "2330",
+            signal_keys=[
+                "cross_below_ma60",
+                "structure_support_break",
+                "volume_price_down",
+                "macd_negative",
+            ],
+            source_rank=1,
+        )
+        contextual_item = {**baseline_item}
+        contextual_item["context_snapshot"] = {
+            "cross_market": {
+                "kind": "cross_market_target_context",
+                "schema_version": "cross_market.context.v1",
+                "status": "ready",
+                "decision_usable": True,
+                "as_of": "2026-07-29",
+                "decision_at": "2026-07-30T05:30:00Z",
+                "methodology_version": "cross_market.direct_parity.v1",
+                "relation_snapshot_version": "relation_registry:42:v1",
+                "snapshot_id": "cmctx:test",
+                "summary": {
+                    "stance": "supportive",
+                    "score": 3.5,
+                    "confidence": "high",
+                    "title": "ADR 隱含價高於台股對齊基準",
+                    "reason_codes": ["direct_adr_parity"],
+                },
+                "coverage": {
+                    "configured_signal_count": 1,
+                    "available_signal_count": 1,
+                    "decision_usable_signal_count": 1,
+                    "configured_weight": 1.0,
+                    "available_weight": 1.0,
+                    "decision_usable_weight": 1.0,
+                    "coverage_ratio": 1.0,
+                    "excluded_by_reason": {},
+                },
+                "limitations": ["direct_equivalent_only_phase_2"],
+            }
+        }
+
+        baseline = build_radar_v2_active_projection(
+            radar=_base_radar(baseline_item),
+            universe_items=[baseline_item],
+        )
+        contextual = build_radar_v2_active_projection(
+            radar=_base_radar(contextual_item),
+            universe_items=[contextual_item],
+        )
+
+        baseline_result = baseline["results"][0]
+        contextual_result = contextual["results"][0]
+        self.assertEqual(
+            contextual_result["radar_v2"]["direction_score"],
+            baseline_result["radar_v2"]["direction_score"],
+        )
+        self.assertEqual(
+            contextual_result["priority_score"],
+            baseline_result["priority_score"],
+        )
+        self.assertEqual(contextual_result["bucket"], baseline_result["bucket"])
+        self.assertEqual(contextual_result["rank"], baseline_result["rank"])
+        cross_signal = next(
+            signal
+            for signal in contextual_result["context_signals"]
+            if signal["key"] == "cross_market_context"
+        )
+        self.assertEqual(cross_signal["stance"], "contradict")
+        self.assertEqual(cross_signal["snapshot_id"], "cmctx:test")
+        self.assertLess(
+            contextual_result["radar_v2"]["context_alignment_score"],
+            0,
+        )
+        self.assertEqual(
+            contextual["radar_v2_summary"]["cross_market_context"][
+                "ranking_effect"
+            ],
+            "none",
+        )
+        WatchlistGroupRadarRead.model_validate(contextual)
+
     def test_active_persistence_and_read_model_do_not_require_v1_snapshot(
         self,
     ) -> None:

@@ -341,6 +341,7 @@ class WatchlistRadarEngineRead(BaseModel):
     mode: str
     rollback_version: str
     technical_direction_owner: str
+    cross_market_context_mode: str = "disabled"
     legacy_status: str = "available"
     legacy_frozen_at: date | None = None
 
@@ -370,6 +371,7 @@ class WatchlistRadarV2SummaryRead(BaseModel):
     market_limitations: list[dict[str, object]] = Field(default_factory=list)
     market_snapshot: dict[str, object] = Field(default_factory=dict)
     readiness: WatchlistRadarV2ReadinessRead | None = None
+    cross_market_context: dict[str, object] = Field(default_factory=dict)
 
 
 class WatchlistRadarItemRead(BaseModel):

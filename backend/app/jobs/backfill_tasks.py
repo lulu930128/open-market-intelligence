@@ -20,6 +20,7 @@ from app.market.fundamental_metrics_backfill import (
     ensure_stock_fundamental_metrics,
 )
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
+from app.market.cross_market.refresh import refresh_cross_market_context_sources
 from app.market.market_chips import refresh_market_chip_daily
 from app.market.indices import refresh_market_index_summary
 from app.market.taiwan_market_state import persist_taiwan_market_minute_state
@@ -525,6 +526,28 @@ def run_us_watchlist_daily_refresh_job(
             outputsize=outputsize,
             adjusted=adjusted,
             sleep_seconds=sleep_seconds,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_cross_market_context_refresh_job(
+    job_id: int,
+    stock_ids: list[str],
+    max_symbols: int,
+    provider: str,
+    outputsize: str,
+    max_runtime_seconds: int,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        return refresh_cross_market_context_sources(
+            db,
+            stock_ids,
+            max_symbols=max_symbols,
+            provider=provider,
+            outputsize=outputsize,
+            max_runtime_seconds=max_runtime_seconds,
             progress_callback=progress,
         )
 

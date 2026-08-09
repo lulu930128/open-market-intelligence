@@ -43,6 +43,9 @@ CRITICAL_TABLES = {
     "radar_outcome_path",
     "radar_outcome_event_link",
     "radar_backtest_run",
+    "cross_market_relation",
+    "cross_market_relation_evidence",
+    "cross_market_signal_snapshot",
 }
 
 
@@ -50,8 +53,8 @@ class DatabaseModelContractTests(unittest.TestCase):
     def test_single_registry_configures_all_current_mappers(self) -> None:
         configure_mappers()
 
-        self.assertEqual(len(Base.metadata.tables), 104)
-        self.assertEqual(len(list(Base.registry.mappers)), 104)
+        self.assertEqual(len(Base.metadata.tables), 107)
+        self.assertEqual(len(list(Base.registry.mappers)), 107)
         self.assertTrue(CRITICAL_TABLES.issubset(Base.metadata.tables))
 
     def test_all_foreign_keys_resolve_inside_shared_metadata(self) -> None:
@@ -61,7 +64,7 @@ class DatabaseModelContractTests(unittest.TestCase):
             for foreign_key in table.foreign_keys
         ]
 
-        self.assertEqual(len(foreign_keys), 73)
+        self.assertEqual(len(foreign_keys), 75)
         for foreign_key in foreign_keys:
             with self.subTest(foreign_key=str(foreign_key)):
                 self.assertIn(foreign_key.column.table.name, Base.metadata.tables)

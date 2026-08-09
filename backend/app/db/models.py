@@ -4792,3 +4792,264 @@ class RadarBacktestRun(Base):
         default=utc_now,
         onupdate=utc_now,
     )
+
+
+class CrossMarketRelation(Base):
+    __tablename__ = "cross_market_relation"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_canonical_symbol",
+            "target_canonical_symbol",
+            "relation_type",
+            "valid_from",
+            name="uq_cross_market_relation_identity_valid_from",
+        ),
+        UniqueConstraint(
+            "source_canonical_symbol",
+            "target_canonical_symbol",
+            "relation_type",
+            "version",
+            name="uq_cross_market_relation_identity_version",
+        ),
+        CheckConstraint(
+            "base_weight >= 0 AND base_weight <= 1",
+            name="ck_cross_market_relation_base_weight_range",
+        ),
+        CheckConstraint(
+            "confidence_tier IN ('A', 'B', 'C', 'D')",
+            name="ck_cross_market_relation_confidence_tier",
+        ),
+        CheckConstraint(
+            "review_status IN ('candidate', 'approved', 'rejected', 'revoked')",
+            name="ck_cross_market_relation_review_status",
+        ),
+        CheckConstraint(
+            "valid_to IS NULL OR valid_to >= valid_from",
+            name="ck_cross_market_relation_validity_range",
+        ),
+        CheckConstraint(
+            "((relation_type IN ('same_equity_dr', 'secondary_listing') "
+            "AND ratio_numerator IS NOT NULL AND ratio_numerator > 0 "
+            "AND ratio_denominator IS NOT NULL AND ratio_denominator > 0) OR "
+            "(relation_type NOT IN ('same_equity_dr', 'secondary_listing') "
+            "AND ratio_numerator IS NULL AND ratio_denominator IS NULL))",
+            name="ck_cross_market_relation_ratio_semantics",
+        ),
+        Index(
+            "ix_cross_market_relation_target_validity",
+            "target_market",
+            "target_canonical_symbol",
+            "is_active",
+            "valid_from",
+            "valid_to",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_market: Mapped[str] = mapped_column(String(16), index=True)
+    source_instrument_type: Mapped[str] = mapped_column(String(32), index=True)
+    source_canonical_symbol: Mapped[str] = mapped_column(String(80), index=True)
+    source_provider_symbol: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    source_exchange: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_currency: Mapped[str | None] = mapped_column(String(12), nullable=True)
+
+    target_market: Mapped[str] = mapped_column(String(16), index=True)
+    target_instrument_type: Mapped[str] = mapped_column(String(32), index=True)
+    target_canonical_symbol: Mapped[str] = mapped_column(String(80), index=True)
+    target_provider_symbol: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    target_exchange: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    target_currency: Mapped[str | None] = mapped_column(String(12), nullable=True)
+
+    relation_type: Mapped[str] = mapped_column(String(40), index=True)
+    relation_subtype: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    bucket: Mapped[str] = mapped_column(String(40), index=True)
+    directionality: Mapped[str] = mapped_column(String(30), default="positive")
+
+    base_weight: Mapped[Decimal] = mapped_column(Numeric(8, 6), default=Decimal("0"))
+    confidence_tier: Mapped[str] = mapped_column(String(2), index=True)
+    evidence_grade: Mapped[str] = mapped_column(String(40), index=True)
+
+    ratio_numerator: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8),
+        nullable=True,
+    )
+    ratio_denominator: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8),
+        nullable=True,
+    )
+    depositary: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    listing_tier: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    valid_from: Mapped[date] = mapped_column(Date, index=True)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    review_status: Mapped[str] = mapped_column(
+        String(20),
+        default="candidate",
+        index=True,
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+    created_by: Mapped[str] = mapped_column(String(160))
+    reviewed_by: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    change_reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+    evidence: Mapped[list["CrossMarketRelationEvidence"]] = relationship(
+        back_populates="relation",
+        cascade="all, delete-orphan",
+        order_by="CrossMarketRelationEvidence.id",
+    )
+
+
+class CrossMarketRelationEvidence(Base):
+    __tablename__ = "cross_market_relation_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "relation_id",
+            "content_hash",
+            name="uq_cross_market_relation_evidence_content",
+        ),
+        CheckConstraint(
+            "source_grade IN ('A', 'B', 'C', 'D')",
+            name="ck_cross_market_relation_evidence_source_grade",
+        ),
+        CheckConstraint(
+            "review_status IN ('candidate', 'approved', 'rejected', 'revoked')",
+            name="ck_cross_market_relation_evidence_review_status",
+        ),
+        Index(
+            "ix_cross_market_relation_evidence_primary",
+            "relation_id",
+            "is_primary",
+            "review_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    relation_id: Mapped[int] = mapped_column(
+        ForeignKey("cross_market_relation.id"),
+        nullable=False,
+        index=True,
+    )
+    source_type: Mapped[str] = mapped_column(String(40), index=True)
+    source_grade: Mapped[str] = mapped_column(String(2), index=True)
+    source_label: Mapped[str] = mapped_column(String(240))
+    source_url: Mapped[str] = mapped_column(Text)
+    statement: Mapped[str] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    review_status: Mapped[str] = mapped_column(
+        String(20),
+        default="candidate",
+        index=True,
+    )
+    supersedes_evidence_id: Mapped[int | None] = mapped_column(
+        ForeignKey("cross_market_relation_evidence.id"),
+        nullable=True,
+        index=True,
+    )
+    created_by: Mapped[str] = mapped_column(String(160))
+    reviewed_by: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+    relation: Mapped[CrossMarketRelation] = relationship(back_populates="evidence")
+
+
+class CrossMarketSignalSnapshot(Base):
+    __tablename__ = "cross_market_signal_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            name="uq_cross_market_signal_snapshot_id",
+        ),
+        UniqueConstraint(
+            "target_canonical_symbol",
+            "decision_at",
+            "methodology_version",
+            name="uq_cross_market_signal_snapshot_target_decision_method",
+        ),
+        CheckConstraint(
+            "status IN ('ready', 'partial', 'stale', 'limited', 'blocked', 'not_applicable')",
+            name="ck_cross_market_signal_snapshot_status",
+        ),
+        Index(
+            "ix_cross_market_signal_snapshot_target_decision",
+            "target_canonical_symbol",
+            "decision_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    snapshot_id: Mapped[str] = mapped_column(String(40), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    methodology_version: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    relation_snapshot_version: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+        index=True,
+    )
+
+    target_market: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    target_canonical_symbol: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        index=True,
+    )
+    target_provider_symbol: Mapped[str | None] = mapped_column(
+        String(80),
+        nullable=True,
+        index=True,
+    )
+    decision_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    as_of: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    decision_usable: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        index=True,
+    )
+    coverage_ratio: Mapped[Decimal] = mapped_column(
+        Numeric(10, 8),
+        nullable=False,
+        default=Decimal("0"),
+    )
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    materialized_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        index=True,
+    )

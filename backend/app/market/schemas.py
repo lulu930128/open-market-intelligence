@@ -1416,6 +1416,22 @@ class AdrParityMappingRead(BaseModel):
     verified_on: date
 
 
+class AdrParityMappingResolutionRead(BaseModel):
+    selected_source: str
+    registry_status: str
+    shadow_status: str
+    shadow_differences: list[str] = Field(default_factory=list)
+    relation_id: int | None = None
+    relation_version: int | None = None
+    relation_valid_from: date | None = None
+    relation_valid_to: date | None = None
+    relation_verified_at: datetime | None = None
+    evidence_ids: list[int] = Field(default_factory=list)
+    registry_schema_version: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class AdrParityRead(BaseModel):
     kind: str
     status: str
@@ -1423,6 +1439,7 @@ class AdrParityRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
     mapping: AdrParityMappingRead
+    mapping_resolution: AdrParityMappingResolutionRead | None = None
     formula: str
     adr_close_usd: float | None = None
     adr_trade_date: date | None = None
@@ -1522,6 +1539,17 @@ class OvernightImpactRead(BaseModel):
     confidence: str
     tw_mapping: OvernightImpactMappingRead
     adr_parity: AdrParityRead | None = None
+    cross_market_context: dict[str, Any] | None = None
+    context_status: str | None = None
+    decision_usable: bool | None = None
+    signals: list[dict[str, Any]] = Field(default_factory=list)
+    bucket_scores: dict[str, float | None] = Field(default_factory=dict)
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    methodology_version: str | None = None
+    relation_snapshot_version: str | None = None
+    snapshot_id: str | None = None
+    limitations: list[str] = Field(default_factory=list)
+    source: str | None = None
     fx_flow_context: FxFlowContextRead | None = None
     factors: list[OvernightImpactFactorRead] = Field(default_factory=list)
     baskets: list[OvernightImpactBasketRead] = Field(default_factory=list)

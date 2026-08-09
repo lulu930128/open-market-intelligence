@@ -218,6 +218,14 @@ export type WatchlistRadarContextSignal = {
   stance: "confirm" | "contradict" | "risk" | "info" | string;
   description: string;
   value_label: string | null;
+  context_status?: string;
+  context_stance?: string;
+  snapshot_id?: string | null;
+  methodology_version?: string | null;
+  relation_snapshot_version?: string | null;
+  coverage?: Record<string, unknown>;
+  limitations?: string[];
+  decision_usable?: boolean;
 };
 
 export type WatchlistRadarItemRead = {
@@ -262,7 +270,7 @@ export type WatchlistRadarItemRead = {
   primary_signal_key: string | null;
   primary_signal_label: string | null;
   indicator_snapshot: Record<string, Record<string, number | null>>;
-  context_snapshot: Record<string, Record<string, number | string | null>>;
+  context_snapshot: Record<string, Record<string, unknown>>;
   context_signals: WatchlistRadarContextSignal[];
   context_summary: string;
   context_score: number;
@@ -314,6 +322,7 @@ export type WatchlistRadarEngineRead = {
   mode: "shadow" | string;
   rollback_version: string;
   technical_direction_owner: string;
+  cross_market_context_mode?: "display_only" | "disabled" | string;
   legacy_status?: string;
   legacy_frozen_at?: string | null;
 };
@@ -343,6 +352,18 @@ export type WatchlistRadarV2SummaryRead = {
   market_limitations: Array<Record<string, unknown>>;
   market_snapshot?: Record<string, unknown>;
   readiness?: WatchlistRadarV2ReadinessRead | null;
+  cross_market_context?: {
+    enabled: boolean;
+    mode: "display_only" | string;
+    snapshot_count: number;
+    decision_usable_count: number;
+    status_counts: Record<string, number>;
+    snapshot_ids: string[];
+    methodology_versions: string[];
+    relation_snapshot_versions: string[];
+    ranking_effect: "none" | string;
+    missing_count: number;
+  };
 };
 
 export type WatchlistGroupRadarRead = {
@@ -1217,6 +1238,21 @@ export type AdrParityRead = {
     source_url: string;
     verified_on: string;
   };
+  mapping_resolution?: {
+    selected_source: string;
+    registry_status: string;
+    shadow_status: string;
+    shadow_differences: string[];
+    relation_id: number | null;
+    relation_version: number | null;
+    relation_valid_from: string | null;
+    relation_valid_to: string | null;
+    relation_verified_at: string | null;
+    evidence_ids: number[];
+    registry_schema_version: string | null;
+    warnings: string[];
+    limitations: string[];
+  } | null;
   formula: string;
   adr_close_usd: number | null;
   adr_trade_date: string | null;
@@ -1244,6 +1280,82 @@ export type AdrParityRead = {
   warnings: string[];
   source_refs: Array<Record<string, string>>;
   freshness: Record<string, unknown>;
+};
+
+export type CrossMarketInstrumentRef = {
+  market: string;
+  instrument_type: string;
+  canonical_symbol: string;
+  provider_symbol: string | null;
+  exchange: string | null;
+  currency: string | null;
+};
+
+export type CrossMarketContextSignal = {
+  signal_id: string;
+  relation_id: number | null;
+  relation_version: number | null;
+  source: CrossMarketInstrumentRef;
+  target: CrossMarketInstrumentRef;
+  bucket: string;
+  relation_type: string;
+  relation_subtype?: string | null;
+  event_context?: string | null;
+  calculation: Record<string, unknown>;
+  direction: string;
+  configured_weight: number;
+  quality_multiplier: number;
+  effective_weight: number;
+  normalized_weight: number | null;
+  contribution: number | null;
+  status: string;
+  decision_usable: boolean;
+  confidence_tier: string;
+  freshness: Record<string, unknown>;
+  evidence_refs: string[];
+  source_refs: Array<Record<string, string>>;
+  warnings: string[];
+  limitations: string[];
+  excluded_reason: string | null;
+};
+
+export type CrossMarketTargetContextRead = {
+  kind: "cross_market_target_context" | string;
+  schema_version: "cross_market.context.v1" | string;
+  target: CrossMarketInstrumentRef;
+  status: string;
+  decision_usable: boolean;
+  as_of: string | null;
+  decision_at: string;
+  methodology_version: string;
+  relation_snapshot_version: string;
+  snapshot_id: string;
+  summary: {
+    stance: string;
+    score: number | null;
+    confidence: string;
+    title: string;
+    reason_codes: string[];
+  };
+  direct_equivalents: AdrParityRead[];
+  signals: CrossMarketContextSignal[];
+  bucket_scores: Record<string, number | null>;
+  coverage: {
+    configured_signal_count: number;
+    available_signal_count: number;
+    decision_usable_signal_count: number;
+    configured_weight: number;
+    available_weight: number;
+    decision_usable_weight: number;
+    coverage_ratio: number;
+    excluded_by_reason: Record<string, number>;
+  };
+  freshness: Record<string, unknown>;
+  missing: string[];
+  warnings: string[];
+  limitations: string[];
+  source_refs: Array<Record<string, string>>;
+  evidence_passport: Record<string, unknown>;
 };
 
 export type FxTrendRead = {
@@ -1322,6 +1434,17 @@ export type OvernightImpactRead = {
     reason: string;
   };
   adr_parity?: AdrParityRead | null;
+  cross_market_context?: CrossMarketTargetContextRead | null;
+  context_status?: string | null;
+  decision_usable?: boolean | null;
+  signals?: CrossMarketContextSignal[];
+  bucket_scores?: Record<string, number | null>;
+  coverage?: CrossMarketTargetContextRead["coverage"];
+  methodology_version?: string | null;
+  relation_snapshot_version?: string | null;
+  snapshot_id?: string | null;
+  limitations?: string[];
+  source?: string | null;
   fx_flow_context?: FxFlowContextRead | null;
   factors: OvernightImpactFactor[];
   baskets: OvernightImpactBasket[];

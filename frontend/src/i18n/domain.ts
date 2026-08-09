@@ -121,6 +121,7 @@ const RADAR_CONTEXT_SOURCE_KEY_BY_SIGNAL_KEY: Record<string, string> = {
   short_balance_change: "short",
   revenue_yoy: "revenue",
   financial_quality: "financial",
+  cross_market_context: "crossMarket",
 };
 
 const RADAR_CONTEXT_LABEL_KEY_BY_LABEL: Record<string, string> = {
@@ -160,6 +161,11 @@ const RADAR_CONTEXT_LABEL_KEY_BY_LABEL: Record<string, string> = {
   獲利背書: "profitSupport",
   獲利逆勢強: "profitContrarianStrong",
   獲利穩定: "profitStable",
+  外部順風: "externalTailwind",
+  外部弱勢確認: "externalWeaknessConfirm",
+  外部逆風: "externalHeadwind",
+  跨市場中性: "crossMarketNeutral",
+  外部脈絡受限: "crossMarketLimited",
 };
 
 export function radarBucketLabel(

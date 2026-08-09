@@ -59,10 +59,11 @@ type WatchlistRadarPanelProps = {
   v2OutcomeHistoryOpen?: boolean;
   v2OutcomeHistoryLoadState?: LoadState;
   v2OutcomeDetailLoadState?: LoadState;
+  v2OutcomeReconcileLoadState?: LoadState;
   selectedV2OutcomeSnapshotDate?: string | null;
   onOpenV2OutcomeHistory?: () => void;
   onCloseV2OutcomeHistory?: () => void;
-  onReloadV2OutcomeHistory?: () => void;
+  onReconcileV2OutcomeHistory?: () => void;
   onSelectV2OutcomeSnapshot?: (snapshotDate: string) => void;
   onSelectStock: (stockId: string, stockName: string | null) => void;
 };
@@ -827,7 +828,13 @@ function scanLine(item: WatchlistRadarItemRead, t: TranslationFunction) {
 }
 
 function contextSignals(item: WatchlistRadarItemRead) {
-  return (item.context_signals ?? []).slice(0, 3);
+  return [...(item.context_signals ?? [])]
+    .sort((left, right) => {
+      const leftPriority = left.key === "cross_market_context" ? 0 : 1;
+      const rightPriority = right.key === "cross_market_context" ? 0 : 1;
+      return leftPriority - rightPriority;
+    })
+    .slice(0, 3);
 }
 
 function urgencyLabel(t: TranslationFunction, urgency: string) {
@@ -931,10 +938,11 @@ export default function WatchlistRadarPanel({
   v2OutcomeHistoryOpen = false,
   v2OutcomeHistoryLoadState = "idle",
   v2OutcomeDetailLoadState = "idle",
+  v2OutcomeReconcileLoadState = "idle",
   selectedV2OutcomeSnapshotDate,
   onOpenV2OutcomeHistory,
   onCloseV2OutcomeHistory,
-  onReloadV2OutcomeHistory,
+  onReconcileV2OutcomeHistory,
   onSelectV2OutcomeSnapshot,
   onSelectStock,
 }: WatchlistRadarPanelProps) {
@@ -1157,10 +1165,11 @@ export default function WatchlistRadarPanel({
           historyOpen={v2OutcomeHistoryOpen}
           historyLoadState={v2OutcomeHistoryLoadState}
           detailLoadState={v2OutcomeDetailLoadState}
+          reconcileLoadState={v2OutcomeReconcileLoadState}
           selectedSnapshotDate={selectedV2OutcomeSnapshotDate}
           disabled={disabled}
           onCloseHistory={onCloseV2OutcomeHistory}
-          onReloadHistory={onReloadV2OutcomeHistory}
+          onReconcileHistory={onReconcileV2OutcomeHistory}
           onSelectSnapshot={onSelectV2OutcomeSnapshot}
         />
       ) : null}
@@ -1835,6 +1844,7 @@ export default function WatchlistRadarPanel({
                         return (
                           <span
                             key={`${signal.key}-${signal.label}`}
+                            data-testid={`watchlist-radar-context-${item.stock_id}-${signal.key}`}
                             className={[
                               "omi-signal-chip inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[11px] font-semibold",
                               contextSignalClass(signal.tone, signal.stance),

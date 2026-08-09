@@ -6,6 +6,11 @@ from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.market.cross_market.snapshot_store import (
+    load_latest_cross_market_context_snapshots,
+    materialize_cross_market_context_batch,
+)
 from app.watchlists import radar_service, radar_v2_service
 from app.watchlists.radar_regime_v2 import classify_market_regime
 from app.watchlists.radar_rule_contract import (
@@ -120,6 +125,143 @@ def _reason(evaluation: Mapping[str, Any]) -> str:
         f"信心 {confidence:.1f}、衝突 {conflict:.1f}、風險 {risk:.1f}"
         f"{limitation_suffix}。"
     )
+
+
+def _cross_market_context(item: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    snapshot = item.get("context_snapshot")
+    value = snapshot.get("cross_market") if isinstance(snapshot, Mapping) else None
+    return value if isinstance(value, Mapping) else None
+
+
+def _display_context_alignment(item: Mapping[str, Any]) -> float:
+    stance_scores = {
+        "confirm": 1.0,
+        "contradict": -1.0,
+        "risk": -0.5,
+        "info": 0.0,
+    }
+    observed = [
+        stance_scores.get(str(signal.get("stance") or ""), 0.0)
+        for signal in item.get("context_signals") or []
+        if isinstance(signal, Mapping)
+    ]
+    if not observed:
+        return 0.0
+    return max(-100.0, min(100.0, 100.0 * sum(observed) / len(observed)))
+
+
+def _cross_market_signal(
+    *,
+    item: Mapping[str, Any],
+    technical_direction: int,
+) -> dict[str, Any] | None:
+    context = _cross_market_context(item)
+    if context is None:
+        return None
+    summary = context.get("summary")
+    summary = summary if isinstance(summary, Mapping) else {}
+    status = str(context.get("status") or "unknown")
+    context_stance = str(summary.get("stance") or "unknown")
+    score = summary.get("score")
+    value_label = (
+        f"{float(score):+.2f}%"
+        if isinstance(score, (int, float)) and not isinstance(score, bool)
+        else None
+    )
+    decision_usable = bool(context.get("decision_usable")) and status == "ready"
+    if not decision_usable:
+        return {
+            "key": "cross_market_context",
+            "source": "跨市場",
+            "label": "外部脈絡受限",
+            "tone": "warning",
+            "stance": "info",
+            "value_label": value_label,
+            "description": f"跨市場 context 狀態為 {status}，不納入對齊分數。",
+            "context_status": status,
+            "snapshot_id": context.get("snapshot_id"),
+            "methodology_version": context.get("methodology_version"),
+            "relation_snapshot_version": context.get("relation_snapshot_version"),
+            "coverage": context.get("coverage") or {},
+            "limitations": list(context.get("limitations") or []),
+            "decision_usable": False,
+        }
+
+    external_direction = {
+        "supportive": 1,
+        "adverse": -1,
+        "neutral": 0,
+    }.get(context_stance, 0)
+    if technical_direction == 0 or external_direction == 0:
+        stance = "info"
+        label = "跨市場中性"
+        tone = "neutral"
+    elif technical_direction == external_direction:
+        stance = "confirm"
+        label = "外部順風" if technical_direction > 0 else "外部弱勢確認"
+        tone = "positive" if technical_direction > 0 else "negative"
+    else:
+        stance = "contradict"
+        label = "外部逆風"
+        tone = "warning"
+    return {
+        "key": "cross_market_context",
+        "source": "跨市場",
+        "label": label,
+        "tone": tone,
+        "stance": stance,
+        "value_label": value_label,
+        "description": str(summary.get("title") or "跨市場直接映射脈絡。"),
+        "context_status": status,
+        "context_stance": context_stance,
+        "snapshot_id": context.get("snapshot_id"),
+        "methodology_version": context.get("methodology_version"),
+        "relation_snapshot_version": context.get("relation_snapshot_version"),
+        "coverage": context.get("coverage") or {},
+        "limitations": list(context.get("limitations") or []),
+        "decision_usable": True,
+    }
+
+
+def _cross_market_summary(items: list[Mapping[str, Any]]) -> dict[str, Any]:
+    contexts = [
+        context
+        for item in items
+        if (context := _cross_market_context(item)) is not None
+    ]
+    statuses = Counter(str(context.get("status") or "unknown") for context in contexts)
+    return {
+        "enabled": bool(settings.cross_market_radar_display_enabled),
+        "mode": "display_only",
+        "snapshot_count": len(contexts),
+        "decision_usable_count": sum(
+            bool(context.get("decision_usable")) for context in contexts
+        ),
+        "status_counts": dict(statuses),
+        "snapshot_ids": list(
+            dict.fromkeys(
+                str(context.get("snapshot_id"))
+                for context in contexts
+                if context.get("snapshot_id")
+            )
+        ),
+        "methodology_versions": list(
+            dict.fromkeys(
+                str(context.get("methodology_version"))
+                for context in contexts
+                if context.get("methodology_version")
+            )
+        ),
+        "relation_snapshot_versions": list(
+            dict.fromkeys(
+                str(context.get("relation_snapshot_version"))
+                for context in contexts
+                if context.get("relation_snapshot_version")
+            )
+        ),
+        "ranking_effect": "none",
+        "missing_count": max(0, len(items) - len(contexts)),
+    }
 
 
 def _public_item(
@@ -291,6 +433,24 @@ def build_radar_v2_active_projection(
             market_regime=market_regime,
             contract=RADAR_V2_ACTIVE_CONTRACT,
         )
+        if settings.cross_market_radar_display_enabled:
+            cross_market_signal = _cross_market_signal(
+                item=source_item,
+                technical_direction=int(evaluation.get("direction") or 0),
+            )
+            if cross_market_signal is not None:
+                source_item["context_signals"] = [
+                    *[
+                        dict(signal)
+                        for signal in source_item.get("context_signals") or []
+                        if isinstance(signal, Mapping)
+                        and str(signal.get("key") or "") != "cross_market_context"
+                    ],
+                    cross_market_signal,
+                ]
+                evaluation["context_alignment_score"] = _display_context_alignment(
+                    source_item
+                )
         evaluation["market_snapshot"] = dict(market_snapshot or {})
         public_item = _public_item(
             source_item=source_item,
@@ -346,6 +506,11 @@ def build_radar_v2_active_projection(
                 "mode": "active",
                 "rollback_version": RADAR_V1_RULE_VERSION,
                 "technical_direction_owner": "backend",
+                "cross_market_context_mode": (
+                    "display_only"
+                    if settings.cross_market_radar_display_enabled
+                    else "disabled"
+                ),
                 "legacy_status": RADAR_V1_LIFECYCLE_STATUS,
                 "legacy_frozen_at": RADAR_V1_FROZEN_AT,
             },
@@ -364,6 +529,7 @@ def build_radar_v2_active_projection(
                 "market_limitations": market_regime["limitations"],
                 "market_snapshot": dict(market_snapshot or {}),
                 "readiness": dict(readiness or _default_readiness()),
+                "cross_market_context": _cross_market_summary(valid_items),
             },
             "_radar_v2_universe": evaluated_universe,
         }
@@ -376,6 +542,7 @@ def build_radar_v2_active_projection_from_db(
     db: Session,
     radar: Mapping[str, Any],
     universe_items: list[Mapping[str, Any]],
+    materialize_cross_market_snapshots: bool = False,
 ) -> dict[str, Any]:
     signal_trade_date = _trade_date(
         radar.get("trade_date") or radar.get("target_trade_date")
@@ -405,9 +572,43 @@ def build_radar_v2_active_projection_from_db(
         group_id=int(radar.get("group_id") or 0),
         mode=str(radar.get("mode") or "action"),
     )
+    projected_universe = [deepcopy(dict(item)) for item in universe_items]
+    if (
+        settings.cross_market_radar_display_enabled
+        and as_of_at is not None
+    ):
+        stock_ids = [
+            str(item.get("stock_id") or "").strip()
+            for item in projected_universe
+            if str(item.get("stock_id") or "").strip()
+        ]
+        if (
+            materialize_cross_market_snapshots
+            and settings.cross_market_radar_materialize_enabled
+        ):
+            materialize_cross_market_context_batch(
+                db,
+                stock_ids,
+                decision_at=as_of_at,
+                materialized_by="watchlist.radar_v2",
+            )
+        contexts = load_latest_cross_market_context_snapshots(
+            db,
+            stock_ids,
+            as_of_at=as_of_at,
+        )
+        for item in projected_universe:
+            stock_id = str(item.get("stock_id") or "").strip()
+            context = contexts.get(stock_id)
+            if context is None:
+                continue
+            snapshot = item.get("context_snapshot")
+            next_snapshot = dict(snapshot) if isinstance(snapshot, Mapping) else {}
+            next_snapshot["cross_market"] = context.model_dump(mode="json")
+            item["context_snapshot"] = next_snapshot
     return build_radar_v2_active_projection(
         radar=radar,
-        universe_items=universe_items,
+        universe_items=projected_universe,
         market_snapshot=market_snapshot,
         readiness=readiness,
     )

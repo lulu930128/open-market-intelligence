@@ -14,6 +14,7 @@ import type { LoadState } from "@/components/stock-detail/stockDetailTypes";
 import { useT, type TranslationFunction } from "@/i18n";
 import type {
   AdrParityRead,
+  CrossMarketTargetContextRead,
   FxFlowContextRead,
   OvernightImpactRead,
 } from "@/types/market";
@@ -295,6 +296,206 @@ function AdrParityStrip({
           <div className="mt-1 text-[11px] leading-4 text-omi-warning">
             {parity.warnings[0] ||
               t("stockDetail.dataViews.overnight.adr.warningFallback")}
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function crossMarketStatusKey(value: string) {
+  if (value === "ready") return "ready";
+  if (value === "partial") return "partial";
+  if (value === "stale") return "stale";
+  if (value === "limited") return "limited";
+  if (value === "blocked") return "blocked";
+  return "unknown";
+}
+
+function crossMarketStatusTone(value: string) {
+  if (value === "ready") return "text-omi-success";
+  if (value === "blocked") return "text-omi-danger";
+  if (value === "partial" || value === "stale" || value === "limited") {
+    return "text-omi-warning";
+  }
+  return "text-omi-text-muted";
+}
+
+function crossMarketStanceKey(value: string) {
+  if (value === "supportive") return "supportive";
+  if (value === "adverse") return "adverse";
+  if (value === "neutral") return "neutral";
+  return "unknown";
+}
+
+function crossMarketLimitationLabel(value: string, t: TranslationFunction) {
+  if (value === "legacy_mapping_fallback") {
+    return t("stockDetail.dataViews.overnight.crossMarket.limitations.legacyMapping");
+  }
+  if (value === "direct_equivalent_only_phase_2") {
+    return t("stockDetail.dataViews.overnight.crossMarket.limitations.directOnly");
+  }
+  if (value === "latest_local_cache_projection_not_materialized_snapshot") {
+    return t("stockDetail.dataViews.overnight.crossMarket.limitations.notMaterialized");
+  }
+  if (value === "industry_proxy_not_company_causality") {
+    return t("stockDetail.dataViews.overnight.crossMarket.limitations.proxyNonCausal");
+  }
+  if (value === "event_context_unresolved") {
+    return t("stockDetail.dataViews.overnight.crossMarket.limitations.eventUnresolved");
+  }
+  return value;
+}
+
+function CrossMarketContextStrip({
+  context,
+  t,
+}: {
+  context: CrossMarketTargetContextRead;
+  t: TranslationFunction;
+}) {
+  if (context.status === "not_applicable") return null;
+
+  const signal =
+    context.signals.find((item) => item.decision_usable) ?? context.signals[0] ?? null;
+  const isProxy = signal !== null && signal.bucket !== "direct_equivalent";
+  const rawSignalValue =
+    signal?.calculation.implied_gap_pct ?? signal?.calculation.excess_return_pct;
+  const signalValue =
+    typeof rawSignalValue === "number" && Number.isFinite(rawSignalValue)
+      ? rawSignalValue
+      : null;
+  const rawReturn = signal?.calculation.raw_return_pct;
+  const benchmarkReturn = signal?.calculation.benchmark_return_pct;
+  const proxyRawReturn =
+    typeof rawReturn === "number" && Number.isFinite(rawReturn) ? rawReturn : null;
+  const proxyBenchmarkReturn =
+    typeof benchmarkReturn === "number" && Number.isFinite(benchmarkReturn)
+      ? benchmarkReturn
+      : null;
+  const mappingResolution = context.direct_equivalents[0]?.mapping_resolution ?? null;
+  const mappingSource =
+    mappingResolution?.selected_source ?? (signal?.relation_id != null ? "registry" : "legacy");
+  const statusKey = crossMarketStatusKey(context.status);
+  const stanceKey = crossMarketStanceKey(context.summary.stance);
+  const coverage = context.coverage;
+  const limitation =
+    context.limitations.find((item) => item === "industry_proxy_not_company_causality") ??
+    context.limitations.find((item) => item === "event_context_unresolved") ??
+    context.limitations[0] ??
+    null;
+
+  return (
+    <details
+      data-testid="cross-market-context-strip"
+      className="group mt-2 border border-omi-border-subtle bg-omi-surface-subtle text-xs"
+    >
+      <summary
+        data-testid="cross-market-context-toggle"
+        title={t("stockDetail.dataViews.overnight.crossMarket.expandLabel")}
+        className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-x-3 gap-y-1 px-2.5 py-1.5 hover:bg-omi-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden"
+      >
+        <span className="flex min-w-0 items-center gap-2 font-semibold text-omi-text-muted">
+          <span className="font-bold uppercase tracking-[0.08em] text-omi-text-strong">
+            {t("stockDetail.dataViews.overnight.crossMarket.label")}
+          </span>
+          <span>
+            {t(`stockDetail.dataViews.overnight.crossMarket.stance.${stanceKey}`)}
+          </span>
+        </span>
+        <span className="flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-0.5 tabular-nums">
+          {signalValue !== null ? (
+            <span className={`font-bold ${valueTone(signalValue)}`}>
+              {formatPct(signalValue)}
+            </span>
+          ) : null}
+          <span className={`font-semibold ${crossMarketStatusTone(context.status)}`}>
+            {t(`stockDetail.dataViews.overnight.crossMarket.status.${statusKey}`)}
+          </span>
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 20 20"
+            className="size-4 shrink-0 text-omi-text-subtle transition-transform duration-200 motion-reduce:transition-none group-open:rotate-180"
+            fill="none"
+          >
+            <path
+              d="m5 7.5 5 5 5-5"
+              stroke="currentColor"
+              strokeWidth="1.75"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </span>
+      </summary>
+
+      <div
+        data-testid="cross-market-context-details"
+        className="border-t border-omi-border-subtle px-2.5 pb-2 pt-1.5"
+      >
+        <dl className="divide-y divide-omi-border-subtle">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-1">
+            <dt className="font-semibold text-omi-text-strong">
+              {t("stockDetail.dataViews.overnight.crossMarket.signalLabel")}
+            </dt>
+            <dd className="text-right text-omi-text-muted">
+              {signal
+                ? `${signal.source.provider_symbol ?? signal.source.canonical_symbol} · ${t(
+                    isProxy
+                      ? "stockDetail.dataViews.overnight.crossMarket.signalType.proxy"
+                      : "stockDetail.dataViews.overnight.crossMarket.signalType.direct"
+                  )}`
+                : t("stockDetail.dataViews.overnight.crossMarket.noSignal")}
+            </dd>
+          </div>
+          {isProxy ? (
+            <div className="grid grid-cols-1 gap-1 py-1 text-left tabular-nums text-omi-text-muted sm:grid-cols-3 sm:gap-2 sm:text-right">
+              <span>
+                {t("stockDetail.dataViews.overnight.crossMarket.rawReturnLabel")} {formatPct(proxyRawReturn)}
+              </span>
+              <span>
+                {t("stockDetail.dataViews.overnight.crossMarket.benchmarkReturnLabel")} {formatPct(proxyBenchmarkReturn)}
+              </span>
+              <span className={signalValue !== null ? valueTone(signalValue) : undefined}>
+                {t("stockDetail.dataViews.overnight.crossMarket.residualLabel")} {formatPct(signalValue)}
+              </span>
+            </div>
+          ) : null}
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-1">
+            <dt className="font-semibold text-omi-text-strong">
+              {t("stockDetail.dataViews.overnight.crossMarket.coverageLabel")}
+            </dt>
+            <dd className="text-right tabular-nums text-omi-text-muted">
+              {t("stockDetail.dataViews.overnight.crossMarket.coverageValue", {
+                usable: coverage.decision_usable_signal_count,
+                configured: coverage.configured_signal_count,
+              })}
+            </dd>
+          </div>
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-1">
+            <dt className="font-semibold text-omi-text-strong">
+              {t("stockDetail.dataViews.overnight.crossMarket.relationLabel")}
+            </dt>
+            <dd className="max-w-full break-all text-right text-omi-text-muted">
+              {t(
+                mappingSource === "registry"
+                  ? "stockDetail.dataViews.overnight.crossMarket.mapping.registry"
+                  : "stockDetail.dataViews.overnight.crossMarket.mapping.legacy"
+              )}
+              {` · ${context.relation_snapshot_version}`}
+            </dd>
+          </div>
+        </dl>
+
+        <div className="mt-1 text-[11px] leading-4 text-omi-text-muted">
+          {t("stockDetail.dataViews.overnight.crossMarket.lineage", {
+            date: formatDate(context.as_of),
+            methodology: context.methodology_version,
+          })}
+        </div>
+        {limitation ? (
+          <div className="mt-1 text-[11px] leading-4 text-omi-warning">
+            {crossMarketLimitationLabel(limitation, t)}
           </div>
         ) : null}
       </div>
@@ -597,6 +798,10 @@ export function OvernightImpactPanel({
           </div>
         </div>
       </div>
+
+      {report.cross_market_context ? (
+        <CrossMarketContextStrip context={report.cross_market_context} t={t} />
+      ) : null}
 
       {report.adr_parity ? <AdrParityStrip parity={report.adr_parity} t={t} /> : null}
 

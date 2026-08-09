@@ -201,6 +201,8 @@ class Settings(BaseSettings):
     scheduler_watchlist_radar_require_daily_release: bool = True
     scheduler_watchlist_radar_reconcile_interval_minutes: int = 30
     scheduler_watchlist_radar_reconcile_until: str = "18:15"
+    cross_market_radar_display_enabled: bool = True
+    cross_market_radar_materialize_enabled: bool = True
 
     dispatch_smtp_host: str | None = None
     dispatch_smtp_port: int = 587
