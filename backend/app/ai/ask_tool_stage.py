@@ -84,6 +84,9 @@ def execute_tool_stages(
             target=resolution_target(resolution),
             scope_type=scope_type,
         )
+    continuation_selected = bool(
+        payload.continuation.get("selected_action_ids")
+    )
 
     us_market_params = (
         payload.market_data_params
@@ -124,6 +127,7 @@ def execute_tool_stages(
                     else None
                 ),
                 session_scope=us_session_scope,
+                force_selected_capabilities=continuation_selected,
                 progress_callback=progress_callback,
             ),
         )
@@ -170,9 +174,6 @@ def execute_tool_stages(
         bool(regional_params.get("include_intraday"))
         if "include_intraday" in regional_params
         else payload.analysis_horizon == "intraday"
-    )
-    continuation_selected = bool(
-        payload.continuation.get("selected_action_ids")
     )
     if (
         scope_type in {"jp_stock", "jp_index", "kr_stock", "kr_index"}
@@ -233,6 +234,7 @@ def execute_tool_stages(
                 raw_budget=payload.tool_budget,
                 existing_freshness=current_freshness,
                 requested_capabilities=selected_v4_capabilities,
+                force_selected_capabilities=continuation_selected,
                 progress_callback=progress_callback,
             ),
         )
@@ -246,7 +248,12 @@ def execute_tool_stages(
         and refresh_before_answer_enabled(payload)
         and payload.allow_external_fetch
         and current_freshness
-        and current_freshness.get("refresh_recommended")
+        and (
+            current_freshness.get("refresh_recommended")
+            or continuation_selected
+        )
+        and query_plan.get("realtime_policy") != "cache_only"
+        and query_plan.get("external_refresh_allowed", True)
     ):
         tool_session = progress.run_tool_session(
             scope_type=scope_type,
@@ -258,6 +265,8 @@ def execute_tool_stages(
                 existing_freshness=current_freshness,
                 include_children=payload.include_children,
                 enabled_only=payload.enabled_only,
+                requested_capabilities=selected_v4_capabilities,
+                force_selected_capabilities=continuation_selected,
                 progress_callback=progress_callback,
             ),
         )

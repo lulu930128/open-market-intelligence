@@ -8,9 +8,9 @@
 > selection 與 `evidence.quality`，不應依賴 legacy `analysis.human_answer`
 > 或 adapter 自製摘要。
 
-> 文件基準：2026-07-24（Asia/Taipei）
+> 文件基準：2026-08-10（Asia/Taipei）
 >
-> Backend OpenAPI：`0.1.0`
+> Backend OpenAPI：`4.0.1`
 >
 > AI 問答 contract：`omi.decision.v4`
 
@@ -24,8 +24,8 @@
 | --- | --- | --- |
 | 一般市場問答、個股證據、跨市場 context | `POST /api/ai/ask` | 統一 target resolution、freshness、bounded refresh、evidence 與回答契約 |
 | UI 或 Kuro 顯示處理進度 | `POST /api/ai/ask/stream` | SSE 提供 `status`、`evidence`、`tool_run`、`delta`、`final`、`done` |
-| 本機支援完整 OMI contract 的 MCP client | repo 內 MCP：`omi.ask`、`omi.ask_stream` | thin adapter，能力最接近 Backend AI contract |
-| ChatGPT 網頁或只需要安全讀取的外部 MCP | `OMI_search`：`omi.search` | 固定不呼叫 LLM、不寫 report，回傳 bounded compact payload |
+| 本機支援完整 OMI contract 的 MCP client | repo 內 MCP：`omi.ask`、`omi.ask_stream`、`omi.read_refresh_status` | thin adapter，能力最接近 Backend AI contract |
+| ChatGPT 網頁或只需要安全讀取的外部 MCP | `OMI_search` 的七個 public read tools | 固定不呼叫 LLM、不寫 report；可安全查詢 background refresh status |
 | 特定圖表、資料表或維運工具 | `/api/market/*` 等專用 HTTP routes | 適合明確知道 schema 的 OMI 自家 UI，不建議當成單一跨市場 public contract |
 
 ### 目前可以做到
@@ -92,18 +92,20 @@ Frontend / Kuro / MCP / ChatGPT / local scripts
 - Proxy 會把 `/omi-data/...` 轉到實際 Backend 的 `/api/...`。
 - 不要在 component 內硬編碼 `8400`，也不要在 UI 重做 freshness 或 provider fallback。
 
-### 目前實測的本機 MCP HTTP adapter
+### 本機 MCP HTTP adapter
 
 - Health：`http://127.0.0.1:8797/health`
 - MCP：`http://127.0.0.1:8797/mcp`
-- Server：`omi-search-mcp` `0.1.0`
-- Public tool：`omi.search`
+- HTTP transport：`omi-search-http-mcp` `0.2.0`
+- MCP server：`omi-search-mcp` `0.4.0`
+- 2026-08-10 已驗證 build ID：`6ffe9eb74fcedf59`
+- Public tools：7 個；完整列表見第 10 節
 
 `127.0.0.1:8797` 只供本機或受控 tunnel 的 target 使用。ChatGPT 網頁不能直接連 localhost；需要 Secure MCP Tunnel 或等價的受控連線層。
 
 ## 4. 接口分級
 
-2026-07-22 的正式 OpenAPI 有 348 個 operations：199 GET、112 POST、18 PATCH、15 DELETE、4 PUT。這只是 route inventory，不代表 348 條都是同等穩定或安全的 public contract。
+2026-08-10 由目前 source 產生的 OpenAPI 有 374 個 operations：216 GET、121 POST、18 PATCH、15 DELETE、4 PUT。這只是 route inventory，不代表 374 條都是同等穩定或安全的 public contract。
 
 ### A. 建議 public integration surface
 
@@ -112,6 +114,7 @@ Frontend / Kuro / MCP / ChatGPT / local scripts
 | `GET` | `/api/system/health` | Process 與 checkout identity | 無 |
 | `GET` | `/api/system/readyz` | Runtime / database readiness | 無 |
 | `GET` | `/api/ai/tools` | 查詢目前 public AI tool schema | 無 |
+| `GET` | `/api/ai/refresh-status/{job_id}` | 讀取 redacted `ai.tool_refresh` operation/evidence 狀態 | 無；不觸發 refresh |
 | `GET` | `/api/ai/strategy-profiles` | 查詢策略 profile | 無 |
 | `POST` | `/api/ai/ask` | 統一問答與 evidence contract | 預設無；受信任且明確允許時可 refresh/LLM/write |
 | `POST` | `/api/ai/ask/stream` | 同一 contract 的 SSE 版本 | 同 `/api/ai/ask` |
@@ -361,7 +364,7 @@ interval），不得把兩者相加或混稱成同一個量。
 
 ## 8. 目前 capability readiness
 
-以下是 Backend `capability_status` contract 在 2026-07-22 的分類；它與即時 source health 是兩件事。
+以下是 Backend `capability_status` contract 在 2026-08-10 的分類；它與即時 source health 是兩件事。完整 response 同時包含 15 項 provider contracts、57 項正式 capability aggregate 與 210 筆 `(scope_type, capability_id)` resolution。
 
 ### 已連接或有條件連接
 
@@ -421,6 +424,7 @@ Consumer 規則：
 
 - `omi.ask`：forward 到 `POST /api/ai/ask`。
 - `omi.ask_stream`：呼叫 SSE endpoint，收集 event 後回給不能原生消費 SSE 的 MCP client。
+- `omi.read_refresh_status`：forward 到 `GET /api/ai/refresh-status/{job_id}`，只讀 redacted AI refresh job。
 
 特性：
 
@@ -433,13 +437,23 @@ Consumer 規則：
 - `OMI_API_BASE_URL` 應指向 launcher 實際選到的 Backend URL。
 - `OMI_MCP_AI_TRUST_TOKEN` 只傳 OMI trust header，不保存 OpenAI key。
 
-注意：Backend `GET /api/ai/tools` 目前只列出統一 callable tool `omi.ask`；`omi.ask_stream` 是 MCP transport 提供的 streaming convenience tool，不是另一套市場邏輯。
+注意：Backend `GET /api/ai/tools` 目前列出 `omi.ask` 與 `omi.read_refresh_status`；`omi.ask_stream` 是 MCP transport 提供的 streaming convenience tool，不是另一套市場邏輯。
 
 ### `OMI_search` standalone adapter
 
 位置：`C:\GPT_MCPtool\OMI_search`
 
-Public tool：`omi.search`
+`tools/list` 只公開七個 tools：
+
+- `omi.ask`
+- `omi.read_refresh_status`
+- `omi.read_market_overview`
+- `omi.read_stock_context`
+- `omi.read_data_freshness`
+- `omi.read_source_health`
+- `omi.read_capability_status`
+
+`omi.search` 只保留為不公開的 legacy callable alias；新 caller 使用 `omi.ask`。
 
 安全預設：
 
@@ -459,9 +473,14 @@ request 自動執行。實際 attempts、tool outcomes、payload 是否進入 ev
 remaining actions 讀 `execution.refresh_reconciliation`，是否能更新 market
 cache 仍由 Backend trust/freshness policy 決定。
 
+`continuation.fill_plan.partition` 將每個 selected capability 恰好放入
+`already_satisfied`、`actions`、`jobs`、`deferred`、`unfillable` 或
+`not_applicable` 一組；compact response 也保留這份分類。Consumer 只呈現這個
+backend-owned status，不從 action count、UI label 或 provider 名稱重做判斷。
+
 ```json
 {
-  "query": "2330 最近量價、法人與分點資料",
+  "question": "2330 最近量價、法人與分點資料",
   "target": { "type": "tw_stock", "id": "2330" },
   "mode": "data_only",
   "refresh_if_missing": false,
@@ -474,6 +493,8 @@ cache 仍由 Backend trust/freshness policy 決定。
 ```
 
 HTTP MCP 使用 session：client 先 `initialize`，保存 response 的 `Mcp-Session-Id`，之後用相同 header 呼叫 `tools/list` / `tools/call`。
+
+若 `omi.ask` 回傳 background job，consumer 呼叫 `omi.read_refresh_status` 並傳正整數 `job_id`。`operation_status=completed` 只代表 refresh operation 結束；`evidence_status=rebuild_required|partial_rebuild_required` 時，必須使用回傳的 cache-only `resume` 重建 evidence，不能直接宣稱資料已 current。未知、非 AI refresh 或不可公開 job 使用相同 predictable 404，adapter 不退回 generic `/api/jobs/{id}` payload。
 
 `TARGET_NOT_FOUND`、trust 拒絕與其他 structured business rejection 都是成功
 傳輸的 canonical result，因此 MCP `isError=false`；只有 protocol、HTTP

@@ -16,7 +16,8 @@ from app.market.adr_parity import (
     resolve_adr_mapping,
 )
 from app.market.calendar_status import expected_us_trade_date
-from app.market.cross_market.context import build_cross_market_target_context
+from app.market.cross_market.refresh import build_cross_market_refresh_plan
+from app.market.cross_market.snapshot_store import read_cross_market_target_context
 from app.market.fx_flow_context import build_fx_flow_context
 from app.us_market import service as us_market_service
 
@@ -471,11 +472,13 @@ def scan_us_overnight_impact_gaps(
     if stock is None:
         raise ValueError(f"Stock not found: {normalized_stock_id}")
 
+    generated_at = _now()
     mapping = _resolve_tw_mapping(stock)
     adr_mapping_resolution = resolve_adr_mapping(
         db,
         normalized_stock_id,
-        as_of=date.today(),
+        as_of=generated_at.date(),
+        data_available_at=generated_at,
     )
     required_symbols = _required_factor_symbols(
         mapping,
@@ -526,6 +529,62 @@ def scan_us_overnight_impact_gaps(
             + ("..." if len(refresh_symbols) > 6 else "")
         )
 
+    refresh_plan = build_cross_market_refresh_plan(
+        db,
+        normalized_stock_id,
+        max_symbols=max_symbols,
+        now=generated_at,
+    )
+    planned_sources = list(refresh_plan.get("planned_sources") or [])
+    deferred_sources = list(refresh_plan.get("deferred_sources") or [])
+    requested_source_count = int(refresh_plan.get("requested_source_count") or 0)
+    planned_source_count = int(refresh_plan.get("planned_source_count") or 0)
+    deferred_source_count = int(refresh_plan.get("deferred_source_count") or 0)
+    for source in [*planned_sources, *deferred_sources]:
+        source_kind = str(source.get("source_kind") or "").strip()
+        symbol = str(source.get("symbol") or "").strip()
+        if not source_kind or not symbol:
+            continue
+        if source_kind == "resource_quote":
+            missing.append(f"resource_quote_snapshot.{symbol}")
+        elif source_kind == "us_daily_price":
+            missing.append(f"us_daily_price.{symbol}")
+
+    if planned_sources:
+        warnings.append(
+            "跨市場背景仍有可刷新資料來源："
+            + ", ".join(
+                str(source.get("symbol") or source.get("source_kind") or "unknown")
+                for source in planned_sources[:6]
+            )
+            + ("..." if len(planned_sources) > 6 else "")
+        )
+    if deferred_sources:
+        warnings.append(
+            "跨市場背景有延後刷新資料來源："
+            + ", ".join(
+                str(source.get("symbol") or source.get("source_kind") or "unknown")
+                for source in deferred_sources[:6]
+            )
+            + ("..." if len(deferred_sources) > 6 else "")
+        )
+
+    if planned_source_count:
+        refresh_decision_status = "planned"
+        refresh_decision_reason = "executable_cross_market_sources_available"
+    elif deferred_source_count:
+        refresh_decision_status = "deferred"
+        refresh_decision_reason = "cross_market_sources_deferred"
+    elif refresh_symbols:
+        refresh_decision_status = "not_planned"
+        refresh_decision_reason = "legacy_overnight_gaps_outside_composite_plan"
+    else:
+        refresh_decision_status = "not_needed"
+        refresh_decision_reason = "cross_market_sources_current"
+
+    is_current = not refresh_symbols and requested_source_count == 0
+    refresh_recommended = planned_source_count > 0
+
     return {
         "kind": "us_overnight_tw_impact_freshness",
         "scope": {
@@ -539,14 +598,26 @@ def scan_us_overnight_impact_gaps(
         "stock_name": stock.stock_name,
         "mapping": mapping,
         "adr_mapping_resolution": adr_mapping_resolution.as_payload(),
-        "is_current": not refresh_symbols,
-        "refresh_recommended": bool(refresh_symbols),
+        "is_current": is_current,
+        "refresh_recommended": refresh_recommended,
+        "refresh_decision": {
+            "status": refresh_decision_status,
+            "should_execute": refresh_recommended,
+            "reason": refresh_decision_reason,
+            "planned_source_count": planned_source_count,
+            "deferred_source_count": deferred_source_count,
+            "cooldown_source_count": int(
+                refresh_plan.get("cooldown_source_count") or 0
+            ),
+        },
+        "refresh_plan": refresh_plan,
         "refresh_symbols": refresh_symbols,
         "symbol_status": symbol_status,
         "missing": _dedupe(missing),
-        "warnings": warnings,
+        "warnings": _dedupe(warnings),
         "expected_dates": {
             "us_daily_price": expected_trade_date.isoformat(),
+            "resource_quote.USD-TWD": "age<=72h",
         },
     }
 
@@ -756,12 +827,13 @@ def build_us_overnight_impact_report(
         normalized_stock_id,
         generated_at=generated_at,
     )
-    cross_market_context = build_cross_market_target_context(
+    cross_market_context = read_cross_market_target_context(
         db,
         normalized_stock_id,
-        decision_at=generated_at,
+        as_of_at=generated_at,
         expected_adr_trade_date=expected_trade_date,
         adr_parity_payload=adr_parity,
+        projection_mode="current",
     ).model_dump(mode="json")
     stale_dates = [
         value
@@ -866,6 +938,11 @@ def build_us_overnight_impact_report(
             "relation_snapshot_version"
         ),
         "snapshot_id": cross_market_context.get("snapshot_id"),
+        "projection_source": cross_market_context.get("projection_source"),
+        "source_cutoff_at": cross_market_context.get("source_cutoff_at"),
+        "materialized_at": cross_market_context.get("materialized_at"),
+        "materialized_by": cross_market_context.get("materialized_by"),
+        "payload_hash": cross_market_context.get("payload_hash"),
         "limitations": list(cross_market_context.get("limitations") or []),
         "source": "app.market.cross_market.context",
         "fx_flow_context": fx_flow_context,
@@ -896,6 +973,16 @@ def build_us_overnight_impact_report(
             ),
             "cross_market_context_status": cross_market_context.get("status"),
             "cross_market_snapshot_id": cross_market_context.get("snapshot_id"),
+            "cross_market_projection_source": cross_market_context.get(
+                "projection_source"
+            ),
+            "cross_market_source_cutoff_at": cross_market_context.get(
+                "source_cutoff_at"
+            ),
+            "cross_market_materialized_at": cross_market_context.get(
+                "materialized_at"
+            ),
+            "cross_market_payload_hash": cross_market_context.get("payload_hash"),
             "cross_market_relation_snapshot_version": cross_market_context.get(
                 "relation_snapshot_version"
             ),
@@ -908,6 +995,11 @@ def build_us_overnight_impact_report(
         "schema_version": cross_market_context.get("schema_version"),
         "status": cross_market_context.get("status"),
         "snapshot_id": cross_market_context.get("snapshot_id"),
+        "projection_source": cross_market_context.get("projection_source"),
+        "source_cutoff_at": cross_market_context.get("source_cutoff_at"),
+        "materialized_at": cross_market_context.get("materialized_at"),
+        "materialized_by": cross_market_context.get("materialized_by"),
+        "payload_hash": cross_market_context.get("payload_hash"),
         "methodology_version": cross_market_context.get("methodology_version"),
         "relation_snapshot_version": cross_market_context.get(
             "relation_snapshot_version"

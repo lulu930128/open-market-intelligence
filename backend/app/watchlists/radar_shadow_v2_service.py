@@ -1050,8 +1050,11 @@ def _upsert_events(
         if contribution.get("signal_type") == "event"
         and int(contribution.get("direction") or 0) != 0
     ]
-    active_keys = {
-        str(contribution["signal_key"])
+    active_identities = {
+        (
+            str(contribution["signal_key"]),
+            int(contribution["direction"]),
+        )
         for contribution in active_contributions
     }
     open_events = (
@@ -1069,7 +1072,7 @@ def _upsert_events(
     created_count = 0
     updated_count = 0
     for event in open_events:
-        if event.event_key in active_keys:
+        if (event.event_key, event.direction) in active_identities:
             continue
         event.status = "exited"
         event.observation_status = "observed_inactive"
@@ -1078,11 +1081,25 @@ def _upsert_events(
         event.updated_at = utc_now()
         updated_count += 1
 
-    by_key = {event.event_key: event for event in open_events}
+    same_onset_events = (
+        db.query(RadarSignalEvent)
+        .filter(RadarSignalEvent.market == feature.market)
+        .filter(RadarSignalEvent.stock_id == feature.stock_id)
+        .filter(RadarSignalEvent.rule_version == rule_version)
+        .filter(RadarSignalEvent.rule_config_hash == rule_config_hash)
+        .filter(RadarSignalEvent.onset_trade_date == feature.signal_trade_date)
+        .all()
+    )
+    by_identity = {
+        (event.event_key, event.direction): event
+        for event in (*same_onset_events, *open_events)
+    }
     for contribution in active_contributions:
         event_key = str(contribution["signal_key"])
-        event = by_key.get(event_key)
+        direction = int(contribution["direction"])
+        event = by_identity.get((event_key, direction))
         if event is not None:
+            was_inactive = event.status != "active"
             event.status = "active"
             event.observation_status = "observed_active"
             event.last_observed_trade_date = feature.signal_trade_date
@@ -1090,6 +1107,8 @@ def _upsert_events(
             if event.last_active_trade_date < feature.signal_trade_date:
                 event.persistence_trading_days += 1
                 event.last_active_trade_date = feature.signal_trade_date
+            if was_inactive:
+                event.retrigger_count += 1
             event.latest_evaluation_id = evaluation.id
             event.event_metadata_json = json_dumps(
                 {
@@ -1104,7 +1123,7 @@ def _upsert_events(
             stock_id=feature.stock_id,
             event_key=event_key,
             family=str(contribution["family"]),
-            direction=int(contribution["direction"]),
+            direction=direction,
             signal_type="event",
             status="active",
             rule_version=rule_version,
@@ -1126,12 +1145,17 @@ def _upsert_events(
             ),
         )
         db.add(event)
-        by_key[event_key] = event
+        by_identity[(event_key, direction)] = event
         created_count += 1
     db.flush()
     linked_count = 0
     for contribution in active_contributions:
-        event = by_key[str(contribution["signal_key"])]
+        event = by_identity[
+            (
+                str(contribution["signal_key"]),
+                int(contribution["direction"]),
+            )
+        ]
         link = (
             db.query(RadarEvaluationEventLink)
             .filter(

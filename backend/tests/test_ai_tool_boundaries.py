@@ -21,6 +21,7 @@ from app.watchlists import backfill_service as watchlist_backfill_service
 
 EXPECTED_INTERNAL_TOOL_NAMES = (
     "omi.ask",
+    "omi.read_refresh_status",
     "omi.read_market_overview",
     "omi.read_stock_context",
     "omi.read_tw_index_context",
@@ -52,7 +53,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "a86a7b72e416154733de9458d276a77230bd0cf1a52baafa741c4a2eee3dea36"
+    "9f6a122e981f17e748870bdbeaa80065afbc514aa3fa260dad40e4c41c0fb1a5"
 )
 
 
@@ -183,7 +184,10 @@ class AIToolBoundaryTests(unittest.TestCase):
     def test_public_tool_inventory_exposes_only_omi_ask(self) -> None:
         catalog = tools.list_ai_tools()
 
-        self.assertEqual([item["name"] for item in catalog["tools"]], ["omi.ask"])
+        self.assertEqual(
+            [item["name"] for item in catalog["tools"]],
+            ["omi.ask", "omi.read_refresh_status"],
+        )
         schema = catalog["tools"][0]["input_schema"]
         self.assertEqual(
             schema["x-omi-capability-registry-version"],

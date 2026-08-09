@@ -2591,6 +2591,11 @@ def _canonical_cross_market_freshness_domain(
         "warnings": list(context.get("warnings") or []),
         "limitations": list(context.get("limitations") or []),
         "snapshot_id": context.get("snapshot_id"),
+        "projection_source": context.get("projection_source"),
+        "source_cutoff_at": context.get("source_cutoff_at"),
+        "materialized_at": context.get("materialized_at"),
+        "materialized_by": context.get("materialized_by"),
+        "payload_hash": context.get("payload_hash"),
         "methodology_version": context.get("methodology_version"),
         "relation_snapshot_version": context.get("relation_snapshot_version"),
     }

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import json
 import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -33,6 +35,7 @@ from app.market.cross_market.snapshot_store import (
     load_latest_cross_market_context_snapshots,
     materialize_cross_market_context_batch,
     materialize_cross_market_context_snapshot,
+    read_cross_market_target_context,
 )
 from app.routers.cross_market import get_cross_market_context
 
@@ -40,6 +43,7 @@ from app.routers.cross_market import get_cross_market_context
 DECISION_AT = datetime(2026, 8, 9, 1, 0, tzinfo=timezone.utc)
 ADR_TRADE_DATE = date(2026, 8, 7)
 VERIFIED_AT = datetime(2026, 7, 22, tzinfo=timezone.utc)
+MATERIALIZED_AT = DECISION_AT + timedelta(minutes=5)
 
 
 def make_session() -> Session:
@@ -105,9 +109,15 @@ def add_verified_tsm_relation(db: Session) -> int:
     return approved.id
 
 
-def add_tw_daily(db: Session, *, close_price: float = 1000.0) -> None:
+def add_tw_daily(
+    db: Session,
+    *,
+    close_price: float = 1000.0,
+    trade_date: date = ADR_TRADE_DATE,
+    available_at: datetime = DECISION_AT,
+) -> None:
     source = SourceRegistry(
-        source_name="test-cross-market-context-tw",
+        source_name=f"test-cross-market-context-tw-{trade_date.isoformat()}",
         source_type="test",
         category="market_daily_price",
     )
@@ -118,7 +128,7 @@ def add_tw_daily(db: Session, *, close_price: float = 1000.0) -> None:
         method="GET",
         url="https://example.test/tw",
         status_code=200,
-        content_hash="cross-market-context-tw",
+        content_hash=f"cross-market-context-tw-{trade_date.isoformat()}",
         raw_text="{}",
     )
     db.add(raw)
@@ -127,12 +137,12 @@ def add_tw_daily(db: Session, *, close_price: float = 1000.0) -> None:
         MarketDailyPrice(
             source_id=source.id,
             raw_result_id=raw.id,
-            trade_date=ADR_TRADE_DATE,
+            trade_date=trade_date,
             stock_id="2330",
             stock_name="台積電",
             close_price=close_price,
-            created_at=DECISION_AT,
-            updated_at=DECISION_AT,
+            created_at=available_at,
+            updated_at=available_at,
         )
     )
     db.commit()
@@ -142,13 +152,14 @@ def add_adr_close(
     db: Session,
     *,
     close_price: float = 200.0,
+    trade_date: date = ADR_TRADE_DATE,
     fetched_at: datetime = DECISION_AT,
 ) -> None:
     db.add(
         USDailyPrice(
             provider="yahoo_chart",
             symbol="TSM",
-            trade_date=ADR_TRADE_DATE,
+            trade_date=trade_date,
             close_price=close_price,
             fetched_at=fetched_at,
         )
@@ -223,6 +234,19 @@ class CrossMarketContextTests(unittest.TestCase):
         self.assertEqual(parsed.signals[0].relation_id, relation_id)
         self.assertEqual(parsed.signals[0].bucket, "direct_equivalent")
         self.assertEqual(parsed.coverage.coverage_ratio, 1.0)
+        self.assertEqual(parsed.projection_source, "latest_local_cache")
+        self.assertEqual(parsed.source_cutoff_at, DECISION_AT)
+        self.assertIsNone(parsed.materialized_at)
+        self.assertIsNone(parsed.payload_hash)
+        self.assertEqual(
+            parsed.freshness["projection_source"],
+            "latest_local_cache",
+        )
+        self.assertTrue(parsed.freshness["input_lineage_hash"])
+        self.assertEqual(
+            parsed.freshness["input_lineage_hash"],
+            parsed.evidence_passport["input_lineage_hash"],
+        )
         self.assertFalse(parsed.freshness["read_path_provider_refresh"])
 
     def test_point_in_time_snapshot_is_idempotent_and_batch_readable(self) -> None:
@@ -237,6 +261,7 @@ class CrossMarketContextTests(unittest.TestCase):
             decision_at=DECISION_AT,
             expected_adr_trade_date=ADR_TRADE_DATE,
             materialized_by="test",
+            materialized_at=MATERIALIZED_AT,
         )
         second = materialize_cross_market_context_snapshot(
             self.db,
@@ -244,6 +269,7 @@ class CrossMarketContextTests(unittest.TestCase):
             decision_at=DECISION_AT,
             expected_adr_trade_date=ADR_TRADE_DATE,
             materialized_by="test",
+            materialized_at=MATERIALIZED_AT + timedelta(minutes=1),
         )
         batch = materialize_cross_market_context_batch(
             self.db,
@@ -269,6 +295,270 @@ class CrossMarketContextTests(unittest.TestCase):
         self.assertEqual(set(loaded), {"2330"})
         self.assertEqual(loaded["2330"].snapshot_id, first.snapshot_id)
         self.assertTrue(loaded["2330"].decision_usable)
+        self.assertEqual(
+            loaded["2330"].projection_source,
+            "materialized_snapshot",
+        )
+        self.assertEqual(loaded["2330"].source_cutoff_at, DECISION_AT)
+        self.assertEqual(loaded["2330"].materialized_at, MATERIALIZED_AT)
+        self.assertEqual(loaded["2330"].materialized_by, "test")
+        self.assertEqual(loaded["2330"].payload_hash, first.payload_hash)
+        self.assertEqual(
+            loaded["2330"].evidence_passport["payload_hash"],
+            first.payload_hash,
+        )
+        self.assertEqual(
+            loaded["2330"].freshness["input_lineage_hash"],
+            loaded["2330"].evidence_passport["input_lineage_hash"],
+        )
+        self.assertNotIn(
+            "latest_local_cache_projection_not_materialized_snapshot",
+            loaded["2330"].limitations,
+        )
+        self.assertEqual(
+            load_latest_cross_market_context_snapshots(
+                self.db,
+                ["2330"],
+                as_of_at=MATERIALIZED_AT,
+                exact_decision_at=DECISION_AT + timedelta(seconds=1),
+            ),
+            {},
+        )
+
+    def test_batch_rethrows_sqlite_lock_for_outer_transaction_retry(self) -> None:
+        add_verified_tsm_relation(self.db)
+        locked = OperationalError(
+            "INSERT cross_market_signal_snapshot",
+            {},
+            Exception("database is locked"),
+        )
+
+        with patch(
+            "app.market.cross_market.snapshot_store."
+            "materialize_cross_market_context_snapshot",
+            side_effect=locked,
+        ):
+            with self.assertRaises(OperationalError) as raised:
+                materialize_cross_market_context_batch(
+                    self.db,
+                    ["2330"],
+                    decision_at=DECISION_AT,
+                    materialized_by="test-lock",
+                )
+
+        self.assertIs(raised.exception, locked)
+
+    def test_snapshot_identity_is_immutable_when_source_data_changes(self) -> None:
+        add_verified_tsm_relation(self.db)
+        add_adr_close(self.db)
+        add_tw_daily(self.db)
+        add_fx(self.db)
+        snapshot = materialize_cross_market_context_snapshot(
+            self.db,
+            "2330",
+            decision_at=DECISION_AT,
+            expected_adr_trade_date=ADR_TRADE_DATE,
+            materialized_by="test",
+            materialized_at=MATERIALIZED_AT,
+        )
+        original_payload = snapshot.payload_json
+        self.db.commit()
+
+        adr = self.db.query(USDailyPrice).filter(USDailyPrice.symbol == "TSM").one()
+        adr.close_price = 250.0
+        self.db.commit()
+
+        with self.assertRaisesRegex(RuntimeError, "non-deterministic"):
+            materialize_cross_market_context_snapshot(
+                self.db,
+                "2330",
+                decision_at=DECISION_AT,
+                expected_adr_trade_date=ADR_TRADE_DATE,
+                materialized_by="changed-source-retry",
+                materialized_at=MATERIALIZED_AT + timedelta(minutes=10),
+            )
+
+        stored = self.db.query(CrossMarketSignalSnapshot).one()
+        self.assertEqual(stored.payload_json, original_payload)
+        self.assertEqual(stored.materialized_at, MATERIALIZED_AT.replace(tzinfo=None))
+
+    def test_snapshot_resolver_rejects_tamper_and_falls_back_to_latest_cache(self) -> None:
+        add_verified_tsm_relation(self.db)
+        add_adr_close(self.db)
+        add_tw_daily(self.db)
+        add_fx(self.db)
+        snapshot = materialize_cross_market_context_snapshot(
+            self.db,
+            "2330",
+            decision_at=DECISION_AT,
+            expected_adr_trade_date=ADR_TRADE_DATE,
+            materialized_by="test",
+            materialized_at=MATERIALIZED_AT,
+        )
+        payload = json.loads(snapshot.payload_json)
+        payload["summary"]["title"] = "tampered"
+        snapshot.payload_json = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.db.commit()
+
+        loaded = load_latest_cross_market_context_snapshots(
+            self.db,
+            ["2330"],
+            as_of_at=MATERIALIZED_AT,
+        )
+        resolved = read_cross_market_target_context(
+            self.db,
+            "2330",
+            as_of_at=MATERIALIZED_AT,
+            expected_adr_trade_date=ADR_TRADE_DATE,
+        )
+
+        self.assertEqual(loaded, {})
+        self.assertEqual(resolved.projection_source, "latest_local_cache")
+        self.assertIn(
+            "latest_local_cache_projection_not_materialized_snapshot",
+            resolved.limitations,
+        )
+
+    def test_current_read_uses_newer_local_inputs_without_breaking_replay(self) -> None:
+        add_verified_tsm_relation(self.db)
+        old_trade_date = date(2026, 8, 4)
+        old_decision_at = datetime(2026, 8, 5, 1, tzinfo=timezone.utc)
+        add_adr_close(
+            self.db,
+            trade_date=old_trade_date,
+            fetched_at=old_decision_at,
+        )
+        add_tw_daily(
+            self.db,
+            trade_date=old_trade_date,
+            available_at=old_decision_at,
+        )
+        add_fx(self.db, fetched_at=old_decision_at)
+        old_snapshot = materialize_cross_market_context_snapshot(
+            self.db,
+            "2330",
+            decision_at=old_decision_at,
+            expected_adr_trade_date=old_trade_date,
+            materialized_by="historical-test",
+            materialized_at=old_decision_at + timedelta(minutes=5),
+        )
+        self.db.commit()
+
+        add_adr_close(
+            self.db,
+            trade_date=ADR_TRADE_DATE,
+            fetched_at=DECISION_AT,
+        )
+        add_tw_daily(
+            self.db,
+            trade_date=ADR_TRADE_DATE,
+            available_at=DECISION_AT,
+        )
+        fx = self.db.query(ResourceQuoteSnapshot).one()
+        fx.event_time = DECISION_AT
+        fx.fetched_at = DECISION_AT
+        self.db.commit()
+
+        current = read_cross_market_target_context(
+            self.db,
+            "2330",
+            as_of_at=DECISION_AT,
+            expected_adr_trade_date=ADR_TRADE_DATE,
+        )
+        replay = read_cross_market_target_context(
+            self.db,
+            "2330",
+            as_of_at=old_decision_at,
+            expected_adr_trade_date=old_trade_date,
+            projection_mode="replay",
+        )
+
+        self.assertEqual(current.projection_source, "latest_local_cache")
+        self.assertEqual(current.as_of, ADR_TRADE_DATE)
+        self.assertNotEqual(current.snapshot_id, old_snapshot.snapshot_id)
+        self.assertIn(
+            "materialized_snapshot_superseded_by_local_inputs",
+            current.limitations,
+        )
+        self.assertEqual(replay.projection_source, "materialized_snapshot")
+        self.assertEqual(replay.snapshot_id, old_snapshot.snapshot_id)
+        self.assertEqual(replay.as_of, old_trade_date)
+        self.assertEqual(self.db.query(CrossMarketSignalSnapshot).count(), 1)
+
+    def test_current_read_reuses_materialized_snapshot_when_lineage_is_unchanged(
+        self,
+    ) -> None:
+        add_verified_tsm_relation(self.db)
+        add_adr_close(self.db)
+        add_tw_daily(self.db)
+        add_fx(self.db)
+        snapshot = materialize_cross_market_context_snapshot(
+            self.db,
+            "2330",
+            decision_at=DECISION_AT,
+            expected_adr_trade_date=ADR_TRADE_DATE,
+            materialized_by="same-lineage-test",
+            materialized_at=MATERIALIZED_AT,
+        )
+        self.db.commit()
+
+        current = read_cross_market_target_context(
+            self.db,
+            "2330",
+            as_of_at=MATERIALIZED_AT,
+            expected_adr_trade_date=ADR_TRADE_DATE,
+        )
+
+        self.assertEqual(current.projection_source, "latest_local_cache")
+        self.assertNotEqual(current.snapshot_id, snapshot.snapshot_id)
+        self.assertEqual(
+            current.freshness["matching_materialized_snapshot"]["snapshot_id"],
+            snapshot.snapshot_id,
+        )
+        self.assertNotIn(
+            "materialized_snapshot_superseded_by_local_inputs",
+            current.limitations,
+        )
+        self.assertEqual(self.db.query(CrossMarketSignalSnapshot).count(), 1)
+
+    def test_current_read_recomputes_freshness_when_unchanged_inputs_age_stale(
+        self,
+    ) -> None:
+        add_verified_tsm_relation(self.db)
+        add_adr_close(self.db)
+        add_tw_daily(self.db)
+        add_fx(self.db)
+        snapshot = materialize_cross_market_context_snapshot(
+            self.db,
+            "2330",
+            decision_at=DECISION_AT,
+            expected_adr_trade_date=ADR_TRADE_DATE,
+            materialized_by="freshness-aging-test",
+            materialized_at=MATERIALIZED_AT,
+        )
+        self.db.commit()
+
+        current = read_cross_market_target_context(
+            self.db,
+            "2330",
+            as_of_at=DECISION_AT + timedelta(hours=73),
+            expected_adr_trade_date=ADR_TRADE_DATE,
+        )
+
+        self.assertEqual(current.projection_source, "latest_local_cache")
+        self.assertEqual(current.status, "stale")
+        self.assertFalse(current.decision_usable)
+        self.assertNotEqual(current.snapshot_id, snapshot.snapshot_id)
+        self.assertIn(
+            "materialized_snapshot_superseded_by_local_inputs",
+            current.limitations,
+        )
+        self.assertEqual(self.db.query(CrossMarketSignalSnapshot).count(), 1)
 
     def test_point_in_time_snapshot_excludes_future_ingestion(self) -> None:
         add_verified_tsm_relation(self.db)

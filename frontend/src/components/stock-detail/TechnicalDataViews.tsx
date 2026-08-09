@@ -2,12 +2,14 @@
 
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import { StockDetailDisclosure } from "@/components/stock-detail/DataPanelPrimitives";
 import {
   formatPct,
   formatPrice,
 } from "@/components/stock-detail/stockDetailFormatters";
 import { useT, type TranslationFunction, type TranslationValues } from "@/i18n";
 import type { StockTechnicalReportRead } from "@/types/market";
+import type { ReactNode } from "react";
 
 export type TechnicalTone = "positive" | "negative" | "neutral" | "warning";
 
@@ -757,54 +759,56 @@ export function TechnicalCurrentStateOverview({
 
   return (
     <section
-      className="border-b border-omi-border-subtle px-5 py-3"
+      className="space-y-2 border-b border-omi-border-subtle px-5 py-3"
       data-testid="tw-technical-current-state"
     >
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <div className="text-sm font-semibold text-omi-text-strong">
-            {t("stockDetail.technicalCurrentState.ladderTitle")}
-          </div>
-          <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">
-            {t("stockDetail.technicalCurrentState.ladderHint")}
-          </div>
+      <StockDetailDisclosure
+        testId="tw-technical-ladder-disclosure"
+        title={t("stockDetail.technicalCurrentState.ladderTitle")}
+        description={t("stockDetail.technicalCurrentState.ladderHint")}
+        summaryClassName="px-1 py-1.5"
+        contentClassName="pb-1 pt-2"
+        trailing={
+          <span className="text-right">
+            <span className="block text-sm font-semibold tabular-nums text-omi-text-strong">
+              {formatPrice(state.position.price)}
+            </span>
+            <span className="block text-xs text-omi-text-muted">
+              {t("stockDetail.technicalCurrentState.currentPrice")}
+            </span>
+          </span>
+        }
+      >
+        <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
+          {state.levels.map((level) => (
+            <div
+              key={level.key}
+              className={`min-w-0 border px-2.5 py-2 ${currentStateLevelClass(level)}`}
+              data-level-key={level.key}
+            >
+              <div className="truncate text-[11px] font-medium text-omi-text-muted">
+                {currentStateLevelLabel(level, t)}
+              </div>
+              <div className="mt-0.5 text-sm font-semibold tabular-nums text-omi-text-strong">
+                {formatPrice(level.price)}
+              </div>
+              <div className={`mt-0.5 text-[11px] leading-4 tabular-nums ${technicalToneClass(level.tone)}`}>
+                {currentStateMoveLabel(level, t)}
+              </div>
+            </div>
+          ))}
         </div>
-        <div className="shrink-0 text-right">
-          <div className="text-sm font-semibold tabular-nums text-omi-text-strong">
-            {formatPrice(state.position.price)}
-          </div>
-          <div className="text-xs text-omi-text-muted">
-            {t("stockDetail.technicalCurrentState.currentPrice")}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-2.5 grid grid-cols-2 gap-2 xl:grid-cols-4">
-        {state.levels.map((level) => (
-          <div
-            key={level.key}
-            className={`min-w-0 border px-2.5 py-2 ${currentStateLevelClass(level)}`}
-            data-level-key={level.key}
-          >
-            <div className="truncate text-[11px] font-medium text-omi-text-muted">
-              {currentStateLevelLabel(level, t)}
-            </div>
-            <div className="mt-0.5 text-sm font-semibold tabular-nums text-omi-text-strong">
-              {formatPrice(level.price)}
-            </div>
-            <div className={`mt-0.5 text-[11px] leading-4 tabular-nums ${technicalToneClass(level.tone)}`}>
-              {currentStateMoveLabel(level, t)}
-            </div>
-          </div>
-        ))}
-      </div>
+      </StockDetailDisclosure>
 
       {state.nextConditions.length ? (
-        <div className="mt-3 border-t border-omi-border-subtle pt-2.5">
-          <div className="text-sm font-semibold text-omi-text-strong">
-            {t("stockDetail.technicalCurrentState.nextConditions")}
-          </div>
-          <ol className="mt-2 space-y-1.5">
+        <StockDetailDisclosure
+          testId="tw-technical-next-conditions-disclosure"
+          className="border-t border-omi-border-subtle"
+          title={t("stockDetail.technicalCurrentState.nextConditions")}
+          summaryClassName="px-1 py-2"
+          contentClassName="pb-1 pt-1"
+        >
+          <ol className="space-y-1.5">
             {state.nextConditions.map((condition, index) => (
               <li
                 key={condition.key}
@@ -819,37 +823,34 @@ export function TechnicalCurrentStateOverview({
               </li>
             ))}
           </ol>
-        </div>
+        </StockDetailDisclosure>
       ) : null}
     </section>
   );
 }
 
 export function TechnicalCurrentStateEvidence({
+  children,
   state,
 }: {
+  children?: ReactNode;
   state: TechnicalCurrentState;
 }) {
   const t = useT();
 
   return (
-    <section
-      className="space-y-2"
-      aria-label={t("stockDetail.technicalCurrentState.evidenceTitle")}
+    <StockDetailDisclosure
+      testId="tw-technical-evidence-disclosure"
+      title={t("stockDetail.technicalCurrentState.evidenceTitle")}
+      description={t("stockDetail.technicalCurrentState.evidenceHint")}
+      summaryClassName="px-1 py-1.5"
+      contentClassName="space-y-2 pt-2"
     >
-      <div className="mb-2.5">
-        <div className="text-sm font-semibold text-omi-text-strong">
-          {t("stockDetail.technicalCurrentState.evidenceTitle")}
-        </div>
-        <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">
-          {t("stockDetail.technicalCurrentState.evidenceHint")}
-        </div>
-      </div>
       {state.evidence.map((item) => (
         <details
           key={item.key}
           id={`tw-technical-evidence-${item.key}`}
-          className="group border border-omi-border-subtle bg-omi-surface-muted"
+          className="group/evidence-item border border-omi-border-subtle bg-omi-surface-muted"
           data-testid={`tw-technical-evidence-${item.key}`}
         >
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-2.5 outline-none transition hover:bg-omi-surface focus-visible:ring-2 focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden">
@@ -863,7 +864,7 @@ export function TechnicalCurrentStateEvidence({
             </span>
             <span
               aria-hidden="true"
-              className="shrink-0 text-base text-omi-text-muted transition-transform group-open:rotate-45"
+              className="shrink-0 text-base text-omi-text-muted transition-transform group-open/evidence-item:rotate-45"
             >
               ＋
             </span>
@@ -873,7 +874,8 @@ export function TechnicalCurrentStateEvidence({
           </div>
         </details>
       ))}
-    </section>
+      {children}
+    </StockDetailDisclosure>
   );
 }
 

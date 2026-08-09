@@ -2,6 +2,7 @@
 
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import { StockDetailDisclosure } from "@/components/stock-detail/DataPanelPrimitives";
 import {
   formatDate,
   formatPct,
@@ -328,6 +329,14 @@ function crossMarketStanceKey(value: string) {
   return "unknown";
 }
 
+function formatCrossMarketWeight(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "-";
+  return value.toLocaleString("zh-TW", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 function crossMarketLimitationLabel(value: string, t: TranslationFunction) {
   if (value === "legacy_mapping_fallback") {
     return t("stockDetail.dataViews.overnight.crossMarket.limitations.legacyMapping");
@@ -365,6 +374,14 @@ function CrossMarketContextStrip({
     typeof rawSignalValue === "number" && Number.isFinite(rawSignalValue)
       ? rawSignalValue
       : null;
+  const contextScore =
+    typeof context.summary.score === "number" && Number.isFinite(context.summary.score)
+      ? context.summary.score
+      : null;
+  const signalContribution =
+    typeof signal?.contribution === "number" && Number.isFinite(signal.contribution)
+      ? signal.contribution
+      : null;
   const rawReturn = signal?.calculation.raw_return_pct;
   const benchmarkReturn = signal?.calculation.benchmark_return_pct;
   const proxyRawReturn =
@@ -378,6 +395,14 @@ function CrossMarketContextStrip({
     mappingResolution?.selected_source ?? (signal?.relation_id != null ? "registry" : "legacy");
   const statusKey = crossMarketStatusKey(context.status);
   const stanceKey = crossMarketStanceKey(context.summary.stance);
+  const sourceSymbol =
+    signal?.source.provider_symbol ?? signal?.source.canonical_symbol ?? null;
+  const targetSymbol =
+    signal?.target.provider_symbol ??
+    signal?.target.canonical_symbol ??
+    context.target.provider_symbol ??
+    context.target.canonical_symbol;
+  const signalTypeKey = isProxy ? "proxy" : "direct";
   const coverage = context.coverage;
   const limitation =
     context.limitations.find((item) => item === "industry_proxy_not_company_causality") ??
@@ -395,18 +420,39 @@ function CrossMarketContextStrip({
         title={t("stockDetail.dataViews.overnight.crossMarket.expandLabel")}
         className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-x-3 gap-y-1 px-2.5 py-1.5 hover:bg-omi-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden"
       >
-        <span className="flex min-w-0 items-center gap-2 font-semibold text-omi-text-muted">
-          <span className="font-bold uppercase tracking-[0.08em] text-omi-text-strong">
+        <span className="min-w-0">
+          <span className="block text-[10px] font-bold uppercase tracking-[0.12em] text-omi-text-muted">
             {t("stockDetail.dataViews.overnight.crossMarket.label")}
           </span>
-          <span>
+          <span className="mt-0.5 block font-bold text-omi-text-strong">
+            {signal && sourceSymbol
+              ? `${t("stockDetail.dataViews.overnight.crossMarket.pairLabel", {
+                  source: sourceSymbol,
+                  target: targetSymbol,
+                })} · ${t(
+                  `stockDetail.dataViews.overnight.crossMarket.signalType.${signalTypeKey}`
+                )}`
+              : t("stockDetail.dataViews.overnight.crossMarket.noSignal")}
+          </span>
+          <span className="mt-0.5 block text-[11px] font-medium text-omi-text-muted">
             {t(`stockDetail.dataViews.overnight.crossMarket.stance.${stanceKey}`)}
+            {signal?.confidence_tier
+              ? ` · ${t(
+                  "stockDetail.dataViews.overnight.crossMarket.confidenceTier",
+                  { tier: signal.confidence_tier }
+                )}`
+              : ""}
           </span>
         </span>
         <span className="flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-0.5 tabular-nums">
-          {signalValue !== null ? (
-            <span className={`font-bold ${valueTone(signalValue)}`}>
-              {formatPct(signalValue)}
+          {contextScore !== null ? (
+            <span className="text-right">
+              <span className="block text-[10px] font-medium text-omi-text-muted">
+                {t("stockDetail.dataViews.overnight.crossMarket.scoreLabel")}
+              </span>
+              <span className={`block font-bold ${valueTone(contextScore)}`}>
+                {formatPct(contextScore)}
+              </span>
             </span>
           ) : null}
           <span className={`font-semibold ${crossMarketStatusTone(context.status)}`}>
@@ -460,6 +506,34 @@ function CrossMarketContextStrip({
                 {t("stockDetail.dataViews.overnight.crossMarket.residualLabel")} {formatPct(signalValue)}
               </span>
             </div>
+          ) : null}
+          {signal ? (
+            <>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-1">
+                <dt className="font-semibold text-omi-text-strong">
+                  {t("stockDetail.dataViews.overnight.crossMarket.weightLabel")}
+                </dt>
+                <dd className="text-right tabular-nums text-omi-text-muted">
+                  {t("stockDetail.dataViews.overnight.crossMarket.weightValue", {
+                    configured: formatCrossMarketWeight(signal.configured_weight),
+                    quality: formatCrossMarketWeight(signal.quality_multiplier),
+                    effective: formatCrossMarketWeight(signal.effective_weight),
+                  })}
+                </dd>
+              </div>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-1">
+                <dt className="font-semibold text-omi-text-strong">
+                  {t("stockDetail.dataViews.overnight.crossMarket.contributionLabel")}
+                </dt>
+                <dd
+                  className={`text-right font-bold tabular-nums ${valueTone(
+                    signalContribution
+                  )}`}
+                >
+                  {formatPct(signalContribution)}
+                </dd>
+              </div>
+            </>
           ) : null}
           <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-1">
             <dt className="font-semibold text-omi-text-strong">
@@ -769,72 +843,92 @@ export function OvernightImpactPanel({
         .slice(0, 3)
     : [];
   const hasWarning = report.warnings.length > 0 || report.confidence === "low";
+  const hasCrossMarketSurface =
+    (report.cross_market_context !== null &&
+      report.cross_market_context !== undefined &&
+      report.cross_market_context.status !== "not_applicable") ||
+    Boolean(report.adr_parity);
 
   return (
-    <div className="mt-3 border-t border-omi-border-subtle pt-3">
-      <div className="omi-overnight-impact flex items-start justify-between gap-4 text-xs">
-        <div className="min-w-0">
-          <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-            {t("stockDetail.dataViews.overnight.eyebrow")}
-          </div>
-          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">
-            {overnightTitle(report, t)}
-          </div>
-          <div className="mt-0.5 max-h-8 overflow-hidden leading-4 text-omi-text-muted">
-            {overnightSummary(report, t)}
-          </div>
-        </div>
-        <div className={`shrink-0 text-right text-sm font-bold ${valueTone(report.weighted_change_pct)}`}>
-          <PriceUpdatePulse
-            value={report.weighted_change_pct}
-            direction={report.weighted_change_pct}
-            resetKey={`${report.stock_id}:overnight:${report.as_of ?? "none"}`}
-            className="justify-end tabular-nums"
+    <section
+      className="mt-3 border-t border-omi-border-subtle pt-3"
+      data-testid="tw-overnight-impact"
+    >
+      <StockDetailDisclosure
+        testId="tw-overnight-impact-disclosure"
+        eyebrow={`${t("stockDetail.dataViews.overnight.eyebrow")} · ${t(
+          "stockDetail.dataViews.overnight.backdropLabel"
+        )}`}
+        title={overnightTitle(report, t)}
+        description={overnightSummary(report, t)}
+        summaryClassName="px-1 py-1.5"
+        contentClassName="pt-3"
+        trailing={
+          <span
+            className={`text-right text-sm font-bold ${valueTone(report.weighted_change_pct)}`}
           >
-            {formatPct(report.weighted_change_pct)}
-          </PriceUpdatePulse>
-          <div className="text-xs font-medium text-omi-text-muted">
-            {overnightConfidenceLabel(report.confidence, t)}
-          </div>
-        </div>
-      </div>
-
-      {report.cross_market_context ? (
-        <CrossMarketContextStrip context={report.cross_market_context} t={t} />
-      ) : null}
-
-      {report.adr_parity ? <AdrParityStrip parity={report.adr_parity} t={t} /> : null}
-
-      {report.fx_flow_context ? (
-        <FxFlowContextStrip context={report.fx_flow_context} t={t} />
-      ) : null}
-
-      {driverRows.length ? (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {driverRows.map((item) => (
-            <span
-              key={item.key}
-              className="inline-flex items-center gap-1 bg-omi-surface-subtle px-2 py-1 text-xs font-semibold text-omi-text-muted"
+            <PriceUpdatePulse
+              value={report.weighted_change_pct}
+              direction={report.weighted_change_pct}
+              resetKey={`${report.stock_id}:overnight:${report.as_of ?? "none"}`}
+              className="justify-end tabular-nums"
             >
-              <span>{item.label}</span>
-              <span className={valueTone(item.value)}>{formatPct(item.value)}</span>
+              {formatPct(report.weighted_change_pct)}
+            </PriceUpdatePulse>
+            <span className="block text-xs font-medium text-omi-text-muted">
+              {overnightConfidenceLabel(report.confidence, t)}
             </span>
-          ))}
-        </div>
-      ) : null}
+          </span>
+        }
+      >
+        {report.fx_flow_context ? (
+          <FxFlowContextStrip context={report.fx_flow_context} t={t} />
+        ) : null}
 
-      {hasWarning ? (
-        <div className="mt-2 text-[11px] leading-4 text-omi-warning">
-          {report.as_of
-            ? t("stockDetail.dataViews.overnight.dataDatePrefix", {
-                date: formatDate(report.as_of),
-              })
-            : ""}
-          {report.warnings[0]
-            ? overnightWarningLabel(report.warnings[0], t)
-            : t("stockDetail.dataViews.overnight.warningFallback")}
+        {driverRows.length ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {driverRows.map((item) => (
+              <span
+                key={item.key}
+                className="inline-flex items-center gap-1 bg-omi-surface-subtle px-2 py-1 text-xs font-semibold text-omi-text-muted"
+              >
+                <span>{item.label}</span>
+                <span className={valueTone(item.value)}>
+                  {formatPct(item.value)}
+                </span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {hasWarning ? (
+          <div className="mt-2 text-[11px] leading-4 text-omi-warning">
+            {report.as_of
+              ? t("stockDetail.dataViews.overnight.dataDatePrefix", {
+                  date: formatDate(report.as_of),
+                })
+              : ""}
+            {report.warnings[0]
+              ? overnightWarningLabel(report.warnings[0], t)
+              : t("stockDetail.dataViews.overnight.warningFallback")}
+          </div>
+        ) : null}
+      </StockDetailDisclosure>
+
+      {hasCrossMarketSurface ? (
+        <div
+          className="mt-2 border-t border-omi-border-subtle pt-2"
+          data-testid="tw-cross-market-relation"
+        >
+          {report.cross_market_context ? (
+            <CrossMarketContextStrip context={report.cross_market_context} t={t} />
+          ) : null}
+
+          {report.adr_parity ? (
+            <AdrParityStrip parity={report.adr_parity} t={t} />
+          ) : null}
         </div>
       ) : null}
-    </div>
+    </section>
   );
 }

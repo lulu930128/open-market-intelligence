@@ -131,6 +131,49 @@ export type TaiwanEtfInavRead = {
   fetched_at: string;
 };
 
+export type TaiwanEtfValuationMetricRead = {
+  value: number | null;
+  as_of_date: string | null;
+  observed_at: string | null;
+  fetched_at: string | null;
+  source: string | null;
+  source_url: string | null;
+  basis: string;
+  status: string;
+  issue_codes: string[];
+};
+
+export type TaiwanEtfValuationRead = {
+  status: string;
+  basis: "daily_close" | "intraday" | string;
+  market_price: TaiwanEtfValuationMetricRead;
+  nav: TaiwanEtfValuationMetricRead;
+  premium_discount_pct: number | null;
+  premium_discount_status: string;
+  aligned: boolean;
+  issue_codes: string[];
+};
+
+export type TaiwanEtfStrategyRead = {
+  management_style: "active" | "passive" | "unknown" | string;
+  benchmark_role:
+    | "tracked_index"
+    | "performance_benchmark"
+    | "unknown"
+    | string;
+  benchmark_name: string | null;
+};
+
+export type TaiwanEtfResourceStateRead = {
+  applicable: boolean | null;
+  connector_supported: boolean;
+  status: string;
+  reason_code: string | null;
+  as_of_date: string | null;
+  observed_at: string | null;
+  source: string | null;
+};
+
 export type TaiwanEtfOverviewRead = {
   stock_id: string;
   stock_name: string | null;
@@ -142,6 +185,9 @@ export type TaiwanEtfOverviewRead = {
   daily_nav: TaiwanEtfNavDailyRead | null;
   pcf: TaiwanEtfPcfRead | null;
   intraday_nav: TaiwanEtfInavRead | null;
+  valuation: TaiwanEtfValuationRead;
+  strategy: TaiwanEtfStrategyRead;
+  resource_states: Record<string, TaiwanEtfResourceStateRead>;
   freshness: {
     status: "current" | "stale" | "missing" | string;
     timezone: string;
@@ -505,6 +551,8 @@ export type WatchlistRadarV2SummaryRead = {
     enabled: boolean;
     mode: "display_only" | string;
     snapshot_count: number;
+    materialization_status: "materialized_snapshot" | "not_materialized" | string;
+    limitations: string[];
     decision_usable_count: number;
     status_counts: Record<string, number>;
     snapshot_ids: string[];

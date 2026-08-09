@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,13 +10,13 @@ from app.db.session import get_db
 from app.jobs import backfill_tasks
 from app.jobs.job_types import CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE
 from app.jobs.schemas import JobRunRead
-from app.market.cross_market.context import build_cross_market_target_context
 from app.market.cross_market.relation_store import build_relation_registry_read
 from app.market.cross_market.refresh import normalize_refresh_stock_ids
 from app.market.cross_market.schemas import (
     CrossMarketRelationRegistryRead,
     CrossMarketTargetContextRead,
 )
+from app.market.cross_market.snapshot_store import read_cross_market_target_context
 from app.routers.market_family_helpers import enqueue_serialized_job
 
 
@@ -51,12 +51,17 @@ def get_cross_market_relations(
 )
 def get_cross_market_context(
     stock_id: str,
+    decision_at: datetime | None = None,
+    prefer_materialized: bool = True,
     db: Session = Depends(get_db),
 ) -> CrossMarketTargetContextRead:
     try:
-        return build_cross_market_target_context(
+        return read_cross_market_target_context(
             db,
             stock_id,
+            as_of_at=decision_at,
+            prefer_materialized=prefer_materialized,
+            projection_mode=("replay" if decision_at is not None else "current"),
         )
     except ValueError as exc:
         raise HTTPException(

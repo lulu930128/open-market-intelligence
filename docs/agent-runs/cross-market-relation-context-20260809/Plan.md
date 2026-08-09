@@ -10,6 +10,7 @@
 - Consumer Release：里程碑 4–6。Proxy snapshot、完整個股 evidence、Radar display-only、OMI v4/MCP 對齊。
 - Evidence Release：里程碑 7–8。Event policy、statistics、walk-forward 與可選 ranking shadow。
 - Production Hardening：里程碑 9。Runtime adoption、rollback 與文件收斂。
+- Corrective Hardening：R0、M2.2、M4.2、M9.3。先修正 refresh trigger 與 current／replay snapshot 選擇，再恢復 Evidence Release。
 
 ## 里程碑 0：基線凍結與 contract golden
 
@@ -357,7 +358,7 @@ $env:PYTHONPATH=(Resolve-Path '.\backend').Path
 .\.venv\Scripts\python.exe -m pytest -q `
   backend\tests\test_cross_market_relation_migration.py `
   backend\tests\test_cross_market_relation_store.py `
-  backend\tests\test_cross_market_point_in_time.py `
+  backend\tests\test_cross_market_context.py `
   backend\tests\test_database_migrations.py
 ```
 
@@ -436,6 +437,141 @@ $env:PYTHONPATH=(Resolve-Path '.\backend').Path
 
 再依 launcher 實際 selected ports 做 HTTP／MCP protocol smoke 與 browser acceptance；只有 source、runtime identity、outward behavior 三者都吻合才標記完成。
 
+### M9.2：個股頁市場背景／個股映射資訊分層
+
+#### 工作
+
+- 將 legacy Overnight 市場背景與 canonical 個股跨市場映射拆成兩個獨立前端 disclosure；canonical 區塊不再被包在 Overnight 折疊內容內。
+- 個股映射直接呈現 backend contract 的 source → target、relation type、summary score、confidence tier、base／quality／effective weight、signal contribution、coverage、lineage 與 limitations。
+- ADR parity 留在個股映射層；匯率／外資與 legacy factors／baskets 留在市場背景層，避免把資料完整度誤讀成關係信心。
+
+#### 驗收
+
+- Overnight 收合時，具 canonical relation 的個股仍可直接看到映射摘要與 status；展開後可核對 residual、權重、貢獻與非因果限制。
+- Frontend 只格式化 backend 欄位，不重算 relation、weight、freshness 或 score；`not_applicable` 不顯示成可用映射。
+- 既有 direct-equivalent、proxy、stale／partial、ADR parity 與 FX/flow 呈現不退化。
+
+#### 驗證
+
+```powershell
+Set-Location .\frontend
+npm exec tsc -- --noEmit --incremental false
+npm run lint
+npm run test:e2e -- --grep "Taiwan overnight"
+```
+
+## 回歸矯正軌：R0／M2.2／M4.2／M9.3
+
+本工作軌處理 `OMI_美股映射台股_v2_更新版回歸測試工程單_20260809.txt` 已確認的兩個 P1，並完成 2408 時間邊界與 ChatGPT host schema 驗收。施工順序固定為 R0 → M2.2 → M4.2 → M9.3；完成前暫停 M7／M8，Radar 維持 `ranking_effect=none`。
+
+### R0：回歸案例與 currentness contract 凍結
+
+#### 工作
+
+- 建立 2330 deterministic fixture：TSM 日線已有 current provider、USD/TWD resource quote stale、完整 cross-market refresh plan 仍有可執行 FX source。
+- 建立 snapshot supersession fixture：既有 materialized snapshot 使用較舊 ADR／FX inputs，本機 cache 已有較新 ADR input；同時保留明示 `decision_at` 的 historical replay 對照。
+- 鎖住 2408／MU `valid_from=2026-08-10` 的前後邊界，以及 local MCP `omi.ask` include／required enums；ChatGPT host cache 不列為 backend regression。
+- 將「currentness」定義為 relation/methodology 與逐來源 input lineage 的比較結果；`source_cutoff_at`、HTTP 200、snapshot 存在或單一 provider current 都不能單獨證明 current。
+
+#### 驗收
+
+- 修正前 regression 必須穩定重現：完整 plan 有 FX operation，但 AI gate 不產生 tool；current Ask／context 被較舊 snapshot 截走。
+- Fixture 不連外、不寫 live DB、不依目前牆鐘時間；2408 runtime 預設查詢另留給 M9.3 跨界 canary。
+- Historical replay 與 current read 的預期行為分開，不用修 current bug 的方式破壞 point-in-time replay。
+
+#### 驗證
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path '.\backend').Path
+.\.venv\Scripts\python.exe -m pytest -q `
+  backend\tests\test_overnight_impact.py `
+  backend\tests\test_cross_market_refresh.py `
+  backend\tests\test_cross_market_context.py `
+  backend\tests\test_cross_market_point_in_time.py `
+  backend\tests\test_cross_market_ai_contract.py
+```
+
+### M2.2：完整 refresh plan 驅動 AI trigger
+
+#### 工作
+
+- 由 `build_cross_market_refresh_plan` 或同一 backend-owned composite planner 產生唯一 refresh execution decision；不再以只掃 US daily 的 `refresh_recommended` 作 cross-market tool gate。
+- Execution decision 保留 planned、deferred、cooldown、來源種類與 machine-readable reason；只有 `planned_source_count > 0` 才加入 `cross_market.refresh_context`。
+- Deferred-only、cooldown-only 或沒有可執行 source 時只回 visible limitation／next eligible time，不建立 no-op tool loop。
+- `cache_only`、`allow_external_fetch=false`、GET context／relation 與 Radar read path 維持零 provider call；bounded refresh 仍限制單一 target、最多 8 sources、dedupe、timeout、retry 與 provider events。
+
+#### 驗收
+
+- 2330 的 US daily current／FX stale case 會規劃一次 composite refresh，且實際 operation 只包含需要的 FX source。
+- 全部來源 current 時不產生 tool；只有 deferred source 時不執行 tool，但 freshness／deferred reason 對 AI 與 outward contract 可見。
+- Partial／failed refresh 保留 stale local evidence 與 failure owner，不清空 cache、不宣稱 ready、不觸發無界重試。
+
+#### 驗證
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path '.\backend').Path
+.\.venv\Scripts\python.exe -m pytest -q `
+  backend\tests\test_cross_market_refresh.py `
+  backend\tests\test_overnight_impact.py `
+  backend\tests\test_ai_tool_boundaries.py `
+  backend\tests\test_cross_market_ai_contract.py
+```
+
+### M4.2：Current projection 與 historical replay 分流
+
+#### 工作
+
+- 在 backend reader 建立明確的 `current`／`replay` projection intent：Stock detail、一般 Ask 與 current overnight 使用 `current`；Radar 固定批次與明示 historical `decision_at` 使用 `replay`。
+- Materialized snapshot additive 保存可比較的 input lineage／fingerprint，至少包含 relation IDs／versions、methodology version，以及逐來源 identity、trade/event date、available/fetched time 與 provider；若 JSON payload 已足夠，不為查詢方便先新增 DB migration。
+- Current reader 先比較 materialized snapshot 與最新本機 inputs。Snapshot 已被新 input 取代時，回 `latest_local_cache` projection 與 `materialized_snapshot_superseded_by_local_inputs` limitation；不在 read path refresh 或 materialize。
+- Replay reader 只載入 `available_at <= decision_at` 的 eligible immutable snapshot；保留 hash／lineage 驗證與 deterministic replay。
+- 保留現有 public route 的 additive 相容性，但 `prefer_materialized` 不再等同 currentness；所有 AI capabilities 必須使用同一 projection intent，並保留各 input 的實際日期與 freshness。
+
+#### 驗收
+
+- 2330 current read 不再因 8/4 materialized snapshot 蓋掉 8/7 local ADR input；projection source、limitation 與 per-input dates 可解釋。
+- 明示 historical replay 仍可穩定讀取原 8/4 snapshot，不滲入 8/7 才 available 的 evidence。
+- `/api/ai/ask` 的 overnight／relations／parity 不再混用互相矛盾的 current resolution；若 FX 仍 stale，必須只把 FX 限制標成 stale，而不是退回整份舊 snapshot。
+- GET、Ask cache-only 與 selector regression 可證明沒有 snapshot INSERT、provider HTTP 或其他隱性寫入。
+
+#### 驗證
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path '.\backend').Path
+.\.venv\Scripts\python.exe -m pytest -q `
+  backend\tests\test_cross_market_context.py `
+  backend\tests\test_cross_market_point_in_time.py `
+  backend\tests\test_cross_market_golden_contract.py `
+  backend\tests\test_overnight_impact.py `
+  backend\tests\test_cross_market_ai_contract.py
+```
+
+### M9.3：2330／2408、HTTP／MCP／ChatGPT 端到端驗收
+
+#### 工作
+
+- 先執行 backend safe validation；只有 source tests 通過後，才透過正式 launcher adoption 驗證 owner、PID、listener、health、build identity 與 outward behavior。
+- 2330 先做 cache-only current read；若 FX 仍 stale 且 policy 允許，僅執行一次單 target bounded refresh，對帳 plan、provider event、結果與重建後 evidence。若 provider 失敗，將失敗視為可見資料限制，不為了變綠重試。
+- 台北時間 `2026-08-10 08:00` 之後執行 2408 預設查詢 canary：relation v2 應離開 `not_applicable`；context 是否 decision-usable 仍依實際行情與 FX freshness 判定。
+- Local MCP 執行 `initialize → tools/list → omi.ask`，對帳 HTTP 的 capability selection、projection source、lineage、freshness 與 limitations。
+- ChatGPT host 以 Refresh Actions／reconnect／new task 驗證新 enum 與代表性 2408 call；若 local/backend schema 正確但 host 仍缺欄，記錄為 host cache blocker，不在 adapter 增加永久 compatibility hack。
+- Browser 檢查個股映射層顯示新的 current projection 與資料限制；Radar baseline rank、technical score、bucket 與 universe 保持不變。
+
+#### 驗收
+
+- 2330 的 refresh decision、current context、AI evidence、MCP 與個股頁對同一次資料狀態一致；成功刷新或 provider failure 都有可稽核結果。
+- 2408 預設 relation 在有效日期後回 approved version 2；proxy／非因果文案、weight、evidence 與 freshness 邊界完整保留。
+- Backend `/api/ai/tools`、local MCP `tools/list` 與 ChatGPT host 可見 schema 完成三層分類；不再把 host cache 誤判為 backend bug。
+- Radar 維持 display-only，任何 currentness 修正都不改 active ranking。
+
+#### 驗證
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend
+```
+
+再依 launcher 實際 selected ports 做 relation／context／overnight、`/api/ai/ask`、MCP protocol 與 browser spot checks；實際 probe、PID、build identity、snapshot／input lineage 與 provider event 記錄於 `Progress.md`。
+
 ## Stop-and-fix 規則
 
 - Migration head、ORM 或 schema 與 worktree 其他修改衝突時，先停止並重排 revision；不得建立平行 head 或覆寫他人 migration。
@@ -445,6 +581,9 @@ $env:PYTHONPATH=(Resolve-Path '.\backend').Path
 - Consumer 若開始重算 relation、weight、freshness 或 alignment，將邏輯移回 backend owner 後再繼續。
 - Radar display-only 若改變 baseline score、bucket、rank 或 universe，視為 regression，不進下一里程碑。
 - Outward projection 若隱藏 stale／partial／missing，或 human answer 把 proxy 寫成因果，視為 contract failure。
+- Composite plan 只有 deferred source 卻仍執行 refresh tool，或 FX stale 仍被 US-daily-only gate 略過時，停止 M2.2。
+- Current selector 若只以 `source_cutoff_at` 或 snapshot 存在判斷最新，或 Ask／GET 為修復 currentness 而隱性 materialize，停止 M4.2。
+- Backend／local MCP schema 已正確時，不為 ChatGPT host cache 加 adapter 旁路；先完成 host reconnect 分類。
 - 驗證失敗先修正相關 root cause；無關既有失敗需隔離並記錄，不能混稱本專案通過。
 - 大量外部 refresh、付費 quota、report/memory 寫入、production migration 或 active ranking promotion 都依既有 trust policy與使用者確認邊界執行。
 

@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import time
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
-from app.db.models import ResourceQuoteSnapshot, USDailyPrice
+from app.db.models import ProviderEvent, ResourceQuoteSnapshot, USDailyPrice
 from app.market.adr_parity import FX_STALE_AFTER_SECONDS, resolve_adr_mapping
 from app.market.calendar_status import expected_us_trade_date
 from app.market.cross_market.proxy_signal_engine import PROXY_BENCHMARK_RULES
 from app.market.cross_market.relation_store import build_relation_registry_read
 from app.market.cross_market.types import taiwan_stock_ref
+from app.observability.provider_health import ERROR_STATUSES, record_provider_event
 from app.resource_market import service as resource_market_service
 from app.us_market import service as us_market_service
 
 
 MAX_REFRESH_SYMBOLS = 8
 MAX_REFRESH_STOCK_IDS = 32
+REFRESH_FAILURE_COOLDOWN_SECONDS = 300
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 
 
@@ -94,6 +96,84 @@ def _fx_status(
         "current" if age_seconds <= FX_STALE_AFTER_SECONDS else "stale",
         as_of,
     )
+
+
+def _refresh_event_target(source_kind: str, symbol: str) -> str:
+    return f"{source_kind}:{symbol}"
+
+
+def _active_failure_cooldown(
+    db: Session,
+    *,
+    source_kind: str,
+    symbol: str,
+    now: datetime,
+) -> tuple[ProviderEvent | None, datetime | None]:
+    threshold = now.astimezone(timezone.utc) - timedelta(
+        seconds=REFRESH_FAILURE_COOLDOWN_SECONDS
+    )
+    event = (
+        db.query(ProviderEvent)
+        .filter(ProviderEvent.market == "cross_market")
+        .filter(ProviderEvent.provider == "cross_market_orchestrator")
+        .filter(ProviderEvent.resource == "context_source")
+        .filter(
+            ProviderEvent.target == _refresh_event_target(source_kind, symbol)
+        )
+        .filter(ProviderEvent.status.in_(ERROR_STATUSES))
+        .filter(ProviderEvent.event_time >= threshold)
+        .order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc())
+        .first()
+    )
+    if event is None:
+        return None, None
+    event_time = event.event_time
+    normalized_event_time = (
+        event_time
+        if event_time.tzinfo is not None
+        else event_time.replace(tzinfo=timezone.utc)
+    )
+    cooldown_until = normalized_event_time.astimezone(timezone.utc) + timedelta(
+        seconds=REFRESH_FAILURE_COOLDOWN_SECONDS
+    )
+    if cooldown_until <= now.astimezone(timezone.utc):
+        return None, None
+    return event, cooldown_until
+
+
+def _record_refresh_failure(
+    db: Session,
+    *,
+    source_kind: str,
+    symbol: str,
+    provider: str,
+    error_message: str,
+    event_time: datetime,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    try:
+        record_provider_event(
+            db,
+            market="cross_market",
+            provider="cross_market_orchestrator",
+            resource="context_source",
+            target=_refresh_event_target(source_kind, symbol),
+            status="failed",
+            event_type="cross_market_refresh",
+            event_time=event_time,
+            observed_at=event_time,
+            message="Bounded cross-market source refresh failed; cooldown applied.",
+            error_message=error_message[:1_000],
+            detail={
+                "source_kind": source_kind,
+                "symbol": symbol,
+                "requested_provider": provider,
+                "cooldown_seconds": REFRESH_FAILURE_COOLDOWN_SECONDS,
+                **(detail or {}),
+            },
+        )
+    except Exception:
+        db.rollback()
 
 
 def build_cross_market_refresh_plan(
@@ -202,8 +282,34 @@ def build_cross_market_refresh_plan(
             }
         )
 
-    planned_sources = candidates[:max_symbols]
-    deferred_sources = candidates[max_symbols:]
+    eligible_sources: list[dict[str, Any]] = []
+    cooldown_sources: list[dict[str, Any]] = []
+    for source in candidates:
+        event, cooldown_until = _active_failure_cooldown(
+            db,
+            source_kind=str(source["source_kind"]),
+            symbol=str(source["symbol"]),
+            now=planned_at,
+        )
+        if event is None or cooldown_until is None:
+            eligible_sources.append(source)
+            continue
+        cooldown_sources.append(
+            {
+                **source,
+                "deferred_reason": "refresh_failure_cooldown",
+                "cooldown_until": cooldown_until,
+                "last_failure_event_id": event.id,
+                "last_failure_at": event.event_time,
+                "last_failure_status": event.status,
+            }
+        )
+
+    planned_sources = eligible_sources[:max_symbols]
+    deferred_sources = [
+        *cooldown_sources,
+        *eligible_sources[max_symbols:],
+    ]
     return {
         "kind": "cross_market_context_refresh_plan",
         "planned_at": planned_at,
@@ -213,9 +319,12 @@ def build_cross_market_refresh_plan(
         "requested_source_count": len(candidates),
         "planned_source_count": len(planned_sources),
         "deferred_source_count": len(deferred_sources),
+        "cooldown_source_count": len(cooldown_sources),
+        "cooldown_seconds": REFRESH_FAILURE_COOLDOWN_SECONDS,
         "max_symbols": max_symbols,
         "planned_sources": planned_sources,
         "deferred_sources": deferred_sources,
+        "cooldown_sources": cooldown_sources,
         "missing_relations": missing_relations,
         "read_path_provider_refresh": False,
     }
@@ -253,6 +362,7 @@ def refresh_cross_market_context_sources(
     deferred = int(plan["deferred_source_count"])
     results: list[dict[str, Any]] = []
     started = time.monotonic()
+    refresh_started_at = _normalized_now(now)
 
     if progress_callback is not None:
         progress_callback(0, max(total, 1), "Refreshing cross-market context sources.")
@@ -288,6 +398,21 @@ def refresh_cross_market_context_sources(
                 succeeded += 1
             else:
                 failed += 1
+                _record_refresh_failure(
+                    db,
+                    source_kind=source_kind,
+                    symbol=symbol,
+                    provider=provider,
+                    error_message=(
+                        str(result.get("error_message") or result.get("message") or "")
+                        or "Provider refresh returned an unsuccessful result."
+                    ),
+                    event_time=refresh_started_at,
+                    detail={
+                        "result_status": result.get("status"),
+                        "error_count": result.get("error_count"),
+                    },
+                )
             results.append(
                 {
                     "source_kind": source_kind,
@@ -299,6 +424,14 @@ def refresh_cross_market_context_sources(
         except Exception as exc:  # provider failures stay isolated per source.
             db.rollback()
             failed += 1
+            _record_refresh_failure(
+                db,
+                source_kind=source_kind,
+                symbol=symbol,
+                provider=provider,
+                error_message=str(exc),
+                event_time=refresh_started_at,
+            )
             results.append(
                 {
                     "source_kind": source_kind,
@@ -315,7 +448,9 @@ def refresh_cross_market_context_sources(
             )
 
     status = (
-        "no_refresh_needed"
+        "cooldown"
+        if total == 0 and int(plan["cooldown_source_count"]) > 0
+        else "no_refresh_needed"
         if total == 0
         else "success"
         if failed == 0 and deferred == 0

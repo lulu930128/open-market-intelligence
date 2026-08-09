@@ -553,6 +553,60 @@ def build_adr_parity_report(
             ),
             "stale_reasons": list(dict.fromkeys(stale_reasons)),
             "data_available_at": _iso(data_available_at),
+            "input_lineage": {
+                "schema_version": "adr_parity.input_lineage.v1",
+                "mapping": {
+                    "selected_source": mapping_resolution.selected_source,
+                    "relation_id": mapping_resolution.relation_id,
+                    "relation_version": mapping_resolution.relation_version,
+                    "evidence_ids": list(mapping_resolution.evidence_ids),
+                },
+                "adr_daily": (
+                    {
+                        "symbol": adr_row.symbol,
+                        "provider": adr_row.provider,
+                        "trade_date": _iso(adr_row.trade_date),
+                        "fetched_at": _iso(adr_row.fetched_at),
+                        "close_price": _round(_number(adr_row.close_price)),
+                    }
+                    if adr_row is not None
+                    else None
+                ),
+                "fx_quote": (
+                    {
+                        "symbol": fx["source_symbol"],
+                        "provider": fx["provider"],
+                        "event_time": _iso(fx["as_of"]),
+                        "fetched_at": _iso(fx.get("fetched_at")),
+                        "usd_twd": _round(fx["usd_twd"], 6),
+                    }
+                    if fx is not None
+                    else None
+                ),
+                "tw_reference": (
+                    {
+                        "stock_id": tw_reference.stock_id,
+                        "trade_date": _iso(tw_reference.trade_date),
+                        "created_at": _iso(tw_reference.created_at),
+                        "updated_at": _iso(tw_reference.updated_at),
+                        "close_price": _round(
+                            _number(tw_reference.close_price)
+                        ),
+                    }
+                    if tw_reference is not None
+                    else None
+                ),
+                "tw_comparison": (
+                    comparison.get("input_lineage")
+                    if isinstance(comparison, dict)
+                    else None
+                ),
+                "freshness_state": {
+                    "status": status,
+                    "expected_adr_trade_date": _iso(expected_adr_trade_date),
+                    "stale_reasons": list(dict.fromkeys(stale_reasons)),
+                },
+            },
         },
     }
 
@@ -664,6 +718,14 @@ def _latest_tw_comparison(
             "as_of": quote.quote_time,
             "source": "taiwan_stock_quote_snapshot",
             "session_phase": quote.session_phase,
+            "input_lineage": {
+                "source": "taiwan_stock_quote_snapshot",
+                "stock_id": quote.stock_id,
+                "trade_date": _iso(quote.trade_date),
+                "quote_time": _iso(quote.quote_time),
+                "fetched_at": _iso(quote.fetched_at),
+                "last_price": _round(_number(quote.last_price)),
+            },
         }
     if daily is None:
         return None
@@ -673,6 +735,14 @@ def _latest_tw_comparison(
         "as_of": None,
         "source": "market_daily_price",
         "session_phase": "daily_close",
+        "input_lineage": {
+            "source": "market_daily_price",
+            "stock_id": daily.stock_id,
+            "trade_date": _iso(daily.trade_date),
+            "created_at": _iso(daily.created_at),
+            "updated_at": _iso(daily.updated_at),
+            "close_price": _round(_number(daily.close_price)),
+        },
     }
 
 
@@ -708,6 +778,7 @@ def _latest_usd_twd(
                 "source_symbol": row.symbol,
                 "provider": row.provider,
                 "as_of": row.event_time or row.fetched_at,
+                "fetched_at": row.fetched_at,
             }
     return None
 

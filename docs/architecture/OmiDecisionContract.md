@@ -204,7 +204,18 @@ continuation 與 error；evidence 使用明確的 bounded projection：
       "version": "omi.fill.plan.v1",
       "plan_id": "",
       "actions": [],
-      "deferred_actions": []
+      "deferred_actions": [],
+      "partition": {
+        "version": "omi.fill.partition.v1",
+        "selected_capabilities": [],
+        "already_satisfied": [],
+        "actions": [],
+        "jobs": [],
+        "deferred": [],
+        "unfillable": [],
+        "not_applicable": [],
+        "complete": true
+      }
     }
   },
   "error": {},
@@ -253,7 +264,10 @@ continuation 表達，不靜默回傳完整大包。
   evidence、quality 是否仍受限，以及剩餘 fill action。
 - `continuation.fill_plan`：精準補資料 actions；不是全市場 refresh。
   正常 release window 或 no-new-data cooldown 期間不建立立即 action，而以
-  `deferred_actions` 揭露 `release_status` 與 `next_eligible_refresh_at`。
+  `deferred_actions` 揭露 `release_status` 與 `next_eligible_refresh_at`。其中
+  `partition` 將每個 selected capability 恰好分到 `already_satisfied`、`actions`、
+  `jobs`、`deferred`、`unfillable` 或 `not_applicable` 一組；compact projection
+  也必須保留這份 backend-owned 分類。
 - `error`：structured business error。Consumer 不得只看 HTTP status。
 
 ## Capability 與補資料
@@ -297,6 +311,8 @@ target、selection 與 registry 驗證 selected action ID；未知、跨 target 
 executable action 會被拒絕。TW、US 與 crypto 都使用 capability 級規劃；
 單一缺口不得觸發全資料、全市場或所有 provider 刷新。Action 中的 `operation`
 是 backend-owned operation，不表示 consumer 可以直接呼叫內部 agentic tool。
+`continuation.selected_action_ids` 最多 8 個；runtime、OpenAPI、backend tool schema
+與 MCP schema 使用相同限制。
 
 `allow_external_fetch=true` 或 standalone adapter 的
 `refresh_if_missing=true` 代表允許主規劃器在 budget 內嘗試 bounded refresh，
@@ -305,6 +321,14 @@ executable action 會被拒絕。TW、US 與 crypto 都使用 capability 級規�
 `continuation.fill_plan` 判斷仍可補哪些能力。成功 tool call 若沒有可投影
 payload，仍保留 fill action；成功且 payload 已進 evidence 時，不重複建立同一
 action。
+
+Background `ai.tool_refresh` 由 `GET /api/ai/refresh-status/{job_id}` 與 MCP
+`omi.read_refresh_status` 提供 redacted operational contract。它只公開 operation、
+produced capabilities、bounded progress/result summary、evidence rebuild 狀態與
+cache-only `resume`。`operation_status=completed` 不等於 evidence 已更新；caller
+必須在 `evidence_status=rebuild_required|partial_rebuild_required` 時以 `resume`
+重建 evidence。未知 job、非 AI refresh job 與不可公開 job 使用相同 predictable
+404，避免 job enumeration 或 request payload 洩漏。
 
 台股法人、融資券與股權分散分別使用
 `institutional_trade_daily`、`margin_trading_daily` 與

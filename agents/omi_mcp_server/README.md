@@ -7,13 +7,14 @@ MCP client -> agents/omi_mcp_server/server.py -> OMI backend /api/ai/*
 ```
 
 Adapter 不讀 OMI DB、不直接呼叫 market provider，也不重做 target、freshness、
-decision readiness 或 answer。預設只公開：
+decision readiness 或 answer。預設公開：
 
 - `omi.ask`
+- `omi.ask_stream`
+- `omi.read_refresh_status`
 
 可選公開：
 
-- `omi.ask_stream`
 - backend internal tools（只限明確 trusted debug 情境）
 
 ## 啟動
@@ -102,7 +103,7 @@ Consumer 應直接讀：
 - `limitations`
 - `execution.selection`、`execution.tool_runs`
 - `execution.refresh_reconciliation`
-- `continuation.fill_plan`
+- `continuation.fill_plan` 與其完整六組 `partition`
 - `error`
 
 `omi.decision.v4` 不含 legacy `evidence.result` 大包。資料量由
@@ -130,6 +131,30 @@ backend 會重新驗證 `plan_id` 與 `selected_action_ids`。Consumer 不得直
 `next_eligible_refresh_at`；adapter 不自行覆寫或提前執行。`source_health`
 查詢可在 `market_data_params` 使用 `problems_only`、`status_filter`、
 `include_healthy`、`market`、`resource`、`target` 與 `provider`。
+
+`continuation.fill_plan.partition` 會將每個 selected capability 恰好放入
+`already_satisfied`、`actions`、`jobs`、`deferred`、`unfillable` 或
+`not_applicable` 一組。Consumer 應以這個 backend-owned partition 判讀續補狀態，
+不能從 UI label 或 action 數量推斷。
+
+## Background refresh status
+
+當 `omi.ask` 回傳 background refresh job 時，使用 job reference 的
+`status_url`，或呼叫：
+
+```json
+{
+  "name": "omi.read_refresh_status",
+  "arguments": {"job_id": 123}
+}
+```
+
+這個 tool 只轉送 `GET /api/ai/refresh-status/{job_id}`，且只能讀
+`ai.tool_refresh` 的 redacted 狀態。`operation_status=completed` 只表示工作已結束；
+`evidence_status=rebuild_required` 或 `partial_rebuild_required` 時，consumer 必須使用
+回傳的 cache-only `resume` 重新呼叫 `omi.ask`，不得直接宣稱資料已 current/fresh。
+未知 job、其他 job type 與不允許公開的 job 使用相同 predictable 404，adapter 不會
+退回 generic `/api/jobs/{id}` payload。
 
 ## Realtime
 

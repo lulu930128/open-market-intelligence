@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-from app.ai import public_contract
+from app.ai import capability_resolution_registry, public_contract
 
 
 OUTPUT_MODES = {"evidence_only", "decision", "decision_with_evidence"}
@@ -1479,6 +1479,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "methodology_version",
             "relation_snapshot_version",
             "snapshot_id",
+            "projection_source",
+            "source_cutoff_at",
+            "materialized_at",
+            "materialized_by",
+            "payload_hash",
             "limitations",
             "adr_parity",
             "factors",
@@ -1501,6 +1506,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "methodology_version",
             "relation_snapshot_version",
             "snapshot_id",
+            "projection_source",
+            "source_cutoff_at",
+            "materialized_at",
+            "materialized_by",
+            "payload_hash",
             "limitations",
             "source",
             "freshness",
@@ -1528,6 +1538,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "methodology_version",
             "relation_snapshot_version",
             "snapshot_id",
+            "projection_source",
+            "source_cutoff_at",
+            "materialized_at",
+            "materialized_by",
+            "payload_hash",
             "summary",
             "signals",
             "coverage",
@@ -1546,6 +1561,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "methodology_version",
             "relation_snapshot_version",
             "snapshot_id",
+            "projection_source",
+            "source_cutoff_at",
+            "materialized_at",
+            "materialized_by",
+            "payload_hash",
             "summary",
             "signals",
             "coverage",
@@ -3776,6 +3796,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "target",
             "summary",
             "capabilities",
+            "provider_contracts",
+            "capability_registry",
+            "resolutions",
             "slots",
             "missing",
             "warnings",
@@ -3786,10 +3809,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "target",
             "summary",
             "capabilities",
+            "provider_contracts",
+            "capability_registry",
             "missing",
             "warnings",
         ),
-        default_limit=50,
+        default_limit=100,
     ),
     CapabilitySpec(
         capability_id="diagnostics.data_freshness",
@@ -3912,6 +3937,48 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
 )
 
+CAPABILITY_RESOLUTION_REGISTRY = (
+    capability_resolution_registry.build_capability_resolution_registry(
+        CAPABILITY_SPECS,
+        operation_produced_capabilities=FILL_OPERATION_PRODUCED_CAPABILITIES,
+        operations_writing_cache=FILL_OPERATIONS_WRITING_CACHE,
+    )
+)
+
+
+def canonical_fill_operation_produced_capabilities() -> dict[str, tuple[str, ...]]:
+    """Return the current public operation ownership map.
+
+    This remains a function instead of a frozen import-time constant so parity
+    and failure-path tests can safely patch the legacy mapping without creating
+    a second, silently stale source of truth.
+    """
+
+    return capability_resolution_registry.canonical_operation_produces(
+        FILL_OPERATION_PRODUCED_CAPABILITIES
+    )
+
+
+def canonical_executable_fill_operations() -> frozenset[str]:
+    return frozenset(canonical_fill_operation_produced_capabilities())
+
+
+def canonical_fill_operations_writing_cache() -> frozenset[str]:
+    return frozenset(FILL_OPERATIONS_WRITING_CACHE) | (
+        capability_resolution_registry.COMPOSITE_OPERATIONS_WRITING_CACHE
+    )
+
+
+def public_refresh_strategy_for_resolution_mode(
+    resolution_mode: str,
+) -> str:
+    return {
+        "reader_fetch": "reader_fetch",
+        "granular_fill": "granular_tool",
+        "composite_fill": "composite_tool",
+        "scheduler_cache": "scheduler_owned",
+        "derived": "derived",
+    }.get(resolution_mode, "cache_only")
 CAPABILITIES = {spec.capability_id: spec for spec in CAPABILITY_SPECS}
 CAPABILITY_ALIASES = {
     "source.health": "diagnostics.source_health",
@@ -3972,12 +4039,18 @@ DOMAIN_CAPABILITIES = {
 SCOPE_DOMAIN_CAPABILITIES = {
     "market": {
         "events": ("events.calendar",),
+        "cross_market": ("market.cross_market",),
     },
     "stock": {
         "events": ("events.upcoming", "events.history"),
         "regulation": (
             "regulation.disposition",
             "regulation.trading_restrictions",
+        ),
+        "cross_market": (
+            "cross_market.overnight",
+            "cross_market.relations",
+            "cross_market.parity",
         ),
     },
     "tw_futures": {
@@ -4722,20 +4795,11 @@ def normalize_selection(
                 requested_as="required",
                 request_source="nlp_inferred",
             )
-        requested_domain_capabilities = _capabilities_from_domains(
-            tuple(
-                domain
-                for domain in requested_domains
-                if domain not in requested_specific_domains
-            ),
-            scope_type=scope_type,
-        )
-        for capability_id in requested_domain_capabilities:
-            record_unsupported(
-                capability_id,
-                requested_as="required",
-                request_source="nlp_inferred",
-            )
+        # A requested domain is a broad NLP inference, not an explicit request
+        # for every capability registered under that domain.  ``legacy_include``
+        # already adds only target-compatible members.  Recording the remaining
+        # members as unsupported would create phantom required capabilities and
+        # incorrectly block an otherwise valid answer.
 
     unsupported_ids = frozenset(
         str(item["capability"]) for item in unsupported_capabilities
@@ -4895,6 +4959,26 @@ def capability_catalog(
         if scope_type is None
         or _compatible(spec, scope_type, target_market)
     ]
+
+
+def capability_resolution_catalog(
+    *,
+    scope_type: str | None = None,
+    capability_id: str | None = None,
+) -> list[dict[str, Any]]:
+    return capability_resolution_registry.resolution_catalog(
+        CAPABILITY_RESOLUTION_REGISTRY,
+        scope_type=scope_type,
+        capability_id=capability_id,
+    )
+
+
+def capability_resolution_for(
+    *,
+    scope_type: str,
+    capability_id: str,
+) -> capability_resolution_registry.CapabilityResolutionSpec | None:
+    return CAPABILITY_RESOLUTION_REGISTRY.get((scope_type, capability_id))
 
 
 def domains_for_selection(selection: dict[str, Any]) -> tuple[str, ...]:
@@ -5518,8 +5602,19 @@ def build_manifest(
             if isinstance(realtime, dict)
             else status_class(status)
         )
-        fill_operation = spec.fill_operation_for_scope(scope_type)
-        refresh_strategy = spec.refresh_strategy_for_scope(scope_type)
+        resolution = capability_resolution_for(
+            scope_type=scope_type,
+            capability_id=capability_id,
+        )
+        fill_operation = resolution.operation if resolution else None
+        resolution_mode = (
+            resolution.resolution_mode
+            if resolution
+            else "not_applicable"
+        )
+        refresh_strategy = public_refresh_strategy_for_resolution_mode(
+            resolution_mode
+        )
         refresh_requires_market_open = (
             spec.refresh_requires_market_open_for_scope(scope_type)
         )
@@ -5527,7 +5622,8 @@ def build_manifest(
             bool(realtime.get("refresh_possible_now"))
             if isinstance(realtime, dict)
             and "refresh_possible_now" in realtime
-            else refresh_strategy in {"reader_fetch", "granular_tool"}
+            else resolution_mode
+            in {"reader_fetch", "granular_fill", "composite_fill"}
         )
         refresh_metadata: dict[str, Any] = {}
         if refresh_strategy != "derived":
@@ -5538,16 +5634,19 @@ def build_manifest(
                 "refresh_requires_market_open": refresh_requires_market_open,
                 "writes_market_cache": bool(
                     spec.writes_cache
-                    or fill_operation in FILL_OPERATIONS_WRITING_CACHE
+                    or fill_operation
+                    in canonical_fill_operations_writing_cache()
                 ),
                 "estimated_calls": (
                     1
-                    if refresh_strategy in {"reader_fetch", "granular_tool"}
+                    if resolution_mode
+                    in {"reader_fetch", "granular_fill", "composite_fill"}
                     else 0
                 ),
                 "expected_timeout_seconds": (
                     8
-                    if refresh_strategy in {"reader_fetch", "granular_tool"}
+                    if resolution_mode
+                    in {"reader_fetch", "granular_fill", "composite_fill"}
                     else 0
                 ),
             }
@@ -5577,6 +5676,40 @@ def build_manifest(
                 "release_status": capability_freshness.get("release_status"),
                 "next_eligible_refresh_at": capability_freshness.get(
                     "next_eligible_refresh_at"
+                ),
+                **(
+                    {
+                        "implementation_status": (
+                            resolution.implementation_status
+                        ),
+                        "resolution_mode": resolution_mode,
+                    }
+                    if resolution
+                    and (
+                        resolution.operation
+                        or resolution.implementation_status != "connected"
+                    )
+                    else {"resolution_mode": resolution_mode}
+                    if resolution_mode
+                    in {
+                        "reader_fetch",
+                        "scheduler_cache",
+                        "private",
+                        "key_required",
+                        "provider_not_connected",
+                        "deprecated",
+                    }
+                    else {}
+                ),
+                **(
+                    {"blocking_reason": resolution.blocking_reason}
+                    if resolution and resolution.blocking_reason
+                    else {}
+                ),
+                **(
+                    {"next_fill": resolution.next_fill}
+                    if resolution and resolution.next_fill
+                    else {}
                 ),
                 **refresh_metadata,
                 "payload_included": included,
@@ -5642,6 +5775,7 @@ def _fill_resolution_without_operation(
     capability_id: str,
     item: dict[str, Any],
     refresh_strategy: str,
+    resolution_mode: str | None = None,
 ) -> tuple[str, str]:
     payload_included = item.get("payload_included") is True
     quality_issues = {
@@ -5659,6 +5793,14 @@ def _fill_resolution_without_operation(
     if refresh_strategy == "reader_fetch":
         return "already_attempted", "reader_fetch_on_primary_request"
     if refresh_strategy == "cache_only":
+        if resolution_mode == "private":
+            return "deferred_action", "server_trust_required"
+        if resolution_mode == "key_required":
+            return "unfillable_action", "provider_key_required"
+        if resolution_mode == "provider_not_connected":
+            return "unfillable_action", "provider_not_connected"
+        if resolution_mode == "deprecated":
+            return "deferred_action", "deprecated_use_replacement"
         return "deferred_action", "cache_only"
     if capability_id == "market.volume_state":
         return "deferred_action", "history_accumulation_required"
@@ -5690,6 +5832,70 @@ def _fill_resolution_without_operation(
     return "unfillable_action", "no_executable_fill_operation"
 
 
+FILL_PARTITION_GROUPS = (
+    "already_satisfied",
+    "actions",
+    "jobs",
+    "deferred",
+    "unfillable",
+    "not_applicable",
+)
+
+
+def _build_fill_partition(
+    *,
+    selected: list[str],
+    already_satisfied: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    deferred: list[dict[str, Any]],
+    unfillable: list[dict[str, Any]],
+    not_applicable: list[dict[str, Any]],
+) -> dict[str, Any]:
+    groups = {
+        "already_satisfied": already_satisfied,
+        "actions": actions,
+        "jobs": jobs,
+        "deferred": deferred,
+        "unfillable": unfillable,
+        "not_applicable": not_applicable,
+    }
+    memberships: dict[str, list[str]] = {}
+    for group_name in FILL_PARTITION_GROUPS:
+        for item in groups[group_name]:
+            capability_id = str(item.get("capability") or "").strip()
+            if capability_id:
+                memberships.setdefault(capability_id, []).append(group_name)
+    selected_set = set(selected)
+    missing = [item for item in selected if item not in memberships]
+    duplicates = {
+        capability_id: group_names
+        for capability_id, group_names in memberships.items()
+        if len(group_names) != 1
+    }
+    unexpected = sorted(set(memberships) - selected_set)
+    if missing or duplicates or unexpected:
+        raise ValueError(
+            "Fill plan partition invariant failed: "
+            f"missing={missing}, duplicates={duplicates}, "
+            f"unexpected={unexpected}."
+        )
+    compact_groups = {
+        group_name: [
+            str(item.get("capability"))
+            for item in groups[group_name]
+            if str(item.get("capability") or "").strip()
+        ]
+        for group_name in FILL_PARTITION_GROUPS
+    }
+    return {
+        "version": "omi.fill.partition.v1",
+        "selected_capabilities": selected,
+        **compact_groups,
+        "complete": True,
+    }
+
+
 def build_fill_plan(
     *,
     canonical: dict[str, Any],
@@ -5700,9 +5906,12 @@ def build_fill_plan(
 ) -> dict[str, Any]:
     target = canonical.get("target") if isinstance(canonical.get("target"), dict) else {}
     actions: list[dict[str, Any]] = []
+    jobs: list[dict[str, Any]] = []
     deferred_actions: list[dict[str, Any]] = []
     unfillable_actions: list[dict[str, Any]] = []
     already_attempted_actions: list[dict[str, Any]] = []
+    already_satisfied: list[dict[str, Any]] = []
+    not_applicable: list[dict[str, Any]] = []
     if canonical.get("ok") is not True or canonical.get("request_status") != "completed":
         return {
             "version": "omi.fill.plan.v1",
@@ -5711,10 +5920,23 @@ def build_fill_plan(
             "deferred_actions": [],
             "unfillable_actions": [],
             "already_attempted_actions": [],
+            "partition": {
+                "version": "omi.fill.partition.v1",
+                "selected_capabilities": [],
+                "already_satisfied": [],
+                "actions": [],
+                "jobs": [],
+                "deferred": [],
+                "unfillable": [],
+                "not_applicable": [],
+                "complete": False,
+                "reason": "canonical_request_not_completed",
+            },
             "resolutions": [],
             "action_count": 0,
             "summary": {
                 "executable_count": 0,
+                "job_count": 0,
                 "deferred_count": 0,
                 "unfillable_count": 0,
                 "already_attempted_count": 0,
@@ -5722,14 +5944,17 @@ def build_fill_plan(
             },
             "auto_executed": False,
         }
-    selected = {
-        str(capability)
-        for capability in (
-            list(selection.get("required") or [])
-            + list(selection.get("optional") or [])
+    selected_list = list(
+        dict.fromkeys(
+            str(capability)
+            for capability in (
+                list(selection.get("required") or [])
+                + list(selection.get("optional") or [])
+            )
+            if str(capability).strip()
         )
-        if str(capability).strip()
-    }
+    )
+    selected = set(selected_list)
     attempted_capabilities = {
         capability
         for run in tool_runs or []
@@ -5740,16 +5965,99 @@ def build_fill_plan(
             scope_type=scope_type,
         )
     }
+    background_jobs_by_capability: dict[str, dict[str, Any]] = {}
+    for run in tool_runs or []:
+        if not isinstance(run, dict):
+            continue
+        job = run.get("job") if isinstance(run.get("job"), dict) else {}
+        job_id = job.get("job_id")
+        if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
+            continue
+        for capability_id in _capabilities_for_tool_run(
+            run=run,
+            selected=selected,
+            scope_type=scope_type,
+        ):
+            background_jobs_by_capability[capability_id] = {
+                "capability": capability_id,
+                "operation": str(run.get("tool") or "") or None,
+                "job_id": job_id,
+                "status": str(job.get("status") or run.get("status") or "running"),
+                "operation_status": str(
+                    run.get("operation_status") or "pending"
+                ),
+                "evidence_status": str(
+                    run.get("evidence_status") or "pending"
+                ),
+                "deduplicated": bool(job.get("deduplicated")),
+                "status_url": str(
+                    job.get("status_url")
+                    or f"/api/ai/refresh-status/{job_id}"
+                ),
+                "resolution_type": "background_job",
+                "reason": "background_refresh_in_progress",
+            }
+    manifest_capabilities: set[str] = set()
     for item in manifest.get("capabilities") or []:
         if not isinstance(item, dict):
             continue
         capability_id = str(item.get("capability") or "")
+        if capability_id not in selected:
+            continue
+        manifest_capabilities.add(capability_id)
         if capability_id in {"target.identity", "data.freshness"}:
+            not_applicable.append(
+                {
+                    "capability": capability_id,
+                    "status": item.get("status"),
+                    "status_class": item.get("status_class"),
+                    "payload_included": item.get("payload_included") is True,
+                    "resolution_type": "not_applicable",
+                    "reason": "request_meta_capability_has_no_independent_fill",
+                    "not_applicable_to": "independent_fill",
+                }
+            )
+            continue
+        if (
+            item.get("status_class") == "neutral"
+            or item.get("status") == "not_applicable"
+            or item.get("resolution_mode") == "not_applicable"
+        ):
+            not_applicable.append(
+                {
+                    "capability": capability_id,
+                    "status": item.get("status"),
+                    "status_class": item.get("status_class"),
+                    "payload_included": item.get("payload_included") is True,
+                    "resolution_type": "not_applicable",
+                    "reason": "capability_not_applicable_to_target",
+                }
+            )
             continue
         if (
             item.get("status_class") == "ready"
             and item.get("payload_included") is True
         ):
+            already_satisfied.append(
+                {
+                    "capability": capability_id,
+                    "status": item.get("status"),
+                    "status_class": item.get("status_class"),
+                    "payload_included": True,
+                    "resolution_type": "already_satisfied",
+                    "reason": "usable_payload_already_included",
+                }
+            )
+            continue
+        if capability_id in background_jobs_by_capability:
+            jobs.append(
+                {
+                    **background_jobs_by_capability[capability_id],
+                    "capability_status": item.get("status"),
+                    "status_class": item.get("status_class"),
+                    "payload_included": item.get("payload_included") is True,
+                }
+            )
             continue
         if (
             capability_id in attempted_capabilities
@@ -5797,7 +6105,11 @@ def build_fill_plan(
             )
             continue
         spec = CAPABILITIES.get(capability_id)
-        if spec is None:
+        resolution_spec = capability_resolution_for(
+            scope_type=scope_type,
+            capability_id=capability_id,
+        )
+        if spec is None or resolution_spec is None:
             unfillable_actions.append(
                 {
                     "capability": capability_id,
@@ -5809,9 +6121,15 @@ def build_fill_plan(
             continue
         refresh_strategy = str(
             item.get("refresh_strategy")
-            or spec.refresh_strategy_for_scope(scope_type)
+            or public_refresh_strategy_for_resolution_mode(
+                resolution_spec.resolution_mode
+            )
         )
-        operation = spec.fill_operation_for_scope(scope_type)
+        resolution_mode = str(
+            item.get("resolution_mode")
+            or resolution_spec.resolution_mode
+        )
+        operation = resolution_spec.operation
         if not operation:
             if capability_id in attempted_capabilities:
                 resolution_type = "already_attempted"
@@ -5821,6 +6139,7 @@ def build_fill_plan(
                     capability_id=capability_id,
                     item=item,
                     refresh_strategy=refresh_strategy,
+                    resolution_mode=resolution_mode,
                 )
             resolution = {
                 "capability": capability_id,
@@ -5830,6 +6149,17 @@ def build_fill_plan(
                 "resolution_type": resolution_type,
                 "reason": reason,
                 "refresh_strategy": refresh_strategy,
+                "resolution_mode": resolution_mode,
+                **(
+                    {"blocking_reason": resolution_spec.blocking_reason}
+                    if resolution_spec.blocking_reason
+                    else {}
+                ),
+                **(
+                    {"next_fill": resolution_spec.next_fill}
+                    if resolution_spec.next_fill
+                    else {}
+                ),
                 "refresh_possible_now": bool(
                     item.get("refresh_possible_now")
                 ),
@@ -5874,7 +6204,10 @@ def build_fill_plan(
             )
             continue
         produced_capabilities = list(
-            FILL_OPERATION_PRODUCED_CAPABILITIES.get(operation, ())
+            canonical_fill_operation_produced_capabilities().get(
+                operation,
+                (),
+            )
         )
         if capability_id not in produced_capabilities:
             deferred_actions.append(
@@ -5900,10 +6233,13 @@ def build_fill_plan(
                 "target": target,
                 "operation": operation,
                 "refresh_strategy": refresh_strategy,
+                "resolution_mode": resolution_mode,
                 "produced_capabilities": produced_capabilities,
                 "status": "planned",
                 "resolution_type": "executable_action",
-                "executable": operation in EXECUTABLE_FILL_OPERATIONS,
+                "executable": (
+                    operation in canonical_executable_fill_operations()
+                ),
                 "required": bool(item.get("required")),
                 "fields": list(item.get("fields") or []),
                 "limit": item.get("limit"),
@@ -5926,9 +6262,22 @@ def build_fill_plan(
                 ),
                 "writes_cache": (
                     spec.writes_cache
-                    or operation in FILL_OPERATIONS_WRITING_CACHE
+                    or operation in canonical_fill_operations_writing_cache()
                 ),
                 "requires_external_fetch": True,
+            }
+        )
+    for capability_id in selected_list:
+        if capability_id in manifest_capabilities:
+            continue
+        unfillable_actions.append(
+            {
+                "capability": capability_id,
+                "status": "unknown",
+                "status_class": "blocked",
+                "payload_included": False,
+                "resolution_type": "unfillable_action",
+                "reason": "manifest_entry_missing",
             }
         )
     plan_id = fill_plan_id(
@@ -5973,21 +6322,34 @@ def build_fill_plan(
         }
     resolutions = [
         *actions,
+        *jobs,
         *deferred_actions,
         *unfillable_actions,
         *already_attempted_actions,
     ]
+    partition = _build_fill_partition(
+        selected=selected_list,
+        already_satisfied=already_satisfied,
+        actions=actions,
+        jobs=jobs,
+        deferred=[*deferred_actions, *already_attempted_actions],
+        unfillable=unfillable_actions,
+        not_applicable=not_applicable,
+    )
     return {
         "version": "omi.fill.plan.v1",
         "plan_id": plan_id,
         "actions": actions,
+        **({"jobs": jobs} if jobs else {}),
         "deferred_actions": deferred_actions,
         "unfillable_actions": unfillable_actions,
         "already_attempted_actions": already_attempted_actions,
+        "partition": partition,
         "resolutions": resolutions,
         "action_count": len(actions),
         "summary": {
             "executable_count": len(actions),
+            "job_count": len(jobs),
             "deferred_count": len(deferred_actions),
             "unfillable_count": len(unfillable_actions),
             "already_attempted_count": len(already_attempted_actions),
@@ -6012,15 +6374,15 @@ def _capabilities_for_tool_run(
     ]
     if requested or not tool:
         return list(dict.fromkeys(requested))
-    return [
-        capability
-        for capability in selected
-        if (
-            CAPABILITIES.get(capability) is not None
-            and CAPABILITIES[capability].fill_operation_for_scope(scope_type)
-            == tool
+    matched: list[str] = []
+    for capability in selected:
+        resolution = capability_resolution_for(
+            scope_type=scope_type,
+            capability_id=capability,
         )
-    ]
+        if resolution is not None and resolution.operation == tool:
+            matched.append(capability)
+    return matched
 
 
 def build_refresh_reconciliation(
@@ -6078,6 +6440,32 @@ def build_refresh_reconciliation(
     already_attempted_by_capability = {
         str(action.get("capability")): action
         for action in fill_plan.get("already_attempted_actions") or []
+        if isinstance(action, dict) and action.get("capability")
+    }
+    partition = (
+        fill_plan.get("partition")
+        if isinstance(fill_plan.get("partition"), dict)
+        else {}
+    )
+    already_satisfied_by_capability = {
+        str(capability): {
+            "capability": str(capability),
+            "resolution_type": "already_satisfied",
+        }
+        for capability in partition.get("already_satisfied") or []
+        if str(capability).strip()
+    }
+    not_applicable_by_capability = {
+        str(capability): {
+            "capability": str(capability),
+            "resolution_type": "not_applicable",
+        }
+        for capability in partition.get("not_applicable") or []
+        if str(capability).strip()
+    }
+    jobs_by_capability = {
+        str(action.get("capability")): action
+        for action in fill_plan.get("jobs") or []
         if isinstance(action, dict) and action.get("capability")
     }
     attempts: list[dict[str, Any]] = []
@@ -6215,6 +6603,9 @@ def build_refresh_reconciliation(
         remaining_action = remaining_actions.get(capability)
         resolution_detail = (
             remaining_action
+            or jobs_by_capability.get(capability)
+            or already_satisfied_by_capability.get(capability)
+            or not_applicable_by_capability.get(capability)
             or already_attempted_by_capability.get(capability)
             or deferred_by_capability.get(capability)
             or unfillable_by_capability.get(capability)
@@ -6230,7 +6621,8 @@ def build_refresh_reconciliation(
         )
         unresolved_reason = (
             None
-            if resolution_type == "satisfied"
+            if resolution_type
+            in {"satisfied", "already_satisfied", "not_applicable"}
             else (resolution_detail or {}).get("reason")
             or "no_resolution_recorded"
         )
@@ -6291,6 +6683,7 @@ def build_refresh_reconciliation(
                         "capability",
                         "operation",
                         "refresh_strategy",
+                        "resolution_mode",
                         "status",
                         "reason",
                         "executable",
@@ -6430,15 +6823,20 @@ def selected_fill_capabilities(
     for capability_id in list(selection.get("required") or []) + list(
         selection.get("optional") or []
     ):
-        spec = CAPABILITIES.get(str(capability_id))
-        if spec is None:
+        resolution = capability_resolution_for(
+            scope_type=scope_type,
+            capability_id=str(capability_id),
+        )
+        if resolution is None:
             continue
-        operation = spec.fill_operation_for_scope(scope_type)
-        if operation not in EXECUTABLE_FILL_OPERATIONS:
+        operation = resolution.operation
+        if operation not in canonical_executable_fill_operations():
             continue
-        if str(capability_id) not in FILL_OPERATION_PRODUCED_CAPABILITIES.get(
-            operation,
-            (),
+        if str(capability_id) not in (
+            canonical_fill_operation_produced_capabilities().get(
+                operation,
+                (),
+            )
         ):
             continue
         expected_action_id = fill_action_id(

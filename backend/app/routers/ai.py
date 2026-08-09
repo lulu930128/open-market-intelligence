@@ -10,7 +10,7 @@ from app.ai import agentic_tools
 from app.ai import ask as ai_ask
 from app.ai import llm as ai_llm
 from app.ai import memory as ai_memory
-from app.ai import orchestrator, prompts, reports, tools
+from app.ai import orchestrator, prompts, refresh_status, reports, tools
 from app.ai import report_store
 from app.ai import streaming as ai_streaming
 from app.ai.schemas import (
@@ -21,6 +21,7 @@ from app.ai.schemas import (
     AiMemoryRead,
     AiMemoryUpdate,
     AiReportEnvelope,
+    AiRefreshStatusRead,
     AiStoredReportRead,
     AiToolListRead,
     StrategyProfileRead,
@@ -184,6 +185,27 @@ def list_ai_tools(
         )
 
     return tools.list_ai_tools(include_internal=wants_internal)
+
+
+@router.get(
+    "/refresh-status/{job_id}",
+    response_model=AiRefreshStatusRead,
+)
+def read_ai_refresh_status(
+    job_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_status.read_refresh_status(db=db, job_id=job_id)
+    except refresh_status.AiRefreshJobNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "AI_REFRESH_JOB_NOT_FOUND",
+                "message": str(exc),
+                "retryable": False,
+            },
+        ) from exc
 
 
 @router.get("/strategy-profiles", response_model=list[StrategyProfileRead])

@@ -2476,7 +2476,17 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 
     const taiwanStockMatch = path.match(/\/stocks\/([^/]+)$/);
     if (taiwanStockMatch) {
-      await fulfillJson(route, stockMasterResponse(decodeURIComponent(taiwanStockMatch[1])));
+      const stockId = decodeURIComponent(taiwanStockMatch[1]);
+      const watchlistItem = taiwanWatchlistItems.find(
+        (candidate) => candidate.stock_id === stockId
+      );
+      const stockMaster = stockMasterResponse(stockId);
+      await fulfillJson(route, {
+        ...stockMaster,
+        stock_name: watchlistItem?.stock_name ?? stockMaster.stock_name,
+        market: watchlistItem?.market ?? stockMaster.market,
+        instrument_type: watchlistItem?.instrument_type ?? stockMaster.instrument_type,
+      });
       return;
     }
 
@@ -3918,11 +3928,22 @@ test.describe("OMI dashboard smoke", () => {
     const crossMarket = page.getByTestId("cross-market-context-strip");
     const crossMarketToggle = page.getByTestId("cross-market-context-toggle");
     const crossMarketDetails = page.getByTestId("cross-market-context-details");
+    const overnightDisclosure = page.getByTestId("tw-overnight-impact-disclosure");
+    await expect(overnightDisclosure).toContainText("Overnight · 市場背景");
+    await expect(overnightDisclosure).not.toHaveAttribute("open", "");
     await expect(crossMarket).toBeVisible();
+    await expect(
+      crossMarket.evaluate(
+        (node) =>
+          node.closest('[data-testid="tw-overnight-impact-disclosure"]') === null
+      )
+    ).resolves.toBe(true);
     await expect(crossMarket).not.toHaveAttribute("open", "");
     await expect(crossMarketDetails).toBeHidden();
-    await expect(crossMarketToggle).toContainText("跨市場脈絡");
+    await expect(crossMarketToggle).toContainText("個股跨市場映射");
+    await expect(crossMarketToggle).toContainText("TSM → 2330 · 直接等價");
     await expect(crossMarketToggle).toContainText("外部相對支撐");
+    await expect(crossMarketToggle).toContainText("映射分數");
     await expect(crossMarketToggle).toContainText("+30.00%");
     await expect(crossMarketToggle).toContainText("可用");
 
@@ -3958,6 +3979,9 @@ test.describe("OMI dashboard smoke", () => {
     const fxFlow = page.getByTestId("fx-flow-context-strip");
     const fxFlowToggle = page.getByTestId("fx-flow-context-toggle");
     const fxFlowDetails = page.getByTestId("fx-flow-context-details");
+    await expect(fxFlow).toBeHidden();
+    await overnightDisclosure.locator(":scope > summary").click();
+    await expect(overnightDisclosure).toHaveAttribute("open", "");
     await expect(fxFlow).toBeVisible();
     await expect(fxFlow).not.toHaveAttribute("open", "");
     await expect(fxFlowDetails).toBeHidden();
@@ -4113,13 +4137,19 @@ test.describe("OMI dashboard smoke", () => {
 
     const context = page.getByTestId("cross-market-context-strip");
     const toggle = page.getByTestId("cross-market-context-toggle");
+    await expect(toggle).toContainText("MU → 2330 · 同業代理（非因果）");
     await expect(toggle).toContainText("外部相對壓力");
-    await expect(toggle).toContainText("-1.00%");
+    await expect(toggle).toContainText("關係信心 Tier C");
+    await expect(toggle).toContainText("映射分數");
+    await expect(toggle).toContainText("-0.24%");
     await toggle.click();
     await expect(context).toContainText("MU · 同業代理（非因果）");
     await expect(context).toContainText("來源 +5.00%");
     await expect(context).toContainText("基準 +6.00%");
     await expect(context).toContainText("Residual -1.00%");
+    await expect(context).toContainText("基礎 0.40 × 品質 0.60 = 有效 0.24");
+    await expect(context).toContainText("主要訊號貢獻");
+    await expect(context).toContainText("-0.24%");
     await expect(context).toContainText("不代表兩家公司有供應、客戶或持股關係");
   });
 
@@ -4620,17 +4650,98 @@ test.describe("OMI dashboard smoke", () => {
     await expect(technical).toBeInViewport();
   });
 
-  test("Taiwan next-session levels render between technical evidence and Overnight", async ({
+  test("Taiwan technical sections collapse below the fixed structure header", async ({
     page,
   }) => {
-    await mockOmiApi(page);
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) =>
+        path.endsWith("/market/overnight-impact/2330")
+          ? {
+              body: {
+                kind: "us_overnight_tw_impact",
+                stock_id: "2330",
+                stock_name: "台積電",
+                as_of: "2026-08-07",
+                generated_at: "2026-08-09T13:00:00Z",
+                stance: "risk_on",
+                title: "Fixture overnight report",
+                summary: "Fixture overnight summary",
+                score: 20,
+                weighted_change_pct: 1,
+                confidence: "high",
+                tw_mapping: null,
+                adr_parity: null,
+                cross_market_context: null,
+                fx_flow_context: null,
+                factors: [],
+                baskets: [],
+                missing: [],
+                warnings: [],
+                source_refs: [],
+                freshness: {},
+                evidence_passport: {},
+              },
+            }
+          : null,
+    });
     await page.goto("/?market=tw&stock_id=2330", {
       waitUntil: "domcontentloaded",
     });
 
     const technicalContext = page.getByTestId("tw-technical-context");
+    const technicalHeader = page.locator(".omi-technical-summary").last();
+    const ladder = page.getByTestId("tw-technical-ladder-disclosure");
+    const nextConditions = page.getByTestId(
+      "tw-technical-next-conditions-disclosure"
+    );
+    const evidence = page.getByTestId("tw-technical-evidence-disclosure");
     const plan = page.getByTestId("tw-next-session-plan");
-    const overnightEyebrow = page.getByText("Overnight", { exact: true }).last();
+    const planDisclosure = page.getByTestId("tw-next-session-plan-disclosure");
+    const overnightDisclosure = page.getByTestId(
+      "tw-overnight-impact-disclosure"
+    );
+    const overnightEyebrow = page
+      .getByText("Overnight · 市場背景", { exact: true })
+      .last();
+
+    await expect(technicalHeader).toBeVisible();
+    await expect(technicalHeader.locator("details")).toHaveCount(0);
+    for (const disclosure of [
+      ladder,
+      nextConditions,
+      evidence,
+      planDisclosure,
+      overnightDisclosure,
+    ]) {
+      await expect(disclosure).toBeVisible();
+      await expect(disclosure).not.toHaveAttribute("open", "");
+    }
+    await expect(technicalContext).not.toHaveAttribute("open", "");
+    await expect(technicalContext).not.toBeVisible();
+
+    await ladder.locator("summary").click();
+    await expect(ladder).toHaveAttribute("open", "");
+    await expect(ladder.locator("[data-level-key]").first()).toBeVisible();
+
+    await nextConditions.locator("summary").click();
+    await expect(nextConditions).toHaveAttribute("open", "");
+    await expect(nextConditions.locator("ol")).toBeVisible();
+
+    await evidence.locator("summary").first().click();
+    await expect(evidence).toHaveAttribute("open", "");
+    const trendEvidence = page.getByTestId("tw-technical-evidence-trend");
+    await expect(trendEvidence).toBeVisible();
+    await expect(trendEvidence).not.toHaveAttribute("open", "");
+    expect(
+      await trendEvidence
+        .locator("summary > span")
+        .last()
+        .evaluate((indicator) => getComputedStyle(indicator).transform)
+    ).toBe("none");
+    await expect(technicalContext).toBeVisible();
+    await evidence.locator("summary").first().click();
+    await expect(evidence).not.toHaveAttribute("open", "");
+    await expect(technicalContext).not.toBeVisible();
 
     await expect(plan).toBeVisible();
     await expect(plan).toHaveAttribute("data-decision-usable", "true");
@@ -4646,7 +4757,14 @@ test.describe("OMI dashboard smoke", () => {
     await expect(
       plan.getByTestId("tw-next-session-zone-between_transition_levels")
     ).toContainText("142 – 150");
+    await expect(plan.getByTestId("tw-next-session-level-ma20")).not.toBeVisible();
+    await planDisclosure.locator("summary").click();
+    await expect(planDisclosure).toHaveAttribute("open", "");
+    await expect(plan.getByTestId("tw-next-session-level-ma20")).toBeVisible();
+
     await expect(overnightEyebrow).toBeVisible();
+    await overnightDisclosure.locator("summary").click();
+    await expect(overnightDisclosure).toHaveAttribute("open", "");
 
     const planHandle = await plan.elementHandle();
     const overnightHandle = await overnightEyebrow.elementHandle();
@@ -4908,8 +5026,13 @@ test.describe("OMI dashboard smoke", () => {
     );
 
     const trendEvidence = page.getByTestId("tw-technical-evidence-trend");
+    const evidenceDisclosure = page.getByTestId(
+      "tw-technical-evidence-disclosure"
+    );
+    await expect(evidenceDisclosure).not.toHaveAttribute("open", "");
     await expect(trendEvidence).not.toHaveAttribute("open", "");
     await page.getByTestId("tw-signal-chip-structure").click();
+    await expect(evidenceDisclosure).toHaveAttribute("open", "");
     await expect(trendEvidence).toHaveAttribute("open", "");
     await expect(trendEvidence).toContainText("ADX 30.09");
 
@@ -7090,6 +7213,97 @@ test.describe("OMI dashboard smoke", () => {
       daily_nav: null,
       pcf: null,
       intraday_nav: null,
+      valuation: {
+        status: "missing",
+        basis: "daily_close",
+        market_price: {
+          value: null,
+          as_of_date: null,
+          observed_at: null,
+          fetched_at: null,
+          source: null,
+          source_url: null,
+          basis: "daily_close",
+          status: "missing",
+          issue_codes: ["daily_market_price_missing"],
+        },
+        nav: {
+          value: null,
+          as_of_date: null,
+          observed_at: null,
+          fetched_at: null,
+          source: null,
+          source_url: null,
+          basis: "daily_nav",
+          status: "missing",
+          issue_codes: ["daily_nav_missing"],
+        },
+        premium_discount_pct: null,
+        premium_discount_status: "input_missing",
+        aligned: false,
+        issue_codes: ["daily_market_price_missing", "daily_nav_missing"],
+      },
+      strategy: {
+        management_style: "unknown",
+        benchmark_role: "unknown",
+        benchmark_name: null,
+      },
+      resource_states: {
+        market_price: {
+          applicable: true,
+          connector_supported: true,
+          status: "missing",
+          reason_code: "daily_market_price_missing",
+          as_of_date: null,
+          observed_at: null,
+          source: null,
+        },
+        daily_nav: {
+          applicable: true,
+          connector_supported: true,
+          status: "missing",
+          reason_code: "daily_nav_missing",
+          as_of_date: null,
+          observed_at: null,
+          source: null,
+        },
+        intraday_nav: {
+          applicable: true,
+          connector_supported: true,
+          status: "missing",
+          reason_code: "intraday_nav_cache_missing",
+          as_of_date: null,
+          observed_at: null,
+          source: null,
+        },
+        pcf_summary: {
+          applicable: true,
+          connector_supported: true,
+          status: "missing",
+          reason_code: "pcf_cache_missing",
+          as_of_date: null,
+          observed_at: null,
+          source: null,
+        },
+        pcf_component_basket: {
+          applicable: true,
+          connector_supported: true,
+          status: "missing",
+          reason_code: "pcf_component_basket_missing",
+          as_of_date: null,
+          observed_at: null,
+          source: null,
+        },
+        fund_holdings: {
+          applicable: true,
+          connector_supported: false,
+          status: "provider_not_connected",
+          reason_code: "fund_holdings_provider_not_connected",
+          as_of_date: null,
+          observed_at: null,
+          source: null,
+        },
+      },
       freshness: {
         status: "missing",
         timezone: "Asia/Taipei",
@@ -7222,6 +7436,79 @@ test.describe("OMI dashboard smoke", () => {
         source_url: "https://www.yuantaetfs.com/tradeInfo/comparison/0050/realtime",
         fetched_at: timestamp,
       },
+      valuation: {
+        status: "current",
+        basis: "daily_close",
+        market_price: {
+          value: 102.85,
+          as_of_date: "2026-08-07",
+          observed_at: null,
+          fetched_at: timestamp,
+          source: "twse_daily_price",
+          source_url: "https://www.twse.com.tw/",
+          basis: "daily_close",
+          status: "current",
+          issue_codes: [],
+        },
+        nav: {
+          value: 102.76,
+          as_of_date: "2026-08-07",
+          observed_at: null,
+          fetched_at: timestamp,
+          source: "mops",
+          source_url: "https://mopsov.twse.com.tw/mops/web/ajax_t78sb35",
+          basis: "daily_nav",
+          status: "current",
+          issue_codes: [],
+        },
+        premium_discount_pct: 0.087583,
+        premium_discount_status: "ready",
+        aligned: true,
+        issue_codes: [],
+      },
+      strategy: {
+        management_style: "passive",
+        benchmark_role: "tracked_index",
+        benchmark_name: "臺灣50指數",
+      },
+      resource_states: {
+        ...baseOverview.resource_states,
+        market_price: {
+          ...baseOverview.resource_states.market_price,
+          status: "current",
+          reason_code: null,
+          as_of_date: "2026-08-07",
+          source: "twse_daily_price",
+        },
+        daily_nav: {
+          ...baseOverview.resource_states.daily_nav,
+          status: "current",
+          reason_code: null,
+          as_of_date: "2026-08-07",
+          source: "mops",
+        },
+        intraday_nav: {
+          ...baseOverview.resource_states.intraday_nav,
+          status: "closed",
+          reason_code: null,
+          observed_at: "2026-08-07T05:31:00Z",
+          source: "yuanta_etfs",
+        },
+        pcf_summary: {
+          ...baseOverview.resource_states.pcf_summary,
+          status: "current",
+          reason_code: null,
+          as_of_date: "2026-08-10",
+          source: "yuanta_etfs",
+        },
+        pcf_component_basket: {
+          ...baseOverview.resource_states.pcf_component_basket,
+          status: "current",
+          reason_code: null,
+          as_of_date: "2026-08-10",
+          source: "yuanta_etfs",
+        },
+      },
       freshness: {
         ...baseOverview.freshness,
         status: "current",
@@ -7311,8 +7598,10 @@ test.describe("OMI dashboard smoke", () => {
     await expect(panel).toContainText("102.7600");
     await expect(panel).toContainText("+0.09%");
     await expect(panel).toContainText("臺灣50指數");
-    await expect(panel).toContainText("盤中 iNAV 已接入");
-    await expect(panel).toContainText("PCF 成分籃子");
+    await expect(panel).toContainText("盤後日資料");
+    await expect(panel).toContainText("盤中 iNAV · 前一交易時段");
+    await expect(panel).toContainText("申購買回資料（PCF）");
+    await expect(panel).toContainText("基金持股 · 來源尚未接入");
     await expect(panel).toContainText("台積電");
     await expect(page.getByText("營收資料", { exact: false })).toHaveCount(0);
     await expect(dataPanel.locator('[data-data-tab="revenue"]')).toHaveCount(0);

@@ -15,11 +15,13 @@ from app.db.models import (
     RadarFeatureSnapshot,
     RadarOutcomePath,
     RadarRuleEvaluation,
+    RadarSignalEvent,
     RadarUniverseObservation,
     WatchlistGroup,
 )
 from app.watchlists.radar_active_v2_service import (
     build_radar_v2_active_projection,
+    build_radar_v2_active_projection_from_db,
     persist_radar_v2_active,
 )
 from app.market.trading_calendar import next_taiwan_trading_day
@@ -38,6 +40,7 @@ from app.watchlists.radar_v2_service import (
 )
 from app.watchlists.schemas import (
     WatchlistGroupRadarRead,
+    WatchlistRadarV2SummaryRead,
     WatchlistRadarV2OutcomeSummaryRead,
 )
 from app.routers.watchlists import (
@@ -156,6 +159,32 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.engine.dispose()
+
+    def test_legacy_cached_summary_fails_closed_when_cross_market_metadata_missing(
+        self,
+    ) -> None:
+        summary = WatchlistRadarV2SummaryRead.model_validate(
+            {
+                "evaluated_count": 8,
+                "universe_evaluated_count": 83,
+                "direction_changed_count": 0,
+                "bucket_changed_count": 0,
+                "conflict_count": 0,
+                "insufficient_count": 0,
+                "market_regime": "insufficient",
+                "market_regime_clarity": 0.0,
+            }
+        ).model_dump(mode="json")
+
+        self.assertEqual(
+            summary["cross_market_context"]["materialization_status"],
+            "not_materialized",
+        )
+        self.assertEqual(summary["cross_market_context"]["mode"], "unavailable")
+        self.assertIn(
+            "cross_market_context_summary_missing_from_cached_radar_snapshot",
+            summary["cross_market_context"]["limitations"],
+        )
 
     def test_persisted_outcome_limitation_codes_normalize_for_public_schema(
         self,
@@ -331,6 +360,11 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
                 "methodology_version": "cross_market.direct_parity.v1",
                 "relation_snapshot_version": "relation_registry:42:v1",
                 "snapshot_id": "cmctx:test",
+                "projection_source": "materialized_snapshot",
+                "source_cutoff_at": "2026-07-30T05:30:00Z",
+                "materialized_at": "2026-07-30T05:35:00Z",
+                "materialized_by": "test-radar-batch",
+                "payload_hash": "a" * 64,
                 "summary": {
                     "stance": "supportive",
                     "score": 3.5,
@@ -380,6 +414,8 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
         )
         self.assertEqual(cross_signal["stance"], "contradict")
         self.assertEqual(cross_signal["snapshot_id"], "cmctx:test")
+        self.assertEqual(cross_signal["projection_source"], "materialized_snapshot")
+        self.assertEqual(cross_signal["payload_hash"], "a" * 64)
         self.assertLess(
             contextual_result["radar_v2"]["context_alignment_score"],
             0,
@@ -390,7 +426,101 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
             ],
             "none",
         )
-        WatchlistGroupRadarRead.model_validate(contextual)
+        self.assertEqual(
+            contextual["radar_v2_summary"]["cross_market_context"][
+                "materialization_status"
+            ],
+            "materialized_snapshot",
+        )
+        self.assertEqual(
+            baseline["radar_v2_summary"]["cross_market_context"][
+                "materialization_status"
+            ],
+            "not_materialized",
+        )
+        self.assertIn(
+            "cross_market_snapshot_not_materialized_for_radar_batch",
+            baseline["radar_v2_summary"]["cross_market_context"]["limitations"],
+        )
+        serialized_contextual = WatchlistGroupRadarRead.model_validate(
+            contextual
+        ).model_dump(mode="json")
+        serialized_cross_market = serialized_contextual["radar_v2_summary"][
+            "cross_market_context"
+        ]
+        self.assertEqual(
+            serialized_cross_market["materialization_status"],
+            "materialized_snapshot",
+        )
+        self.assertEqual(serialized_cross_market["snapshot_count"], 1)
+        self.assertEqual(serialized_cross_market["ranking_effect"], "none")
+
+        serialized_baseline = WatchlistGroupRadarRead.model_validate(
+            baseline
+        ).model_dump(mode="json")
+        serialized_baseline_cross_market = serialized_baseline["radar_v2_summary"][
+            "cross_market_context"
+        ]
+        self.assertEqual(
+            serialized_baseline_cross_market["materialization_status"],
+            "not_materialized",
+        )
+        self.assertIn(
+            "cross_market_snapshot_not_materialized_for_radar_batch",
+            serialized_baseline_cross_market["limitations"],
+        )
+
+    def test_cross_market_db_projection_reads_only_the_same_radar_batch(self) -> None:
+        item = _source_item(
+            "2330",
+            signal_keys=["ma20_bullish"],
+            source_rank=1,
+        )
+        with (
+            Session(self.engine) as db,
+            patch(
+                "app.watchlists.radar_active_v2_service.latest_market_regime_snapshot",
+                return_value=None,
+            ),
+            patch(
+                "app.watchlists.radar_active_v2_service.radar_v2_service."
+                "get_radar_v2_validation_readiness",
+                return_value=None,
+            ),
+            patch(
+                "app.watchlists.radar_active_v2_service."
+                "materialize_cross_market_context_batch"
+            ) as materialize,
+            patch(
+                "app.watchlists.radar_active_v2_service."
+                "load_latest_cross_market_context_snapshots",
+                return_value={},
+            ) as load_snapshots,
+            patch(
+                "app.watchlists.radar_active_v2_service.settings."
+                "cross_market_radar_display_enabled",
+                True,
+            ),
+        ):
+            result = build_radar_v2_active_projection_from_db(
+                db=db,
+                radar=_base_radar(item),
+                universe_items=[item],
+                materialize_cross_market_snapshots=False,
+            )
+
+        materialize.assert_not_called()
+        load_kwargs = load_snapshots.call_args.kwargs
+        self.assertEqual(
+            load_kwargs["exact_decision_at"],
+            load_kwargs["as_of_at"],
+        )
+        self.assertEqual(
+            result["radar_v2_summary"]["cross_market_context"][
+                "materialization_status"
+            ],
+            "not_materialized",
+        )
 
     def test_active_persistence_and_read_model_do_not_require_v1_snapshot(
         self,
@@ -479,6 +609,48 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
                     for row in db.query(RadarRuleEvaluation).all()
                 )
             )
+
+    def test_same_day_exited_event_is_reused_on_idempotent_rerun(self) -> None:
+        selected = _source_item(
+            "2222",
+            signal_keys=["cross_below_ma60"],
+            source_rank=1,
+        )
+        active = build_radar_v2_active_projection(
+            radar=_base_radar(selected),
+            universe_items=[selected],
+        )
+
+        with Session(self.engine) as db:
+            db.add(WatchlistGroup(id=7, group_name="Radar v2"))
+            db.commit()
+            first = persist_radar_v2_active(
+                db=db,
+                radar=active,
+                group_id=7,
+                mode="action",
+            )
+            event = db.query(RadarSignalEvent).one()
+            event.status = "exited"
+            event.observation_status = "observed_inactive"
+            event.exit_trade_date = event.onset_trade_date
+            db.commit()
+
+            second = persist_radar_v2_active(
+                db=db,
+                radar=active,
+                group_id=7,
+                mode="action",
+            )
+
+            db.refresh(event)
+            self.assertEqual(db.query(RadarSignalEvent).count(), 1)
+            self.assertEqual(event.status, "active")
+            self.assertIsNone(event.exit_trade_date)
+            self.assertEqual(event.retrigger_count, 1)
+            self.assertEqual(first["event_created_count"], 1)
+            self.assertEqual(second["event_created_count"], 0)
+            self.assertGreaterEqual(second["event_updated_count"], 1)
 
     def test_pending_active_outcomes_are_reconciled_oldest_first(self) -> None:
         quiet = _source_item("1111", signal_keys=[], source_rank=1)

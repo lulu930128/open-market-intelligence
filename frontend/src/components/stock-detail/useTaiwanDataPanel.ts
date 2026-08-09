@@ -129,9 +129,9 @@ export function useTaiwanDataPanel({
   subresourceRefreshSeconds,
   t,
 }: {
-  autoRefreshEnabled?: boolean;
+  autoRefreshEnabled?: boolean | null;
   enabled?: boolean;
-  includeFundamentals?: boolean;
+  includeFundamentals?: boolean | null;
   isIndexProduct: boolean;
   onDailyPricesChanged?: () => void;
   stockId: string | null;
@@ -180,6 +180,17 @@ export function useTaiwanDataPanel({
   const subresourceRefreshSecondsRef = useRef(subresourceRefreshSeconds);
   const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const tRef = useRef(t);
+  const resolvedStockInstrumentType =
+    stockInfo?.stock_id === stockId
+      ? stockInfo.instrument_type?.trim().toLowerCase() ?? "unknown"
+      : "unknown";
+  const resolvedIncludeFundamentals =
+    includeFundamentals ??
+    (resolvedStockInstrumentType !== "" &&
+      resolvedStockInstrumentType !== "unknown" &&
+      resolvedStockInstrumentType !== "etf");
+  const resolvedAutoRefreshEnabled =
+    autoRefreshEnabled ?? resolvedIncludeFundamentals;
 
   useEffect(() => {
     let cancelled = false;
@@ -305,7 +316,7 @@ export function useTaiwanDataPanel({
 
     async function loadBasicDetail() {
       try {
-        const [institutionalData, marginData, revenueData, stockData] =
+        const [institutionalData, marginData, initialRevenueData, stockData] =
           await Promise.all([
             fetchOptional<InstitutionalTradeDailyRead>(
               `/api/market/institutional/${requestedStockId}/latest`,
@@ -315,7 +326,7 @@ export function useTaiwanDataPanel({
               `/api/market/margin/${requestedStockId}/latest`,
               { ensure_daily: false }
             ),
-            includeFundamentals
+            includeFundamentals === true
               ? fetchOptional<MonthlyRevenueRead>(
                   `/api/market/revenue/${requestedStockId}/latest`,
                   { ensure_latest: false }
@@ -325,9 +336,23 @@ export function useTaiwanDataPanel({
           ]);
         if (cancelled) return;
 
+        const resolvedStockDataInstrumentType =
+          stockData?.instrument_type?.trim().toLowerCase() ?? "unknown";
+        const resolvedRevenueData =
+          includeFundamentals === null &&
+          resolvedStockDataInstrumentType !== "" &&
+          resolvedStockDataInstrumentType !== "unknown" &&
+          resolvedStockDataInstrumentType !== "etf"
+            ? await fetchOptional<MonthlyRevenueRead>(
+                `/api/market/revenue/${requestedStockId}/latest`,
+                { ensure_latest: false }
+              )
+            : initialRevenueData;
+        if (cancelled) return;
+
         setInstitutional(institutionalData);
         setMargin(marginData);
-        setMonthlyRevenue(revenueData);
+        setMonthlyRevenue(resolvedRevenueData);
         setStockInfo(stockData);
       } catch {
         if (cancelled) return;
@@ -458,7 +483,7 @@ export function useTaiwanDataPanel({
     }
   ) {
     if (!enabled || !stockId) return;
-    if (!includeFundamentals && (tab === "revenue" || tab === "earnings")) return;
+    if (!resolvedIncludeFundamentals && (tab === "revenue" || tab === "earnings")) return;
 
     const targetStockId = stockId;
     const targetBranchDays = tab === "branch" ? branchDays : 1;
@@ -948,7 +973,7 @@ export function useTaiwanDataPanel({
   }
 
   useEffect(() => {
-    if (!autoRefreshEnabled || !enabled || !stockId || isIndexProduct) return;
+    if (!resolvedAutoRefreshEnabled || !enabled || !stockId || isIndexProduct) return;
 
     const requestKey = dataPanelCacheKey(stockId, activeDataTab, branchDays);
     const cachedBranchSummary =
@@ -1007,7 +1032,7 @@ export function useTaiwanDataPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeDataTab,
-    autoRefreshEnabled,
+    resolvedAutoRefreshEnabled,
     branchDays,
     enabled,
     isIndexProduct,

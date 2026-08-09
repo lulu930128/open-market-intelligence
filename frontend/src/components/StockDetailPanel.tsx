@@ -337,13 +337,13 @@ export default function StockDetailPanel({
   } | null>(null);
   const indexProduct = stockId ? indexProducts.get(stockId) ?? null : null;
   const isIndexProduct = indexProduct !== null;
-  const normalizedInstrumentType =
+  const requestedInstrumentType =
     instrumentType?.trim().toLowerCase() ?? "unknown";
-  const instrumentTypeResolved =
-    normalizedInstrumentType !== "" && normalizedInstrumentType !== "unknown";
-  const isEtfProduct = normalizedInstrumentType === "etf";
-  const selectedEtfDataTab =
-    isEtfProduct && etfDataTabSelection?.stockId === stockId
+  const requestedInstrumentTypeResolved =
+    requestedInstrumentType !== "" && requestedInstrumentType !== "unknown";
+  const requestedIsEtfProduct = requestedInstrumentType === "etf";
+  const requestedEtfDataTab =
+    requestedIsEtfProduct && etfDataTabSelection?.stockId === stockId
       ? etfDataTabSelection.tab
       : "etf";
   const indexId = indexProduct?.indexId ?? null;
@@ -385,16 +385,30 @@ export default function StockDetailPanel({
       setStockInfo,
     },
   } = useTaiwanDataPanel({
-    autoRefreshEnabled:
-      instrumentTypeResolved &&
-      (!isEtfProduct || selectedEtfDataTab !== "etf"),
-    includeFundamentals: instrumentTypeResolved && !isEtfProduct,
+    autoRefreshEnabled: requestedInstrumentTypeResolved
+      ? !requestedIsEtfProduct || requestedEtfDataTab !== "etf"
+      : null,
+    includeFundamentals: requestedInstrumentTypeResolved
+      ? !requestedIsEtfProduct
+      : null,
     isIndexProduct,
     onDailyPricesChanged,
     stockId,
     subresourceRefreshSeconds: taiwanSubresourceRefreshSeconds,
     t,
   });
+  const stockInfoInstrumentType =
+    stockInfo?.stock_id === stockId
+      ? stockInfo.instrument_type?.trim().toLowerCase() ?? "unknown"
+      : "unknown";
+  const normalizedInstrumentType = requestedInstrumentTypeResolved
+    ? requestedInstrumentType
+    : stockInfoInstrumentType;
+  const isEtfProduct = normalizedInstrumentType === "etf";
+  const selectedEtfDataTab =
+    isEtfProduct && etfDataTabSelection?.stockId === stockId
+      ? etfDataTabSelection.tab
+      : "etf";
   const visibleDataPanelTabs = isEtfProduct ? etfDataPanelTabs : dataPanelTabs;
   const activeDataSurfaceTab = isEtfProduct ? selectedEtfDataTab : activeDataTab;
   const selectDataSurfaceTab = useCallback(
@@ -1136,6 +1150,11 @@ export default function StockDetailPanel({
 
       if (target instanceof HTMLDetailsElement) {
         target.open = true;
+      }
+      let ancestorDetails = target.parentElement?.closest("details") ?? null;
+      while (ancestorDetails instanceof HTMLDetailsElement) {
+        ancestorDetails.open = true;
+        ancestorDetails = ancestorDetails.parentElement?.closest("details") ?? null;
       }
       if (dataTabTarget) {
         selectDataSurfaceTab(dataTabTarget);
@@ -1922,12 +1941,12 @@ export default function StockDetailPanel({
             <div className="px-5 py-3">
               {technicalCurrentState ? (
                 <>
-                  <TechnicalCurrentStateEvidence state={technicalCurrentState} />
-                  <details
-                    id="tw-technical-context"
-                    className="group mt-3 border border-omi-border-subtle bg-omi-surface-muted"
-                    data-testid="tw-technical-context"
-                  >
+                  <TechnicalCurrentStateEvidence state={technicalCurrentState}>
+                    <details
+                      id="tw-technical-context"
+                      className="group/technical-context border border-omi-border-subtle bg-omi-surface-muted"
+                      data-testid="tw-technical-context"
+                    >
                     <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-2.5 outline-none transition hover:bg-omi-surface focus-visible:ring-2 focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden">
                       <span className="min-w-0">
                         <span className="block text-sm font-semibold text-omi-text-strong">
@@ -1939,7 +1958,7 @@ export default function StockDetailPanel({
                       </span>
                       <span
                         aria-hidden="true"
-                        className="shrink-0 text-base text-omi-text-muted transition-transform group-open:rotate-45"
+                        className="shrink-0 text-base text-omi-text-muted transition-transform group-open/technical-context:rotate-45"
                       >
                         ＋
                       </span>
@@ -1982,7 +2001,8 @@ export default function StockDetailPanel({
                         </div>
                       </div>
                     </div>
-                  </details>
+                    </details>
+                  </TechnicalCurrentStateEvidence>
                   <NextSessionPlanPanel
                     plan={nextSessionPlan}
                     loadState={nextSessionPlanLoadState}

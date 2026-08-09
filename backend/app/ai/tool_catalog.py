@@ -146,6 +146,7 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                 "selected_action_ids": {
                                     "type": "array",
                                     "items": {"type": "string"},
+                                    "maxItems": 8,
                                     "uniqueItems": True,
                                 },
                             },
@@ -385,6 +386,26 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "x-omi-capabilities": (
                         capability_contract.capability_catalog()
                     ),
+                },
+            },
+            {
+                "name": "omi.read_refresh_status",
+                "title": "Read OMI Refresh Status",
+                "description": (
+                    "Read one redacted ai.tool_refresh background job. Operation "
+                    "completion never implies fresh evidence; completed jobs return a "
+                    "cache-only omi.ask resume template."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "integer",
+                            "minimum": 1,
+                        }
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": False,
                 },
             },
             {
@@ -1038,6 +1059,6 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
     ]
 
     if not include_internal:
-        tool_list = tool_list[:1]
+        tool_list = tool_list[:2]
 
     return {"tools": tool_list}

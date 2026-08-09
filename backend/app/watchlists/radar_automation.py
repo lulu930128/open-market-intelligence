@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.db.write_coordination import run_with_sqlite_write_retry
 from app.db.models import (
     MarketDailyPrice,
     RadarOutcomePath,
@@ -686,33 +687,41 @@ def run_watchlist_radar_automation(
                     invalid_count += 1
                     continue
 
-                active_radar = (
-                    radar_active_v2_service.build_radar_v2_active_projection_from_db(
-                        db=db,
-                        radar=radar,
-                        universe_items=v2_universe,
-                        materialize_cross_market_snapshots=True,
+                def persist_active_scope():
+                    active_radar = (
+                        radar_active_v2_service.build_radar_v2_active_projection_from_db(
+                            db=db,
+                            radar=radar,
+                            universe_items=v2_universe,
+                            materialize_cross_market_snapshots=True,
+                        )
                     )
-                )
-                active_result = (
-                    radar_active_v2_service.persist_radar_v2_active(
+                    active_result = radar_active_v2_service.persist_radar_v2_active(
                         db=db,
                         radar=active_radar,
                         group_id=group_id,
                         mode=mode,
                     )
+                    active_outcomes = (
+                        radar_shadow_v2_service.evaluate_pending_radar_v2_outcomes(
+                            db=db,
+                            evaluation_ids=active_result["evaluation_ids"],
+                            group_id=group_id,
+                            mode=mode,
+                            rule_version=str(active_result["rule_version"]),
+                        )
+                    )
+                    return active_radar, active_result, active_outcomes
+
+                active_radar, active_result, active_outcomes = (
+                    run_with_sqlite_write_retry(
+                        db,
+                        persist_active_scope,
+                        reset_session_before_attempt=True,
+                    )
                 )
                 active_persisted_count += int(
                     active_result["evaluation_created_count"]
-                )
-                active_outcomes = (
-                    radar_shadow_v2_service.evaluate_pending_radar_v2_outcomes(
-                        db=db,
-                        evaluation_ids=active_result["evaluation_ids"],
-                        group_id=group_id,
-                        mode=mode,
-                        rule_version=str(active_result["rule_version"]),
-                    )
                 )
                 active_outcome_evaluated_count += int(
                     active_outcomes["evaluated_count"]

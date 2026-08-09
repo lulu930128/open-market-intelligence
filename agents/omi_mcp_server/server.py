@@ -45,7 +45,10 @@ def _env_int(name: str, default: int) -> int:
 
 
 API_TIMEOUT_SECONDS = _env_int("OMI_API_TIMEOUT_SECONDS", 180)
-SCHEMA_TIMEOUT_SECONDS = _env_int("OMI_SCHEMA_TIMEOUT_SECONDS", 2)
+SCHEMA_TIMEOUT_SECONDS = _env_int(
+    "OMI_MCP_SCHEMA_TIMEOUT_SECONDS",
+    _env_int("OMI_SCHEMA_TIMEOUT_SECONDS", 2),
+)
 AI_TRUST_TOKEN = (
     os.environ.get("OMI_MCP_AI_TRUST_TOKEN")
     or os.environ.get("OMI_AI_TRUST_TOKEN")
@@ -353,6 +356,7 @@ ASK_TOOL: dict[str, Any] = {
                     "selected_action_ids": {
                         "type": "array",
                         "items": {"type": "string"},
+                        "maxItems": 8,
                         "uniqueItems": True,
                     },
                 },
@@ -507,6 +511,23 @@ ASK_STREAM_TOOL: dict[str, Any] = {
         "MCP clients that cannot consume native HTTP SSE directly. Prefer direct "
         "HTTP SSE when the client UI needs live incremental updates."
     ),
+}
+
+READ_REFRESH_STATUS_TOOL: dict[str, Any] = {
+    "name": "omi.read_refresh_status",
+    "title": "Read OMI Refresh Status",
+    "description": (
+        "Read one redacted OMI background refresh job. A completed operation "
+        "still requires the returned cache-only evidence rebuild step."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "job_id": {"type": "integer", "minimum": 1},
+        },
+        "required": ["job_id"],
+        "additionalProperties": False,
+    },
 }
 
 
@@ -1323,7 +1344,10 @@ def _augment_market_payload_control_schema(tool: dict[str, Any]) -> dict[str, An
     return tool
 
 
-PUBLIC_TOOLS = [_augment_market_payload_control_schema(tool) for tool in [ASK_TOOL, ASK_STREAM_TOOL]]
+PUBLIC_TOOLS = [
+    _augment_market_payload_control_schema(tool)
+    for tool in [ASK_TOOL, ASK_STREAM_TOOL, READ_REFRESH_STATUS_TOOL]
+]
 INTERNAL_TOOLS = [_augment_market_payload_control_schema(tool) for tool in INTERNAL_TOOLS]
 TOOLS = [*PUBLIC_TOOLS, *INTERNAL_TOOLS] if EXPOSE_INTERNAL_TOOLS else PUBLIC_TOOLS
 
@@ -1489,7 +1513,32 @@ def _backend_public_tools() -> list[dict[str, Any]]:
             "description": ASK_STREAM_TOOL["description"],
         }
     )
-    public_tools = [ask_tool, stream_tool]
+    refresh_source = next(
+        (
+            item
+            for item in backend_tools
+            if isinstance(item, dict)
+            and item.get("name") == "omi.read_refresh_status"
+        ),
+        None,
+    )
+    refresh_tool = json.loads(json.dumps(READ_REFRESH_STATUS_TOOL))
+    if refresh_source is not None:
+        refresh_tool = {
+            "name": "omi.read_refresh_status",
+            "title": str(
+                refresh_source.get("title")
+                or READ_REFRESH_STATUS_TOOL["title"]
+            ),
+            "description": str(
+                refresh_source.get("description")
+                or READ_REFRESH_STATUS_TOOL["description"]
+            ),
+            "inputSchema": json.loads(
+                json.dumps(refresh_source.get("input_schema") or {})
+            ),
+        }
+    public_tools = [ask_tool, stream_tool, refresh_tool]
     return (
         [*public_tools, *INTERNAL_TOOLS]
         if EXPOSE_INTERNAL_TOOLS
@@ -2054,6 +2103,12 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
             raise RuntimeError("OMI backend returned a non-v4 public stream response.")
         return response
 
+    if name == "omi.read_refresh_status":
+        job_id = int(_require(arguments, "job_id"))
+        if job_id <= 0:
+            raise ValueError("job_id must be a positive integer.")
+        return _api_get(f"/api/ai/refresh-status/{job_id}")
+
     if name == "omi.read_market_overview":
         return _api_get(
             "/api/ai/market-overview",
@@ -2314,7 +2369,8 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "version": SERVER_VERSION,
                 },
                 "instructions": (
-                    "Use omi.ask as the public entry point, or omi.ask_stream when collected stream events are useful. "
+                    "Use omi.ask as the public entry point, omi.ask_stream when collected stream events are useful, "
+                    "and omi.read_refresh_status for a returned background refresh job. "
                     "It is read-only by default; "
                     "report generation requires a server-side trusted request. Do not treat missing data as a conclusion. "
                     "Read omi.decision.v4 through answer, decision, evidence, limitations, status, "

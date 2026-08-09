@@ -102,6 +102,45 @@ class TaiwanEtfInavRead(BaseModel):
     fetched_at: datetime
 
 
+class TaiwanEtfValuationMetricRead(BaseModel):
+    value: float | None = None
+    as_of_date: date | None = None
+    observed_at: datetime | None = None
+    fetched_at: datetime | None = None
+    source: str | None = None
+    source_url: str | None = None
+    basis: str
+    status: str
+    issue_codes: list[str] = Field(default_factory=list)
+
+
+class TaiwanEtfValuationRead(BaseModel):
+    status: str
+    basis: str
+    market_price: TaiwanEtfValuationMetricRead
+    nav: TaiwanEtfValuationMetricRead
+    premium_discount_pct: float | None = None
+    premium_discount_status: str
+    aligned: bool = False
+    issue_codes: list[str] = Field(default_factory=list)
+
+
+class TaiwanEtfStrategyRead(BaseModel):
+    management_style: str
+    benchmark_role: str
+    benchmark_name: str | None = None
+
+
+class TaiwanEtfResourceStateRead(BaseModel):
+    applicable: bool | None = None
+    connector_supported: bool = False
+    status: str
+    reason_code: str | None = None
+    as_of_date: date | None = None
+    observed_at: datetime | None = None
+    source: str | None = None
+
+
 class TaiwanEtfFreshnessRead(BaseModel):
     status: str
     timezone: str = "Asia/Taipei"
@@ -152,6 +191,9 @@ class TaiwanEtfOverviewRead(BaseModel):
     daily_nav: TaiwanEtfNavDailyRead | None = None
     pcf: TaiwanEtfPcfRead | None = None
     intraday_nav: TaiwanEtfInavRead | None = None
+    valuation: TaiwanEtfValuationRead
+    strategy: TaiwanEtfStrategyRead
+    resource_states: dict[str, TaiwanEtfResourceStateRead]
     freshness: TaiwanEtfFreshnessRead
     sources: list[TaiwanEtfSourceRead]
     warnings: list[str] = Field(default_factory=list)

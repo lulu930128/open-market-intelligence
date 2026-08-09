@@ -360,6 +360,25 @@ class WatchlistRadarV2ReadinessRead(BaseModel):
     limitations: list[dict[str, object]] = Field(default_factory=list)
 
 
+class WatchlistRadarCrossMarketContextSummaryRead(BaseModel):
+    enabled: bool = False
+    mode: str = "unavailable"
+    snapshot_count: int = 0
+    materialization_status: str = "not_materialized"
+    limitations: list[str] = Field(
+        default_factory=lambda: [
+            "cross_market_context_summary_missing_from_cached_radar_snapshot"
+        ]
+    )
+    decision_usable_count: int = 0
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    snapshot_ids: list[str] = Field(default_factory=list)
+    methodology_versions: list[str] = Field(default_factory=list)
+    relation_snapshot_versions: list[str] = Field(default_factory=list)
+    ranking_effect: str = "none"
+    missing_count: int = 0
+
+
 class WatchlistRadarV2SummaryRead(BaseModel):
     evaluated_count: int
     universe_evaluated_count: int = 0
@@ -373,7 +392,9 @@ class WatchlistRadarV2SummaryRead(BaseModel):
     market_limitations: list[dict[str, object]] = Field(default_factory=list)
     market_snapshot: dict[str, object] = Field(default_factory=dict)
     readiness: WatchlistRadarV2ReadinessRead | None = None
-    cross_market_context: dict[str, object] = Field(default_factory=dict)
+    cross_market_context: WatchlistRadarCrossMarketContextSummaryRead = Field(
+        default_factory=WatchlistRadarCrossMarketContextSummaryRead
+    )
 
 
 class WatchlistRadarItemRead(BaseModel):

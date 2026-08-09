@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from app.ai import capability_contract
 from app.ai.evidence_passport import build_evidence_passport
 
 
@@ -165,6 +166,97 @@ CAPABILITIES: tuple[dict[str, Any], ...] = (
 )
 
 
+MARKET_SCOPE_TYPES: dict[str, frozenset[str]] = {
+    "tw": frozenset({"stock", "market", "watchlist", "tw_index", "tw_futures"}),
+    "us": frozenset({"us_stock", "us_watchlist", "us_macro"}),
+    "jp": frozenset({"jp_stock", "jp_index", "jp_watchlist"}),
+    "kr": frozenset({"kr_stock", "kr_index", "kr_watchlist"}),
+    "crypto": frozenset({"crypto_asset", "crypto_market"}),
+    "resource": frozenset({"resource_asset"}),
+    "multi": frozenset({"portfolio"}),
+}
+
+
+def _capability_registry_rows(
+    resolutions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    entries_by_capability: dict[str, list[dict[str, Any]]] = {}
+    for entry in resolutions:
+        entries_by_capability.setdefault(
+            str(entry.get("capability_id") or ""),
+            [],
+        ).append(entry)
+    specs = {
+        spec.capability_id: spec
+        for spec in capability_contract.CAPABILITY_SPECS
+    }
+    rows: list[dict[str, Any]] = []
+    for capability_id, entries in sorted(entries_by_capability.items()):
+        spec = specs.get(capability_id)
+        rows.append(
+            {
+                "id": capability_id,
+                "title": spec.title if spec else "",
+                "description": spec.description if spec else "",
+                "scopes": sorted(
+                    {
+                        str(entry.get("scope_type"))
+                        for entry in entries
+                        if entry.get("scope_type")
+                    }
+                ),
+                "implementation_statuses": sorted(
+                    {
+                        str(entry.get("implementation_status"))
+                        for entry in entries
+                        if entry.get("implementation_status")
+                    }
+                ),
+                "resolution_modes": sorted(
+                    {
+                        str(entry.get("resolution_mode"))
+                        for entry in entries
+                        if entry.get("resolution_mode")
+                    }
+                ),
+                "operations": sorted(
+                    {
+                        str(entry.get("operation"))
+                        for entry in entries
+                        if entry.get("operation")
+                    }
+                ),
+                "provider_contract_ids": sorted(
+                    {
+                        str(provider_id)
+                        for entry in entries
+                        for provider_id in entry.get("provider_contract_ids") or []
+                        if str(provider_id).strip()
+                    }
+                ),
+                "deprecated": bool(spec and spec.deprecated),
+                "replacement_capabilities": list(
+                    spec.replacement_capabilities if spec else ()
+                ),
+                "blocking_reasons": list(
+                    dict.fromkeys(
+                        str(entry.get("blocking_reason"))
+                        for entry in entries
+                        if entry.get("blocking_reason")
+                    )
+                ),
+                "next_fills": list(
+                    dict.fromkeys(
+                        str(entry.get("next_fill"))
+                        for entry in entries
+                        if entry.get("next_fill")
+                    )
+                ),
+            }
+        )
+    return rows
+
+
 def read_capability_status(
     *,
     capability_id: str | None = None,
@@ -175,6 +267,9 @@ def read_capability_status(
     requested_id = str(capability_id or params.get("capability_id") or "").strip().lower()
     market_filter = str(params.get("market") or "").strip().lower()
     status_filter = str(params.get("status") or "").strip().lower()
+    scope_filter = str(
+        params.get("scope_type") or params.get("target_type") or ""
+    ).strip().lower()
     rows = [dict(item) for item in CAPABILITIES]
     if requested_id:
         rows = [row for row in rows if row["id"].lower() == requested_id]
@@ -183,16 +278,50 @@ def read_capability_status(
     if status_filter:
         rows = [row for row in rows if str(row.get("status") or "").lower() == status_filter]
 
+    resolutions = capability_contract.capability_resolution_catalog()
+    if requested_id:
+        resolutions = [
+            row
+            for row in resolutions
+            if str(row.get("capability_id") or "").lower() == requested_id
+        ]
+    if scope_filter:
+        resolutions = [
+            row
+            for row in resolutions
+            if str(row.get("scope_type") or "").lower() == scope_filter
+        ]
+    elif market_filter in MARKET_SCOPE_TYPES:
+        allowed_scopes = MARKET_SCOPE_TYPES[market_filter]
+        resolutions = [
+            row
+            for row in resolutions
+            if str(row.get("scope_type") or "") in allowed_scopes
+        ]
+    if status_filter:
+        resolutions = [
+            row
+            for row in resolutions
+            if str(row.get("implementation_status") or "").lower()
+            == status_filter
+        ]
+    registry_rows = _capability_registry_rows(resolutions)
+
     status_counts: dict[str, int] = {}
     for row in rows:
         key = str(row.get("status") or "unknown")
         status_counts[key] = status_counts.get(key, 0) + 1
     connected = [row for row in rows if str(row.get("status") or "").startswith("connected")]
     blocked = [row for row in rows if row.get("status") == "provider_not_connected"]
-    missing = [f"capability.{requested_id}"] if requested_id and not rows else []
+    missing = (
+        [f"capability.{requested_id}"]
+        if requested_id and not rows and not registry_rows
+        else []
+    )
     warnings = [
         "Capability status describes implementation/provider readiness; use source_health for current runtime freshness and provider incidents.",
         "provider_not_connected entries are explicit blocked contracts and must not be treated as empty market data.",
+        "capability_registry is backend-owned implementation metadata; resolutions are scope-specific and do not describe live source health.",
     ]
     slots = {
         "connected": {
@@ -218,6 +347,15 @@ def read_capability_status(
         "connected_count": len(connected),
         "blocked_count": len(blocked),
         "status_counts": status_counts,
+        "provider_contract_count": len(rows),
+        "registry_capability_count": len(registry_rows),
+        "registry_resolution_count": len(resolutions),
+        "registry_total_capability_count": len(
+            capability_contract.CAPABILITY_SPECS
+        ),
+        "registry_total_resolution_count": len(
+            capability_contract.CAPABILITY_RESOLUTION_REGISTRY
+        ),
     }
     compact_capabilities = [
         {
@@ -237,6 +375,38 @@ def read_capability_status(
         }
         for row in rows
     ]
+    compact_registry_rows = [
+        {
+            "id": row["id"],
+            "implementation_status": (
+                row["implementation_statuses"][0]
+                if len(row["implementation_statuses"]) == 1
+                else "scope_specific"
+            ),
+            "resolution_mode": (
+                row["resolution_modes"][0]
+                if len(row["resolution_modes"]) == 1
+                else "scope_specific"
+            ),
+            **({"deprecated": True} if row["deprecated"] else {}),
+            **(
+                {
+                    "replacement_capabilities": row[
+                        "replacement_capabilities"
+                    ]
+                }
+                if row["replacement_capabilities"]
+                else {}
+            ),
+            **(
+                {"blocking_reasons": row["blocking_reasons"]}
+                if row["blocking_reasons"]
+                else {}
+            ),
+            **({"next_fills": row["next_fills"]} if row["next_fills"] else {}),
+        }
+        for row in registry_rows
+    ]
     envelope = {
         "kind": "capability_status",
         "generated_at": now.isoformat(),
@@ -251,6 +421,9 @@ def read_capability_status(
         "summary": summary,
         "data": {
             "capabilities": rows,
+            "provider_contracts": rows,
+            "capability_registry": registry_rows,
+            "resolutions": resolutions,
             "connected": connected,
             "blocked": blocked,
             "slots": slots,
@@ -265,6 +438,9 @@ def read_capability_status(
                 },
                 "summary": summary,
                 "capabilities": compact_capabilities,
+                "provider_contracts": compact_capabilities,
+                "capability_registry": compact_registry_rows,
+                "resolutions": resolutions,
                 "slots": slots,
                 "missing": missing,
                 "warnings": warnings,
@@ -272,7 +448,10 @@ def read_capability_status(
         },
         "missing": missing,
         "warnings": warnings,
-        "source_refs": [{"type": "contract", "name": "app.ai.market_context.capability_context"}],
+        "source_refs": [
+            {"type": "contract", "name": "app.ai.market_context.capability_context"},
+            {"type": "contract", "name": "app.ai.capability_resolution_registry"},
+        ],
     }
     envelope["evidence_passport"] = build_evidence_passport(
         kind=envelope["kind"],

@@ -78,6 +78,16 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
   const autoRefreshAttempted = useRef(new Set<string>());
   const contextKey = `tw:etf:${stockId}`;
   const contextLabel = `${stockId}${stockName ? ` ${stockName}` : ""}`;
+  const contextLabelRef = useRef(contextLabel);
+  const marketRef = useRef(market);
+
+  useEffect(() => {
+    contextLabelRef.current = contextLabel;
+  }, [contextLabel]);
+
+  useEffect(() => {
+    marketRef.current = market;
+  }, [market]);
 
   const publishFailure = useCallback(
     (title: string, error: unknown, level: "warning" | "error" = "error") => {
@@ -91,11 +101,11 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
             : t("stockDetail.etf.loadFailedMessage"),
         source: t("stockDetail.etf.source"),
         contextKey,
-        contextLabel,
+        contextLabel: contextLabelRef.current,
         dedupeKey: `${contextKey}:overview-refresh`,
       });
     },
-    [contextKey, contextLabel, t]
+    [contextKey, t]
   );
 
   const refresh = useCallback(
@@ -147,6 +157,9 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
 
   useEffect(() => {
     const controller = new AbortController();
+    const autoRefreshAttempts = autoRefreshAttempted.current;
+    let autoRefreshStarted = false;
+    let autoRefreshCompleted = false;
     queueMicrotask(() => {
       if (!controller.signal.aborted) setLoading(true);
     });
@@ -160,11 +173,14 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
         setOverview(cached);
         if (
           cached.freshness.refresh_recommended &&
-          (market ?? cached.market).toUpperCase() === "TWSE" &&
-          !autoRefreshAttempted.current.has(stockId)
+          (marketRef.current ?? cached.market).toUpperCase() === "TWSE" &&
+          !autoRefreshAttempts.has(stockId)
         ) {
-          autoRefreshAttempted.current.add(stockId);
-          return refresh(controller.signal, cached.capabilities);
+          autoRefreshAttempts.add(stockId);
+          autoRefreshStarted = true;
+          return refresh(controller.signal, cached.capabilities).then(() => {
+            if (!controller.signal.aborted) autoRefreshCompleted = true;
+          });
         }
         return undefined;
       })
@@ -176,20 +192,66 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
         if (!controller.signal.aborted) setLoading(false);
       });
 
-    return () => controller.abort();
-  }, [market, publishFailure, refresh, stockId, t]);
+    return () => {
+      controller.abort();
+      if (autoRefreshStarted && !autoRefreshCompleted) {
+        autoRefreshAttempts.delete(stockId);
+      }
+    };
+  }, [publishFailure, refresh, stockId, t]);
 
   const nav = overview?.daily_nav ?? null;
   const profile = overview?.profile ?? null;
   const pcf = overview?.pcf ?? null;
   const intradayNav = overview?.intraday_nav ?? null;
-  const freshnessStatus = overview?.freshness.status ?? "missing";
-  const pcfStatus = overview?.freshness.pcf_status ?? "not_supported";
-  const inavStatus = overview?.freshness.inav_status ?? "not_supported";
-  const pcfSupported = overview?.capabilities.pcf === true;
+  const valuation = overview?.valuation ?? null;
+  const strategy = overview?.strategy ?? null;
+  const resourceStates = overview?.resource_states ?? {};
+  const valuationStatus = valuation?.status ?? overview?.freshness.status ?? "missing";
+  const pcfStatus =
+    resourceStates.pcf_summary?.status ??
+    overview?.freshness.pcf_status ??
+    "provider_not_connected";
+  const inavStatus =
+    resourceStates.intraday_nav?.status ??
+    overview?.freshness.inav_status ??
+    "provider_not_connected";
+  const componentExposureSupported =
+    resourceStates.pcf_component_basket?.connector_supported ??
+    overview?.capabilities.component_exposure === true;
   const inavSupported =
+    resourceStates.intraday_nav?.connector_supported ??
     overview?.capabilities.intraday_estimated_nav === true;
-  const premiumDiscount = nav?.premium_discount_pct ?? null;
+  const componentBasketStatus =
+    resourceStates.pcf_component_basket?.status ??
+    ((pcf?.components.length ?? 0) > 0
+      ? pcfStatus
+      : componentExposureSupported
+        ? "missing"
+        : "provider_not_connected");
+  const hasComponentBasket =
+    resourceStates.pcf_component_basket?.applicable !== false &&
+    (pcf?.components.length ?? 0) > 0;
+  const valuationBasis = valuation?.basis ?? "daily_close";
+  const canonicalNav = valuation?.nav.value ?? nav?.nav ?? null;
+  const canonicalMarketPrice =
+    valuation?.market_price.value ?? nav?.close_price ?? null;
+  const premiumDiscount =
+    valuation?.premium_discount_pct ?? nav?.premium_discount_pct ?? null;
+  const valuationDate =
+    valuation?.nav.as_of_date ??
+    valuation?.market_price.as_of_date ??
+    overview?.freshness.latest_nav_date ??
+    "—";
+  const benchmarkLabel =
+    strategy?.benchmark_role === "performance_benchmark"
+      ? t("stockDetail.etf.performanceBenchmark")
+      : t("stockDetail.etf.benchmark");
+  const benchmarkValue =
+    strategy?.benchmark_name ??
+    profile?.performance_benchmark_name ??
+    profile?.benchmark_name ??
+    null;
   const premiumDiscountLabel =
     premiumDiscount === null
       ? t("stockDetail.etf.premiumDiscount")
@@ -211,18 +273,26 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
             <span className="border border-omi-accent px-2 py-0.5 text-[11px] font-bold uppercase tracking-[0.14em] text-omi-accent">
               ETF
             </span>
-            <span className={`border px-2 py-0.5 text-[11px] font-semibold ${statusClass(freshnessStatus)}`}>
-              {t(`stockDetail.etf.status.${freshnessStatus}`)}
+            <span className={`border px-2 py-0.5 text-[11px] font-semibold ${statusClass(valuationStatus)}`}>
+              {t(`stockDetail.etf.status.${valuationStatus}`)}
             </span>
           </div>
           <h2 className="mt-2 text-lg font-bold text-omi-text-strong">
             {t("stockDetail.etf.title")}
           </h2>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-omi-text-muted">
-            {t("stockDetail.etf.dailyCloseNote", {
-              date: overview?.freshness.latest_nav_date ?? "—",
-              time: overview?.freshness.nav_release_time ?? "21:00",
-            })}
+            {valuationBasis === "intraday"
+              ? t("stockDetail.etf.intradayValuationNote", {
+                  time: formatDateTime(
+                    valuation?.nav.observed_at ??
+                      valuation?.market_price.observed_at ??
+                      null
+                  ),
+                })
+              : t("stockDetail.etf.dailyCloseNote", {
+                  date: valuationDate,
+                  time: overview?.freshness.nav_release_time ?? "21:00",
+                })}
           </p>
         </div>
         <button
@@ -240,12 +310,26 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
       <div className="space-y-5 px-5 py-4">
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <Metric
-            label={t("stockDetail.etf.nav")}
-            value={formatNumber(nav?.nav ?? null, 4, 4)}
+            label={
+              valuationBasis === "intraday"
+                ? t("stockDetail.etf.estimatedNav")
+                : t("stockDetail.etf.nav")
+            }
+            value={formatNumber(canonicalNav, 4, 4)}
           />
-          <Metric label={t("stockDetail.etf.closePrice")} value={formatNumber(nav?.close_price ?? null)} />
+          <Metric
+            label={
+              valuationBasis === "intraday"
+                ? t("stockDetail.etf.inavMarketPrice")
+                : t("stockDetail.etf.closePrice")
+            }
+            value={formatNumber(canonicalMarketPrice)}
+          />
           <Metric label={premiumDiscountLabel} value={formatPercent(premiumDiscount)} />
-          <Metric label={t("stockDetail.etf.navChange")} value={formatPercent(nav?.nav_change_pct ?? null)} />
+          <Metric
+            label={t("stockDetail.etf.valuationBasis")}
+            value={t(`stockDetail.etf.basis.${valuationBasis}`)}
+          />
         </div>
 
         {inavSupported ? (
@@ -306,7 +390,7 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
             <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-3 text-sm md:grid-cols-2 xl:grid-cols-3">
               {[
                 [t("stockDetail.etf.fundType"), profile.fund_type],
-                [t("stockDetail.etf.benchmark"), profile.benchmark_name],
+                [benchmarkLabel, benchmarkValue],
                 [t("stockDetail.etf.issuer"), profile.issuer_name],
                 [t("stockDetail.etf.manager"), profile.fund_manager],
                 [t("stockDetail.etf.listedDate"), profile.listed_date],
@@ -335,8 +419,7 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
           </div>
         ) : null}
 
-        {pcfSupported ? (
-          <div className="border-t border-omi-border-subtle pt-4">
+        <div className="border-t border-omi-border-subtle pt-4">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
@@ -360,10 +443,13 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
             {pcf ? (
               <>
                 <div className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
-                  <Metric
-                    label={t("stockDetail.etf.componentCount")}
-                    value={formatNumber(pcf.component_count, 0, 0)}
-                  />
+                  {(resourceStates.pcf_component_basket?.applicable ??
+                    componentExposureSupported) === true ? (
+                    <Metric
+                      label={t("stockDetail.etf.componentCount")}
+                      value={formatNumber(pcf.component_count, 0, 0)}
+                    />
+                  ) : null}
                   <Metric
                     label={t("stockDetail.etf.creationUnit")}
                     value={formatNumber(pcf.creation_unit, 0, 0)}
@@ -378,8 +464,9 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
                   />
                 </div>
 
-                <div className="mt-4 max-h-80 overflow-auto border border-omi-border-subtle">
-                  <table className="min-w-[720px] w-full border-collapse text-left text-xs">
+                {hasComponentBasket ? (
+                  <div className="mt-4 max-h-80 overflow-auto border border-omi-border-subtle">
+                    <table className="min-w-[720px] w-full border-collapse text-left text-xs">
                     <thead className="sticky top-0 bg-omi-surface-muted text-omi-text-subtle">
                       <tr>
                         <th className="px-3 py-2 font-semibold">{t("stockDetail.etf.componentType")}</th>
@@ -418,37 +505,55 @@ export default function TaiwanETFDataPanel({ stockId, stockName, market }: Props
                         </tr>
                       ))}
                     </tbody>
-                  </table>
-                </div>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="mt-4 border border-dashed border-omi-border px-4 py-4 text-sm text-omi-text-muted">
+                    {componentBasketStatus === "not_applicable"
+                      ? t("stockDetail.etf.componentBasketNotApplicable")
+                      : componentBasketStatus === "provider_not_connected"
+                        ? t("stockDetail.etf.componentBasketProviderNotConnected")
+                        : componentExposureSupported
+                          ? t("stockDetail.etf.componentExposureEmpty")
+                          : t("stockDetail.etf.pcfSummaryOnly")}
+                  </div>
+                )}
               </>
             ) : (
               <div className="mt-3 border border-dashed border-omi-border px-4 py-4 text-sm text-omi-text-muted">
-                {t("stockDetail.etf.pcfEmpty")}
+                {pcfStatus === "provider_not_connected"
+                  ? t("stockDetail.etf.pcfProviderNotConnected")
+                  : t("stockDetail.etf.pcfEmpty")}
               </div>
             )}
           </div>
-        ) : null}
 
         <div className="flex flex-wrap gap-2 border-t border-omi-border-subtle pt-4 text-xs">
-          <span className={`border px-2 py-1 ${nav ? "border-omi-success text-omi-success-strong" : "border-omi-border text-omi-text-muted"}`}>
-            {nav
-              ? t("stockDetail.etf.dailyNavAvailable")
-              : t("stockDetail.etf.dailyNavMissing")}
-          </span>
-          <span className={`border px-2 py-1 ${intradayNav ? "border-omi-success text-omi-success-strong" : "border-omi-border text-omi-text-muted"}`}>
-            {!inavSupported
-              ? t("stockDetail.etf.inavUnsupported")
-              : intradayNav
-                ? t("stockDetail.etf.inavAvailable")
-                : t("stockDetail.etf.inavMissing")}
-          </span>
-          <span className={`border px-2 py-1 ${pcf ? "border-omi-success text-omi-success-strong" : "border-omi-border text-omi-text-muted"}`}>
-            {!pcfSupported
-              ? t("stockDetail.etf.pcfUnsupported")
-              : pcf
-                ? t("stockDetail.etf.pcfAvailable")
-                : t("stockDetail.etf.pcfMissing")}
-          </span>
+          {[
+            {
+              key: "daily_nav",
+              status:
+                resourceStates.daily_nav?.status ??
+                (canonicalNav === null ? "missing" : valuationStatus),
+            },
+            { key: "intraday_nav", status: inavStatus },
+            { key: "pcf_summary", status: pcfStatus },
+            { key: "pcf_component_basket", status: componentBasketStatus },
+            {
+              key: "fund_holdings",
+              status:
+                resourceStates.fund_holdings?.status ??
+                "provider_not_connected",
+            },
+          ].map((resource) => (
+            <span
+              key={resource.key}
+              className={`border px-2 py-1 ${statusClass(resource.status)}`}
+            >
+              {t(`stockDetail.etf.resource.${resource.key}`)} ·{" "}
+              {t(`stockDetail.etf.resourceStatus.${resource.status}`)}
+            </span>
+          ))}
         </div>
 
         <div className="text-[11px] leading-5 text-omi-text-subtle">

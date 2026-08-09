@@ -724,6 +724,59 @@ def _compact_capability_status(
     }
 
 
+def _compact_fill_partition(fill_plan: dict[str, Any]) -> dict[str, Any]:
+    partition = _dict(fill_plan.get("partition"))
+    if not partition:
+        return {}
+    compact = {
+        "version": partition.get("version"),
+        "selected_capabilities": [
+            str(capability)
+            for capability in _list(partition.get("selected_capabilities"))
+            if str(capability).strip()
+        ],
+        **{
+            group_name: [
+                str(capability)
+                for capability in _list(partition.get(group_name))
+                if str(capability).strip()
+            ]
+            for group_name in capability_contract.FILL_PARTITION_GROUPS
+        },
+        "complete": bool(partition.get("complete")),
+    }
+    if partition.get("reason") is not None:
+        compact["reason"] = partition.get("reason")
+    return compact
+
+
+def _compact_fill_jobs(
+    fill_plan: dict[str, Any],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            key: deepcopy(job[key])
+            for key in (
+                "capability",
+                "operation",
+                "job_id",
+                "status",
+                "operation_status",
+                "evidence_status",
+                "deduplicated",
+                "status_url",
+                "resolution_type",
+                "reason",
+            )
+            if key in job
+        }
+        for job in _list(fill_plan.get("jobs"))[:limit]
+        if isinstance(job, dict)
+    ]
+
+
 def _compact_continuation(continuation: dict[str, Any]) -> None:
     fill_plan = _dict(continuation.get("fill_plan"))
     actions = [
@@ -781,7 +834,9 @@ def _compact_continuation(continuation: dict[str, Any]) -> None:
         "version": fill_plan.get("version"),
         "plan_id": fill_plan.get("plan_id"),
         "actions": actions,
+        "jobs": _compact_fill_jobs(fill_plan, limit=8),
         "deferred_actions": deferred_actions,
+        "partition": _compact_fill_partition(fill_plan),
         "action_count": fill_plan.get("action_count", len(actions)),
         "auto_executed": fill_plan.get("auto_executed", False),
         "projection_truncated": len(_list(fill_plan.get("actions"))) > len(actions)
@@ -988,6 +1043,7 @@ def _emergency_compact_envelope(envelope: dict[str, Any]) -> None:
             for action in _list(fill_plan.get("actions"))[:4]
             if isinstance(action, dict)
         ],
+        "jobs": _compact_fill_jobs(fill_plan, limit=4),
         "deferred_actions": [
             {
                 key: deepcopy(action[key])
@@ -1006,6 +1062,7 @@ def _emergency_compact_envelope(envelope: dict[str, Any]) -> None:
             for action in _list(fill_plan.get("deferred_actions"))[:4]
             if isinstance(action, dict)
         ],
+        "partition": _compact_fill_partition(fill_plan),
         "action_count": fill_plan.get("action_count", 0),
         "auto_executed": fill_plan.get("auto_executed", False),
         "projection_truncated": True,
@@ -1221,7 +1278,9 @@ def _hard_cap_envelope(
             "version": fill_plan.get("version"),
             "plan_id": fill_plan.get("plan_id"),
             "actions": [],
+            "jobs": _compact_fill_jobs(fill_plan, limit=4),
             "deferred_actions": [],
+            "partition": _compact_fill_partition(fill_plan),
             "action_count": fill_plan.get("action_count", 0),
             "auto_executed": fill_plan.get("auto_executed", False),
             "projection_truncated": True,
@@ -2278,6 +2337,7 @@ def _compact_to_required_core(
         "version": fill_plan.get("version"),
         "plan_id": fill_plan.get("plan_id"),
         "actions": compact_actions,
+        "jobs": _compact_fill_jobs(fill_plan, limit=4),
         "deferred_actions": [
             {
                 key: deepcopy(action[key])
@@ -2300,6 +2360,7 @@ def _compact_to_required_core(
             and action.get("refresh_strategy")
             in {"reader_fetch", "granular_tool"}
         ],
+        "partition": _compact_fill_partition(fill_plan),
         "action_count": fill_plan.get("action_count", len(compact_actions)),
         "auto_executed": fill_plan.get("auto_executed", False),
         "projection_truncated": True,
@@ -3091,13 +3152,27 @@ def _rejected_envelope(
                 action_ids=[],
             ),
             "actions": [],
+            "jobs": [],
             "deferred_actions": [],
             "unfillable_actions": [],
             "already_attempted_actions": [],
+            "partition": {
+                "version": "omi.fill.partition.v1",
+                "selected_capabilities": [],
+                "already_satisfied": [],
+                "actions": [],
+                "jobs": [],
+                "deferred": [],
+                "unfillable": [],
+                "not_applicable": [],
+                "complete": False,
+                "reason": "canonical_request_not_completed",
+            },
             "resolutions": [],
             "action_count": 0,
             "summary": {
                 "executable_count": 0,
+                "job_count": 0,
                 "deferred_count": 0,
                 "unfillable_count": 0,
                 "already_attempted_count": 0,

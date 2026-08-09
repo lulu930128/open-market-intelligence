@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
 import unittest
@@ -8,8 +9,10 @@ import uuid
 
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import sessionmaker
 
 from app.db.migrations import create_alembic_config
+from app.market.cross_market.relation_store import build_relation_registry_read
 
 
 def sqlite_url(path: Path) -> str:
@@ -152,6 +155,216 @@ class CrossMarketRelationMigrationTests(unittest.TestCase):
                     inspector.has_table("cross_market_signal_snapshot")
                 )
                 self.assertTrue(inspector.has_table("dispatch_schedule_run"))
+            finally:
+                engine.dispose()
+
+    def test_proxy_temporal_revalidation_is_forward_only_and_replay_safe(self) -> None:
+        with migration_directory() as directory:
+            database_url = sqlite_url(directory / "cross-market-revalidated.db")
+            config = create_alembic_config(database_url)
+            command.upgrade(config, "20260809_0056")
+
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    relations = connection.execute(
+                        text(
+                            """
+                            SELECT id, version, valid_from, verified_at,
+                                   review_status, is_active, created_by,
+                                   reviewed_by, reviewed_at, change_reason
+                            FROM cross_market_relation
+                            WHERE source_canonical_symbol = 'US:MU'
+                              AND target_canonical_symbol = 'TW:2408'
+                              AND relation_type = 'industry_peer'
+                            ORDER BY version
+                            """
+                        )
+                    ).mappings().all()
+                    evidence = connection.execute(
+                        text(
+                            """
+                            SELECT relation_id, verified_at, content_hash,
+                                   review_status, created_by, reviewed_by
+                            FROM cross_market_relation_evidence
+                            WHERE relation_id IN (:old_id, :new_id)
+                            ORDER BY relation_id, content_hash
+                            """
+                        ),
+                        {
+                            "old_id": int(relations[0]["id"]),
+                            "new_id": int(relations[1]["id"]),
+                        },
+                    ).mappings().all()
+
+                self.assertEqual([int(row["version"]) for row in relations], [1, 2])
+                old, new = relations
+                self.assertEqual(old["review_status"], "revoked")
+                self.assertFalse(bool(old["is_active"]))
+                self.assertEqual(old["created_by"], "migration:20260809_0052")
+                self.assertEqual(old["reviewed_by"], "migration:20260809_0056")
+                self.assertIn("future verification timestamp", old["change_reason"])
+
+                self.assertEqual(new["review_status"], "approved")
+                self.assertTrue(bool(new["is_active"]))
+                self.assertEqual(new["created_by"], "migration:20260809_0056")
+                self.assertEqual(new["reviewed_by"], "migration:20260809_0056")
+                verified_at = datetime.fromisoformat(str(new["verified_at"]))
+                if verified_at.tzinfo is None:
+                    verified_at = verified_at.replace(tzinfo=timezone.utc)
+                self.assertEqual(
+                    str(new["valid_from"]),
+                    (verified_at.date() + timedelta(days=1)).isoformat(),
+                )
+                self.assertEqual(len(evidence), 4)
+                self.assertEqual(
+                    {row["created_by"] for row in evidence},
+                    {"migration:20260809_0052", "migration:20260809_0056"},
+                )
+                self.assertTrue(
+                    all(row["review_status"] == "approved" for row in evidence)
+                )
+
+                session = sessionmaker(bind=engine)()
+                try:
+                    unavailable = build_relation_registry_read(
+                        session,
+                        "2408",
+                        as_of=verified_at.date(),
+                        generated_at=verified_at + timedelta(minutes=1),
+                    )
+                    available = build_relation_registry_read(
+                        session,
+                        "2408",
+                        as_of=verified_at.date() + timedelta(days=1),
+                        generated_at=verified_at + timedelta(days=1, minutes=1),
+                    )
+                finally:
+                    session.close()
+                self.assertEqual(unavailable.status, "not_applicable")
+                self.assertEqual(unavailable.relation_count, 0)
+                self.assertEqual(available.status, "ready")
+                self.assertEqual(available.relation_count, 1)
+                self.assertEqual(available.relations[0].relation_version, 2)
+
+                command.downgrade(config, "20260809_0055")
+                command.upgrade(config, "20260809_0056")
+                with engine.connect() as connection:
+                    count = connection.execute(
+                        text(
+                            """
+                            SELECT COUNT(*)
+                            FROM cross_market_relation
+                            WHERE source_canonical_symbol = 'US:MU'
+                              AND target_canonical_symbol = 'TW:2408'
+                              AND relation_type = 'industry_peer'
+                            """
+                        )
+                    ).scalar_one()
+                self.assertEqual(count, 2)
+            finally:
+                engine.dispose()
+
+    def test_proxy_temporal_revalidation_fails_closed_on_seed_drift(self) -> None:
+        with migration_directory() as directory:
+            database_url = sqlite_url(directory / "cross-market-conflict.db")
+            config = create_alembic_config(database_url)
+            command.upgrade(config, "20260809_0055")
+
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE cross_market_relation
+                            SET base_weight = 0.5
+                            WHERE source_canonical_symbol = 'US:MU'
+                              AND target_canonical_symbol = 'TW:2408'
+                              AND relation_type = 'industry_peer'
+                            """
+                        )
+                    )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "relation seed fingerprint mismatch",
+                ):
+                    command.upgrade(config, "20260809_0056")
+                with engine.connect() as connection:
+                    current_revision = connection.execute(
+                        text("SELECT version_num FROM alembic_version")
+                    ).scalar_one()
+                self.assertEqual(current_revision, "20260809_0055")
+            finally:
+                engine.dispose()
+
+    def test_proxy_temporal_revalidation_can_seed_an_absent_proxy(self) -> None:
+        with migration_directory() as directory:
+            database_url = sqlite_url(directory / "cross-market-absent.db")
+            config = create_alembic_config(database_url)
+            command.upgrade(config, "20260809_0055")
+
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    relation_id = connection.execute(
+                        text(
+                            """
+                            SELECT id
+                            FROM cross_market_relation
+                            WHERE source_canonical_symbol = 'US:MU'
+                              AND target_canonical_symbol = 'TW:2408'
+                              AND relation_type = 'industry_peer'
+                            """
+                        )
+                    ).scalar_one()
+                    connection.execute(
+                        text(
+                            "DELETE FROM cross_market_relation_evidence "
+                            "WHERE relation_id = :relation_id"
+                        ),
+                        {"relation_id": relation_id},
+                    )
+                    connection.execute(
+                        text(
+                            "DELETE FROM cross_market_relation "
+                            "WHERE id = :relation_id"
+                        ),
+                        {"relation_id": relation_id},
+                    )
+
+                command.upgrade(config, "20260809_0056")
+                with engine.connect() as connection:
+                    relation = connection.execute(
+                        text(
+                            """
+                            SELECT id, version, valid_from, verified_at,
+                                   review_status, is_active, created_by
+                            FROM cross_market_relation
+                            WHERE source_canonical_symbol = 'US:MU'
+                              AND target_canonical_symbol = 'TW:2408'
+                              AND relation_type = 'industry_peer'
+                            """
+                        )
+                    ).mappings().one()
+                    evidence_count = connection.execute(
+                        text(
+                            "SELECT COUNT(*) "
+                            "FROM cross_market_relation_evidence "
+                            "WHERE relation_id = :relation_id"
+                        ),
+                        {"relation_id": int(relation["id"])},
+                    ).scalar_one()
+                verified_at = datetime.fromisoformat(str(relation["verified_at"]))
+                self.assertEqual(int(relation["version"]), 1)
+                self.assertEqual(relation["review_status"], "approved")
+                self.assertTrue(bool(relation["is_active"]))
+                self.assertEqual(relation["created_by"], "migration:20260809_0056")
+                self.assertEqual(
+                    str(relation["valid_from"]),
+                    (verified_at.date() + timedelta(days=1)).isoformat(),
+                )
+                self.assertEqual(evidence_count, 2)
             finally:
                 engine.dispose()
 

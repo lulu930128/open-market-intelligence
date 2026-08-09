@@ -133,6 +133,92 @@ def _snapshot_id(payload: dict[str, Any]) -> str:
     return f"cmctx:{digest[:24]}"
 
 
+def _input_lineage(
+    *,
+    relation_snapshot_version: str,
+    registry: Any,
+    parity: Any,
+    signals: list[CrossMarketContextSignalRead],
+    status: str,
+    decision_usable: bool,
+    missing: list[str],
+) -> tuple[dict[str, Any], str]:
+    direct_inputs: list[dict[str, Any]] = []
+    if parity is not None:
+        parity_freshness = (
+            parity.freshness if isinstance(parity.freshness, dict) else {}
+        )
+        direct_inputs.append(
+            {
+                "stock_id": parity.stock_id,
+                "mapping_resolution": parity.mapping_resolution,
+                "adr_close_usd": parity.adr_close_usd,
+                "adr_trade_date": parity.adr_trade_date,
+                "adr_provider": parity.adr_provider,
+                "usd_twd": parity.usd_twd,
+                "fx_source_symbol": parity.fx_source_symbol,
+                "fx_provider": parity.fx_provider,
+                "fx_as_of": parity.fx_as_of,
+                "tw_reference_price_twd": parity.tw_reference_price_twd,
+                "tw_reference_trade_date": parity.tw_reference_trade_date,
+                "tw_comparison_price_twd": parity.tw_comparison_price_twd,
+                "tw_comparison_trade_date": parity.tw_comparison_trade_date,
+                "tw_comparison_source": parity.tw_comparison_source,
+                "status": parity.status,
+                "is_current": parity.is_current,
+                "input_lineage": parity_freshness.get("input_lineage"),
+            }
+        )
+
+    proxy_inputs = [
+        {
+            "signal_id": signal.signal_id,
+            "relation_id": signal.relation_id,
+            "relation_version": signal.relation_version,
+            "status": signal.status,
+            "decision_usable": signal.decision_usable,
+            "calculation": signal.calculation,
+            "freshness": {
+                key: value
+                for key, value in (signal.freshness or {}).items()
+                if key != "data_available_at"
+            },
+        }
+        for signal in signals
+        if signal.bucket != "direct_equivalent"
+    ]
+    payload = {
+        "schema_version": "cross_market.input_lineage.v1",
+        "methodology_version": METHODOLOGY_VERSION,
+        "relation_snapshot_version": relation_snapshot_version,
+        "relations": [
+            {
+                "relation_id": relation.relation_id,
+                "version": relation.relation_version,
+                "evidence_ids": [item.evidence_id for item in relation.evidence],
+            }
+            for relation in registry.relations
+        ],
+        "direct_inputs": direct_inputs,
+        "proxy_inputs": proxy_inputs,
+        "freshness_state": {
+            "status": status,
+            "decision_usable": decision_usable,
+            "missing": missing,
+        },
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    return payload, digest
+
+
 def _relation_snapshot_version(
     relations: list[Any],
     mapping_resolution: dict[str, Any] | None,
@@ -171,6 +257,9 @@ def build_cross_market_target_context(
     built_at = decision_at or _now()
     if built_at.tzinfo is None:
         built_at = built_at.replace(tzinfo=timezone.utc)
+    source_cutoff_at = data_available_at or built_at
+    if source_cutoff_at.tzinfo is None:
+        source_cutoff_at = source_cutoff_at.replace(tzinfo=timezone.utc)
     expected_date = expected_adr_trade_date or expected_us_trade_date(
         "us_daily_price",
         now=built_at,
@@ -183,7 +272,7 @@ def build_cross_market_target_context(
         stock_id,
         as_of=built_at.date(),
         generated_at=built_at,
-        data_available_at=data_available_at or built_at,
+        data_available_at=source_cutoff_at,
     )
     parity_payload = (
         build_adr_parity_report(
@@ -192,7 +281,7 @@ def build_cross_market_target_context(
             expected_adr_trade_date=expected_date,
             generated_at=built_at,
             mapping_as_of=built_at.date(),
-            data_available_at=data_available_at,
+            data_available_at=source_cutoff_at,
         )
         if adr_parity_payload is _PARITY_UNSET
         else adr_parity_payload
@@ -411,6 +500,15 @@ def build_cross_market_target_context(
         registry.relations,
         mapping_resolution,
     )
+    input_lineage, input_lineage_hash = _input_lineage(
+        relation_snapshot_version=relation_snapshot_version,
+        registry=registry,
+        parity=parity,
+        signals=signals,
+        status=status,
+        decision_usable=decision_usable,
+        missing=missing,
+    )
     snapshot_payload = {
         "schema_version": CONTEXT_SCHEMA_VERSION,
         "methodology_version": METHODOLOGY_VERSION,
@@ -457,6 +555,11 @@ def build_cross_market_target_context(
     evidence_passport = {
         "kind": "cross_market_context_evidence",
         "snapshot_id": snapshot_id,
+        "projection_source": "latest_local_cache",
+        "source_cutoff_at": source_cutoff_at,
+        "materialized_at": None,
+        "materialized_by": None,
+        "payload_hash": None,
         "methodology_version": METHODOLOGY_VERSION,
         "relation_snapshot_version": relation_snapshot_version,
         "relation_ids": [
@@ -470,6 +573,8 @@ def build_cross_market_target_context(
             )
         ),
         "mapping_source": selected_source,
+        "input_lineage": input_lineage,
+        "input_lineage_hash": input_lineage_hash,
         "source_refs": deduped_source_refs,
         "missing": missing,
         "warnings": warnings,
@@ -498,6 +603,11 @@ def build_cross_market_target_context(
         methodology_version=METHODOLOGY_VERSION,
         relation_snapshot_version=relation_snapshot_version,
         snapshot_id=snapshot_id,
+        projection_source="latest_local_cache",
+        source_cutoff_at=source_cutoff_at,
+        materialized_at=None,
+        materialized_by=None,
+        payload_hash=None,
         summary=summary,
         direct_equivalents=[parity] if parity is not None else [],
         signals=signals,
@@ -505,6 +615,8 @@ def build_cross_market_target_context(
         coverage=coverage,
         freshness={
             "status": status,
+            "projection_source": "latest_local_cache",
+            "source_cutoff_at": source_cutoff_at,
             "expected_adr_trade_date": expected_date,
             "latest_adr_trade_date": parity.adr_trade_date if parity is not None else None,
             "relation_governance": registry.freshness,
@@ -514,6 +626,8 @@ def build_cross_market_target_context(
                 for signal in signals
                 if signal.bucket != "direct_equivalent"
             ],
+            "input_lineage": input_lineage,
+            "input_lineage_hash": input_lineage_hash,
             "read_path_provider_refresh": False,
         },
         missing=missing,

@@ -5468,6 +5468,10 @@ class CrossMarketSignalSnapshot(Base):
             "status IN ('ready', 'partial', 'stale', 'limited', 'blocked', 'not_applicable')",
             name="ck_cross_market_signal_snapshot_status",
         ),
+        CheckConstraint(
+            "projection_source = 'materialized_snapshot'",
+            name="ck_cross_market_signal_snapshot_projection_source",
+        ),
         Index(
             "ix_cross_market_signal_snapshot_target_decision",
             "target_canonical_symbol",
@@ -5517,6 +5521,23 @@ class CrossMarketSignalSnapshot(Base):
     )
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    projection_source: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="materialized_snapshot",
+        index=True,
+    )
+    source_cutoff_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    materialized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        index=True,
+    )
     materialized_by: Mapped[str] = mapped_column(String(120), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

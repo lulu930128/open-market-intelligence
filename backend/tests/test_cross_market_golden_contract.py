@@ -104,6 +104,11 @@ class CrossMarketGoldenContractTests(unittest.TestCase):
                 "methodology_version",
                 "relation_snapshot_version",
                 "snapshot_id",
+                "projection_source",
+                "source_cutoff_at",
+                "materialized_at",
+                "materialized_by",
+                "payload_hash",
                 "limitations",
                 "adr_parity",
                 "factors",
@@ -116,7 +121,19 @@ class CrossMarketGoldenContractTests(unittest.TestCase):
             ),
         )
         self.assertTrue(
-            {"as_of", "summary", "signals", "source", "freshness", "warnings"}
+            {
+                "as_of",
+                "summary",
+                "signals",
+                "projection_source",
+                "source_cutoff_at",
+                "materialized_at",
+                "materialized_by",
+                "payload_hash",
+                "source",
+                "freshness",
+                "warnings",
+            }
             <= set(capability.default_fields)
         )
 

@@ -1,5 +1,7 @@
 "use client";
 
+import { LoadingDots } from "@/components/LoadingPlaceholders";
+import { StockDetailDisclosure } from "@/components/stock-detail/DataPanelPrimitives";
 import type { LoadState } from "@/components/stock-detail/stockDetailTypes";
 import {
   formatDate,
@@ -137,129 +139,134 @@ export default function NextSessionPlanPanel({
       data-decision-usable={plan?.readiness.decision_usable ?? false}
       data-testid="tw-next-session-plan"
     >
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="text-[11px] font-bold uppercase tracking-[0.16em] text-omi-text-muted">
-            {t("stockDetail.dataViews.nextSessionPlan.eyebrow")}
-          </div>
-          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">
-            {t("stockDetail.dataViews.nextSessionPlan.title")}
-          </div>
-          <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">
-            {plan?.as_of_trade_date && plan.target_trade_date
-              ? t("stockDetail.dataViews.nextSessionPlan.dateLine", {
-                  asOf: formatDate(plan.as_of_trade_date),
-                  target: formatDate(plan.target_trade_date),
-                })
-              : t("stockDetail.dataViews.nextSessionPlan.description")}
-          </div>
-        </div>
-
-        {plan ? (
-          <div className="shrink-0 text-right">
-            <span
-              className={`inline-flex border px-2 py-1 text-[11px] font-semibold ${statusTone(plan.status)}`}
-              data-testid="tw-next-session-plan-status"
-            >
-              {t(`stockDetail.dataViews.nextSessionPlan.status.${plan.status}`)}
+      <StockDetailDisclosure
+        testId="tw-next-session-plan-disclosure"
+        eyebrow={t("stockDetail.dataViews.nextSessionPlan.eyebrow")}
+        title={t("stockDetail.dataViews.nextSessionPlan.title")}
+        description={
+          plan?.as_of_trade_date && plan.target_trade_date
+            ? t("stockDetail.dataViews.nextSessionPlan.dateLine", {
+                asOf: formatDate(plan.as_of_trade_date),
+                target: formatDate(plan.target_trade_date),
+              })
+            : t("stockDetail.dataViews.nextSessionPlan.description")
+        }
+        summaryClassName="px-1 py-1.5"
+        contentClassName="pt-3"
+        trailing={
+          plan ? (
+            <span className="text-right">
+              <span
+                className={`inline-flex border px-2 py-1 text-[11px] font-semibold ${statusTone(plan.status)}`}
+                data-testid="tw-next-session-plan-status"
+              >
+                {t(
+                  `stockDetail.dataViews.nextSessionPlan.status.${plan.status}`
+                )}
+              </span>
             </span>
-            {plan.target_trade_date ? (
-              <div className="mt-1 text-[11px] tabular-nums text-omi-text-subtle">
-                {formatDate(plan.target_trade_date)}
-              </div>
-            ) : null}
+          ) : loadState === "loading" ? (
+            <LoadingDots
+              label={t("stockDetail.dataViews.nextSessionPlan.description")}
+            />
+          ) : null
+        }
+      >
+        {loadState === "loading" ? (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {[0, 1].map((item) => (
+              <div
+                key={item}
+                className="omi-skeleton h-[86px] border border-omi-border-subtle bg-omi-surface-subtle"
+              />
+            ))}
           </div>
         ) : null}
-      </div>
 
-      {loadState === "loading" ? (
-        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {[0, 1].map((item) => (
-            <div
-              key={item}
-              className="omi-skeleton h-[86px] border border-omi-border-subtle bg-omi-surface-subtle"
-            />
-          ))}
-        </div>
-      ) : null}
-
-      {loadState === "error" ? (
-        <div className="mt-3 border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs leading-5 text-omi-text-muted">
-          <div className="font-semibold text-omi-text-strong">
-            {t("stockDetail.dataViews.nextSessionPlan.loadUnavailableTitle")}
+        {loadState === "error" ? (
+          <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs leading-5 text-omi-text-muted">
+            <div className="font-semibold text-omi-text-strong">
+              {t("stockDetail.dataViews.nextSessionPlan.loadUnavailableTitle")}
+            </div>
+            <div>
+              {t(
+                "stockDetail.dataViews.nextSessionPlan.loadUnavailableMessage"
+              )}
+            </div>
           </div>
-          <div>{t("stockDetail.dataViews.nextSessionPlan.loadUnavailableMessage")}</div>
-        </div>
-      ) : null}
+        ) : null}
 
-      {plan ? (
-        <>
-          {!plan.readiness.decision_usable ? (
-            <div className="mt-3 border border-omi-warning-border bg-omi-warning-soft px-3 py-2 text-xs leading-4 text-omi-warning-strong">
-              {t("stockDetail.dataViews.nextSessionPlan.decisionBlocked", {
-                status: t(
-                  `stockDetail.dataViews.nextSessionPlan.status.${plan.status}`
-                ),
-              })}
-            </div>
-          ) : null}
-
-          {plan.levels.length ? (
-            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {plan.levels.map((level) => (
-                <LevelCard
-                  key={level.key}
-                  level={level}
-                  usable={plan.readiness.decision_usable}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="mt-3 border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs text-omi-text-muted">
-              {t("stockDetail.dataViews.nextSessionPlan.noLevels")}
-            </div>
-          )}
-
-          {plan.scenario_zones.length ? (
-            <div className="mt-3">
-              <div className="text-[11px] font-semibold text-omi-text-muted">
-                {t("stockDetail.dataViews.nextSessionPlan.zonesTitle")}
+        {plan ? (
+          <>
+            {!plan.readiness.decision_usable ? (
+              <div className="mt-3 border border-omi-warning-border bg-omi-warning-soft px-3 py-2 text-xs leading-4 text-omi-warning-strong">
+                {t("stockDetail.dataViews.nextSessionPlan.decisionBlocked", {
+                  status: t(
+                    `stockDetail.dataViews.nextSessionPlan.status.${plan.status}`
+                  ),
+                })}
               </div>
-              <div className="mt-1 grid grid-cols-1 border border-omi-border-subtle sm:grid-cols-3 sm:divide-x sm:divide-omi-border-subtle">
-                {plan.scenario_zones.map((zone) => (
-                  <div
-                    key={zone.key}
-                    className="border-t border-omi-border-subtle bg-omi-surface-subtle px-2.5 py-2 first:border-t-0 sm:border-t-0"
-                    data-testid={`tw-next-session-zone-${zone.key}`}
-                  >
-                    <div className="text-[10px] font-semibold text-omi-text-subtle">
-                      {t(
-                        `stockDetail.dataViews.nextSessionPlan.zones.${zone.key}`
-                      )}
-                    </div>
-                    <div className="mt-0.5 text-xs font-semibold tabular-nums text-omi-text-strong">
-                      {zoneRange(zone, t)}
-                    </div>
-                  </div>
+            ) : null}
+
+            {plan.levels.length ? (
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {plan.levels.map((level) => (
+                  <LevelCard
+                    key={level.key}
+                    level={level}
+                    usable={plan.readiness.decision_usable}
+                  />
                 ))}
               </div>
-            </div>
-          ) : null}
+            ) : (
+              <div className="mt-3 border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs text-omi-text-muted">
+                {t("stockDetail.dataViews.nextSessionPlan.noLevels")}
+              </div>
+            )}
 
-          <div className="mt-2 text-[11px] leading-4 text-omi-text-subtle">
-            {t("stockDetail.dataViews.nextSessionPlan.limitation")}
-            {plan.readiness.missing_level_keys.length ? (
-              <span className="ml-1 text-omi-warning">
-                · {t("stockDetail.dataViews.nextSessionPlan.missingLevels", {
-                  levels: plan.readiness.missing_level_keys
-                    .map((key) => key.replace("_transition", "").toUpperCase())
-                    .join("、"),
-                })}
-              </span>
+            {plan.scenario_zones.length ? (
+              <div className="mt-3">
+                <div className="text-[11px] font-semibold text-omi-text-muted">
+                  {t("stockDetail.dataViews.nextSessionPlan.zonesTitle")}
+                </div>
+                <div className="mt-1 grid grid-cols-1 border border-omi-border-subtle sm:grid-cols-3 sm:divide-x sm:divide-omi-border-subtle">
+                  {plan.scenario_zones.map((zone) => (
+                    <div
+                      key={zone.key}
+                      className="border-t border-omi-border-subtle bg-omi-surface-subtle px-2.5 py-2 first:border-t-0 sm:border-t-0"
+                      data-testid={`tw-next-session-zone-${zone.key}`}
+                    >
+                      <div className="text-[10px] font-semibold text-omi-text-subtle">
+                        {t(
+                          `stockDetail.dataViews.nextSessionPlan.zones.${zone.key}`
+                        )}
+                      </div>
+                      <div className="mt-0.5 text-xs font-semibold tabular-nums text-omi-text-strong">
+                        {zoneRange(zone, t)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             ) : null}
-          </div>
-        </>
-      ) : null}
+
+            <div className="mt-2 text-[11px] leading-4 text-omi-text-subtle">
+              {t("stockDetail.dataViews.nextSessionPlan.limitation")}
+              {plan.readiness.missing_level_keys.length ? (
+                <span className="ml-1 text-omi-warning">
+                  · {t("stockDetail.dataViews.nextSessionPlan.missingLevels", {
+                    levels: plan.readiness.missing_level_keys
+                      .map((key) =>
+                        key.replace("_transition", "").toUpperCase()
+                      )
+                      .join("、"),
+                  })}
+                </span>
+              ) : null}
+            </div>
+          </>
+        ) : null}
+      </StockDetailDisclosure>
     </section>
   );
 }

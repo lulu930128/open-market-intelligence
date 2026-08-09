@@ -12,6 +12,7 @@ from app.config import settings
 from app.crypto_market.realtime import CryptoRealtimeUpdate, LIQUIDATION_RESOURCE, OHLCV_RESOURCE
 from app.crypto_market.service import persist_crypto_realtime_updates
 from app.db.session import SessionLocal
+from app.db.write_coordination import run_with_sqlite_write_retry
 
 
 logger = logging.getLogger(__name__)
@@ -187,7 +188,10 @@ class CryptoRealtimePersistenceManager:
 
     def _persist_updates(self, updates: list[CryptoRealtimeUpdate]) -> dict[str, Any]:
         with self._session_factory() as db:
-            return self._persist_func(db, updates)
+            return run_with_sqlite_write_retry(
+                db,
+                lambda: self._persist_func(db, updates),
+            )
 
     def status(self) -> dict[str, Any]:
         with self._lock:

@@ -91,6 +91,15 @@ ALLOWED_TOOLS: dict[str, ToolDefinition] = {
         external_fetch=True,
         writes_cache=True,
     ),
+    "cross_market.refresh_context": ToolDefinition(
+        name="cross_market.refresh_context",
+        description=(
+            "Refresh the bounded cross-market context source set for one Taiwan stock, "
+            "including required US daily prices, proxy benchmarks, and USD/TWD when applicable."
+        ),
+        external_fetch=True,
+        writes_cache=True,
+    ),
     "us.read_intraday_trend": ToolDefinition(
         name="us.read_intraday_trend",
         description="Fetch same-day Yahoo chart intraday trend for one US symbol.",

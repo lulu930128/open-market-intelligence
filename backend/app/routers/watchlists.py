@@ -15,6 +15,10 @@ from app.watchlists import (
     signal_service,
 )
 from app.db.session import get_db
+from app.db.write_coordination import (
+    SqliteWriteBusyError,
+    run_with_sqlite_write_retry,
+)
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.job_types import WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE
 from app.jobs.schemas import JobRunRead
@@ -995,21 +999,37 @@ def persist_watchlist_group_radar_v2_shadow(
             use_intraday=use_intraday,
             intraday_limit=intraday_limit,
         )
-        attached = radar_shadow_v2_service.attach_radar_v2_shadow_from_db(
-            db=db,
-            radar=radar,
-            universe_items=v2_universe,
-        )
-        return radar_shadow_v2_service.persist_radar_v2_shadow(
-            db=db,
-            radar=attached,
-            group_id=group_id,
-            mode=mode,
+        def persist_shadow():
+            attached = radar_shadow_v2_service.attach_radar_v2_shadow_from_db(
+                db=db,
+                radar=radar,
+                universe_items=v2_universe,
+            )
+            return radar_shadow_v2_service.persist_radar_v2_shadow(
+                db=db,
+                radar=attached,
+                group_id=group_id,
+                mode=mode,
+            )
+
+        return run_with_sqlite_write_retry(
+            db,
+            persist_shadow,
+            reset_session_before_attempt=True,
         )
     except service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except SqliteWriteBusyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SQLITE_WRITE_BUSY",
+                "message": str(exc),
+                "retryable": True,
+            },
+        ) from exc
 
 
 @router.post(
@@ -1050,30 +1070,37 @@ def persist_watchlist_group_radar_v2_active(
                 intraday_limit=intraday_limit,
             )
         )
-        active = (
-            radar_active_v2_service.build_radar_v2_active_projection_from_db(
-                db=db,
-                radar=base_radar,
-                universe_items=calculation_universe,
-                materialize_cross_market_snapshots=True,
+        def persist_active():
+            active = (
+                radar_active_v2_service.build_radar_v2_active_projection_from_db(
+                    db=db,
+                    radar=base_radar,
+                    universe_items=calculation_universe,
+                    materialize_cross_market_snapshots=True,
+                )
             )
-        )
-        persisted = radar_active_v2_service.persist_radar_v2_active(
-            db=db,
-            radar=active,
-            group_id=group_id,
-            mode=mode,
-        )
-        outcomes = (
-            radar_shadow_v2_service.evaluate_pending_radar_v2_outcomes(
+            persisted = radar_active_v2_service.persist_radar_v2_active(
                 db=db,
-                evaluation_ids=persisted["evaluation_ids"],
+                radar=active,
                 group_id=group_id,
                 mode=mode,
-                rule_version=str(persisted["rule_version"]),
             )
+            outcomes = (
+                radar_shadow_v2_service.evaluate_pending_radar_v2_outcomes(
+                    db=db,
+                    evaluation_ids=persisted["evaluation_ids"],
+                    group_id=group_id,
+                    mode=mode,
+                    rule_version=str(persisted["rule_version"]),
+                )
+            )
+            return {**persisted, "outcomes": outcomes}
+
+        return run_with_sqlite_write_retry(
+            db,
+            persist_active,
+            reset_session_before_attempt=True,
         )
-        return {**persisted, "outcomes": outcomes}
     except service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1083,6 +1110,15 @@ def persist_watchlist_group_radar_v2_active(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
+        ) from exc
+    except SqliteWriteBusyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SQLITE_WRITE_BUSY",
+                "message": str(exc),
+                "retryable": True,
+            },
         ) from exc
 
 

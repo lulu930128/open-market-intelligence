@@ -221,6 +221,11 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         stream_tool = next(
             tool for tool in tools if tool["name"] == "omi.ask_stream"
         )
+        refresh_tool = next(
+            tool
+            for tool in tools
+            if tool["name"] == "omi.read_refresh_status"
+        )
         self.assertEqual(ask_tool["title"], "Backend Ask OMI")
         self.assertEqual(
             ask_tool["inputSchema"]["properties"]["selection"]["properties"][
@@ -232,6 +237,12 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         self.assertEqual(
             stream_tool["inputSchema"]["properties"]["selection"],
             ask_tool["inputSchema"]["properties"]["selection"],
+        )
+        self.assertEqual(
+            refresh_tool["inputSchema"]["properties"]["job_id"][
+                "minimum"
+            ],
+            1,
         )
         request.assert_called_once_with(
             "GET",
@@ -359,6 +370,37 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
             )
 
         self.assertIs(response, raw_response)
+
+    def test_read_refresh_status_calls_redacted_ai_endpoint(self) -> None:
+        payload = {
+            "kind": "ai_refresh_status",
+            "version": "omi.ai.refresh.status.v1",
+            "job_id": 17,
+            "status": "running",
+            "evidence_status": "unobserved",
+        }
+        with patch.object(
+            self.server,
+            "_api_get",
+            return_value=payload,
+        ) as api_get:
+            response = self.server._call_tool(
+                "omi.read_refresh_status",
+                {"job_id": 17},
+            )
+
+        self.assertIs(response, payload)
+        api_get.assert_called_once_with("/api/ai/refresh-status/17")
+
+    def test_offline_public_schema_limits_selected_actions_to_eight(self) -> None:
+        selected_actions = self.server.ASK_TOOL["inputSchema"]["properties"][
+            "continuation"
+        ]["properties"]["selected_action_ids"]
+        self.assertEqual(selected_actions["maxItems"], 8)
+        self.assertIn(
+            "omi.read_refresh_status",
+            [tool["name"] for tool in self.server.PUBLIC_TOOLS],
+        )
 
     def test_ask_schema_supports_cross_market_targets_and_market_data_params(self) -> None:
         properties = self.server.ASK_TOOL["inputSchema"]["properties"]

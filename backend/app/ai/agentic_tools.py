@@ -25,6 +25,7 @@ from app.ai.market_context import common as market_context_common
 from app.db.models import (
     USDailyPrice,
     USCompanyProfile,
+    USCorporateAction,
     USSecCompanyFact,
 )
 from app.crypto_market import service as crypto_market_service
@@ -35,6 +36,7 @@ from app.jp_market.sources import normalize_jp_symbol
 from app.kr_market import service as kr_market_service
 from app.kr_market.sources import normalize_kr_index_id, normalize_kr_symbol
 from app.market import stock_selection_refresh
+from app.market.cross_market import refresh as cross_market_refresh
 from app.market.overnight_impact import scan_us_overnight_impact_gaps
 from app.portfolio import service as portfolio_service
 from app.resource_market import service as resource_market_service
@@ -129,6 +131,21 @@ def _sec_metric_count(db: Session, symbol: str) -> int:
     )
 
 
+def _corporate_action_summary(
+    db: Session,
+    symbol: str,
+) -> tuple[int, Any]:
+    count, fetched_at = (
+        db.query(
+            func.count(USCorporateAction.id),
+            func.max(USCorporateAction.fetched_at),
+        )
+        .filter(USCorporateAction.symbol == symbol)
+        .one()
+    )
+    return int(count or 0), fetched_at
+
+
 def scan_us_stock_gaps(
     db: Session,
     symbol: str,
@@ -155,6 +172,9 @@ def scan_us_stock_gaps(
     latest_daily = _latest_us_daily_price(db, normalized_symbol)
     profile = _latest_profile(db, normalized_symbol)
     sec_metric_count = _sec_metric_count(db, normalized_symbol)
+    corporate_action_count, corporate_action_fetched_at = (
+        _corporate_action_summary(db, normalized_symbol)
+    )
     missing: list[str] = []
     warnings: list[str] = []
     expected_dates: dict[str, Any] = {}
@@ -192,6 +212,17 @@ def scan_us_stock_gaps(
         and sec_metric_count <= 0
     ):
         missing.append("us_sec_company_fact")
+
+    expected_dates["us_corporate_action_count"] = corporate_action_count
+    expected_dates["us_corporate_action_fetched_at"] = _json_value(
+        corporate_action_fetched_at
+    )
+    if (
+        instrument_type != "index"
+        and "us_corporate_action" in required_capabilities
+        and corporate_action_count <= 0
+    ):
+        missing.append("us_corporate_action")
 
     if (
         "us_intraday_trend" in required_capabilities
@@ -250,7 +281,7 @@ def attach_us_overnight_gaps_to_tw_stock_freshness(
     cross_market["us_overnight_impact"] = overnight_gaps
     merged["cross_market"] = cross_market
 
-    if overnight_gaps.get("refresh_recommended"):
+    if not overnight_gaps.get("is_current", True):
         missing = list(merged.get("missing") or [])
         missing.append("us_overnight_tw_impact")
         merged["missing"] = list(dict.fromkeys(missing))
@@ -263,6 +294,8 @@ def attach_us_overnight_gaps_to_tw_stock_freshness(
         ).get("us_daily_price")
         merged["expected_dates"] = expected_dates
         merged["is_current"] = False
+
+    if overnight_gaps.get("refresh_recommended"):
         merged["refresh_recommended"] = True
 
     return merged
@@ -296,6 +329,7 @@ def run_us_stock_tool_session(
     requested_capabilities: tuple[str, ...] | None = None,
     requested_trade_date: str | None = None,
     session_scope: str = "regular",
+    force_selected_capabilities: bool = False,
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol)
@@ -331,6 +365,7 @@ def run_us_stock_tool_session(
         requested_capabilities=requested_capabilities,
         requested_trade_date=requested_trade_date,
         session_scope=session_scope,
+        force_selected_capabilities=force_selected_capabilities,
     )
     plan["budget"] = budget
     runs, run_warnings = execute_tool_plan(
@@ -693,6 +728,7 @@ def run_tw_stock_tool_session(
     raw_budget: dict[str, Any] | None,
     existing_freshness: dict[str, Any] | None = None,
     requested_capabilities: tuple[str, ...] | None = None,
+    force_selected_capabilities: bool = False,
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = str(stock_id or "").strip()
@@ -734,6 +770,7 @@ def run_tw_stock_tool_session(
         budget=budget,
         can_call_llm=bool(policy.get("can_plan_tools")),
         requested_capabilities=requested_capabilities,
+        force_selected_capabilities=force_selected_capabilities,
     )
     plan["budget"] = budget
     runs, run_warnings = execute_tool_plan(
@@ -775,6 +812,8 @@ def run_tw_watchlist_tool_session(
     existing_freshness: dict[str, Any] | None = None,
     include_children: bool = True,
     enabled_only: bool = True,
+    requested_capabilities: tuple[str, ...] | None = None,
+    force_selected_capabilities: bool = False,
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     del target
@@ -805,6 +844,8 @@ def run_tw_watchlist_tool_session(
         budget=budget,
         include_children=include_children,
         enabled_only=enabled_only,
+        requested_capabilities=requested_capabilities,
+        force_selected_capabilities=force_selected_capabilities,
     )
     if gaps.get("refresh_recommended") and not plan.get("tool_plan"):
         plan_warnings.append(plan.get("reason") or "No Taiwan watchlist refresh tool was selected.")

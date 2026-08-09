@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    SourceRegistry,
     StockMaster,
     TaiwanEtfInavSnapshot,
     TaiwanEtfNavDaily,
@@ -24,14 +25,16 @@ from app.market.providers.tw_etf import (
     fetch_twse_etf_profile,
     find_etf_nav_record,
 )
-from app.market.providers.tw_etf_yuanta import (
-    YUANTA_ETF_API_URL,
-    YUANTA_INAV_HTTP_REQUEST_COUNT,
-    YUANTA_INAV_HUB_URL,
+from app.market.financial_valuation import resolve_latest_completed_daily_close
+from app.market.providers.tw_etf_contracts import (
     TaiwanEtfInavRecord,
+    TaiwanEtfInstrumentIdentity,
     TaiwanEtfPcfRecord,
-    fetch_yuanta_etf_inav,
-    fetch_yuanta_etf_pcf,
+)
+from app.market.providers.tw_etf_issuers import canonicalize_taiwan_etf_identity
+from app.market.providers.tw_etf_registry import (
+    DEFAULT_TAIWAN_ETF_PROVIDER_REGISTRY,
+    TaiwanEtfProviderRegistry,
 )
 from app.market.trading_calendar import (
     is_taiwan_trading_day,
@@ -40,6 +43,16 @@ from app.market.trading_calendar import (
     previous_taiwan_trading_day,
     taiwan_market_session_phase,
     taiwan_now,
+)
+from app.market.tw_etf_resources import (
+    build_taiwan_etf_resource_states,
+    classify_taiwan_etf_strategy,
+)
+from app.market.tw_etf_valuation import (
+    TaiwanEtfValuationMetric,
+    compose_taiwan_etf_valuation,
+    missing_valuation_metric,
+    valuation_metric,
 )
 from app.observability.provider_health import record_provider_event
 from app.observability.provider_http import provider_http_failure
@@ -112,21 +125,20 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _yuanta_provider_supported(
+def _etf_provider_identity(
     stock: StockMaster,
     profile: TaiwanEtfProfile | None,
-) -> bool:
-    candidates = (
-        stock.stock_name,
-        profile.issuer_name if profile else None,
-        profile.fund_short_name if profile else None,
-        profile.fund_name if profile else None,
-        profile.fund_name_en if profile else None,
-    )
-    return any(
-        text.strip().upper().startswith("YUANTA") or text.strip().startswith("元大")
-        for text in candidates
-        if text
+) -> TaiwanEtfInstrumentIdentity:
+    return canonicalize_taiwan_etf_identity(
+        TaiwanEtfInstrumentIdentity(
+            stock_id=stock.stock_id,
+            market=stock.market,
+            issuer_name=profile.issuer_name if profile else None,
+            stock_name=stock.stock_name,
+            fund_short_name=profile.fund_short_name if profile else None,
+            fund_name=profile.fund_name if profile else None,
+            fund_name_en=profile.fund_name_en if profile else None,
+        )
     )
 
 
@@ -285,12 +297,200 @@ def _inav_dict(inav: TaiwanEtfInavSnapshot) -> dict[str, Any]:
     }
 
 
+def _date_status(value_date: date, expected_date: date) -> str:
+    if value_date == expected_date:
+        return "current"
+    if value_date < expected_date:
+        return "stale"
+    return "invalid"
+
+
+def _daily_market_price_metric(
+    db: Session,
+    *,
+    stock_id: str,
+    nav: TaiwanEtfNavDaily | None,
+    checked_at: datetime,
+    expected_nav_date: date,
+) -> TaiwanEtfValuationMetric:
+    resolution = resolve_latest_completed_daily_close(
+        db,
+        stock_id=stock_id,
+        as_of=checked_at,
+    )
+    if resolution.status == "ready" and resolution.price is not None:
+        source = (
+            db.get(SourceRegistry, resolution.source_id)
+            if resolution.source_id is not None
+            else None
+        )
+        return valuation_metric(
+            value=resolution.price,
+            as_of_date=resolution.trade_date,
+            observed_at=resolution.price_as_of,
+            fetched_at=None,
+            source=resolution.source_name,
+            source_url=source.endpoint_url if source is not None else None,
+            basis=resolution.price_basis,
+            status="current",
+            issue_codes=resolution.issue_codes,
+        )
+
+    if (
+        nav is not None
+        and nav.close_price is not None
+        and nav.nav_date <= expected_nav_date
+    ):
+        return valuation_metric(
+            value=nav.close_price,
+            as_of_date=nav.nav_date,
+            observed_at=None,
+            fetched_at=nav.fetched_at,
+            source=nav.source,
+            source_url=nav.source_url,
+            basis="mops_daily_nav_close",
+            status=_date_status(nav.nav_date, expected_nav_date),
+            issue_codes=resolution.issue_codes,
+        )
+
+    return missing_valuation_metric(
+        basis=resolution.price_basis,
+        status=resolution.status,
+        issue_codes=resolution.issue_codes,
+    )
+
+
+def _daily_nav_metric(
+    *,
+    nav: TaiwanEtfNavDaily | None,
+    pcf: TaiwanEtfPcfSnapshot | None,
+    pcf_unit_nav_is_daily_nav: bool,
+    expected_nav_date: date,
+) -> TaiwanEtfValuationMetric:
+    candidates: list[tuple[int, TaiwanEtfValuationMetric]] = []
+    if nav is not None and nav.nav is not None and nav.nav_date <= expected_nav_date:
+        candidates.append(
+            (
+                0,
+                valuation_metric(
+                    value=nav.nav,
+                    as_of_date=nav.nav_date,
+                    observed_at=None,
+                    fetched_at=nav.fetched_at,
+                    source=nav.source,
+                    source_url=nav.source_url,
+                    basis="mops_daily_nav",
+                    status=_date_status(nav.nav_date, expected_nav_date),
+                ),
+            )
+        )
+    if (
+        pcf_unit_nav_is_daily_nav
+        and pcf is not None
+        and pcf.unit_nav is not None
+        and pcf.reference_date is not None
+        and pcf.reference_date <= expected_nav_date
+    ):
+        candidates.append(
+            (
+                1,
+                valuation_metric(
+                    value=pcf.unit_nav,
+                    as_of_date=pcf.reference_date,
+                    observed_at=pcf.source_updated_at,
+                    fetched_at=pcf.fetched_at,
+                    source=pcf.source,
+                    source_url=pcf.source_url,
+                    basis="pcf_unit_nav",
+                    status=_date_status(pcf.reference_date, expected_nav_date),
+                ),
+            )
+        )
+    usable_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate[1].value is not None
+    ]
+    if usable_candidates:
+        return max(
+            usable_candidates,
+            key=lambda candidate: (
+                candidate[1].as_of_date == expected_nav_date,
+                candidate[1].as_of_date or date.min,
+                -candidate[0],
+            ),
+        )[1]
+
+    issue_codes = ["valuation_daily_nav_missing"]
+    if pcf is not None and pcf.unit_nav is not None:
+        if not pcf_unit_nav_is_daily_nav:
+            issue_codes.append("valuation_pcf_unit_nav_not_eligible")
+        elif pcf.reference_date is None:
+            issue_codes.append("valuation_pcf_unit_nav_reference_date_missing")
+        elif pcf.reference_date > expected_nav_date:
+            issue_codes.append("valuation_pcf_unit_nav_future_dated")
+    return missing_valuation_metric(
+        basis="daily_nav",
+        issue_codes=tuple(issue_codes),
+    )
+
+
+def _intraday_valuation_metrics(
+    inav: TaiwanEtfInavSnapshot | None,
+    *,
+    checked_at: datetime,
+    inav_status: str,
+) -> tuple[TaiwanEtfValuationMetric, TaiwanEtfValuationMetric]:
+    if inav is None:
+        return (
+            missing_valuation_metric(
+                basis="issuer_intraday_market_price",
+                status=inav_status,
+                issue_codes=("valuation_intraday_market_price_missing",),
+            ),
+            missing_valuation_metric(
+                basis="issuer_intraday_estimated_nav",
+                status=inav_status,
+                issue_codes=("valuation_intraday_nav_missing",),
+            ),
+        )
+    observed_at = _as_utc(inav.observed_at)
+    observed_date = observed_at.astimezone(checked_at.tzinfo).date()
+    market_price = valuation_metric(
+        value=inav.market_price,
+        as_of_date=observed_date,
+        observed_at=observed_at,
+        fetched_at=inav.fetched_at,
+        source=inav.source,
+        source_url=inav.source_url,
+        basis="issuer_intraday_market_price",
+        status=inav_status,
+        issue_codes=(
+            ()
+            if inav.market_price is not None
+            else ("valuation_intraday_market_price_missing",)
+        ),
+    )
+    estimated_nav = valuation_metric(
+        value=inav.estimated_nav,
+        as_of_date=observed_date,
+        observed_at=observed_at,
+        fetched_at=inav.fetched_at,
+        source=inav.source,
+        source_url=inav.source_url,
+        basis="issuer_intraday_estimated_nav",
+        status=inav_status,
+    )
+    return market_price, estimated_nav
+
+
 def get_taiwan_etf_overview(
     db: Session,
     stock_id: str,
     *,
     now: datetime | None = None,
     refresh_result: dict[str, Any] | None = None,
+    provider_registry: TaiwanEtfProviderRegistry = DEFAULT_TAIWAN_ETF_PROVIDER_REGISTRY,
 ) -> dict[str, Any]:
     stock = _get_etf_master(db, stock_id)
     checked_at = taiwan_now(now)
@@ -307,12 +507,22 @@ def get_taiwan_etf_overview(
     pcf = _latest_pcf(db, stock.stock_id)
     inav = _latest_inav(db, stock.stock_id)
     nav_is_current = bool(nav and nav.nav_date >= expected_nav_date)
-    yuanta_supported = _yuanta_provider_supported(stock, profile)
+    provider_binding = provider_registry.resolve(_etf_provider_identity(stock, profile))
+    pcf_provider = provider_binding.pcf if provider_binding else None
+    inav_provider = provider_binding.intraday_nav if provider_binding else None
+    pcf_source_url = (
+        pcf_provider.source_url_for(stock.stock_id) if pcf_provider else ""
+    )
+    inav_source_url = (
+        inav_provider.source_url_for(stock.stock_id) if inav_provider else ""
+    )
+    pcf_supported = pcf_provider is not None
+    inav_supported = inav_provider is not None
     session_phase = taiwan_market_session_phase(checked_at)
     expected_pcf_date = _expected_pcf_date(checked_at)
     pcf_status = (
         "not_supported"
-        if not yuanta_supported
+        if not pcf_supported
         else "missing"
         if pcf is None
         else "current"
@@ -320,7 +530,7 @@ def get_taiwan_etf_overview(
         else "stale"
     )
     expected_inav_date = _expected_inav_date(checked_at, session_phase)
-    if yuanta_supported:
+    if inav_supported:
         inav_status, inav_age_seconds = _inav_freshness(
             inav,
             checked_at=checked_at,
@@ -329,6 +539,57 @@ def get_taiwan_etf_overview(
         )
     else:
         inav_status, inav_age_seconds = "not_supported", None
+
+    daily_market_price = _daily_market_price_metric(
+        db,
+        stock_id=stock.stock_id,
+        nav=nav,
+        checked_at=checked_at,
+        expected_nav_date=expected_nav_date,
+    )
+    canonical_daily_nav = _daily_nav_metric(
+        nav=nav,
+        pcf=pcf,
+        pcf_unit_nav_is_daily_nav=bool(
+            pcf_provider and pcf_provider.unit_nav_is_daily_nav
+        ),
+        expected_nav_date=expected_nav_date,
+    )
+    intraday_market_price, canonical_intraday_nav = _intraday_valuation_metrics(
+        inav,
+        checked_at=checked_at,
+        inav_status=inav_status,
+    )
+    valuation = compose_taiwan_etf_valuation(
+        expected_nav_date=expected_nav_date,
+        session_phase=session_phase,
+        inav_status=inav_status,
+        daily_market_price=daily_market_price,
+        daily_nav=canonical_daily_nav,
+        intraday_market_price=intraday_market_price,
+        intraday_nav=canonical_intraday_nav,
+    )
+    profile_payload = _profile_dict(profile) if profile else None
+    pcf_payload = _pcf_dict(db, pcf) if pcf else None
+    inav_payload = _inav_dict(inav) if inav else None
+    strategy = classify_taiwan_etf_strategy(
+        stock_name=stock.stock_name,
+        profile=profile_payload,
+    )
+    resource_states = build_taiwan_etf_resource_states(
+        strategy=strategy,
+        profile=profile_payload,
+        valuation=valuation,
+        pcf=pcf_payload,
+        pcf_status=pcf_status,
+        pcf_supported=pcf_supported,
+        component_exposure_supported=bool(
+            pcf_provider and pcf_provider.includes_component_exposure
+        ),
+        intraday_nav=inav_payload,
+        inav_status=inav_status,
+        inav_supported=inav_supported,
+    )
 
     if profile is not None and nav_is_current:
         overview_status = "current"
@@ -351,7 +612,7 @@ def get_taiwan_etf_overview(
         )
     if stock.market.upper() != "TWSE":
         warnings.append("第一版官方 ETF profile／NAV provider coverage 僅涵蓋 TWSE 上市 ETF。")
-    if yuanta_supported:
+    if pcf_supported:
         if pcf is None:
             warnings.append("尚無 ETF PCF／成分曝險 cache。")
         elif pcf_status == "stale":
@@ -359,6 +620,9 @@ def get_taiwan_etf_overview(
                 f"ETF PCF 生效日停留在 {pcf.effective_date.isoformat()}，"
                 f"目前預期日期為 {expected_pcf_date.isoformat()}。"
             )
+    else:
+        warnings.append("ETF provider_not_connected：此發行商尚未接入 PCF／成分曝險。")
+    if inav_supported:
         if inav is None:
             warnings.append("尚無 ETF 盤中估計淨值 cache。")
         elif inav_status in {"delayed", "stale"}:
@@ -367,7 +631,7 @@ def get_taiwan_etf_overview(
                 f"來源時間為 {_as_utc(inav.observed_at).isoformat()}。"
             )
     else:
-        warnings.append("PCF／盤中 iNAV 第一版 provider coverage 僅涵蓋元大投信 ETF。")
+        warnings.append("ETF provider_not_connected：此發行商尚未接入盤中 iNAV。")
     if refresh_result:
         warnings.extend(
             f"{resource} 更新失敗：{message}"
@@ -393,16 +657,40 @@ def get_taiwan_etf_overview(
         },
         {
             "resource": "pcf",
-            "provider": "yuanta_etfs",
-            "source_url": YUANTA_ETF_API_URL,
+            "provider": (
+                pcf.source
+                if pcf is not None
+                else provider_binding.provider
+                if pcf_provider is not None and provider_binding is not None
+                else "not_connected"
+            ),
+            "source_url": (
+                pcf.source_url
+                if pcf is not None and pcf.source_url
+                else pcf_source_url
+                if pcf_provider is not None
+                else ""
+            ),
             "status": pcf_status,
             "observed_date": pcf.effective_date if pcf else None,
             "fetched_at": pcf.fetched_at if pcf else None,
         },
         {
             "resource": "intraday_estimated_nav",
-            "provider": "yuanta_etfs",
-            "source_url": YUANTA_INAV_HUB_URL,
+            "provider": (
+                inav.source
+                if inav is not None
+                else provider_binding.provider
+                if inav_provider is not None and provider_binding is not None
+                else "not_connected"
+            ),
+            "source_url": (
+                inav.source_url
+                if inav is not None and inav.source_url
+                else inav_source_url
+                if inav_provider is not None
+                else ""
+            ),
             "status": inav_status,
             "observed_date": (
                 _as_utc(inav.observed_at).astimezone(checked_at.tzinfo).date()
@@ -426,17 +714,22 @@ def get_taiwan_etf_overview(
             "broker_branch": True,
             "etf_profile": True,
             "daily_close_nav": True,
-            "intraday_estimated_nav": yuanta_supported,
-            "pcf": yuanta_supported,
-            "component_exposure": yuanta_supported,
+            "intraday_estimated_nav": inav_supported,
+            "pcf": pcf_supported,
+            "component_exposure": bool(
+                pcf_provider and pcf_provider.includes_component_exposure
+            ),
             "holdings": False,
             "company_revenue": False,
             "company_financials": False,
         },
-        "profile": _profile_dict(profile) if profile else None,
+        "profile": profile_payload,
         "daily_nav": _nav_dict(nav) if nav else None,
-        "pcf": _pcf_dict(db, pcf) if pcf else None,
-        "intraday_nav": _inav_dict(inav) if inav else None,
+        "pcf": pcf_payload,
+        "intraday_nav": inav_payload,
+        "valuation": valuation,
+        "strategy": strategy,
+        "resource_states": resource_states,
         "freshness": {
             "status": "current" if nav_is_current else ("stale" if nav else "missing"),
             "timezone": "Asia/Taipei",
@@ -445,10 +738,10 @@ def get_taiwan_etf_overview(
             "latest_nav_date": nav.nav_date if nav else None,
             "nav_is_current": nav_is_current,
             "profile_report_date": profile.report_date if profile else None,
-            "expected_pcf_date": expected_pcf_date if yuanta_supported else None,
+            "expected_pcf_date": expected_pcf_date if pcf_supported else None,
             "latest_pcf_date": pcf.effective_date if pcf else None,
             "pcf_status": pcf_status,
-            "expected_inav_date": expected_inav_date if yuanta_supported else None,
+            "expected_inav_date": expected_inav_date if inav_supported else None,
             "latest_inav_at": inav.observed_at if inav else None,
             "inav_status": inav_status,
             "inav_age_seconds": inav_age_seconds,
@@ -456,9 +749,9 @@ def get_taiwan_etf_overview(
             "refresh_recommended": (
                 profile is None
                 or not nav_is_current
-                or (yuanta_supported and pcf_status in {"missing", "stale"})
+                or (pcf_supported and pcf_status in {"missing", "stale"})
                 or (
-                    yuanta_supported
+                    inav_supported
                     and session_phase in {"regular", "closing_auction"}
                     and inav_status in {"missing", "delayed", "stale"}
                 )
@@ -554,6 +847,9 @@ def _upsert_pcf(
     db: Session,
     record: TaiwanEtfPcfRecord,
     fetched_at: datetime,
+    *,
+    provider: str,
+    source_url: str,
 ) -> TaiwanEtfPcfSnapshot:
     snapshot = (
         db.query(TaiwanEtfPcfSnapshot)
@@ -585,8 +881,8 @@ def _upsert_pcf(
         "source_updated_at",
     ):
         setattr(snapshot, field, getattr(record, field))
-    snapshot.source = "yuanta_etfs"
-    snapshot.source_url = YUANTA_ETF_API_URL
+    snapshot.source = provider
+    snapshot.source_url = source_url
     snapshot.fetched_at = fetched_at
     db.flush()
     (
@@ -618,6 +914,9 @@ def _upsert_inav(
     db: Session,
     record: TaiwanEtfInavRecord,
     fetched_at: datetime,
+    *,
+    provider: str,
+    source_url: str,
 ) -> TaiwanEtfInavSnapshot:
     observed_at = _as_utc(record.observed_at)
     snapshot = (
@@ -642,8 +941,8 @@ def _upsert_inav(
         "premium_discount_pct",
     ):
         setattr(snapshot, field, getattr(record, field))
-    snapshot.source = "yuanta_etfs"
-    snapshot.source_url = YUANTA_INAV_HUB_URL
+    snapshot.source = provider
+    snapshot.source_url = source_url
     snapshot.fetched_at = fetched_at
     db.flush()
     expired_ids = [
@@ -713,8 +1012,9 @@ def refresh_taiwan_etf(
     now: datetime | None = None,
     fetch_profile: Callable[[str], TaiwanEtfProfileRecord] = fetch_twse_etf_profile,
     fetch_nav: Callable[[date], tuple[TaiwanEtfNavRecord, ...]] = fetch_mops_etf_nav_daily,
-    fetch_pcf: Callable[..., TaiwanEtfPcfRecord] = fetch_yuanta_etf_pcf,
-    fetch_inav: Callable[[str], TaiwanEtfInavRecord] = fetch_yuanta_etf_inav,
+    fetch_pcf: Callable[..., TaiwanEtfPcfRecord] | None = None,
+    fetch_inav: Callable[[str], TaiwanEtfInavRecord] | None = None,
+    provider_registry: TaiwanEtfProviderRegistry = DEFAULT_TAIWAN_ETF_PROVIDER_REGISTRY,
 ) -> dict[str, Any]:
     stock = _get_etf_master(db, stock_id)
     if not any((refresh_profile, refresh_nav, refresh_pcf, refresh_inav)):
@@ -800,42 +1100,80 @@ def refresh_taiwan_etf(
             .filter(TaiwanEtfProfile.stock_id == stock.stock_id)
             .first()
         )
-        yuanta_supported = _yuanta_provider_supported(stock, profile)
+        provider_binding = provider_registry.resolve(_etf_provider_identity(stock, profile))
+        pcf_provider = provider_binding.pcf if provider_binding else None
+        inav_provider = provider_binding.intraday_nav if provider_binding else None
+        pcf_source_url = (
+            pcf_provider.source_url_for(stock.stock_id) if pcf_provider else ""
+        )
+        inav_source_url = (
+            inav_provider.source_url_for(stock.stock_id) if inav_provider else ""
+        )
         if refresh_pcf:
-            if not yuanta_supported:
-                errors["pcf"] = "PCF 第一版 provider coverage 僅涵蓋元大投信 ETF。"
+            if pcf_provider is None or provider_binding is None:
+                errors["pcf"] = (
+                    "ETF provider_not_connected：此發行商尚未接入 PCF／成分曝險。"
+                )
             else:
-                request_count += 1
+                request_count += pcf_provider.request_count
                 try:
-                    pcf_record = fetch_pcf(
+                    pcf_fetcher = fetch_pcf or pcf_provider.fetch
+                    pcf_record = pcf_fetcher(
                         stock.stock_id,
                         target_date=target_pcf_date,
                     )
-                    _upsert_pcf(db, pcf_record, fetched_at)
+                    _upsert_pcf(
+                        db,
+                        pcf_record,
+                        fetched_at,
+                        provider=provider_binding.provider,
+                        source_url=pcf_source_url,
+                    )
                     refreshed_pcf_date = pcf_record.effective_date
                     refreshed_resources.append("pcf")
-                    attempts.append(("yuanta_etfs", "etf_pcf", YUANTA_ETF_API_URL, None))
+                    attempts.append(
+                        (
+                            provider_binding.provider,
+                            "etf_pcf",
+                            pcf_source_url,
+                            None,
+                        )
+                    )
                 except Exception as exc:
                     errors["pcf"] = str(exc)
-                    attempts.append(("yuanta_etfs", "etf_pcf", YUANTA_ETF_API_URL, exc))
+                    attempts.append(
+                        (
+                            provider_binding.provider,
+                            "etf_pcf",
+                            pcf_source_url,
+                            exc,
+                        )
+                    )
 
         if refresh_inav:
-            if not yuanta_supported:
+            if inav_provider is None or provider_binding is None:
                 errors["intraday_estimated_nav"] = (
-                    "盤中 iNAV 第一版 provider coverage 僅涵蓋元大投信 ETF。"
+                    "ETF provider_not_connected：此發行商尚未接入盤中 iNAV。"
                 )
             else:
-                request_count += YUANTA_INAV_HTTP_REQUEST_COUNT
+                request_count += inav_provider.request_count
                 try:
-                    inav_record = fetch_inav(stock.stock_id)
-                    _upsert_inav(db, inav_record, fetched_at)
+                    inav_fetcher = fetch_inav or inav_provider.fetch
+                    inav_record = inav_fetcher(stock.stock_id)
+                    _upsert_inav(
+                        db,
+                        inav_record,
+                        fetched_at,
+                        provider=provider_binding.provider,
+                        source_url=inav_source_url,
+                    )
                     refreshed_inav_at = inav_record.observed_at
                     refreshed_resources.append("intraday_estimated_nav")
                     attempts.append(
                         (
-                            "yuanta_etfs",
+                            provider_binding.provider,
                             "etf_intraday_estimated_nav",
-                            YUANTA_INAV_HUB_URL,
+                            inav_source_url,
                             None,
                         )
                     )
@@ -843,9 +1181,9 @@ def refresh_taiwan_etf(
                     errors["intraday_estimated_nav"] = str(exc)
                     attempts.append(
                         (
-                            "yuanta_etfs",
+                            provider_binding.provider,
                             "etf_intraday_estimated_nav",
-                            YUANTA_INAV_HUB_URL,
+                            inav_source_url,
                             exc,
                         )
                     )
@@ -880,4 +1218,5 @@ def refresh_taiwan_etf(
         stock.stock_id,
         now=local_now,
         refresh_result=refresh_result,
+        provider_registry=provider_registry,
     )

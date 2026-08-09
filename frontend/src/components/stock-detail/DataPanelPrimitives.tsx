@@ -10,6 +10,68 @@ import type { ReactNode } from "react";
 
 export type DataPanelSurfaceTab = DataPanelTab | "etf";
 
+export function StockDetailDisclosure({
+  children,
+  className = "",
+  contentClassName = "",
+  description,
+  eyebrow,
+  id,
+  summaryClassName = "",
+  testId,
+  title,
+  trailing,
+}: {
+  children: ReactNode;
+  className?: string;
+  contentClassName?: string;
+  description?: ReactNode;
+  eyebrow?: ReactNode;
+  id?: string;
+  summaryClassName?: string;
+  testId?: string;
+  title: ReactNode;
+  trailing?: ReactNode;
+}) {
+  return (
+    <details
+      id={id}
+      className={`group/section-disclosure ${className}`}
+      data-testid={testId}
+    >
+      <summary
+        className={`flex cursor-pointer list-none items-center justify-between gap-3 outline-none transition hover:bg-omi-surface-subtle focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden ${summaryClassName}`}
+      >
+        <span className="min-w-0">
+          {eyebrow ? (
+            <span className="block text-[11px] font-bold uppercase tracking-[0.16em] text-omi-text-muted">
+              {eyebrow}
+            </span>
+          ) : null}
+          <span className="block text-sm font-semibold text-omi-text-strong">
+            {title}
+          </span>
+          {description ? (
+            <span className="mt-0.5 block text-xs leading-4 text-omi-text-muted">
+              {description}
+            </span>
+          ) : null}
+        </span>
+        <span className="flex shrink-0 items-center gap-3">
+          {trailing}
+          <span
+            aria-hidden="true"
+            className="text-base text-omi-text-muted transition-transform group-open/section-disclosure:rotate-45"
+          >
+            ＋
+          </span>
+        </span>
+      </summary>
+      <div className={contentClassName}>{children}</div>
+    </details>
+  );
+}
+
 export function MetricRow({
   label,
   value,

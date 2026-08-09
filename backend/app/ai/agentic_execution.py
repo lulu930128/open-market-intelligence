@@ -18,6 +18,7 @@ from app.jp_market.sources import normalize_jp_symbol
 from app.kr_market import service as kr_market_service
 from app.kr_market.sources import normalize_kr_index_id, normalize_kr_symbol
 from app.market import stock_selection_refresh
+from app.market.cross_market import refresh as cross_market_refresh
 from app.us_market import service as us_market_service
 from app.us_market.sources import normalize_us_symbol
 from app.watchlists import backfill_service as watchlist_backfill_service
@@ -301,6 +302,13 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "message",
         "error_message",
         "failed_steps",
+        "attempted_count",
+        "failed_count",
+        "deferred_count",
+        "cooldown_source_count",
+        "cooldown_seconds",
+        "max_symbols",
+        "max_runtime_seconds",
         "volume_unit",
         "volume_semantics",
         "volume_status",
@@ -501,6 +509,8 @@ def _execute_tool(
         raise ValueError("stock_id is required for Taiwan stock tools.")
     if tool_name == "tw.refresh_watchlist_evidence" and not group_id_text:
         raise ValueError("group_id is required for Taiwan watchlist tools.")
+    if tool_name == "cross_market.refresh_context" and not stock_id:
+        raise ValueError("stock_id is required for cross-market refresh tools.")
 
     if tool_name.startswith("us.") and not symbol and tool_name != "us.refresh_macro_series":
         raise ValueError("symbol is required for US stock tools.")
@@ -578,6 +588,26 @@ def _execute_tool(
             sleep_seconds=sleep_seconds,
             skip_existing_months=skip_existing_months if skip_existing_months is not None else True,
             should_cancel=cancel_event.is_set if cancel_event is not None else None,
+        )
+
+    if tool_name == "cross_market.refresh_context":
+        return cross_market_refresh.refresh_cross_market_context_sources(
+            db,
+            [stock_id],
+            max_symbols=agentic_common._safe_int(
+                args.get("max_symbols"),
+                default=8,
+                minimum=1,
+                maximum=8,
+            ),
+            provider=str(args.get("provider") or "auto"),
+            outputsize=str(args.get("outputsize") or "compact"),
+            max_runtime_seconds=agentic_common._safe_int(
+                args.get("max_runtime_seconds"),
+                default=120,
+                minimum=10,
+                maximum=120,
+            ),
         )
 
     if tool_name == "us.read_intraday_trend":
@@ -790,6 +820,7 @@ def _execute_tool_with_deadline(
                     "status": _public_job_status(job),
                     "deduplicated": False,
                     "poll_url": f"/api/jobs/{job.id}",
+                    "status_url": f"/api/ai/refresh-status/{job.id}",
                 }
                 return {
                     "__background_job": job_ref,
@@ -844,6 +875,7 @@ def _execute_tool_with_deadline(
                 "status": _public_job_status(job),
                 "deduplicated": existing is not None,
                 "poll_url": f"/api/jobs/{job.id}",
+                "status_url": f"/api/ai/refresh-status/{job.id}",
             }
         except Exception as exc:
             job_ref = {
@@ -1038,6 +1070,10 @@ def execute_tool_plan(
                             "status": _public_job_status(existing_background_job),
                             "deduplicated": True,
                             "poll_url": f"/api/jobs/{existing_background_job.id}",
+                            "status_url": (
+                                "/api/ai/refresh-status/"
+                                f"{existing_background_job.id}"
+                            ),
                         },
                     }
                 )
@@ -1136,6 +1172,17 @@ def execute_tool_plan(
                     else "cached fallback was disabled by refresh_policy."
                 )
             )
+        elif tool_name == "cross_market.refresh_context" and operation_status in {
+            "partial",
+            "failed",
+        }:
+            warning = (
+                "Cross-market refresh was incomplete; OMI kept the local cached context "
+                "and its stale or missing limitations visible."
+            )
+            if operation_error:
+                warning += f" Error: {operation_error}"
+            warnings.append(warning)
         _emit_tool_progress(
             progress_callback,
             tool_name=tool_name,

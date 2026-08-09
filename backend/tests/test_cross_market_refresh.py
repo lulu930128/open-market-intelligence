@@ -13,6 +13,7 @@ from app.db.models import (
     Base,
     CrossMarketRelation,
     CrossMarketRelationEvidence,
+    ProviderEvent,
     ResourceQuoteSnapshot,
     USDailyPrice,
 )
@@ -339,6 +340,39 @@ class CrossMarketRefreshTests(unittest.TestCase):
         self.assertEqual(result["success_count"], 1)
         self.assertEqual(result["failed_count"], 1)
         self.assertIn("provider timeout", result["results"][1]["error"])
+        event = (
+            self.db.query(ProviderEvent)
+            .filter(ProviderEvent.market == "cross_market")
+            .filter(ProviderEvent.event_type == "cross_market_refresh")
+            .one()
+        )
+        self.assertEqual(event.provider, "cross_market_orchestrator")
+        self.assertEqual(event.resource, "context_source")
+        self.assertEqual(event.target, "us_daily_price:TSM")
+        self.assertEqual(event.status, "failed")
+
+        cooldown_plan = build_cross_market_refresh_plan(
+            self.db,
+            "2330",
+            now=NOW,
+        )
+        self.assertEqual(cooldown_plan["cooldown_source_count"], 1)
+        self.assertEqual(cooldown_plan["cooldown_sources"][0]["symbol"], "TSM")
+        self.assertEqual(
+            cooldown_plan["cooldown_sources"][0]["deferred_reason"],
+            "refresh_failure_cooldown",
+        )
+
+        expired_plan = build_cross_market_refresh_plan(
+            self.db,
+            "2330",
+            now=NOW.replace(minute=6),
+        )
+        self.assertEqual(expired_plan["cooldown_source_count"], 0)
+        self.assertIn(
+            "TSM",
+            {source["symbol"] for source in expired_plan["planned_sources"]},
+        )
 
     def test_refresh_route_enqueues_deduplicable_job_contract(self) -> None:
         fake_job = {

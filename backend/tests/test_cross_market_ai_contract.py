@@ -119,27 +119,117 @@ class CrossMarketAiContractTests(unittest.TestCase):
             ],
         )
 
-        plan = query_plan.build_query_plan(
-            payload=AiAskRequest(
-                question="2330 的 ADR 與美股隔夜影響如何？",
-                target={"type": "stock", "id": "2330", "market": "TW"},
-                output="evidence_only",
-                realtime_policy="cache_only",
-            ),
+        for stock_id, question in (
+            ("2330", "2330 的 ADR 與美股隔夜影響如何？"),
+            ("2408", "2408 的 MU 與美股隔夜影響如何？"),
+        ):
+            with self.subTest(stock_id=stock_id):
+                plan = query_plan.build_query_plan(
+                    payload=AiAskRequest(
+                        question=question,
+                        target={"type": "stock", "id": stock_id, "market": "TW"},
+                        output="evidence_only",
+                        realtime_policy="cache_only",
+                    ),
+                    scope_type="stock",
+                    question_intent=decision_core.infer_question_intent(question),
+                    effective_mode="data_only",
+                    target_market="TW",
+                )
+                self.assertEqual(plan.reader_profile, "standard")
+                self.assertEqual(plan.requested_domains, ("cross_market",))
+                self.assertEqual(
+                    plan.selection["required"],
+                    [
+                        "target.identity",
+                        "cross_market.overnight",
+                        "cross_market.relations",
+                        "cross_market.parity",
+                        "data.freshness",
+                    ],
+                )
+                self.assertNotIn("market.cross_market", plan.selected_capabilities)
+                self.assertEqual(plan.selection["unsupported_capabilities"], [])
+                self.assertEqual(plan.selection["unmet_required_capabilities"], [])
+
+    def test_cross_market_domain_is_scoped_before_capability_diagnostics(self) -> None:
+        stock_selection = capability_contract.normalize_selection(
+            selection={},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
             scope_type="stock",
-            question_intent=intent,
-            effective_mode="data_only",
             target_market="TW",
+            question_intent="general",
+            requested_domains=("cross_market",),
         )
-        self.assertEqual(plan.reader_profile, "standard")
-        self.assertEqual(plan.requested_domains, ("cross_market",))
+
         self.assertTrue(
             {
                 "cross_market.overnight",
                 "cross_market.relations",
                 "cross_market.parity",
             }
-            <= set(plan.selected_capabilities)
+            <= set(stock_selection["required"])
+        )
+        self.assertNotIn("market.cross_market", stock_selection["required"])
+        self.assertEqual(stock_selection["unsupported_capabilities"], [])
+        self.assertEqual(stock_selection["unmet_required_capabilities"], [])
+
+        market_selection = capability_contract.normalize_selection(
+            selection={},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="TW",
+            question_intent="general",
+            requested_domains=("cross_market",),
+        )
+
+        self.assertIn("market.cross_market", market_selection["required"])
+        self.assertNotIn("cross_market.overnight", market_selection["required"])
+        self.assertNotIn("cross_market.relations", market_selection["required"])
+        self.assertNotIn("cross_market.parity", market_selection["required"])
+        self.assertEqual(market_selection["unsupported_capabilities"], [])
+
+    def test_explicit_market_cross_market_request_for_stock_remains_unsupported(
+        self,
+    ) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["market.cross_market"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            target_market="TW",
+            question_intent="cross_market",
+        )
+
+        self.assertNotIn("market.cross_market", selection["required"])
+        self.assertEqual(
+            selection["unsupported_capabilities"],
+            [
+                {
+                    "capability": "market.cross_market",
+                    "status": "unsupported",
+                    "reason_code": "unsupported_target_scope",
+                    "requested_as": "required",
+                    "request_source": "explicit_selection",
+                    "target_scope": "stock",
+                    "target_market": "TW",
+                    "supported_scopes": ["market"],
+                    "supported_markets": [],
+                    "message": (
+                        "market.cross_market is not supported for target "
+                        "scope=stock, market=TW."
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(
+            selection["unmet_required_capabilities"],
+            selection["unsupported_capabilities"],
         )
 
     def test_decision_projection_is_context_only_with_stable_lineage(self) -> None:

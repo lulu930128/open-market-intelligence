@@ -245,8 +245,12 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 373)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 372)
+        self.assertEqual(len(operations), 374)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 373)
+        self.assertIn(
+            ("get", "/api/ai/refresh-status/{job_id}"),
+            operations,
+        )
 
         self.assertIn(
             (

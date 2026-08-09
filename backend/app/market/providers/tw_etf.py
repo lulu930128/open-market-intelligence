@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from app.market.providers._http import DEFAULT_HEADERS, get_json, post
 
@@ -194,6 +195,49 @@ def _benchmark_from_rows(rows: list[Any], start: int) -> tuple[object, ...] | No
     return None
 
 
+def _mops_fund_row(
+    code_cell: Tag,
+    *,
+    next_code_cell: Tag | None,
+) -> tuple[Tag, list[str], int] | None:
+    parent = code_cell.parent
+    if isinstance(parent, Tag) and parent.name == "tr":
+        values = _row_values(parent)
+        try:
+            code_index = values.index(code_cell.get_text(" ", strip=True))
+        except ValueError:
+            code_index = -1
+        data = values[code_index + 1 :] if code_index >= 0 else values
+        date_index = next(
+            (
+                idx
+                for idx, value in enumerate(data)
+                if re.fullmatch(r"(?:\d{3}|\d{4})[/.-]\d{1,2}[/.-]\d{1,2}", value)
+            ),
+            None,
+        )
+        if date_index is not None and date_index >= 1 and len(data) >= date_index + 7:
+            return parent, data, date_index
+
+    for node in code_cell.next_elements:
+        if node is next_code_cell:
+            break
+        if not isinstance(node, Tag) or node.name != "tr":
+            continue
+        values = _row_values(node)
+        date_index = next(
+            (
+                idx
+                for idx, value in enumerate(values)
+                if re.fullmatch(r"(?:\d{3}|\d{4})[/.-]\d{1,2}[/.-]\d{1,2}", value)
+            ),
+            None,
+        )
+        if date_index is not None and date_index >= 1 and len(values) >= date_index + 7:
+            return node, values, date_index
+    return None
+
+
 def parse_mops_etf_nav_html(html: str) -> tuple[TaiwanEtfNavRecord, ...]:
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("table.hasBorder")
@@ -204,44 +248,44 @@ def parse_mops_etf_nav_html(html: str) -> tuple[TaiwanEtfNavRecord, ...]:
 
     rows = table.find_all("tr")
     records: list[TaiwanEtfNavRecord] = []
+    code_cells = [
+        cell
+        for cell in table.find_all("td")
+        if re.fullmatch(r"\d{4,6}[A-Z]?", cell.get_text(" ", strip=True))
+    ]
     current_issuer: str | None = None
-    pending_code: str | None = None
 
-    for index, row in enumerate(rows):
-        cells = row.find_all(["th", "td"])
-        values = _row_values(row)
-        if not values:
-            continue
+    for code_position, code_cell in enumerate(code_cells):
+        stock_id = code_cell.get_text(" ", strip=True)
+        parent = code_cell.parent
+        if isinstance(parent, Tag) and parent.name == "tr":
+            preceding_values: list[str] = []
+            for sibling in parent.find_all("td", recursive=False):
+                if sibling is code_cell:
+                    break
+                value = sibling.get_text(" ", strip=True)
+                if value and not re.fullmatch(r"\d{4,6}[A-Z]?", value):
+                    preceding_values.append(value)
+            if preceding_values:
+                current_issuer = _text(preceding_values[-1]) or current_issuer
 
-        code_index = next(
-            (idx for idx, value in enumerate(values) if re.fullmatch(r"\d{4,6}[A-Z]?", value)),
-            None,
+        next_code_cell = (
+            code_cells[code_position + 1]
+            if code_position + 1 < len(code_cells)
+            else None
         )
-        if code_index is not None:
-            if code_index > 0:
-                current_issuer = _text(values[code_index - 1]) or current_issuer
-            pending_code = values[code_index]
-            data = values[code_index + 1 :]
-        elif pending_code is not None and not row.find("th"):
-            data = values
-        else:
-            continue
-
-        date_index = next(
-            (
-                idx
-                for idx, value in enumerate(data)
-                if re.fullmatch(r"(?:\d{3}|\d{4})[/.-]\d{1,2}[/.-]\d{1,2}", value)
-            ),
-            None,
+        fund_row = _mops_fund_row(
+            code_cell,
+            next_code_cell=next_code_cell,
         )
-        if date_index is None or date_index < 1 or len(data) < date_index + 7:
+        if fund_row is None:
             continue
-
-        benchmark = _benchmark_from_rows(rows, index + 1)
+        row, data, date_index = fund_row
+        row_index = rows.index(row)
+        benchmark = _benchmark_from_rows(rows, row_index + 1)
         records.append(
             TaiwanEtfNavRecord(
-                stock_id=pending_code,
+                stock_id=stock_id,
                 issuer_name=current_issuer,
                 fund_name=_text(data[date_index - 1]),
                 nav_date=_roc_date(data[date_index]),
@@ -259,7 +303,6 @@ def parse_mops_etf_nav_html(html: str) -> tuple[TaiwanEtfNavRecord, ...]:
                 benchmark_change_pct=benchmark[5] if benchmark else None,
             )
         )
-        pending_code = None
 
     if not records:
         text = soup.get_text(" ", strip=True)

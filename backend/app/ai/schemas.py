@@ -15,6 +15,34 @@ class AiToolListRead(BaseModel):
     tools: list[AiToolRead]
 
 
+class AiRefreshStatusRead(BaseModel):
+    kind: Literal["ai_refresh_status"] = "ai_refresh_status"
+    version: Literal["omi.ai.refresh.status.v1"] = "omi.ai.refresh.status.v1"
+    job_id: int
+    job_type: Literal["ai.tool_refresh"] = "ai.tool_refresh"
+    status: str
+    operation_status: str
+    evidence_status: str
+    operation: str | None = None
+    target: dict[str, Any] = Field(default_factory=dict)
+    requested_capabilities: list[str] = Field(default_factory=list)
+    produced_capabilities: list[str] = Field(default_factory=list)
+    provider_set: list[str] = Field(default_factory=list)
+    date_range: dict[str, Any] = Field(default_factory=dict)
+    include_today: bool | None = None
+    progress: dict[str, int] = Field(default_factory=dict)
+    result_summary: dict[str, Any] = Field(default_factory=dict)
+    evidence_rebuild_required: bool = False
+    retryable: bool = False
+    error: dict[str, Any] | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime
+    poll_url: str
+    resume: dict[str, Any] | None = None
+
+
 class StrategyProfileRead(BaseModel):
     key: str
     label: str
@@ -81,6 +109,25 @@ class AiAskRequest(BaseModel):
             "Optional v4 continuation input such as a prior fill plan id and selected "
             "fill action ids. Backend revalidates every action."
         ),
+        json_schema_extra={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string"},
+                "plan_action_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 32,
+                    "uniqueItems": True,
+                },
+                "selected_action_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 8,
+                    "uniqueItems": True,
+                },
+            },
+            "additionalProperties": False,
+        },
     )
     payload_level: str | None = Field(
         default=None,

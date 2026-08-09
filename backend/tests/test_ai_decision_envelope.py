@@ -3396,6 +3396,19 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             intraday_outcome["remaining_fill_action"],
             intraday_action["action_id"],
         )
+        partition = canonical["continuation"]["fill_plan"]["partition"]
+        self.assertTrue(partition["complete"])
+        self.assertEqual(
+            partition["selected_capabilities"],
+            ["target.identity", "intraday.bars", "data.freshness"],
+        )
+        self.assertEqual(partition["actions"], ["intraday.bars"])
+        memberships = [
+            group_name
+            for group_name in capability_contract.FILL_PARTITION_GROUPS
+            if "intraday.bars" in partition[group_name]
+        ]
+        self.assertEqual(memberships, ["actions"])
 
     def test_v4_projects_daily_ohlcv_from_canonical_result_before_mode_projection(
         self,

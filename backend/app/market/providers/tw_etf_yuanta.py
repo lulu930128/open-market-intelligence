@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
@@ -14,6 +13,11 @@ from requests.adapters import HTTPAdapter
 
 from app.http_client import new_session
 from app.market.providers._http import DEFAULT_HEADERS, get, post
+from app.market.providers.tw_etf_contracts import (
+    TaiwanEtfInavRecord,
+    TaiwanEtfPcfComponentRecord,
+    TaiwanEtfPcfRecord,
+)
 
 
 YUANTA_ETF_API_URL = "https://etfapi.yuantaetfs.com/ectranslation/api/bridge"
@@ -63,56 +67,6 @@ def _new_yuanta_session() -> requests.Session:
 
 class TaiwanEtfYuantaProviderError(RuntimeError):
     pass
-
-
-@dataclass(frozen=True)
-class TaiwanEtfPcfComponentRecord:
-    source_section: str
-    asset_type: str
-    symbol: str
-    name: str | None
-    name_en: str | None
-    contract_month: str | None
-    quantity: Decimal | None
-    weight_pct: Decimal | None
-    cash_in_lieu: str | None
-    minimum_creation: bool | None
-    order_index: int
-
-
-@dataclass(frozen=True)
-class TaiwanEtfPcfRecord:
-    stock_id: str
-    fund_id: str | None
-    fund_name: str | None
-    full_name: str | None
-    name_en: str | None
-    reference_date: date | None
-    effective_date: date
-    total_net_assets: Decimal | None
-    issued_units: int | None
-    unit_nav: Decimal | None
-    creation_unit: int | None
-    estimated_creation_value: Decimal | None
-    estimated_cash_component: Decimal | None
-    unit_change: int | None
-    actual_cash_component: Decimal | None
-    redemption_method: str
-    source_updated_at: datetime | None
-    components: tuple[TaiwanEtfPcfComponentRecord, ...]
-
-
-@dataclass(frozen=True)
-class TaiwanEtfInavRecord:
-    stock_id: str
-    fund_short_name: str | None
-    investment_area: str | None
-    estimated_nav: Decimal
-    nav_change: Decimal | None
-    market_price: Decimal | None
-    price_change: Decimal | None
-    premium_discount_pct: Decimal | None
-    observed_at: datetime
 
 
 def _text(value: object) -> str | None:

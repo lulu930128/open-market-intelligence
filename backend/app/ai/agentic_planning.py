@@ -43,6 +43,8 @@ US_CAPABILITY_REQUIREMENTS = {
     "intraday.bars": ("us_intraday_trend",),
     "daily.ohlcv": ("us_daily_price",),
     "technical.structure": ("us_daily_price",),
+    "company.profile": ("us_company_profile",),
+    "corporate.actions": ("us_corporate_action",),
     "fundamentals.financials": ("us_sec_company_fact",),
 }
 CRYPTO_CAPABILITY_REFRESH_TOOLS = {
@@ -150,6 +152,7 @@ def _selected_us_plan(
     requested_capabilities: tuple[str, ...],
     requested_trade_date: str | None = None,
     session_scope: str = "regular",
+    force_selected_capabilities: bool = False,
 ) -> dict[str, Any]:
     missing = set(gaps.get("missing") or [])
     steps: list[dict[str, Any]] = []
@@ -166,7 +169,7 @@ def _selected_us_plan(
                     if requirement != "us_intraday_trend"
                 )
         for requirement in requirements:
-            if requirement not in missing:
+            if requirement not in missing and not force_selected_capabilities:
                 continue
             if requirement == "us_intraday_trend":
                 tool_name = "us.read_intraday_trend"
@@ -184,6 +187,12 @@ def _selected_us_plan(
                 }
             elif requirement == "us_sec_company_fact":
                 tool_name = "us.refresh_sec_facts"
+                args = {"symbol": symbol}
+            elif requirement == "us_company_profile":
+                tool_name = "us.refresh_company_profile"
+                args = {"symbol": symbol}
+            elif requirement == "us_corporate_action":
+                tool_name = "us.refresh_corporate_actions"
                 args = {"symbol": symbol}
             else:
                 continue
@@ -352,29 +361,47 @@ def plan_crypto_asset_tools(
 
 def _overnight_daily_refresh_steps(
     overnight_gaps: dict[str, Any] | None,
+    *,
+    stock_id: str,
+    requested_capabilities: tuple[str, ...] = (
+        "cross_market.overnight",
+    ),
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     if not isinstance(overnight_gaps, dict):
+        if not force:
+            return []
+        overnight_gaps = {}
+    refresh_decision = overnight_gaps.get("refresh_decision")
+    should_execute = (
+        bool(refresh_decision.get("should_execute"))
+        if isinstance(refresh_decision, dict)
+        else bool(overnight_gaps.get("refresh_recommended"))
+    )
+    if not should_execute and not force:
         return []
-
-    steps: list[dict[str, Any]] = []
-    for symbol in overnight_gaps.get("refresh_symbols") or []:
-        normalized_symbol = normalize_us_symbol(symbol)
-        if not normalized_symbol:
-            continue
-        steps.append(
-            {
-                "tool": "us.refresh_daily_price",
-                "args": {
-                    "symbol": normalized_symbol,
-                    "provider": "auto",
-                    "outputsize": "compact",
-                    "adjusted": False,
-                },
-                "reason": "美股隔夜影響核心因素資料缺漏或過期，先刷新本機美股日線快取。",
-            }
-        )
-
-    return steps
+    normalized_stock_id = str(stock_id or "").strip()
+    if not normalized_stock_id:
+        return []
+    return [
+        {
+            "tool": "cross_market.refresh_context",
+            "args": {
+                "stock_id": normalized_stock_id,
+                "max_symbols": 8,
+                "provider": "auto",
+                "outputsize": "compact",
+                "max_runtime_seconds": 120,
+                "requested_capabilities": list(
+                    dict.fromkeys(requested_capabilities)
+                ),
+            },
+            "reason": (
+                "Refresh the backend-owned bounded cross-market source set, including "
+                "required US daily prices, proxy benchmarks, and USD/TWD when applicable."
+            ),
+        }
+    ]
 
 
 def _fallback_tw_stock_plan(
@@ -399,7 +426,12 @@ def _fallback_tw_stock_plan(
             }
         )
 
-    steps.extend(_overnight_daily_refresh_steps(overnight_gaps))
+    steps.extend(
+        _overnight_daily_refresh_steps(
+            overnight_gaps,
+            stock_id=stock_id,
+        )
+    )
     reason = "Deterministic fallback selected Taiwan stock refresh from local freshness gaps."
     if overnight_gaps and overnight_gaps.get("refresh_recommended"):
         reason = (
@@ -420,27 +452,45 @@ def _fallback_tw_watchlist_plan(
     gaps: dict[str, Any],
     include_children: bool,
     enabled_only: bool,
+    requested_capabilities: tuple[str, ...] | None = None,
+    force_selected_capabilities: bool = False,
 ) -> dict[str, Any]:
     steps: list[dict[str, Any]] = []
     refresh_params = gaps.get("refresh_params") if isinstance(gaps.get("refresh_params"), dict) else {}
     missing = set(gaps.get("missing") or [])
-    if gaps.get("refresh_recommended") and "market_daily_price" in missing:
+    selected = tuple(
+        capability
+        for capability in requested_capabilities or ()
+        if capability in {"watchlist.ranking", "watchlist.radar"}
+    )
+    should_refresh = bool(
+        gaps.get("refresh_recommended")
+        and "market_daily_price" in missing
+    ) or bool(force_selected_capabilities and selected)
+    if should_refresh:
+        args = {
+            "group_id": group_id,
+            "lookback_days": refresh_params.get("lookback_days", 14),
+            "include_today": refresh_params.get("include_today", False),
+            "include_children": refresh_params.get("include_children", include_children),
+            "enabled_only": refresh_params.get("enabled_only", enabled_only),
+            "sleep_seconds": min(
+                float(refresh_params.get("sleep_seconds", 0.3) or 0.3),
+                0.3,
+            ),
+            "skip_existing_months": refresh_params.get("skip_existing_months", True),
+        }
+        if selected:
+            args["requested_capabilities"] = list(dict.fromkeys(selected))
         steps.append(
             {
                 "tool": "tw.refresh_watchlist_evidence",
-                "args": {
-                    "group_id": group_id,
-                    "lookback_days": refresh_params.get("lookback_days", 14),
-                    "include_today": refresh_params.get("include_today", False),
-                    "include_children": refresh_params.get("include_children", include_children),
-                    "enabled_only": refresh_params.get("enabled_only", enabled_only),
-                    "sleep_seconds": min(
-                        float(refresh_params.get("sleep_seconds", 0.3) or 0.3),
-                        0.3,
-                    ),
-                    "skip_existing_months": refresh_params.get("skip_existing_months", True),
-                },
-                "reason": "Local Taiwan watchlist daily price evidence is stale or incomplete before answering.",
+                "args": args,
+                "reason": (
+                    "Execute the caller-selected bounded Taiwan watchlist fill action."
+                    if force_selected_capabilities and selected
+                    else "Local Taiwan watchlist daily price evidence is stale or incomplete before answering."
+                ),
             }
         )
 
@@ -573,6 +623,7 @@ def plan_us_stock_tools(
     requested_capabilities: tuple[str, ...] | None = None,
     requested_trade_date: str | None = None,
     session_scope: str = "regular",
+    force_selected_capabilities: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     normalized_symbol = normalize_us_symbol(symbol)
@@ -585,6 +636,7 @@ def plan_us_stock_tools(
                 requested_capabilities=requested_capabilities,
                 requested_trade_date=requested_trade_date,
                 session_scope=session_scope,
+                force_selected_capabilities=force_selected_capabilities,
             ),
             default_symbol=normalized_symbol,
             provider="capability_registry",
@@ -636,6 +688,7 @@ def plan_tw_stock_tools(
     budget: dict[str, int],
     can_call_llm: bool,
     requested_capabilities: tuple[str, ...] | None = None,
+    force_selected_capabilities: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     normalized_stock_id = str(stock_id or "").strip()
@@ -649,7 +702,10 @@ def plan_tw_stock_tools(
             if mapping is None:
                 continue
             dataset, tool_name = mapping
-            if dataset not in missing or tool_name in seen_tools:
+            if (
+                dataset not in missing
+                and not force_selected_capabilities
+            ) or tool_name in seen_tools:
                 continue
             seen_tools.add(tool_name)
             steps.append(
@@ -667,12 +723,25 @@ def plan_tw_stock_tools(
                     ),
                 }
             )
-        if (
-            "cross_market.overnight" in requested_capabilities
-            and overnight_gaps
-            and overnight_gaps.get("refresh_recommended")
-        ):
-            steps.extend(_overnight_daily_refresh_steps(overnight_gaps))
+        cross_market_capabilities = tuple(
+            capability
+            for capability in requested_capabilities
+            if capability
+            in {
+                "cross_market.overnight",
+                "cross_market.relations",
+                "cross_market.parity",
+            }
+        )
+        if cross_market_capabilities:
+            steps.extend(
+                _overnight_daily_refresh_steps(
+                    overnight_gaps,
+                    stock_id=normalized_stock_id,
+                    requested_capabilities=cross_market_capabilities,
+                    force=force_selected_capabilities,
+                )
+            )
         return _normalize_plan(
             {
                 "provider": "capability_registry",
@@ -684,7 +753,10 @@ def plan_tw_stock_tools(
         ), warnings
 
     def with_overnight_steps(plan: dict[str, Any]) -> dict[str, Any]:
-        overnight_steps = _overnight_daily_refresh_steps(overnight_gaps)
+        overnight_steps = _overnight_daily_refresh_steps(
+            overnight_gaps,
+            stock_id=normalized_stock_id,
+        )
         if not overnight_steps:
             return plan
         existing = {
@@ -752,6 +824,8 @@ def plan_tw_watchlist_tools(
     budget: dict[str, int],
     include_children: bool,
     enabled_only: bool,
+    requested_capabilities: tuple[str, ...] | None = None,
+    force_selected_capabilities: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     del budget
     return _normalize_plan(
@@ -760,6 +834,8 @@ def plan_tw_watchlist_tools(
             gaps=gaps,
             include_children=include_children,
             enabled_only=enabled_only,
+            requested_capabilities=requested_capabilities,
+            force_selected_capabilities=force_selected_capabilities,
         ),
         default_symbol=str(group_id),
         provider="fallback",

@@ -180,6 +180,11 @@ def _cross_market_signal(
             "description": f"跨市場 context 狀態為 {status}，不納入對齊分數。",
             "context_status": status,
             "snapshot_id": context.get("snapshot_id"),
+            "projection_source": context.get("projection_source"),
+            "source_cutoff_at": context.get("source_cutoff_at"),
+            "materialized_at": context.get("materialized_at"),
+            "materialized_by": context.get("materialized_by"),
+            "payload_hash": context.get("payload_hash"),
             "methodology_version": context.get("methodology_version"),
             "relation_snapshot_version": context.get("relation_snapshot_version"),
             "coverage": context.get("coverage") or {},
@@ -215,6 +220,11 @@ def _cross_market_signal(
         "context_status": status,
         "context_stance": context_stance,
         "snapshot_id": context.get("snapshot_id"),
+        "projection_source": context.get("projection_source"),
+        "source_cutoff_at": context.get("source_cutoff_at"),
+        "materialized_at": context.get("materialized_at"),
+        "materialized_by": context.get("materialized_by"),
+        "payload_hash": context.get("payload_hash"),
         "methodology_version": context.get("methodology_version"),
         "relation_snapshot_version": context.get("relation_snapshot_version"),
         "coverage": context.get("coverage") or {},
@@ -230,10 +240,17 @@ def _cross_market_summary(items: list[Mapping[str, Any]]) -> dict[str, Any]:
         if (context := _cross_market_context(item)) is not None
     ]
     statuses = Counter(str(context.get("status") or "unknown") for context in contexts)
+    materialized = bool(contexts)
     return {
         "enabled": bool(settings.cross_market_radar_display_enabled),
         "mode": "display_only",
         "snapshot_count": len(contexts),
+        "materialization_status": (
+            "materialized_snapshot" if materialized else "not_materialized"
+        ),
+        "limitations": (
+            [] if materialized else ["cross_market_snapshot_not_materialized_for_radar_batch"]
+        ),
         "decision_usable_count": sum(
             bool(context.get("decision_usable")) for context in contexts
         ),
@@ -596,6 +613,7 @@ def build_radar_v2_active_projection_from_db(
             db,
             stock_ids,
             as_of_at=as_of_at,
+            exact_decision_at=as_of_at,
         )
         for item in projected_universe:
             stock_id = str(item.get("stock_id") or "").strip()

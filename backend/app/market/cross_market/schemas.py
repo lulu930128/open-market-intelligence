@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.market.schemas import AdrParityRead
 
@@ -165,6 +165,14 @@ class CrossMarketTargetContextRead(BaseModel):
     methodology_version: str
     relation_snapshot_version: str
     snapshot_id: str
+    projection_source: Literal[
+        "latest_local_cache",
+        "materialized_snapshot",
+    ] = "latest_local_cache"
+    source_cutoff_at: datetime | None = None
+    materialized_at: datetime | None = None
+    materialized_by: str | None = None
+    payload_hash: str | None = None
     summary: CrossMarketContextSummaryRead
     direct_equivalents: list[AdrParityRead] = Field(default_factory=list)
     signals: list[CrossMarketContextSignalRead] = Field(default_factory=list)
@@ -176,3 +184,39 @@ class CrossMarketTargetContextRead(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, str]] = Field(default_factory=list)
     evidence_passport: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_snapshot_lifecycle(self) -> "CrossMarketTargetContextRead":
+        if self.projection_source == "materialized_snapshot":
+            if (
+                self.source_cutoff_at is None
+                or self.materialized_at is None
+                or not str(self.materialized_by or "").strip()
+                or not str(self.payload_hash or "").strip()
+            ):
+                raise ValueError(
+                    "materialized snapshot requires source cutoff, materialized time, "
+                    "materializer, and payload hash"
+                )
+            forbidden = "latest_local_cache_projection_not_materialized_snapshot"
+            passport_limitations = (
+                self.evidence_passport.get("limitations")
+                if isinstance(self.evidence_passport, dict)
+                else []
+            )
+            if forbidden in self.limitations or forbidden in (passport_limitations or []):
+                raise ValueError(
+                    "materialized snapshot cannot retain the latest-cache limitation"
+                )
+        elif any(
+            value is not None
+            for value in (
+                self.materialized_at,
+                self.materialized_by,
+                self.payload_hash,
+            )
+        ):
+            raise ValueError(
+                "latest local-cache projection cannot claim materialized metadata"
+            )
+        return self
