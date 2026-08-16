@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     MarketDailyPrice,
+    ResourceOhlcvBar,
     ResourceQuoteSnapshot,
     TaiwanStockQuoteSnapshot,
     USDailyPrice,
@@ -20,9 +21,7 @@ from app.market.trading_calendar import (
     previous_taiwan_trading_day,
 )
 from app.market.cross_market.relation_store import build_relation_registry_read
-
-
-FX_STALE_AFTER_SECONDS = 72 * 60 * 60
+from app.resource_market.fx_freshness import evaluate_fx_freshness, fx_daily_data_date
 
 
 @dataclass(frozen=True)
@@ -365,11 +364,15 @@ def build_adr_parity_report(
     if adr_row is None:
         missing.append(f"us_daily_price.{mapping.adr_symbol}")
 
-    fx = _latest_usd_twd(db, available_at=data_available_at)
+    adr_trade_date = adr_row.trade_date if adr_row is not None else None
+    fx = _latest_usd_twd(
+        db,
+        aligned_trade_date=adr_trade_date,
+        available_at=data_available_at,
+    )
     if fx is None:
         missing.append("resource_quote_snapshot.USD-TWD")
 
-    adr_trade_date = adr_row.trade_date if adr_row is not None else None
     tw_reference = (
         _latest_tw_daily_at_or_before(
             db,
@@ -436,11 +439,24 @@ def build_adr_parity_report(
     if fx is not None:
         fx_age_seconds = _age_seconds(now, fx["as_of"])
         fx["age_seconds"] = fx_age_seconds
+        fx_freshness = evaluate_fx_freshness(
+            purpose="adr_alignment",
+            now=now,
+            event_time=fx["as_of"],
+            fetched_at=fx.get("fetched_at"),
+            data_date=fx.get("data_date"),
+            expected_data_date=adr_trade_date,
+        )
+        fx["freshness"] = fx_freshness.as_payload()
         if fx["source_symbol"] == "TWD-USD":
             warnings.append("USD/TWD 由 TWD-USD 反向換算。")
-        if fx_age_seconds is not None and fx_age_seconds > FX_STALE_AFTER_SECONDS:
+        if not fx_freshness.usable:
             stale_reasons.append("fx")
-            warnings.append("USD/TWD 匯率快取已超過 72 小時。")
+            warnings.append(
+                "USD/TWD 與 ADR 交易日未對齊："
+                f"匯率 {fx_freshness.actual_data_date}，"
+                f"ADR {fx_freshness.expected_data_date}。"
+            )
 
     if adr_trade_date is not None and tw_reference is not None:
         expected_tw_reference_date = previous_taiwan_trading_day(
@@ -471,7 +487,14 @@ def build_adr_parity_report(
         },
         {"type": "table", "name": "us_daily_price"},
         {"type": "table", "name": "market_daily_price"},
-        {"type": "table", "name": "resource_quote_snapshot"},
+        {
+            "type": "table",
+            "name": (
+                fx.get("source_resource")
+                if fx is not None
+                else "resource_quote_snapshot"
+            ),
+        },
         {"type": "derived", "name": "app.market.adr_parity"},
     ]
     if mapping_resolution.relation_id is not None:
@@ -511,6 +534,7 @@ def build_adr_parity_report(
         "fx_provider": fx["provider"] if fx is not None else None,
         "fx_as_of": _iso(fx["as_of"] if fx is not None else None),
         "fx_age_seconds": fx.get("age_seconds") if fx is not None else None,
+        "fx_freshness": fx.get("freshness") if fx is not None else None,
         "tw_reference_price_twd": _round(tw_reference_price_twd),
         "tw_reference_trade_date": _iso(
             tw_reference.trade_date if tw_reference is not None else None
@@ -548,6 +572,7 @@ def build_adr_parity_report(
                 )
             ),
             "fx_is_current": bool(fx is not None and "fx" not in stale_reasons),
+            "fx": fx.get("freshness") if fx is not None else None,
             "tw_reference_is_current": bool(
                 tw_reference is not None and "tw_reference" not in stale_reasons
             ),
@@ -578,6 +603,8 @@ def build_adr_parity_report(
                         "provider": fx["provider"],
                         "event_time": _iso(fx["as_of"]),
                         "fetched_at": _iso(fx.get("fetched_at")),
+                        "data_date": _iso(fx.get("data_date")),
+                        "source_resource": fx.get("source_resource"),
                         "usd_twd": _round(fx["usd_twd"], 6),
                     }
                     if fx is not None
@@ -749,8 +776,44 @@ def _latest_tw_comparison(
 def _latest_usd_twd(
     db: Session,
     *,
+    aligned_trade_date: date | None = None,
     available_at: datetime | None = None,
 ) -> dict[str, Any] | None:
+    if aligned_trade_date is not None:
+        for symbol in ("USD-TWD", "TWD-USD"):
+            query = db.query(ResourceOhlcvBar).filter(
+                ResourceOhlcvBar.symbol == symbol,
+                ResourceOhlcvBar.interval == "1d",
+            )
+            if available_at is not None:
+                query = query.filter(ResourceOhlcvBar.fetched_at <= available_at)
+            rows = (
+                query.order_by(
+                    ResourceOhlcvBar.bar_time.desc(),
+                    ResourceOhlcvBar.fetched_at.desc(),
+                    ResourceOhlcvBar.id.desc(),
+                )
+                .limit(160)
+                .all()
+            )
+            for row in rows:
+                data_date = fx_daily_data_date(row.bar_time, row.raw_payload_json)
+                if (
+                    data_date != aligned_trade_date
+                    or not _positive(row.close_price)
+                ):
+                    continue
+                close = float(row.close_price)
+                return {
+                    "usd_twd": close if symbol == "USD-TWD" else 1 / close,
+                    "source_symbol": row.symbol,
+                    "provider": row.provider,
+                    "as_of": row.bar_time,
+                    "fetched_at": row.fetched_at,
+                    "data_date": data_date,
+                    "source_resource": "resource_ohlcv_bar.1d",
+                }
+
     for symbol in ("USD-TWD", "TWD-USD"):
         query = db.query(ResourceQuoteSnapshot).filter(
             ResourceQuoteSnapshot.symbol == symbol
@@ -779,6 +842,8 @@ def _latest_usd_twd(
                 "provider": row.provider,
                 "as_of": row.event_time or row.fetched_at,
                 "fetched_at": row.fetched_at,
+                "data_date": None,
+                "source_resource": "resource_quote_snapshot",
             }
     return None
 

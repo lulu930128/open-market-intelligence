@@ -51,6 +51,31 @@ class Settings(BaseSettings):
 
     database_url: str = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
     runtime_lock_dir: Path = DEFAULT_DB_PATH.parent / ".runtime"
+    us_sec_submissions_cache_path: Path = (
+        DEFAULT_DB_PATH.parent / "us_sec_submissions.json"
+    )
+    us_sec_ownership_cache_path: Path = (
+        DEFAULT_DB_PATH.parent / "cache" / "us_sec" / "ownership"
+    )
+    us_sec_13f_warehouse_path: Path = (
+        DEFAULT_DB_PATH.parent / "cache" / "us_sec" / "ownership" / "warehouse" / "form-13f"
+    )
+    us_sec_13f_projection_temp_path: Path = (
+        DEFAULT_DB_PATH.parent / "cache" / "us_sec" / "ownership" / "projection-tmp"
+    )
+    us_sec_13f_projection_memory_limit: str = "1536MB"
+    us_sec_ownership_observation_hours: int = 24
+    us_sec_form4_max_filings_per_symbol: int = 100
+    us_sec_ownership_max_archive_bytes: int = 512 * 1024 * 1024
+    us_sec_ownership_max_uncompressed_bytes: int = 4 * 1024 * 1024 * 1024
+    us_sec_ownership_storage_budget_gb: float = 20.0
+    us_sec_13f_storage_budget_gb: float = 32.0
+    us_sec_ownership_min_free_space_gb: float = 5.0
+    us_sec_13f_parquet_compression: str = "zstd"
+    openfigi_api_key: str | None = None
+    openfigi_timeout_seconds: int = 30
+    openfigi_mapping_version: str = "openfigi.v3"
+    openfigi_max_jobs_per_sync: int = 5000
     runtime_schema_lock_timeout_seconds: float = 60.0
 
     enable_scheduler: bool = False
@@ -64,6 +89,9 @@ class Settings(BaseSettings):
     technical_macd_fast_period: int = 12
     technical_macd_slow_period: int = 26
     technical_macd_signal_period: int = 9
+    technical_pvo_fast_period: int = 12
+    technical_pvo_slow_period: int = 26
+    technical_pvo_signal_period: int = 9
     technical_rsi_period: int = 14
     technical_atr_period: int = 14
     technical_adx_period: int = 14
@@ -81,6 +109,7 @@ class Settings(BaseSettings):
     technical_support_resistance_period: int = 20
     technical_max_gap_days: int = 10
     technical_volume_ratio_threshold: float = 1.5
+    technical_breakout_volume_ratio_threshold: float = 1.2
     technical_near_level_threshold_pct: float = 2.0
     technical_adx_trend_threshold: float = 25.0
     technical_rsi_bull_min: float = 50.0
@@ -94,10 +123,17 @@ class Settings(BaseSettings):
     technical_atr_expansion_multiplier: float = 1.2
     technical_atr_expansion_min_pct: float = 2.0
     technical_bollinger_squeeze_bandwidth_pct: float = 8.0
+    technical_canonical_v2_active: bool = True
 
     scheduler_market_refresh_time: str = "15:15"
     scheduler_market_refresh_lookback_days: int = 7
     scheduler_market_refresh_sleep_seconds: float = 0.2
+    enable_market_daily_repair_scheduler: bool = True
+    scheduler_market_daily_repair_interval_minutes: int = 30
+    scheduler_market_daily_repair_base_backoff_seconds: int = 900
+    scheduler_market_daily_repair_max_backoff_seconds: int = 7200
+    scheduler_market_daily_repair_max_attempts: int = 4
+    scheduler_market_daily_repair_provider_cooldown_seconds: int = 1800
     scheduler_market_chip_refresh_time: str = "15:10"
     scheduler_market_chip_margin_refresh_time: str = "21:10"
     enable_market_chip_margin_scheduler: bool = True

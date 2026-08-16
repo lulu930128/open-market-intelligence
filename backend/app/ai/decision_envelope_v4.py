@@ -1007,8 +1007,14 @@ def _emergency_compact_envelope(envelope: dict[str, Any]) -> None:
             for key in (
                 "version",
                 "required",
+                "unsupported_capabilities",
                 "output",
                 "max_response_bytes",
+                "requested_max_response_bytes",
+                "default_max_response_bytes",
+                "effective_max_response_bytes",
+                "max_response_ceiling_bytes",
+                "response_budget_source",
             )
             if key in selection
         },
@@ -1198,6 +1204,9 @@ def _hard_cap_envelope(
         "passport": {
             "version": passport.get("version"),
             "trust_level": passport.get("trust_level"),
+            "status_dimensions": deepcopy(
+                _dict(passport.get("status_dimensions"))
+            ),
             "decision_readiness": {
                 key: deepcopy(passport_readiness[key])
                 for key in ("status", "decision_ready", "quality_ref")
@@ -1236,6 +1245,9 @@ def _hard_cap_envelope(
             )
             if key in quality
         },
+        "status_dimensions": deepcopy(
+            _dict(evidence.get("status_dimensions"))
+        ),
     }
     compact_evidence["quality"]["capabilities"] = compact_quality_capabilities
 
@@ -1256,6 +1268,11 @@ def _hard_cap_envelope(
                 "output_override_reason",
                 "realtime_policy",
                 "max_response_bytes",
+                "requested_max_response_bytes",
+                "default_max_response_bytes",
+                "effective_max_response_bytes",
+                "max_response_ceiling_bytes",
+                "response_budget_source",
             )
             if key in selection
         },
@@ -1408,6 +1425,217 @@ def _summary_dict(
         for key in fields
         if key in value
     }
+
+
+def _brief_technical_indicator_point(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return _summary_dict(
+        value,
+        fields=(
+            "time",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "algorithm_version",
+            "price_basis",
+            "ma",
+            "volume_ma",
+            "ema",
+            "macd",
+            "rsi",
+            "atr",
+            "adx",
+            "roc",
+            "mfi",
+            "bollinger",
+            "kd",
+            "pvo",
+            "support_resistance",
+        ),
+    )
+
+
+def _brief_technical_advanced_summary(
+    capability_id: str,
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    common = _summary_dict(
+        value,
+        fields=(
+            "kind",
+            "algorithm_version",
+            "method",
+            "status",
+            "decision_usable",
+            "as_of",
+            "price_basis",
+            "source_granularity",
+            "confidence",
+            "corporate_action",
+            "missing",
+            "warnings",
+            "limitations",
+            "source_refs",
+        ),
+    )
+    if capability_id == "technical.swings":
+        common.update(
+            {
+                **_summary_dict(value, fields=("parameters", "confirmed_count")),
+                "pivots": _summary_rows(
+                    list(value.get("pivots") or [])[-4:],
+                    fields=(
+                        "evidence_id",
+                        "type",
+                        "price",
+                        "pivot_time",
+                        "confirmed_at",
+                        "status",
+                        "price_basis",
+                    ),
+                    limit=4,
+                ),
+                "provisional": _summary_rows(
+                    list(value.get("provisional") or [])[-2:],
+                    fields=(
+                        "evidence_id",
+                        "type",
+                        "price",
+                        "pivot_time",
+                        "status",
+                        "price_basis",
+                    ),
+                    limit=2,
+                ),
+            }
+        )
+    elif capability_id == "technical.fibonacci":
+        common.update(
+            {
+                **_summary_dict(
+                    value,
+                    fields=(
+                        "direction",
+                        "anchor_ids",
+                        "anchor_start_id",
+                        "anchor_end_id",
+                        "confluence_method",
+                    ),
+                ),
+                "anchor_start": _summary_dict(
+                    value.get("anchor_start"),
+                    fields=("evidence_id", "type", "price", "pivot_time", "confirmed_at"),
+                ),
+                "anchor_end": _summary_dict(
+                    value.get("anchor_end"),
+                    fields=("evidence_id", "type", "price", "pivot_time", "confirmed_at"),
+                ),
+                "levels": _summary_rows(
+                    value.get("levels"),
+                    fields=("kind", "ratio", "price", "price_basis"),
+                    limit=8,
+                ),
+            }
+        )
+    elif capability_id == "technical.divergence":
+        common.update(
+            {
+                **_summary_dict(value, fields=("hidden_divergence_enabled",)),
+                "divergences": _summary_rows(
+                    value.get("divergences"),
+                    fields=(
+                        "type",
+                        "direction",
+                        "first_pivot_id",
+                        "second_pivot_id",
+                        "price_change_pct",
+                        "indicator",
+                        "indicator_change",
+                        "bars_apart",
+                        "status",
+                    ),
+                    limit=4,
+                ),
+            }
+        )
+    elif capability_id == "technical.breakout":
+        common.update(
+            _summary_dict(
+                value,
+                fields=(
+                    "state",
+                    "quality",
+                    "level",
+                    "level_evidence",
+                    "bar_time",
+                    "high",
+                    "low",
+                    "close",
+                    "close_distance_pct",
+                    "wick_rejected",
+                    "volume_ratio",
+                    "pvo",
+                    "previously_confirmed",
+                    "suppressed",
+                ),
+            )
+        )
+    elif capability_id == "technical.volume_profile":
+        common.update(
+            {
+                **_summary_dict(
+                    value,
+                    fields=(
+                        "lookback_bars",
+                        "source_row_count",
+                        "poc",
+                        "val",
+                        "vah",
+                        "value_area_pct",
+                    ),
+                ),
+                "high_volume_nodes": _summary_rows(
+                    value.get("high_volume_nodes"),
+                    fields=("index", "low", "high", "mid", "volume", "volume_pct", "in_value_area"),
+                    limit=3,
+                ),
+                "bins_included": 0,
+            }
+        )
+    elif capability_id == "technical.anchored_vwap":
+        common.update(
+            _summary_dict(
+                value,
+                fields=(
+                    "anchor_evidence_id",
+                    "anchor_time",
+                    "anchor_price",
+                    "value",
+                    "cumulative_volume",
+                    "used_bars",
+                ),
+            )
+        )
+    elif capability_id == "technical.relative_strength":
+        common.update(
+            _summary_dict(
+                value,
+                fields=(
+                    "benchmark",
+                    "aligned_trade_date_count",
+                    "stock_latest_date",
+                    "benchmark_latest_date",
+                    "horizons",
+                    "sector",
+                    "freshness",
+                ),
+            )
+        )
+    return {**common, "projection_level": "summary"}
 
 
 def _brief_capability_summary(
@@ -1674,10 +1902,12 @@ def _brief_capability_summary(
     if capability_id == "technical.structure":
         analysis = _dict(value.get("analysis"))
         levels = _dict(value.get("levels"))
+        advanced = _dict(value.get("advanced_shadow"))
         return {
             **_summary_dict(
                 value,
                 fields=(
+                    "contract_version",
                     "as_of",
                     "trade_date",
                     "latest_price",
@@ -1718,8 +1948,96 @@ def _brief_capability_summary(
                 )
                 if key in levels
             },
+            "advanced_shadow": {
+                **_summary_dict(
+                    advanced,
+                    fields=(
+                        "version",
+                        "algorithm_version",
+                        "mode",
+                        "active_score_impact",
+                        "status",
+                        "decision_usable",
+                        "as_of",
+                        "price_basis",
+                        "decision_snapshot",
+                        "momentum_confirmation",
+                        "volatility_context",
+                        "breakout_context",
+                        "fibonacci_context",
+                        "cost_context",
+                        "relative_strength",
+                        "levels",
+                        "invalidation",
+                        "counter_evidence",
+                        "corporate_action",
+                        "warnings",
+                        "limitations",
+                    ),
+                ),
+                "projection_level": "summary",
+            }
+            if advanced
+            else None,
             "projection_level": "summary",
         }
+    if capability_id == "technical.indicators":
+        timeframes = _dict(value.get("timeframes"))
+        summarized_timeframes: dict[str, Any] = {}
+        for timeframe in ("daily", "weekly", "monthly"):
+            snapshot = _dict(timeframes.get(timeframe))
+            if not snapshot:
+                continue
+            summarized_timeframes[timeframe] = {
+                **_summary_dict(
+                    snapshot,
+                    fields=(
+                        "timeframe",
+                        "period",
+                        "decision_snapshot",
+                        "available_bars",
+                        "completed_bars",
+                        "warmup",
+                    ),
+                ),
+                "completed": _brief_technical_indicator_point(snapshot.get("completed")),
+                "current_partial": _brief_technical_indicator_point(
+                    snapshot.get("current_partial")
+                ),
+            }
+        return {
+            **_summary_dict(
+                value,
+                fields=(
+                    "kind",
+                    "schema_version",
+                    "status",
+                    "stock_id",
+                    "as_of",
+                    "price_basis",
+                    "currency",
+                    "price_unit",
+                    "methods",
+                    "corporate_action",
+                    "missing",
+                    "warnings",
+                    "source_refs",
+                    "freshness",
+                ),
+            ),
+            "timeframes": summarized_timeframes,
+            "projection_level": "summary",
+        }
+    if capability_id in {
+        "technical.swings",
+        "technical.fibonacci",
+        "technical.divergence",
+        "technical.breakout",
+        "technical.volume_profile",
+        "technical.anchored_vwap",
+        "technical.relative_strength",
+    }:
+        return _brief_technical_advanced_summary(capability_id, value)
     if capability_id == "chips.institutional":
         return {
             **_summary_dict(
@@ -2023,6 +2341,21 @@ def _apply_response_budget_error(
                 "selection": {
                     "required": required,
                     "max_response_bytes": max_bytes,
+                    "requested_max_response_bytes": projection.get(
+                        "requested_max_response_bytes"
+                    ),
+                    "default_max_response_bytes": projection.get(
+                        "default_max_response_bytes"
+                    ),
+                    "effective_max_response_bytes": projection.get(
+                        "effective_max_response_bytes"
+                    ),
+                    "max_response_ceiling_bytes": projection.get(
+                        "max_response_ceiling_bytes"
+                    ),
+                    "response_budget_source": projection.get(
+                        "response_budget_source"
+                    ),
                 }
             },
             "continuation": {},
@@ -2167,12 +2500,16 @@ def _compact_to_required_core(
         ).items()
         if capability_id in required_set and isinstance(item, dict)
     }
+    compact_status_dimensions = deepcopy(
+        _dict(evidence.get("status_dimensions"))
+    )
     evidence.clear()
     evidence.update(
         {
             "data": deepcopy(required_core),
             "capability_status": compact_status,
             "quality": compact_quality,
+            "status_dimensions": compact_status_dimensions,
             "manifest": compact_manifest,
             "freshness_by_capability": compact_freshness,
             "source_refs": [],
@@ -2194,9 +2531,15 @@ def _compact_to_required_core(
                 "version",
                 "required",
                 "optional",
+                "unsupported_capabilities",
                 "output",
                 "realtime_policy",
                 "max_response_bytes",
+                "requested_max_response_bytes",
+                "default_max_response_bytes",
+                "effective_max_response_bytes",
+                "max_response_ceiling_bytes",
+                "response_budget_source",
             )
             if key in selection_contract
         },
@@ -2394,11 +2737,40 @@ def _fit_budget(
     *,
     selection: dict[str, Any],
 ) -> dict[str, Any]:
-    max_bytes = int(selection.get("max_response_bytes") or 32_768)
+    budget_source = str(
+        selection.get("response_budget_source")
+        or (
+            "caller_explicit"
+            if selection.get("requested_max_response_bytes") is not None
+            else "payload_default_adaptive"
+        )
+    )
+    requested_max_bytes = selection.get("requested_max_response_bytes")
+    default_max_bytes = int(
+        selection.get("default_max_response_bytes")
+        or selection.get("max_response_bytes")
+        or 32_768
+    )
+    max_bytes = int(
+        selection.get("effective_max_response_bytes")
+        or selection.get("max_response_bytes")
+        or default_max_bytes
+    )
+    ceiling_bytes = int(
+        selection.get("max_response_ceiling_bytes")
+        or max_bytes
+    )
     pre_projection_bytes = _json_bytes(envelope)
     projection = {
         "version": "omi.response.projection.v1",
         "max_response_bytes": max_bytes,
+        "requested_max_response_bytes": requested_max_bytes,
+        "default_max_response_bytes": default_max_bytes,
+        "effective_max_response_bytes": max_bytes,
+        "max_response_ceiling_bytes": ceiling_bytes,
+        "response_budget_source": budget_source,
+        "adaptation_reason": None,
+        "serialized_size_basis": "final_envelope_utf8_json",
         "truncated": False,
         "trimmed_fields": [],
         "trimmed_lists": {},
@@ -2410,6 +2782,7 @@ def _fit_budget(
         "budget_met": False,
     }
     envelope["projection"] = projection
+    initial_projected_bytes = _json_bytes(envelope)
 
     def mark_field(path: str) -> None:
         fields = projection["trimmed_fields"]
@@ -2445,6 +2818,67 @@ def _fit_budget(
         for capability_id in required
         if capability_id in data
     }
+    minimum_candidate = deepcopy(envelope)
+    _compact_to_required_core(
+        minimum_candidate,
+        required_core=required_core,
+        required=required,
+        max_bytes=ceiling_bytes,
+    )
+    minimum_required_envelope_bytes = _json_bytes(minimum_candidate)
+    if (
+        budget_source == "payload_default_adaptive"
+        and minimum_required_envelope_bytes > default_max_bytes
+    ):
+        rounded_required_bytes = (
+            (minimum_required_envelope_bytes + 4_095) // 4_096
+        ) * 4_096
+        max_bytes = min(
+            ceiling_bytes,
+            max(default_max_bytes, rounded_required_bytes),
+        )
+        if max_bytes > default_max_bytes:
+            projection["adaptation_reason"] = (
+                "minimum_required_envelope_exceeds_payload_default"
+            )
+    elif (
+        budget_source == "payload_default_adaptive"
+        and initial_projected_bytes > default_max_bytes
+    ):
+        # Absorb bounded final-envelope/provenance overhead near the payload
+        # default.  Large optional payloads still use the existing trimming
+        # path instead of silently expanding to the ceiling.
+        max_bytes = min(
+            ceiling_bytes,
+            default_max_bytes + 8_192,
+        )
+        if max_bytes > default_max_bytes:
+            projection["adaptation_reason"] = (
+                "bounded_final_envelope_overhead"
+            )
+    execution = _dict(envelope.get("execution"))
+    selection_contract = _dict(execution.get("selection"))
+    selection_contract.update(
+        {
+            "max_response_bytes": max_bytes,
+            "requested_max_response_bytes": requested_max_bytes,
+            "default_max_response_bytes": default_max_bytes,
+            "effective_max_response_bytes": max_bytes,
+            "max_response_ceiling_bytes": ceiling_bytes,
+            "response_budget_source": budget_source,
+        }
+    )
+    execution["selection"] = selection_contract
+    envelope["execution"] = execution
+    projection.update(
+        {
+            "max_response_bytes": max_bytes,
+            "effective_max_response_bytes": max_bytes,
+            "minimum_required_envelope_bytes": (
+                minimum_required_envelope_bytes
+            ),
+        }
+    )
     core_payload_bytes = _json_bytes(
         {
             "target": _brief_capability_summary(
@@ -2770,6 +3204,7 @@ def _fit_budget(
                     "version",
                     "required",
                     "optional",
+                    "unsupported_capabilities",
                     "output",
                     "requested_output",
                     "effective_output",
@@ -2780,6 +3215,11 @@ def _fit_budget(
                     "capability_origins",
                     "inference_policy",
                     "max_response_bytes",
+                    "requested_max_response_bytes",
+                    "default_max_response_bytes",
+                    "effective_max_response_bytes",
+                    "max_response_ceiling_bytes",
+                    "response_budget_source",
                 )
                 if key in selection_contract
             },
@@ -3080,6 +3520,20 @@ def _rejected_envelope(
         )
         if key in passport
     }
+    rejected_status_dimensions = (
+        data_quality_contract.status_dimensions_from_quality_contract(
+            {
+                "status": "blocked",
+                "decision_ready": False,
+                "blocked_required_capabilities": ["target.identity"],
+                "issues": [{"code": "canonical_request_not_completed"}],
+            }
+        )
+    )
+    evidence["status_dimensions"] = rejected_status_dimensions
+    evidence["passport"]["status_dimensions"] = deepcopy(
+        rejected_status_dimensions
+    )
     evidence["manifest"] = {
         "version": "omi.data.manifest.v1",
         "capabilities": [

@@ -202,7 +202,11 @@ class OvernightImpactTests(unittest.TestCase):
             {"XLK": -2.0, "SOXX": -3.5, "IGV": -1.2},
         )
 
-        report = build_us_overnight_impact_report(db=self.db, stock_id="2330")
+        with patch(
+            "app.market.overnight_impact.expected_us_daily_price_date",
+            return_value=date(2026, 6, 5),
+        ):
+            report = build_us_overnight_impact_report(db=self.db, stock_id="2330")
 
         self.assertEqual(report["kind"], "us_overnight_tw_impact")
         self.assertIn("semiconductor", report["tw_mapping"]["profiles"])
@@ -274,6 +278,39 @@ class OvernightImpactTests(unittest.TestCase):
         self.assertGreater(report["weighted_change_pct"], 0)
         self.assertIn(report["stance"], {"risk_on", "strong_risk_on"})
         self.assertNotIn("^SOX", {factor["symbol"] for factor in report["factors"]})
+
+    def test_current_core_factors_are_not_suppressed_by_missing_optional_baskets(
+        self,
+    ) -> None:
+        add_stock(self.db, stock_id="3711", stock_name="日月光投控", industry="24")
+        add_core_us_market(self.db)
+
+        with patch(
+            "app.market.overnight_impact.expected_us_daily_price_date",
+            return_value=date(2026, 6, 5),
+        ):
+            report = build_us_overnight_impact_report(
+                db=self.db,
+                stock_id="3711",
+                suppress_stale_signal=True,
+            )
+
+        self.assertTrue(report["freshness"]["is_current"])
+        self.assertEqual(report["freshness"]["valid_weight"], 1.0)
+        self.assertNotEqual(report["stance"], "unknown")
+        self.assertIsNotNone(report["weighted_change_pct"])
+        self.assertEqual(report["missing"], [])
+        self.assertEqual(report["confidence"], "medium")
+        basket_coverage = report["freshness"]["optional_basket_coverage"]
+        self.assertEqual(basket_coverage["requested_count"], 4)
+        self.assertEqual(basket_coverage["available_count"], 0)
+        self.assertFalse(basket_coverage["is_complete"])
+        self.assertIn(
+            "us_watchlist_group.半導體_GPU_ASIC",
+            basket_coverage["missing"],
+        )
+        self.assertTrue(any("加值主題籃子未完整" in item for item in report["warnings"]))
+        self.assertEqual(report["evidence_passport"]["data_freshness"], "current")
 
     def test_stale_overnight_report_suppresses_directional_signal(self) -> None:
         add_stock(self.db, stock_id="1101", stock_name="台泥", industry="水泥工業")
@@ -376,7 +413,7 @@ class OvernightImpactTests(unittest.TestCase):
         add_stock(self.db, stock_id="2330", stock_name="台積電", industry="24")
         add_core_us_market(self.db)
         now = datetime(2026, 6, 9, 8, tzinfo=timezone.utc)
-        stale_fx_at = now - timedelta(days=4)
+        stale_fx_at = now - timedelta(days=5)
         self.db.add(
             ResourceQuoteSnapshot(
                 provider="yahoo_chart",
@@ -435,7 +472,7 @@ class OvernightImpactTests(unittest.TestCase):
         add_stock(self.db, stock_id="2330", stock_name="台積電", industry="24")
         add_core_us_market(self.db)
         now = datetime(2026, 6, 9, 8, tzinfo=timezone.utc)
-        stale_fx_at = now - timedelta(days=4)
+        stale_fx_at = now - timedelta(days=5)
         self.db.add_all(
             [
                 ResourceQuoteSnapshot(

@@ -719,6 +719,8 @@ def backfill_market_daily_metrics(
             resolved_include_today,
             resolved_sleep_seconds,
             skip_existing,
+            None,
+            None,
         ),
     )
 

@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster
 from app.ai.evidence_passport import build_evidence_passport
-from app.market import indicator_service
 from app.market import service as market_service
 from app.market.intraday import get_intraday_trend
 from app.market.stock_volume_pace import build_tw_stock_volume_pace
@@ -16,6 +15,13 @@ from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     get_technical_analysis_parameters,
 )
+from app.market.technical_evidence import classify_latest_period
+from app.market.technical_indicator_gateway import (
+    active_engine_contract,
+    calculate_active_indicator_points,
+    calculate_active_latest_daily_indicator,
+)
+from app.market.technical_intraday_projection import build_current_partial_daily_bar
 from app.market.technical_structure import (
     build_moving_average_structure,
     build_price_range_signals,
@@ -222,11 +228,9 @@ def _daily_indicator(
     parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any] | None:
     technical_parameters = parameters or get_technical_analysis_parameters()
-    return indicator_service.calculate_latest_daily_indicator(
+    return calculate_active_latest_daily_indicator(
         db=db,
         stock_id=stock_id,
-        ma_windows=technical_parameters.ma_windows_text,
-        volume_ma_windows=technical_parameters.volume_ma_windows_text,
         parameters=technical_parameters,
     )
 
@@ -247,14 +251,24 @@ def _aggregated_indicator(
         ensure_history=False,
     )
     points = chart.get("points") or []
-    indicators = indicator_service.calculate_indicator_points_from_ohlc_points(
+    indicators = calculate_active_indicator_points(
         points,
-        ma_windows=technical_parameters.ma_windows_text,
-        volume_ma_windows=technical_parameters.volume_ma_windows_text,
-        max_gap_days=None,
         parameters=technical_parameters,
     )
-    return (indicators[-1] if indicators else None), chart
+    period = classify_latest_period(
+        points,
+        timeframe=timeframe,
+        latest_observation_date=chart.get("latest_data_date"),
+    )
+    current_partial = None
+    completed = indicators[-1] if indicators else None
+    if period["status"] == "current_partial" and indicators:
+        current_partial = indicators[-1]
+        completed = indicators[-2] if len(indicators) > 1 else None
+    chart["period"] = period
+    chart["current_partial_indicator"] = current_partial
+    chart["decision_snapshot"] = "completed"
+    return completed, chart
 
 
 def _daily_context(
@@ -270,6 +284,75 @@ def _daily_context(
         "indicator": latest_indicator,
         "institutional": latest_institutional,
         "margin": latest_margin,
+    }
+
+
+def _current_partial_daily_indicator(
+    *,
+    db: Session,
+    stock_id: str,
+    intraday_points: list[dict[str, Any]],
+    market_session: dict[str, Any],
+    parameters: TechnicalAnalysisParameters,
+) -> dict[str, Any] | None:
+    rows = market_service.list_stock_daily_history(
+        db=db,
+        stock_id=stock_id,
+        limit=400,
+        ascending=True,
+    )
+    completed_points = [
+        {
+            "time": row.trade_date,
+            "open": row.open_price,
+            "high": row.high_price,
+            "low": row.low_price,
+            "close": row.close_price,
+            "volume": row.trade_volume,
+            "price_change": row.price_change,
+        }
+        for row in rows
+    ]
+    session_date = market_session.get("date")
+    if not isinstance(session_date, date):
+        return None
+    partial_bar = build_current_partial_daily_bar(
+        completed_daily_points=completed_points,
+        intraday_points=intraday_points,
+        quote=None,
+        session_date=session_date,
+        session_phase=(
+            "post_close" if market_session.get("is_after_close") else "regular"
+        ),
+    )
+    if partial_bar is None:
+        return None
+    calculated = calculate_active_indicator_points(
+        [*completed_points, partial_bar],
+        parameters=parameters,
+    )
+    if not calculated:
+        return None
+    return {
+        **calculated[-1],
+        "open": partial_bar.get("open"),
+        "high": partial_bar.get("high"),
+        "low": partial_bar.get("low"),
+        "bar_status": partial_bar.get("bar_status"),
+        "event_time": partial_bar.get("event_time"),
+        "source": partial_bar.get("source"),
+        "volume_semantics": partial_bar.get("volume_semantics"),
+        "indicator_semantics": {
+            "price_based": "intraday_partial",
+            "range_based": "intraday_partial",
+            "volume_based": "partial_cumulative_volume",
+        },
+        "decision_usable": False,
+        "volume_based_decision_usable": False,
+        "warnings": [
+            "This is an intraday provisional daily indicator observation; completed daily evidence remains the decision snapshot.",
+            "Volume-based values use cumulative partial-session volume and are not finalized daily indicators.",
+        ],
     }
 
 
@@ -399,6 +482,10 @@ def _today_market_session() -> dict[str, Any]:
 
 def _with_evidence_passport(report: dict[str, Any]) -> dict[str, Any]:
     wrapped = dict(report)
+    engine = active_engine_contract()
+    wrapped["algorithm_version"] = engine["algorithm_version"]
+    wrapped["indicator_engine"] = engine
+    wrapped.setdefault("data", {})["indicator_engine"] = engine
     wrapped["evidence_passport"] = build_evidence_passport(
         kind=str(wrapped.get("kind") or "technical_report"),
         as_of=_report_as_of(wrapped),
@@ -845,6 +932,17 @@ def _build_today_report(
         latest_point.get("time"),
         market_session["date"],
     )
+    current_partial_indicator = (
+        _current_partial_daily_indicator(
+            db=db,
+            stock_id=stock_id,
+            intraday_points=points,
+            market_session=market_session,
+            parameters=technical_parameters,
+        )
+        if latest_in_current_session
+        else None
+    )
     opening_phase = (
         minutes_from_open is None
         or minutes_from_open < OPENING_OBSERVATION_MINUTES
@@ -1044,6 +1142,8 @@ def _build_today_report(
                 "volume_pace": volume_pace,
             },
             "daily_background": indicator,
+            "current_partial_indicator": current_partial_indicator,
+            "decision_snapshot": "completed",
             "market_session": {
                 **{key: _json_value(value) for key, value in market_session.items()},
                 "latest_daily_date": _json_value(latest_daily_date),
@@ -1132,6 +1232,7 @@ def _build_daily_report(
     analysis_price_time = indicator.get("time")
     analysis_price_source = "market_daily_price"
     analysis_is_intraday = False
+    current_partial_indicator: dict[str, Any] | None = None
     intraday_context: dict[str, Any] | None = None
     market_session = _today_market_session()
     indicator_time = indicator.get("time")
@@ -1189,6 +1290,13 @@ def _build_daily_report(
             analysis_price_time = latest_intraday_time
             analysis_price_source = str(intraday.get("source") or "intraday")
             analysis_is_intraday = True
+            current_partial_indicator = _current_partial_daily_indicator(
+                db=db,
+                stock_id=stock_id,
+                intraday_points=intraday_points,
+                market_session=market_session,
+                parameters=technical_parameters,
+            )
         elif latest_intraday_point is not None:
             warnings.append(
                 "Latest intraday point is not from the current Taiwan trading session; daily close remains the analysis price."
@@ -1449,7 +1557,7 @@ def _build_daily_report(
     if analysis_is_intraday:
         badges.append(_badge("盤中價 × 已收盤指標", "warning"))
         warnings.append(
-            "Current-session price is provisional; MA, RSI, MACD, ADX, volume, and flow indicators remain finalized daily values."
+            "Decision fields use finalized daily indicators; current_partial_indicator exposes the separate provisional daily calculation."
         )
     summary_parts = [
         current_state["position"]["label"],
@@ -1473,6 +1581,8 @@ def _build_daily_report(
         "badges": badges,
         "data": {
             "daily_indicator": indicator,
+            "current_partial_indicator": current_partial_indicator,
+            "decision_snapshot": "completed",
             "market": _stock_market(db=db, stock_id=stock_id),
             "change_pct": analysis_change_pct,
             "current_state": current_state,
@@ -1521,7 +1631,7 @@ def _build_aggregated_report(
         timeframe=timeframe,
         parameters=technical_parameters,
     )
-    return _build_indicator_report(
+    report = _build_indicator_report(
         db=db,
         stock_id=stock_id,
         timeframe=timeframe,
@@ -1529,6 +1639,20 @@ def _build_aggregated_report(
         point_count=chart.get("point_count"),
         parameters=technical_parameters,
     )
+    period = chart.get("period") or {}
+    report.setdefault("data", {})["period"] = period
+    report["data"]["current_partial_indicator"] = chart.get(
+        "current_partial_indicator"
+    )
+    report["data"]["decision_snapshot"] = chart.get(
+        "decision_snapshot",
+        "completed",
+    )
+    if period.get("status") == "current_partial":
+        report.setdefault("warnings", []).append(
+            "The current weekly/monthly bar is incomplete; decision fields use the latest completed period while current_partial_indicator is observational only."
+        )
+    return report
 
 
 def build_stock_technical_report(

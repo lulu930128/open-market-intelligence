@@ -38,7 +38,17 @@ from app.us_market.chart_projection import (
     ohlc_point as _us_ohlc_point,
     should_skip_daily_price_update as _should_skip_us_daily_price_update,
 )
-from app.us_market import catalog_store, fundamentals_store, price_store, watchlist_metrics, watchlist_store, watchlist_workflows
+from app.us_market import (
+    catalog_store,
+    financials_service,
+    fundamentals_store,
+    ownership_13f_analytics,
+    ownership_service,
+    price_store,
+    watchlist_metrics,
+    watchlist_store,
+    watchlist_workflows,
+)
 from app.us_market.errors import (
     USMarketConfigurationError,
     USMarketDataFetchError,
@@ -66,6 +76,7 @@ from app.us_market.providers.fred import fetch_fred_series_observations_payload
 from app.us_market.providers.sec import (
     fetch_sec_company_tickers_exchange_payload,
     fetch_sec_companyfacts_payload,
+    fetch_sec_submissions_payload,
 )
 from app.us_market.providers.yahoo import fetch_yahoo_chart_payload
 from app.us_market.sources import (
@@ -91,6 +102,12 @@ from app.us_market.sources import (
     parse_yahoo_symbol_record,
 )
 from app.us_market.source_health import build_us_source_health
+from app.us_market.sec_fundamentals.freshness import evaluate_sec_filing_freshness
+from app.us_market.sec_fundamentals.submissions import (
+    SEC_SUBMISSIONS_CACHE,
+    parse_sec_submissions,
+    submissions_cache_path_for_session,
+)
 from app.us_market.trading_calendar import US_MARKET_TIMEZONE, previous_us_trading_day
 from app.market.calendar_status import build_us_calendar_status, expected_us_trade_date
 from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
@@ -1006,16 +1023,30 @@ def list_us_ohlc_chart_data(
     start_date = end_date - timedelta(days=lookback_days)
     backfill_result = None
 
-    source_rows = _list_us_ohlc_source_rows(
-        db=db,
-        symbol=normalized_symbol,
-        from_date=start_date,
-        to_date=end_date,
-    )
-    rows = _filter_us_ohlc_source_rows(source_rows)
-    daily_points = [_us_ohlc_point(row) for row in rows]
-    latest_data_date = rows[-1].trade_date if rows else None
-    base_points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
+    # An ensure-history read can cross a provider boundary. Use a short-lived
+    # cache-read session so the request does not hold a pooled SQLite connection
+    # while waiting on provider HTTP; persistence still uses the caller-owned
+    # session after the provider response arrives.
+    cache_read_db = Session(bind=db.get_bind()) if ensure_history else db
+    owns_cache_read_db = cache_read_db is not db
+    try:
+        source_rows = _list_us_ohlc_source_rows(
+            db=cache_read_db,
+            symbol=normalized_symbol,
+            from_date=start_date,
+            to_date=end_date,
+        )
+        rows = _filter_us_ohlc_source_rows(source_rows)
+        daily_points = [_us_ohlc_point(row) for row in rows]
+        latest_data_date = rows[-1].trade_date if rows else None
+        has_newer_untrusted_rows = _has_newer_untrusted_us_daily_rows(
+            rows=source_rows,
+            trusted_rows=rows,
+        )
+        base_points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
+    finally:
+        if owns_cache_read_db:
+            cache_read_db.close()
     intraday_overlay = None
     points = base_points
     if include_intraday:
@@ -1035,10 +1066,7 @@ def list_us_ohlc_chart_data(
         outputsize=outputsize,
         adjusted=adjusted,
         provider=provider,
-        has_newer_untrusted_rows=_has_newer_untrusted_us_daily_rows(
-            rows=source_rows,
-            trusted_rows=rows,
-        ),
+        has_newer_untrusted_rows=has_newer_untrusted_rows,
         latest_data_date=latest_data_date,
         expected_data_date=resolved_expected_data_date,
     )
@@ -1262,18 +1290,17 @@ def get_us_intraday_trend(
         )
 
     try:
-        range_value = (
-            "1d"
-            if normalized_symbol.startswith("^")
-            or db is None
-            or not intraday_history_needs_bootstrap(
-                db,
-                stock_id=normalized_symbol,
-                market="US",
-                market_timezone=US_MARKET_TIMEZONE,
-            )
-            else "5d"
-        )
+        if normalized_symbol.startswith("^") or db is None:
+            range_value = "1d"
+        else:
+            with Session(bind=db.get_bind()) as bootstrap_read_db:
+                needs_bootstrap = intraday_history_needs_bootstrap(
+                    bootstrap_read_db,
+                    stock_id=normalized_symbol,
+                    market="US",
+                    market_timezone=US_MARKET_TIMEZONE,
+                )
+            range_value = "5d" if needs_bootstrap else "1d"
         yahoo_payload, source_url = fetch_yahoo_chart_payload(
             symbol=normalized_symbol,
             range_value=range_value,
@@ -1349,6 +1376,55 @@ def refresh_us_sec_companyfacts(
 ) -> dict:
     normalized_symbol = normalize_us_symbol(symbol)
     cik = _resolve_cik_for_symbol(db, normalized_symbol)
+    submissions_payload, submissions_source_url = fetch_sec_submissions_payload(
+        cik=cik,
+        sec_user_agent=_require_sec_user_agent(),
+        timeout_seconds=settings.us_market_http_timeout_seconds,
+    )
+    submissions_snapshot = parse_sec_submissions(
+        submissions_payload,
+        source_url=submissions_source_url,
+    )
+    submissions_cache_persisted = SEC_SUBMISSIONS_CACHE.put(
+        submissions_snapshot,
+        cache_path=submissions_cache_path_for_session(
+            db,
+            configured_path=settings.us_sec_submissions_cache_path,
+        ),
+    )
+    latest_remote_filing = submissions_snapshot.latest_relevant_filing
+    prior_local_filing = fundamentals_store.latest_us_sec_filing_fact(
+        db,
+        symbol=normalized_symbol,
+    )
+    if (
+        prior_local_filing is not None
+        and latest_remote_filing is not None
+        and prior_local_filing.accession_number == latest_remote_filing.accession_number
+    ):
+        freshness = evaluate_sec_filing_freshness(
+            local_accession_number=prior_local_filing.accession_number,
+            local_filing_date=prior_local_filing.filed_date,
+            local_fetched_at=prior_local_filing.fetched_at,
+            expected_accession_number=latest_remote_filing.accession_number,
+            expected_filing_date=latest_remote_filing.filing_date,
+            last_checked_at=submissions_snapshot.fetched_at,
+        )
+        return {
+            "status": "success",
+            "symbol": normalized_symbol,
+            "cik": cik,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "submissions_fetched_count": len(submissions_snapshot.filings),
+            "submissions_cache_persisted": submissions_cache_persisted,
+            "prior_local_accession_number": prior_local_filing.accession_number,
+            "latest_local_accession_number": prior_local_filing.accession_number,
+            "latest_remote_accession_number": latest_remote_filing.accession_number,
+            "freshness": freshness.to_dict(),
+            "message": "US SEC company facts already match the latest EDGAR filing.",
+        }
     payload, source_url = fetch_sec_companyfacts_payload(
         cik=cik,
         sec_user_agent=_require_sec_user_agent(),
@@ -1360,14 +1436,44 @@ def refresh_us_sec_companyfacts(
         source_url=source_url,
     )
     result = upsert_us_sec_fact_records(db, records)
+    latest_local_filing = fundamentals_store.latest_us_sec_filing_fact(
+        db,
+        symbol=normalized_symbol,
+    )
+    freshness = evaluate_sec_filing_freshness(
+        local_accession_number=(
+            latest_local_filing.accession_number if latest_local_filing else None
+        ),
+        local_filing_date=(latest_local_filing.filed_date if latest_local_filing else None),
+        local_fetched_at=(latest_local_filing.fetched_at if latest_local_filing else None),
+        expected_accession_number=(
+            latest_remote_filing.accession_number if latest_remote_filing else None
+        ),
+        expected_filing_date=(
+            latest_remote_filing.filing_date if latest_remote_filing else None
+        ),
+        last_checked_at=submissions_snapshot.fetched_at,
+    )
 
     return {
-        "status": "success",
+        "status": "success" if freshness.status == "current" else "partial",
         "symbol": normalized_symbol,
         "cik": cik,
         "fetched_count": len(records),
         "inserted_count": result["inserted_count"],
         "updated_count": result["updated_count"],
+        "submissions_fetched_count": len(submissions_snapshot.filings),
+        "submissions_cache_persisted": submissions_cache_persisted,
+        "prior_local_accession_number": (
+            prior_local_filing.accession_number if prior_local_filing else None
+        ),
+        "latest_local_accession_number": (
+            latest_local_filing.accession_number if latest_local_filing else None
+        ),
+        "latest_remote_accession_number": (
+            latest_remote_filing.accession_number if latest_remote_filing else None
+        ),
+        "freshness": freshness.to_dict(),
         "message": "US SEC company facts refreshed from EDGAR.",
     }
 
@@ -1401,6 +1507,74 @@ def get_us_sec_fundamental_summary(db: Session, *, symbol: str) -> dict:
         "metric_count": len(metrics),
         "metrics": metrics,
     }
+
+
+def get_us_sec_financial_contract(
+    db: Session,
+    *,
+    symbol: str,
+    mode: str = "current_comparable",
+    periods: int = 8,
+    as_of: datetime | None = None,
+) -> dict:
+    return financials_service.build_us_sec_financial_contract(
+        db,
+        symbol=symbol,
+        mode=mode,
+        periods=periods,
+        as_of=as_of,
+    )
+
+
+def get_us_sec_insider_transactions(
+    db: Session,
+    *,
+    symbol: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    codes: list[str] | tuple[str, ...] | None = None,
+    include_derivatives: bool = True,
+    limit: int = 100,
+    cursor: str | None = None,
+    now: datetime | None = None,
+) -> dict:
+    return ownership_service.read_insider_transactions(
+        db,
+        symbol=symbol,
+        from_date=from_date,
+        to_date=to_date,
+        codes=codes,
+        include_derivatives=include_derivatives,
+        limit=limit,
+        cursor=cursor,
+        now=now,
+    )
+
+
+def get_us_sec_institutional_holdings(
+    db: Session,
+    *,
+    symbol: str,
+    manager_limit: int = 50,
+) -> dict:
+    return ownership_13f_analytics.get_13f_symbol_contract(
+        db,
+        symbol=symbol,
+        manager_limit=manager_limit,
+    )
+
+
+def refresh_us_sec_insider_transactions(
+    db: Session,
+    *,
+    symbol: str,
+    max_filings: int = 50,
+) -> dict:
+    return ownership_service.sync_form4_symbol(
+        db,
+        symbol=symbol,
+        max_filings=max_filings,
+    )
 
 
 upsert_us_company_profile_records = fundamentals_store.upsert_us_company_profile_records

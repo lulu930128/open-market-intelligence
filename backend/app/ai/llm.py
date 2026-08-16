@@ -87,6 +87,7 @@ LLM_TOOL_PLAN_SCHEMA: dict[str, Any] = {
                             "us.refresh_daily_price",
                             "us.refresh_company_profile",
                             "us.refresh_sec_facts",
+                            "us.refresh_insider_transactions",
                             "us.read_sec_fundamentals",
                             "us.refresh_corporate_actions",
                         ],

@@ -1055,8 +1055,12 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
       : undefined;
   const displayTime = selectedQuote?.event_time ?? selectedQuote?.fetched_at ?? latestChartPoint?.time ?? null;
   const currentIntervalLabel = t(`crypto.intervals.${effectiveInterval}`);
+  const quoteFreshnessStatus =
+    currentQuoteHealth?.freshness?.status === "latest_completed_session"
+      ? t("crypto.resource.latestCompletedSession")
+      : resourceHealthStatusLabel(currentQuoteHealth?.status, t);
   const quoteFreshness = currentQuoteHealth
-    ? `${resourceHealthStatusLabel(currentQuoteHealth.status, t)} / ${formatDurationSeconds(
+    ? `${quoteFreshnessStatus} / ${formatDurationSeconds(
         currentQuoteHealth.age_seconds,
         t
       )}`

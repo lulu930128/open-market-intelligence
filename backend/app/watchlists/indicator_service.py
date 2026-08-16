@@ -1,6 +1,10 @@
 from sqlalchemy.orm import Session
 
-from app.market.indicator_service import calculate_latest_daily_indicator
+from app.market.technical_indicator_gateway import (
+    active_engine_contract,
+    calculate_active_latest_daily_indicator,
+)
+from app.market.technical_parameters import get_technical_analysis_parameters
 from app.watchlists import service as watchlist_service
 
 
@@ -54,6 +58,10 @@ def get_watchlist_group_latest_indicators(
     ma_windows: str | None = None,
     volume_ma_windows: str | None = None,
 ) -> dict:
+    technical_parameters = get_technical_analysis_parameters(
+        ma_windows=ma_windows,
+        volume_ma_windows=volume_ma_windows,
+    )
     watchlist_service.get_group(db=db, group_id=group_id)
 
     items = watchlist_service.list_items(
@@ -88,11 +96,10 @@ def get_watchlist_group_latest_indicators(
         stock_name = item.get("stock_name")
 
         try:
-            point = calculate_latest_daily_indicator(
+            point = calculate_active_latest_daily_indicator(
                 db=db,
                 stock_id=stock_id,
-                ma_windows=ma_windows,
-                volume_ma_windows=volume_ma_windows,
+                parameters=technical_parameters,
             )
 
             status = _normalize_indicator_status(point)
@@ -144,5 +151,6 @@ def get_watchlist_group_latest_indicators(
         "success_count": success_count,
         "no_data_count": no_data_count,
         "error_count": error_count,
+        "indicator_engine": active_engine_contract(),
         "results": results,
     }

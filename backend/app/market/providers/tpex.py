@@ -12,6 +12,8 @@ DAILY_INDEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_daily_trading_index"
 DAILY_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
 INDEX_5S_URL = "https://www.tpex.org.tw/www/zh-tw/indexInfo/miIndex"
 MARKET_HIGHLIGHT_URL = "https://www.tpex.org.tw/www/zh-tw/afterTrading/highlight"
+TPEX50_INDEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex50_index"
+TPEX200_CHANGE_URL = "https://www.tpex.org.tw/openapi/v1/tpex200_change"
 
 
 def _resource(url: str) -> str:
@@ -105,6 +107,59 @@ def fetch_market_highlight_payload(
         target="TPEX",
         params=params,
         timeout_seconds=timeout_seconds,
+    )
+
+
+def _fetch_named_index_payload(
+    url: str,
+    *,
+    resource: str,
+    target: str,
+    timeout_seconds: int,
+    request: ResponseGetter | None,
+) -> Any:
+    if request is not None:
+        response = request(
+            url,
+            headers=DEFAULT_HEADERS,
+            timeout=timeout_seconds,
+        )
+        return json_from_response(response)
+
+    return get_json(
+        url,
+        provider=PROVIDER,
+        resource=resource,
+        target=target,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def fetch_tpex50_index_history_payload(
+    *,
+    timeout_seconds: int = 10,
+    request: ResponseGetter | None = None,
+) -> Any:
+    return _fetch_named_index_payload(
+        TPEX50_INDEX_URL,
+        resource="index_daily_history",
+        target="TPEX50",
+        timeout_seconds=timeout_seconds,
+        request=request,
+    )
+
+
+def fetch_tpex200_close_payload(
+    *,
+    timeout_seconds: int = 10,
+    request: ResponseGetter | None = None,
+) -> Any:
+    return _fetch_named_index_payload(
+        TPEX200_CHANGE_URL,
+        resource="index_close",
+        target="TPEX200",
+        timeout_seconds=timeout_seconds,
+        request=request,
     )
 
 

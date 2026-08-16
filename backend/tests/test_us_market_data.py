@@ -365,6 +365,22 @@ SEC_COMPANYFACTS_MU_SAMPLE = {
 }
 
 
+SEC_SUBMISSIONS_MU_SAMPLE = {
+    "cik": "723125",
+    "filings": {
+        "recent": {
+            "accessionNumber": ["0000723125-25-000001"],
+            "filingDate": ["2025-10-17"],
+            "reportDate": ["2025-08-28"],
+            "acceptanceDateTime": ["20251017160000"],
+            "form": ["10-K"],
+            "primaryDocument": ["mu-20250828.htm"],
+            "isXBRL": [1],
+        }
+    },
+}
+
+
 ALPHAVANTAGE_OVERVIEW_SAMPLE = {
     "Symbol": "IBM",
     "Name": "International Business Machines Corporation",
@@ -1091,12 +1107,14 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(macro_result["inserted_count"], 2)
         self.assertEqual(self.db.query(MacroSeriesObservation).count(), 2)
 
+    @patch("app.us_market.service.fetch_sec_submissions_payload")
     @patch("app.us_market.service.fetch_sec_companyfacts_payload")
     @patch("app.us_market.service.fetch_sec_company_tickers_exchange_payload")
     def test_sec_fact_refresh_resolves_missing_cik_from_sec_mapping(
         self,
         mock_fetch_sec_tickers,
         mock_fetch_companyfacts,
+        mock_fetch_submissions,
     ) -> None:
         self.db.add(
             USStockMaster(
@@ -1117,6 +1135,10 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             SEC_COMPANYFACTS_MU_SAMPLE,
             "https://data.sec.gov/api/xbrl/companyfacts/CIK0000723125.json",
         )
+        mock_fetch_submissions.return_value = (
+            SEC_SUBMISSIONS_MU_SAMPLE,
+            "https://data.sec.gov/submissions/CIK0000723125.json",
+        )
 
         with patch(
             "app.us_market.service.settings.us_sec_user_agent",
@@ -1129,9 +1151,12 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(stock.sec_company_name, "MICRON TECHNOLOGY INC")
         self.assertEqual(result["cik"], "0000723125")
         self.assertEqual(result["fetched_count"], 1)
+        self.assertEqual(result["latest_remote_accession_number"], "0000723125-25-000001")
+        self.assertEqual(result["freshness"]["status"], "current")
         self.assertEqual(self.db.query(USSecCompanyFact).count(), 1)
         mock_fetch_sec_tickers.assert_called_once()
         mock_fetch_companyfacts.assert_called_once()
+        mock_fetch_submissions.assert_called_once()
 
     def test_sec_fundamental_summary_uses_latest_sec_fact_metrics(self) -> None:
         self.db.add(

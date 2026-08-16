@@ -25,6 +25,9 @@ import TechnicalIndicatorMenu, {
   indicatorTemplates,
   type IndicatorTemplateKey,
 } from "@/components/stock-detail/TechnicalIndicatorMenu";
+import USFundamentalWorkspace, {
+  type USFundamentalTab,
+} from "@/components/us-stock-detail/USFundamentalWorkspace";
 import {
   buildChartDrawingSnapshotPayload,
   chartDrawingApiPath,
@@ -41,6 +44,7 @@ import {
   type ChartDrawingStorageState,
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
+import { requestBackfillJob } from "@/lib/jobs";
 import {
   clearDataStatusFocus,
   emitDataStatusEvent,
@@ -73,6 +77,10 @@ import {
 } from "@/lib/stockVolumePace";
 import type { USCorporateEventSummaryRead } from "@/types/corporateEvents";
 import type {
+  USSecDerivedValueRead,
+  USSecFinancialContractRead,
+} from "@/types/usFinancials";
+import type {
   ChartPoint,
   ChartDrawingSnapshotRead,
   IntradayTrendPoint,
@@ -87,6 +95,9 @@ import type {
   USSecFactRefreshResultRead,
   USSecFundamentalMetricRead,
   USSecFundamentalSummaryRead,
+  USSec13FInstitutionalHoldingsRead,
+  USSecInsiderTransactionRead,
+  USSecInsiderTransactionsRead,
   USShortVolumeDailyRead,
   USStockMasterRead,
 } from "@/types/market";
@@ -107,8 +118,7 @@ type USHistoricalTimeframe = Exclude<USChartTimeframe, "today">;
 type USProfessionalIntradayTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h";
 type USProfessionalTimeframe = USProfessionalIntradayTimeframe | USHistoricalTimeframe;
 type USProfessionalChartStyle = ProfessionalChartStyle;
-type USDataPanelTab = "ownership" | "insider" | "short" | "filings";
-type CoverageStatus = "ready" | "missing" | "loading" | "stale";
+type CoverageStatus = "ready" | "partial" | "missing" | "loading" | "stale";
 
 type Props = {
   selectedSymbol: string | null;
@@ -142,13 +152,6 @@ const usProfessionalIntradayMinutes: Record<USProfessionalIntradayTimeframe, num
   "1h": 60,
   "4h": 240,
 };
-
-const usDataPanelTabs: Array<{ key: USDataPanelTab }> = [
-  { key: "ownership" },
-  { key: "insider" },
-  { key: "short" },
-  { key: "filings" },
-];
 
 const secFundamentalCards: Array<{ metric: string }> = [
   { metric: "revenue" },
@@ -243,6 +246,73 @@ function formatRatioAsPct(value: number | null | undefined) {
   return `${normalized.toFixed(2)}%`;
 }
 
+function financialNumber(value: string | null | undefined) {
+  if (value === null || value === undefined || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatDecimalText(value: string | null | undefined, maximumFractionDigits = 4) {
+  const parsed = financialNumber(value);
+  return parsed === null ? "-" : formatNumber(parsed, maximumFractionDigits);
+}
+
+function formatSignedDecimalText(value: string | null | undefined) {
+  const parsed = financialNumber(value);
+  if (parsed === null) return "-";
+  return `${parsed > 0 ? "+" : ""}${formatNumber(parsed, 0)}`;
+}
+
+function insiderCategoryTone(category: string) {
+  if (category === "open_market_purchase") {
+    return "border-omi-success-border bg-omi-success-soft text-omi-success-strong";
+  }
+  if (category === "open_market_sale") {
+    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  }
+  return "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-muted";
+}
+
+function insiderOwnerRole(owner: USSecInsiderTransactionRead["owners"][number]) {
+  return [
+    owner.officer_title,
+    owner.is_director ? "Director" : null,
+    owner.is_ten_percent_owner ? "10% Owner" : null,
+    owner.is_other ? owner.other_text || "Other" : null,
+  ]
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function formatDerivedValue(
+  value: USSecDerivedValueRead | null | undefined,
+  options: { percent?: boolean; perShare?: boolean } = {}
+) {
+  if (!value || value.status !== "ready") return "-";
+  const parsed = financialNumber(value.value);
+  if (parsed === null) return "-";
+  if (options.percent || value.unit === "percent") return `${parsed.toFixed(2)}%`;
+  if (options.perShare || value.unit?.toLowerCase().includes("usd/share")) {
+    return `$${formatNumber(parsed, 2)}`;
+  }
+  if (value.unit === "USD") return formatCompactCurrency(parsed);
+  if (value.unit?.toLowerCase().includes("shares")) return formatVolume(parsed);
+  return formatNumber(parsed, 2);
+}
+
+function latestDerivedValue(
+  values: USSecDerivedValueRead[] | null | undefined,
+  metricCode?: string
+) {
+  return (values ?? [])
+    .filter((value) => !metricCode || value.metric_code === metricCode)
+    .sort((left, right) => {
+      return `${right.period_end ?? ""}-${right.period ?? ""}`.localeCompare(
+        `${left.period_end ?? ""}-${left.period ?? ""}`
+      );
+    })[0] ?? null;
+}
+
 function formatActionValue(action: USCorporateActionRead) {
   if (action.action_type === "dividend") {
     return action.amount !== null && action.amount !== undefined
@@ -290,11 +360,16 @@ async function fetchOptionalJson<T>(
 type USSupplementalData = {
   factData: USSecCompanyFactRead[];
   fundamentalData: USSecFundamentalSummaryRead | null;
+  financialData: USSecFinancialContractRead | null;
   profileData: USCompanyProfileRead | null;
   actionData: USCorporateActionRead[];
   eventSummaryData: USCorporateEventSummaryRead | null;
   eventSummaryError: unknown | null;
   shortVolumeData: USShortVolumeDailyRead[];
+  insiderData: USSecInsiderTransactionsRead | null;
+  insiderError: unknown | null;
+  institutionalData: USSec13FInstitutionalHoldingsRead | null;
+  institutionalError: unknown | null;
 };
 
 type USIntradayMeta = {
@@ -393,10 +468,13 @@ async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalDa
   const [
     factData,
     fundamentalData,
+    financialData,
     profileData,
     actionData,
     eventSummaryResult,
     shortVolumeData,
+    insiderResult,
+    institutionalResult,
   ] = await Promise.all([
     fetchJson<USSecCompanyFactRead[]>(
       `/api/us-market/sec/${encodedSymbol}/facts`,
@@ -407,6 +485,10 @@ async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalDa
     ).catch(() => []),
     fetchOptionalJson<USSecFundamentalSummaryRead>(
       `/api/us-market/sec/${encodedSymbol}/fundamentals`
+    ).catch(() => null),
+    fetchOptionalJson<USSecFinancialContractRead>(
+      `/api/us-market/sec/${encodedSymbol}/financials`,
+      { periods: 8 }
     ).catch(() => null),
     fetchOptionalJson<USCompanyProfileRead>(
       `/api/us-market/profiles/${encodedSymbol}`
@@ -430,16 +512,33 @@ async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalDa
         offset: 0,
       }
     ).catch(() => []),
+    fetchJson<USSecInsiderTransactionsRead>(
+      `/api/us-market/sec/${encodedSymbol}/insider-transactions`,
+      { limit: 100 }
+    )
+      .then((data) => ({ data, error: null }))
+      .catch((error: unknown) => ({ data: null, error })),
+    fetchJson<USSec13FInstitutionalHoldingsRead>(
+      `/api/us-market/sec/${encodedSymbol}/institutional-holdings`,
+      { manager_limit: 100 }
+    )
+      .then((data) => ({ data, error: null }))
+      .catch((error: unknown) => ({ data: null, error })),
   ]);
 
   return {
     factData,
     fundamentalData,
+    financialData,
     profileData,
     actionData,
     eventSummaryData: eventSummaryResult.data,
     eventSummaryError: eventSummaryResult.error,
     shortVolumeData,
+    insiderData: insiderResult.data,
+    insiderError: insiderResult.error,
+    institutionalData: institutionalResult.data,
+    institutionalError: institutionalResult.error,
   };
 }
 
@@ -741,6 +840,7 @@ function coverageStatus(
 function coverageClass(status: CoverageStatus) {
   const classes: Record<CoverageStatus, string> = {
     ready: "border-omi-success-border bg-omi-success-soft text-omi-success",
+    partial: "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
     missing: "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-muted",
     loading: "border-omi-info-border bg-omi-info-soft text-omi-info",
     stale: "border-omi-warning-border bg-omi-warning-soft text-omi-warning",
@@ -788,96 +888,9 @@ function metricBarClass(value: number | null | undefined) {
   return "bg-omi-border";
 }
 
-function safeDivide(
-  numerator: number | null | undefined,
-  denominator: number | null | undefined
-) {
-  if (
-    numerator === null ||
-    numerator === undefined ||
-    denominator === null ||
-    denominator === undefined ||
-    denominator === 0
-  ) {
-    return null;
-  }
-
-  return numerator / denominator;
-}
-
 function EmptyDataState({ message }: { message: string }) {
   return (
     <StateSurface title={message} tone="empty" compact />
-  );
-}
-
-function USDataTabIcon({ type }: { type: USDataPanelTab }) {
-  if (type === "ownership") {
-    return (
-      <svg viewBox="0 0 20 20" className="h-5 w-5" aria-hidden="true">
-        <path
-          d="M10 2c3.3 0 6 1 6 2.3S13.3 6.6 10 6.6 4 5.6 4 4.3 6.7 2 10 2Zm-6 4.2c1.2 1 3.4 1.5 6 1.5s4.8-.6 6-1.5v2.1c0 1.3-2.7 2.3-6 2.3s-6-1-6-2.3V6.2Zm0 4c1.2 1 3.4 1.5 6 1.5s4.8-.6 6-1.5v2.1c0 1.3-2.7 2.3-6 2.3s-6-1-6-2.3v-2.1Zm0 4c1.2 1 3.4 1.5 6 1.5s4.8-.6 6-1.5v1.5c0 1.3-2.7 2.3-6 2.3s-6-1-6-2.3v-1.5Z"
-          fill="currentColor"
-        />
-      </svg>
-    );
-  }
-
-  if (type === "insider") {
-    return (
-      <svg viewBox="0 0 20 20" className="h-5 w-5" aria-hidden="true">
-        <path
-          d="M10 2a4 4 0 0 1 2.8 6.8A7 7 0 0 1 17 15.2V18H3v-2.8a7 7 0 0 1 4.2-6.4A4 4 0 0 1 10 2Zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm0 6c-2.8 0-5 2.2-5 5v1h10v-1c0-2.8-2.2-5-5-5Z"
-          fill="currentColor"
-        />
-      </svg>
-    );
-  }
-
-  if (type === "short") {
-    return (
-      <svg viewBox="0 0 20 20" className="h-5 w-5" aria-hidden="true">
-        <path
-          d="M10 17 3 10l1.4-1.4L9 13.2V3h2v10.2l4.6-4.6L17 10l-7 7Z"
-          fill="currentColor"
-        />
-      </svg>
-    );
-  }
-
-  return (
-    <svg viewBox="0 0 20 20" className="h-5 w-5" aria-hidden="true">
-      <path
-        d="M5 2h7l3 3v13H5V2Zm2 2v12h6V6h-3V4H7Zm1 5h4v1.5H8V9Zm0 3h4v1.5H8V12Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
-
-function USDataTabButton({
-  tab,
-  active,
-  onClick,
-}: {
-  tab: { key: USDataPanelTab; label: string };
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        "flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-omi-border-subtle text-sm font-semibold transition last:border-r-0",
-        active
-          ? "bg-omi-surface text-omi-text-strong shadow-[inset_0_-2px_0_var(--omi-color-accent)]"
-          : "bg-omi-surface-subtle text-omi-text-muted hover:bg-omi-surface hover:text-omi-text",
-      ].join(" ")}
-    >
-      <USDataTabIcon type={tab.key} />
-      <span>{tab.label}</span>
-    </button>
   );
 }
 
@@ -953,7 +966,7 @@ export default function USStockDetailPanel({
       past: [],
       future: [],
     });
-  const [activeDataTab, setActiveDataTab] = useState<USDataPanelTab>("ownership");
+  const [activeDataTab, setActiveDataTab] = useState<USFundamentalTab>("financials");
   const [selectedStock, setSelectedStock] = useState<USStockMasterRead | null>(null);
   const [chart, setChart] = useState<USOhlcChartRead | null>(null);
   const [companyProfile, setCompanyProfile] = useState<USCompanyProfileRead | null>(null);
@@ -961,6 +974,10 @@ export default function USStockDetailPanel({
   const [corporateEventSummary, setCorporateEventSummary] =
     useState<USCorporateEventSummaryRead | null>(null);
   const [shortVolumeRows, setShortVolumeRows] = useState<USShortVolumeDailyRead[]>([]);
+  const [insiderTransactions, setInsiderTransactions] =
+    useState<USSecInsiderTransactionsRead | null>(null);
+  const [institutionalHoldings, setInstitutionalHoldings] =
+    useState<USSec13FInstitutionalHoldingsRead | null>(null);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("unavailable");
@@ -973,11 +990,14 @@ export default function USStockDetailPanel({
   const [factRows, setFactRows] = useState<USSecCompanyFactRead[]>([]);
   const [fundamentalSummary, setFundamentalSummary] =
     useState<USSecFundamentalSummaryRead | null>(null);
+  const [financialContract, setFinancialContract] =
+    useState<USSecFinancialContractRead | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [factLoadState, setFactLoadState] = useState<LoadState>("idle");
   const [refreshingFacts, setRefreshingFacts] = useState(false);
   const [refreshingProfile, setRefreshingProfile] = useState(false);
   const [refreshingActions, setRefreshingActions] = useState(false);
+  const [refreshingInsiders, setRefreshingInsiders] = useState(false);
   const [successMessage, setSuccessMessage] = useState<SuccessMessage>(null);
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
@@ -1124,26 +1144,76 @@ export default function USStockDetailPanel({
     return new Map(fundamentalMetrics.map((metric) => [metric.metric, metric]));
   }, [fundamentalMetrics]);
   const revenueMetric = fundamentalMetricMap.get("revenue") ?? null;
-  const grossProfitMetric = fundamentalMetricMap.get("gross_profit") ?? null;
-  const netIncomeMetric = fundamentalMetricMap.get("net_income") ?? null;
-  const debtTotalMetric = fundamentalMetricMap.get("debt_total") ?? null;
-  const equityMetric = fundamentalMetricMap.get("equity") ?? null;
   const epsDilutedMetric = fundamentalMetricMap.get("eps_diluted") ?? null;
   const sharesOutstandingMetric = fundamentalMetricMap.get("shares_outstanding") ?? null;
-  const sharesOutstanding = sharesOutstandingMetric?.value_numeric ?? null;
-  const estimatedMarketCap =
-    latestClose !== null && sharesOutstanding !== null ? latestClose * sharesOutstanding : null;
-  const grossMargin = safeDivide(grossProfitMetric?.value_numeric, revenueMetric?.value_numeric);
-  const netMargin = safeDivide(netIncomeMetric?.value_numeric, revenueMetric?.value_numeric);
-  const debtToEquity = safeDivide(debtTotalMetric?.value_numeric, equityMetric?.value_numeric);
+  const financialDerived = financialContract?.derived;
+  const financialQuality = financialContract?.quality;
+  const decisionBlockingFinancialIssues =
+    financialQuality?.decision_blocking_issues?.length
+      ? financialQuality.decision_blocking_issues
+      : !financialQuality?.decision_usable
+        ? financialQuality?.issues ?? []
+        : [];
+  const nonBlockingFinancialIssues = financialQuality?.non_blocking_issues ?? [];
+  const revenueTtmMetric = financialDerived?.ttm?.revenue ?? null;
+  const epsTtmMetric =
+    financialDerived?.ttm?.eps_diluted ?? financialDerived?.ttm?.eps_basic ?? null;
+  const grossMarginMetric = latestDerivedValue(financialDerived?.ratios, "gross_margin");
+  const operatingMarginMetric = latestDerivedValue(
+    financialDerived?.ratios,
+    "operating_margin"
+  );
+  const netMarginMetric = latestDerivedValue(financialDerived?.ratios, "net_margin");
+  const revenueYoyMetric = latestDerivedValue(
+    financialDerived?.growth,
+    "revenue_yoy_growth"
+  );
+  const freeCashFlowMetric = latestDerivedValue(financialDerived?.free_cash_flow);
+  const sharesOutstandingContractMetric =
+    financialDerived?.latest_balance?.shares_outstanding ?? null;
+  const latestFinancialFiling = financialContract?.as_reported.latest_filing;
+  const normalizedFacts = financialContract?.normalized.facts ?? [];
+  const financialQuarterRows = useMemo(() => {
+    const byPeriod = new Map<
+      string,
+      {
+        period: string;
+        periodEnd: string | null;
+        revenue?: USSecDerivedValueRead;
+        netIncome?: USSecDerivedValueRead;
+        eps?: USSecDerivedValueRead;
+      }
+    >();
+    const add = (
+      metricCode: "revenue" | "net_income" | "eps_diluted",
+      value: USSecDerivedValueRead
+    ) => {
+      if (!value.period) return;
+      const row = byPeriod.get(value.period) ?? {
+        period: value.period,
+        periodEnd: value.period_end,
+      };
+      if (metricCode === "revenue") row.revenue = value;
+      if (metricCode === "net_income") row.netIncome = value;
+      if (metricCode === "eps_diluted") row.eps = value;
+      byPeriod.set(value.period, row);
+    };
+    (financialDerived?.quarterly?.revenue ?? []).forEach((value) => add("revenue", value));
+    (financialDerived?.quarterly?.net_income ?? []).forEach((value) => add("net_income", value));
+    (financialDerived?.quarterly?.eps_diluted ?? []).forEach((value) => add("eps_diluted", value));
+    return Array.from(byPeriod.values())
+      .sort((left, right) => right.period.localeCompare(left.period))
+      .slice(0, 8);
+  }, [financialDerived]);
   const latestFundamentalFiledDate = latestDate(
-    fundamentalMetrics.map((metric) => metric.filed_date)
+    [latestFinancialFiling?.filed_date, ...fundamentalMetrics.map((metric) => metric.filed_date)]
   );
   const latestFundamentalPeriodEnd = latestDate(
-    fundamentalMetrics.map((metric) => metric.period_end_date)
+    [
+      ...normalizedFacts.map((metric) => metric.period_end),
+      ...fundamentalMetrics.map((metric) => metric.period_end_date),
+    ]
   );
-  const activeDataTabMeta =
-    usDataPanelTabs.find((tab) => tab.key === activeDataTab) ?? usDataPanelTabs[0];
   const selectedIndexConfig = getUsMarketIndexConfig(selectedSymbol);
   const upcomingCorporateEvents = selectedIndexConfig
     ? []
@@ -1336,6 +1406,61 @@ export default function USStockDetailPanel({
     t,
   ]);
 
+  const secCoverageStatus: CoverageStatus =
+    factLoadState === "loading"
+      ? "loading"
+      : financialContract?.quality.freshness === "stale"
+        ? "stale"
+        : financialContract?.quality.decision_usable
+          ? "ready"
+          : financialContract || factRows.length > 0 || fundamentalMetrics.length > 0
+            ? "partial"
+            : "missing";
+  const secCoverageDetail = financialContract
+    ? `${financialContract.contract_version} / ${financialContract.quality.freshness} / ${latestFundamentalFiledDate}`
+    : factRows.length > 0 || fundamentalMetrics.length > 0
+      ? t("usStockDetail.coverage.details.secMetrics", {
+          count: fundamentalMetrics.length,
+          date:
+            latestFundamentalFiledDate !== "-"
+              ? latestFundamentalFiledDate
+              : latestFactFiledDate,
+        })
+      : t("usStockDetail.coverage.details.noSecFacts");
+  const insiderCoverageStatus: CoverageStatus =
+    factLoadState === "loading"
+      ? "loading"
+      : insiderTransactions?.status === "current" ||
+          insiderTransactions?.status === "ready_empty"
+        ? "ready"
+        : insiderTransactions?.status === "stale"
+          ? "stale"
+          : insiderTransactions?.status === "partial"
+            ? "partial"
+            : "missing";
+  const insiderCoverageDetail = insiderTransactions
+    ? t("usStockDetail.coverage.details.form4", {
+        count: insiderTransactions.summary.transaction_count,
+        date: formatDate(insiderTransactions.freshness.last_checked_at),
+      })
+    : t("usStockDetail.coverage.details.noForm4Observation");
+  const institutionalCoverageStatus: CoverageStatus =
+    factLoadState === "loading"
+      ? "loading"
+      : institutionalHoldings?.quality.decision_usable
+        ? institutionalHoldings.status === "partial"
+          ? "partial"
+          : "ready"
+        : institutionalHoldings
+          ? "partial"
+          : "missing";
+  const institutionalCoverageDetail = institutionalHoldings?.quarters.length
+    ? t("usStockDetail.institutions.coverage", {
+        count: institutionalHoldings.summary.reporting_manager_count ?? 0,
+        date: formatDate(institutionalHoldings.summary.report_period_end),
+      })
+    : t("usStockDetail.institutions.unavailable");
+
   const dataCoverageItems: Array<{
     label: string;
     status: CoverageStatus;
@@ -1394,22 +1519,18 @@ export default function USStockDetailPanel({
         },
         {
           label: "SEC",
-          status: coverageStatus(
-            factRows.length > 0 || fundamentalMetrics.length > 0,
-            factLoadState,
-            latestFundamentalFiledDate !== "-" ? latestFundamentalFiledDate : latestFactFiledDate,
-            210
-          ),
-          detail:
-            factRows.length > 0 || fundamentalMetrics.length > 0
-              ? t("usStockDetail.coverage.details.secMetrics", {
-                  count: fundamentalMetrics.length,
-                  date:
-                    latestFundamentalFiledDate !== "-"
-                      ? latestFundamentalFiledDate
-                      : latestFactFiledDate,
-                })
-              : t("usStockDetail.coverage.details.noSecFacts"),
+          status: secCoverageStatus,
+          detail: secCoverageDetail,
+        },
+        {
+          label: "Form 4",
+          status: insiderCoverageStatus,
+          detail: insiderCoverageDetail,
+        },
+        {
+          label: "13F",
+          status: institutionalCoverageStatus,
+          detail: institutionalCoverageDetail,
         },
         {
           label: t("usStockDetail.coverage.labels.actions"),
@@ -1488,11 +1609,14 @@ export default function USStockDetailPanel({
             );
             setFactRows([]);
             setFundamentalSummary(null);
+            setFinancialContract(null);
             setCompanyProfile(null);
             onCompanyProfileChange?.(null);
             setCorporateActions([]);
             setCorporateEventSummary(null);
             setShortVolumeRows([]);
+            setInsiderTransactions(null);
+            setInstitutionalHoldings(null);
             setLoadState("success");
             setFactLoadState("success");
             return;
@@ -1522,11 +1646,14 @@ export default function USStockDetailPanel({
           setTodayIntradayMeta(emptyUsIntradayMeta);
           setFactRows([]);
           setFundamentalSummary(null);
+          setFinancialContract(null);
           setCompanyProfile(null);
           onCompanyProfileChange?.(null);
           setCorporateActions([]);
           setCorporateEventSummary(null);
           setShortVolumeRows([]);
+          setInsiderTransactions(null);
+          setInstitutionalHoldings(null);
           setLoadState("success");
           setFactLoadState("success");
           return;
@@ -1575,11 +1702,14 @@ export default function USStockDetailPanel({
           );
           setFactRows([]);
           setFundamentalSummary(null);
+          setFinancialContract(null);
           setCompanyProfile(null);
           onCompanyProfileChange?.(null);
           setCorporateActions([]);
           setCorporateEventSummary(null);
           setShortVolumeRows([]);
+          setInsiderTransactions(null);
+          setInstitutionalHoldings(null);
           setLoadState("success");
           setFactLoadState("loading");
           void fetchUsSupplementalData(symbol)
@@ -1588,15 +1718,30 @@ export default function USStockDetailPanel({
 
               setFactRows(supplementalData.factData);
               setFundamentalSummary(supplementalData.fundamentalData);
+              setFinancialContract(supplementalData.financialData);
               setCompanyProfile(supplementalData.profileData);
               onCompanyProfileChange?.(supplementalData.profileData);
               setCorporateActions(supplementalData.actionData);
               setCorporateEventSummary(supplementalData.eventSummaryData);
               setShortVolumeRows(supplementalData.shortVolumeData);
+              setInsiderTransactions(supplementalData.insiderData);
+              setInstitutionalHoldings(supplementalData.institutionalData);
               if (supplementalData.eventSummaryError) {
                 publishDetailDataStatus(
                   tRef.current("settings.calendar.loadError"),
                   supplementalData.eventSummaryError
+                );
+              }
+              if (supplementalData.insiderError) {
+                publishDetailDataStatus(
+                  tRef.current("usStockDetail.errors.insiderLoadFailed"),
+                  supplementalData.insiderError
+                );
+              }
+              if (supplementalData.institutionalError) {
+                publishDetailDataStatus(
+                  tRef.current("usStockDetail.institutions.loadFailed"),
+                  supplementalData.institutionalError
                 );
               }
               setFactLoadState("success");
@@ -1640,11 +1785,14 @@ export default function USStockDetailPanel({
         setTodayIntradayMeta(emptyUsIntradayMeta);
         setFactRows([]);
         setFundamentalSummary(null);
+        setFinancialContract(null);
         setCompanyProfile(null);
         onCompanyProfileChange?.(null);
         setCorporateActions([]);
         setCorporateEventSummary(null);
         setShortVolumeRows([]);
+        setInsiderTransactions(null);
+        setInstitutionalHoldings(null);
         setLoadState("success");
         setFactLoadState("loading");
         void fetchUsSupplementalData(symbol)
@@ -1653,15 +1801,30 @@ export default function USStockDetailPanel({
 
             setFactRows(supplementalData.factData);
             setFundamentalSummary(supplementalData.fundamentalData);
+            setFinancialContract(supplementalData.financialData);
             setCompanyProfile(supplementalData.profileData);
             onCompanyProfileChange?.(supplementalData.profileData);
             setCorporateActions(supplementalData.actionData);
             setCorporateEventSummary(supplementalData.eventSummaryData);
             setShortVolumeRows(supplementalData.shortVolumeData);
+            setInsiderTransactions(supplementalData.insiderData);
+            setInstitutionalHoldings(supplementalData.institutionalData);
             if (supplementalData.eventSummaryError) {
               publishDetailDataStatus(
                 tRef.current("settings.calendar.loadError"),
                 supplementalData.eventSummaryError
+              );
+            }
+            if (supplementalData.insiderError) {
+              publishDetailDataStatus(
+                tRef.current("usStockDetail.errors.insiderLoadFailed"),
+                supplementalData.insiderError
+              );
+            }
+            if (supplementalData.institutionalError) {
+              publishDetailDataStatus(
+                tRef.current("usStockDetail.institutions.loadFailed"),
+                supplementalData.institutionalError
               );
             }
             setFactLoadState("success");
@@ -1683,11 +1846,14 @@ export default function USStockDetailPanel({
         setTodayIntradayMeta(emptyUsIntradayMeta);
         setFactRows([]);
         setFundamentalSummary(null);
+        setFinancialContract(null);
         setCompanyProfile(null);
         onCompanyProfileChange?.(null);
         setCorporateActions([]);
         setCorporateEventSummary(null);
         setShortVolumeRows([]);
+        setInsiderTransactions(null);
+        setInstitutionalHoldings(null);
         setLoadState("error");
         setFactLoadState("error");
         publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
@@ -1711,6 +1877,8 @@ export default function USStockDetailPanel({
         setCorporateActions([]);
         setCorporateEventSummary(null);
         setShortVolumeRows([]);
+        setInsiderTransactions(null);
+        setInstitutionalHoldings(null);
         setTodayTrend([]);
         setTodayPreviousClose(null);
         setTodaySource("unavailable");
@@ -1718,6 +1886,7 @@ export default function USStockDetailPanel({
         setTodayIntradayMeta(emptyUsIntradayMeta);
         setFactRows([]);
         setFundamentalSummary(null);
+        setFinancialContract(null);
         setLoadState("idle");
         setFactLoadState("idle");
         return;
@@ -2265,8 +2434,54 @@ export default function USStockDetailPanel({
     }
   }
 
+  async function refreshInsiderTransactions() {
+    if (!selectedSymbol) return;
+
+    const symbol = selectedSymbol;
+    const requestId = requestSeq.current;
+    setRefreshingInsiders(true);
+    setSuccessMessage(null);
+
+    try {
+      await requestBackfillJob(
+        "/api/us-market/sec/ownership/jobs/form4-sync",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            scope: "symbol",
+            symbol,
+            max_symbols: 1,
+            max_filings_per_symbol: 50,
+          }),
+        },
+        undefined,
+        { intervalMs: 1_000, timeoutMs: 180_000 }
+      );
+      const contract = await fetchJson<USSecInsiderTransactionsRead>(
+        `/api/us-market/sec/${encodeURIComponent(symbol)}/insider-transactions`,
+        { limit: 100 }
+      );
+      if (requestSeq.current !== requestId) return;
+
+      setInsiderTransactions(contract);
+      setSuccessMessage({
+        text: t("usStockDetail.messages.insiderRefreshSuccess", {
+          symbol,
+          fetched: contract.summary.transaction_count,
+        }),
+      });
+    } catch (error) {
+      publishDetailDataStatus(
+        t("usStockDetail.errors.insiderRefreshFailed"),
+        error
+      );
+    } finally {
+      setRefreshingInsiders(false);
+    }
+  }
+
   function renderDataPanelAction() {
-    if (activeDataTab === "ownership") {
+    if (activeDataTab === "overview") {
       return (
         <button
           type="button"
@@ -2275,6 +2490,19 @@ export default function USStockDetailPanel({
           disabled={!selectedSymbol || refreshingProfile}
         >
           {refreshingProfile ? t("common.updating") : t("usStockDetail.actions.profile")}
+        </button>
+      );
+    }
+
+    if (activeDataTab === "financials") {
+      return (
+        <button
+          type="button"
+          onClick={() => void refreshFacts()}
+          className="h-8 bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-border"
+          disabled={!selectedSymbol || refreshingFacts}
+        >
+          {refreshingFacts ? t("common.updating") : t("usStockDetail.actions.secFacts")}
         </button>
       );
     }
@@ -2310,6 +2538,29 @@ export default function USStockDetailPanel({
       );
     }
 
+    if (activeDataTab === "institutions") {
+      return (
+        <div className="border border-omi-border-subtle px-3 py-2 text-xs font-semibold text-omi-text-muted">
+          SEC 13F
+        </div>
+      );
+    }
+
+    if (activeDataTab === "insider") {
+      return (
+        <button
+          type="button"
+          onClick={() => void refreshInsiderTransactions()}
+          className="h-8 bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-border"
+          disabled={!selectedSymbol || refreshingInsiders}
+        >
+          {refreshingInsiders
+            ? t("common.updating")
+            : t("usStockDetail.actions.form4")}
+        </button>
+      );
+    }
+
     return (
       <div className="border border-omi-border-subtle px-3 py-2 text-xs font-semibold text-omi-text-muted">
         {t("usStockDetail.actions.form4")}
@@ -2317,7 +2568,7 @@ export default function USStockDetailPanel({
     );
   }
 
-  function renderOwnershipTab() {
+  function renderOverviewTab() {
     return (
       <div className="space-y-4">
         <div className="overflow-hidden border border-omi-border-subtle">
@@ -2326,48 +2577,44 @@ export default function USStockDetailPanel({
             <MetricCell label={t("usStockDetail.metrics.type")} value={assetTypeLabel(t, selectedStock)} />
             <MetricCell label={t("usStockDetail.metrics.cik")} value={selectedStock?.cik ?? "-"} />
             <MetricCell
-              label={
-                companyProfile?.market_cap !== null && companyProfile?.market_cap !== undefined
-                  ? t("usStockDetail.metrics.marketCap")
-                  : t("usStockDetail.metrics.marketCapEstimate")
-              }
-              value={formatCompactCurrency(companyProfile?.market_cap ?? estimatedMarketCap)}
+              label={t("usStockDetail.metrics.marketCap")}
+              value={formatCompactCurrency(companyProfile?.market_cap)}
             />
-            <MetricCell label={t("usStockDetail.metrics.shares")} value={formatFundamentalValue(sharesOutstandingMetric)} />
-            <MetricCell label={t("usStockDetail.metrics.pe")} value={formatNumber(companyProfile?.pe_ratio)} />
+            <MetricCell
+              label={t("usStockDetail.metrics.shares")}
+              value={
+                sharesOutstandingContractMetric
+                  ? formatDerivedValue(sharesOutstandingContractMetric)
+                  : formatFundamentalValue(sharesOutstandingMetric)
+              }
+            />
+            <MetricCell
+              label={t("usStockDetail.metrics.pe")}
+              value={
+                financialContract?.valuation.status === "ready"
+                  ? formatNumber(financialNumber(financialContract.valuation.pe_ttm))
+                  : "-"
+              }
+            />
             <MetricCell
               label={t("usStockDetail.metrics.eps")}
               value={
-                companyProfile?.eps !== null && companyProfile?.eps !== undefined
-                  ? formatNumber(companyProfile.eps)
+                epsTtmMetric
+                  ? formatDerivedValue(epsTtmMetric, { perShare: true })
                   : formatFundamentalValue(epsDilutedMetric)
               }
             />
             <MetricCell
-              label={
-                companyProfile?.revenue_ttm !== null && companyProfile?.revenue_ttm !== undefined
-                  ? t("usStockDetail.metrics.revenueTtm")
-                  : t("usStockDetail.metrics.secRevenue")
-              }
+              label={t("usStockDetail.metrics.revenueTtm")}
               value={
-                companyProfile?.revenue_ttm !== null && companyProfile?.revenue_ttm !== undefined
-                  ? formatCompactCurrency(companyProfile.revenue_ttm)
+                revenueTtmMetric
+                  ? formatDerivedValue(revenueTtmMetric)
                   : formatFundamentalValue(revenueMetric)
               }
             />
             <MetricCell
-              label={
-                companyProfile?.profit_margin !== null &&
-                companyProfile?.profit_margin !== undefined
-                  ? t("usStockDetail.metrics.profitMargin")
-                  : t("usStockDetail.metrics.netMargin")
-              }
-              value={
-                companyProfile?.profit_margin !== null &&
-                companyProfile?.profit_margin !== undefined
-                  ? formatRatioAsPct(companyProfile.profit_margin)
-                  : formatRatioAsPct(netMargin)
-              }
+              label={t("usStockDetail.metrics.netMargin")}
+              value={formatDerivedValue(netMarginMetric, { percent: true })}
             />
             <MetricCell label={t("usStockDetail.metrics.secPeriod")} value={latestFundamentalPeriodEnd} />
             <MetricCell label={t("usStockDetail.metrics.latestFiled")} value={latestFundamentalFiledDate} />
@@ -2407,40 +2654,321 @@ export default function USStockDetailPanel({
           )}
         </div>
 
-        <div className="overflow-hidden border border-omi-border-subtle">
-          <div className="grid grid-cols-[1fr_96px_96px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
+      </div>
+    );
+  }
+
+  function renderInstitutionsTab() {
+    if (factLoadState === "loading" && !institutionalHoldings) {
+      return (
+        <StateSurface
+          title={t("usStockDetail.institutions.loading")}
+          tone="loading"
+          busy
+          compact
+        />
+      );
+    }
+
+    if (!institutionalHoldings || institutionalHoldings.quarters.length === 0) {
+      return (
+        <div className="space-y-3">
+          <EmptyDataState message={t("usStockDetail.institutions.unavailable")} />
+          {institutionalHoldings?.quality.limitations[0] ? (
+            <div className="border border-omi-warning bg-omi-warning-soft px-4 py-3 text-xs leading-5 text-omi-warning-strong">
+              {institutionalHoldings.quality.limitations[0]}
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+
+    const summary = institutionalHoldings.summary;
+    const latestPeriod = summary.report_period_end ?? "-";
+    const managerMovement = [
+      `${t("usStockDetail.institutions.newManagers")} ${summary.new_manager_count ?? "-"}`,
+      `${t("usStockDetail.institutions.increasedManagers")} ${summary.increased_manager_count ?? "-"}`,
+      `${t("usStockDetail.institutions.reducedManagers")} ${summary.reduced_manager_count ?? "-"}`,
+      `${t("usStockDetail.institutions.exitedManagers")} ${summary.exited_manager_count ?? "-"}`,
+    ].join(" / ");
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3 border border-omi-border-subtle bg-omi-surface-subtle px-4 py-3">
+          <div>
+            <div className="text-xs font-bold uppercase tracking-wide text-omi-text-muted">
+              {institutionalHoldings.contract_version} / {institutionalHoldings.status}
+            </div>
+            <div className="mt-1 text-sm font-bold text-omi-text-strong">
+              {t("usStockDetail.institutions.reportedPeriod")} {formatDate(latestPeriod)}
+            </div>
+          </div>
+          <div className="text-right text-xs leading-5 text-omi-text-muted">
+            <div>{t("usStockDetail.institutions.releasePeriod")}: {institutionalHoldings.freshness.latest_release_period ?? "-"}</div>
+            <div>{t("usStockDetail.institutions.computedAt")}: {formatDateTime(institutionalHoldings.as_of)}</div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-px overflow-hidden border border-omi-border-subtle bg-omi-surface-strong md:grid-cols-3">
+          <MetricCell
+            label={t("usStockDetail.institutions.reportingManagers")}
+            value={formatNumber(summary.reporting_manager_count, 0)}
+          />
+          <MetricCell
+            label={t("usStockDetail.institutions.reportedLongShares")}
+            value={formatDecimalText(summary.reported_long_shares, 0)}
+          />
+          <MetricCell
+            label={t("usStockDetail.institutions.reportedLongValue")}
+            value={formatCompactCurrency(financialNumber(summary.reported_long_value_usd))}
+          />
+          <MetricCell
+            label={t("usStockDetail.institutions.reportedPutValue")}
+            value={formatCompactCurrency(financialNumber(summary.reported_put_value_usd))}
+          />
+          <MetricCell
+            label={t("usStockDetail.institutions.reportedCallValue")}
+            value={formatCompactCurrency(financialNumber(summary.reported_call_value_usd))}
+          />
+          <MetricCell
+            label={t("usStockDetail.institutions.managerMovement")}
+            value={<span className="text-xs leading-5">{managerMovement}</span>}
+          />
+        </div>
+
+        <div className="border border-omi-warning bg-omi-warning-soft px-4 py-3 text-xs leading-5 text-omi-warning-strong">
+          {institutionalHoldings.quality.limitations[0] ?? t("usStockDetail.institutions.limitation")}
+        </div>
+
+        <div className="overflow-x-auto border border-omi-border-subtle">
+          <div className="grid min-w-[620px] grid-cols-[minmax(0,1fr)_120px_120px_96px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
             <span>{t("usStockDetail.tableHeaders.holder13f")}</span>
             <span className="text-right">{t("usStockDetail.tableHeaders.shares")}</span>
+            <span className="text-right">{t("usStockDetail.tableHeaders.value")}</span>
             <span className="text-right">{t("usStockDetail.tableHeaders.qoq")}</span>
           </div>
-          <div className="border-t border-omi-border-subtle p-4">
-            <EmptyDataState message={t("usStockDetail.empty.no13f")} />
-          </div>
+          {institutionalHoldings.managers.length > 0 ? (
+            institutionalHoldings.managers.map((manager) => {
+              const change = financialNumber(manager.reported_long_shares_change);
+              return (
+                <div
+                  key={`${manager.manager_cik ?? manager.manager_name}-${manager.report_period_end}`}
+                  className="grid min-w-[620px] grid-cols-[minmax(0,1fr)_120px_120px_96px] items-center border-t border-omi-border-subtle px-4 py-3 text-xs"
+                >
+                  <div className="min-w-0 pr-3">
+                    <div className="truncate font-bold text-omi-text-strong">{manager.manager_name}</div>
+                    <div className="mt-1 truncate text-[11px] text-omi-text-subtle">CIK {manager.manager_cik ?? "-"}</div>
+                  </div>
+                  <div className="text-right font-semibold text-omi-text">
+                    {formatDecimalText(manager.reported_long_shares, 0)}
+                  </div>
+                  <div className="text-right font-semibold text-omi-text">
+                    {formatCompactCurrency(financialNumber(manager.reported_value_usd))}
+                  </div>
+                  <div
+                    className={`text-right font-bold ${
+                      change === null || change === 0
+                        ? "text-omi-text-muted"
+                        : change > 0
+                          ? "text-omi-success-strong"
+                          : "text-omi-danger"
+                    }`}
+                  >
+                    {formatSignedDecimalText(manager.reported_long_shares_change)}
+                    <div className="mt-0.5 text-[10px] font-semibold uppercase">{manager.direction}</div>
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="border-t border-omi-border-subtle p-4">
+              <EmptyDataState message={t("usStockDetail.institutions.noManagers")} />
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
   function renderInsiderTab() {
+    if (factLoadState === "loading" && !insiderTransactions) {
+      return (
+        <StateSurface
+          title={t("usStockDetail.insider.loading")}
+          tone="loading"
+          busy
+          compact
+        />
+      );
+    }
+
+    if (!insiderTransactions) {
+      return <EmptyDataState message={t("usStockDetail.empty.noForm4Observation")} />;
+    }
+
+    const statusTone =
+      insiderTransactions.status === "current" ||
+      insiderTransactions.status === "ready_empty"
+        ? "border-omi-success-border bg-omi-success-soft text-omi-success-strong"
+        : insiderTransactions.status === "stale" ||
+            insiderTransactions.status === "partial"
+          ? "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong"
+          : "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+    const summary = insiderTransactions.summary;
+
     return (
       <div className="space-y-4">
-        <div className="overflow-hidden border border-omi-border-subtle">
-          <div className="grid grid-cols-3 gap-px bg-omi-surface-strong text-center text-sm">
-            <MetricCell label={t("usStockDetail.metrics.latestFiling")} value="-" />
-            <MetricCell label={t("usStockDetail.metrics.transactions")} value="-" />
-            <MetricCell label={t("usStockDetail.metrics.netShares")} value="-" />
+        <div className={["border px-4 py-3 text-xs leading-5", statusTone].join(" ")}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-bold">
+              {insiderTransactions.contract_version} / {insiderTransactions.status}
+            </span>
+            <span className="font-semibold">
+              {t("usStockDetail.insider.lastChecked")}: {formatDateTime(insiderTransactions.as_of)}
+            </span>
           </div>
+          <div className="mt-1">
+            {t("usStockDetail.insider.latestFiling")}: {formatDate(insiderTransactions.freshness.latest_filing_date)}
+            {" / "}
+            {t("usStockDetail.insider.accession")}: {insiderTransactions.freshness.latest_accession_number ?? "-"}
+          </div>
+          {insiderTransactions.quality.issue_codes.length > 0 ? (
+            <div className="mt-1 break-words font-mono text-[11px]">
+              {insiderTransactions.quality.issue_codes.slice(0, 6).join(" / ")}
+            </div>
+          ) : null}
         </div>
 
         <div className="overflow-hidden border border-omi-border-subtle">
-          <div className="grid grid-cols-[88px_1fr_88px_92px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
+          <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
+            <MetricCell
+              label={t("usStockDetail.insider.openMarketPurchases")}
+              value={`${summary.open_market_purchase_count} / ${formatDecimalText(summary.open_market_purchase_shares, 2)}`}
+            />
+            <MetricCell
+              label={t("usStockDetail.insider.openMarketSales")}
+              value={`${summary.open_market_sale_count} / ${formatDecimalText(summary.open_market_sale_shares, 2)}`}
+            />
+            <MetricCell
+              label={t("usStockDetail.insider.otherTransactions")}
+              value={formatNumber(summary.other_transaction_count, 0)}
+            />
+            <MetricCell
+              label={t("usStockDetail.insider.filings")}
+              value={formatNumber(summary.filing_count, 0)}
+            />
+            <MetricCell
+              label={t("usStockDetail.insider.amendments")}
+              value={formatNumber(summary.amendment_count, 0)}
+            />
+            <MetricCell
+              label={t("usStockDetail.insider.latestTransaction")}
+              value={formatDate(summary.latest_transaction_date)}
+            />
+          </div>
+        </div>
+
+        <div className="border border-omi-warning-border bg-omi-warning-soft px-4 py-3 text-xs leading-5 text-omi-warning-strong">
+          {insiderTransactions.quality.limitations[0] ??
+            t("usStockDetail.insider.form4Limitation")}
+        </div>
+
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="hidden grid-cols-[84px_minmax(170px,1.2fr)_minmax(150px,1fr)_108px_112px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted md:grid">
             <span>{t("usStockDetail.tableHeaders.date")}</span>
             <span>{t("usStockDetail.tableHeaders.insider")}</span>
-            <span className="text-right">{t("usStockDetail.tableHeaders.type")}</span>
+            <span>{t("usStockDetail.tableHeaders.type")}</span>
             <span className="text-right">{t("usStockDetail.tableHeaders.shares")}</span>
+            <span className="text-right">{t("usStockDetail.insider.priceAfter")}</span>
           </div>
-          <div className="border-t border-omi-border-subtle p-4">
-            <EmptyDataState message={t("usStockDetail.empty.noForm4")} />
+          <div className="max-h-[34rem] overflow-y-auto">
+            {insiderTransactions.transactions.length > 0 ? (
+              insiderTransactions.transactions.map((row) => {
+                const owner = row.owners[0] ?? null;
+                const role = owner ? insiderOwnerRole(owner) : "";
+                return (
+                  <div
+                    key={row.transaction_id}
+                    className="grid gap-3 border-t border-omi-border-subtle px-4 py-3 text-sm md:grid-cols-[84px_minmax(170px,1.2fr)_minmax(150px,1fr)_108px_112px] md:items-start md:gap-0"
+                  >
+                    <div className="text-omi-text-muted">
+                      <span className="block font-semibold text-omi-text">
+                        {formatDate(row.transaction_date)}
+                      </span>
+                      <span className="block text-[10px]">{row.form_type}</span>
+                    </div>
+                    <div className="min-w-0">
+                      <span className="block truncate font-bold text-omi-text-strong">
+                        {owner?.name ?? "-"}
+                      </span>
+                      <span className="block truncate text-xs text-omi-text-muted">
+                        {role || owner?.cik || "-"}
+                      </span>
+                      {row.owners.length > 1 ? (
+                        <span className="block text-[10px] text-omi-text-subtle">
+                          +{row.owners.length - 1} {t("usStockDetail.insider.additionalOwners")}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap gap-1">
+                        <span className={["border px-1.5 py-0.5 text-[10px] font-bold", insiderCategoryTone(row.category)].join(" ")}>
+                          {row.transaction_code ?? "-"} / {t(`usStockDetail.insider.categories.${row.category}`)}
+                        </span>
+                        {row.table_type === "derivative" ? (
+                          <span className="border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-semibold text-omi-text-muted">
+                            {t("usStockDetail.insider.derivative")}
+                          </span>
+                        ) : null}
+                        {row.aff10b5_one ? (
+                          <span className="border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-semibold text-omi-text-muted">
+                            10b5-1
+                          </span>
+                        ) : null}
+                        {row.is_amendment ? (
+                          <span className="border border-omi-warning-border px-1.5 py-0.5 text-[10px] font-semibold text-omi-warning-strong">
+                            4/A
+                          </span>
+                        ) : null}
+                      </div>
+                      <span className="mt-1 block truncate text-xs text-omi-text-muted">
+                        {row.security_title ?? row.underlying_security_title ?? "-"}
+                      </span>
+                    </div>
+                    <div className="text-left md:text-right">
+                      <span className="font-bold text-omi-text-strong">
+                        {row.acquired_disposed_code ?? "-"} {formatDecimalText(row.shares, 2)}
+                      </span>
+                      <span className="block text-xs text-omi-text-muted">
+                        {row.direct_indirect_code ?? "-"} / {t("usStockDetail.insider.after")} {formatDecimalText(row.post_transaction_shares, 2)}
+                      </span>
+                    </div>
+                    <div className="text-left md:text-right">
+                      <span className="font-bold text-omi-text-strong">
+                        {row.price_per_share ? `$${formatDecimalText(row.price_per_share, 4)}` : "-"}
+                      </span>
+                      <a
+                        href={row.source_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block truncate text-xs font-semibold text-omi-accent hover:underline"
+                      >
+                        SEC {row.accession_number.slice(-8)}
+                      </a>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="border-t border-omi-border-subtle p-4">
+                <EmptyDataState
+                  message={
+                    insiderTransactions.status === "ready_empty"
+                      ? t("usStockDetail.empty.form4CheckedEmpty")
+                      : t("usStockDetail.empty.noForm4Rows")
+                  }
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -2501,6 +3029,107 @@ export default function USStockDetailPanel({
     );
   }
 
+  function renderFinancialsTab() {
+    return (
+      <div className="overflow-hidden border border-omi-border-subtle">
+        <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
+          {t("usStockDetail.sections.secFundamentals")}
+        </div>
+        {financialContract ? (
+          <>
+            <div
+              className={[
+                "border-b px-4 py-3 text-xs leading-5",
+                financialQuality?.decision_usable
+                  ? "border-omi-success-border bg-omi-success-soft text-omi-success-strong"
+                  : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
+              ].join(" ")}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold">
+                  {financialContract.contract_version} · {financialContract.normalized.status}
+                </span>
+                <span className="font-semibold">
+                  {t("usStockDetail.financialQuality.freshness")}: {financialQuality?.freshness ?? "-"}
+                </span>
+              </div>
+              <div className="mt-1">
+                {t("usStockDetail.financialQuality.continuity")}: {financialQuality?.continuity ?? "-"}
+                {" · "}
+                {t("usStockDetail.financialQuality.semanticValidity")}: {financialQuality?.semantic_validity ?? "-"}
+                {" · "}
+                {t("usStockDetail.financialQuality.supplementalSemanticValidity")}: {financialQuality?.supplemental_semantic_validity ?? "-"}
+              </div>
+              {decisionBlockingFinancialIssues.length > 0 ? (
+                <div className="mt-1 break-words font-mono text-[11px]">
+                  {decisionBlockingFinancialIssues.slice(0, 6).join(" · ")}
+                </div>
+              ) : null}
+              {nonBlockingFinancialIssues.length > 0 ? (
+                <div className="mt-1 break-words font-mono text-[11px] text-omi-warning-strong">
+                  {nonBlockingFinancialIssues.slice(0, 6).join(" · ")}
+                </div>
+              ) : null}
+            </div>
+            <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
+              <MetricCell label={t("usStockDetail.metrics.revenueTtm")} value={formatDerivedValue(revenueTtmMetric)} />
+              <MetricCell label={t("usStockDetail.metrics.epsTtm")} value={formatDerivedValue(epsTtmMetric, { perShare: true })} />
+              <MetricCell label={t("usStockDetail.metrics.peTtm")} value={formatNumber(financialNumber(financialContract.valuation.pe_ttm))} />
+              <MetricCell label={t("usStockDetail.metrics.grossMargin")} value={formatDerivedValue(grossMarginMetric, { percent: true })} />
+              <MetricCell label={t("usStockDetail.metrics.operatingMargin")} value={formatDerivedValue(operatingMarginMetric, { percent: true })} />
+              <MetricCell label={t("usStockDetail.metrics.netMargin")} value={formatDerivedValue(netMarginMetric, { percent: true })} />
+              <MetricCell label={t("usStockDetail.metrics.revenueYoy")} value={formatDerivedValue(revenueYoyMetric, { percent: true })} />
+              <MetricCell label={t("usStockDetail.metrics.freeCashFlow")} value={formatDerivedValue(freeCashFlowMetric)} />
+              <MetricCell label={t("usStockDetail.metrics.netDebt")} value={formatDerivedValue(financialDerived?.net_debt)} />
+            </div>
+            <div className="grid grid-cols-[76px_minmax(94px,1fr)_minmax(94px,1fr)_72px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
+              <span>{t("usStockDetail.tableHeaders.period")}</span>
+              <span className="text-right">{t("usStockDetail.fundamentals.revenue")}</span>
+              <span className="text-right">{t("usStockDetail.fundamentals.net_income")}</span>
+              <span className="text-right">EPS</span>
+            </div>
+            <div className="max-h-72 overflow-y-auto">
+              {financialQuarterRows.length > 0 ? (
+                financialQuarterRows.map((row) => (
+                  <div
+                    key={row.period}
+                    className="grid grid-cols-[76px_minmax(94px,1fr)_minmax(94px,1fr)_72px] border-t border-omi-border-subtle px-4 py-2 text-sm text-omi-text"
+                  >
+                    <span>
+                      <span className="block font-bold">{row.period}</span>
+                      <span className="block text-[10px] text-omi-text-subtle">{formatDate(row.periodEnd)}</span>
+                    </span>
+                    <span className="text-right font-semibold">{formatDerivedValue(row.revenue)}</span>
+                    <span className="text-right font-semibold">{formatDerivedValue(row.netIncome)}</span>
+                    <span className="text-right font-semibold">{formatDerivedValue(row.eps, { perShare: true })}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="border-t border-omi-border-subtle p-4">
+                  <EmptyDataState message={t("usStockDetail.empty.noNormalizedQuarters")} />
+                </div>
+              )}
+            </div>
+          </>
+        ) : fundamentalMetrics.length > 0 ? (
+          <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
+            {secFundamentalCards.map((card) => (
+              <FundamentalMetricCell
+                key={card.metric}
+                label={t(`usStockDetail.fundamentals.${card.metric}`)}
+                metric={fundamentalMetricMap.get(card.metric)}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="p-4">
+            <EmptyDataState message={t("usStockDetail.empty.noSecFundamentals")} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function renderFilingsTab() {
     return (
       <div className="space-y-4">
@@ -2521,34 +3150,6 @@ export default function USStockDetailPanel({
             <MetricCell label={t("usStockDetail.metrics.actions")} value={corporateActions.length} />
             <MetricCell label={t("usStockDetail.metrics.latestAction")} value={latestActionDate} />
           </div>
-        </div>
-
-        <div className="overflow-hidden border border-omi-border-subtle">
-          <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-            {t("usStockDetail.sections.secFundamentals")}
-          </div>
-          {fundamentalMetrics.length > 0 ? (
-            <>
-              <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
-                <MetricCell label={t("usStockDetail.metrics.grossMargin")} value={formatRatioAsPct(grossMargin)} />
-                <MetricCell label={t("usStockDetail.metrics.netMargin")} value={formatRatioAsPct(netMargin)} />
-                <MetricCell label={t("usStockDetail.metrics.debtToEquity")} value={formatNumber(debtToEquity, 2)} />
-              </div>
-              <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
-                {secFundamentalCards.map((card) => (
-                  <FundamentalMetricCell
-                    key={card.metric}
-                    label={t(`usStockDetail.fundamentals.${card.metric}`)}
-                    metric={fundamentalMetricMap.get(card.metric)}
-                  />
-                ))}
-              </div>
-            </>
-          ) : (
-            <div className="p-4">
-              <EmptyDataState message={t("usStockDetail.empty.noSecFundamentals")} />
-            </div>
-          )}
         </div>
 
         <div className="overflow-hidden border border-omi-border-subtle">
@@ -2618,10 +3219,12 @@ export default function USStockDetailPanel({
   }
 
   function renderActiveDataTab() {
+    if (activeDataTab === "overview") return renderOverviewTab();
+    if (activeDataTab === "financials") return renderFinancialsTab();
+    if (activeDataTab === "institutions") return renderInstitutionsTab();
     if (activeDataTab === "insider") return renderInsiderTab();
     if (activeDataTab === "short") return renderShortTab();
-    if (activeDataTab === "filings") return renderFilingsTab();
-    return renderOwnershipTab();
+    return renderFilingsTab();
   }
 
   if (!selectedSymbol) {
@@ -3194,37 +3797,13 @@ export default function USStockDetailPanel({
             </div>
           </section>
         ) : (
-          <section className="border-t border-omi-border-subtle">
-            <div className="grid grid-cols-4 border-b border-omi-border-subtle">
-              {usDataPanelTabs.map((tab) => (
-                <USDataTabButton
-                  key={tab.key}
-                  tab={{ ...tab, label: t(`usStockDetail.tabs.${tab.key}.label`) }}
-                  active={activeDataTab === tab.key}
-                  onClick={() => setActiveDataTab(tab.key)}
-                />
-              ))}
-            </div>
-
-            <div className="px-5 py-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                    {t("usStockDetail.sections.data")}
-                  </div>
-                  <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
-                    {t(`usStockDetail.tabs.${activeDataTabMeta.key}.title`)}
-                  </h3>
-                  <div className="mt-1 text-xs text-omi-text-muted">
-                    {t(`usStockDetail.tabs.${activeDataTabMeta.key}.description`)}
-                  </div>
-                </div>
-                {renderDataPanelAction()}
-              </div>
-
-              <div className="mt-4">{renderActiveDataTab()}</div>
-            </div>
-          </section>
+          <USFundamentalWorkspace
+            activeTab={activeDataTab}
+            onTabChange={setActiveDataTab}
+            action={renderDataPanelAction()}
+          >
+            {renderActiveDataTab()}
+          </USFundamentalWorkspace>
         )}
       </aside>
       ) : null}

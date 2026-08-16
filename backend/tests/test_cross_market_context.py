@@ -171,6 +171,7 @@ def add_fx(
     db: Session,
     *,
     last_price: float = 32.5,
+    event_time: datetime = datetime(2026, 8, 7, 20, tzinfo=timezone.utc),
     fetched_at: datetime = DECISION_AT,
 ) -> None:
     db.add(
@@ -188,7 +189,7 @@ def add_fx(
             instrument_type="currency_pair",
             contract_key="spot",
             last_price=last_price,
-            event_time=fetched_at,
+            event_time=event_time,
             fetched_at=fetched_at,
         )
     )
@@ -438,7 +439,11 @@ class CrossMarketContextTests(unittest.TestCase):
             trade_date=old_trade_date,
             available_at=old_decision_at,
         )
-        add_fx(self.db, fetched_at=old_decision_at)
+        add_fx(
+            self.db,
+            event_time=datetime(2026, 8, 4, 20, tzinfo=timezone.utc),
+            fetched_at=old_decision_at,
+        )
         old_snapshot = materialize_cross_market_context_snapshot(
             self.db,
             "2330",
@@ -460,7 +465,7 @@ class CrossMarketContextTests(unittest.TestCase):
             available_at=DECISION_AT,
         )
         fx = self.db.query(ResourceQuoteSnapshot).one()
-        fx.event_time = DECISION_AT
+        fx.event_time = datetime(2026, 8, 7, 20, tzinfo=timezone.utc)
         fx.fetched_at = DECISION_AT
         self.db.commit()
 
@@ -526,7 +531,7 @@ class CrossMarketContextTests(unittest.TestCase):
         )
         self.assertEqual(self.db.query(CrossMarketSignalSnapshot).count(), 1)
 
-    def test_current_read_recomputes_freshness_when_unchanged_inputs_age_stale(
+    def test_current_read_keeps_session_aligned_fx_usable_as_wall_clock_ages(
         self,
     ) -> None:
         add_verified_tsm_relation(self.db)
@@ -551,11 +556,15 @@ class CrossMarketContextTests(unittest.TestCase):
         )
 
         self.assertEqual(current.projection_source, "latest_local_cache")
-        self.assertEqual(current.status, "stale")
-        self.assertFalse(current.decision_usable)
+        self.assertEqual(current.status, "ready")
+        self.assertTrue(current.decision_usable)
         self.assertNotEqual(current.snapshot_id, snapshot.snapshot_id)
-        self.assertIn(
+        self.assertNotIn(
             "materialized_snapshot_superseded_by_local_inputs",
+            current.limitations,
+        )
+        self.assertIn(
+            "latest_local_cache_projection_not_materialized_snapshot",
             current.limitations,
         )
         self.assertEqual(self.db.query(CrossMarketSignalSnapshot).count(), 1)

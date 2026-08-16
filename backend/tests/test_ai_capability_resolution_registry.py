@@ -34,7 +34,7 @@ class CapabilityResolutionRegistryTest(unittest.TestCase):
         registry = capability_contract.CAPABILITY_RESOLUTION_REGISTRY
         self.assertEqual(set(registry), expected)
         self.assertEqual(len(registry), len(expected))
-        self.assertEqual(len(capability_contract.CAPABILITY_SPECS), 57)
+        self.assertEqual(len(capability_contract.CAPABILITY_SPECS), 66)
 
     def test_registry_entries_use_supported_statuses_and_modes(self) -> None:
         for entry in capability_contract.CAPABILITY_RESOLUTION_REGISTRY.values():
@@ -246,11 +246,11 @@ class CapabilityResolutionRegistryTest(unittest.TestCase):
         )
 
         self.assertEqual(result["summary"]["provider_contract_count"], 15)
-        self.assertEqual(result["summary"]["registry_capability_count"], 57)
-        self.assertEqual(result["summary"]["registry_resolution_count"], 210)
+        self.assertEqual(result["summary"]["registry_capability_count"], 66)
+        self.assertEqual(result["summary"]["registry_resolution_count"], 219)
         self.assertEqual(len(result["data"]["provider_contracts"]), 15)
-        self.assertEqual(len(result["data"]["capability_registry"]), 57)
-        self.assertEqual(len(result["data"]["resolutions"]), 210)
+        self.assertEqual(len(result["data"]["capability_registry"]), 66)
+        self.assertEqual(len(result["data"]["resolutions"]), 219)
         blocked_providers = {
             item["id"]: item
             for item in result["data"]["provider_contracts"]

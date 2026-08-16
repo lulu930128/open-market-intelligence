@@ -151,7 +151,7 @@ async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
       {
         timeframe: "daily",
         bars: 60,
-        ensure_history: true,
+        ensure_history: false,
         outputsize: "compact",
         provider: "yahoo_chart",
       }
@@ -209,7 +209,7 @@ async function fetchJpMarketTapeSnapshot(config: JPMarketIndexConfig) {
       {
         timeframe: "daily",
         bars: 60,
-        ensure_history: true,
+        ensure_history: false,
         outputsize: "compact",
         provider: "auto",
       }

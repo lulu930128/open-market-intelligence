@@ -167,6 +167,66 @@ class ProviderHealthTests(unittest.TestCase):
 
         self.assertEqual(snapshots[0]["snapshot_age_seconds"], 86401)
         self.assertTrue(snapshots[0]["snapshot_is_stale"])
+        self.assertEqual(
+            snapshots[0]["snapshot_lifecycle"],
+            "active_canonical_scope",
+        )
+        self.assertEqual(
+            snapshots[0]["operational_freshness_status"],
+            "stale",
+        )
+
+    def test_source_health_snapshot_list_hides_historical_provider_generation(
+        self,
+    ) -> None:
+        now = datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc)
+        self.db.add_all(
+            [
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="daily_price",
+                    target="all",
+                    provider="old-provider",
+                    status="stale",
+                    ok=False,
+                    checked_at=now - timedelta(days=2),
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="daily_price",
+                    target="all",
+                    provider="current-provider",
+                    status="current",
+                    ok=True,
+                    checked_at=now,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        with patch.object(provider_health, "_now", return_value=now):
+            operational = list_source_health_snapshots(
+                self.db,
+                market="tw",
+            )
+            audited = list_source_health_snapshots(
+                self.db,
+                market="tw",
+                include_historical=True,
+            )
+
+        self.assertEqual(
+            [entry["provider"] for entry in operational],
+            ["current-provider"],
+        )
+        audited_by_provider = {
+            entry["provider"]: entry for entry in audited
+        }
+        self.assertEqual(len(audited_by_provider), 2)
+        self.assertEqual(
+            audited_by_provider["old-provider"]["snapshot_lifecycle"],
+            "historical_provider_generation",
+        )
 
     def test_degraded_source_health_transition_creates_one_trace_event(self) -> None:
         checked_at = datetime(2026, 7, 24, 4, 0, tzinfo=timezone.utc)

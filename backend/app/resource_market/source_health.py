@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -18,6 +18,12 @@ from app.resource_market.contract import (
     normalize_resource_symbol,
 )
 from app.resource_market.sources import normalize_resource_interval
+from app.resource_market.fx_freshness import (
+    FxFreshnessEvaluation,
+    evaluate_fx_freshness,
+    fx_daily_data_date,
+    latest_completed_fx_data_date,
+)
 
 
 RESOURCE_QUOTE_STALE_SECONDS = 30 * 60
@@ -47,11 +53,13 @@ SESSION_UNKNOWN = "unknown"
 RESOURCE_QUOTE_HEALTH_COLUMNS = (
     ResourceQuoteSnapshot.id,
     ResourceQuoteSnapshot.provider_symbol,
+    ResourceQuoteSnapshot.event_time,
     ResourceQuoteSnapshot.fetched_at,
 )
 RESOURCE_OHLCV_HEALTH_COLUMNS = (
     ResourceOhlcvBar.id,
     ResourceOhlcvBar.bar_time,
+    ResourceOhlcvBar.raw_payload_json,
     ResourceOhlcvBar.fetched_at,
 )
 
@@ -72,6 +80,7 @@ class ResourceSourceHealthEntry:
     age_seconds: int | None = None
     stale_seconds: int | None = None
     session_status: str = SESSION_UNKNOWN
+    freshness: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +98,7 @@ class ResourceSourceHealthEntry:
             "age_seconds": self.age_seconds,
             "stale_seconds": self.stale_seconds,
             "session_status": self.session_status,
+            "freshness": self.freshness,
         }
 
 
@@ -199,6 +209,27 @@ def _status_for_latest(
     )
 
 
+def _fx_health_status(
+    freshness: FxFreshnessEvaluation,
+    *,
+    provider_status: str,
+) -> tuple[str, bool, str, str]:
+    reason = (
+        f"FX freshness={freshness.status}; session={freshness.session_status}; "
+        f"reasons={','.join(freshness.reason_codes)}."
+    )
+    if freshness.status == "missing":
+        return "empty", False, "empty", reason
+    if not freshness.usable:
+        return "stale", False, freshness.status, reason
+    if provider_status == PROVIDER_BEST_EFFORT or freshness.status in {
+        "delayed",
+        "latest_completed_session",
+    }:
+        return "delayed", True, PROVIDER_BEST_EFFORT, reason
+    return "live", True, "ok", reason
+
+
 def _split_symbols(symbols: str | None) -> list[str] | None:
     if not symbols:
         return None
@@ -266,6 +297,35 @@ def _quote_entry(db: Session, *, instrument, now: datetime) -> ResourceSourceHea
         else None
     )
     latest_fetched_at = latest.fetched_at if latest else None
+    if (instrument.exchange or "").strip().upper() == "FX":
+        freshness = evaluate_fx_freshness(
+            purpose="spot_quote",
+            now=now,
+            event_time=(latest.event_time or latest.fetched_at) if latest else None,
+            fetched_at=latest.fetched_at if latest else None,
+        )
+        status, ok, data_quality, reason = _fx_health_status(
+            freshness,
+            provider_status=instrument.provider_status,
+        )
+        return ResourceSourceHealthEntry(
+            resource="quote",
+            provider=instrument.provider,
+            target=instrument.symbol,
+            status=status,
+            ok=ok,
+            row_count=row_count,
+            latest_fetched_at=latest_fetched_at,
+            latest_data_key=(
+                latest.provider_symbol if latest else instrument.provider_symbol
+            ),
+            data_quality=data_quality,
+            reason=reason,
+            age_seconds=freshness.event_age_seconds,
+            stale_seconds=freshness.stale_after_seconds,
+            session_status=freshness.session_status,
+            freshness=freshness.as_payload(),
+        )
     status, ok, data_quality, reason, age_seconds, stale_seconds = _status_for_latest(
         row_count=row_count,
         latest_fetched_at=latest_fetched_at,
@@ -315,15 +375,84 @@ def _ohlcv_entry(
         )
         .one()
     )
-    latest = (
-        query.options(load_only(*RESOURCE_OHLCV_HEALTH_COLUMNS))
-        .filter(ResourceOhlcvBar.fetched_at == latest_fetched_at)
-        .order_by(ResourceOhlcvBar.fetched_at.desc(), ResourceOhlcvBar.id.desc())
-        .first()
-        if latest_fetched_at is not None
-        else None
-    )
+    is_fx = (instrument.exchange or "").strip().upper() == "FX"
+    if is_fx and interval == "1d":
+        expected_data_date = latest_completed_fx_data_date(now)
+        completed_cutoff = datetime.combine(
+            expected_data_date + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        candidate_rows = (
+            query.options(load_only(*RESOURCE_OHLCV_HEALTH_COLUMNS))
+            .filter(ResourceOhlcvBar.bar_time < completed_cutoff)
+            .order_by(
+                ResourceOhlcvBar.bar_time.desc(),
+                ResourceOhlcvBar.fetched_at.desc(),
+                ResourceOhlcvBar.id.desc(),
+            )
+            .limit(64)
+            .all()
+        )
+        latest = next(
+            (
+                row
+                for row in candidate_rows
+                if (
+                    fx_daily_data_date(row.bar_time, row.raw_payload_json)
+                    or date.min
+                )
+                <= expected_data_date
+            ),
+            None,
+        )
+    else:
+        latest = (
+            query.options(load_only(*RESOURCE_OHLCV_HEALTH_COLUMNS))
+            .filter(ResourceOhlcvBar.fetched_at == latest_fetched_at)
+            .order_by(ResourceOhlcvBar.fetched_at.desc(), ResourceOhlcvBar.id.desc())
+            .first()
+            if latest_fetched_at is not None
+            else None
+        )
     latest_fetched_at = latest.fetched_at if latest else None
+    if is_fx:
+        data_date = (
+            fx_daily_data_date(latest.bar_time, latest.raw_payload_json)
+            if latest and interval == "1d"
+            else None
+        )
+        freshness = evaluate_fx_freshness(
+            purpose="daily_trend" if interval == "1d" else "spot_quote",
+            now=now,
+            event_time=latest.bar_time if latest else None,
+            fetched_at=latest.fetched_at if latest else None,
+            data_date=data_date,
+        )
+        status, ok, data_quality, reason = _fx_health_status(
+            freshness,
+            provider_status=instrument.provider_status,
+        )
+        return ResourceSourceHealthEntry(
+            resource="ohlcv",
+            provider=instrument.provider,
+            target=f"{instrument.symbol}:{interval}",
+            status=status,
+            ok=ok,
+            row_count=row_count,
+            latest_fetched_at=latest_fetched_at,
+            latest_data_key=latest.bar_time.isoformat() if latest else interval,
+            data_quality=data_quality,
+            reason=reason,
+            age_seconds=freshness.event_age_seconds,
+            stale_seconds=(
+                freshness.stale_after_seconds
+                if freshness.stale_after_seconds is not None
+                else stale_seconds
+            ),
+            session_status=freshness.session_status,
+            freshness=freshness.as_payload(),
+        )
     status, ok, data_quality, reason, age_seconds, stale_seconds = _status_for_latest(
         row_count=row_count,
         latest_fetched_at=latest_fetched_at,

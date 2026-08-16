@@ -21,11 +21,20 @@ export const messages: Record<AppLocale, MessageTree> = {
 
 function readMessage(tree: MessageTree, key: string): string | null {
   let current: string | MessageTree = tree;
+  const parts = key.split(".");
 
-  for (const part of key.split(".")) {
+  for (let index = 0; index < parts.length; index += 1) {
     if (typeof current === "string") return null;
-    current = current[part];
-    if (current === undefined) return null;
+
+    const nextValue: string | MessageTree | undefined = current[parts[index]];
+    if (nextValue !== undefined) {
+      current = nextValue;
+      continue;
+    }
+
+    const dottedLeaf: string | MessageTree | undefined =
+      current[parts.slice(index).join(".")];
+    return typeof dottedLeaf === "string" ? dottedLeaf : null;
   }
 
   return typeof current === "string" ? current : null;

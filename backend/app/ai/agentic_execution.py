@@ -638,8 +638,36 @@ def _execute_tool(
     if tool_name == "us.refresh_sec_facts":
         return us_market_service.refresh_us_sec_companyfacts(db=db, symbol=symbol)
 
+    if tool_name == "us.refresh_insider_transactions":
+        return us_market_service.refresh_us_sec_insider_transactions(
+            db=db,
+            symbol=symbol,
+            max_filings=agentic_common._safe_int(
+                args.get("max_filings"),
+                default=50,
+                minimum=1,
+                maximum=100,
+            ),
+        )
+
     if tool_name == "us.read_sec_fundamentals":
-        return us_market_service.get_us_sec_fundamental_summary(db=db, symbol=symbol)
+        return {
+            "financial_contract": us_market_service.get_us_sec_financial_contract(
+                db=db,
+                symbol=symbol,
+                periods=8,
+            ),
+            "sec_fundamentals": us_market_service.get_us_sec_fundamental_summary(
+                db=db,
+                symbol=symbol,
+            ),
+            "currency": "USD",
+            "source_amount_unit": "USD",
+            "normalized_amount_unit": "USD",
+            "amount_scale": 1,
+            "ratio_unit": "percent",
+            "per_share_unit": "USD/share",
+        }
 
     if tool_name == "us.refresh_corporate_actions":
         return us_market_service.refresh_us_corporate_actions_from_alphavantage(

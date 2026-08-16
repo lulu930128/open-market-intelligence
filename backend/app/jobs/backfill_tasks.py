@@ -2,7 +2,8 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
-from app.jobs.service import ProgressCallback, run_tracked_job
+from app.db.models import utc_now
+from app.jobs.service import JobExecutionError, ProgressCallback, run_tracked_job
 from app.jp_market import service as jp_market_service
 from app.kr_market import service as kr_market_service
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
@@ -13,6 +14,7 @@ from app.market.daily_metrics_backfill import (
     ensure_daily_metrics,
     ensure_latest_daily_metrics,
     ensure_stock_daily_metrics,
+    evaluate_daily_metrics_postcondition,
 )
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.fundamental_metrics_backfill import (
@@ -34,6 +36,10 @@ from app.market.tw_derivatives import (
     refresh_taiwan_derivatives,
 )
 from app.us_market import service as us_market_service
+from app.us_market import ownership_service as us_ownership_service
+from app.us_market import ownership_13f_analytics as us_13f_analytics
+from app.us_market import ownership_13f_mapping as us_13f_mapping
+from app.us_market import ownership_13f_service as us_13f_service
 from app.watchlists.backfill_service import (
     backfill_watchlist_group_twse,
     refresh_watchlist_group_daily_prices,
@@ -101,29 +107,76 @@ def run_market_daily_metrics_job(
     include_today: bool,
     sleep_seconds: float,
     skip_existing: bool,
+    expected_trade_date: date | None = None,
+    repair_context: dict | None = None,
 ) -> None:
     def worker(db: Session, progress: ProgressCallback):
         progress(0, 1, "Backfilling market daily metrics.")
 
         if start_date is not None:
-            return ensure_daily_metrics(
+            result = ensure_daily_metrics(
                 db=db,
                 start_date=start_date,
                 end_date=end_date or start_date,
                 categories=categories,
                 sleep_seconds=sleep_seconds,
                 skip_existing=skip_existing,
+                required_trade_dates=(expected_trade_date,) if expected_trade_date else None,
+            )
+        else:
+            result = ensure_latest_daily_metrics(
+                db=db,
+                categories=categories,
+                to_date=end_date,
+                lookback_days=lookback_days,
+                include_today=include_today,
+                sleep_seconds=sleep_seconds,
+                skip_existing=skip_existing,
+                expected_trade_date=expected_trade_date,
             )
 
-        return ensure_latest_daily_metrics(
-            db=db,
-            categories=categories,
-            to_date=end_date,
-            lookback_days=lookback_days,
-            include_today=include_today,
-            sleep_seconds=sleep_seconds,
-            skip_existing=skip_existing,
-        )
+        if expected_trade_date is not None:
+            postcondition = result.get("postcondition")
+            if not isinstance(postcondition, dict):
+                postcondition = evaluate_daily_metrics_postcondition(
+                    db,
+                    categories=categories,
+                    expected_trade_date=expected_trade_date,
+                )
+                result["postcondition"] = postcondition
+                result["postcondition_met"] = postcondition["postcondition_met"]
+                result["expected_trade_date"] = expected_trade_date
+                result["observed_max_trade_date"] = postcondition[
+                    "observed_max_trade_date"
+                ]
+
+            if repair_context is not None:
+                result["repair"] = {
+                    **repair_context,
+                    "resolved_at": (
+                        utc_now() if postcondition["postcondition_met"] else None
+                    ),
+                }
+
+            if not postcondition["postcondition_met"]:
+                result["status"] = (
+                    "partial_success"
+                    if postcondition.get("satisfied_source_count", 0) > 0
+                    else "error"
+                )
+                result["message"] = (
+                    "Daily metric refresh finished without satisfying the expected-date contract."
+                )
+                observed = postcondition.get("observed_max_trade_date")
+                raise JobExecutionError(
+                    "Daily metric postcondition failed: "
+                    f"expected={expected_trade_date.isoformat()} "
+                    f"observed={observed.isoformat() if observed else 'none'} "
+                    f"coverage={postcondition.get('coverage_ratio', 0.0)}.",
+                    result=result,
+                )
+
+        return result
 
     run_tracked_job(job_id, worker)
 
@@ -658,6 +711,112 @@ def run_us_watchlist_resource_refresh_job(
             sleep_seconds=sleep_seconds,
             progress_callback=progress,
         )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_us_sec_form4_sync_job(
+    job_id: int,
+    scope: str,
+    symbol: str | None,
+    group_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    from_date: date | None,
+    to_date: date | None,
+    max_symbols: int,
+    max_filings_per_symbol: int,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, max(max_symbols, 1), "Refreshing SEC Form 4 filings.")
+        return us_ownership_service.sync_form4_scope(
+            db,
+            scope=scope,
+            symbol=symbol,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            from_date=from_date,
+            to_date=to_date,
+            max_symbols=max_symbols,
+            max_filings_per_symbol=max_filings_per_symbol,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_us_sec_13f_quarter_sync_job(
+    job_id: int,
+    period_key: str,
+    source_url: str,
+    force_download: bool,
+    force_rebuild: bool,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 5, f"Synchronizing SEC Form 13F release {period_key}.")
+        return us_13f_service.sync_13f_release(
+            db,
+            period_key=period_key,
+            source_url=source_url,
+            force_download=force_download,
+            force_rebuild=force_rebuild,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_us_sec_13f_history_sync_job(
+    job_id: int,
+    max_releases: int,
+    refresh_manifest: bool,
+    include_completed: bool,
+    force_download: bool,
+    force_rebuild: bool,
+    stop_on_error: bool,
+    rebuild_projections: bool,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, max(max_releases, 1), "Synchronizing SEC Form 13F history manifest.")
+        return us_13f_service.sync_13f_history(
+            db,
+            max_releases=max_releases,
+            refresh_manifest=refresh_manifest,
+            include_completed=include_completed,
+            force_download=force_download,
+            force_rebuild=force_rebuild,
+            stop_on_error=stop_on_error,
+            rebuild_projections=rebuild_projections,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_us_sec_13f_mapping_sync_job(
+    job_id: int,
+    cusips: list[str],
+    max_identifiers: int,
+    refresh: bool,
+    rebuild_projections: bool,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 2, "Synchronizing OpenFIGI CUSIP mappings for SEC Form 13F.")
+        mapping = us_13f_mapping.sync_13f_identifier_mappings(
+            db,
+            cusips=cusips or None,
+            max_identifiers=max_identifiers,
+            refresh=refresh,
+        )
+        progress(1, 2, "Rebuilding bounded SEC Form 13F symbol projections.")
+        projection = (
+            us_13f_analytics.rebuild_13f_symbol_quarter_projections(db)
+            if rebuild_projections
+            else None
+        )
+        progress(2, 2, "SEC Form 13F identifier mapping sync completed.")
+        return {"mapping": mapping, "projection": projection}
 
     run_tracked_job(job_id, worker)
 

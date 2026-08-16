@@ -26,7 +26,10 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             "phase": "post_close",
             "reason": "trading_day",
             "release_windows": {
-                TAIWAN_DATASET_INSTITUTIONAL_TRADE: {"is_released": True},
+                TAIWAN_DATASET_INSTITUTIONAL_TRADE: {
+                    "is_released": True,
+                    "expected_trade_date": "2026-06-15",
+                },
                 TAIWAN_DATASET_MARGIN_TRADING: {"is_released": False},
             },
         }
@@ -47,6 +50,8 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(request["categories"], [TAIWAN_REFRESH_INSTITUTIONAL_TRADE])
         self.assertTrue(request["include_today"])
         self.assertTrue(task_args[4])
+        self.assertEqual(request["expected_trade_date"], date(2026, 6, 15))
+        self.assertEqual(task_args[7], date(2026, 6, 15))
         self.assertEqual(request["calendar_phase"], "post_close")
         fake_db.close.assert_called_once()
 
@@ -59,7 +64,10 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             "phase": "post_close",
             "reason": "trading_day",
             "release_windows": {
-                TAIWAN_DATASET_MARGIN_TRADING: {"is_released": True},
+                TAIWAN_DATASET_MARGIN_TRADING: {
+                    "is_released": True,
+                    "expected_trade_date": "2026-06-15",
+                },
             },
         }
 
@@ -80,6 +88,8 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertTrue(request["include_today"])
         self.assertEqual(task_args[2], [TAIWAN_REFRESH_MARGIN_TRADING])
         self.assertTrue(task_args[4])
+        self.assertEqual(request["expected_trade_date"], date(2026, 6, 15))
+        self.assertEqual(task_args[7], date(2026, 6, 15))
         fake_db.close.assert_called_once()
 
     def test_scheduler_market_chip_refresh_uses_calendar_expected_trade_date(self) -> None:

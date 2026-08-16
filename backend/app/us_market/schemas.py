@@ -38,6 +38,7 @@ class USStockMasterRead(BaseModel):
 
 class USSymbolSyncResultRead(BaseModel):
     status: str
+    as_of: str | None = None
     scanned_count: int
     created_count: int
     updated_count: int
@@ -227,6 +228,12 @@ class USSecFactRefreshResultRead(BaseModel):
     fetched_count: int
     inserted_count: int
     updated_count: int
+    submissions_fetched_count: int = 0
+    submissions_cache_persisted: bool = False
+    prior_local_accession_number: str | None = None
+    latest_local_accession_number: str | None = None
+    latest_remote_accession_number: str | None = None
+    freshness: dict | None = None
     message: str
 
 
@@ -255,6 +262,110 @@ class USSecFundamentalSummaryRead(BaseModel):
     entity_name: str | None = None
     metric_count: int
     metrics: list[USSecFundamentalMetricRead]
+
+
+class USSecFinancialQualityRead(BaseModel):
+    freshness: str
+    filing_freshness: dict = Field(default_factory=dict)
+    continuity: str
+    semantic_validity: str
+    supplemental_semantic_validity: str = "valid"
+    completeness: str
+    decision_usable: bool
+    issues: list[str] = Field(default_factory=list)
+    decision_blocking_issues: list[str] = Field(default_factory=list)
+    non_blocking_issues: list[str] = Field(default_factory=list)
+    revenue_continuity: dict = Field(default_factory=dict)
+
+
+class USSecFinancialContractRead(BaseModel):
+    contract_version: str
+    target: dict
+    as_of: datetime
+    mode: str
+    as_reported: dict
+    normalized: dict
+    derived: dict
+    valuation: dict
+    quality: USSecFinancialQualityRead
+    source_refs: list[dict] = Field(default_factory=list)
+
+
+class USSecInsiderTransactionsRead(BaseModel):
+    contract_version: str
+    symbol: str
+    cik: str | None = None
+    status: str
+    as_of: str | None = None
+    freshness: dict = Field(default_factory=dict)
+    summary: dict = Field(default_factory=dict)
+    transactions: list[dict] = Field(default_factory=list)
+    quality: dict = Field(default_factory=dict)
+    source_refs: list[dict] = Field(default_factory=list)
+    pagination: dict = Field(default_factory=dict)
+
+
+class USSecForm4SyncRequest(BaseModel):
+    scope: str = Field(default="symbol", pattern="^(symbol|watchlist)$")
+    symbol: str | None = None
+    group_id: int | None = Field(default=None, ge=1)
+    include_children: bool = True
+    enabled_only: bool = True
+    from_date: date | None = None
+    to_date: date | None = None
+    max_symbols: int = Field(default=25, ge=1, le=100)
+    max_filings_per_symbol: int = Field(default=50, ge=1, le=100)
+
+
+class USSec13FInstitutionalHoldingsRead(BaseModel):
+    contract_version: str
+    symbol: str
+    cik: str | None = None
+    status: str
+    as_of: str | None = None
+    freshness: dict = Field(default_factory=dict)
+    summary: dict = Field(default_factory=dict)
+    quarters: list[dict] = Field(default_factory=list)
+    managers: list[dict] = Field(default_factory=list)
+    quality: dict = Field(default_factory=dict)
+    source_refs: list[dict] = Field(default_factory=list)
+
+
+class USSec13FCoverageRead(BaseModel):
+    contract_version: str
+    status: str
+    as_of: str
+    warehouse: dict = Field(default_factory=dict)
+    mapping: dict = Field(default_factory=dict)
+    quality: dict = Field(default_factory=dict)
+
+
+class USSec13FQuarterSyncRequest(BaseModel):
+    period_key: str = Field(..., min_length=4, max_length=40)
+    source_url: str = Field(
+        ...,
+        pattern=r"^https://www\.sec\.gov/",
+        max_length=500,
+    )
+    force_download: bool = False
+    force_rebuild: bool = False
+
+
+class USSec13FHistorySyncRequest(BaseModel):
+    max_releases: int = Field(default=4, ge=1, le=60)
+    refresh_manifest: bool = True
+    include_completed: bool = False
+    force_download: bool = False
+    force_rebuild: bool = False
+    stop_on_error: bool = False
+    rebuild_projections: bool = True
+
+
+class USSec13FMappingSyncRequest(BaseModel):
+    cusips: list[str] = Field(default_factory=list, max_length=100)
+    max_identifiers: int = Field(default=25, ge=1, le=5000)
+    refresh: bool = False
+    rebuild_projections: bool = True
 
 
 class USCompanyProfileRead(BaseModel):
@@ -397,6 +508,11 @@ class USSourceHealthEntryRead(BaseModel):
     rate_limited: bool = False
     retry_after_seconds: int | None = None
     error_message: str | None = None
+    latest_accession_number: str | None = None
+    expected_accession_number: str | None = None
+    latest_filing_date: date | None = None
+    last_checked_at: datetime | None = None
+    freshness_basis: str | None = None
     latest_event_id: int | None = None
     latest_event_at: datetime | None = None
     latest_event_status: str | None = None

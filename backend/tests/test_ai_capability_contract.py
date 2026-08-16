@@ -514,6 +514,67 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(selection["max_response_bytes"], 20_000)
         self.assertEqual(selection["realtime_policy"], "require_live")
 
+    def test_selection_traces_default_and_explicit_response_budgets(self) -> None:
+        default_selection = capability_contract.normalize_selection(
+            selection={"include": ["market.indices"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="TW",
+            question_intent="market_overview",
+        )
+
+        self.assertIsNone(
+            default_selection["requested_max_response_bytes"]
+        )
+        self.assertEqual(
+            default_selection["default_max_response_bytes"],
+            32_768,
+        )
+        self.assertEqual(
+            default_selection["effective_max_response_bytes"],
+            32_768,
+        )
+        self.assertEqual(
+            default_selection["max_response_ceiling_bytes"],
+            65_536,
+        )
+        self.assertEqual(
+            default_selection["response_budget_source"],
+            "payload_default_adaptive",
+        )
+
+        explicit_selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["market.indices"],
+                "max_response_bytes": 20_000,
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="TW",
+            question_intent="market_overview",
+        )
+
+        self.assertEqual(
+            explicit_selection["requested_max_response_bytes"],
+            20_000,
+        )
+        self.assertEqual(
+            explicit_selection["effective_max_response_bytes"],
+            20_000,
+        )
+        self.assertEqual(
+            explicit_selection["max_response_ceiling_bytes"],
+            20_000,
+        )
+        self.assertEqual(
+            explicit_selection["response_budget_source"],
+            "caller_explicit",
+        )
+
     def test_natural_language_chip_capabilities_do_not_select_siblings(self) -> None:
         payload = AiAskRequest(
             question=(
@@ -2368,6 +2429,35 @@ class AiCapabilityContractTests(unittest.TestCase):
             providers=["binance"],
             symbols=["BTC-USDT"],
         )
+
+    def test_us_fundamental_tool_returns_versioned_contract_and_legacy_summary(self) -> None:
+        contract = {
+            "contract_version": "omi.financial.v1",
+            "quality": {"decision_usable": True},
+        }
+        summary = {"symbol": "AAPL", "metric_count": 7}
+        with (
+            patch.object(
+                agentic_execution.us_market_service,
+                "get_us_sec_financial_contract",
+                return_value=contract,
+            ) as read_contract,
+            patch.object(
+                agentic_execution.us_market_service,
+                "get_us_sec_fundamental_summary",
+                return_value=summary,
+            ) as read_summary,
+        ):
+            result = agentic_execution._execute_tool(
+                db=object(),
+                tool_name="us.read_sec_fundamentals",
+                args={"symbol": "AAPL"},
+            )
+
+        self.assertEqual(result["financial_contract"]["contract_version"], "omi.financial.v1")
+        self.assertEqual(result["sec_fundamentals"]["metric_count"], 7)
+        read_contract.assert_called_once_with(db=ANY, symbol="AAPL", periods=8)
+        read_summary.assert_called_once_with(db=ANY, symbol="AAPL")
 
     def test_continuation_revalidates_action_against_target_and_selection(self) -> None:
         selection = capability_contract.normalize_selection(

@@ -3700,6 +3700,16 @@ test.describe("OMI dashboard smoke", () => {
                   fx_provider: "yahoo_chart",
                   fx_as_of: "2026-06-08T08:00:00Z",
                   fx_age_seconds: 14_400,
+                  fx_freshness: {
+                    purpose: "adr_alignment",
+                    status: "current",
+                    usable: true,
+                    session_status: "open",
+                    expected_data_date: "2026-06-05",
+                    actual_data_date: "2026-06-05",
+                    refresh_eligible: false,
+                    reason_codes: ["fx_matches_adr_trade_date"],
+                  },
                   tw_reference_price_twd: 1_000,
                   tw_reference_trade_date: "2026-06-05",
                   target_tw_trade_date: "2026-06-08",
@@ -3974,6 +3984,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(parity).toContainText("TSM US$200");
     await expect(parity).toContainText("USD/TWD 32.50");
     await expect(parity).toContainText("高於台股基準 +30.00%");
+    await expect(parity).toContainText("匯率 2026-06-05");
     await expect(parity).toContainText("較台股對照仍高 +4.00%");
 
     const fxFlow = page.getByTestId("fx-flow-context-strip");
@@ -3998,6 +4009,107 @@ test.describe("OMI dashboard smoke", () => {
     await expect(fxFlow).toContainText("5日 -500億");
     await expect(fxFlow).toContainText("5日 -5,500張");
     await expect(fxFlow).toContainText("不代表台幣升貶單向造成外資買賣");
+  });
+
+  test("Taiwan overnight context executes one bounded refresh job then rereads", async ({
+    page,
+  }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    const reportBody = (shouldExecute: boolean) => ({
+      kind: "us_overnight_tw_impact",
+      stock_id: "2330",
+      stock_name: "台積電",
+      as_of: "2026-08-07",
+      generated_at: "2026-08-10T12:00:00Z",
+      stance: "neutral",
+      title: "Fixture bounded refresh",
+      summary: shouldExecute ? "等待跨市場更新" : "跨市場資料已更新",
+      score: 0,
+      weighted_change_pct: 0,
+      confidence: "medium",
+      tw_mapping: {
+        stock_id: "2330",
+        stock_name: "台積電",
+        market: "TWSE",
+        industry: "24",
+        category: null,
+        profiles: ["semiconductor"],
+        reason: "fixture",
+      },
+      adr_parity: null,
+      cross_market_context: null,
+      fx_flow_context: null,
+      refresh_decision: {
+        status: shouldExecute ? "planned" : "not_needed",
+        should_execute: shouldExecute,
+        reason: shouldExecute
+          ? "executable_cross_market_sources_available"
+          : "cross_market_sources_current",
+        planned_source_count: shouldExecute ? 1 : 0,
+        deferred_source_count: 0,
+        cooldown_source_count: 0,
+      },
+      refresh_plan: {},
+      factors: [],
+      baskets: [],
+      missing: [],
+      warnings: [],
+      source_refs: [],
+      freshness: {},
+      evidence_passport: {},
+    });
+    const completedJob = {
+      id: 91,
+      job_type: "cross_market.context_refresh",
+      status: "success",
+      target: "2330",
+      progress_current: 1,
+      progress_total: 1,
+      message: "Bounded cross-market refresh complete.",
+      error_message: null,
+      request: {},
+      result: { status: "success", success_count: 1, failed_count: 0 },
+      created_at: "2026-08-10T12:00:00Z",
+      started_at: "2026-08-10T12:00:01Z",
+      ended_at: "2026-08-10T12:00:02Z",
+      updated_at: "2026-08-10T12:00:02Z",
+    };
+
+    await mockOmiApi(page, {
+      apiRequests,
+      apiResponder: ({ method, path, requestNumber }) => {
+        if (method === "GET" && path.endsWith("/market/overnight-impact/2330")) {
+          return { body: reportBody(requestNumber === 1) };
+        }
+        if (method === "POST" && path.endsWith("/market/cross-market/refresh")) {
+          return { body: completedJob };
+        }
+        if (method === "GET" && path.endsWith("/jobs/91")) {
+          return { body: completedJob };
+        }
+        return null;
+      },
+    });
+
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect.poll(
+      () =>
+        apiRequests.filter(
+          (request) =>
+            request.method === "GET" &&
+            request.path.endsWith("/market/overnight-impact/2330")
+        ).length
+    ).toBe(2);
+    const refreshRequests = apiRequests.filter(
+      (request) =>
+        request.method === "POST" &&
+        request.path.endsWith("/market/cross-market/refresh")
+    );
+    expect(refreshRequests).toHaveLength(1);
+    expect(refreshRequests[0]?.search).toContain("stock_ids=2330");
+    expect(refreshRequests[0]?.search).toContain("max_symbols=1");
+    expect(refreshRequests[0]?.search).toContain("max_runtime_seconds=120");
   });
 
   test("Taiwan overnight context renders noncausal proxy residual", async ({ page }) => {
@@ -5590,6 +5702,63 @@ test.describe("OMI dashboard smoke", () => {
     await expect(chart).toHaveAttribute("data-source-point-count", "3");
     await expect(chart).toHaveAttribute("data-chart-point-count", "2");
     expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan chart history backfill stays in Update status without an inline banner", async ({
+    page,
+  }) => {
+    let backfillRequested = false;
+    const fullOhlc = stockOhlcResponse("2330");
+    const initialPoints = fullOhlc.points.slice(-1);
+    const backfillJob = {
+      ...completedRefreshJob(),
+      id: 501,
+      job_type: "market.twse_daily_price_backfill",
+      target: "2330",
+      progress_current: 1,
+      progress_total: 1,
+      message: "Taiwan daily history backfill completed.",
+    };
+
+    await mockOmiApi(page, {
+      apiResponder: ({ method, path }) => {
+        if (method === "GET" && path.endsWith("/market/ohlc/2330")) {
+          return {
+            body: backfillRequested
+              ? fullOhlc
+              : {
+                  ...fullOhlc,
+                  from_date: initialPoints[0]?.time,
+                  to_date: initialPoints[0]?.time,
+                  point_count: initialPoints.length,
+                  points: initialPoints,
+                },
+          };
+        }
+        if (method === "POST" && path.endsWith("/market/backfill/twse/2330")) {
+          backfillRequested = true;
+          return { body: backfillJob };
+        }
+        if (method === "GET" && path.endsWith("/jobs/501")) {
+          return { body: backfillJob };
+        }
+        if (method === "GET" && path.endsWith("/jobs")) {
+          return { body: backfillRequested ? [backfillJob] : [] };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect.poll(() => backfillRequested).toBe(true);
+    const detailPanel = page.getByTestId("stock-detail-panel");
+    await expect(detailPanel).not.toContainText("詳見左側更新狀態");
+    await expect(detailPanel).not.toContainText("日K：補齊");
+
+    const sidebar = page.getByRole("complementary").first();
+    await sidebar.getByRole("button", { name: /更新狀態/ }).click();
+    await expect(sidebar).toContainText("上市日線補齊");
+    await expect(sidebar).toContainText("#2330");
   });
 
   test("Taiwan professional chart keeps the last drawing deleted while remote sync is stale", async ({

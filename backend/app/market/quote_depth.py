@@ -1720,6 +1720,7 @@ def capture_taiwan_quote_contract_snapshot(
     stock_id: str,
     capture_slot: str,
     now: datetime | None = None,
+    contract_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = _normalize_stock_id(stock_id)
     local_now = _local_now(now)
@@ -1742,6 +1743,11 @@ def capture_taiwan_quote_contract_snapshot(
             refresh=True,
             now=local_now,
         )
+        if isinstance(payload, dict) and contract_context:
+            payload = {
+                **payload,
+                "scheduler_contract": deepcopy(contract_context),
+            }
     except Exception as exc:
         db.rollback()
         error = str(exc) or exc.__class__.__name__

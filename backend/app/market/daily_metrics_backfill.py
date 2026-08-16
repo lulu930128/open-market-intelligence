@@ -251,6 +251,72 @@ def _latest_source_trade_date(db: Session, source: SourceRegistry) -> date | Non
     )
 
 
+def evaluate_daily_metrics_postcondition(
+    db: Session,
+    *,
+    categories: list[str] | tuple[str, ...] | None,
+    expected_trade_date: date,
+) -> dict:
+    """Evaluate whether every enabled required source reached the expected date."""
+
+    normalized_categories = _normalize_categories(categories)
+    sources = _list_metric_sources(db=db, categories=normalized_categories)
+    source_outcomes: list[dict] = []
+    satisfied_count = 0
+
+    for source in sources:
+        observed_max_trade_date = _latest_source_trade_date(db, source)
+        satisfied = bool(
+            observed_max_trade_date is not None
+            and observed_max_trade_date >= expected_trade_date
+        )
+        satisfied_count += int(satisfied)
+        source_outcomes.append(
+            {
+                "source_id": source.id,
+                "source_name": source.source_name,
+                "category": source.category,
+                "parser_type": source.parser_type,
+                "expected_trade_date": expected_trade_date,
+                "observed_max_trade_date": observed_max_trade_date,
+                "satisfied": satisfied,
+                "last_success_at": source.last_success_at,
+                "last_error_at": source.last_error_at,
+                "last_error_message": source.last_error_message,
+            }
+        )
+
+    required_count = len(source_outcomes)
+    postcondition_met = required_count > 0 and satisfied_count == required_count
+    if postcondition_met:
+        status = "satisfied"
+    elif satisfied_count > 0:
+        status = "partial"
+    else:
+        status = "failed"
+
+    observed_dates = [
+        item["observed_max_trade_date"]
+        for item in source_outcomes
+        if item["observed_max_trade_date"] is not None
+    ]
+    return {
+        "status": status,
+        "postcondition_met": postcondition_met,
+        "expected_trade_date": expected_trade_date,
+        "observed_max_trade_date": max(observed_dates) if observed_dates else None,
+        "required_source_count": required_count,
+        "satisfied_source_count": satisfied_count,
+        "coverage_ratio": (
+            round(satisfied_count / required_count, 6) if required_count else 0.0
+        ),
+        "missing_source_ids": [
+            item["source_id"] for item in source_outcomes if not item["satisfied"]
+        ],
+        "sources": source_outcomes,
+    }
+
+
 def _default_start_date(
     db: Session,
     sources: list[SourceRegistry],
@@ -277,6 +343,7 @@ def ensure_daily_metrics(
     sleep_seconds: float = 0.2,
     skip_existing: bool = True,
     parser_types: list[str] | tuple[str, ...] | None = None,
+    required_trade_dates: list[date] | tuple[date, ...] | None = None,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
@@ -293,6 +360,17 @@ def ensure_daily_metrics(
         parser_types=normalized_parser_types,
     )
     trade_dates = _market_trade_dates(db=db, start_date=start_date, end_date=end_date)
+    if required_trade_dates:
+        trade_dates = sorted(
+            {
+                *trade_dates,
+                *(
+                    item
+                    for item in required_trade_dates
+                    if start_date <= item <= end_date
+                ),
+            }
+        )
 
     if not sources:
         return {
@@ -426,10 +504,11 @@ def ensure_latest_daily_metrics(
     include_today: bool = False,
     sleep_seconds: float = 0.2,
     skip_existing: bool = True,
+    expected_trade_date: date | None = None,
 ) -> dict:
     normalized_categories = _normalize_categories(categories)
     sources = _list_metric_sources(db=db, categories=normalized_categories)
-    latest_trade_date = _latest_market_trade_date(
+    latest_trade_date = expected_trade_date or _latest_market_trade_date(
         db=db,
         to_date=to_date,
         include_today=include_today,
@@ -461,14 +540,35 @@ def ensure_latest_daily_metrics(
     if start_date > latest_trade_date:
         start_date = latest_trade_date
 
-    return ensure_daily_metrics(
+    result = ensure_daily_metrics(
         db=db,
         start_date=start_date,
         end_date=latest_trade_date,
         categories=normalized_categories,
         sleep_seconds=sleep_seconds,
         skip_existing=skip_existing,
+        required_trade_dates=(expected_trade_date,) if expected_trade_date else None,
     )
+    if expected_trade_date is not None:
+        postcondition = evaluate_daily_metrics_postcondition(
+            db,
+            categories=normalized_categories,
+            expected_trade_date=expected_trade_date,
+        )
+        result["expected_trade_date"] = expected_trade_date
+        result["postcondition"] = postcondition
+        result["postcondition_met"] = postcondition["postcondition_met"]
+        result["observed_max_trade_date"] = postcondition["observed_max_trade_date"]
+        if not postcondition["postcondition_met"]:
+            result["status"] = (
+                "partial_success"
+                if postcondition["satisfied_source_count"] > 0
+                else "error"
+            )
+            result["message"] = (
+                "Daily metric ensure did not reach the required expected trade date."
+            )
+    return result
 
 
 def ensure_stock_daily_metrics(

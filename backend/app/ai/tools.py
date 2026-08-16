@@ -32,6 +32,7 @@ from app.market.tw_corporate_events import (
     list_taiwan_corporate_events,
 )
 from app.market.technical_report import build_stock_technical_report
+from app.market.technical_evidence import build_tw_stock_technical_evidence
 from app.market.indices import (
     get_market_index_contributions,
     get_market_index_intraday,
@@ -438,6 +439,7 @@ def read_stock_context(
             get_taiwan_disposition_status=get_taiwan_disposition_status,
             get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
             get_taiwan_stock_event_history=get_taiwan_stock_event_history,
+            build_tw_stock_technical_evidence=build_tw_stock_technical_evidence,
             now=_now,
         ),
     )

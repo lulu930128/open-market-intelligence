@@ -338,18 +338,42 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
                 stock_id="2330",
                 capture_slot="08:50",
                 now=first_now,
+                contract_context={
+                    "version": "tw.quote.scheduler.capture.v1",
+                    "universe": {
+                        "symbol_set_digest": "fixture-digest",
+                        "symbols": ["2330"],
+                        "target": "universe:fixture-digest",
+                    },
+                },
             )
             repeated = capture_taiwan_quote_contract_snapshot(
                 db=self.db,
                 stock_id="2330",
                 capture_slot="08:50",
                 now=first_now,
+                contract_context={
+                    "version": "tw.quote.scheduler.capture.v1",
+                    "universe": {
+                        "symbol_set_digest": "fixture-digest",
+                        "symbols": ["2330"],
+                        "target": "universe:fixture-digest",
+                    },
+                },
             )
             second = capture_taiwan_quote_contract_snapshot(
                 db=self.db,
                 stock_id="2330",
                 capture_slot="08:55",
                 now=second_now,
+                contract_context={
+                    "version": "tw.quote.scheduler.capture.v1",
+                    "universe": {
+                        "symbol_set_digest": "fixture-digest",
+                        "symbols": ["2330"],
+                        "target": "universe:fixture-digest",
+                    },
+                },
             )
 
         before_replay_count = self.db.query(TaiwanQuoteContractSnapshot).count()
@@ -379,6 +403,12 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
             if item["status"].startswith("captured")
         }
         self.assertEqual(captured["08:50"]["quote"]["provider"], "twse_mis")
+        self.assertEqual(
+            captured["08:50"]["quote"]["scheduler_contract"]["universe"][
+                "symbol_set_digest"
+            ],
+            "fixture-digest",
+        )
         projected_quote = captured["08:50"]["quote"]
         self.assertEqual(
             projected_quote["snapshot_time"],

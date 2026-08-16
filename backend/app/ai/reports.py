@@ -376,6 +376,17 @@ def _compact_us_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
     sec_fundamentals = (
         data.get("sec_fundamentals") if isinstance(data.get("sec_fundamentals"), dict) else {}
     )
+    financials = data.get("financials") if isinstance(data.get("financials"), dict) else {}
+    financial_contract = (
+        financials.get("financial_contract")
+        if isinstance(financials.get("financial_contract"), dict)
+        else {}
+    )
+    financial_quality = (
+        financial_contract.get("quality")
+        if isinstance(financial_contract.get("quality"), dict)
+        else {}
+    )
     corporate_actions = (
         data.get("corporate_actions") if isinstance(data.get("corporate_actions"), list) else []
     )
@@ -411,9 +422,34 @@ def _compact_us_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
         checks.append("US company profile is missing.")
 
     metric_count = sec_fundamentals.get("metric_count")
-    if metric_count:
+    normalized = (
+        financial_contract.get("normalized")
+        if isinstance(financial_contract.get("normalized"), dict)
+        else {}
+    )
+    normalized_facts = normalized.get("facts") if isinstance(normalized.get("facts"), list) else []
+    if financial_contract:
+        latest_filing = (
+            financial_contract.get("as_reported", {}).get("latest_filing")
+            if isinstance(financial_contract.get("as_reported"), dict)
+            else {}
+        ) or {}
         highlights.append(
-            "SEC fundamentals "
+            "SEC financial contract "
+            f"{financial_contract.get('contract_version') or '-'} / "
+            f"{normalized.get('status') or '-'} / "
+            f"filed {latest_filing.get('filed_date') or '-'} / "
+            f"decision_usable={bool(financial_quality.get('decision_usable'))}."
+        )
+        if financial_quality.get("decision_usable") is not True:
+            checks.extend(
+                str(issue)
+                for issue in financial_quality.get("issues") or []
+                if str(issue).strip()
+            )
+    elif metric_count:
+        highlights.append(
+            "Legacy SEC fundamentals "
             f"{metric_count} metrics, latest filed {sec_fundamentals.get('latest_filed_date') or '-'}."
         )
     else:
@@ -449,6 +485,11 @@ def _compact_us_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
             "daily_rows": len(daily_rows),
             "has_profile": bool(profile),
             "sec_metric_count": metric_count or 0,
+            "sec_normalized_fact_count": len(normalized_facts),
+            "financial_contract_version": financial_contract.get("contract_version"),
+            "financial_contract_decision_usable": bool(
+                financial_quality.get("decision_usable")
+            ),
             "corporate_action_count": len(corporate_actions),
             "short_volume_rows": len(short_volume),
         },
@@ -698,7 +739,7 @@ def _build_us_stock_analysis(context: dict[str, Any], requested_horizon: str) ->
             "intraday": score if horizon == "intraday" else None,
             "short": score,
             "swing": score,
-            "long": score if coverage.get("sec_metric_count") else None,
+            "long": score if coverage.get("financial_contract_decision_usable") else None,
         },
         "components": adapter["components"],
     }

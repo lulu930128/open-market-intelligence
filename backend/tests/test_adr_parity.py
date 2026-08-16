@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import json
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from app.db.models import (
     CrossMarketRelationEvidence,
     MarketDailyPrice,
     RawFetchResult,
+    ResourceOhlcvBar,
     ResourceQuoteSnapshot,
     SourceRegistry,
     StockMaster,
@@ -79,7 +81,7 @@ def add_fx(
     *,
     symbol: str = "USD-TWD",
     last_price: float = 32.5,
-    event_time: datetime = datetime(2026, 6, 8, 8, tzinfo=timezone.utc),
+    event_time: datetime = datetime(2026, 6, 5, 20, tzinfo=timezone.utc),
 ) -> None:
     db.add(
         ResourceQuoteSnapshot(
@@ -256,6 +258,100 @@ class AdrParityTests(unittest.TestCase):
         self.assertEqual(report["remaining_gap_pct"], 4.0)
         self.assertEqual(report["comparison_mode"], "target_session_review")
         self.assertEqual(AdrParityRead.model_validate(report).mapping.adr_symbol, "TSM")
+
+    def test_exact_trade_date_fx_remains_usable_after_wall_clock_exceeds_72h(self) -> None:
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="ASX",
+                trade_date=date(2026, 8, 7),
+                close_price=12.0,
+            )
+        )
+        self.db.commit()
+        add_tw_daily(
+            self.db,
+            stock_id="3711",
+            trade_date=date(2026, 8, 7),
+            close_price=180.0,
+        )
+        add_fx(
+            self.db,
+            event_time=datetime(2026, 8, 7, 20, tzinfo=timezone.utc),
+        )
+
+        report = build_adr_parity_report(
+            self.db,
+            "3711",
+            expected_adr_trade_date=date(2026, 8, 7),
+            generated_at=datetime(2026, 8, 11, 12, tzinfo=timezone.utc),
+        )
+
+        assert report is not None
+        self.assertEqual(report["status"], "ready")
+        self.assertTrue(report["freshness"]["fx_is_current"])
+        self.assertEqual(report["freshness"]["fx"]["status"], "current")
+        self.assertGreater(report["fx_age_seconds"], 72 * 60 * 60)
+
+    def test_adr_parity_prefers_trade_date_daily_fx_over_later_spot(self) -> None:
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="ASX",
+                trade_date=date(2026, 8, 7),
+                close_price=12.0,
+            )
+        )
+        self.db.add(
+            ResourceOhlcvBar(
+                provider="yahoo_chart",
+                exchange="FX",
+                symbol="USD-TWD",
+                provider_symbol="USDTWD=X",
+                name="USD/TWD",
+                root_folder="currency",
+                group="foreign_to_twd",
+                asset_class="foreign_exchange",
+                base_asset="USD",
+                quote_asset="TWD",
+                instrument_type="spot",
+                contract_key="spot",
+                interval="1d",
+                bar_time=datetime(2026, 8, 6, 23, tzinfo=timezone.utc),
+                close_price=32.5,
+                raw_payload_json=json.dumps(
+                    {"exchange_timezone_name": "Europe/London"}
+                ),
+                fetched_at=datetime(2026, 8, 10, 12, tzinfo=timezone.utc),
+            )
+        )
+        self.db.commit()
+        add_tw_daily(
+            self.db,
+            stock_id="3711",
+            trade_date=date(2026, 8, 7),
+            close_price=180.0,
+        )
+        add_fx(
+            self.db,
+            last_price=40.0,
+            event_time=datetime(2026, 8, 10, 12, tzinfo=timezone.utc),
+        )
+
+        report = build_adr_parity_report(
+            self.db,
+            "3711",
+            expected_adr_trade_date=date(2026, 8, 7),
+            generated_at=datetime(2026, 8, 10, 13, tzinfo=timezone.utc),
+        )
+
+        assert report is not None
+        self.assertEqual(report["usd_twd"], 32.5)
+        self.assertEqual(
+            report["freshness"]["input_lineage"]["fx_quote"]["source_resource"],
+            "resource_ohlcv_bar.1d",
+        )
+        self.assertEqual(report["status"], "ready")
 
     def test_matching_registry_mapping_becomes_primary_with_relation_lineage(self) -> None:
         relation = add_approved_adr_relation(self.db)

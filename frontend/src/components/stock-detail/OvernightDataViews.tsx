@@ -268,7 +268,9 @@ function AdrParityStrip({
                   adrDate: formatDate(parity.adr_trade_date),
                   twDate: formatDate(parity.tw_reference_trade_date),
                   price: formatPrice(parity.tw_reference_price_twd),
-                  fxDate: formatDate(parity.fx_as_of),
+                  fxDate: formatDate(
+                    parity.fx_freshness?.actual_data_date ?? parity.fx_as_of,
+                  ),
                 })}
                 {parity.target_tw_trade_date
                   ? ` · ${t("stockDetail.dataViews.overnight.adr.nextSessionLine", {
@@ -655,6 +657,8 @@ function FxFlowContextStrip({
       ? t("stockDetail.dataViews.overnight.fxFlow.statusPartial")
       : context.status === "stale"
         ? t("stockDetail.dataViews.overnight.fxFlow.statusStale")
+        : context.fx.freshness?.status === "latest_completed_session"
+          ? t("stockDetail.dataViews.overnight.fxFlow.latestCompletedSession")
         : null;
 
   return (
@@ -809,10 +813,18 @@ export function OvernightImpactPanel({
               {t("stockDetail.dataViews.overnight.eyebrow")}
             </div>
             <div className="mt-1 text-sm font-bold text-omi-text-strong">
-              {t("stockDetail.dataViews.overnight.insufficientTitle")}
+              {t(
+                loadState === "error"
+                  ? "stockDetail.dataViews.overnight.loadErrorTitle"
+                  : "stockDetail.dataViews.overnight.insufficientTitle"
+              )}
             </div>
             <div className="mt-0.5 text-omi-text-muted">
-              {t("stockDetail.dataViews.overnight.insufficientDescription")}
+              {t(
+                loadState === "error"
+                  ? "stockDetail.dataViews.overnight.loadErrorMessage"
+                  : "stockDetail.dataViews.overnight.insufficientDescription"
+              )}
             </div>
           </div>
           <div className="text-right font-bold text-omi-text-subtle">-</div>

@@ -1615,6 +1615,17 @@ export type AdrParityRead = {
   fx_provider: string | null;
   fx_as_of: string | null;
   fx_age_seconds: number | null;
+  fx_freshness?: {
+    purpose?: string;
+    status?: string;
+    usable?: boolean;
+    session_status?: string;
+    expected_data_date?: string | null;
+    actual_data_date?: string | null;
+    next_expected_update_at?: string | null;
+    refresh_eligible?: boolean;
+    reason_codes?: string[];
+  } | null;
   tw_reference_price_twd: number | null;
   tw_reference_trade_date: string | null;
   target_tw_trade_date: string | null;
@@ -1718,7 +1729,20 @@ export type FxTrendRead = {
   data_date: string | null;
   as_of: string | null;
   age_seconds: number | null;
+  freshness: {
+    purpose?: string;
+    status?: string;
+    usable?: boolean;
+    session_status?: string;
+    expected_data_date?: string | null;
+    actual_data_date?: string | null;
+    next_expected_update_at?: string | null;
+    refresh_eligible?: boolean;
+    reason_codes?: string[];
+  };
   history_points: number;
+  observed_history_points?: number;
+  excluded_provisional_points?: number;
   usd_twd_change_1d_pct: number | null;
   usd_twd_change_5d_pct: number | null;
   usd_twd_change_20d_pct: number | null;
@@ -1921,6 +1945,15 @@ export type OvernightImpactRead = {
   limitations?: string[];
   source?: string | null;
   fx_flow_context?: FxFlowContextRead | null;
+  refresh_decision?: {
+    status?: string;
+    should_execute?: boolean;
+    reason?: string;
+    planned_source_count?: number;
+    deferred_source_count?: number;
+    cooldown_source_count?: number;
+  };
+  refresh_plan?: Record<string, unknown>;
   factors: OvernightImpactFactor[];
   baskets: OvernightImpactBasket[];
   missing: string[];
@@ -2970,6 +3003,157 @@ export type USSecFundamentalSummaryRead = {
   metrics: USSecFundamentalMetricRead[];
 };
 
+export type USSecInsiderOwnerRead = {
+  cik: string;
+  name: string;
+  is_director: boolean;
+  is_officer: boolean;
+  is_ten_percent_owner: boolean;
+  is_other: boolean;
+  officer_title: string | null;
+  other_text: string | null;
+};
+
+export type USSecInsiderTransactionRead = {
+  transaction_id: string;
+  accession_number: string;
+  form_type: "4" | "4/A" | string;
+  filing_date: string | null;
+  accepted_at: string | null;
+  period_of_report: string | null;
+  transaction_date: string | null;
+  table_type: "non_derivative" | "derivative" | string;
+  category: string;
+  transaction_code: string | null;
+  acquired_disposed_code: string | null;
+  security_title: string | null;
+  shares: string | null;
+  price_per_share: string | null;
+  post_transaction_shares: string | null;
+  direct_indirect_code: string | null;
+  nature_of_ownership: string | null;
+  conversion_exercise_price: string | null;
+  exercise_date: string | null;
+  expiration_date: string | null;
+  underlying_security_title: string | null;
+  underlying_shares: string | null;
+  equity_swap_involved: boolean | null;
+  aff10b5_one: boolean | null;
+  is_amendment: boolean;
+  owners: USSecInsiderOwnerRead[];
+  footnotes: Array<{ id: string; text: string | null }>;
+  issue_codes: string[];
+  source_url: string;
+};
+
+export type USSecInsiderTransactionsRead = {
+  contract_version: "omi.sec.insiders.v1" | string;
+  symbol: string;
+  cik: string | null;
+  status: "current" | "ready_empty" | "missing" | "stale" | "partial" | "blocked" | string;
+  as_of: string | null;
+  freshness: {
+    status: string;
+    last_checked_at: string | null;
+    last_success_at: string | null;
+    latest_filing_date: string | null;
+    latest_accession_number: string | null;
+    basis: string;
+    observation_window_hours: number;
+  };
+  summary: {
+    filing_count: number;
+    amendment_count: number;
+    transaction_count: number;
+    open_market_purchase_count: number;
+    open_market_sale_count: number;
+    open_market_purchase_shares: string | null;
+    open_market_sale_shares: string | null;
+    other_transaction_count: number;
+    latest_transaction_date: string | null;
+  };
+  transactions: USSecInsiderTransactionRead[];
+  quality: {
+    issue_codes: string[];
+    warnings: string[];
+    limitations: string[];
+  };
+  source_refs: Array<{
+    provider: string;
+    accession_number: string;
+    form_type: string;
+    filing_date: string | null;
+    source_url: string;
+  }>;
+  pagination: {
+    limit: number;
+    returned_count: number;
+    next_cursor: string | null;
+  };
+};
+
+export type USSec13FQuarterRead = {
+  report_quarter: string;
+  report_period_end: string;
+  reporting_manager_count: number;
+  reported_row_count: number;
+  reported_long_shares: string | null;
+  reported_long_value_usd: string | null;
+  reported_put_value_usd: string | null;
+  reported_call_value_usd: string | null;
+  new_manager_count: number | null;
+  increased_manager_count: number | null;
+  reduced_manager_count: number | null;
+  exited_manager_count: number | null;
+  status: string;
+};
+
+export type USSec13FManagerRead = {
+  manager_cik: string | null;
+  manager_name: string;
+  report_period_end: string;
+  reported_long_shares: string | null;
+  reported_value_usd: string | null;
+  prior_reported_long_shares: string | null;
+  reported_long_shares_change: string | null;
+  direction: "new" | "increased" | "reduced" | "unchanged" | "not_observed" | string;
+  reported_value_share: number;
+};
+
+export type USSec13FInstitutionalHoldingsRead = {
+  contract_version: "omi.sec.13f.v1" | string;
+  symbol: string;
+  cik: string | null;
+  status: "current" | "partial" | "missing" | "blocked" | string;
+  as_of: string | null;
+  freshness: {
+    status: string;
+    latest_release_period?: string | null;
+    latest_report_period_end?: string | null;
+    basis?: string;
+    is_delayed_quarterly_filing?: boolean;
+    reason?: string;
+  };
+  summary: Partial<USSec13FQuarterRead>;
+  quarters: USSec13FQuarterRead[];
+  managers: USSec13FManagerRead[];
+  quality: {
+    decision_usable: boolean;
+    mapping_version?: string;
+    mapping_row_coverage?: number;
+    mapping_value_coverage?: number;
+    unresolved_row_count?: number;
+    unresolved_value_usd?: string | null;
+    limitations: string[];
+  };
+  source_refs: Array<{
+    period_key: string;
+    source_url: string | null;
+    source_sha256?: string;
+    holdings_sha256?: string;
+  }>;
+};
+
 export type USCompanyProfileRead = {
   id: number;
   provider: string;
@@ -3442,4 +3626,28 @@ export type TaiwanFinancialContractRead = {
   } | null;
   quality: TaiwanFinancialQualityRead;
   source_refs: Array<Record<string, unknown>>;
+};
+export type OmiStatusDimensions = {
+  version: string;
+  status_authority: "backend_status_taxonomy" | string;
+  service_status: "available" | "degraded" | "unavailable" | string;
+  data_quality:
+    | "current"
+    | "stale"
+    | "partial"
+    | "missing"
+    | "failed"
+    | "pending"
+    | "not_applicable"
+    | "unknown"
+    | string;
+  decision_readiness: "ready" | "limited" | "blocked" | "not_applicable" | string;
+  provider_status:
+    | "available"
+    | "degraded"
+    | "unavailable"
+    | "unknown"
+    | "not_applicable"
+    | string;
+  reason_codes: string[];
 };

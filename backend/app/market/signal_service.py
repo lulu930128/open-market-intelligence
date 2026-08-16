@@ -1,6 +1,9 @@
 from sqlalchemy.orm import Session
 
-from app.market.indicator_service import calculate_daily_indicators
+from app.market.technical_indicator_gateway import (
+    active_engine_contract,
+    calculate_active_daily_indicators,
+)
 from app.market.technical_parameters import get_technical_analysis_parameters
 from app.market.technical_structure import build_price_moving_average_signals
 
@@ -36,6 +39,9 @@ def _to_dict(value) -> dict:
         "bollinger",
         "kd",
         "support_resistance",
+        "pvo",
+        "algorithm_version",
+        "price_basis",
     ]:
         result[key] = getattr(value, key, None)
 
@@ -132,6 +138,7 @@ def _indicator_snapshot(point: dict) -> dict[str, dict[str, float | None]]:
         "bollinger",
         "kd",
         "support_resistance",
+        "pvo",
     ]:
         raw_values = point.get(key) or {}
         if not isinstance(raw_values, dict):
@@ -166,12 +173,10 @@ def calculate_latest_stock_signals(
         volume_ratio_threshold=volume_ratio_threshold,
     )
     volume_ratio_threshold = technical_parameters.volume_ratio_threshold
-    points = calculate_daily_indicators(
+    points = calculate_active_daily_indicators(
         db=db,
         stock_id=stock_id,
         limit=limit,
-        ma_windows=technical_parameters.ma_windows_text,
-        volume_ma_windows=technical_parameters.volume_ma_windows_text,
         parameters=technical_parameters,
     )
 
@@ -189,6 +194,7 @@ def calculate_latest_stock_signals(
             "status": "no_data",
             "signals": [],
             "indicator_snapshot": {},
+            "indicator_engine": active_engine_contract(),
         }
 
     latest = normalized_points[-1]
@@ -262,6 +268,7 @@ def calculate_latest_stock_signals(
             "status": "no_data",
             "signals": [],
             "indicator_snapshot": indicator_snapshot,
+            "indicator_engine": active_engine_contract(),
         }
 
     # Price direction
@@ -398,8 +405,16 @@ def calculate_latest_stock_signals(
 
     if previous is not None:
         prev_ema = previous.get("ema") or {}
-        prev_ema12 = _num(prev_ema.get("ema12"))
-        prev_ema26 = _num(prev_ema.get("ema26"))
+        prev_ema12 = _indicator_value(
+            prev_ema,
+            technical_parameters.ema_fast_key,
+            "ema12",
+        )
+        prev_ema26 = _indicator_value(
+            prev_ema,
+            technical_parameters.ema_slow_key,
+            "ema26",
+        )
 
         if (
             prev_ema12 is not None
@@ -487,8 +502,16 @@ def calculate_latest_stock_signals(
 
     if previous is not None:
         prev_donchian = previous.get("donchian") or {}
-        prev_upper20 = _num(prev_donchian.get("upper20"))
-        prev_lower20 = _num(prev_donchian.get("lower20"))
+        prev_upper20 = _indicator_value(
+            prev_donchian,
+            technical_parameters.donchian_upper_key,
+            "upper20",
+        )
+        prev_lower20 = _indicator_value(
+            prev_donchian,
+            technical_parameters.donchian_lower_key,
+            "lower20",
+        )
 
         if prev_upper20 is not None and close > prev_upper20:
             score += 2
@@ -772,7 +795,11 @@ def calculate_latest_stock_signals(
     elif previous is not None and atr_pct is not None:
         prev_atr = previous.get("atr") or {}
         prev_close = _num(previous.get("close"))
-        prev_atr14 = _num(prev_atr.get("atr14"))
+        prev_atr14 = _indicator_value(
+            prev_atr,
+            technical_parameters.atr_key,
+            "atr14",
+        )
         prev_atr_pct = _safe_ratio(prev_atr14, prev_close)
         prev_atr_pct = prev_atr_pct * 100 if prev_atr_pct is not None else None
 
@@ -860,4 +887,5 @@ def calculate_latest_stock_signals(
         "status": _score_to_status(score),
         "signals": signals,
         "indicator_snapshot": indicator_snapshot,
+        "indicator_engine": active_engine_contract(),
     }

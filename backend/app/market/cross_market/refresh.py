@@ -6,14 +6,20 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
-from app.db.models import ProviderEvent, ResourceQuoteSnapshot, USDailyPrice
-from app.market.adr_parity import FX_STALE_AFTER_SECONDS, resolve_adr_mapping
+from app.db.models import (
+    ProviderEvent,
+    ResourceOhlcvBar,
+    ResourceQuoteSnapshot,
+    USDailyPrice,
+)
+from app.market.adr_parity import resolve_adr_mapping
 from app.market.calendar_status import expected_us_trade_date
 from app.market.cross_market.proxy_signal_engine import PROXY_BENCHMARK_RULES
 from app.market.cross_market.relation_store import build_relation_registry_read
 from app.market.cross_market.types import taiwan_stock_ref
 from app.observability.provider_health import ERROR_STATUSES, record_provider_event
 from app.resource_market import service as resource_market_service
+from app.resource_market.fx_freshness import evaluate_fx_freshness, fx_daily_data_date
 from app.us_market import service as us_market_service
 
 
@@ -61,8 +67,44 @@ def _latest_us_trade_date(db: Session, symbol: str):
     return row.trade_date if row is not None else None
 
 
-def _latest_fx_snapshot(db: Session) -> ResourceQuoteSnapshot | None:
-    return (
+def _latest_fx_evidence(
+    db: Session,
+    *,
+    expected_data_date,
+) -> dict[str, Any] | None:
+    daily_rows = (
+        db.query(ResourceOhlcvBar)
+        .filter(ResourceOhlcvBar.symbol.in_(("USD-TWD", "TWD-USD")))
+        .filter(ResourceOhlcvBar.interval == "1d")
+        .order_by(
+            ResourceOhlcvBar.bar_time.desc(),
+            ResourceOhlcvBar.fetched_at.desc(),
+            ResourceOhlcvBar.id.desc(),
+        )
+        .limit(160)
+        .all()
+    )
+    aligned = next(
+        (
+            row
+            for row in daily_rows
+            if fx_daily_data_date(row.bar_time, row.raw_payload_json)
+            == expected_data_date
+            and isinstance(row.close_price, (int, float))
+            and row.close_price > 0
+        ),
+        None,
+    )
+    if aligned is not None:
+        data_date = fx_daily_data_date(aligned.bar_time, aligned.raw_payload_json)
+        return {
+            "as_of": aligned.bar_time,
+            "fetched_at": aligned.fetched_at,
+            "data_date": data_date,
+            "source_resource": "resource_ohlcv_bar.1d",
+        }
+
+    snapshot = (
         db.query(ResourceQuoteSnapshot)
         .filter(ResourceQuoteSnapshot.symbol.in_(("USD-TWD", "TWD-USD")))
         .order_by(
@@ -71,31 +113,41 @@ def _latest_fx_snapshot(db: Session) -> ResourceQuoteSnapshot | None:
         )
         .first()
     )
+    if snapshot is None:
+        return None
+    return {
+        "as_of": snapshot.event_time or snapshot.fetched_at,
+        "fetched_at": snapshot.fetched_at,
+        "data_date": None,
+        "source_resource": "resource_quote_snapshot",
+    }
 
 
 def _fx_status(
     db: Session,
     *,
     now: datetime,
-) -> tuple[str, datetime | None]:
-    row = _latest_fx_snapshot(db)
-    if row is None:
-        return "missing", None
-    as_of = row.event_time or row.fetched_at
-    normalized = as_of if as_of.tzinfo is not None else as_of.replace(tzinfo=timezone.utc)
-    age_seconds = max(
-        0,
-        int(
-            (
-                now.astimezone(timezone.utc)
-                - normalized.astimezone(timezone.utc)
-            ).total_seconds()
-        ),
+) -> tuple[str, datetime | None, dict[str, Any]]:
+    expected_data_date = expected_us_trade_date(
+        "us_daily_price",
+        now=now,
     )
-    return (
-        "current" if age_seconds <= FX_STALE_AFTER_SECONDS else "stale",
-        as_of,
+    evidence = _latest_fx_evidence(
+        db,
+        expected_data_date=expected_data_date or now.date(),
     )
+    evaluation = evaluate_fx_freshness(
+        purpose="adr_alignment",
+        now=now,
+        event_time=evidence.get("as_of") if evidence is not None else None,
+        fetched_at=evidence.get("fetched_at") if evidence is not None else None,
+        data_date=evidence.get("data_date") if evidence is not None else None,
+        expected_data_date=expected_data_date or now.date(),
+    )
+    payload = evaluation.as_payload()
+    if evidence is not None:
+        payload["source_resource"] = evidence["source_resource"]
+    return evaluation.status, evidence.get("as_of") if evidence else None, payload
 
 
 def _refresh_event_target(source_kind: str, symbol: str) -> str:
@@ -246,8 +298,8 @@ def build_cross_market_refresh_plan(
             missing_relations.append(stock_id)
 
     candidates: list[dict[str, Any]] = []
-    fx_status, fx_as_of = _fx_status(db, now=planned_at)
-    if fx_status != "current" and adr_targets:
+    fx_status, fx_as_of, fx_freshness = _fx_status(db, now=planned_at)
+    if not bool(fx_freshness.get("usable")) and adr_targets:
         candidates.append(
             {
                 "source_kind": "resource_quote",
@@ -255,7 +307,8 @@ def build_cross_market_refresh_plan(
                 "targets": sorted({item for values in adr_targets.values() for item in values}),
                 "status": fx_status,
                 "latest": fx_as_of,
-                "expected": "age<=72h",
+                "expected": expected_date,
+                "freshness": fx_freshness,
             }
         )
 
@@ -284,7 +337,21 @@ def build_cross_market_refresh_plan(
 
     eligible_sources: list[dict[str, Any]] = []
     cooldown_sources: list[dict[str, Any]] = []
+    session_deferred_sources: list[dict[str, Any]] = []
     for source in candidates:
+        freshness = source.get("freshness")
+        if (
+            isinstance(freshness, dict)
+            and not bool(freshness.get("refresh_eligible"))
+        ):
+            session_deferred_sources.append(
+                {
+                    **source,
+                    "deferred_reason": "fx_session_not_refreshable",
+                    "next_eligible_at": freshness.get("next_expected_update_at"),
+                }
+            )
+            continue
         event, cooldown_until = _active_failure_cooldown(
             db,
             source_kind=str(source["source_kind"]),
@@ -307,19 +374,24 @@ def build_cross_market_refresh_plan(
 
     planned_sources = eligible_sources[:max_symbols]
     deferred_sources = [
+        *session_deferred_sources,
         *cooldown_sources,
         *eligible_sources[max_symbols:],
     ]
     return {
         "kind": "cross_market_context_refresh_plan",
         "planned_at": planned_at,
-        "expected_dates": {"us_daily_price": expected_date},
+        "expected_dates": {
+            "us_daily_price": expected_date,
+            "resource_fx.USD-TWD": expected_date,
+        },
         "requested_stock_ids": normalized_stock_ids,
         "mapping_entries": mapping_entries,
         "requested_source_count": len(candidates),
         "planned_source_count": len(planned_sources),
         "deferred_source_count": len(deferred_sources),
         "cooldown_source_count": len(cooldown_sources),
+        "session_deferred_source_count": len(session_deferred_sources),
         "cooldown_seconds": REFRESH_FAILURE_COOLDOWN_SECONDS,
         "max_symbols": max_symbols,
         "planned_sources": planned_sources,
@@ -385,9 +457,11 @@ def refresh_cross_market_context_sources(
                 )
                 success = result.get("status") in {"success", "partial_success"}
             elif source_kind == "resource_quote":
-                result = resource_market_service.refresh_resource_quotes(
+                result = resource_market_service.refresh_resource_market_snapshot(
                     db,
                     symbols=symbol,
+                    intervals="1d",
+                    limit=10,
                 )
                 success = int(result.get("error_count") or 0) == 0 and int(
                     result.get("refreshed_count") or 0

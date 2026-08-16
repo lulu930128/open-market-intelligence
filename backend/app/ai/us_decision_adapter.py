@@ -98,10 +98,73 @@ def _sec_metric_count(context: dict[str, Any]) -> int:
         return 0
 
 
+def _financial_contract(context: dict[str, Any]) -> dict[str, Any]:
+    data = context.get("data") if isinstance(context.get("data"), dict) else {}
+    financials = data.get("financials") if isinstance(data.get("financials"), dict) else {}
+    contract = (
+        financials.get("financial_contract")
+        if isinstance(financials.get("financial_contract"), dict)
+        else {}
+    )
+    return contract
+
+
+def _derived_metric(contract: dict[str, Any], metric_code: str) -> float | None:
+    derived = contract.get("derived") if isinstance(contract.get("derived"), dict) else {}
+    ratios = derived.get("ratios") if isinstance(derived.get("ratios"), list) else []
+    candidates = [
+        item
+        for item in ratios
+        if isinstance(item, dict)
+        and item.get("metric_code") == metric_code
+        and item.get("status") == "ready"
+    ]
+    if not candidates:
+        return None
+    latest = max(
+        candidates,
+        key=lambda item: (str(item.get("period_end") or ""), str(item.get("period") or "")),
+    )
+    return _numeric(latest.get("value"))
+
+
 def _short_volume_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
     data = context.get("data") if isinstance(context.get("data"), dict) else {}
     rows = data.get("short_volume") if isinstance(data.get("short_volume"), list) else []
     return [row for row in rows if isinstance(row, dict)]
+
+
+def _institutional_holdings(context: dict[str, Any]) -> dict[str, Any]:
+    data = context.get("data") if isinstance(context.get("data"), dict) else {}
+    holdings = (
+        data.get("institutional_holdings")
+        if isinstance(data.get("institutional_holdings"), dict)
+        else {}
+    )
+    return holdings
+
+
+def _institutional_evidence(context: dict[str, Any]) -> dict[str, Any]:
+    holdings = _institutional_holdings(context)
+    status = str(holdings.get("status") or "missing")
+    summary = holdings.get("summary") if isinstance(holdings.get("summary"), dict) else {}
+    quality = holdings.get("quality") if isinstance(holdings.get("quality"), dict) else {}
+    return {
+        "status": status,
+        "included_in_score": False,
+        "decision_role": "delayed_quarterly_context_only",
+        "report_period_end": summary.get("report_period_end"),
+        "reporting_manager_count": summary.get("reporting_manager_count"),
+        "reported_long_shares": summary.get("reported_long_shares"),
+        "reported_long_value_usd": summary.get("reported_long_value_usd"),
+        "mapping_row_coverage": quality.get("mapping_row_coverage"),
+        "mapping_value_coverage": quality.get("mapping_value_coverage"),
+        "limitations": [
+            "Form 13F is delayed quarterly disclosure and must not be interpreted as real-time institutional flow.",
+            "This evidence does not change the adapter score by itself.",
+            *(quality.get("limitations") or []),
+        ],
+    }
 
 
 def _component(key: str, score: int, weight: float, included: bool, summary: str) -> dict[str, Any]:
@@ -169,14 +232,39 @@ def _volume_component(rows: list[dict[str, Any]], weight: float) -> dict[str, An
 def _fundamentals_component(context: dict[str, Any], weight: float) -> dict[str, Any]:
     profile = _profile(context)
     metric_count = _sec_metric_count(context)
-    profit_margin = _numeric(profile.get("profit_margin"))
-    pe_ratio = _numeric(profile.get("pe_ratio"))
+    contract = _financial_contract(context)
+    quality = contract.get("quality") if isinstance(contract.get("quality"), dict) else {}
+    valuation = contract.get("valuation") if isinstance(contract.get("valuation"), dict) else {}
+    normalized = contract.get("normalized") if isinstance(contract.get("normalized"), dict) else {}
+    contract_present = bool(contract)
+    profit_margin = (
+        (_derived_metric(contract, "net_margin") or 0.0) / 100
+        if contract_present and _derived_metric(contract, "net_margin") is not None
+        else None
+        if contract_present
+        else _numeric(profile.get("profit_margin"))
+    )
+    pe_ratio = (
+        _numeric(valuation.get("pe_ttm"))
+        if contract_present and valuation.get("status") == "ready"
+        else None
+        if contract_present
+        else _numeric(profile.get("pe_ratio"))
+    )
     score = 0
     details: list[str] = []
 
-    if metric_count:
+    if contract_present and quality.get("decision_usable") is True:
         score += 8
-        details.append(f"SEC metrics {metric_count}")
+        details.append("SEC financial contract decision-usable")
+    elif contract_present:
+        details.append(
+            "SEC financial contract "
+            f"{normalized.get('status') or quality.get('completeness') or 'partial'}"
+        )
+    elif metric_count:
+        score += 8
+        details.append(f"legacy SEC metrics {metric_count}")
     if profit_margin is not None:
         if profit_margin >= 0.15:
             score += 8
@@ -190,7 +278,7 @@ def _fundamentals_component(context: dict[str, Any], weight: float) -> dict[str,
             score += 3
         details.append(f"PE {pe_ratio:.2f}")
 
-    included = bool(profile) or bool(metric_count)
+    included = contract_present or bool(profile) or bool(metric_count)
     return _component(
         "fundamentals",
         _clip(score, -25, 25),
@@ -310,6 +398,7 @@ def build_us_stock_decision_adapter(
         "selected_confidence": confidence,
         "stance": stance,
         "components": components,
+        "institutional_evidence": _institutional_evidence(context),
         "data_limits": list(dict.fromkeys(data_limits)),
     }
 

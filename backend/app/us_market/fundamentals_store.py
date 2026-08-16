@@ -24,6 +24,7 @@ from app.us_market.sources import (
 
 
 SEC_FUNDAMENTAL_FORMS = ("10-K", "10-Q", "20-F", "40-F")
+SEC_DOMESTIC_FILING_FORMS = ("10-K", "10-K/A", "10-Q", "10-Q/A")
 
 def upsert_us_sec_fact_records(
     db: Session,
@@ -122,6 +123,27 @@ def list_us_sec_company_facts(
         .offset(offset)
         .limit(limit)
         .all()
+    )
+
+
+def latest_us_sec_filing_fact(
+    db: Session,
+    *,
+    symbol: str,
+) -> USSecCompanyFact | None:
+    normalized_symbol = normalize_us_symbol(symbol)
+    return (
+        db.query(USSecCompanyFact)
+        .filter(USSecCompanyFact.symbol == normalized_symbol)
+        .filter(USSecCompanyFact.form.in_(SEC_DOMESTIC_FILING_FORMS))
+        .filter(USSecCompanyFact.accession_number.isnot(None))
+        .order_by(
+            USSecCompanyFact.filed_date.desc(),
+            USSecCompanyFact.accession_number.desc(),
+            USSecCompanyFact.fetched_at.desc(),
+            USSecCompanyFact.id.desc(),
+        )
+        .first()
     )
 
 def _latest_us_sec_fact_for_tag(

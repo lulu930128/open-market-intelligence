@@ -59,6 +59,11 @@ type TechnicalAnalysisSettingsRead = {
       slow: number;
       signal: number;
     };
+    pvo: {
+      fast: number;
+      slow: number;
+      signal: number;
+    };
     rsi: number;
     atr: number;
     adx: number;
@@ -77,6 +82,7 @@ type TechnicalAnalysisSettingsRead = {
   };
   thresholds: {
     volume_ratio: number;
+    breakout_volume_ratio: number;
     near_level_pct: number;
     adx_trend: number;
     rsi: {
@@ -340,6 +346,13 @@ const parameterSectionTemplates: ParameterSectionTemplate[] = [
         step: 0.1,
         unit: "x",
       },
+      {
+        key: "breakoutVolumeRatio",
+        inputMode: "decimal",
+        min: 0,
+        step: 0.1,
+        unit: "x",
+      },
     ],
   },
   {
@@ -348,6 +361,9 @@ const parameterSectionTemplates: ParameterSectionTemplate[] = [
       { key: "macdFast", inputMode: "numeric", min: 1, step: 1 },
       { key: "macdSlow", inputMode: "numeric", min: 1, step: 1 },
       { key: "macdSignal", inputMode: "numeric", min: 1, step: 1 },
+      { key: "pvoFast", inputMode: "numeric", min: 1, step: 1 },
+      { key: "pvoSlow", inputMode: "numeric", min: 1, step: 1 },
+      { key: "pvoSignal", inputMode: "numeric", min: 1, step: 1 },
       { key: "adxPeriod", inputMode: "numeric", min: 1, step: 1 },
       { key: "adxTrend", inputMode: "decimal", min: 0, step: 0.5 },
       { key: "donchianPeriod", inputMode: "numeric", min: 1, step: 1 },
@@ -549,9 +565,13 @@ function buildParameterDraft(settings: TechnicalAnalysisSettingsRead): Parameter
     maWindows: settings.query_defaults.ma_windows,
     volumeMaWindows: settings.query_defaults.volume_ma_windows,
     volumeRatio: stringValue(settings.thresholds.volume_ratio),
+    breakoutVolumeRatio: stringValue(settings.thresholds.breakout_volume_ratio),
     macdFast: stringValue(settings.periods.macd.fast),
     macdSlow: stringValue(settings.periods.macd.slow),
     macdSignal: stringValue(settings.periods.macd.signal),
+    pvoFast: stringValue(settings.periods.pvo.fast),
+    pvoSlow: stringValue(settings.periods.pvo.slow),
+    pvoSignal: stringValue(settings.periods.pvo.signal),
     adxPeriod: stringValue(settings.periods.adx),
     adxTrend: stringValue(settings.thresholds.adx_trend),
     donchianPeriod: stringValue(settings.periods.donchian),
@@ -704,6 +724,11 @@ function buildTechnicalSettingsWritePayload(
         slow: parseNumberValue(draft, "macdSlow", fieldLabel("macdSlow"), t, { integer: true }),
         signal: parseNumberValue(draft, "macdSignal", fieldLabel("macdSignal"), t, { integer: true }),
       },
+      pvo: {
+        fast: parseNumberValue(draft, "pvoFast", fieldLabel("pvoFast"), t, { integer: true }),
+        slow: parseNumberValue(draft, "pvoSlow", fieldLabel("pvoSlow"), t, { integer: true }),
+        signal: parseNumberValue(draft, "pvoSignal", fieldLabel("pvoSignal"), t, { integer: true }),
+      },
       rsi: parseNumberValue(draft, "rsiPeriod", fieldLabel("rsiPeriod"), t, { integer: true }),
       atr: parseNumberValue(draft, "atrPeriod", fieldLabel("atrPeriod"), t, { integer: true }),
       adx: parseNumberValue(draft, "adxPeriod", fieldLabel("adxPeriod"), t, { integer: true }),
@@ -732,6 +757,12 @@ function buildTechnicalSettingsWritePayload(
     },
     thresholds: {
       volume_ratio: parseNumberValue(draft, "volumeRatio", fieldLabel("volumeRatio"), t),
+      breakout_volume_ratio: parseNumberValue(
+        draft,
+        "breakoutVolumeRatio",
+        fieldLabel("breakoutVolumeRatio"),
+        t
+      ),
       near_level_pct: parseNumberValue(draft, "nearLevelPct", fieldLabel("nearLevelPct"), t),
       adx_trend: parseNumberValue(draft, "adxTrend", fieldLabel("adxTrend"), t),
       rsi: {

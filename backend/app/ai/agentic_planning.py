@@ -46,6 +46,7 @@ US_CAPABILITY_REQUIREMENTS = {
     "company.profile": ("us_company_profile",),
     "corporate.actions": ("us_corporate_action",),
     "fundamentals.financials": ("us_sec_company_fact",),
+    "ownership.insider_transactions": ("us_sec_insider_transactions",),
 }
 CRYPTO_CAPABILITY_REFRESH_TOOLS = {
     "quote.snapshot": ("ticker", "crypto.refresh_ticker", SPOT),
@@ -129,6 +130,18 @@ def _fallback_plan(
             }
         )
 
+    if (
+        "us_sec_insider_transactions" in missing
+        and "us_sec_insider_transactions" in required
+    ):
+        steps.append(
+            {
+                "tool": "us.refresh_insider_transactions",
+                "args": {"symbol": symbol, "max_filings": 50},
+                "reason": "Local SEC Form 4 observation is missing or stale.",
+            }
+        )
+
     if any(hint in lowered_question for hint in ("dividend", "split", "股利", "拆股", "除息")):
         steps.append(
             {
@@ -188,6 +201,9 @@ def _selected_us_plan(
             elif requirement == "us_sec_company_fact":
                 tool_name = "us.refresh_sec_facts"
                 args = {"symbol": symbol}
+            elif requirement == "us_sec_insider_transactions":
+                tool_name = "us.refresh_insider_transactions"
+                args = {"symbol": symbol, "max_filings": 50}
             elif requirement == "us_company_profile":
                 tool_name = "us.refresh_company_profile"
                 args = {"symbol": symbol}

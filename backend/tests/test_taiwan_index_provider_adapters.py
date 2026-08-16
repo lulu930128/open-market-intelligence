@@ -176,6 +176,46 @@ class TaiwanIndexProviderAdapterTests(unittest.TestCase):
         self.assertEqual(kwargs["params"]["date"], "2026/05/29")
         self.assertEqual(kwargs["params"]["response"], "json")
 
+    def test_tpex50_history_uses_explicit_provider_context(self) -> None:
+        response = _response({}, status_code=429)
+        with (
+            patch.object(
+                provider_http.http_client,
+                "request",
+                return_value=response,
+            ) as request,
+            self.assertRaises(provider_http.ProviderHttpError) as raised,
+        ):
+            tpex.fetch_tpex50_index_history_payload(timeout_seconds=7)
+
+        args, kwargs = request.call_args
+        self.assertEqual(args[:2], ("GET", tpex.TPEX50_INDEX_URL))
+        self.assertEqual(kwargs["timeout"], 7)
+        self.assertEqual(raised.exception.context.provider, tpex.PROVIDER)
+        self.assertEqual(raised.exception.context.resource, "index_daily_history")
+        self.assertEqual(raised.exception.context.target, "TPEX50")
+        self.assertTrue(raised.exception.rate_limited)
+
+    def test_tpex200_close_uses_explicit_provider_context(self) -> None:
+        response = _response({}, status_code=429)
+        with (
+            patch.object(
+                provider_http.http_client,
+                "request",
+                return_value=response,
+            ) as request,
+            self.assertRaises(provider_http.ProviderHttpError) as raised,
+        ):
+            tpex.fetch_tpex200_close_payload(timeout_seconds=9)
+
+        args, kwargs = request.call_args
+        self.assertEqual(args[:2], ("GET", tpex.TPEX200_CHANGE_URL))
+        self.assertEqual(kwargs["timeout"], 9)
+        self.assertEqual(raised.exception.context.provider, tpex.PROVIDER)
+        self.assertEqual(raised.exception.context.resource, "index_close")
+        self.assertEqual(raised.exception.context.target, "TPEX200")
+        self.assertTrue(raised.exception.rate_limited)
+
     def test_tpex_json_adapter_classifies_daily_quote_resource(self) -> None:
         response = _response([])
         with patch.object(provider_http.http_client, "request", return_value=response):

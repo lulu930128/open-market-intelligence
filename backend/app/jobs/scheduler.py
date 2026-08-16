@@ -21,6 +21,9 @@ from app.jobs.taiwan_index_contract_scheduler import (
     TAIWAN_INDEX_CONTRACT_SLOTS,
     add_taiwan_index_contract_snapshot_jobs,
 )
+from app.jobs.taiwan_daily_metric_repair import (
+    reconcile_taiwan_daily_metric_repairs,
+)
 from app.jobs.taiwan_quote_contract_scheduler import (
     TAIWAN_QUOTE_CONTRACT_SLOTS,
     add_taiwan_quote_contract_snapshot_jobs,
@@ -264,6 +267,11 @@ def enqueue_market_daily_refresh(*, allow_non_trading_day: bool = False) -> None
         market="tw",
         key=TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     )
+    if expected_trade_date is None:
+        logger.error(
+            "Skipped scheduled market daily refresh because the release calendar did not provide an expected trade date."
+        )
+        return
 
     request = {
         "schedule": "market_daily_refresh",
@@ -271,6 +279,7 @@ def enqueue_market_daily_refresh(*, allow_non_trading_day: bool = False) -> None
         "categories": categories,
         "lookback_days": settings.scheduler_market_refresh_lookback_days,
         "include_today": include_today,
+        "expected_trade_date": expected_trade_date,
         "calendar_phase": calendar_status.get("phase"),
         "calendar_release_windows": {
             dataset_key: calendar_status.get("release_windows", {}).get(dataset_key)
@@ -302,6 +311,8 @@ def enqueue_market_daily_refresh(*, allow_non_trading_day: bool = False) -> None
                 include_today,
                 sleep_seconds,
                 True,
+                expected_trade_date,
+                None,
             ),
         )
         logger.info(
@@ -344,6 +355,11 @@ def enqueue_market_margin_daily_refresh(
         market="tw",
         key=TAIWAN_DATASET_MARGIN_TRADING,
     )
+    if expected_trade_date is None:
+        logger.error(
+            "Skipped scheduled market margin daily refresh because the release calendar did not provide an expected trade date."
+        )
+        return
 
     request = {
         "schedule": "market_margin_daily_refresh",
@@ -351,6 +367,7 @@ def enqueue_market_margin_daily_refresh(
         "categories": categories,
         "lookback_days": settings.scheduler_market_refresh_lookback_days,
         "include_today": include_today,
+        "expected_trade_date": expected_trade_date,
         "calendar_phase": calendar_status.get("phase"),
         "calendar_release_windows": {
             dataset_key: calendar_status.get("release_windows", {}).get(dataset_key)
@@ -382,6 +399,8 @@ def enqueue_market_margin_daily_refresh(
                 include_today,
                 sleep_seconds,
                 True,
+                expected_trade_date,
+                None,
             ),
         )
         logger.info(
@@ -1114,6 +1133,60 @@ def _add_taiwan_stock_detail_daily_refresh_jobs(scheduler: Any) -> bool:
         trigger="date",
         run_date=datetime.now(_timezone()) + timedelta(seconds=3),
         id="tw_stock_detail_daily_startup_catchup",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    return True
+
+
+def reconcile_taiwan_daily_metric_repair_jobs(*, trigger: str = "interval") -> None:
+    db = SessionLocal()
+    try:
+        result = reconcile_taiwan_daily_metric_repairs(db, trigger=trigger)
+        logger.info(
+            "Taiwan daily-metric repair reconciliation completed trigger=%s queued=%s decisions=%s.",
+            trigger,
+            result.get("queued_count"),
+            len(result.get("decisions") or []),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Taiwan daily-metric repair reconciliation failed.")
+    finally:
+        db.close()
+
+
+def reconcile_taiwan_daily_metric_repairs_startup() -> None:
+    reconcile_taiwan_daily_metric_repair_jobs(trigger="startup")
+
+
+def _add_taiwan_daily_metric_repair_jobs(scheduler: Any) -> bool:
+    if not settings.enable_market_daily_repair_scheduler or not (
+        settings.enable_scheduler or settings.enable_tw_stock_detail_scheduler
+    ):
+        return False
+
+    interval_minutes = max(
+        int(settings.scheduler_market_daily_repair_interval_minutes),
+        5,
+    )
+    current = datetime.now(_timezone())
+    scheduler.add_job(
+        reconcile_taiwan_daily_metric_repair_jobs,
+        trigger="interval",
+        minutes=interval_minutes,
+        id="taiwan_daily_metric_repair_reconcile",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=current + timedelta(minutes=interval_minutes),
+    )
+    scheduler.add_job(
+        reconcile_taiwan_daily_metric_repairs_startup,
+        trigger="date",
+        run_date=current + timedelta(seconds=6),
+        id="taiwan_daily_metric_repair_startup",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
@@ -2012,6 +2085,9 @@ def start_scheduler() -> Any | None:
     taiwan_stock_detail_daily_refresh_enabled = (
         _add_taiwan_stock_detail_daily_refresh_jobs(scheduler)
     )
+    taiwan_daily_metric_repair_enabled = _add_taiwan_daily_metric_repair_jobs(
+        scheduler
+    )
     taiwan_fundamental_refresh_enabled = add_taiwan_fundamental_refresh_jobs(
         scheduler
     )
@@ -2096,6 +2172,12 @@ def start_scheduler() -> Any | None:
         settings.scheduler_tw_margin_refresh_time,
         settings.timezone,
         taiwan_stock_detail_daily_refresh_enabled,
+    )
+    logger.info(
+        "Taiwan daily-metric bounded repair interval=%sm max_attempts=%s enabled=%s.",
+        max(int(settings.scheduler_market_daily_repair_interval_minutes), 5),
+        max(int(settings.scheduler_market_daily_repair_max_attempts), 1),
+        taiwan_daily_metric_repair_enabled,
     )
     logger.info(
         "Taiwan stock-detail fundamental refresh shareholding=%s Saturday; "

@@ -212,6 +212,75 @@ def scan_us_stock_gaps(
         and sec_metric_count <= 0
     ):
         missing.append("us_sec_company_fact")
+    elif (
+        instrument_type != "index"
+        and "us_sec_company_fact" in required_capabilities
+        and sec_metric_count > 0
+    ):
+        try:
+            financial_contract = us_market_service.get_us_sec_financial_contract(
+                db=db,
+                symbol=normalized_symbol,
+                periods=8,
+            )
+            quality = (
+                financial_contract.get("quality")
+                if isinstance(financial_contract.get("quality"), dict)
+                else {}
+            )
+            filing_freshness = (
+                quality.get("filing_freshness")
+                if isinstance(quality.get("filing_freshness"), dict)
+                else {}
+            )
+            expected_dates["us_sec_filing_freshness"] = filing_freshness
+            freshness_status = str(quality.get("freshness") or "unknown")
+            if freshness_status in {"missing", "stale", "blocked", "failed"}:
+                missing.append("us_sec_company_fact")
+                warnings.append(
+                    "US SEC filing cache is not current for the requested symbol."
+                )
+            elif quality.get("decision_usable") is not True:
+                issues = [
+                    str(issue)
+                    for issue in quality.get("issues") or []
+                    if str(issue).strip()
+                ]
+                warnings.append(
+                    "US SEC facts are cached but the normalized financial contract is partial"
+                    + (f": {', '.join(issues[:6])}" if issues else ".")
+                )
+        except Exception as exc:
+            missing.append("us_sec_company_fact")
+            warnings.append(f"US SEC financial contract check failed: {exc}")
+
+    if (
+        instrument_type != "index"
+        and "us_sec_insider_transactions" in required_capabilities
+    ):
+        try:
+            insider_contract = us_market_service.get_us_sec_insider_transactions(
+                db,
+                symbol=normalized_symbol,
+                limit=1,
+            )
+            insider_status = str(insider_contract.get("status") or "missing")
+            expected_dates["us_sec_insider_transactions"] = {
+                "status": insider_status,
+                "as_of": insider_contract.get("as_of"),
+            }
+            if insider_status in {"missing", "stale", "blocked", "failed"}:
+                missing.append("us_sec_insider_transactions")
+                warnings.append(
+                    "US SEC Form 4 observation is not current for the requested symbol."
+                )
+            elif insider_status == "partial":
+                warnings.append(
+                    "US SEC Form 4 evidence is available with visible partial failures."
+                )
+        except Exception as exc:
+            missing.append("us_sec_insider_transactions")
+            warnings.append(f"US SEC Form 4 contract check failed: {exc}")
 
     expected_dates["us_corporate_action_count"] = corporate_action_count
     expected_dates["us_corporate_action_fetched_at"] = _json_value(
@@ -244,7 +313,13 @@ def scan_us_stock_gaps(
         "instrument_type": instrument_type,
         "required_capabilities": sorted(required_capabilities),
         "not_applicable": (
-            ["us_company_profile", "us_sec_company_fact", "us_corporate_action", "us_short_volume"]
+            [
+                "us_company_profile",
+                "us_sec_company_fact",
+                "us_sec_insider_transactions",
+                "us_corporate_action",
+                "us_short_volume",
+            ]
             if instrument_type == "index"
             else []
         ),

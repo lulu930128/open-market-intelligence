@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.ai.market_context.taiwan_projection import _compact_index_quote
 from app.db.models import TaiwanIndexContractSnapshot, utc_now
 from app.market.calendar_status import build_taiwan_calendar_status
+from app.market.index_resolution import resolve_taiwan_index_quote_state
 from app.market.indices import (
     get_market_index_intraday,
     get_market_index_summary,
@@ -168,6 +169,15 @@ def capture_taiwan_index_contract_snapshot(
             intraday=intraday,
             calendar_status=calendar_status,
         )
+        resolution = resolve_taiwan_index_quote_state(
+            intraday=intraday,
+            index_snapshot=summary,
+            calendar_status=calendar_status,
+            index_id=normalized_index_id,
+            acquisition_policy=str(
+                intraday.get("acquisition_policy") or "prefer_live"
+            ),
+        )
         payload = {
             "kind": "taiwan_index_contract_snapshot",
             "index_id": normalized_index_id,
@@ -191,6 +201,9 @@ def capture_taiwan_index_contract_snapshot(
             "selection_reason": quote.get("selection_reason"),
             "official_close_status": quote.get("official_close_status"),
             "official_close_price": quote.get("official_close_price"),
+            "resolution_version": resolution.get("resolution_version"),
+            "resolution_id": resolution.get("resolution_id"),
+            "resolution": resolution,
             "quote_semantics": quote.get("quote_semantics"),
             "delivery_status": quote.get("delivery_status"),
             "quote": quote,
@@ -317,6 +330,16 @@ def get_taiwan_index_contract_replay(
                 "selected_value": row.selected_value,
                 "selection_reason": row.selection_reason,
                 "official_close_status": row.official_close_status,
+                "resolution_version": (
+                    payload.get("resolution_version")
+                    if isinstance(payload, dict)
+                    else None
+                ),
+                "resolution_id": (
+                    payload.get("resolution_id")
+                    if isinstance(payload, dict)
+                    else None
+                ),
                 "error": row.error,
                 "payload": payload,
             }

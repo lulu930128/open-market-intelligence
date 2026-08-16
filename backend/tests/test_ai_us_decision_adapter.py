@@ -91,6 +91,67 @@ class USDecisionAdapterTests(unittest.TestCase):
         )
         self.assertLess(source_component["score"], 0)
 
+    def test_us_adapter_prefers_decision_usable_financial_contract(self) -> None:
+        context = make_context()
+        context["summary"]["profile"]["profit_margin"] = -0.5
+        context["summary"]["profile"]["pe_ratio"] = 120.0
+        context["data"]["financials"] = {
+            "financial_contract": {
+                "normalized": {"status": "ready"},
+                "derived": {
+                    "ratios": [
+                        {
+                            "metric_code": "net_margin",
+                            "period": "2026Q2",
+                            "period_end": "2026-06-30",
+                            "value": "22.5",
+                            "status": "ready",
+                        }
+                    ]
+                },
+                "valuation": {"status": "ready", "pe_ttm": "24"},
+                "quality": {"decision_usable": True},
+            }
+        }
+
+        decision = build_us_stock_decision_adapter(context, "long")
+        fundamentals = next(
+            component
+            for component in decision["components"]
+            if component["key"] == "fundamentals"
+        )
+
+        self.assertGreater(fundamentals["score"], 0)
+        self.assertIn("decision-usable", fundamentals["summary"])
+        self.assertIn("profit margin 0.23", fundamentals["summary"])
+
+    def test_us_adapter_exposes_13f_as_delayed_non_scoring_evidence(self) -> None:
+        context = make_context()
+        context["data"]["institutional_holdings"] = {
+            "status": "current",
+            "summary": {
+                "report_period_end": "2026-03-31",
+                "reporting_manager_count": 6037,
+                "reported_long_shares": "9356512110",
+                "reported_long_value_usd": "2262529531862",
+            },
+            "quality": {
+                "mapping_row_coverage": 0.002786,
+                "mapping_value_coverage": 0.037255,
+                "limitations": ["CUSIP mapping is partial."],
+            },
+        }
+
+        without_13f = build_us_stock_decision_adapter(make_context(), "long")
+        with_13f = build_us_stock_decision_adapter(context, "long")
+
+        self.assertEqual(with_13f["selected_score"], without_13f["selected_score"])
+        evidence = with_13f["institutional_evidence"]
+        self.assertFalse(evidence["included_in_score"])
+        self.assertEqual(evidence["decision_role"], "delayed_quarterly_context_only")
+        self.assertEqual(evidence["report_period_end"], "2026-03-31")
+        self.assertIn("CUSIP mapping is partial.", evidence["limitations"])
+
 
 if __name__ == "__main__":
     unittest.main()

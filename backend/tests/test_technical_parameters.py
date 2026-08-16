@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AppSetting, Base
 from app.market import technical_parameters
+from app.market import indicator_service
 from app.market.indicator_service import calculate_indicator_points_from_ohlc_points
 from app.main import app
 from app.routers.settings import (
@@ -110,6 +111,79 @@ class TechnicalParametersTests(unittest.TestCase):
         self.assertIn("rsi14", latest["rsi"])
         self.assertEqual(latest["rsi"]["rsi10"], latest["rsi"]["rsi14"])
 
+    def test_legal_lunar_new_year_gap_does_not_clear_moving_averages(self) -> None:
+        points = _points(5)
+        trading_dates = [
+            date(2026, 2, 9),
+            date(2026, 2, 10),
+            date(2026, 2, 11),
+            date(2026, 2, 23),
+            date(2026, 2, 24),
+        ]
+        for point, trade_date in zip(points, trading_dates):
+            point["time"] = trade_date
+        params = technical_parameters.get_technical_analysis_parameters(
+            ma_windows="5",
+            volume_ma_windows="5",
+            persisted_settings=None,
+        )
+
+        latest = calculate_indicator_points_from_ohlc_points(
+            points,
+            parameters=params,
+        )[-1]
+
+        self.assertIsNotNone(latest["ma"]["ma5"])
+        self.assertIsNotNone(latest["volume_ma"]["volume_ma5"])
+
+    def test_missing_expected_trading_day_clears_moving_averages(self) -> None:
+        points = _points(5)
+        trading_dates = [
+            date(2026, 3, 2),
+            date(2026, 3, 3),
+            date(2026, 3, 5),
+            date(2026, 3, 6),
+            date(2026, 3, 9),
+        ]
+        for point, trade_date in zip(points, trading_dates):
+            point["time"] = trade_date
+        params = technical_parameters.get_technical_analysis_parameters(
+            ma_windows="5",
+            volume_ma_windows="5",
+            persisted_settings=None,
+        )
+
+        latest = calculate_indicator_points_from_ohlc_points(
+            points,
+            parameters=params,
+        )[-1]
+
+        self.assertIsNone(latest["ma"]["ma5"])
+        self.assertIsNone(latest["volume_ma"]["volume_ma5"])
+
+    def test_moving_average_gap_checks_are_precomputed_once_per_edge(self) -> None:
+        points = _points(1_000)
+        params = technical_parameters.get_technical_analysis_parameters(
+            ma_windows="5,20,60",
+            volume_ma_windows="5,20",
+            persisted_settings=None,
+        )
+
+        with patch.object(
+            indicator_service,
+            "_has_unexpected_taiwan_gap",
+            return_value=False,
+        ) as gap_check:
+            result = calculate_indicator_points_from_ohlc_points(
+                points,
+                parameters=params,
+            )
+
+        self.assertEqual(len(result), len(points))
+        self.assertEqual(gap_check.call_count, len(points) - 1)
+        self.assertIsNotNone(result[-1]["ma"]["ma60"])
+        self.assertIsNotNone(result[-1]["volume_ma"]["volume_ma20"])
+
     def test_persisted_settings_override_backend_defaults(self) -> None:
         params = technical_parameters.get_technical_analysis_parameters(
             persisted_settings={
@@ -138,8 +212,11 @@ class TechnicalParametersTests(unittest.TestCase):
         self.assertEqual(payload["query_defaults"]["ma_windows"], "5,20,60")
         self.assertEqual(payload["query_defaults"]["volume_ma_windows"], "5,20")
         self.assertEqual(payload["periods"]["macd"], {"fast": 12, "slow": 26, "signal": 9})
+        self.assertEqual(payload["periods"]["pvo"], {"fast": 12, "slow": 26, "signal": 9})
         self.assertEqual(payload["periods"]["bollinger"], {"period": 20, "std_dev": 2.0})
         self.assertEqual(payload["indicator_keys"]["ma_medium"], "ma20")
+        self.assertEqual(payload["indicator_keys"]["kd_j"], "j9")
+        self.assertEqual(payload["thresholds"]["breakout_volume_ratio"], 1.2)
 
     def test_technical_settings_endpoint_uses_service_schema(self) -> None:
         with settings_db_session() as db:
@@ -162,7 +239,11 @@ class TechnicalParametersTests(unittest.TestCase):
             payload.windows.ma = [4, 8, 16]
             payload.windows.volume_ma = [3, 9]
             payload.periods.rsi = 10
+            payload.periods.pvo.fast = 5
+            payload.periods.pvo.slow = 10
+            payload.periods.pvo.signal = 4
             payload.thresholds.volume_ratio = 1.8
+            payload.thresholds.breakout_volume_ratio = 1.3
 
             response = update_technical_analysis_settings(db=db, payload=payload)
 
@@ -176,7 +257,11 @@ class TechnicalParametersTests(unittest.TestCase):
         self.assertEqual(stored_payload["ma_windows"], [4, 8, 16])
         self.assertEqual(stored_payload["volume_ma_windows"], [3, 9])
         self.assertEqual(stored_payload["rsi_period"], 10)
+        self.assertEqual(stored_payload["pvo_fast_period"], 5)
+        self.assertEqual(stored_payload["pvo_slow_period"], 10)
+        self.assertEqual(stored_payload["pvo_signal_period"], 4)
         self.assertEqual(stored_payload["volume_ratio_threshold"], 1.8)
+        self.assertEqual(stored_payload["breakout_volume_ratio_threshold"], 1.3)
         self.assertEqual(reread.source, "database")
         self.assertEqual(reread.windows.ma, [4, 8, 16])
         self.assertEqual(reread.periods.rsi, 10)

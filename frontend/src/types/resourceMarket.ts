@@ -153,6 +153,17 @@ export type ResourceSourceHealthEntry = {
   age_seconds?: number | null;
   stale_seconds?: number | null;
   session_status?: string;
+  freshness?: {
+    purpose?: string;
+    status?: string;
+    usable?: boolean;
+    session_status?: string;
+    expected_data_date?: string | null;
+    actual_data_date?: string | null;
+    next_expected_update_at?: string | null;
+    refresh_eligible?: boolean;
+    reason_codes?: string[];
+  } | null;
   latest_event_at?: string | null;
   latest_event_status?: string | null;
   latest_event_severity?: string | null;

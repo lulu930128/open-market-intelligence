@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import json
 import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -12,6 +13,7 @@ from app.db.models import (
     Base,
     FinancialMetricQuarterly,
     InstitutionalTradeDaily,
+    JobRun,
     MarketChipDaily,
     MarketDailyPrice,
     MarketIntradayBar,
@@ -19,6 +21,7 @@ from app.db.models import (
     SourceHealthSnapshot,
     StockMaster,
     TaiwanMarketMinuteState,
+    TaiwanQuoteContractSnapshot,
     TaiwanStockQuoteSnapshot,
 )
 from app.market.source_health import build_taiwan_source_health
@@ -149,6 +152,70 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.latest_event_id, event.id)
         self.assertEqual(snapshot.status, "stale")
+
+    def test_daily_metric_source_health_exposes_persisted_repair_state(self) -> None:
+        self.db.add(
+            InstitutionalTradeDaily(
+                source_id=1,
+                raw_result_id=1,
+                trade_date=date(2026, 6, 12),
+                stock_id="2330",
+            )
+        )
+        self.db.add(
+            JobRun(
+                job_type="scheduler.market_daily_refresh",
+                status="error",
+                target="2026-06-15",
+                request_json=json.dumps(
+                    {
+                        "repair": {
+                            "repair_key": "institutional_trade_daily:2026-06-15",
+                            "detected_at": "2026-06-15T12:00:00+00:00",
+                            "attempt": 1,
+                            "max_attempts": 4,
+                            "next_retry_at": "2026-06-15T12:15:00+00:00",
+                        }
+                    }
+                ),
+                error_message="expected date missing",
+            )
+        )
+        self.db.commit()
+        calendar_status = {
+            "phase": "post_close",
+            "release_windows": {
+                "institutional_trade_daily": {
+                    "expected_trade_date": "2026-06-15",
+                    "is_released": True,
+                    "status": "released",
+                }
+            },
+        }
+
+        with patch(
+            "app.market.source_health.build_taiwan_calendar_status",
+            return_value=calendar_status,
+        ):
+            health = build_taiwan_source_health(
+                self.db,
+                dataset="institutional_trade_daily",
+                now=datetime(2026, 6, 15, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+            )
+
+        repair_state = health["entries"][0]["health_dimensions"]["repair"]
+        self.assertEqual(repair_state["status"], "retry_wait")
+        self.assertEqual(repair_state["attempt"], 1)
+        self.assertEqual(repair_state["job_status"], "error")
+        self.assertEqual(repair_state["last_error"], "expected date missing")
+        status_dimensions = health["entries"][0]["status_dimensions"]
+        self.assertEqual(status_dimensions["service_status"], "available")
+        self.assertEqual(status_dimensions["data_quality"], "stale")
+        self.assertEqual(status_dimensions["decision_readiness"], "limited")
+        self.assertEqual(
+            health["summary"]["status_dimensions"]["data_quality"],
+            "stale",
+        )
 
     def test_weekly_shareholding_uses_latest_conservative_friday(self) -> None:
         self.db.add(
@@ -306,6 +373,25 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         )
         self.db.commit()
 
+        record_provider_event(
+            self.db,
+            market="tw",
+            provider="twse_mis",
+            resource="quote_depth",
+            target="2330",
+            status="timeout",
+            event_time=datetime(
+                2026,
+                7,
+                22,
+                9,
+                9,
+                50,
+                tzinfo=ZoneInfo("Asia/Taipei"),
+            ),
+            error_message="fixture timeout",
+        )
+
         with patch(
             "app.market.source_health.get_market_index_summary",
             return_value={"as_of": "2026-07-22T09:10:00+08:00", "indices": []},
@@ -325,6 +411,123 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         )
         self.assertEqual(entries["market_intraday_bar_1m"]["status"], "current")
         self.assertEqual(entries["market_intraday_bar_1m"]["age_seconds"], 60)
+        quote_dimensions = entries["taiwan_stock_quote_snapshot"][
+            "health_dimensions"
+        ]
+        self.assertEqual(quote_dimensions["request_live"]["status"], "current")
+        self.assertEqual(
+            quote_dimensions["provider_availability"]["status"],
+            "unavailable",
+        )
+        self.assertFalse(
+            quote_dimensions["provider_availability"][
+                "inferred_from_quote_row"
+            ]
+        )
+
+    def test_global_quote_health_uses_bounded_scheduler_contract_not_random_row(
+        self,
+    ) -> None:
+        observed_at = datetime(
+            2026,
+            7,
+            22,
+            8,
+            30,
+            10,
+            tzinfo=ZoneInfo("Asia/Taipei"),
+        )
+        self.db.add_all(
+            [
+                StockMaster(
+                    stock_id="2330",
+                    stock_name="TSMC",
+                    market="TWSE",
+                    instrument_type="stock",
+                ),
+                StockMaster(
+                    stock_id="2317",
+                    stock_name="Hon Hai",
+                    market="TWSE",
+                    instrument_type="stock",
+                ),
+                TaiwanStockQuoteSnapshot(
+                    provider="twse_mis",
+                    market="TWSE",
+                    stock_id="2330",
+                    stock_name="TSMC",
+                    session_phase="preopen_auction",
+                    trade_date=date(2026, 7, 22),
+                    quote_time=observed_at,
+                    source="twse_mis_quote_depth",
+                    fetched_at=observed_at,
+                ),
+                TaiwanQuoteContractSnapshot(
+                    provider="twse_mis",
+                    market="TWSE",
+                    stock_id="2330",
+                    trade_date=date(2026, 7, 22),
+                    capture_slot="08:30",
+                    scheduled_at=observed_at.replace(second=0),
+                    captured_at=observed_at,
+                    quote_time=observed_at,
+                    session_phase="preopen_auction",
+                    capture_status="captured",
+                    refresh_outcome="updated",
+                    freshness_status="live",
+                    source="twse_mis_quote_depth",
+                ),
+            ]
+        )
+        self.db.commit()
+
+        with (
+            patch.object(
+                provider_health,
+                "_now",
+                return_value=observed_at,
+            ),
+            patch(
+                "app.market.source_health.get_market_index_summary",
+                return_value={"as_of": observed_at.isoformat(), "indices": []},
+            ),
+            patch(
+                "app.market.quote_contract_health.settings."
+                "scheduler_taiwan_quote_contract_symbols",
+                "2330,2317",
+            ),
+            patch(
+                "app.market.quote_contract_health.settings."
+                "scheduler_taiwan_quote_contract_max_symbols",
+                2,
+            ),
+        ):
+            health = build_taiwan_source_health(
+                self.db,
+                now=observed_at,
+            )
+
+        quote = next(
+            entry
+            for entry in health["entries"]
+            if entry["resource"] == "taiwan_stock_quote_snapshot"
+        )
+        dimensions = quote["health_dimensions"]
+        scheduler = dimensions["scheduler_contract"]
+
+        self.assertNotEqual(quote["target"], "all")
+        self.assertEqual(dimensions["request_live"]["status"], "not_requested")
+        self.assertEqual(scheduler["target_scope"], "bounded_universe")
+        self.assertEqual(scheduler["requested_symbol_count"], 2)
+        self.assertEqual(scheduler["requested_count"], 2)
+        self.assertEqual(scheduler["captured_count"], 1)
+        self.assertEqual(scheduler["coverage_ratio"], 0.5)
+        self.assertEqual(scheduler["status"], "partial")
+        self.assertEqual(scheduler["missing_symbols"], ["2317"])
+        self.assertEqual(
+            dimensions["provider_availability"]["status"],
+            "unknown",
+        )
 
     def test_realtime_source_health_uses_presentation_session_before_open(self) -> None:
         self.db.add(

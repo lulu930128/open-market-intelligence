@@ -133,6 +133,14 @@ DERIVED_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         "daily.ohlcv",
         "intraday.bars",
     ),
+    "technical.indicators": ("daily.ohlcv",),
+    "technical.swings": ("daily.ohlcv",),
+    "technical.fibonacci": ("technical.swings",),
+    "technical.divergence": ("technical.indicators", "technical.swings"),
+    "technical.breakout": ("technical.indicators", "daily.ohlcv"),
+    "technical.volume_profile": ("daily.ohlcv",),
+    "technical.anchored_vwap": ("technical.swings", "daily.ohlcv"),
+    "technical.relative_strength": ("daily.ohlcv", "market.indices"),
     "market.volume_state": ("intraday.bars", "market.breadth"),
     "watchlist.coverage": ("watchlist.ranking", "watchlist.radar"),
     "portfolio.summary": ("portfolio.holdings", "portfolio.valuation"),
@@ -165,6 +173,7 @@ READER_FETCH_OVERRIDES = frozenset(
 PROVIDER_CONTRACTS_BY_SCOPE_CAPABILITY: dict[
     tuple[str, str], tuple[str, ...]
 ] = {
+    ("us_stock", "ownership.insider_transactions"): ("sec_edgar_form4",),
     ("market", "market.breadth"): ("tw_full_market_breadth",),
     ("market", "market.chips"): ("tw_market_chips_rankings",),
     ("tw_futures", "derivatives.positioning"): (

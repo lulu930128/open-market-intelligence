@@ -164,10 +164,19 @@ CAPABILITY_IDS = [
     "intraday.bars",
     "daily.ohlcv",
     "technical.structure",
+    "technical.indicators",
+    "technical.swings",
+    "technical.fibonacci",
+    "technical.divergence",
+    "technical.breakout",
+    "technical.volume_profile",
+    "technical.anchored_vwap",
+    "technical.relative_strength",
     "chips.institutional",
     "chips.margin",
     "broker_branch.summary",
     "ownership.distribution",
+    "ownership.insider_transactions",
     "fundamentals.revenue",
     "fundamentals.financials",
     "cross_market.overnight",
@@ -2045,6 +2054,7 @@ def _summarize_ask_response(response: Any) -> Any:
                     "sample_value_leaders",
                     "freshness_by_domain",
                     "data_quality",
+                    "status_dimensions",
                     "slots",
                 )
                 if key in compact
@@ -2066,6 +2076,7 @@ def _summarize_ask_response(response: Any) -> Any:
                     "completeness",
                     "confidence",
                     "decision_readiness",
+                    "status_dimensions",
                 )
                 if key in passport
             }

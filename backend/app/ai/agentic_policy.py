@@ -123,6 +123,15 @@ ALLOWED_TOOLS: dict[str, ToolDefinition] = {
         external_fetch=True,
         writes_cache=True,
     ),
+    "us.refresh_insider_transactions": ToolDefinition(
+        name="us.refresh_insider_transactions",
+        description=(
+            "Refresh a bounded set of SEC Form 4 insider transaction filings "
+            "for one US symbol."
+        ),
+        external_fetch=True,
+        writes_cache=True,
+    ),
     "us.read_sec_fundamentals": ToolDefinition(
         name="us.read_sec_fundamentals",
         description="Read normalized SEC fundamental summary from local cache.",

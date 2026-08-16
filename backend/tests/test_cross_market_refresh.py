@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from app.db.models import (
     CrossMarketRelation,
     CrossMarketRelationEvidence,
     ProviderEvent,
+    ResourceOhlcvBar,
     ResourceQuoteSnapshot,
     USDailyPrice,
 )
@@ -34,7 +36,7 @@ from app.routers import jobs as jobs_router
 from app.routers.cross_market import refresh_cross_market_context
 
 
-NOW = datetime(2026, 8, 9, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
 EXPECTED_DATE = date(2026, 8, 7)
 SOURCE_URL = "https://www.sec.gov/Archives/edgar/data/1046179/000162828026025362/tsm-20251231.htm"
 
@@ -125,6 +127,26 @@ def add_current_sources(db: Session) -> None:
             contract_key="spot",
             last_price=32.5,
             event_time=NOW,
+            fetched_at=NOW,
+        )
+    )
+    db.add(
+        ResourceOhlcvBar(
+            provider="yahoo_chart",
+            exchange="FX",
+            symbol="USD-TWD",
+            provider_symbol="USDTWD=X",
+            name="USD/TWD",
+            root_folder="currency",
+            group="fx",
+            asset_class="currency",
+            base_asset="USD",
+            quote_asset="TWD",
+            instrument_type="currency_pair",
+            contract_key="spot",
+            interval="1d",
+            bar_time=datetime(2026, 8, 7, 20, tzinfo=timezone.utc),
+            close_price=32.5,
             fetched_at=NOW,
         )
     )
@@ -224,6 +246,30 @@ class CrossMarketRefreshTests(unittest.TestCase):
         "app.market.cross_market.refresh.expected_us_trade_date",
         return_value=EXPECTED_DATE,
     )
+    def test_closed_fx_session_defers_missing_fx_refresh(self, _expected) -> None:
+        plan = build_cross_market_refresh_plan(
+            self.db,
+            "2330",
+            now=datetime(2026, 8, 9, 20, tzinfo=timezone.utc),
+        )
+
+        fx_source = next(
+            source
+            for source in plan["deferred_sources"]
+            if source["symbol"] == "USD-TWD"
+        )
+        self.assertEqual(fx_source["deferred_reason"], "fx_session_not_refreshable")
+        self.assertEqual(fx_source["freshness"]["session_status"], "closed")
+        self.assertFalse(fx_source["freshness"]["refresh_eligible"])
+        self.assertNotIn(
+            "USD-TWD",
+            {source["symbol"] for source in plan["planned_sources"]},
+        )
+
+    @patch(
+        "app.market.cross_market.refresh.expected_us_trade_date",
+        return_value=EXPECTED_DATE,
+    )
     def test_current_sources_produce_no_refresh_plan(self, _expected) -> None:
         add_current_sources(self.db)
 
@@ -232,6 +278,24 @@ class CrossMarketRefreshTests(unittest.TestCase):
             "2330",
             now=NOW,
         )
+        self.assertEqual(plan["planned_sources"], [])
+        self.assertEqual(plan["requested_source_count"], 0)
+
+    @patch(
+        "app.market.cross_market.refresh.expected_us_trade_date",
+        return_value=EXPECTED_DATE,
+    )
+    def test_provider_timezone_fx_bar_satisfies_trade_date_alignment(self, _expected) -> None:
+        add_current_sources(self.db)
+        daily = self.db.query(ResourceOhlcvBar).one()
+        daily.bar_time = datetime(2026, 8, 6, 23, tzinfo=timezone.utc)
+        daily.raw_payload_json = json.dumps(
+            {"exchange_timezone_name": "Europe/London"}
+        )
+        self.db.commit()
+
+        plan = build_cross_market_refresh_plan(self.db, "2330", now=NOW)
+
         self.assertEqual(plan["planned_sources"], [])
         self.assertEqual(plan["requested_source_count"], 0)
 
@@ -263,7 +327,7 @@ class CrossMarketRefreshTests(unittest.TestCase):
         "app.market.cross_market.refresh.expected_us_trade_date",
         return_value=EXPECTED_DATE,
     )
-    @patch("app.market.cross_market.refresh.resource_market_service.refresh_resource_quotes")
+    @patch("app.market.cross_market.refresh.resource_market_service.refresh_resource_market_snapshot")
     @patch("app.market.cross_market.refresh.us_market_service.refresh_us_daily_prices")
     def test_worker_is_bounded_and_isolates_provider_results(
         self,
@@ -297,7 +361,12 @@ class CrossMarketRefreshTests(unittest.TestCase):
         self.assertEqual(result["attempted_count"], 2)
         self.assertEqual(result["success_count"], 2)
         self.assertEqual(result["failed_count"], 0)
-        refresh_resource.assert_called_once_with(self.db, symbols="USD-TWD")
+        refresh_resource.assert_called_once_with(
+            self.db,
+            symbols="USD-TWD",
+            intervals="1d",
+            limit=10,
+        )
         refresh_us.assert_called_once_with(
             db=self.db,
             symbol="TSM",
@@ -311,7 +380,7 @@ class CrossMarketRefreshTests(unittest.TestCase):
         "app.market.cross_market.refresh.expected_us_trade_date",
         return_value=EXPECTED_DATE,
     )
-    @patch("app.market.cross_market.refresh.resource_market_service.refresh_resource_quotes")
+    @patch("app.market.cross_market.refresh.resource_market_service.refresh_resource_market_snapshot")
     @patch(
         "app.market.cross_market.refresh.us_market_service.refresh_us_daily_prices",
         side_effect=RuntimeError("provider timeout"),

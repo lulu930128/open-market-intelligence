@@ -555,11 +555,9 @@ def _round_price(value: Any) -> float | None:
     number = _finite_number(value)
     if number is None or number <= 0:
         return None
-    if number >= 100:
-        return float(round(number))
-    if number >= 10:
-        return round(number, 1)
-    return round(number, 2)
+    # Keep calculation evidence independent from display formatting. Taiwan
+    # prices above 100 can still carry valid half-unit or finer precision.
+    return round(number, 4)
 
 
 def _price_zone(low: Any, high: Any, *, label: str, basis: str) -> dict[str, Any] | None:

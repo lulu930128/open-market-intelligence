@@ -62,6 +62,7 @@ $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $runLogDir = Join-Path (Join-Path $repoRoot ".tmp\validation") $runStamp
 $pycacheDir = Join-Path ([System.IO.Path]::GetTempPath()) "omi_pycache_safe_validation"
+$pytestBaseTemp = Join-Path (Join-Path $repoRoot ".tmp") "pytest-safe-validation-$runStamp"
 
 New-Item -ItemType Directory -Force -Path $runLogDir | Out-Null
 
@@ -438,7 +439,14 @@ if ($Profile -in @("backend", "full")) {
         Name = "backend pytest"
         WorkingDirectory = $repoRoot
         FilePath = $python
-        Arguments = @("-m", "pytest", "-p", "no:cacheprovider") + $BackendPytestArgs
+        Arguments = @(
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "--basetemp",
+            $pytestBaseTemp
+        ) + $BackendPytestArgs
         TimeoutSeconds = $BackendTestTimeoutSeconds
         Environment = $pythonEnv
     }

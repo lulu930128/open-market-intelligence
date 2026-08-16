@@ -19,6 +19,7 @@ from app.db.models import (
     StockMaster,
 )
 from app.market.indicator_service import calculate_indicator_points_from_ohlc_points
+from app.market.signal_service import calculate_latest_stock_signals
 from app.market.schemas import TechnicalReportRead
 from app.market.technical_report import TAIPEI_TZ, _fmt_price, build_stock_technical_report
 
@@ -202,6 +203,46 @@ class TechnicalReportTests(unittest.TestCase):
             )
         )
 
+    def test_report_and_signal_share_canonical_indicator_truth(self) -> None:
+        report = build_stock_technical_report(
+            db=self.db,
+            stock_id="2330",
+            timeframe="daily",
+            include_intraday=False,
+        )
+        signal = calculate_latest_stock_signals(
+            db=self.db,
+            stock_id="2330",
+            limit=100,
+        )
+        report_indicator = report["data"]["daily_indicator"]
+        signal_indicator = signal["indicator_snapshot"]
+
+        self.assertEqual(report["algorithm_version"], "tw.technical.indicators.v3")
+        self.assertEqual(signal["indicator_engine"], report["indicator_engine"])
+        self.assertEqual(report_indicator["rsi"], signal_indicator["rsi"])
+        self.assertEqual(report_indicator["macd"], signal_indicator["macd"])
+        self.assertEqual(report_indicator["kd"], signal_indicator["kd"])
+        self.assertIn("j9", report_indicator["kd"])
+
+    def test_legacy_indicator_engine_remains_a_bounded_rollback(self) -> None:
+        with patch(
+            "app.market.technical_indicator_gateway.settings.technical_canonical_v2_active",
+            False,
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="daily",
+                include_intraday=False,
+            )
+
+        self.assertEqual(report["indicator_engine"]["active_engine"], "legacy")
+        self.assertEqual(
+            report["algorithm_version"],
+            "tw.technical.indicators.v1-legacy",
+        )
+
     def test_daily_report_can_overlay_current_price_without_relabeling_daily_indicators(self) -> None:
         with (
             patch(
@@ -255,6 +296,16 @@ class TechnicalReportTests(unittest.TestCase):
             report["evidence_passport"]["as_of"],
             "2026-03-23T10:00:00+08:00",
         )
+        self.assertEqual(report["data"]["decision_snapshot"], "completed")
+        partial = report["data"]["current_partial_indicator"]
+        self.assertEqual(partial["time"], date(2026, 3, 23))
+        self.assertEqual(partial["bar_status"], "intraday_partial")
+        self.assertEqual(
+            partial["indicator_semantics"]["volume_based"],
+            "partial_cumulative_volume",
+        )
+        self.assertFalse(partial["decision_usable"])
+        self.assertEqual(report["data"]["daily_indicator"]["time"], date(2026, 3, 21))
 
     def test_daily_report_uses_finalized_daily_state_after_close(self) -> None:
         self.db.query(MarketDailyPrice).filter(

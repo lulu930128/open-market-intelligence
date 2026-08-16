@@ -210,8 +210,10 @@ class FxFlowContextTests(unittest.TestCase):
 
         report = self.build()
 
-        self.assertEqual(report["fx"]["history_points"], 21)
-        self.assertEqual(report["fx"]["usd_twd"], 32.0)
+        self.assertEqual(report["fx"]["observed_history_points"], 21)
+        self.assertEqual(report["fx"]["history_points"], 18)
+        self.assertEqual(report["fx"]["excluded_provisional_points"], 3)
+        self.assertEqual(report["fx"]["usd_twd"], 31.85)
 
     def test_missing_stock_flow_is_partial_but_keeps_market_signal(self) -> None:
         add_fx_history(self.db, weakening=True)
@@ -244,6 +246,29 @@ class FxFlowContextTests(unittest.TestCase):
             set(report["freshness"]["stale_reasons"]),
             {"market_foreign", "stock_foreign"},
         )
+
+    def test_friday_daily_bar_is_current_before_monday_fx_session_completes(self) -> None:
+        add_fx_history(self.db, weakening=True)
+        for row in self.db.query(ResourceOhlcvBar).all():
+            if row.bar_time.date() > date(2026, 6, 5):
+                self.db.delete(row)
+        self.db.commit()
+        add_market_flow(self.db, inflow=False)
+        add_stock_flow(self.db, inflow=False)
+
+        report = self.build()
+
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(report["fx"]["status"], "ready")
+        self.assertEqual(
+            report["fx"]["freshness"]["status"],
+            "latest_completed_session",
+        )
+        self.assertEqual(
+            report["fx"]["freshness"]["expected_data_date"],
+            "2026-06-05",
+        )
+        self.assertGreater(report["fx"]["age_seconds"], 72 * 60 * 60)
 
     def test_overnight_contract_exposes_fx_flow_context_without_changing_score(self) -> None:
         self.db.add(

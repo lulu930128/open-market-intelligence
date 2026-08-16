@@ -390,6 +390,150 @@ class ResourceMarketTests(unittest.TestCase):
         self.assertEqual(quote_entry["stale_seconds"], 4 * 60 * 60)
         self.assertEqual(quote_entry["session_status"], "open")
 
+    def test_fx_quote_health_uses_weekend_session_contract(self) -> None:
+        now = datetime(2026, 8, 9, 20, tzinfo=timezone.utc)
+        event_time = datetime(2026, 8, 7, 20, tzinfo=timezone.utc)
+        self.db.add(
+            ResourceQuoteSnapshot(
+                provider="yahoo_chart",
+                exchange="FX",
+                symbol="USD-TWD",
+                provider_symbol="USDTWD=X",
+                name="USD/TWD",
+                root_folder="currency",
+                group="foreign_to_twd",
+                asset_class="foreign_exchange",
+                base_asset="USD",
+                quote_asset="TWD",
+                instrument_type="spot",
+                contract_key="spot",
+                last_price=32.5,
+                event_time=event_time,
+                fetched_at=event_time,
+            )
+        )
+        self.db.commit()
+
+        with patch("app.resource_market.source_health._now", return_value=now):
+            health = build_resource_source_health(
+                self.db,
+                symbols="USD-TWD",
+                intervals="1d",
+                include_events=False,
+            )
+
+        quote_entry = next(
+            entry for entry in health["entries"] if entry["resource"] == "quote"
+        )
+        self.assertEqual(quote_entry["status"], "delayed")
+        self.assertTrue(quote_entry["ok"])
+        self.assertEqual(quote_entry["session_status"], "closed")
+        self.assertEqual(
+            quote_entry["freshness"]["status"],
+            "latest_completed_session",
+        )
+        self.assertFalse(quote_entry["freshness"]["refresh_eligible"])
+
+    def test_fx_daily_health_uses_expected_completed_session_date(self) -> None:
+        now = datetime(2026, 6, 8, 12, tzinfo=timezone.utc)
+        bar_time = datetime(2026, 6, 5, 8, tzinfo=timezone.utc)
+        self.db.add(
+            ResourceOhlcvBar(
+                provider="yahoo_chart",
+                exchange="FX",
+                symbol="USD-TWD",
+                provider_symbol="USDTWD=X",
+                name="USD/TWD",
+                root_folder="currency",
+                group="foreign_to_twd",
+                asset_class="foreign_exchange",
+                base_asset="USD",
+                quote_asset="TWD",
+                instrument_type="spot",
+                contract_key="spot",
+                interval="1d",
+                bar_time=bar_time,
+                close_price=32.5,
+                fetched_at=bar_time,
+            )
+        )
+        self.db.commit()
+
+        with patch("app.resource_market.source_health._now", return_value=now):
+            health = build_resource_source_health(
+                self.db,
+                symbols="USD-TWD",
+                intervals="1d",
+                include_events=False,
+            )
+
+        daily_entry = next(
+            entry for entry in health["entries"] if entry["resource"] == "ohlcv"
+        )
+        self.assertEqual(daily_entry["status"], "delayed")
+        self.assertTrue(daily_entry["ok"])
+        self.assertEqual(
+            daily_entry["freshness"]["status"],
+            "latest_completed_session",
+        )
+        self.assertEqual(
+            daily_entry["freshness"]["expected_data_date"],
+            "2026-06-05",
+        )
+        self.assertGreater(daily_entry["age_seconds"], 72 * 60 * 60)
+
+    def test_fx_daily_health_ignores_current_provisional_provider_bar(self) -> None:
+        now = datetime(2026, 8, 11, 10, tzinfo=timezone.utc)
+        payload = json.dumps({"exchange_timezone_name": "Europe/London"})
+        for bar_time, close_price in (
+            (datetime(2026, 8, 9, 23, tzinfo=timezone.utc), 32.2),
+            (datetime(2026, 8, 11, 9, 30, tzinfo=timezone.utc), 32.3),
+        ):
+            self.db.add(
+                ResourceOhlcvBar(
+                    provider="yahoo_chart",
+                    exchange="FX",
+                    symbol="USD-TWD",
+                    provider_symbol="USDTWD=X",
+                    name="USD/TWD",
+                    root_folder="currency",
+                    group="foreign_to_twd",
+                    asset_class="foreign_exchange",
+                    base_asset="USD",
+                    quote_asset="TWD",
+                    instrument_type="spot",
+                    contract_key="spot",
+                    interval="1d",
+                    bar_time=bar_time,
+                    close_price=close_price,
+                    raw_payload_json=payload,
+                    fetched_at=now,
+                )
+            )
+        self.db.commit()
+
+        with patch("app.resource_market.source_health._now", return_value=now):
+            health = build_resource_source_health(
+                self.db,
+                symbols="USD-TWD",
+                intervals="1d",
+                include_events=False,
+            )
+
+        daily_entry = next(
+            entry for entry in health["entries"] if entry["resource"] == "ohlcv"
+        )
+        self.assertEqual(daily_entry["status"], "delayed")
+        self.assertTrue(daily_entry["ok"])
+        self.assertEqual(
+            daily_entry["freshness"]["actual_data_date"],
+            "2026-08-10",
+        )
+        self.assertEqual(
+            daily_entry["freshness"]["status"],
+            "latest_completed_session",
+        )
+
     def test_refresh_resource_market_snapshot_writes_yahoo_quote_and_ohlcv(self) -> None:
         payload = {
             "chart": {

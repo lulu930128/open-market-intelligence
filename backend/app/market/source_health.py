@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+import json
 from typing import Any
 
 from sqlalchemy.orm import Query, Session
 
 from app.db.models import (
+    JobRun,
     MarketChipDaily,
     MarketIntradayBar,
     StockMaster,
@@ -16,10 +18,16 @@ from app.db.models import (
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.indices import get_market_index_summary
 from app.market.quote_depth import TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS
+from app.market.quote_contract_health import (
+    build_taiwan_quote_provider_availability,
+    build_taiwan_quote_scheduler_contract,
+)
 from app.market.taiwan_market_state import SUPPORTED_MARKETS
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_FINANCIAL_METRICS,
+    TAIWAN_DATASET_INSTITUTIONAL_TRADE,
+    TAIWAN_DATASET_MARGIN_TRADING,
     TAIWAN_DATASET_SPECS,
     TaiwanDatasetSpec,
     expected_date_for_dataset,
@@ -30,6 +38,7 @@ from app.observability.provider_health import (
     enrich_source_health_entries,
     sync_source_health_snapshots,
 )
+from app.observability.status_taxonomy import summarize_status_dimensions
 from app.observability.source_health_contract import (
     daily_row_status,
     freshness_lag_days as _freshness_lag,
@@ -39,6 +48,10 @@ from app.observability.source_health_contract import (
 
 
 MARKET_CHIP_RESOURCE = "market_chip_daily"
+DAILY_METRIC_REPAIR_JOB_TYPES = {
+    TAIWAN_DATASET_INSTITUTIONAL_TRADE: "scheduler.market_daily_refresh",
+    TAIWAN_DATASET_MARGIN_TRADING: "scheduler.market_margin_daily_refresh",
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +81,7 @@ class TaiwanSourceHealthEntry:
     latest_observed_at: datetime | None = None
     age_seconds: int | None = None
     stale_after_seconds: int | None = None
+    health_dimensions: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -100,6 +114,7 @@ class TaiwanSourceHealthEntry:
             ),
             "age_seconds": self.age_seconds,
             "stale_after_seconds": self.stale_after_seconds,
+            "health_dimensions": self.health_dimensions or {},
         }
 
 
@@ -303,12 +318,18 @@ def _stock_quote_entry(
     query = db.query(TaiwanStockQuoteSnapshot)
     if stock_id is not None:
         query = query.filter(TaiwanStockQuoteSnapshot.stock_id == stock_id)
-    row_count = query.count()
-    latest = _latest_or_none(
-        query,
-        TaiwanStockQuoteSnapshot.quote_time.desc(),
-        TaiwanStockQuoteSnapshot.id.desc(),
-    )
+        row_count = query.count()
+        latest = _latest_or_none(
+            query,
+            TaiwanStockQuoteSnapshot.quote_time.desc(),
+            TaiwanStockQuoteSnapshot.id.desc(),
+        )
+    else:
+        # A random row from the entire quote table is not evidence for an
+        # all-market quote contract.  Global health is owned by the bounded
+        # scheduler universe below.
+        row_count = 0
+        latest = None
     observed_at = _taiwan_observed_at(latest.quote_time if latest else None)
     latest_data_date = latest.trade_date if latest else None
     expected_data_date = _expected_observation_date(calendar_status)
@@ -321,11 +342,76 @@ def _stock_quote_entry(
         phase=str(calendar_status.get("phase") or "unknown"),
         stale_after_seconds=TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS,
     )
+    request_live = {
+        "version": "tw.quote.health.v1",
+        "axis": "request_live",
+        "status": status_value if stock_id else "not_requested",
+        "target": stock_id,
+        "row_count": row_count,
+        "latest_data_date": (
+            latest_data_date.isoformat() if latest_data_date else None
+        ),
+        "expected_data_date": (
+            expected_data_date.isoformat() if expected_data_date else None
+        ),
+        "latest_observed_at": (
+            observed_at.isoformat() if observed_at else None
+        ),
+        "age_seconds": age_seconds,
+        "stale_after_seconds": (
+            TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS
+        ),
+        "provider": getattr(latest, "provider", None) if latest else None,
+        "source": getattr(latest, "source", None) if latest else None,
+        "reason": (
+            reason
+            if stock_id
+            else "No single-symbol live quote was requested."
+        ),
+    }
+    scheduler_contract = build_taiwan_quote_scheduler_contract(
+        db,
+        trade_date=expected_data_date,
+        current_time=current_time,
+        stock_id=stock_id,
+    )
+    provider_availability = build_taiwan_quote_provider_availability(
+        db,
+        stock_id=stock_id,
+    )
+    if stock_id is None:
+        scheduler_status = str(scheduler_contract.get("status") or "missing")
+        status_value = (
+            "current"
+            if scheduler_status == "ready"
+            else "pending"
+            if scheduler_status in {"pending", "not_configured"}
+            else "partial"
+            if scheduler_status == "partial"
+            else "disabled"
+            if scheduler_status == "disabled"
+            else "empty"
+        )
+        ok = scheduler_status == "ready"
+        data_quality = (
+            "ok" if ok else "pending" if status_value == "pending" else "partial"
+        )
+        reason = (
+            "Bounded quote scheduler contract is complete."
+            if ok
+            else "Bounded quote scheduler contract is not complete: "
+            f"status={scheduler_status}."
+        )
+        row_count = int(scheduler_contract.get("captured_count") or 0)
+        latest_data_date = expected_data_date if row_count else None
     return TaiwanSourceHealthEntry(
         resource="taiwan_stock_quote_snapshot",
         label="Taiwan stock quote snapshot",
         frequency="realtime",
-        target=_target(stock_id=stock_id),
+        target=(
+            stock_id
+            or str(scheduler_contract.get("target") or "unconfigured")
+        ),
         status=status_value,
         ok=ok,
         row_count=row_count,
@@ -342,6 +428,12 @@ def _stock_quote_entry(
         latest_observed_at=observed_at,
         age_seconds=age_seconds,
         stale_after_seconds=TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS,
+        health_dimensions={
+            "version": "tw.quote.health.v1",
+            "request_live": request_live,
+            "scheduler_contract": scheduler_contract,
+            "provider_availability": provider_availability,
+        },
     )
 
 
@@ -630,6 +722,95 @@ def _stock_master_entry(
     )
 
 
+def _json_dict(value: str | None) -> dict[str, Any]:
+    try:
+        payload = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _daily_metric_repair_health(
+    db: Session,
+    *,
+    dataset_key: str,
+    expected_data_date: date | None,
+    latest_data_date: date | None,
+    release_is_released: bool | None,
+) -> dict[str, Any] | None:
+    job_type = DAILY_METRIC_REPAIR_JOB_TYPES.get(dataset_key)
+    if job_type is None or expected_data_date is None:
+        return None
+    if latest_data_date is not None and latest_data_date >= expected_data_date:
+        return {
+            "status": "resolved",
+            "expected_trade_date": expected_data_date.isoformat(),
+            "observed_max_trade_date": latest_data_date.isoformat(),
+        }
+    if release_is_released is not True:
+        return {
+            "status": "not_due",
+            "expected_trade_date": expected_data_date.isoformat(),
+            "observed_max_trade_date": (
+                latest_data_date.isoformat() if latest_data_date else None
+            ),
+        }
+
+    target = expected_data_date.isoformat()
+    job = (
+        db.query(JobRun)
+        .filter(JobRun.job_type == job_type, JobRun.target == target)
+        .order_by(JobRun.created_at.desc(), JobRun.id.desc())
+        .first()
+    )
+    if job is None:
+        return {
+            "status": "pending_detection",
+            "expected_trade_date": target,
+            "observed_max_trade_date": (
+                latest_data_date.isoformat() if latest_data_date else None
+            ),
+        }
+
+    request = _json_dict(job.request_json)
+    result = _json_dict(job.result_json)
+    repair = request.get("repair") if isinstance(request.get("repair"), dict) else {}
+    repair_result = (
+        result.get("repair") if isinstance(result.get("repair"), dict) else {}
+    )
+    if job.status in {"queued", "running"}:
+        status = "repairing" if repair else "initial_refresh_running"
+    elif repair and job.status == "error":
+        status = (
+            "exhausted"
+            if int(repair.get("attempt") or 0) >= int(repair.get("max_attempts") or 1)
+            else "retry_wait"
+        )
+    elif job.status == "error":
+        status = "detected"
+    elif job.status == "success":
+        status = "outcome_mismatch"
+    else:
+        status = "pending_detection"
+
+    return {
+        "status": status,
+        "job_id": job.id,
+        "job_status": job.status,
+        "repair_key": repair.get("repair_key"),
+        "expected_trade_date": target,
+        "observed_max_trade_date": (
+            latest_data_date.isoformat() if latest_data_date else None
+        ),
+        "detected_at": repair.get("detected_at"),
+        "attempt": repair.get("attempt"),
+        "max_attempts": repair.get("max_attempts"),
+        "next_retry_at": repair.get("next_retry_at"),
+        "last_error": job.error_message or repair.get("last_error"),
+        "resolved_at": repair_result.get("resolved_at"),
+    }
+
+
 def _dataset_entry(
     db: Session,
     *,
@@ -689,6 +870,13 @@ def _dataset_entry(
     latest_data_date = _date_or_none(latest_value)
     latest_data_key = _key_or_none(latest_value)
     latest_updated_at = getattr(latest, "updated_at", None) if latest else None
+    repair_health = _daily_metric_repair_health(
+        db,
+        dataset_key=spec.key,
+        expected_data_date=expected_data_date,
+        latest_data_date=latest_data_date,
+        release_is_released=window.get("is_released"),
+    )
     status_value, ok, data_quality, reason = _status_for(
         row_count=row_count,
         latest_data_date=latest_data_date,
@@ -738,6 +926,7 @@ def _dataset_entry(
         next_release_at=window.get("next_release_at"),
         data_quality=data_quality,
         reason=reason,
+        health_dimensions={"repair": repair_health} if repair_health else None,
     )
 
 
@@ -882,6 +1071,8 @@ def build_taiwan_source_health(
             checked_at=generated_at,
         )
 
+    summary = _summary(entries)
+    summary["status_dimensions"] = summarize_status_dimensions(entry_dicts)
     return {
         "kind": "taiwan_source_health",
         "generated_at": generated_at.isoformat(),
@@ -897,7 +1088,7 @@ def build_taiwan_source_health(
             "reason": calendar_status.get("reason"),
             "is_trading_day": calendar_status.get("is_trading_day"),
         },
-        "summary": _summary(entries),
+        "summary": summary,
         "entries": entry_dicts,
     }
 

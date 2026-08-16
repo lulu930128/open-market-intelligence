@@ -143,9 +143,18 @@ def get_indices_list(
 
 
 @router.get("/indices/{index_id}/intraday", response_model=IntradayTrendRead)
-def get_index_intraday_trend(index_id: str):
+def get_index_intraday_trend(
+    index_id: str,
+    acquisition_policy: str = Query(
+        default="prefer_live",
+        pattern="^(cache_only|prefer_live|require_live)$",
+    ),
+):
     try:
-        return get_market_index_intraday(index_id=index_id)
+        return get_market_index_intraday(
+            index_id=index_id,
+            acquisition_policy=acquisition_policy,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

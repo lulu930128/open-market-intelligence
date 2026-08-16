@@ -12,8 +12,10 @@ from app.db.models import SourceHealthSnapshot
 from app.observability.provider_health import (
     ERROR_STATUSES,
     list_provider_events,
+    source_health_provider_generation_map,
     source_health_snapshot_to_dict,
 )
+from app.observability.status_taxonomy import summarize_status_dimensions
 
 
 SOURCE_HEALTH_CURRENT_TTL = timedelta(hours=1)
@@ -92,12 +94,14 @@ def _row_dict(
     row: SourceHealthSnapshot,
     *,
     generated_at: datetime,
+    current_provider_checked_at: datetime | None,
     event_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output = source_health_snapshot_to_dict(
         row,
         now=generated_at,
         stale_after_seconds=int(SOURCE_HEALTH_CURRENT_TTL.total_seconds()),
+        current_provider_checked_at=current_provider_checked_at,
     )
     row_freshness = _snapshot_freshness(
         checked_at=row.checked_at,
@@ -105,13 +109,6 @@ def _row_dict(
     )
     output["storage"] = "persisted_source_health_snapshot"
     output["row_snapshot_freshness"] = row_freshness
-    output["snapshot_lifecycle"] = (
-        "historical_expired"
-        if row_freshness["status"] == "expired"
-        else "active_canonical_scope"
-        if str(row.target or "all") == "all"
-        else "active_target_specific"
-    )
     output["event_diagnostics"] = event_diagnostics or {
         "last_success_at": None,
         "last_error_at": None,
@@ -215,6 +212,7 @@ def read_unified_source_health_context(
     problems_only = params.get("problems_only") is True
     include_healthy_requested = params.get("include_healthy") is not False
     include_healthy = include_healthy_requested and not problems_only
+    include_historical = params.get("include_historical") is True
     raw_status_filter = params.get("status_filter")
     if isinstance(raw_status_filter, str):
         requested_statuses = tuple(
@@ -371,7 +369,6 @@ def read_unified_source_health_context(
             snapshot.resource.asc(),
             snapshot.target.asc(),
         )
-        .limit(row_limit)
         .all()
     )
     recent_events = list_provider_events(
@@ -383,14 +380,46 @@ def read_unified_source_health_context(
         limit=event_scan_limit,
     )
     event_diagnostics = _bounded_event_diagnostics(recent_events)
-    entries = [
+    provider_generations = source_health_provider_generation_map(
+        db,
+        market=requested_market,
+        resource=requested_resource,
+        target=requested_target,
+    )
+    classified_entries = [
         _row_dict(
             row,
             generated_at=generated_at,
+            current_provider_checked_at=provider_generations.get(
+                (
+                    str(row.market or "").lower(),
+                    str(row.resource or ""),
+                    str(row.target or "all"),
+                )
+            ),
             event_diagnostics=event_diagnostics.get(_snapshot_key(row)),
         )
         for row in rows
     ]
+    operational_entries = [
+        entry
+        for entry in classified_entries
+        if entry.get("is_operational") is True
+    ]
+    historical_entries = [
+        entry
+        for entry in classified_entries
+        if entry.get("is_historical") is True
+    ]
+    operational_rows = [
+        row
+        for row, entry in zip(rows, classified_entries, strict=True)
+        if entry.get("is_operational") is True
+    ]
+    returnable_entries = (
+        classified_entries if include_historical else operational_entries
+    )
+    entries = returnable_entries[:row_limit]
 
     returned_status_counts: dict[str, int] = {}
     returned_market_counts: dict[str, int] = {}
@@ -408,6 +437,29 @@ def read_unified_source_health_context(
         for status, count in returned_status_counts.items()
         if status in PROBLEM_STATUSES
     )
+    operational_status_counts: dict[str, int] = {}
+    for entry in operational_entries:
+        entry_status = str(entry.get("status") or "unknown")
+        operational_status_counts[entry_status] = (
+            operational_status_counts.get(entry_status, 0) + 1
+        )
+    historical_status_counts: dict[str, int] = {}
+    for entry in historical_entries:
+        entry_status = str(entry.get("status") or "unknown")
+        historical_status_counts[entry_status] = (
+            historical_status_counts.get(entry_status, 0) + 1
+        )
+    operational_problem_count = sum(
+        count
+        for entry_status, count in operational_status_counts.items()
+        if entry_status in PROBLEM_STATUSES
+    )
+    historical_problem_count = sum(
+        count
+        for entry_status, count in historical_status_counts.items()
+        if entry_status in PROBLEM_STATUSES
+    )
+    status_dimensions = summarize_status_dimensions(operational_entries)
     recent_error_count = sum(
         int(entry.get("recent_error_count") or 0)
         for entry in entries
@@ -424,45 +476,70 @@ def read_unified_source_health_context(
         )
         for entry in entries
     )
+    operational_current_count = sum(
+        entry.get("row_snapshot_freshness", {}).get("status") == "current"
+        for entry in operational_entries
+    )
+    operational_expired_age_count = sum(
+        entry.get("row_snapshot_freshness", {}).get("status") == "expired"
+        for entry in operational_entries
+    )
+    operational_stale_count = (
+        len(operational_entries) - operational_current_count
+    )
     age_bucket_count = sum(
         count > 0
         for count in (
-            current_snapshot_count,
-            stale_snapshot_count,
-            expired_snapshot_count,
+            operational_current_count,
+            operational_stale_count,
         )
     )
     aggregate_status = (
         "missing"
-        if matched_entry_count == 0
+        if not operational_entries
         else "mixed"
         if age_bucket_count > 1
         else "current"
-        if current_snapshot_count
+        if operational_current_count
         else "stale"
-        if stale_snapshot_count
-        else "expired"
+    )
+    operational_checked_at = [
+        _utc_datetime(row.checked_at)
+        for row in operational_rows
+        if _utc_datetime(row.checked_at) is not None
+    ]
+    oldest_operational_checked_at = (
+        min(operational_checked_at) if operational_checked_at else None
+    )
+    latest_operational_checked_at = (
+        max(operational_checked_at) if operational_checked_at else None
     )
     newest_freshness = _snapshot_freshness(
-        checked_at=latest_checked_at,
+        checked_at=latest_operational_checked_at,
         generated_at=generated_at,
     )
     oldest_freshness = _snapshot_freshness(
-        checked_at=oldest_checked_at,
+        checked_at=oldest_operational_checked_at,
         generated_at=generated_at,
     )
     freshness = {
         "status": aggregate_status,
         "is_current": aggregate_status == "current",
-        "is_complete": matched_entry_count == len(entries),
-        "oldest_checked_at": _json_value(oldest_checked_at),
-        "newest_checked_at": _json_value(latest_checked_at),
+        "is_complete": len(returnable_entries) == len(entries),
+        "oldest_checked_at": _json_value(oldest_operational_checked_at),
+        "newest_checked_at": _json_value(latest_operational_checked_at),
         "oldest_age_seconds": oldest_freshness.get("age_seconds"),
         "newest_age_seconds": newest_freshness.get("age_seconds"),
         "mixed_snapshot_ages": age_bucket_count > 1,
+        # Legacy raw-age buckets remain additive compatibility fields.
         "current_entry_count": current_snapshot_count,
         "stale_entry_count": stale_snapshot_count,
         "expired_entry_count": expired_snapshot_count,
+        "operational_current_entry_count": operational_current_count,
+        "operational_stale_entry_count": operational_stale_count,
+        "operational_expired_age_count": operational_expired_age_count,
+        "operational_entry_count": len(operational_entries),
+        "historical_entry_count": len(historical_entries),
         "current_ttl_seconds": int(SOURCE_HEALTH_CURRENT_TTL.total_seconds()),
         "expired_ttl_seconds": int(SOURCE_HEALTH_EXPIRED_TTL.total_seconds()),
     }
@@ -470,10 +547,16 @@ def read_unified_source_health_context(
     warnings: list[str] = []
     if not entries:
         warnings.append("No persisted source-health snapshots match the requested filters.")
-    if matched_problem_count:
+    if operational_problem_count:
         warnings.append(
             "Unified source health contains "
-            f"{matched_problem_count} matched non-current or failed entries."
+            f"{operational_problem_count} operational non-current or failed entries."
+        )
+    if historical_entries and not include_historical:
+        warnings.append(
+            f"{len(historical_entries)} historical source-health entries were "
+            "excluded from the operational view; set include_historical=true "
+            "for audit output."
         )
     if freshness["status"] == "mixed":
         warnings.append(
@@ -483,10 +566,6 @@ def read_unified_source_health_context(
     elif freshness["status"] == "stale":
         warnings.append(
             "Source-health snapshot is stale; checked_at is older than one hour."
-        )
-    elif freshness["status"] == "expired":
-        warnings.append(
-            "Source-health snapshot is expired; checked_at is older than 24 hours."
         )
 
     target = {
@@ -501,7 +580,7 @@ def read_unified_source_health_context(
         else str(freshness["status"])
         if freshness["status"] in {"stale", "expired"}
         else "partial"
-        if matched_problem_count or freshness["status"] == "mixed"
+        if operational_problem_count or freshness["status"] == "mixed"
         else "ready"
     )
     slots = {
@@ -511,7 +590,7 @@ def read_unified_source_health_context(
             payload_ref="data.entries",
             payload_level=level,
             priority="core",
-            as_of=_json_value(latest_checked_at),
+            as_of=_json_value(latest_operational_checked_at),
             missing=missing,
         ),
         "provider_events": slot_envelope(
@@ -533,7 +612,7 @@ def read_unified_source_health_context(
     envelope = {
         "kind": "unified_source_health_context",
         "generated_at": generated_at,
-        "as_of": _json_value(latest_checked_at),
+        "as_of": _json_value(latest_operational_checked_at),
         "scope": {"target": target},
         "data": {
             "filters": {
@@ -544,6 +623,7 @@ def read_unified_source_health_context(
                 "problems_only": problems_only,
                 "include_healthy_requested": include_healthy_requested,
                 "include_healthy": include_healthy,
+                "include_historical": include_historical,
                 "status_filter": list(requested_statuses),
                 "limit": row_limit,
                 "event_scan_limit": event_scan_limit,
@@ -557,6 +637,12 @@ def read_unified_source_health_context(
                 "total_problem_count": total_problem_count,
                 "matched_problem_count": matched_problem_count,
                 "returned_problem_count": returned_problem_count,
+                "operational_entry_count": len(operational_entries),
+                "operational_problem_count": operational_problem_count,
+                "operational_status_counts": operational_status_counts,
+                "historical_entry_count": len(historical_entries),
+                "historical_problem_count": historical_problem_count,
+                "historical_status_counts": historical_status_counts,
                 "status_counts": matched_status_counts,
                 "total_status_counts": total_status_counts,
                 "returned_status_counts": returned_status_counts,
@@ -568,11 +654,12 @@ def read_unified_source_health_context(
                 "fallback_observed_count": fallback_observed_count,
                 "event_scan_count": len(recent_events),
                 "event_scan_truncated": len(recent_events) >= event_scan_limit,
+                "status_dimensions": status_dimensions,
             },
             "entries": entries,
             "returned_count": len(entries),
-            "truncated": matched_entry_count > len(entries),
-            "is_partial": matched_entry_count > len(entries),
+            "truncated": len(returnable_entries) > len(entries),
+            "is_partial": len(returnable_entries) > len(entries),
             "freshness": freshness,
             "compact": {
                 "kind": "unified_source_health_compact_evidence",
@@ -588,6 +675,12 @@ def read_unified_source_health_context(
                     "total_problem_count": total_problem_count,
                     "matched_problem_count": matched_problem_count,
                     "returned_problem_count": returned_problem_count,
+                    "operational_entry_count": len(operational_entries),
+                    "operational_problem_count": operational_problem_count,
+                    "operational_status_counts": operational_status_counts,
+                    "historical_entry_count": len(historical_entries),
+                    "historical_problem_count": historical_problem_count,
+                    "historical_status_counts": historical_status_counts,
                     "status_counts": matched_status_counts,
                     "total_status_counts": total_status_counts,
                     "market_counts": matched_market_counts,
@@ -597,12 +690,14 @@ def read_unified_source_health_context(
                     "source_health": freshness["status"]
                 },
                 "freshness": freshness,
+                "status_dimensions": status_dimensions,
                 "slots": slots,
             },
             "slots": slots,
         },
         "missing": missing,
         "warnings": warnings,
+        "status_dimensions": status_dimensions,
         "source_refs": [{"type": "table", "name": "source_health_snapshot"}],
     }
     envelope["evidence_passport"] = build_evidence_passport(

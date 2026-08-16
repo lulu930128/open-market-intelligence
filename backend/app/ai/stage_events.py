@@ -17,6 +17,7 @@ STAGE_LABELS = {
     "answer_ready": "回答就緒",
 }
 TOOL_LABELS = {
+    "us.refresh_insider_transactions": "SEC Form 4 內部人交易更新",
     "tw.refresh_stock_evidence": "台股資料刷新",
     "tw.refresh_watchlist_evidence": "自選群組刷新",
     "us.read_intraday_trend": "美股盤中趨勢讀取",

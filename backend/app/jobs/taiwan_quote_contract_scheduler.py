@@ -6,8 +6,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.db.models import StockMaster, WatchlistGroup, WatchlistItem
 from app.db.session import SessionLocal
+from app.market.quote_contract_health import (
+    resolve_taiwan_quote_contract_universe,
+)
 from app.market.quote_depth import (
     TAIWAN_QUOTE_CONTRACT_SLOTS,
     capture_taiwan_quote_contract_snapshot,
@@ -19,49 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _configured_quote_contract_symbols(db: Any) -> list[str]:
-    configured = [
-        value.strip()
-        for value in settings.scheduler_taiwan_quote_contract_symbols.split(",")
-        if value.strip()
-    ]
-    max_symbols = max(
-        min(int(settings.scheduler_taiwan_quote_contract_max_symbols), 20),
-        1,
-    )
-    if configured:
-        known = {
-            row[0]
-            for row in (
-                db.query(StockMaster.stock_id)
-                .filter(StockMaster.stock_id.in_(configured))
-                .all()
-            )
-        }
-        return [symbol for symbol in configured if symbol in known][:max_symbols]
-
-    rows = (
-        db.query(WatchlistItem.stock_id)
-        .join(WatchlistGroup, WatchlistGroup.id == WatchlistItem.group_id)
-        .filter(WatchlistItem.enabled.is_(True))
-        .filter(WatchlistGroup.is_active.is_(True))
-        .order_by(
-            WatchlistItem.priority.asc(),
-            WatchlistItem.stock_id.asc(),
-        )
-        .limit(max_symbols * 4)
-        .all()
-    )
-    unique_symbols: list[str] = []
-    seen: set[str] = set()
-    for (stock_id,) in rows:
-        normalized = str(stock_id or "").strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        unique_symbols.append(normalized)
-        if len(unique_symbols) >= max_symbols:
-            break
-    return unique_symbols
+    return list(resolve_taiwan_quote_contract_universe(db)["symbols"])
 
 
 def collect_taiwan_quote_contract_snapshots(
@@ -92,13 +52,22 @@ def collect_taiwan_quote_contract_snapshots(
 
     db = SessionLocal()
     try:
-        symbols = _configured_quote_contract_symbols(db)
+        universe = resolve_taiwan_quote_contract_universe(db)
+        symbols = list(universe["symbols"])
+        contract_context = {
+            "version": "tw.quote.scheduler.capture.v1",
+            "universe": universe,
+            "capture_slot": capture_slot,
+            "trade_date": local_now.date().isoformat(),
+            "requested_count": len(symbols),
+        }
         results = [
             capture_taiwan_quote_contract_snapshot(
                 db=db,
                 stock_id=stock_id,
                 capture_slot=capture_slot,
                 now=local_now,
+                contract_context=contract_context,
             )
             for stock_id in symbols
         ]
@@ -122,6 +91,9 @@ def collect_taiwan_quote_contract_snapshots(
             "requested_count": len(symbols),
             "captured_count": captured_count,
             "failed_count": failed_count,
+            "universe": universe,
+            "symbol_set_digest": universe["symbol_set_digest"],
+            "target": universe["target"],
             "results": results,
         }
         logger.info(

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ownershipDocument>
+  <schemaVersion>X0609</schemaVersion>
+  <documentType>4/A</documentType>
+  <periodOfReport>2026-06-15</periodOfReport>
+  <dateOfOriginalSubmission>2026-06-17</dateOfOriginalSubmission>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Example Issuer Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000001</rptOwnerCik>
+      <rptOwnerName>Example Officer</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isOfficer>true</isOfficer>
+      <officerTitle>Chief Example Officer</officerTitle>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000002</rptOwnerCik>
+      <rptOwnerName>Example Director</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isDirector>true</isDirector>
+      <isOfficer>false</isOfficer>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <remarks>Corrects the transaction price reported in the original filing.</remarks>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2026-06-15</value></transactionDate>
+      <transactionCoding>
+        <transactionFormType>4</transactionFormType>
+        <transactionCode>P</transactionCode>
+        <equitySwapInvolved>0</equitySwapInvolved>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1250.50</value></transactionShares>
+        <transactionPricePerShare><value>202.00</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>11250.50</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>

@@ -379,11 +379,119 @@ def _local_now(value: datetime | None = None) -> datetime:
     return current.astimezone(TAIWAN_TZ)
 
 
+def _failure_window_bounds(value: Any) -> tuple[date, date] | None:
+    match = re.fullmatch(r"(\d{4})(?:-(\d{2}))?", str(value or "").strip())
+    if match is None:
+        return None
+    try:
+        year = int(match.group(1))
+        month_text = match.group(2)
+        if month_text is None:
+            return date(year, 1, 1), date(year, 12, 31)
+        month = int(month_text)
+        if month < 1 or month > 12:
+            return None
+        start = date(year, month, 1)
+        if month == 12:
+            end = date(year, 12, 31)
+        else:
+            end = date(year, month + 1, 1) - timedelta(days=1)
+    except ValueError:
+        return None
+    return start, end
+
+
+def _failure_detail_matches_scope(
+    detail: Mapping[str, Any],
+    *,
+    requested_markets: set[str],
+    date_from: date,
+    date_to: date,
+) -> bool:
+    failure_markets = {
+        part.strip().upper()
+        for part in str(detail.get("market") or "").split(",")
+        if part.strip()
+    }
+    if failure_markets and failure_markets.isdisjoint(requested_markets):
+        return False
+    bounds = _failure_window_bounds(detail.get("window"))
+    if bounds is None:
+        return True
+    window_start, window_end = bounds
+    return window_start <= date_to and window_end >= date_from
+
+
+def _successful_windows_cover_scope(
+    entry: Mapping[str, Any],
+    *,
+    requested_markets: set[str],
+    date_from: date,
+    date_to: date,
+) -> bool:
+    if date_to < date_from:
+        return False
+    coverage_start = _parse_date(entry.get("coverage_start"))
+    coverage_end = _parse_date(entry.get("coverage_end"))
+    if (
+        coverage_start is None
+        or coverage_end is None
+        or coverage_start > date_from
+        or coverage_end < date_to
+    ):
+        return False
+    successful_windows = {
+        str(item).strip().upper()
+        for item in entry.get("successful_windows") or []
+        if str(item).strip()
+    }
+    if not successful_windows:
+        return False
+    cursor = date(date_from.year, date_from.month, 1)
+    final_month = date(date_to.year, date_to.month, 1)
+    while cursor <= final_month:
+        for market in requested_markets:
+            monthly_window = f"{market}:{cursor.year}-{cursor.month:02d}"
+            annual_window = f"{market}:{cursor.year}"
+            if (
+                monthly_window not in successful_windows
+                and annual_window not in successful_windows
+            ):
+                return False
+        cursor = (
+            date(cursor.year + 1, 1, 1)
+            if cursor.month == 12
+            else date(cursor.year, cursor.month + 1, 1)
+        )
+    return True
+
+
+def _failure_detail_summary(detail: Mapping[str, Any]) -> str:
+    provider = str(detail.get("provider") or "provider").strip().upper()
+    market = str(detail.get("market") or "all").strip()
+    window = str(detail.get("window") or "all").strip()
+    stage = str(detail.get("stage") or "provider").strip()
+    exception_type = str(detail.get("exception_type") or "Error").strip()
+    status = str(detail.get("status") or "error").strip()
+    try:
+        attempt_count = max(int(detail.get("attempt_count") or 1), 1)
+    except (TypeError, ValueError):
+        attempt_count = 1
+    message = str(detail.get("message") or exception_type).strip()
+    return (
+        f"{provider}/{market}/{window}/{stage}：{exception_type}（{status}），"
+        f"嘗試 {attempt_count} 次後仍失敗：{message}"
+    )
+
+
 def _provider_cache_status(
     entry: Any,
     *,
     now: datetime,
     archive: bool = False,
+    requested_markets: set[str] | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> dict[str, Any]:
     if not isinstance(entry, dict):
         return {
@@ -402,6 +510,46 @@ def _provider_cache_status(
         if isinstance(item, dict)
     ]
     partial_success = bool(entry.get("partial_success"))
+    normalized_requested_markets = {
+        str(item).strip().upper()
+        for item in requested_markets or set()
+        if str(item).strip()
+    }
+    if (
+        last_error
+        and partial_success
+        and last_failure_details
+        and normalized_requested_markets
+        and date_from is not None
+        and date_to is not None
+    ):
+        matching_failures = [
+            detail
+            for detail in last_failure_details
+            if _failure_detail_matches_scope(
+                detail,
+                requested_markets=normalized_requested_markets,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        ]
+        if matching_failures:
+            last_failure_details = matching_failures
+            last_error = "；".join(
+                _failure_detail_summary(detail) for detail in matching_failures
+            )
+        elif _successful_windows_cover_scope(
+            entry,
+            requested_markets=normalized_requested_markets,
+            date_from=date_from,
+            date_to=date_to,
+        ):
+            last_error = None
+            last_failure_details = []
+            partial_success = False
+        else:
+            last_error = "成功更新窗口未完整涵蓋查詢範圍。"
+            last_failure_details = []
     stale_hours = (
         max(
             int(
@@ -569,6 +717,9 @@ def list_taiwan_corporate_events(
             provider_entry,
             now=local_now,
             archive=bool(config.get("archive")),
+            requested_markets=normalized_markets,
+            date_from=start_filter,
+            date_to=end_filter,
         )
         source_status[provider_key] = {
             **config,

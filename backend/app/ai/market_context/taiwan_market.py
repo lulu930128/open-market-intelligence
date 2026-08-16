@@ -20,11 +20,11 @@ from app.ai.market_payload_contract import (
     payload_level as _payload_level,
 )
 from app.db.models import StockMaster
+from app.market.calendar_status import build_taiwan_calendar_status
+from app.market.index_resolution import resolve_taiwan_index_quote_state
 from app.market.taiwan_index_minute import read_taiwan_index_minute_series
 from app.market.taiwan_industries import normalize_tw_industry_label
 from app.market.trading_calendar import (
-    is_taiwan_trading_day,
-    previous_taiwan_trading_day,
     taiwan_market_session_phase,
     taiwan_now,
 )
@@ -1164,16 +1164,8 @@ def _market_indices_capability(
     )
     local_now = taiwan_now(checked_at)
     session_phase = taiwan_market_session_phase(checked_at)
+    calendar_status = build_taiwan_calendar_status(now=checked_at)
     active_index_session = session_phase in {"regular", "closing_auction"}
-    expected_completed_date = (
-        local_now.date()
-        if session_phase == "post_close"
-        and is_taiwan_trading_day(local_now.date())
-        else previous_taiwan_trading_day(
-            local_now.date(),
-            include_value=session_phase == "market_closed",
-        )
-    )
     try:
         summary = dependencies.get_market_index_summary(
             db,
@@ -1275,6 +1267,13 @@ def _market_indices_capability(
             and live_age_seconds is not None
             and live_age_seconds <= 240
         )
+        resolution = resolve_taiwan_index_quote_state(
+            intraday=live_series,
+            index_snapshot=item,
+            calendar_status=calendar_status,
+            index_id=index_id,
+            acquisition_policy="cache_only",
+        )
         previous_close = live_series.get("previous_close")
         live_value = (
             latest_live.get("price")
@@ -1292,18 +1291,33 @@ def _market_indices_capability(
             if live_change is not None and previous_close
             else None
         )
-        completed_date_current = str(trade_date or "") == (
-            expected_completed_date.isoformat()
+        current_for_requested_session = bool(
+            resolution.get("decision_usable")
         )
-        current_for_requested_session = (
-            live_current
-            if active_index_session
-            else completed_date_current
-            if session_phase in {"post_close", "market_closed"}
-            else False
+        selected_value = resolution.get("selected_value")
+        selected_as_of = (
+            resolution.get("selected_event_time")
+            or official_as_of
+            or trade_date
         )
-        selected_value = live_value if live_current else close
-        selected_as_of = live_time if live_current else official_as_of or trade_date
+        selected_is_live = (
+            resolution.get("selected_candidate") == "intraday_last_trade"
+        )
+        quote_semantics = (
+            "current_session_index_snapshot"
+            if selected_is_live
+            else "official_previous_close"
+            if session_phase in {
+                "preopen_pending",
+                "preopen",
+                "regular",
+                "closing_auction",
+            }
+            else "official_session_close"
+        )
+        selected_trade_date = resolution.get("selected_trade_date")
+        selected_change = live_change if selected_is_live else change
+        selected_change_pct = live_change_pct if selected_is_live else change_pct
         items.append(
             {
                 "index_id": index_id,
@@ -1336,34 +1350,33 @@ def _market_indices_capability(
                 ),
                 "value": selected_value,
                 "latest_value": selected_value,
-                "change": live_change if live_current else change,
-                "change_pct": live_change_pct if live_current else change_pct,
-                "trade_date": (
-                    local_now.date().isoformat() if live_current else trade_date
-                ),
-                "event_time": live_time if live_current else None,
+                "change": selected_change,
+                "change_pct": selected_change_pct,
+                "trade_date": selected_trade_date,
+                "event_time": resolution.get("selected_event_time"),
                 "as_of": selected_as_of,
-                "quote_semantics": (
-                    "current_session_index_snapshot"
-                    if live_current
-                    else "official_previous_close"
-                    if session_phase in {
-                        "preopen_pending",
-                        "preopen",
-                        "regular",
-                        "closing_auction",
-                    }
-                    else "official_session_close"
+                # Preserve the established capability vocabulary while the
+                # nested resolution exposes the more precise canonical term.
+                "quote_semantics": quote_semantics,
+                "resolution_quote_semantics": resolution.get(
+                    "quote_semantics"
                 ),
                 "current_for_requested_session": current_for_requested_session,
                 "decision_usable": current_for_requested_session,
-                "source": (
-                    live_series.get("source")
-                    if live_current
-                    else item.get("source")
-                    or summary.get("source")
-                    or "market_index_summary"
+                "source": resolution.get("selected_source")
+                or item.get("source")
+                or summary.get("source")
+                or "market_index_summary",
+                "resolution_version": resolution.get("resolution_version"),
+                "resolution_id": resolution.get("resolution_id"),
+                "acquisition_policy": resolution.get("acquisition_policy"),
+                "selected_candidate": resolution.get("selected_candidate"),
+                "selection_reason": resolution.get("selection_reason"),
+                "current_observation": resolution.get("current_observation"),
+                "official_close_status": resolution.get(
+                    "official_close_status"
                 ),
+                "resolution": resolution,
                 "freshness": item.get("freshness")
                 or item.get("quote_status")
                 or {},

@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+from pathlib import Path
+from threading import Event, Thread
+from unittest.mock import patch
+from uuid import uuid4
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import QueuePool
+
+from app.db.models import Base
+from app.us_market import service as us_market_service
+
+
+def test_us_ohlc_provider_wait_does_not_hold_sqlite_pool_connection() -> None:
+    database_name = f"omi_pool_boundary_{uuid4().hex}"
+    engine = create_engine(
+        f"sqlite:///file:{database_name}?mode=memory&cache=shared&uri=true",
+        connect_args={"check_same_thread": False},
+        poolclass=QueuePool,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.2,
+    )
+    Base.metadata.create_all(bind=engine)
+    provider_entered = Event()
+    release_provider = Event()
+    worker_errors: list[BaseException] = []
+
+    def blocked_refresh(**_kwargs) -> dict:
+        provider_entered.set()
+        if not release_provider.wait(timeout=3):
+            raise TimeoutError("test provider release was not signaled")
+        return {
+            "status": "success",
+            "provider": "yahoo_chart",
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "test refresh completed",
+        }
+
+    def load_chart() -> None:
+        try:
+            with Session(engine) as db:
+                us_market_service.list_us_ohlc_chart_data(
+                    db=db,
+                    symbol="^GSPC",
+                    timeframe="daily",
+                    bars=60,
+                    ensure_history=True,
+                    provider="yahoo_chart",
+                )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            worker_errors.append(exc)
+
+    try:
+        with patch.object(
+            us_market_service,
+            "refresh_us_daily_prices",
+            side_effect=blocked_refresh,
+        ):
+            worker = Thread(target=load_chart, daemon=True)
+            worker.start()
+            assert provider_entered.wait(timeout=2)
+            try:
+                with Session(engine) as probe_db:
+                    assert probe_db.execute(text("SELECT 1")).scalar_one() == 1
+            finally:
+                release_provider.set()
+            worker.join(timeout=3)
+
+        assert not worker.is_alive()
+        assert worker_errors == []
+    finally:
+        release_provider.set()
+        engine.dispose()
+
+
+def test_us_intraday_provider_wait_does_not_hold_sqlite_pool_connection() -> None:
+    database_name = f"omi_intraday_pool_boundary_{uuid4().hex}"
+    engine = create_engine(
+        f"sqlite:///file:{database_name}?mode=memory&cache=shared&uri=true",
+        connect_args={"check_same_thread": False},
+        poolclass=QueuePool,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.2,
+    )
+    Base.metadata.create_all(bind=engine)
+    provider_entered = Event()
+    release_provider = Event()
+    worker_errors: list[BaseException] = []
+    symbol = f"POOL{uuid4().hex[:8].upper()}"
+
+    def blocked_fetch(**_kwargs):
+        provider_entered.set()
+        if not release_provider.wait(timeout=3):
+            raise TimeoutError("test provider release was not signaled")
+        raise RuntimeError("test provider failure after connection-boundary probe")
+
+    def load_intraday() -> None:
+        try:
+            with Session(engine) as db:
+                us_market_service.get_us_intraday_trend(symbol=symbol, db=db)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            worker_errors.append(exc)
+
+    try:
+        with patch.object(
+            us_market_service,
+            "fetch_yahoo_chart_payload",
+            side_effect=blocked_fetch,
+        ):
+            worker = Thread(target=load_intraday, daemon=True)
+            worker.start()
+            assert provider_entered.wait(timeout=2)
+            try:
+                with Session(engine) as probe_db:
+                    assert probe_db.execute(text("SELECT 1")).scalar_one() == 1
+            finally:
+                release_provider.set()
+            worker.join(timeout=3)
+
+        assert not worker.is_alive()
+        assert worker_errors == []
+    finally:
+        release_provider.set()
+        engine.dispose()
+
+
+def test_regional_market_tape_polling_is_cache_first() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    tape_path = (
+        repo_root
+        / "frontend"
+        / "src"
+        / "components"
+        / "market-dashboard"
+        / "tape"
+        / "useRegionalMarketTapeState.ts"
+    )
+    tape_source = tape_path.read_text(encoding="utf-8-sig")
+
+    assert "ensure_history: true" not in tape_source
+    assert tape_source.count("ensure_history: false") >= 3
+
+
+def test_inactive_us_ranking_preload_does_not_start_provider_refresh() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    hook_path = (
+        repo_root
+        / "frontend"
+        / "src"
+        / "components"
+        / "market-dashboard"
+        / "ranking"
+        / "useUsRankingState.ts"
+    )
+    hook_source = hook_path.read_text(encoding="utf-8-sig")
+    preload_start = hook_source.index(
+        "if (groupId === null || active || initialPreloadQueuedRef.current) return;"
+    )
+    active_load_start = hook_source.index(
+        "if (!active || groupId === null) return;",
+        preload_start,
+    )
+    inactive_preload = hook_source[preload_start:active_load_start]
+
+    assert "void load(currentGroupId, rankBy, { silent: true });" in inactive_preload
+    assert "refreshDailyPrices(" not in inactive_preload

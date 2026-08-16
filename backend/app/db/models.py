@@ -4320,6 +4320,438 @@ class USSecCompanyFact(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class USSecDatasetRelease(Base):
+    __tablename__ = "us_sec_dataset_release"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_code",
+            "period_key",
+            "source_sha256",
+            name="uq_us_sec_dataset_release_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_code: Mapped[str] = mapped_column(String(60), index=True)
+    period_key: Mapped[str] = mapped_column(String(40), index=True)
+    source_url: Mapped[str] = mapped_column(Text)
+    source_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    source_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    downloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schema_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    parser_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="discovered", index=True)
+    source_row_counts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    persisted_row_counts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quarantined_row_counts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSecIngestionCheckpoint(Base):
+    __tablename__ = "us_sec_ingestion_checkpoint"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_release_id",
+            "stage_code",
+            "partition_key",
+            name="uq_us_sec_ingestion_checkpoint_stage",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_release_id: Mapped[int] = mapped_column(
+        ForeignKey("us_sec_dataset_release.id"),
+        index=True,
+    )
+    stage_code: Mapped[str] = mapped_column(String(60), index=True)
+    partition_key: Mapped[str] = mapped_column(String(120), default="all", index=True)
+    cursor_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processed_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSec13FWarehousePartition(Base):
+    __tablename__ = "us_sec_13f_warehouse_partition"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_release_id",
+            name="uq_us_sec_13f_warehouse_partition_release",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_release_id: Mapped[int] = mapped_column(
+        ForeignKey("us_sec_dataset_release.id"), unique=True, index=True
+    )
+    period_key: Mapped[str] = mapped_column(String(40), index=True)
+    source_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    holdings_path: Mapped[str] = mapped_column(Text)
+    holdings_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    row_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    distinct_cusip_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_reported_value_usd_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="staged", index=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSec13FManager(Base):
+    __tablename__ = "us_sec_13f_manager"
+
+    __table_args__ = (UniqueConstraint("cik", name="uq_us_sec_13f_manager_cik"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    cik: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(240), index=True)
+    form13f_file_number: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    address_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_release_id: Mapped[int | None] = mapped_column(
+        ForeignKey("us_sec_dataset_release.id"), nullable=True, index=True
+    )
+    last_seen_release_id: Mapped[int | None] = mapped_column(
+        ForeignKey("us_sec_dataset_release.id"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSec13FFiling(Base):
+    __tablename__ = "us_sec_13f_filing"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_release_id",
+            "accession_number",
+            name="uq_us_sec_13f_filing_release_accession",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_release_id: Mapped[int] = mapped_column(
+        ForeignKey("us_sec_dataset_release.id"), index=True
+    )
+    manager_id: Mapped[int] = mapped_column(ForeignKey("us_sec_13f_manager.id"), index=True)
+    accession_number: Mapped[str] = mapped_column(String(40), index=True)
+    submission_type: Mapped[str] = mapped_column(String(12), index=True)
+    filing_date: Mapped[date] = mapped_column(Date, index=True)
+    period_of_report: Mapped[date] = mapped_column(Date, index=True)
+    report_calendar_or_quarter: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    is_amendment: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    amendment_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amendment_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    report_type: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    form13f_file_number: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    other_included_managers_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    table_entry_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    table_value_total_raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    table_value_unit: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    table_value_total_usd_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_confidential_omitted: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
+    is_notice_only: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    effective_status: Mapped[str] = mapped_column(String(30), default="as_filed", index=True)
+    supersedes_accession_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    source_url: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSec13FOtherManager(Base):
+    __tablename__ = "us_sec_13f_other_manager"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "filing_id",
+            "source_row_sequence",
+            name="uq_us_sec_13f_other_manager_source_row",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    filing_id: Mapped[int] = mapped_column(ForeignKey("us_sec_13f_filing.id"), index=True)
+    source_row_sequence: Mapped[int] = mapped_column(Integer)
+    sequence_number: Mapped[int] = mapped_column(Integer)
+    cik: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    form13f_file_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    name: Mapped[str] = mapped_column(String(240), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class USSecurityIdentifierMap(Base):
+    __tablename__ = "us_security_identifier_map"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "identifier_type",
+            "identifier_value",
+            "mapping_version",
+            name="uq_us_security_identifier_map_version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    identifier_type: Mapped[str] = mapped_column(String(20), index=True)
+    identifier_value: Mapped[str] = mapped_column(String(80), index=True)
+    mapping_version: Mapped[str] = mapped_column(String(80), index=True)
+    figi: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    composite_figi: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    share_class_figi: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    issuer_cik: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    exchange_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    market_sector: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    security_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    security_type2: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    mapping_source: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    confidence: Mapped[str] = mapped_column(String(20), default="unverified", index=True)
+    manual_override: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSec13FSymbolQuarter(Base):
+    __tablename__ = "us_sec_13f_symbol_quarter"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "report_quarter",
+            "mapping_version",
+            "source_release_id",
+            name="uq_us_sec_13f_symbol_quarter_projection",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    issuer_cik: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    report_quarter: Mapped[str] = mapped_column(String(12), index=True)
+    report_period_end: Mapped[date] = mapped_column(Date, index=True)
+    mapping_version: Mapped[str] = mapped_column(String(80), index=True)
+    source_release_id: Mapped[int] = mapped_column(
+        ForeignKey("us_sec_dataset_release.id"), index=True
+    )
+    reporting_manager_count: Mapped[int] = mapped_column(Integer, default=0)
+    reported_row_count: Mapped[int] = mapped_column(Integer, default=0)
+    reported_long_shares_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reported_long_value_usd_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reported_put_value_usd_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reported_call_value_usd_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_manager_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    increased_manager_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reduced_manager_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exited_manager_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mapping_row_coverage: Mapped[float] = mapped_column(Float, default=0.0)
+    mapping_value_coverage: Mapped[float] = mapped_column(Float, default=0.0)
+    unresolved_row_count: Mapped[int] = mapped_column(Integer, default=0)
+    unresolved_value_usd_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="partial", index=True)
+    limitations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    top_managers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class USSecOwnershipSyncState(Base):
+    __tablename__ = "us_sec_ownership_sync_state"
+
+    __table_args__ = (
+        UniqueConstraint("symbol", name="uq_us_sec_ownership_sync_state_symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    issuer_cik: Mapped[str] = mapped_column(String(20), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="missing", index=True)
+    latest_accession_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    latest_filing_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    warning_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSecOwnershipFiling(Base):
+    __tablename__ = "us_sec_ownership_filing"
+
+    __table_args__ = (
+        UniqueConstraint("accession_number", name="uq_us_sec_ownership_filing_accession"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_release_id: Mapped[int | None] = mapped_column(
+        ForeignKey("us_sec_dataset_release.id"),
+        nullable=True,
+        index=True,
+    )
+    accession_number: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    form_type: Mapped[str] = mapped_column(String(12), index=True)
+    schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    issuer_cik: Mapped[str] = mapped_column(String(20), index=True)
+    issuer_name: Mapped[str] = mapped_column(String(240))
+    issuer_trading_symbol: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    period_of_report: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    original_submission_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    filing_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    is_amendment: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    supersedes_accession_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    aff10b5_one: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
+    remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str] = mapped_column(Text)
+    source_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    parser_version: Mapped[str] = mapped_column(String(80))
+    issue_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSecReportingOwner(Base):
+    __tablename__ = "us_sec_reporting_owner"
+
+    __table_args__ = (
+        UniqueConstraint("cik", name="uq_us_sec_reporting_owner_cik"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    cik: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(240), index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSecFilingReportingOwner(Base):
+    __tablename__ = "us_sec_filing_reporting_owner"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "filing_id",
+            "reporting_owner_id",
+            name="uq_us_sec_filing_reporting_owner_link",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    filing_id: Mapped[int] = mapped_column(ForeignKey("us_sec_ownership_filing.id"), index=True)
+    reporting_owner_id: Mapped[int] = mapped_column(ForeignKey("us_sec_reporting_owner.id"), index=True)
+    is_director: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_officer: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_ten_percent_owner: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_other: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    officer_title: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    other_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSecOwnershipTransaction(Base):
+    __tablename__ = "us_sec_ownership_transaction"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "filing_id",
+            "row_sequence",
+            name="uq_us_sec_ownership_transaction_row",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    filing_id: Mapped[int] = mapped_column(ForeignKey("us_sec_ownership_filing.id"), index=True)
+    row_sequence: Mapped[int] = mapped_column(Integer)
+    table_type: Mapped[str] = mapped_column(String(30), index=True)
+    security_title: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    transaction_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    deemed_execution_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    transaction_form_type: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    transaction_code: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
+    equity_swap_involved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    acquired_disposed_code: Mapped[str | None] = mapped_column(String(4), nullable=True, index=True)
+    shares_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    price_per_share_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    post_transaction_shares_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    direct_indirect_code: Mapped[str | None] = mapped_column(String(4), nullable=True, index=True)
+    nature_of_ownership: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversion_exercise_price_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exercise_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    underlying_security_title: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    underlying_shares_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    footnote_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    issue_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_row_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class USSecOwnershipPosition(Base):
+    __tablename__ = "us_sec_ownership_position"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "filing_id",
+            "row_sequence",
+            name="uq_us_sec_ownership_position_row",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    filing_id: Mapped[int] = mapped_column(ForeignKey("us_sec_ownership_filing.id"), index=True)
+    row_sequence: Mapped[int] = mapped_column(Integer)
+    table_type: Mapped[str] = mapped_column(String(30), index=True)
+    security_title: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    post_transaction_shares_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    direct_indirect_code: Mapped[str | None] = mapped_column(String(4), nullable=True, index=True)
+    nature_of_ownership: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversion_exercise_price_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exercise_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    underlying_security_title: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    underlying_shares_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    footnote_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    issue_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_row_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class USSecOwnershipFootnote(Base):
+    __tablename__ = "us_sec_ownership_footnote"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "filing_id",
+            "footnote_id",
+            name="uq_us_sec_ownership_footnote_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    filing_id: Mapped[int] = mapped_column(ForeignKey("us_sec_ownership_filing.id"), index=True)
+    footnote_id: Mapped[str] = mapped_column(String(40), index=True)
+    footnote_text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class USCompanyProfile(Base):
     __tablename__ = "us_company_profile"
 

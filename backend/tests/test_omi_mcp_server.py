@@ -303,6 +303,14 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         )
 
     def test_ask_include_raw_false_keeps_canonical_v4_envelope(self) -> None:
+        status_dimensions = {
+            "version": "omi.status-dimensions.v1",
+            "status_authority": "backend_status_taxonomy",
+            "service_status": "available",
+            "data_quality": "current",
+            "decision_readiness": "ready",
+            "provider_status": "available",
+        }
         raw_response = {
             "kind": "omi_decision",
             "contract_version": "omi.decision.v4",
@@ -312,6 +320,7 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
                 "text": "Canonical backend answer.",
             },
             "evidence": {
+                "status_dimensions": status_dimensions,
                 "data": {
                     "quote.snapshot": {
                         "price": 170,
@@ -332,6 +341,44 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
             )
 
         self.assertIs(response, raw_response)
+        self.assertEqual(response["evidence"]["status_dimensions"], status_dimensions)
+
+    def test_legacy_ask_summary_preserves_status_dimensions(self) -> None:
+        status_dimensions = {
+            "version": "omi.status-dimensions.v1",
+            "status_authority": "backend_status_taxonomy",
+            "service_status": "available",
+            "data_quality": "stale",
+            "decision_readiness": "limited",
+            "provider_status": "degraded",
+        }
+        response = {
+            "ok": True,
+            "result": {
+                "kind": "market_context",
+                "data": {
+                    "compact": {
+                        "kind": "market_context_compact",
+                        "status_dimensions": status_dimensions,
+                    }
+                },
+            },
+            "evidence_passport": {
+                "kind": "omi.evidence.passport.v1",
+                "status_dimensions": status_dimensions,
+            },
+        }
+
+        summary = self.server._summarize_ask_response(response)
+
+        self.assertEqual(
+            summary["compact_evidence"]["status_dimensions"],
+            status_dimensions,
+        )
+        self.assertEqual(
+            summary["evidence_passport"]["status_dimensions"],
+            status_dimensions,
+        )
 
     def test_ask_rejects_non_v4_backend_response(self) -> None:
         raw_response = {

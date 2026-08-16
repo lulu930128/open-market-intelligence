@@ -99,6 +99,7 @@ def get_source_health_snapshots(
     resource: str | None = None,
     target: str | None = None,
     status: str | None = None,
+    include_historical: bool = False,
     limit: int = Query(default=200, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
@@ -109,5 +110,6 @@ def get_source_health_snapshots(
         resource=resource,
         target=target,
         status=status,
+        include_historical=include_historical,
         limit=limit,
     )

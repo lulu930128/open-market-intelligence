@@ -7,6 +7,12 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.jobs import backfill_tasks
+from app.jobs.job_types import (
+    US_SEC_13F_HISTORY_SYNC_JOB_TYPE,
+    US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
+    US_SEC_13F_QUARTER_SYNC_JOB_TYPE,
+    US_SEC_FORM4_SYNC_JOB_TYPE,
+)
 from app.jobs.schemas import JobRunRead
 from app.routers.market_family_helpers import (
     enqueue_serialized_job,
@@ -32,7 +38,15 @@ from app.us_market.schemas import (
     USResourceRefreshResultRead,
     USSecCompanyFactRead,
     USSecFactRefreshResultRead,
+    USSecFinancialContractRead,
     USSecFundamentalSummaryRead,
+    USSecForm4SyncRequest,
+    USSec13FCoverageRead,
+    USSec13FHistorySyncRequest,
+    USSec13FInstitutionalHoldingsRead,
+    USSec13FMappingSyncRequest,
+    USSec13FQuarterSyncRequest,
+    USSecInsiderTransactionsRead,
     USShortVolumeDailyRead,
     USSourceHealthRead,
     USStockMasterRead,
@@ -65,6 +79,7 @@ from app.us_market.service import (
     get_us_company_profile,
     get_us_intraday_trend,
     get_us_sec_fundamental_summary,
+    get_us_sec_financial_contract,
     get_us_stock,
     get_us_watchlist_group,
     get_us_watchlist_ranking,
@@ -92,6 +107,11 @@ from app.us_market.service import (
     sync_us_symbol_master,
     update_us_watchlist_group,
     update_us_watchlist_item,
+)
+from app.us_market.ownership_service import read_insider_transactions
+from app.us_market.ownership_13f_analytics import (
+    get_13f_coverage_contract,
+    get_13f_symbol_contract,
 )
 
 
@@ -246,6 +266,112 @@ def _enqueue_us_daily_price_quality_repair(
             outputsize,
             adjusted,
             sleep_seconds,
+        ),
+    )
+
+
+def _enqueue_us_sec_form4_sync(
+    *,
+    db: Session,
+    request_model: USSecForm4SyncRequest,
+) -> dict:
+    request = request_model.model_dump(mode="json")
+    if request_model.scope == "symbol":
+        if not request_model.symbol:
+            raise ValueError("symbol is required when scope='symbol'.")
+        target = request_model.symbol.strip().upper()
+    else:
+        target = watchlist_group_target(request_model.group_id)
+    return enqueue_serialized_job(
+        db=db,
+        job_type=US_SEC_FORM4_SYNC_JOB_TYPE,
+        target=target,
+        request=request,
+        progress_total=max(request_model.max_symbols, 1),
+        message="Queued SEC Form 4 sync.",
+        task=backfill_tasks.run_us_sec_form4_sync_job,
+        task_args=(
+            request_model.scope,
+            request_model.symbol,
+            request_model.group_id,
+            request_model.include_children,
+            request_model.enabled_only,
+            request_model.from_date,
+            request_model.to_date,
+            request_model.max_symbols,
+            request_model.max_filings_per_symbol,
+        ),
+    )
+
+
+def _enqueue_us_sec_13f_quarter_sync(
+    *,
+    db: Session,
+    request_model: USSec13FQuarterSyncRequest,
+) -> dict:
+    request = request_model.model_dump(mode="json")
+    return enqueue_serialized_job(
+        db=db,
+        job_type=US_SEC_13F_QUARTER_SYNC_JOB_TYPE,
+        target=request_model.period_key.strip().upper(),
+        request=request,
+        progress_total=5,
+        message="Queued SEC Form 13F quarter sync.",
+        task=backfill_tasks.run_us_sec_13f_quarter_sync_job,
+        task_args=(
+            request_model.period_key,
+            request_model.source_url,
+            request_model.force_download,
+            request_model.force_rebuild,
+        ),
+    )
+
+
+def _enqueue_us_sec_13f_mapping_sync(
+    *,
+    db: Session,
+    request_model: USSec13FMappingSyncRequest,
+) -> dict:
+    request = request_model.model_dump(mode="json")
+    return enqueue_serialized_job(
+        db=db,
+        job_type=US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
+        target="cusip",
+        request=request,
+        progress_total=2,
+        message="Queued SEC Form 13F identifier mapping sync.",
+        task=backfill_tasks.run_us_sec_13f_mapping_sync_job,
+        task_args=(
+            request_model.cusips,
+            request_model.max_identifiers,
+            request_model.refresh,
+            request_model.rebuild_projections,
+        ),
+    )
+
+
+def _enqueue_us_sec_13f_history_sync(
+    *,
+    db: Session,
+    request_model: USSec13FHistorySyncRequest,
+) -> dict:
+    request = request_model.model_dump(mode="json")
+    return enqueue_serialized_job(
+        db=db,
+        job_type=US_SEC_13F_HISTORY_SYNC_JOB_TYPE,
+        target="all-published-history",
+        request=request,
+        progress_total=max(request_model.max_releases, 1),
+        message="Queued SEC Form 13F history sync.",
+        task=backfill_tasks.run_us_sec_13f_history_sync_job,
+        task_args=(
+            request_model.max_releases,
+            request_model.refresh_manifest,
+            request_model.include_completed,
+            request_model.force_download,
+            request_model.force_rebuild,
+            request_model.stop_on_error,
+            request_model.rebuild_projections,
         ),
     )
 
@@ -883,6 +1009,184 @@ def get_us_sec_fundamentals(symbol: str, db: Session = Depends(get_db)):
     except USStockNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/sec/{symbol}/financials", response_model=USSecFinancialContractRead)
+def get_us_sec_financials(
+    symbol: str,
+    mode: str = Query(
+        default="current_comparable",
+        pattern="^(current_comparable|as_reported_as_of)$",
+    ),
+    periods: int = Query(default=8, ge=4, le=12),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_us_sec_financial_contract(
+            db=db,
+            symbol=symbol,
+            mode=mode,
+            periods=periods,
+        )
+    except USStockNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/sec/{symbol}/insider-transactions",
+    response_model=USSecInsiderTransactionsRead,
+)
+def get_us_sec_insider_transactions(
+    symbol: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    codes: str | None = Query(default=None, max_length=80),
+    include_derivatives: bool = True,
+    limit: int = Query(default=100, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=256),
+    db: Session = Depends(get_db),
+):
+    try:
+        parsed_codes = tuple(
+            item.strip().upper()
+            for item in str(codes or "").split(",")
+            if item.strip()
+        )
+        return read_insider_transactions(
+            db,
+            symbol=symbol,
+            from_date=from_date,
+            to_date=to_date,
+            codes=parsed_codes,
+            include_derivatives=include_derivatives,
+            limit=limit,
+            cursor=cursor,
+        )
+    except USStockNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/sec/ownership/jobs/form4-sync",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_us_sec_form4_sync(
+    request: USSecForm4SyncRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return _enqueue_us_sec_form4_sync(db=db, request_model=request)
+    except (ValueError, USMarketConfigurationError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/sec/{symbol}/institutional-holdings",
+    response_model=USSec13FInstitutionalHoldingsRead,
+)
+def get_us_sec_institutional_holdings(
+    symbol: str,
+    manager_limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_13f_symbol_contract(
+            db,
+            symbol=symbol,
+            manager_limit=manager_limit,
+        )
+    except USStockNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/sec/ownership/coverage",
+    response_model=USSec13FCoverageRead,
+)
+def get_us_sec_13f_coverage(db: Session = Depends(get_db)):
+    return get_13f_coverage_contract(db)
+
+
+@router.post(
+    "/sec/ownership/jobs/13f-quarter-sync",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_us_sec_13f_quarter_sync(
+    request: USSec13FQuarterSyncRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return _enqueue_us_sec_13f_quarter_sync(db=db, request_model=request)
+    except (ValueError, USMarketConfigurationError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/sec/ownership/jobs/13f-mapping-sync",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_us_sec_13f_mapping_sync(
+    request: USSec13FMappingSyncRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return _enqueue_us_sec_13f_mapping_sync(db=db, request_model=request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/sec/ownership/jobs/13f-history-sync",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_us_sec_13f_history_sync(
+    request: USSec13FHistorySyncRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return _enqueue_us_sec_13f_history_sync(db=db, request_model=request)
+    except (ValueError, USMarketConfigurationError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
 

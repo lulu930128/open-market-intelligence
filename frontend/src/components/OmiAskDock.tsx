@@ -166,6 +166,14 @@ const SLOT_PRIORITY = [
   "market.indices",
   "market.breadth",
   "technical.structure",
+  "technical.indicators",
+  "technical.breakout",
+  "technical.swings",
+  "technical.fibonacci",
+  "technical.divergence",
+  "technical.anchored_vwap",
+  "technical.volume_profile",
+  "technical.relative_strength",
   "screening.intraday",
   "market.hot_groups",
   "data.freshness",
@@ -184,12 +192,26 @@ const SLOT_PRIORITY = [
   "fundamentals",
   "news_events",
 ];
+const STATUS_DIMENSION_KEYS = [
+  "service_status",
+  "data_quality",
+  "decision_readiness",
+  "provider_status",
+] as const;
 const SLOT_LABEL_KEYS: Record<string, string> = {
   "quote.snapshot": "ask.slots.quote",
   "intraday.bars": "ask.slots.intraday",
   "market.indices": "ask.slots.indexIntraday",
   "market.breadth": "ask.slots.marketBreadth",
   "technical.structure": "ask.slots.technical",
+  "technical.indicators": "ask.slots.technical",
+  "technical.swings": "ask.slots.technical",
+  "technical.fibonacci": "ask.slots.technical",
+  "technical.divergence": "ask.slots.technical",
+  "technical.breakout": "ask.slots.technical",
+  "technical.volume_profile": "ask.slots.technical",
+  "technical.anchored_vwap": "ask.slots.technical",
+  "technical.relative_strength": "ask.slots.technical",
   "screening.intraday": "ask.slots.intradayScreening",
   "market.hot_groups": "ask.slots.hotGroups",
   "data.freshness": "ask.slots.dataQuality",
@@ -207,6 +229,9 @@ const SLOT_LABEL_KEYS: Record<string, string> = {
   institutional: "ask.slots.institutional",
   fundamentals: "ask.slots.fundamentals",
   news_events: "ask.slots.newsEvents",
+  service_status: "ask.slots.serviceStatus",
+  decision_readiness: "ask.slots.decisionReadiness",
+  provider_status: "ask.slots.providerStatus",
 };
 const SLOT_STATUS_LABEL_KEYS: Record<string, string> = {
   ready: "ask.slots.statusReady",
@@ -217,6 +242,13 @@ const SLOT_STATUS_LABEL_KEYS: Record<string, string> = {
   not_applicable: "ask.slots.statusNotApplicable",
   blocked: "ask.slots.statusBlocked",
   stale: "ask.slots.statusStale",
+  available: "ask.slots.statusAvailable",
+  current: "ask.slots.statusCurrent",
+  limited: "ask.slots.statusLimited",
+  degraded: "ask.slots.statusDegraded",
+  unavailable: "ask.slots.statusUnavailable",
+  unknown: "ask.slots.statusUnknown",
+  pending: "ask.slots.statusPending",
 };
 
 function asRecord(value: unknown): UnknownRecord {
@@ -574,17 +606,58 @@ function slotStatusLabel(status: string, t: TranslationFunction) {
 }
 
 function slotStatusClass(status: string) {
-  if (status === "ready") return "border-omi-success-border bg-omi-success-soft text-omi-success";
-  if (status === "partial" || status === "stale") {
+  if (status === "ready" || status === "available" || status === "current") {
+    return "border-omi-success-border bg-omi-success-soft text-omi-success";
+  }
+  if (
+    status === "partial" ||
+    status === "stale" ||
+    status === "limited" ||
+    status === "degraded" ||
+    status === "pending"
+  ) {
     return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
   }
-  if (status === "missing" || status === "blocked" || status === "failed" || status === "error") {
+  if (
+    status === "missing" ||
+    status === "blocked" ||
+    status === "failed" ||
+    status === "error" ||
+    status === "unavailable"
+  ) {
     return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
   }
   if (status === "not_requested" || status === "planned" || status === "not_applicable") {
     return "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-muted";
   }
   return "border-omi-info-border bg-omi-info-soft text-omi-info";
+}
+
+function responseStatusDimensions(response: UnknownRecord, t: TranslationFunction) {
+  const evidence = asRecord(response.evidence);
+  const result = asRecord(response.result);
+  const data = asRecord(result.data);
+  const candidates = [
+    asRecord(evidence.status_dimensions),
+    asRecord(asRecord(evidence.passport).status_dimensions),
+    asRecord(response.status_dimensions),
+    asRecord(result.status_dimensions),
+    asRecord(asRecord(data.summary).status_dimensions),
+    asRecord(asRecord(data.compact).status_dimensions),
+  ];
+  const dimensions = candidates.find((item) => Object.keys(item).length > 0) ?? {};
+  return STATUS_DIMENSION_KEYS.flatMap((key) => {
+    const status = stringValue(dimensions[key])?.toLowerCase();
+    if (!status) return [];
+    return [
+      {
+        key,
+        label: slotLabel(key, t),
+        status,
+        statusLabel: slotStatusLabel(status, t),
+      },
+    ];
+  });
 }
 
 function responsePayloadLevel(response: UnknownRecord) {
@@ -604,6 +677,7 @@ function responsePayloadLevel(response: UnknownRecord) {
 function responseSlots(response: UnknownRecord) {
   const evidence = asRecord(response.evidence);
   const capabilityStatus = asRecord(evidence.capability_status);
+  const capabilityData = asRecord(evidence.data);
   if (Object.keys(capabilityStatus).length > 0) {
     return Object.fromEntries(
       Object.entries(capabilityStatus).map(([capabilityId, value]) => {
@@ -621,6 +695,22 @@ function responseSlots(response: UnknownRecord) {
         const usability = stringValue(status.usability_status)?.toLowerCase();
         const factsUsable = status.facts_usable === true;
         const decisionUsable = status.decision_usable === true;
+        const payload = asRecord(capabilityData[capabilityId]);
+        const payloadSummary = [
+          stringValue(payload.state) ? `state=${stringValue(payload.state)}` : null,
+          stringValue(payload.method) ? `method=${stringValue(payload.method)}` : null,
+          stringValue(payload.price_basis)
+            ? `basis=${stringValue(payload.price_basis)}`
+            : null,
+          stringValue(payload.confidence)
+            ? `confidence=${stringValue(payload.confidence)}`
+            : null,
+          stringValue(payload.schema_version) || stringValue(payload.algorithm_version)
+            ? `version=${stringValue(payload.schema_version) || stringValue(payload.algorithm_version)}`
+            : null,
+        ]
+          .filter((item): item is string => Boolean(item))
+          .join(" · ");
         const displayStatus =
           applicability === "not_applicable"
             ? "not_applicable"
@@ -645,6 +735,7 @@ function responseSlots(response: UnknownRecord) {
             ...status,
             status: displayStatus,
             capability: capabilityId,
+            payload_summary: payloadSummary || null,
             reason: textItems(status.reason_codes, 3).join("、") || null,
           },
         ];
@@ -673,6 +764,7 @@ function slotDetail(slot: UnknownRecord) {
   const warnings = textItems(slot.warnings, 1);
   return (
     stringValue(slot.reason) ||
+    stringValue(slot.payload_summary) ||
     stringValue(slot.next_fill) ||
     stringValue(slot.missing_reason) ||
     warnings[0] ||
@@ -712,7 +804,8 @@ function SlotStatusPanel({ response }: { response: UnknownRecord | null }) {
   if (!response) return null;
 
   const items = slotItems(response, t);
-  if (items.length === 0) return null;
+  const statusDimensions = responseStatusDimensions(response, t);
+  if (items.length === 0 && statusDimensions.length === 0) return null;
 
   const payloadLevel = responsePayloadLevel(response);
 
@@ -728,6 +821,25 @@ function SlotStatusPanel({ response }: { response: UnknownRecord | null }) {
           </div>
         ) : null}
       </div>
+      {statusDimensions.length > 0 ? (
+        <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
+          {statusDimensions.map((item) => (
+            <div
+              key={item.key}
+              className="flex min-w-0 items-center justify-between gap-2 border border-omi-border-subtle bg-omi-surface-subtle px-2.5 py-2"
+            >
+              <span className="truncate text-[11px] font-bold text-omi-text-strong">
+                {item.label}
+              </span>
+              <span
+                className={`shrink-0 border px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.08em] ${slotStatusClass(item.status)}`}
+              >
+                {item.statusLabel}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="grid gap-1.5 sm:grid-cols-2">
         {items.map((item) => (
           <div key={item.key} className="min-w-0 border border-omi-border-subtle bg-omi-surface-subtle px-2.5 py-2">

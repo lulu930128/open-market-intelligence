@@ -67,6 +67,209 @@ def signed_change(sign_value, change_value) -> float | None:
     return change
 
 
+TPEX_POST_CLOSE_INDEX_FIELDS = (
+    ("櫃買指數", "櫃買指數"),
+    ("紡織纖維", "紡織纖維"),
+    ("電機機械", "電機機械"),
+    ("化學工業", "化學"),
+    ("鋼鐵工業", "鋼鐵"),
+    ("電子工業", "電子"),
+    ("建材營造", "建材營造"),
+    ("航運業", "航運業"),
+    ("觀光餐旅", "觀光餐旅"),
+    ("生技醫療", "生技醫療"),
+    ("半導體業", "半導體"),
+    ("電腦週邊業", "電腦及週邊設備"),
+    ("光電業", "光電"),
+    ("通信網路業", "通信網路"),
+    ("電子零件業", "電子零組件"),
+    ("電子通路業", "電子通路"),
+    ("資訊服務業", "資訊服務"),
+    ("其他電子業", "其他電子"),
+    ("文化創意業", "文化創意"),
+    ("綠能環保", "綠能環保"),
+    ("數位雲端", "數位雲端"),
+    ("居家生活", "居家生活"),
+    ("其他", "其他"),
+)
+TPEX_POST_CLOSE_INDEX_NAMES = tuple(
+    display_name for _, display_name in TPEX_POST_CLOSE_INDEX_FIELDS
+)
+TPEX_POST_CLOSE_INDEX_FIELD_ALIASES = {
+    "紡織纖維": ("紡織纖維", "紡纖纖維"),
+}
+
+
+def _normalized_tpex_field(value) -> str:
+    return str(value or "").replace(" ", "").replace("\u3000", "").strip()
+
+
+def parse_tpex_post_close_index_list(
+    payload,
+    *,
+    expected_trade_date: date | None = None,
+) -> list[dict]:
+    if not isinstance(payload, dict) or str(payload.get("stat") or "").lower() != "ok":
+        return []
+
+    trade_date = parse_trade_date(payload.get("date"))
+    if trade_date is None or (
+        expected_trade_date is not None and trade_date != expected_trade_date
+    ):
+        return []
+
+    table = next(
+        (
+            item
+            for item in payload.get("tables") or []
+            if isinstance(item, dict)
+            and isinstance(item.get("fields"), list)
+            and isinstance(item.get("data"), list)
+            and "櫃買指數"
+            in {_normalized_tpex_field(field) for field in item.get("fields") or []}
+        ),
+        None,
+    )
+    if table is None:
+        return []
+
+    fields = table.get("fields") or []
+    rows = table.get("data") or []
+    positions = {
+        _normalized_tpex_field(field): index for index, field in enumerate(fields)
+    }
+    time_index = positions.get("時間")
+    if time_index is None:
+        return []
+
+    reference_row = next(
+        (
+            row
+            for row in rows
+            if isinstance(row, list)
+            and time_index < len(row)
+            and str(row[time_index]).strip() == "09:00:00"
+        ),
+        None,
+    )
+    closing_row = next(
+        (
+            row
+            for row in reversed(rows)
+            if isinstance(row, list)
+            and time_index < len(row)
+            and str(row[time_index]).strip() == "99:99:99"
+        ),
+        None,
+    )
+    if reference_row is None or closing_row is None:
+        return []
+
+    items: list[dict] = []
+    for provider_name, display_name in TPEX_POST_CLOSE_INDEX_FIELDS:
+        provider_aliases = TPEX_POST_CLOSE_INDEX_FIELD_ALIASES.get(
+            provider_name,
+            (provider_name,),
+        )
+        value_index = next(
+            (
+                positions[normalized_alias]
+                for alias in provider_aliases
+                for normalized_alias in [_normalized_tpex_field(alias)]
+                if normalized_alias in positions
+            ),
+            None,
+        )
+        if value_index is None or value_index >= len(closing_row):
+            continue
+
+        close = as_float(closing_row[value_index])
+        if close is None:
+            continue
+        previous_close = (
+            as_float(reference_row[value_index])
+            if value_index < len(reference_row)
+            else None
+        )
+        change = close - previous_close if previous_close is not None else None
+        change_pct = (
+            (change / previous_close) * 100
+            if change is not None and previous_close not in (None, 0)
+            else None
+        )
+        items.append(
+            {
+                "market": "TPEX",
+                "name": display_name,
+                "close": close,
+                "change": change,
+                "change_pct": change_pct,
+                "trade_date": trade_date,
+            }
+        )
+
+    return items
+
+
+def parse_tpex50_index_list_item(payload) -> dict | None:
+    rows = payload if isinstance(payload, list) else []
+    values_by_date: dict[date, float] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        trade_date = parse_trade_date(row.get("Date"))
+        close = as_float(row.get("TPEx50Index"))
+        if trade_date is not None and close is not None:
+            values_by_date[trade_date] = close
+
+    ordered = sorted(values_by_date.items())
+    if not ordered:
+        return None
+
+    trade_date, close = ordered[-1]
+    previous_close = ordered[-2][1] if len(ordered) >= 2 else None
+    change = close - previous_close if previous_close is not None else None
+    change_pct = (
+        (change / previous_close) * 100
+        if change is not None and previous_close not in (None, 0)
+        else None
+    )
+    return {
+        "market": "TPEX",
+        "name": "富櫃五十指數",
+        "close": close,
+        "change": change,
+        "change_pct": change_pct,
+        "trade_date": trade_date,
+    }
+
+
+def parse_tpex200_index_list_item(payload) -> dict | None:
+    rows = payload if isinstance(payload, list) else []
+    candidates: list[tuple[date, dict]] = []
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("指數") or "").strip() != "富櫃200指數":
+            continue
+        trade_date = parse_trade_date(row.get("資料日期"))
+        if trade_date is not None:
+            candidates.append((trade_date, row))
+
+    if not candidates:
+        return None
+
+    trade_date, latest = max(candidates, key=lambda item: item[0])
+    return {
+        "market": "TPEX",
+        "name": "富櫃200指數",
+        "close": as_float(latest.get("收盤指數")),
+        "change": signed_change(latest.get("漲跌"), latest.get("漲跌點數")),
+        "change_pct": signed_change(
+            latest.get("漲跌"), latest.get("漲跌百分比")
+        ),
+        "trade_date": trade_date,
+    }
+
+
 def regular_stock_code(value) -> str | None:
     if value is None:
         return None
@@ -313,14 +516,19 @@ def parse_tpex_market_highlight_rows(
 
 
 __all__ = [
+    "TPEX_POST_CLOSE_INDEX_FIELDS",
+    "TPEX_POST_CLOSE_INDEX_NAMES",
     "as_float",
     "as_int",
     "count_with_limit",
     "list_value",
     "market_index_ohlc_item",
     "market_index_stat_item",
+    "parse_tpex200_index_list_item",
+    "parse_tpex50_index_list_item",
     "parse_tpex_market_highlight_rows",
     "parse_tpex_market_daily_rows",
+    "parse_tpex_post_close_index_list",
     "parse_trade_date",
     "parse_twse_index_daily_ohlc_rows",
     "parse_twse_market_daily_history_rows",

@@ -15,6 +15,12 @@ class TechnicalAnalysisMacdPeriodsRead(BaseModel):
     signal: int
 
 
+class TechnicalAnalysisPvoPeriodsRead(BaseModel):
+    fast: int = 12
+    slow: int = 26
+    signal: int = 9
+
+
 class TechnicalAnalysisKdPeriodsRead(BaseModel):
     period: int
     smooth: int
@@ -27,6 +33,9 @@ class TechnicalAnalysisBollingerPeriodsRead(BaseModel):
 
 class TechnicalAnalysisPeriodsRead(BaseModel):
     macd: TechnicalAnalysisMacdPeriodsRead
+    pvo: TechnicalAnalysisPvoPeriodsRead = Field(
+        default_factory=TechnicalAnalysisPvoPeriodsRead
+    )
     rsi: int
     atr: int
     adx: int
@@ -66,6 +75,7 @@ class TechnicalAnalysisAtrThresholdsRead(BaseModel):
 
 class TechnicalAnalysisThresholdsRead(BaseModel):
     volume_ratio: float
+    breakout_volume_ratio: float = 1.2
     near_level_pct: float
     adx_trend: float
     rsi: TechnicalAnalysisRsiThresholdsRead
@@ -104,6 +114,7 @@ class TechnicalAnalysisIndicatorKeysRead(BaseModel):
     bollinger_bandwidth: str
     kd_k: str
     kd_d: str
+    kd_j: str
     support: str
     resistance: str
 

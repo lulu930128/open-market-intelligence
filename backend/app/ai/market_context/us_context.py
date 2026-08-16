@@ -543,7 +543,12 @@ def read_us_stock_context(
     selected_daily_provider = latest_daily.provider if latest_daily else None
     profile = None if is_index else dependencies.latest_profile(db, normalized_symbol)
     sec_summary: dict[str, Any] | None = None
+    financial_contract: dict[str, Any] | None = None
+    insider_transactions: dict[str, Any] | None = None
+    institutional_holdings: dict[str, Any] | None = None
     sec_warning: str | None = None
+    insider_warning: str | None = None
+    institutional_warning: str | None = None
     if not is_index:
         try:
             sec_summary = dependencies.us_market_service.get_us_sec_fundamental_summary(
@@ -552,6 +557,34 @@ def read_us_stock_context(
             )
         except Exception as exc:
             sec_warning = str(exc)
+        try:
+            financial_contract = dependencies.us_market_service.get_us_sec_financial_contract(
+                db=db,
+                symbol=normalized_symbol,
+                periods=8,
+            )
+        except Exception as exc:
+            contract_warning = f"US SEC financial contract unavailable: {exc}"
+            sec_warning = f"{sec_warning}; {contract_warning}" if sec_warning else contract_warning
+        try:
+            insider_transactions = (
+                dependencies.us_market_service.get_us_sec_insider_transactions(
+                    db,
+                    symbol=normalized_symbol,
+                    limit=20,
+                )
+            )
+        except Exception as exc:
+            insider_warning = f"US SEC Form 4 contract unavailable: {exc}"
+        try:
+            candidate = dependencies.us_market_service.get_us_sec_institutional_holdings(
+                db,
+                symbol=normalized_symbol,
+                manager_limit=20,
+            )
+            institutional_holdings = candidate if isinstance(candidate, dict) else None
+        except Exception as exc:
+            institutional_warning = f"US SEC Form 13F contract unavailable: {exc}"
 
     corporate_actions = [] if is_index else dependencies.us_market_service.list_us_corporate_actions(
         db=db,
@@ -586,6 +619,30 @@ def read_us_stock_context(
         missing.append("us_sec_company_fact")
     if sec_warning:
         warnings.append(sec_warning)
+    if insider_warning:
+        warnings.append(insider_warning)
+    insider_status = str((insider_transactions or {}).get("status") or "missing")
+    if insider_status in {"stale", "partial", "blocked"}:
+        warnings.append(
+            f"US SEC Form 4 evidence status is {insider_status}; limitations remain visible."
+        )
+    institutional_status = str((institutional_holdings or {}).get("status") or "missing")
+    financial_quality = (
+        financial_contract.get("quality")
+        if isinstance(financial_contract, dict)
+        and isinstance(financial_contract.get("quality"), dict)
+        else {}
+    )
+    if financial_contract and financial_quality.get("decision_usable") is not True:
+        issue_codes = [
+            str(issue)
+            for issue in financial_quality.get("issues") or []
+            if str(issue).strip()
+        ]
+        warnings.append(
+            "US SEC financial contract is not decision-usable"
+            + (f": {', '.join(issue_codes[:6])}" if issue_codes else ".")
+        )
     if requested_trade_date is not None and latest_daily is None:
         requested_missing = "us_daily_price_requested_trade_date"
         if requested_missing not in missing:
@@ -681,6 +738,20 @@ def read_us_stock_context(
     if not is_index:
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_company_profile"})
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_sec_company_fact"})
+        _append_source_ref_once(
+            source_refs,
+            {"type": "table", "name": "us_sec_ownership_transaction"},
+        )
+        _append_source_ref_once(
+            source_refs,
+            {"type": "table", "name": "us_sec_13f_symbol_quarter"},
+        )
+        for source_ref in (insider_transactions or {}).get("source_refs") or []:
+            if isinstance(source_ref, dict):
+                _append_source_ref_once(source_refs, source_ref)
+        for source_ref in (institutional_holdings or {}).get("source_refs") or []:
+            if isinstance(source_ref, dict):
+                _append_source_ref_once(source_refs, source_ref)
     if corporate_actions:
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_corporate_action"})
     if short_volume_rows:
@@ -801,6 +872,18 @@ def read_us_stock_context(
             ),
             "chart": _json_ready(chart),
             "sec_fundamentals": sec_summary,
+            "financials": {
+                "financial_contract": financial_contract,
+                "sec_fundamentals": sec_summary,
+                "currency": "USD",
+                "source_amount_unit": "USD",
+                "normalized_amount_unit": "USD",
+                "amount_scale": 1,
+                "ratio_unit": "percent",
+                "per_share_unit": "USD/share",
+            },
+            "insider_transactions": insider_transactions,
+            "institutional_holdings": institutional_holdings,
             "corporate_actions": _list_rows(
                 corporate_actions,
                 (
@@ -849,6 +932,16 @@ def read_us_stock_context(
             "daily_rows": len(daily_rows),
             "profile_available": profile is not None,
             "sec_metric_count": (sec_summary or {}).get("metric_count") if sec_summary else 0,
+            "fundamental_available": bool(financial_contract),
+            "insider_transaction_rows": len(
+                (insider_transactions or {}).get("transactions") or []
+            ),
+            "institutional_holding_quarters": len(
+                (institutional_holdings or {}).get("quarters") or []
+            ),
+            "institutional_manager_rows": len(
+                (institutional_holdings or {}).get("managers") or []
+            ),
             "corporate_action_rows": len(corporate_actions),
             "short_volume_rows": len(short_volume_rows),
             "chart_points": chart.get("point_count") if chart else 0,
@@ -871,6 +964,11 @@ def read_us_stock_context(
                 else "missing"
             ),
             "profile": "current" if profile else "missing",
+            "fundamentals": financial_quality.get("freshness") or (
+                "current" if financial_contract else "missing"
+            ),
+            "insider_transactions": insider_status,
+            "institutional_holdings": institutional_status,
             "chart": "current" if chart else "missing",
             "intraday": (
                 "current"
@@ -891,6 +989,32 @@ def read_us_stock_context(
         "fallback_providers": source_health.get("fallback_provider_summary"),
         "provider_health": source_health.get("summary"),
     }
+    envelope["data"]["compact"]["fundamentals"] = {
+        "financial_contract": financial_contract,
+        "sec_fundamentals": sec_summary,
+        "currency": "USD",
+        "source_amount_unit": "USD",
+        "normalized_amount_unit": "USD",
+        "amount_scale": 1,
+        "ratio_unit": "percent",
+        "per_share_unit": "USD/share",
+    }
+    envelope["data"]["compact"]["ownership"] = {
+        "insider_transactions": insider_transactions,
+        "institutional_holdings": institutional_holdings,
+        "institutional_evidence_role": "delayed_quarterly_context_only",
+    }
+    if not is_index:
+        envelope["data_limitations"] = list(
+            dict.fromkeys(
+                [
+                    *envelope["data_limitations"],
+                    "SEC Form 13F is delayed quarterly disclosure, not real-time institutional flow or a standalone trading signal.",
+                    "CUSIP-to-symbol mapping coverage may be partial; unresolved holdings remain excluded from symbol projections and visible in quality metadata.",
+                    *([institutional_warning] if institutional_warning else []),
+                ]
+            )
+        )
     envelope["data"]["compact"]["intraday_bars"] = intraday_bars
     envelope["evidence_passport"] = build_evidence_passport(
         kind="us_stock_context",

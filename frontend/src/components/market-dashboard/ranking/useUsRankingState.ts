@@ -201,23 +201,14 @@ export function useUsRankingState({
 
     initialPreloadQueuedRef.current = true;
     const currentGroupId = groupId;
-    const refreshTimer = window.setTimeout(() => {
-      void load(currentGroupId, rankBy, { silent: true }).then((rankingData) => {
-        if (selectedGroupIdRef.current !== currentGroupId) return;
-        if (rankingData?.is_current !== false) return;
-
-        void refreshDailyPrices(
-          currentGroupId,
-          rankBy,
-          rankingData.target_trade_date
-        );
-      });
+    const preloadTimer = window.setTimeout(() => {
+      void load(currentGroupId, rankBy, { silent: true });
     }, 0);
 
     return () => {
-      window.clearTimeout(refreshTimer);
+      window.clearTimeout(preloadTimer);
     };
-  }, [active, groupId, load, rankBy, refreshDailyPrices]);
+  }, [active, groupId, load, rankBy]);
 
   useEffect(() => {
     if (!active || groupId === null) return;

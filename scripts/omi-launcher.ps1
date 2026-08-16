@@ -89,6 +89,8 @@ $script:BackendProcess = $null
 $script:FrontendProcess = $null
 $script:LastStatusText = $null
 $script:BackendStopExpected = $false
+$script:BackendRecoveryInProgress = $false
+$script:BackendPortRecoveryAttempts = 0
 $script:IsShuttingDown = $false
 $script:DashboardAutoOpened = $false
 $script:DefaultFrontendHost = "127.0.0.1"
@@ -97,6 +99,8 @@ $script:FrontendPortSearchSpan = 1000
 $script:DefaultBackendHost = "127.0.0.1"
 $script:DefaultBackendPort = 8400
 $script:BackendPortSearchSpan = 1000
+$script:BackendBindFailureExitCode = 78
+$script:MaxBackendPortRecoveryAttempts = 3
 $script:DefaultApiProxyPath = "/omi-data"
 $script:BackendReload = $false
 $script:BackendSourceStaleToleranceSeconds = 2
@@ -1131,6 +1135,25 @@ function Test-ProcessRunning {
     }
 }
 
+function Get-ExitedProcessCode {
+    param($Process)
+
+    if ($null -eq $Process) {
+        return $null
+    }
+
+    try {
+        $Process.Refresh()
+        if (-not $Process.HasExited) {
+            return $null
+        }
+        return [int]$Process.ExitCode
+    }
+    catch {
+        return $null
+    }
+}
+
 function Invoke-BackendPythonRuntimeCheck {
     param([Parameter(Mandatory = $true)][string]$PythonPath)
 
@@ -1423,6 +1446,47 @@ function Start-Services {
     }
 }
 
+function Invoke-BackendBindFailureRecovery {
+    if ($script:BackendStopExpected -or
+        $script:IsShuttingDown -or
+        $script:BackendRecoveryInProgress) {
+        return $false
+    }
+
+    if ($script:BackendPortRecoveryAttempts -ge $script:MaxBackendPortRecoveryAttempts) {
+        Write-LauncherLog "Backend bind recovery exhausted. attempts=$($script:BackendPortRecoveryAttempts) max_attempts=$($script:MaxBackendPortRecoveryAttempts)" "ERROR"
+        return $false
+    }
+
+    $script:BackendRecoveryInProgress = $true
+    $previousBackendUrl = $script:BackendBaseUrl
+    $previousFrontendUrl = $script:DashboardUrl
+    try {
+        $script:BackendPortRecoveryAttempts += 1
+        Stop-FrontendService
+
+        $script:BackendPort = Find-AvailableBackendPort -PreferredPort ($script:BackendPort + 1)
+        Update-BackendServiceUrls
+        Write-LauncherLog (
+            "Backend bind recovery selected a new port. " +
+            "attempt=$($script:BackendPortRecoveryAttempts)/$($script:MaxBackendPortRecoveryAttempts) " +
+            "previous=$previousBackendUrl selected=$($script:BackendBaseUrl) " +
+            "frontend=$previousFrontendUrl"
+        ) "WARN"
+
+        Start-Backend
+        Start-Frontend
+        return $true
+    }
+    catch {
+        Write-LauncherLog "Backend bind recovery failed. previous=$previousBackendUrl error=$($_.Exception.Message)" "ERROR"
+        return $false
+    }
+    finally {
+        $script:BackendRecoveryInProgress = $false
+    }
+}
+
 function Stop-BackendService {
     $script:BackendStopExpected = $true
     Stop-ProcessTree $script:BackendProcess "backend"
@@ -1476,6 +1540,7 @@ function Stop-Services {
 
 function Restart-Services {
     Write-LauncherLog "Restart requested."
+    $script:BackendPortRecoveryAttempts = 0
     Stop-Services
     Start-Sleep -Seconds 1
     Start-Services
@@ -1591,6 +1656,15 @@ $script:NotifyIcon.add_DoubleClick({ Open-Url $script:DashboardUrl })
 $script:Timer = New-Object System.Windows.Forms.Timer
 $script:Timer.Interval = 5000
 $script:Timer.add_Tick({
+    $backendRunnerExitCode = Get-ExitedProcessCode $script:BackendProcess
+    if ($backendRunnerExitCode -eq $script:BackendBindFailureExitCode -and
+        (-not $script:BackendStopExpected)) {
+        $script:BackendProcess = $null
+        if (Invoke-BackendBindFailureRecovery) {
+            return
+        }
+    }
+
     $backendHttp = Test-HttpOk $script:BackendReadyUrl
     $frontendHttp = Test-FrontendOk
     $backendProc = Test-ProcessRunning $script:BackendProcess
@@ -1599,6 +1673,11 @@ $script:Timer.add_Tick({
     $backendState = if ($backendHttp) { "API OK" } elseif ($backendProc) { "API starting" } else { "API stopped" }
     $frontendState = if ($frontendHttp) { "UI OK" } elseif ($frontendProc) { "UI starting" } else { "UI stopped" }
     $statusText = "$backendState; $frontendState"
+
+    if ($backendHttp -and $script:BackendPortRecoveryAttempts -gt 0) {
+        Write-LauncherLog "Backend bind recovery adopted. selected=$($script:BackendBaseUrl) attempts=$($script:BackendPortRecoveryAttempts)"
+        $script:BackendPortRecoveryAttempts = 0
+    }
 
     $script:StatusItem.Text = "Status: $statusText"
     $script:NotifyIcon.Text = "$($script:AppDisplayName): $statusText"

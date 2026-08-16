@@ -7,6 +7,10 @@ from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     get_technical_analysis_parameters,
 )
+from app.market.trading_calendar import (
+    is_taiwan_trading_day,
+    next_taiwan_trading_day,
+)
 
 
 _DEFAULT_MAX_GAP_DAYS = object()
@@ -18,17 +22,27 @@ def _moving_average(
     window: int,
     dates: list[date] | None = None,
     max_gap_days: int = 10,
+    unexpected_gap_prefix: list[int] | None = None,
 ) -> float | None:
     start = index - window + 1
 
     if start < 0:
         return None
 
-    if dates is not None:
+    if unexpected_gap_prefix is not None:
+        if len(unexpected_gap_prefix) != len(values):
+            raise ValueError("unexpected_gap_prefix must match values length.")
+        if unexpected_gap_prefix[index] > unexpected_gap_prefix[start]:
+            return None
+    elif dates is not None:
         window_dates = dates[start : index + 1]
 
         if any(
-            (right - left).days > max_gap_days
+            _has_unexpected_taiwan_gap(
+                left,
+                right,
+                fallback_max_gap_days=max_gap_days,
+            )
             for left, right in zip(window_dates, window_dates[1:])
         ):
             return None
@@ -41,6 +55,45 @@ def _moving_average(
     total = sum(value for value in window_values if value is not None)
 
     return round(total / window, 4)
+
+
+def _has_unexpected_taiwan_gap(
+    left: date,
+    right: date,
+    *,
+    fallback_max_gap_days: int,
+) -> bool:
+    """Distinguish a missing Taiwan trading day from a legitimate closure.
+
+    Real daily rows are exchange trading dates, so their successor must match
+    the calendar's next trading date. The fallback preserves generic/synthetic
+    OHLC callers that deliberately include non-trading calendar dates.
+    """
+
+    if right <= left:
+        return True
+    if is_taiwan_trading_day(left) and is_taiwan_trading_day(right):
+        return right != next_taiwan_trading_day(left, include_value=False)
+    return (right - left).days > fallback_max_gap_days
+
+
+def _build_unexpected_gap_prefix(
+    dates: list[date],
+    *,
+    fallback_max_gap_days: int,
+) -> list[int]:
+    """Count continuity breaks once so every moving-average window is O(1)."""
+
+    prefix = [0] * len(dates)
+    for index in range(1, len(dates)):
+        prefix[index] = prefix[index - 1] + int(
+            _has_unexpected_taiwan_gap(
+                dates[index - 1],
+                dates[index],
+                fallback_max_gap_days=fallback_max_gap_days,
+            )
+        )
+    return prefix
 
 
 def _calculate_change(
@@ -628,6 +681,14 @@ def calculate_indicator_points_from_ohlc_points(
         if isinstance(effective_max_gap_days, int)
         else technical_parameters.max_gap_days
     )
+    unexpected_gap_prefix = (
+        _build_unexpected_gap_prefix(
+            point_dates,
+            fallback_max_gap_days=gap_days_for_ma,
+        )
+        if point_dates is not None
+        else None
+    )
 
     for index, point in enumerate(points):
         previous_close = closes[index - 1] if index > 0 else None
@@ -646,6 +707,7 @@ def calculate_indicator_points_from_ohlc_points(
                 window,
                 point_dates,
                 max_gap_days=gap_days_for_ma,
+                unexpected_gap_prefix=unexpected_gap_prefix,
             )
             for window in ma_window_list
         }
@@ -657,6 +719,7 @@ def calculate_indicator_points_from_ohlc_points(
                 window,
                 point_dates,
                 max_gap_days=gap_days_for_ma,
+                unexpected_gap_prefix=unexpected_gap_prefix,
             )
             for window in volume_ma_window_list
         }

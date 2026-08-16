@@ -490,7 +490,7 @@ SOURCE_HEALTH_DOMAIN_HINTS: dict[str, tuple[str, ...]] = {
     "chips": ("institutional", "margin", "shareholding"),
     "fundamentals": ("fundamental", "financial", "revenue", "sec_fact"),
     "broker_branch": ("broker_branch",),
-    "ownership": ("shareholding", "ownership"),
+    "ownership": ("shareholding", "ownership", "insider_transaction", "form4"),
     "source_health": ("source_health",),
 }
 SOURCE_HEALTH_CAPABILITY_HINTS: dict[str, tuple[str, ...]] = {
@@ -518,6 +518,12 @@ SOURCE_HEALTH_CAPABILITY_HINTS: dict[str, tuple[str, ...]] = {
     "chips.margin": ("margin",),
     "broker_branch.summary": ("broker_branch",),
     "ownership.distribution": ("shareholding", "ownership"),
+    "ownership.insider_transactions": (
+        "ownership",
+        "insider_transaction",
+        "form4",
+        "sec_insider_transactions",
+    ),
     "fundamentals.revenue": ("revenue",),
     "fundamentals.financials": ("fundamental", "financial", "sec_fact"),
     "diagnostics.source_health": ("source_health",),

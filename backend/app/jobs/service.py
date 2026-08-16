@@ -75,6 +75,14 @@ class JobRunNotFoundError(Exception):
     pass
 
 
+class JobExecutionError(Exception):
+    """Fail a tracked job while preserving structured outcome evidence."""
+
+    def __init__(self, message: str, *, result: Any = None) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 def _json_default(value: Any) -> str:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
@@ -366,6 +374,25 @@ def find_active_job(
         query = query.filter(JobRun.request_json == request_json)
 
     return query.order_by(JobRun.created_at.desc(), JobRun.id.desc()).first()
+
+
+def find_active_job_by_target(
+    db: Session,
+    job_type: str,
+    target: str | None = None,
+) -> JobRun | None:
+    """Find an active lease regardless of request metadata differences."""
+
+    return (
+        db.query(JobRun)
+        .filter(
+            JobRun.job_type == job_type,
+            JobRun.status.in_(ACTIVE_STATUSES),
+            JobRun.target == target,
+        )
+        .order_by(JobRun.created_at.desc(), JobRun.id.desc())
+        .first()
+    )
 
 
 def find_recent_successful_job(
@@ -668,6 +695,9 @@ def run_tracked_job(job_id: int, worker: JobWorker) -> None:
         start_job(db, job_id, message="Job started.")
         result = worker(db, progress)
         complete_job(db, job_id, result=result)
+    except JobExecutionError as exc:
+        fail_job(db, job_id, error_message=str(exc), result=exc.result)
+        logger.warning("Tracked job %s failed its outcome contract: %s", job_id, exc)
     except Exception as exc:
         fail_job(db, job_id, error_message=str(exc))
         logger.exception("Tracked job %s failed.", job_id)

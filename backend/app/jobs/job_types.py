@@ -19,3 +19,7 @@ WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE = (
     "watchlist.radar_v2.outcome_reconcile"
 )
 CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE = "cross_market.context_refresh"
+US_SEC_FORM4_SYNC_JOB_TYPE = "us_market.sec_form4_sync"
+US_SEC_13F_QUARTER_SYNC_JOB_TYPE = "us_market.sec_13f_quarter_sync"
+US_SEC_13F_MAPPING_SYNC_JOB_TYPE = "us_market.sec_13f_mapping_sync"
+US_SEC_13F_HISTORY_SYNC_JOB_TYPE = "us_market.sec_13f_history_sync"

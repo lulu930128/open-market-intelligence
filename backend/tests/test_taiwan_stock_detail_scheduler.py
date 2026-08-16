@@ -61,6 +61,32 @@ class TaiwanStockDetailDailySchedulerTests(unittest.TestCase):
 
         enqueue.assert_not_called()
 
+    def test_registers_bounded_daily_metric_repair_and_startup_reconcile(self) -> None:
+        fake_scheduler = SimpleNamespace(add_job=Mock())
+        with (
+            patch.object(
+                scheduler.settings,
+                "enable_market_daily_repair_scheduler",
+                True,
+            ),
+            patch.object(scheduler.settings, "enable_scheduler", False),
+            patch.object(scheduler.settings, "enable_tw_stock_detail_scheduler", True),
+            patch.object(
+                scheduler.settings,
+                "scheduler_market_daily_repair_interval_minutes",
+                30,
+            ),
+        ):
+            added = scheduler._add_taiwan_daily_metric_repair_jobs(fake_scheduler)
+
+        self.assertTrue(added)
+        self.assertEqual(fake_scheduler.add_job.call_count, 2)
+        interval, startup = fake_scheduler.add_job.call_args_list
+        self.assertEqual(interval.kwargs["trigger"], "interval")
+        self.assertEqual(interval.kwargs["minutes"], 30)
+        self.assertEqual(interval.kwargs["max_instances"], 1)
+        self.assertEqual(startup.kwargs["trigger"], "date")
+
 
 class TaiwanFundamentalSchedulerTests(unittest.TestCase):
     def test_registers_bounded_release_and_deadline_jobs(self) -> None:

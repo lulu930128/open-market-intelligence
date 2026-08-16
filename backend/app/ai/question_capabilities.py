@@ -28,6 +28,14 @@ US_FUNDAMENTAL_HINTS = (
     "營收",
     "獲利",
 )
+US_INSIDER_HINTS = (
+    "insider",
+    "form 4",
+    "form4",
+    "內部人",
+    "內部交易",
+    "高管交易",
+)
 US_PROFILE_HINTS = (
     "company",
     "profile",
@@ -51,6 +59,7 @@ US_TOOL_CAPABILITIES = {
     "us.refresh_company_profile": "us_company_profile",
     "us.refresh_sec_facts": "us_sec_company_fact",
     "us.read_sec_fundamentals": "us_sec_company_fact",
+    "us.refresh_insider_transactions": "us_sec_insider_transactions",
     "us.refresh_corporate_actions": "us_corporate_action",
 }
 
@@ -72,6 +81,8 @@ def required_us_capabilities(
         required.append("us_company_profile")
     if instrument_type != "index" and _has_hint(question, US_FUNDAMENTAL_HINTS):
         required.extend(("us_company_profile", "us_sec_company_fact"))
+    if instrument_type != "index" and _has_hint(question, US_INSIDER_HINTS):
+        required.append("us_sec_insider_transactions")
     if instrument_type != "index" and _has_hint(question, US_CORPORATE_ACTION_HINTS):
         required.append("us_corporate_action")
     return tuple(dict.fromkeys(required))

@@ -487,11 +487,13 @@ export default function StockDetailPanel({
       title,
       message,
       source = dataStatusSource,
+      statusKey,
     }: {
       level?: DataStatusLevel;
       title: string;
       message: string;
       source?: string;
+      statusKey?: string;
     }) => {
       if (!stockId) return;
 
@@ -503,7 +505,9 @@ export default function StockDetailPanel({
         source,
         contextKey: dataStatusContextKey,
         contextLabel: dataStatusContextLabel,
-        dedupeKey: `${dataStatusContextKey}:${source}:${title}:${level}`,
+        dedupeKey: statusKey
+          ? `${dataStatusContextKey}:${statusKey}`
+          : `${dataStatusContextKey}:${source}:${title}:${level}`,
       });
     },
     [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, stockId]
@@ -603,11 +607,9 @@ export default function StockDetailPanel({
       benchmarkChartKey,
       benchmarkIndexId,
       chartData,
-      chartHistoryMessage,
       chartIntradayOverlay,
       chartStockId,
       chartTimeframe,
-      errorMessage,
       indicatorData,
       loadState,
       professionalIntradayData,
@@ -1528,12 +1530,6 @@ export default function StockDetailPanel({
 
           )}
 
-          {!chartFocusMode && chartHistoryMessage && !errorMessage ? (
-            <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-2 text-xs text-omi-warning-strong">
-              {chartHistoryMessage}
-            </div>
-          ) : null}
-
           {chartFocusMode ? (
             <ProfessionalChartPanel
               title={`${stockId} ${
@@ -1599,13 +1595,6 @@ export default function StockDetailPanel({
                 setChartDrawingTool("cursor");
                 setChartFocusMode(false);
               }}
-              message={
-                chartHistoryMessage && !errorMessage ? (
-                  <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-2 text-xs text-omi-warning-strong">
-                    {chartHistoryMessage}
-                  </div>
-                ) : null
-              }
               chartReady={professionalChartReady}
               emptyState={
                 <EmptyDataState

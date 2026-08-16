@@ -25,6 +25,12 @@ DEFAULT_RESPONSE_BYTES = {
     "standard": 131_072,
     "full": 524_288,
 }
+ADAPTIVE_RESPONSE_BYTE_CEILINGS = {
+    "summary": 32_768,
+    "compact": 65_536,
+    "standard": 262_144,
+    "full": 786_432,
+}
 
 READY_STATUSES = {
     "available",
@@ -37,6 +43,7 @@ READY_STATUSES = {
     "live",
     "ok",
     "ready",
+    "ready_empty",
 }
 LIMITED_STATUSES = {"cached", "delayed", "partial", "pending", "waiting"}
 NEUTRAL_STATUSES = {"not_applicable", "not_requested"}
@@ -51,6 +58,7 @@ EXECUTABLE_FILL_OPERATIONS = {
     "us.read_intraday_trend",
     "us.refresh_daily_price",
     "us.refresh_sec_facts",
+    "us.refresh_insider_transactions",
     "jp.read_intraday_trend",
     "jp.refresh_daily_price",
     "kr.read_stock_intraday_trend",
@@ -73,6 +81,7 @@ FILL_OPERATION_PRODUCED_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "us.read_intraday_trend": ("quote.snapshot", "intraday.bars"),
     "us.refresh_daily_price": ("daily.ohlcv",),
     "us.refresh_sec_facts": ("fundamentals.financials",),
+    "us.refresh_insider_transactions": ("ownership.insider_transactions",),
     "jp.read_intraday_trend": ("quote.snapshot", "intraday.bars"),
     "jp.refresh_daily_price": ("daily.ohlcv",),
     "kr.read_stock_intraday_trend": ("quote.snapshot", "intraday.bars"),
@@ -94,6 +103,7 @@ FILL_OPERATIONS_WRITING_CACHE = {
     "tw.refresh_financials",
     "us.refresh_daily_price",
     "us.refresh_sec_facts",
+    "us.refresh_insider_transactions",
     "jp.refresh_daily_price",
     "kr.read_stock_intraday_trend",
     "kr.refresh_daily_price",
@@ -1186,6 +1196,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "price_unit",
             "score_unit",
             "score_contracts",
+            "contract_version",
+            "advanced_shadow",
         ),
         default_fields=(
             "analysis",
@@ -1218,8 +1230,259 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "price_unit",
             "score_unit",
             "score_contracts",
+            "contract_version",
+            "advanced_shadow",
         ),
         default_limit=20,
+    ),
+    CapabilitySpec(
+        capability_id="technical.indicators",
+        domain="technical",
+        slot="technical",
+        scopes=("stock",),
+        markets=("TW",),
+        paths=(
+            "compact.technical_indicators",
+            "data.technical_indicators",
+            "data.technical_evidence.indicators",
+        ),
+        fields=(
+            "kind",
+            "schema_version",
+            "status",
+            "stock_id",
+            "as_of",
+            "price_basis",
+            "currency",
+            "price_unit",
+            "methods",
+            "timeframes",
+            "corporate_action",
+            "corporate_action_coverage_by_timeframe",
+            "freshness",
+            "missing",
+            "warnings",
+            "source_refs",
+        ),
+        default_fields=(
+            "schema_version",
+            "status",
+            "stock_id",
+            "as_of",
+            "price_basis",
+            "methods",
+            "timeframes",
+            "corporate_action",
+            "corporate_action_coverage_by_timeframe",
+            "freshness",
+            "missing",
+            "warnings",
+            "source_refs",
+        ),
+        default_limit=40,
+        schema_version="tw.technical.indicators.v3",
+        frequency="daily",
+        event_time_basis="completed_market_period_and_explicit_intraday_partial",
+        unit_semantics="TWD_price_shares_volume_percent_oscillators",
+        title="Taiwan technical indicator snapshot",
+        description="Versioned daily, weekly, and monthly indicator values with methods, warm-up, period completeness, and price-basis disclosure.",
+    ),
+    CapabilitySpec(
+        capability_id="technical.swings",
+        domain="technical",
+        slot="technical",
+        scopes=("stock",),
+        markets=("TW",),
+        paths=(
+            "compact.technical_advanced.swings",
+            "data.technical_advanced.swings",
+            "data.technical_evidence.swings",
+        ),
+        fields=(
+            "kind", "algorithm_version", "method", "parameters", "status",
+            "price_basis", "pivots", "provisional", "confirmed_count", "limitations",
+            "corporate_action", "warnings", "source_refs",
+        ),
+        default_fields=(
+            "algorithm_version", "method", "parameters", "status", "price_basis",
+            "pivots", "provisional", "limitations", "corporate_action", "warnings", "source_refs",
+        ),
+        default_limit=20,
+        schema_version="tw.technical.swings.v1",
+        frequency="daily",
+        event_time_basis="confirmed_after_right_hand_bars",
+        title="Taiwan confirmed swing evidence",
+    ),
+    CapabilitySpec(
+        capability_id="technical.fibonacci",
+        domain="technical",
+        slot="technical",
+        scopes=("stock",),
+        markets=("TW",),
+        paths=(
+            "compact.technical_advanced.fibonacci",
+            "data.technical_advanced.fibonacci",
+            "data.technical_evidence.fibonacci",
+        ),
+        fields=(
+            "kind", "algorithm_version", "method", "status", "direction",
+            "anchor_ids", "anchor_start_id", "anchor_end_id", "anchor_start",
+            "anchor_end", "price_basis", "levels", "confluence_method", "missing",
+            "corporate_action", "warnings", "source_refs",
+        ),
+        default_fields=(
+            "algorithm_version", "method", "status", "direction", "anchor_ids",
+            "anchor_start", "anchor_end", "price_basis", "levels", "missing",
+            "corporate_action", "warnings", "source_refs",
+        ),
+        default_limit=20,
+        schema_version="tw.technical.fibonacci.v1",
+        frequency="daily",
+        event_time_basis="confirmed_swing_anchors",
+        title="Taiwan Fibonacci swing levels",
+    ),
+    CapabilitySpec(
+        capability_id="technical.divergence",
+        domain="technical",
+        slot="technical",
+        scopes=("stock",),
+        markets=("TW",),
+        paths=(
+            "compact.technical_advanced.divergence",
+            "data.technical_advanced.divergence",
+            "data.technical_evidence.divergence",
+        ),
+        fields=(
+            "kind", "algorithm_version", "method", "status", "divergences",
+            "hidden_divergence_enabled", "limitations", "corporate_action", "warnings", "source_refs",
+        ),
+        default_fields=(
+            "algorithm_version", "method", "status", "divergences", "limitations",
+            "corporate_action", "warnings", "source_refs",
+        ),
+        default_limit=20,
+        schema_version="tw.technical.divergence.v1",
+        frequency="daily",
+        event_time_basis="confirmed_price_pivots",
+        title="Taiwan technical divergence evidence",
+    ),
+    CapabilitySpec(
+        capability_id="technical.breakout",
+        domain="technical",
+        slot="technical",
+        scopes=("stock",),
+        markets=("TW",),
+        paths=(
+            "compact.technical_advanced.breakout",
+            "data.technical_advanced.breakout",
+            "data.technical_evidence.breakout",
+        ),
+        fields=(
+            "kind", "algorithm_version", "method", "status", "state", "quality",
+            "level", "level_evidence", "bar_time", "high", "low", "close",
+            "breakout_event_id", "breakout_level", "breakout_confirmed_at",
+            "last_evaluated_at", "confirmation_state", "parameters",
+            "close_distance_pct", "wick_rejected", "volume_ratio", "pvo",
+            "previously_confirmed", "bar_status", "price_basis", "decision_usable",
+            "corporate_action_coverage_status", "corporate_action", "warnings", "source_refs",
+        ),
+        default_fields=(
+            "algorithm_version", "method", "status", "state", "quality", "level",
+            "breakout_event_id", "breakout_level", "breakout_confirmed_at",
+            "last_evaluated_at", "confirmation_state", "parameters",
+            "bar_time", "high", "low", "close", "wick_rejected", "volume_ratio",
+            "pvo", "bar_status", "price_basis", "decision_usable",
+            "corporate_action_coverage_status", "corporate_action", "warnings", "source_refs",
+        ),
+        default_limit=20,
+        schema_version="tw.technical.breakout.v2",
+        frequency="daily",
+        event_time_basis="completed_daily_bar",
+        title="Taiwan breakout quality state",
+    ),
+    CapabilitySpec(
+        capability_id="technical.volume_profile",
+        domain="technical",
+        slot="technical",
+        scopes=("stock",),
+        markets=("TW",),
+        paths=(
+            "compact.technical_advanced.volume_profile",
+            "data.technical_advanced.volume_profile",
+            "data.technical_evidence.volume_profile",
+        ),
+        fields=(
+            "kind", "algorithm_version", "status", "method", "source_granularity",
+            "confidence", "price_basis", "lookback_bars", "source_row_count", "poc",
+            "val", "vah", "value_area_pct", "bins", "high_volume_nodes", "limitations",
+            "corporate_action", "warnings", "source_refs",
+        ),
+        default_fields=(
+            "algorithm_version", "status", "method", "source_granularity", "confidence",
+            "price_basis", "lookback_bars", "poc", "val", "vah", "value_area_pct",
+            "high_volume_nodes", "limitations", "corporate_action", "warnings", "source_refs",
+        ),
+        default_limit=24,
+        schema_version="tw.technical.volume_profile.v1",
+        frequency="daily",
+        event_time_basis="completed_daily_bars",
+        title="Taiwan daily-bar volume profile approximation",
+    ),
+    CapabilitySpec(
+        capability_id="technical.anchored_vwap",
+        domain="technical",
+        slot="technical",
+        scopes=("stock",),
+        markets=("TW",),
+        paths=(
+            "compact.technical_advanced.anchored_vwap",
+            "data.technical_advanced.anchored_vwap",
+            "data.technical_evidence.anchored_vwap",
+        ),
+        fields=(
+            "kind", "algorithm_version", "status", "method", "source_granularity",
+            "confidence", "anchor_evidence_id", "anchor_time", "anchor_price", "value",
+            "cumulative_volume", "used_bars", "price_basis", "limitations", "missing",
+            "corporate_action", "warnings", "source_refs",
+        ),
+        default_fields=(
+            "algorithm_version", "status", "method", "source_granularity", "confidence",
+            "anchor_evidence_id", "anchor_time", "anchor_price", "value", "used_bars",
+            "price_basis", "limitations", "missing", "corporate_action", "warnings", "source_refs",
+        ),
+        default_limit=20,
+        schema_version="tw.technical.anchored_vwap.v1",
+        frequency="daily",
+        event_time_basis="confirmed_swing_anchor",
+        title="Taiwan anchored VWAP approximation",
+    ),
+    CapabilitySpec(
+        capability_id="technical.relative_strength",
+        domain="technical",
+        slot="technical",
+        scopes=("stock",),
+        markets=("TW",),
+        paths=(
+            "compact.technical_advanced.relative_strength",
+            "data.technical_advanced.relative_strength",
+            "data.technical_evidence.relative_strength",
+        ),
+        fields=(
+            "kind", "algorithm_version", "status", "method", "benchmark",
+            "aligned_trade_date_count", "as_of", "stock_latest_date", "benchmark_latest_date",
+            "horizons", "sector", "price_basis", "freshness", "limitations",
+            "corporate_action", "warnings", "source_refs",
+        ),
+        default_fields=(
+            "algorithm_version", "status", "method", "benchmark", "aligned_trade_date_count",
+            "as_of", "stock_latest_date", "benchmark_latest_date", "horizons", "sector",
+            "price_basis", "freshness", "limitations", "corporate_action", "warnings", "source_refs",
+        ),
+        default_limit=20,
+        schema_version="tw.technical.relative_strength.v1",
+        frequency="daily",
+        event_time_basis="aligned_completed_trade_dates",
+        title="Taiwan stock relative strength versus TAIEX",
     ),
     CapabilitySpec(
         capability_id="chips.institutional",
@@ -1364,6 +1627,51 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         default_limit=10,
         fill_operations=(("stock", "tw.refresh_shareholding"),),
         writes_cache=True,
+    ),
+    CapabilitySpec(
+        capability_id="ownership.insider_transactions",
+        domain="ownership",
+        slot="ownership",
+        scopes=("us_stock",),
+        paths=(
+            "compact.ownership.insider_transactions",
+            "data.insider_transactions",
+        ),
+        fields=(
+            "contract_version",
+            "symbol",
+            "issuer_cik",
+            "status",
+            "as_of",
+            "summary",
+            "transactions",
+            "quality",
+            "source_refs",
+            "pagination",
+        ),
+        default_fields=(
+            "symbol",
+            "status",
+            "as_of",
+            "summary",
+            "transactions",
+            "quality",
+            "source_refs",
+        ),
+        default_limit=20,
+        fill_operations=(
+            ("us_stock", "us.refresh_insider_transactions"),
+        ),
+        writes_cache=True,
+        title="SEC insider transactions",
+        description=(
+            "Bounded SEC Form 4 transaction-ledger evidence with transaction-code, "
+            "amendment, derivative, source, and freshness semantics."
+        ),
+        markets=("us",),
+        frequency="event",
+        unit_semantics="shares_and_usd_per_share",
+        event_time_basis="transaction_date_and_filing_date",
     ),
     CapabilitySpec(
         capability_id="fundamentals.revenue",
@@ -3995,6 +4303,10 @@ DOMAIN_CAPABILITIES = {
         "ownership.distribution",
         "market.chips",
     ),
+    "ownership": (
+        "ownership.distribution",
+        "ownership.insider_transactions",
+    ),
     "fundamentals": (
         "fundamentals.revenue",
         "fundamentals.financials",
@@ -4052,6 +4364,10 @@ SCOPE_DOMAIN_CAPABILITIES = {
             "cross_market.relations",
             "cross_market.parity",
         ),
+    },
+    "us_stock": {
+        "chips": ("ownership.insider_transactions",),
+        "ownership": ("ownership.insider_transactions",),
     },
     "tw_futures": {
         # Futures volume is contract-count data. The cumulative session value
@@ -4227,6 +4543,7 @@ def _default_capabilities(scope_type: str, question_intent: str) -> tuple[str, .
             "daily.ohlcv",
             "technical.structure",
             "fundamentals.financials",
+            "ownership.insider_transactions",
             "corporate.actions",
             "market.short_volume",
             "data.freshness",
@@ -4879,14 +5196,27 @@ def normalize_selection(
         )
 
     raw_max_bytes = raw.get("max_response_bytes")
-    max_response_bytes = DEFAULT_RESPONSE_BYTES.get(payload_level, DEFAULT_RESPONSE_BYTES["compact"])
+    default_max_response_bytes = DEFAULT_RESPONSE_BYTES.get(
+        payload_level,
+        DEFAULT_RESPONSE_BYTES["compact"],
+    )
+    adaptive_max_response_bytes = ADAPTIVE_RESPONSE_BYTE_CEILINGS.get(
+        payload_level,
+        ADAPTIVE_RESPONSE_BYTE_CEILINGS["compact"],
+    )
+    requested_max_response_bytes = None
+    max_response_bytes = default_max_response_bytes
+    response_budget_source = "payload_default_adaptive"
     if raw_max_bytes is not None:
         if isinstance(raw_max_bytes, bool) or not isinstance(raw_max_bytes, int):
             raise ValueError("selection.max_response_bytes must be an integer.")
+        requested_max_response_bytes = raw_max_bytes
         max_response_bytes = max(
             MIN_RESPONSE_BYTES,
             min(raw_max_bytes, MAX_RESPONSE_BYTES),
         )
+        adaptive_max_response_bytes = max_response_bytes
+        response_budget_source = "caller_explicit"
 
     capability_origins: dict[str, dict[str, str]] = {}
     for capability_id in (*required, *optional):
@@ -4945,6 +5275,11 @@ def normalize_selection(
         "unmet_required_capabilities": unmet_required_capabilities,
         "deprecated_aliases": deprecated_aliases,
         "max_response_bytes": max_response_bytes,
+        "requested_max_response_bytes": requested_max_response_bytes,
+        "default_max_response_bytes": default_max_response_bytes,
+        "effective_max_response_bytes": max_response_bytes,
+        "max_response_ceiling_bytes": adaptive_max_response_bytes,
+        "response_budget_source": response_budget_source,
     }
 
 

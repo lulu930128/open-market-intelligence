@@ -7,7 +7,8 @@ param(
     [int]$LauncherPid = 0,
     [ValidateRange(0, 20)][int]$MaxRestartAttempts = 3,
     [string]$RestartBackoffSecondsCsv = "2,10,30",
-    [ValidateRange(1, 86400)][int]$StableRunResetSeconds = 600
+    [ValidateRange(1, 86400)][int]$StableRunResetSeconds = 600,
+    [ValidateRange(1, 255)][int]$BindFailureExitCode = 78
 )
 
 $ErrorActionPreference = "Stop"
@@ -137,6 +138,40 @@ function Wait-RestartBackoff {
     return (Test-LauncherAlive)
 }
 
+function Test-ServiceBindFailure {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string[]]$OutputLines = @()
+    )
+
+    if ($Name -ne "backend") {
+        return $false
+    }
+
+    foreach ($line in $OutputLines) {
+        if ($line -match "(?i)error while attempting to bind on address" -or
+            $line -match "(?i)winerror\s+(?:10013|10048)" -or
+            $line -match "(?i)address already in use") {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-ServiceOutputSinceLine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [ValidateRange(0, 2147483647)][int]$StartLine
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+
+    return @(Get-Content -LiteralPath $Path | Select-Object -Skip $StartLine)
+}
+
 try {
     $argumentsJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgumentsJsonBase64))
     $parsedArguments = ConvertFrom-Json -InputObject $argumentsJson
@@ -179,6 +214,7 @@ try {
 
         Write-ServiceLog "Starting service. file=$FilePath args=$($arguments -join ' ') cwd=$WorkingDirectory launcher_pid=$LauncherPid instance_id=$instanceId restart_attempt=$restartAttempt" "SYSTEM"
         Write-ServiceLog "Process runner. file=$processFilePath args=$processArguments" "SYSTEM"
+        $serviceOutputStartLine = @(Get-Content -LiteralPath $serviceLogPath).Count
 
         # Windows PowerShell can expose the lazily initialized environment
         # dictionaries as null to the indexer. Reading Count materializes the
@@ -217,6 +253,17 @@ try {
         $runtimeSeconds = [int][Math]::Max(0, ((Get-Date) - $startedAt).TotalSeconds)
         $process.Dispose()
         Write-ServiceLog "Service exited. exit_code=$exitCode runtime_seconds=$runtimeSeconds instance_id=$instanceId restart_attempt=$restartAttempt" "SYSTEM"
+
+        $serviceOutput = @(
+            Get-ServiceOutputSinceLine `
+                -Path $serviceLogPath `
+                -StartLine $serviceOutputStartLine
+        )
+        if ($exitCode -ne 0 -and
+            (Test-ServiceBindFailure -Name $ServiceName -OutputLines $serviceOutput)) {
+            Write-ServiceLog "Service bind failure classified for launcher port recovery. child_exit_code=$exitCode launcher_exit_code=$BindFailureExitCode instance_id=$instanceId" "ERROR"
+            exit $BindFailureExitCode
+        }
 
         if ($exitCode -eq 0) {
             exit 0

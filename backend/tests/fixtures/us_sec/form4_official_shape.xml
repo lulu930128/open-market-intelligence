@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Minimal SEC ownership XML shape derived from the public EDGAR ownership
+  schema and public Form 4 filings. Values are synthetic and safe for tests.
+-->
+<ownershipDocument>
+  <schemaVersion>X0609</schemaVersion>
+  <documentType>4</documentType>
+  <periodOfReport>2026-06-15</periodOfReport>
+  <issuer>
+    <issuerCik>0000320193</issuerCik>
+    <issuerName>Example Issuer Inc.</issuerName>
+    <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000001</rptOwnerCik>
+      <rptOwnerName>Example Officer</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isDirector>false</isDirector>
+      <isOfficer>true</isOfficer>
+      <isTenPercentOwner>false</isTenPercentOwner>
+      <isOther>false</isOther>
+      <officerTitle>Chief Example Officer</officerTitle>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0001000002</rptOwnerCik>
+      <rptOwnerName>Example Director</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isDirector>true</isDirector>
+      <isOfficer>false</isOfficer>
+      <isTenPercentOwner>false</isTenPercentOwner>
+      <isOther>false</isOther>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <aff10b5One>true</aff10b5One>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2026-06-15</value></transactionDate>
+      <transactionCoding>
+        <transactionFormType>4</transactionFormType>
+        <transactionCode>P</transactionCode>
+        <equitySwapInvolved>0</equitySwapInvolved>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1250.50</value></transactionShares>
+        <transactionPricePerShare><value>201.25</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>11250.50</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </nonDerivativeTransaction>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Common Stock</value><footnoteId id="F2"/></securityTitle>
+      <transactionDate><value>2026-06-15</value></transactionDate>
+      <transactionCoding>
+        <transactionFormType>4</transactionFormType>
+        <transactionCode>F</transactionCode>
+        <equitySwapInvolved>0</equitySwapInvolved>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>200</value></transactionShares>
+        <transactionPricePerShare><value>201.25</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>11050.50</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </nonDerivativeTransaction>
+    <nonDerivativeHolding>
+      <securityTitle><value>Common Stock</value></securityTitle>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>11050.50</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>I</value></directOrIndirectOwnership>
+        <natureOfOwnership><value>By family trust</value></natureOfOwnership>
+      </ownershipNature>
+    </nonDerivativeHolding>
+  </nonDerivativeTable>
+  <derivativeTable>
+    <derivativeTransaction>
+      <securityTitle><value>Restricted Stock Unit</value></securityTitle>
+      <conversionOrExercisePrice><footnoteId id="F1"/></conversionOrExercisePrice>
+      <transactionDate><value>2026-06-15</value></transactionDate>
+      <transactionCoding>
+        <transactionFormType>4</transactionFormType>
+        <transactionCode>M</transactionCode>
+        <equitySwapInvolved>0</equitySwapInvolved>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>500</value></transactionShares>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+        <transactionPricePerShare><value>0</value></transactionPricePerShare>
+      </transactionAmounts>
+      <exerciseDate><value>2026-06-15</value></exerciseDate>
+      <expirationDate><value>2030-06-15</value></expirationDate>
+      <underlyingSecurity>
+        <underlyingSecurityTitle><value>Common Stock</value></underlyingSecurityTitle>
+        <underlyingSecurityShares><value>500</value></underlyingSecurityShares>
+      </underlyingSecurity>
+      <postTransactionAmounts>
+        <sharesOwnedFollowingTransaction><value>2500</value></sharesOwnedFollowingTransaction>
+      </postTransactionAmounts>
+      <ownershipNature>
+        <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+      </ownershipNature>
+    </derivativeTransaction>
+  </derivativeTable>
+  <footnotes>
+    <footnote id="F1">Each restricted stock unit represents one share at settlement.</footnote>
+    <footnote id="F2">Shares withheld for taxes; no open-market sale occurred.</footnote>
+  </footnotes>
+</ownershipDocument>

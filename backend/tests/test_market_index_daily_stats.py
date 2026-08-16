@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Base, MarketDailyPrice, MarketIndexDailyStat, RawFetchResult, SourceRegistry
 from app.jobs import scheduler as job_scheduler
-from app.market import indices
+from app.market import index_parsers, indices
 
 
 def make_session() -> Session:
@@ -183,6 +183,160 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(rows[0]["trade_date"], date(2026, 6, 15))
         self.assertEqual(rows[0]["close_value"], 429.37)
         self.assertEqual(rows[0]["price_change"], 9.65)
+
+    def test_tpex_post_close_index_list_parses_official_index_columns(self) -> None:
+        rows = index_parsers.parse_tpex_post_close_index_list(
+            {
+                "stat": "ok",
+                "date": "20260811",
+                "tables": [
+                    {
+                        "fields": [
+                            "時 間",
+                            "紡纖纖維",
+                            "半導體業",
+                            "櫃買指數",
+                            "成交金額(萬元)",
+                        ],
+                        "data": [
+                            ["09:00:00", "107.37", "264.43", "391.61", "0"],
+                            ["13:30:00", "108.20", "262.70", "391.09", "1"],
+                            ["99:99:99", "108.29", "262.83", "391.68", "2"],
+                        ],
+                    }
+                ],
+            },
+            expected_trade_date=date(2026, 8, 11),
+        )
+
+        self.assertEqual(
+            [item["name"] for item in rows],
+            ["櫃買指數", "紡織纖維", "半導體"],
+        )
+        self.assertEqual(rows[0]["close"], 391.68)
+        self.assertAlmostEqual(rows[0]["change"], 0.07)
+        self.assertAlmostEqual(rows[1]["change"], 0.92)
+        self.assertAlmostEqual(rows[2]["change_pct"], (-1.60 / 264.43) * 100)
+        self.assertEqual(rows[2]["trade_date"], date(2026, 8, 11))
+
+    def test_tpex_post_close_index_list_rejects_non_final_or_wrong_date(self) -> None:
+        payload = {
+            "stat": "ok",
+            "date": "20260811",
+            "tables": [
+                {
+                    "fields": ["時 間", "櫃買指數"],
+                    "data": [["09:00:00", "391.61"], ["13:30:00", "391.09"]],
+                }
+            ],
+        }
+
+        self.assertEqual(
+            index_parsers.parse_tpex_post_close_index_list(payload),
+            [],
+        )
+        payload["tables"][0]["data"].append(["99:99:99", "391.68"])
+        self.assertEqual(
+            index_parsers.parse_tpex_post_close_index_list(
+                payload,
+                expected_trade_date=date(2026, 8, 8),
+            ),
+            [],
+        )
+
+    def test_tpex_special_index_list_parsers_keep_native_change_semantics(self) -> None:
+        tpex50 = index_parsers.parse_tpex50_index_list_item(
+            [
+                {"Date": "1150810", "TPEx50Index": "577.30"},
+                {"Date": "1150811", "TPEx50Index": "579.83"},
+            ]
+        )
+        tpex200 = index_parsers.parse_tpex200_index_list_item(
+            [
+                {
+                    "資料日期": "1150811",
+                    "指數": "富櫃200報酬指數",
+                    "收盤指數": "22,906.73",
+                    "漲跌": "+",
+                    "漲跌點數": "44.04",
+                    "漲跌百分比": "0.19",
+                },
+                {
+                    "資料日期": "1150811",
+                    "指數": "富櫃200指數",
+                    "收盤指數": "18,135.88",
+                    "漲跌": "-",
+                    "漲跌點數": "34.87",
+                    "漲跌百分比": "0.19",
+                },
+            ]
+        )
+
+        self.assertIsNotNone(tpex50)
+        self.assertEqual(tpex50["name"], "富櫃五十指數")
+        self.assertAlmostEqual(tpex50["change"], 2.53)
+        self.assertAlmostEqual(tpex50["change_pct"], (2.53 / 577.30) * 100)
+        self.assertEqual(tpex200["name"], "富櫃200指數")
+        self.assertEqual(tpex200["change"], -34.87)
+        self.assertEqual(tpex200["change_pct"], -0.19)
+
+    def test_tpex_index_list_isolates_single_provider_failure(self) -> None:
+        post_close_payload = {
+            "stat": "ok",
+            "date": "20260811",
+            "tables": [
+                {
+                    "fields": ["時 間", "紡織纖維", "櫃買指數"],
+                    "data": [
+                        ["09:00:00", "107.37", "391.61"],
+                        ["99:99:99", "108.29", "391.68"],
+                    ],
+                }
+            ],
+        }
+        with (
+            patch.object(
+                indices,
+                "latest_released_trading_day",
+                return_value=date(2026, 8, 11),
+            ),
+            patch.object(
+                indices.tpex,
+                "fetch_json",
+                return_value=[
+                    {"Date": "1150811", "TPExIndex": "391.68", "Change": "0.07"}
+                ],
+            ),
+            patch.object(
+                indices.tpex,
+                "fetch_index_5s_payload",
+                return_value=post_close_payload,
+            ),
+            patch.object(
+                indices.tpex,
+                "fetch_tpex50_index_history_payload",
+                return_value=[
+                    {"Date": "1150810", "TPEx50Index": "577.30"},
+                    {"Date": "1150811", "TPEx50Index": "579.83"},
+                ],
+            ),
+            patch.object(
+                indices.tpex,
+                "fetch_tpex200_close_payload",
+                side_effect=RuntimeError("provider unavailable"),
+            ),
+        ):
+            items = indices._fetch_tpex_index_list()
+
+        self.assertEqual(len(items), 25)
+        self.assertEqual(items[0]["name"], "櫃買指數")
+        self.assertEqual(items[0]["close"], 391.68)
+        self.assertEqual(items[1]["name"], "富櫃200指數")
+        self.assertIsNone(items[1]["close"])
+        self.assertEqual(items[2]["name"], "富櫃五十指數")
+        self.assertEqual(items[2]["close"], 579.83)
+        self.assertEqual(items[3]["name"], "紡織纖維")
+        self.assertEqual(items[3]["close"], 108.29)
 
     def test_twse_index_daily_ohlc_rows_parse_official_values(self) -> None:
         rows = indices._parse_twse_index_daily_ohlc_rows(

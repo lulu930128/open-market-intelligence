@@ -14,6 +14,10 @@ from app.jobs.job_types import (
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
     WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
+    US_SEC_FORM4_SYNC_JOB_TYPE,
+    US_SEC_13F_HISTORY_SYNC_JOB_TYPE,
+    US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
+    US_SEC_13F_QUARTER_SYNC_JOB_TYPE,
 )
 from app.jobs.schemas import JobRunRead
 from app.stocks.bootstrap import BOOTSTRAP_JOB_TYPE, run_stock_master_bootstrap_job
@@ -95,6 +99,9 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         "scheduler.market_daily_refresh",
         "scheduler.market_margin_daily_refresh",
     }:
+        expected_trade_date = _parse_date(request.get("expected_trade_date"))
+        if expected_trade_date is None and job_type.startswith("scheduler."):
+            expected_trade_date = _parse_date(job.target)
         return (
             backfill_tasks.run_market_daily_metrics_job,
             (
@@ -105,6 +112,8 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 bool(request.get("include_today", False)),
                 float(request.get("sleep_seconds", 0.2)),
                 bool(request.get("skip_existing", True)),
+                expected_trade_date,
+                request.get("repair") if isinstance(request.get("repair"), dict) else None,
             ),
             request,
         )
@@ -381,6 +390,62 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 str(request.get("outputsize") or "compact"),
                 bool(request.get("adjusted", False)),
                 float(request.get("sleep_seconds", 12.0)),
+            ),
+            request,
+        )
+
+    if job_type == US_SEC_FORM4_SYNC_JOB_TYPE:
+        return (
+            backfill_tasks.run_us_sec_form4_sync_job,
+            (
+                str(request.get("scope") or "symbol"),
+                request.get("symbol"),
+                int(request["group_id"]) if request.get("group_id") is not None else None,
+                bool(request.get("include_children", True)),
+                bool(request.get("enabled_only", True)),
+                _parse_date(request.get("from_date")),
+                _parse_date(request.get("to_date")),
+                int(request.get("max_symbols", 25)),
+                int(request.get("max_filings_per_symbol", 50)),
+            ),
+            request,
+        )
+
+    if job_type == US_SEC_13F_QUARTER_SYNC_JOB_TYPE:
+        return (
+            backfill_tasks.run_us_sec_13f_quarter_sync_job,
+            (
+                str(request.get("period_key") or ""),
+                str(request.get("source_url") or ""),
+                bool(request.get("force_download", False)),
+                bool(request.get("force_rebuild", False)),
+            ),
+            request,
+        )
+
+    if job_type == US_SEC_13F_MAPPING_SYNC_JOB_TYPE:
+        return (
+            backfill_tasks.run_us_sec_13f_mapping_sync_job,
+            (
+                _parse_string_list(request.get("cusips")),
+                int(request.get("max_identifiers", 25)),
+                bool(request.get("refresh", False)),
+                bool(request.get("rebuild_projections", True)),
+            ),
+            request,
+        )
+
+    if job_type == US_SEC_13F_HISTORY_SYNC_JOB_TYPE:
+        return (
+            backfill_tasks.run_us_sec_13f_history_sync_job,
+            (
+                int(request.get("max_releases", 4)),
+                bool(request.get("refresh_manifest", True)),
+                bool(request.get("include_completed", False)),
+                bool(request.get("force_download", False)),
+                bool(request.get("force_rebuild", False)),
+                bool(request.get("stop_on_error", False)),
+                bool(request.get("rebuild_projections", True)),
             ),
             request,
         )

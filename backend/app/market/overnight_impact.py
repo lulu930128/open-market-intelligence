@@ -229,6 +229,7 @@ def _basket_from_group(
     group_name: str,
     role: str,
     weight: float,
+    expected_trade_date: date | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     group = (
         db.query(USWatchlistGroup)
@@ -255,6 +256,9 @@ def _basket_from_group(
             missing_count += 1
             continue
         latest, previous = rows[0], rows[1]
+        if expected_trade_date is not None and latest.trade_date < expected_trade_date:
+            missing_count += 1
+            continue
         change_pct = _pct_change(latest.close_price, previous.close_price)
         if change_pct is None:
             missing_count += 1
@@ -617,7 +621,9 @@ def scan_us_overnight_impact_gaps(
         "warnings": _dedupe(warnings),
         "expected_dates": {
             "us_daily_price": expected_trade_date.isoformat(),
-            "resource_quote.USD-TWD": "age<=72h",
+            "resource_fx.USD-TWD": (
+                refresh_plan.get("expected_dates", {}).get("resource_fx.USD-TWD")
+            ),
         },
     }
 
@@ -747,6 +753,7 @@ def build_us_overnight_impact_report(
     *,
     suppress_stale_signal: bool = False,
     refresh_metadata: dict[str, Any] | None = None,
+    refresh_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = stock_id.strip()
     stock = db.query(StockMaster).filter(StockMaster.stock_id == normalized_stock_id).first()
@@ -755,9 +762,12 @@ def build_us_overnight_impact_report(
 
     mapping = _resolve_tw_mapping(stock)
     factor_weights, basket_weights = _factor_weights_for_mapping(mapping)
+    expected_trade_date = expected_us_daily_price_date()
     factors: list[dict[str, Any]] = []
     baskets: list[dict[str, Any]] = []
     missing: list[str] = []
+    optional_basket_missing: list[str] = []
+    optional_basket_partial: list[str] = []
     warnings: list[str] = []
 
     for symbol, weight in factor_weights.items():
@@ -789,11 +799,28 @@ def build_us_overnight_impact_report(
             group_name=group_name,
             role=basket_roles.get(group_name, "us_watchlist_basket"),
             weight=weight,
+            expected_trade_date=expected_trade_date,
         )
         if basket is not None:
             baskets.append(basket)
+            if int(basket.get("missing_count") or 0) > 0:
+                optional_basket_partial.append(group_name)
         elif missing_key:
-            missing.append(missing_key)
+            optional_basket_missing.append(missing_key)
+
+    optional_basket_gaps = _dedupe(
+        [
+            *optional_basket_missing,
+            *(
+                f"us_watchlist_group.{group_name}.partial"
+                for group_name in optional_basket_partial
+            ),
+        ]
+    )
+    if optional_basket_gaps:
+        warnings.append(
+            "美股加值主題籃子未完整，隔夜判斷僅使用當期可用的核心因子與籃子。"
+        )
 
     all_items = factors + baskets
     weighted_change_pct, valid_weight = _normalize_weighted_items(all_items)
@@ -807,13 +834,17 @@ def build_us_overnight_impact_report(
         if contribution_items
         else None
     )
-    as_of_values = [
+    factor_as_of_values = [
+        item.get("trade_date")
+        for item in factors
+        if isinstance(item.get("trade_date"), date)
+    ]
+    item_as_of_values = [
         item.get("trade_date")
         for item in all_items
         if isinstance(item.get("trade_date"), date)
     ]
-    as_of = max(as_of_values) if as_of_values else None
-    expected_trade_date = expected_us_daily_price_date()
+    as_of = max(factor_as_of_values) if factor_as_of_values else None
     generated_at = _now()
     adr_parity = build_adr_parity_report(
         db,
@@ -837,15 +868,15 @@ def build_us_overnight_impact_report(
     ).model_dump(mode="json")
     stale_dates = [
         value
-        for value in as_of_values
+        for value in factor_as_of_values
         if isinstance(value, date) and value < expected_trade_date
     ]
     if stale_dates:
         warnings.append(
             f"美股日線最新日期 {max(stale_dates).isoformat()}，落後預期 {expected_trade_date.isoformat()}。"
         )
-    if as_of_values:
-        date_counts = Counter(as_of_values)
+    if item_as_of_values:
+        date_counts = Counter(item_as_of_values)
         if len(date_counts) > 1:
             warnings.append("美股因素日期不一致；分數以各因素最新可用資料計算。")
 
@@ -874,15 +905,33 @@ def build_us_overnight_impact_report(
         source_refs.extend(adr_parity.get("source_refs") or [])
     source_refs.extend(cross_market_context.get("source_refs") or [])
     source_refs.extend(fx_flow_context.get("source_refs") or [])
-    is_current = bool(as_of_values) and not stale_dates and not missing
+    is_current = bool(factor_as_of_values) and not stale_dates and not missing
     freshness = {
         "expected_trade_date": expected_trade_date.isoformat(),
         "latest_trade_date": as_of.isoformat() if as_of else None,
         "is_current": is_current,
         "valid_weight": _round(valid_weight),
+        "optional_basket_coverage": {
+            "requested_count": len(basket_weights),
+            "available_count": len(baskets),
+            "is_complete": not optional_basket_gaps,
+            "missing": optional_basket_gaps,
+        },
     }
     if refresh_metadata:
         freshness["refresh"] = refresh_metadata
+    cross_market_refresh_state = refresh_state or scan_us_overnight_impact_gaps(
+        db,
+        normalized_stock_id,
+    )
+    refresh_decision = dict(
+        cross_market_refresh_state.get("refresh_decision") or {}
+    )
+    refresh_plan = dict(cross_market_refresh_state.get("refresh_plan") or {})
+    freshness["cross_market_refresh"] = {
+        "is_current": bool(cross_market_refresh_state.get("is_current")),
+        "decision": refresh_decision,
+    }
 
     reported_stance = stance
     reported_score = score
@@ -946,6 +995,8 @@ def build_us_overnight_impact_report(
         "limitations": list(cross_market_context.get("limitations") or []),
         "source": "app.market.cross_market.context",
         "fx_flow_context": fx_flow_context,
+        "refresh_decision": refresh_decision,
+        "refresh_plan": refresh_plan,
         "factors": factors,
         "baskets": baskets,
         "missing": reported_missing,
@@ -1076,4 +1127,5 @@ def ensure_current_us_overnight_impact_report(
         stock_id=stock_id,
         suppress_stale_signal=True,
         refresh_metadata=refresh_metadata,
+        refresh_state=refreshed_gaps,
     )

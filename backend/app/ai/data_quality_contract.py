@@ -6,6 +6,10 @@ import re
 from statistics import median
 from typing import Any
 
+from app.observability.status_taxonomy import (
+    status_dimensions_from_quality_contract,
+)
+
 
 QUALITY_VERSION = "omi.data.quality.v1"
 
@@ -1755,6 +1759,8 @@ def apply_quality_contract(
 ) -> dict[str, Any]:
     evidence = _dict(canonical.get("evidence"))
     evidence["quality"] = deepcopy(quality)
+    status_dimensions = status_dimensions_from_quality_contract(quality)
+    evidence["status_dimensions"] = status_dimensions
     manifest = _dict(evidence.get("manifest"))
     quality_capabilities = _dict(quality.get("capabilities"))
     capability_status = {
@@ -2192,6 +2198,7 @@ def apply_quality_contract(
         "decision_ready": bool(quality.get("decision_ready")),
         "quality_ref": "evidence.quality",
     }
+    passport["status_dimensions"] = deepcopy(status_dimensions)
     evidence["passport"] = passport
     canonical["evidence"] = evidence
 

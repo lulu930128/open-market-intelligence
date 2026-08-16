@@ -586,6 +586,15 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
             self.assertEqual(compact["slots"]["intraday"]["payload_level"], "summary")
             self.assertEqual(compact["slots"]["intraday"]["payload_ref"], "intraday_bars")
+            self.assertEqual(
+                compact["fundamentals"]["financial_contract"]["contract_version"],
+                "omi.financial.v1",
+            )
+            self.assertFalse(
+                compact["fundamentals"]["financial_contract"]["quality"][
+                    "decision_usable"
+                ]
+            )
         finally:
             db.close()
 

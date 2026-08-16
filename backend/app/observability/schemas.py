@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class ProviderEventRead(BaseModel):
@@ -58,5 +60,16 @@ class SourceHealthSnapshotRead(BaseModel):
     checked_at: datetime
     snapshot_age_seconds: int = 0
     snapshot_is_stale: bool = False
+    snapshot_lifecycle: str
+    lifecycle_scope: str
+    lifecycle_reason: str
+    is_operational: bool
+    is_historical: bool
+    health_dimensions: dict[str, Any] = Field(default_factory=dict)
+    status_dimensions: dict[str, Any] = Field(default_factory=dict)
+    provider_generation: str
+    provider_generation_checked_at: datetime
+    canonical_scope: bool
+    operational_freshness_status: str
     created_at: datetime
     updated_at: datetime

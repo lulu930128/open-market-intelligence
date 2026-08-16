@@ -88,6 +88,7 @@ class TaiwanStockDependencies:
             "warning": "Taiwan corporate-event history reader is unavailable.",
         }
     )
+    build_tw_stock_technical_evidence: Callable[..., dict[str, Any]] | None = None
 
 
 def _company_profile_payload(
@@ -2088,13 +2089,63 @@ def read_stock_context(
         market_data_params=market_data_params,
         calendar_status=market_calendar_status,
     )
+    intraday_series = (
+        intraday_bars.get("series")
+        if isinstance(intraday_bars.get("series"), dict)
+        else {}
+    )
     if intraday_bars.get("enabled"):
         _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "market_intraday_bar"})
         for warning in intraday_bars.get("warnings") or []:
             warnings.append(str(warning))
-        series = intraday_bars.get("series") if isinstance(intraday_bars.get("series"), dict) else {}
-        if not any(isinstance(item, dict) and item.get("returned_point_count") for item in series.values()):
+        if not any(isinstance(item, dict) and item.get("returned_point_count") for item in intraday_series.values()):
             missing.append("intraday_bars")
+
+    technical_evidence: dict[str, Any] = {}
+    requested_capabilities = {
+        str(value)
+        for value in (market_data_params or {}).get("requested_capabilities") or []
+    }
+    technical_evidence_capabilities = {
+        "technical.structure",
+        "technical.indicators",
+        "technical.swings",
+        "technical.fibonacci",
+        "technical.divergence",
+        "technical.breakout",
+        "technical.volume_profile",
+        "technical.anchored_vwap",
+        "technical.relative_strength",
+    }
+    if (
+        dependencies.build_tw_stock_technical_evidence is not None
+        and requested_capabilities & technical_evidence_capabilities
+    ):
+        try:
+            corporate_event_history = dependencies.get_taiwan_stock_event_history(
+                normalized_stock_id,
+                market=getattr(stock, "market", None),
+                years=10,
+                max_results=200,
+                now=dependencies.now(),
+            )
+            technical_evidence = dependencies.build_tw_stock_technical_evidence(
+                db=db,
+                stock_id=normalized_stock_id,
+                corporate_event_history=corporate_event_history,
+                current_quote=quote,
+                intraday_points=list((intraday_series.get("1m") or {}).get("points") or []),
+                market_calendar_status=market_calendar_status,
+            )
+            for item in technical_evidence.get("warnings") or []:
+                warnings.append(str(item))
+            for item in technical_evidence.get("source_refs") or []:
+                if isinstance(item, dict):
+                    _append_source_ref_once(source_refs, item)
+        except Exception as exc:
+            warnings.append(f"Canonical technical evidence unavailable: {exc}")
+            missing.append("technical_evidence")
+
     resolved_current_price = _apply_taiwan_current_price_contract(
         quote=quote,
         intraday_bars=intraday_bars,
@@ -2188,6 +2239,22 @@ def read_stock_context(
                 ],
             },
             "technical_reports": technical_reports,
+            "technical_evidence": technical_evidence,
+            "technical_indicators": technical_evidence.get("indicators"),
+            "technical_advanced": {
+                key: technical_evidence.get(key)
+                for key in (
+                    "structure_v2",
+                    "swings",
+                    "fibonacci",
+                    "divergence",
+                    "breakout",
+                    "volume_profile",
+                    "anchored_vwap",
+                    "relative_strength",
+                )
+                if technical_evidence.get(key) is not None
+            },
             "analysis": technical_analysis,
             "technical_levels": technical_levels,
             "current_price": resolved_current_price,
@@ -2208,6 +2275,7 @@ def read_stock_context(
                 technical_reports=technical_reports,
                 technical_analysis=technical_analysis,
                 technical_levels=technical_levels,
+                technical_evidence=technical_evidence,
                 quote=quote,
                 intraday_bars=intraday_bars,
                 source_health=source_health,

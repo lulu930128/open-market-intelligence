@@ -633,7 +633,7 @@ class AiSupplementalContextTests(unittest.TestCase):
         self.assertEqual(len(result["data"]["entries"]), 1)
         self.assertEqual(result["data"]["entries"][0]["resource"], "daily")
 
-    def test_unified_source_health_expires_old_snapshot(self) -> None:
+    def test_unified_source_health_keeps_expired_all_target_operational_stale(self) -> None:
         checked_at = NOW - timedelta(days=2)
         self.db.add(
             SourceHealthSnapshot(
@@ -654,21 +654,25 @@ class AiSupplementalContextTests(unittest.TestCase):
             now=lambda: NOW,
         )
 
-        self.assertEqual(result["data"]["freshness"]["status"], "expired")
+        self.assertEqual(result["data"]["freshness"]["status"], "stale")
         self.assertFalse(result["data"]["freshness"]["is_current"])
         self.assertEqual(
             result["data"]["compact"]["freshness_by_domain"][
                 "source_health"
             ],
-            "expired",
+            "stale",
         )
         self.assertEqual(
             result["data"]["slots"]["health_entries"]["status"],
-            "expired",
+            "stale",
         )
         self.assertTrue(
-            any("expired" in warning.lower() for warning in result["warnings"])
+            any("stale" in warning.lower() for warning in result["warnings"])
         )
+        entry = result["data"]["entries"][0]
+        self.assertEqual(entry["snapshot_lifecycle"], "active_canonical_scope")
+        self.assertEqual(entry["lifecycle_scope"], "operational")
+        self.assertEqual(entry["operational_freshness_status"], "stale")
 
     def test_unified_source_health_exposes_mixed_row_ages(self) -> None:
         self.db.add_all(
@@ -716,11 +720,128 @@ class AiSupplementalContextTests(unittest.TestCase):
         )
         self.assertEqual(
             entries["expired-provider"]["snapshot_lifecycle"],
-            "historical_expired",
+            "active_canonical_scope",
         )
         self.assertGreater(
             entries["expired-provider"]["snapshot_age_seconds"],
             86_400,
+        )
+
+    def test_unified_source_health_separates_provider_generations(self) -> None:
+        self.db.add_all(
+            [
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="market_daily_price",
+                    target="all",
+                    provider="old-provider",
+                    status="stale",
+                    ok=False,
+                    checked_at=NOW - timedelta(days=2),
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="market_daily_price",
+                    target="all",
+                    provider="current-provider",
+                    status="current",
+                    ok=True,
+                    checked_at=NOW,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        operational = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={"market": "tw", "limit": 20},
+            now=lambda: NOW,
+        )
+        summary = operational["data"]["summary"]
+
+        self.assertEqual(summary["entry_count"], 2)
+        self.assertEqual(summary["problem_count"], 1)
+        self.assertEqual(summary["operational_entry_count"], 1)
+        self.assertEqual(summary["operational_problem_count"], 0)
+        self.assertEqual(summary["historical_entry_count"], 1)
+        self.assertEqual(summary["historical_problem_count"], 1)
+        self.assertEqual(
+            summary["status_dimensions"]["service_status"],
+            "available",
+        )
+        self.assertEqual(summary["status_dimensions"]["data_quality"], "current")
+        self.assertEqual(
+            operational["status_dimensions"]["decision_readiness"],
+            "ready",
+        )
+        self.assertEqual(
+            [entry["provider"] for entry in operational["data"]["entries"]],
+            ["current-provider"],
+        )
+        self.assertEqual(
+            operational["data"]["slots"]["health_entries"]["status"],
+            "ready",
+        )
+
+        audited = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={
+                "market": "tw",
+                "include_historical": True,
+                "limit": 20,
+            },
+            now=lambda: NOW,
+        )
+        audited_entries = {
+            entry["provider"]: entry for entry in audited["data"]["entries"]
+        }
+        self.assertEqual(len(audited_entries), 2)
+        self.assertEqual(
+            audited_entries["old-provider"]["snapshot_lifecycle"],
+            "historical_provider_generation",
+        )
+        self.assertEqual(
+            audited_entries["current-provider"]["snapshot_lifecycle"],
+            "active_canonical_scope",
+        )
+
+    def test_unified_source_health_hides_expired_target_specific_scope(self) -> None:
+        self.db.add(
+            SourceHealthSnapshot(
+                market="tw",
+                resource="quote",
+                target="2330",
+                provider="twse_mis",
+                status="stale",
+                ok=False,
+                checked_at=NOW - timedelta(days=2),
+            )
+        )
+        self.db.commit()
+
+        operational = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={"market": "tw", "limit": 20},
+            now=lambda: NOW,
+        )
+        self.assertEqual(operational["data"]["entries"], [])
+        self.assertEqual(
+            operational["data"]["summary"]["historical_entry_count"],
+            1,
+        )
+
+        audited = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={
+                "market": "tw",
+                "include_historical": True,
+                "limit": 20,
+            },
+            now=lambda: NOW,
+        )
+        self.assertEqual(
+            audited["data"]["entries"][0]["snapshot_lifecycle"],
+            "historical_expired_target",
         )
 
     def test_unified_source_health_includes_bounded_event_and_fallback_diagnostics(self) -> None:

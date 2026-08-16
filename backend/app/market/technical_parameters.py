@@ -22,6 +22,9 @@ class TechnicalAnalysisParameters:
     macd_fast_period: int
     macd_slow_period: int
     macd_signal_period: int
+    pvo_fast_period: int
+    pvo_slow_period: int
+    pvo_signal_period: int
     rsi_period: int
     atr_period: int
     adx_period: int
@@ -39,6 +42,7 @@ class TechnicalAnalysisParameters:
     support_resistance_period: int
     max_gap_days: int
     volume_ratio_threshold: float
+    breakout_volume_ratio_threshold: float
     near_level_threshold_pct: float
     adx_trend_threshold: float
     rsi_bull_min: float
@@ -170,6 +174,10 @@ class TechnicalAnalysisParameters:
         return _series_key("d", self.kd_period) or "d"
 
     @property
+    def kd_j_key(self) -> str:
+        return _series_key("j", self.kd_period) or "j"
+
+    @property
     def support_key(self) -> str:
         return _series_key("support", self.support_resistance_period) or "support"
 
@@ -273,6 +281,33 @@ def get_technical_analysis_parameters(
                 settings.technical_macd_signal_period,
             ),
             "TECHNICAL_MACD_SIGNAL_PERIOD",
+            max_value=MAX_WINDOW,
+        ),
+        pvo_fast_period=_positive_int(
+            _setting_value(
+                persisted_settings,
+                "pvo_fast_period",
+                settings.technical_pvo_fast_period,
+            ),
+            "TECHNICAL_PVO_FAST_PERIOD",
+            max_value=MAX_WINDOW,
+        ),
+        pvo_slow_period=_positive_int(
+            _setting_value(
+                persisted_settings,
+                "pvo_slow_period",
+                settings.technical_pvo_slow_period,
+            ),
+            "TECHNICAL_PVO_SLOW_PERIOD",
+            max_value=MAX_WINDOW,
+        ),
+        pvo_signal_period=_positive_int(
+            _setting_value(
+                persisted_settings,
+                "pvo_signal_period",
+                settings.technical_pvo_signal_period,
+            ),
+            "TECHNICAL_PVO_SIGNAL_PERIOD",
             max_value=MAX_WINDOW,
         ),
         rsi_period=_positive_int(
@@ -400,6 +435,14 @@ def get_technical_analysis_parameters(
             ),
             "TECHNICAL_VOLUME_RATIO_THRESHOLD",
         ),
+        breakout_volume_ratio_threshold=_positive_float(
+            _setting_value(
+                persisted_settings,
+                "breakout_volume_ratio_threshold",
+                settings.technical_breakout_volume_ratio_threshold,
+            ),
+            "TECHNICAL_BREAKOUT_VOLUME_RATIO_THRESHOLD",
+        ),
         near_level_threshold_pct=_positive_float(
             _setting_value(
                 persisted_settings,
@@ -499,6 +542,8 @@ def get_technical_analysis_parameters(
     )
     if resolved.macd_fast_period >= resolved.macd_slow_period:
         raise ValueError("TECHNICAL_MACD_FAST_PERIOD must be less than TECHNICAL_MACD_SLOW_PERIOD.")
+    if resolved.pvo_fast_period >= resolved.pvo_slow_period:
+        raise ValueError("TECHNICAL_PVO_FAST_PERIOD must be less than TECHNICAL_PVO_SLOW_PERIOD.")
     if resolved.rsi_bull_min > resolved.rsi_bull_max:
         raise ValueError("TECHNICAL_RSI_BULL_MIN must be less than or equal to TECHNICAL_RSI_BULL_MAX.")
     if resolved.mfi_inflow_min > resolved.mfi_inflow_max:

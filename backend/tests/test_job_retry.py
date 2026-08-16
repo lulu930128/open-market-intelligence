@@ -166,6 +166,8 @@ class JobRetryTests(unittest.TestCase):
                 False,
                 0.2,
                 True,
+                date(2026, 7, 24),
+                None,
             ),
         )
         self.assertEqual(request["categories"], ["margin_trading"])

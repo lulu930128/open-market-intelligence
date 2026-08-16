@@ -344,6 +344,8 @@ class TaiwanSourceHealthEntryRead(BaseModel):
     recent_event_count: int = 0
     recent_error_count: int = 0
     consecutive_error_count: int = 0
+    health_dimensions: dict[str, Any] = Field(default_factory=dict)
+    status_dimensions: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaiwanSourceHealthSummaryRead(BaseModel):
@@ -353,6 +355,7 @@ class TaiwanSourceHealthSummaryRead(BaseModel):
     stale_count: int
     not_applicable_count: int
     error_count: int
+    status_dimensions: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaiwanSourceHealthRead(BaseModel):
@@ -583,6 +586,13 @@ class MarketIndexSnapshotRead(BaseModel):
     breadth: MarketBreadthRead | None = None
     breadth_status: MarketBreadthStatusRead
     error_message: str | None = None
+    resolution_version: str | None = None
+    resolution_id: str | None = None
+    acquisition_policy: str | None = None
+    current_observation: dict[str, Any] | None = None
+    official_close: dict[str, Any] | None = None
+    decision_usable: bool = False
+    resolution: dict[str, Any] | None = None
 
 
 class MarketIndexSummaryRead(BaseModel):
@@ -592,6 +602,8 @@ class MarketIndexSummaryRead(BaseModel):
     cache_status: str = "unknown"
     refresh_recommended: bool = False
     warnings: list[str] = Field(default_factory=list)
+    resolution_version: str | None = None
+    acquisition_policy: str | None = None
 
 
 class TaiwanMarketVolumeBaselineRead(BaseModel):
@@ -840,6 +852,13 @@ class IntradayTrendRead(BaseModel):
     )
     current_observation: IntradayCurrentObservationRead | None = None
     observations: list[IntradayCurrentObservationRead] = Field(default_factory=list)
+    resolution_version: str | None = None
+    resolution_id: str | None = None
+    acquisition_policy: str | None = None
+    acquisition_status: str | None = None
+    canonical_observation: dict[str, Any] | None = None
+    decision_usable: bool = False
+    resolution: dict[str, Any] | None = None
     points: list[IntradayTrendPointRead]
 
 
@@ -1060,6 +1079,8 @@ class TaiwanIndexContractReplaySnapshotRead(BaseModel):
     selected_value: float | None = None
     selection_reason: str | None = None
     official_close_status: str | None = None
+    resolution_version: str | None = None
+    resolution_id: str | None = None
     error: str | None = None
     payload: dict[str, Any] | None = None
 
@@ -1600,6 +1621,7 @@ class AdrParityRead(BaseModel):
     fx_provider: str | None = None
     fx_as_of: datetime | None = None
     fx_age_seconds: int | None = None
+    fx_freshness: dict[str, Any] | None = None
     tw_reference_price_twd: float | None = None
     tw_reference_trade_date: date | None = None
     tw_reference_semantics: str
@@ -1629,7 +1651,10 @@ class FxTrendRead(BaseModel):
     data_date: date | None = None
     as_of: datetime | None = None
     age_seconds: int | None = None
+    freshness: dict[str, Any] = Field(default_factory=dict)
     history_points: int = 0
+    observed_history_points: int = 0
+    excluded_provisional_points: int = 0
     usd_twd_change_1d_pct: float | None = None
     usd_twd_change_5d_pct: float | None = None
     usd_twd_change_20d_pct: float | None = None
@@ -1701,6 +1726,8 @@ class OvernightImpactRead(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     source: str | None = None
     fx_flow_context: FxFlowContextRead | None = None
+    refresh_decision: dict[str, Any] = Field(default_factory=dict)
+    refresh_plan: dict[str, Any] = Field(default_factory=dict)
     factors: list[OvernightImpactFactorRead] = Field(default_factory=list)
     baskets: list[OvernightImpactBasketRead] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)

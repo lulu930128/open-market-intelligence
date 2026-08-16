@@ -15,14 +15,29 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry, StockMaster
+from app.market.index_resolution import (
+    TAIWAN_INDEX_RESOLUTION_VERSION,
+    normalize_index_acquisition_policy,
+    resolve_taiwan_index_quote_state,
+)
 from app.market.index_parsers import as_float as _as_float
 from app.market.index_parsers import as_int as _as_int
 from app.market.index_parsers import count_with_limit as _count_with_limit
 from app.market.index_parsers import list_value as _list_value
+from app.market.index_parsers import TPEX_POST_CLOSE_INDEX_NAMES
+from app.market.index_parsers import (
+    parse_tpex200_index_list_item as _parse_tpex200_index_list_item,
+)
+from app.market.index_parsers import (
+    parse_tpex50_index_list_item as _parse_tpex50_index_list_item,
+)
 from app.market.index_parsers import (
     parse_tpex_market_highlight_rows as _parse_tpex_market_highlight_rows,
 )
 from app.market.index_parsers import parse_tpex_market_daily_rows as _parse_tpex_market_daily_rows
+from app.market.index_parsers import (
+    parse_tpex_post_close_index_list as _parse_tpex_post_close_index_list,
+)
 from app.market.index_parsers import parse_trade_date as _parse_trade_date
 from app.market.index_parsers import (
     parse_twse_index_daily_ohlc_rows as _parse_twse_index_daily_ohlc_rows,
@@ -38,6 +53,7 @@ from app.market.providers import tpex, twse, twse_mis, yahoo
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import (
     is_taiwan_trading_day,
+    latest_released_trading_day,
     taiwan_presentation_session,
 )
 from app.market.tw_market_breadth_contract import (
@@ -75,6 +91,7 @@ TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS = 30
 TWSE_MIS_LIVE_BREADTH_BATCH_SIZE = 100
 TWSE_MIS_LIVE_BREADTH_MIN_CODES = 500
 INDEX_LIST_CACHE_TTL_SECONDS = 300
+TPEX_INDEX_LIST_TIMEOUT_SECONDS = 10
 MAX_INDEX_STAT_FETCH_WORKERS = 4
 MAX_TWSE_INDEX_DAILY_OHLC_OVERLAY_MONTHS = 3
 MAX_TPEX_INDEX_DAILY_OHLC_OVERLAY_DAYS = 20
@@ -86,6 +103,7 @@ MAX_TWSE_MIS_BREADTH_FETCH_WORKERS = 2
 TWSE_MIS_BREADTH_CIRCUIT_FAILURE_THRESHOLD = 3
 TWSE_MIS_BREADTH_CIRCUIT_COOLDOWN_SECONDS = 90
 TAIWAN_INDEX_SESSION_CLOSE_TIME = time(13, 30)
+TAIWAN_INDEX_LIVE_REFRESH_START_TIME = time(8, 30)
 TAIWAN_INDEX_LIVE_REFRESH_END_TIME = time(13, 40)
 TAIWAN_INDEX_RECONCILIATION_END_TIME = time(16, 0)
 TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS = 300
@@ -150,7 +168,9 @@ def is_taiwan_index_live_refresh_window(now: datetime | None = None) -> bool:
         local_now = local_now.astimezone(TAIPEI_TZ)
     return (
         is_taiwan_trading_day(local_now.date())
-        and time(8, 55) <= local_now.time() <= TAIWAN_INDEX_LIVE_REFRESH_END_TIME
+        and TAIWAN_INDEX_LIVE_REFRESH_START_TIME
+        <= local_now.time()
+        <= TAIWAN_INDEX_LIVE_REFRESH_END_TIME
     )
 
 
@@ -1537,7 +1557,10 @@ def _market_breadth_target_date(now: datetime | None = None) -> date:
         local_now = local_now.replace(tzinfo=TAIPEI_TZ)
     else:
         local_now = local_now.astimezone(TAIPEI_TZ)
-    if is_taiwan_trading_day(local_now.date()) and local_now.time() >= time(8, 55):
+    if (
+        is_taiwan_trading_day(local_now.date())
+        and local_now.time() >= TAIWAN_INDEX_LIVE_REFRESH_START_TIME
+    ):
         return local_now.date()
     return expected_daily_price_date(now=local_now)
 
@@ -3562,8 +3585,7 @@ def _fetch_twse_index_list() -> list[dict]:
     return items
 
 
-def _fetch_tpex_index_list() -> list[dict]:
-    payload = _fetch_json(TPEX_DAILY_INDEX_URL)
+def _tpex_main_index_list_item(payload) -> dict | None:
     rows = payload if isinstance(payload, list) else []
     dated_rows = [
         (_parse_trade_date(row.get("Date")), row)
@@ -3574,7 +3596,7 @@ def _fetch_tpex_index_list() -> list[dict]:
     latest_row = max(dated_rows, key=lambda item: item[0])[1] if dated_rows else None
 
     if latest_row is None:
-        return []
+        return None
 
     close = _as_float(latest_row.get("TPExIndex"))
     change = _as_float(latest_row.get("Change"))
@@ -3586,15 +3608,87 @@ def _fetch_tpex_index_list() -> list[dict]:
         if previous_close != 0:
             change_pct = (change / previous_close) * 100
 
-    return [
-        {
-            "market": "TPEX",
-            "name": "櫃買指數",
-            "close": close,
-            "change": change,
-            "change_pct": change_pct,
-            "trade_date": _parse_trade_date(latest_row.get("Date")),
+    return {
+        "market": "TPEX",
+        "name": "櫃買指數",
+        "close": close,
+        "change": change,
+        "change_pct": change_pct,
+        "trade_date": _parse_trade_date(latest_row.get("Date")),
+    }
+
+
+def _unavailable_tpex_index_list_item(name: str) -> dict:
+    return {
+        "market": "TPEX",
+        "name": name,
+        "close": None,
+        "change": None,
+        "change_pct": None,
+        "trade_date": None,
+    }
+
+
+def _fetch_tpex_index_list() -> list[dict]:
+    requested_trade_date = latest_released_trading_day(
+        release_time=TAIWAN_INDEX_LIVE_REFRESH_END_TIME,
+        now=datetime.now(TAIPEI_TZ),
+    )
+    fetchers = {
+        "market_daily": lambda: tpex.fetch_json(
+            TPEX_DAILY_INDEX_URL,
+            timeout_seconds=TPEX_INDEX_LIST_TIMEOUT_SECONDS,
+        ),
+        "post_close_indices": lambda: tpex.fetch_index_5s_payload(
+            requested_trade_date,
+            timeout_seconds=TPEX_INDEX_LIST_TIMEOUT_SECONDS,
+        ),
+        "tpex50": lambda: tpex.fetch_tpex50_index_history_payload(
+            timeout_seconds=TPEX_INDEX_LIST_TIMEOUT_SECONDS,
+        ),
+        "tpex200": lambda: tpex.fetch_tpex200_close_payload(
+            timeout_seconds=TPEX_INDEX_LIST_TIMEOUT_SECONDS,
+        ),
+    }
+    payloads: dict[str, object] = {}
+    with ThreadPoolExecutor(max_workers=len(fetchers)) as executor:
+        futures = {
+            executor.submit(fetcher): source_name
+            for source_name, fetcher in fetchers.items()
         }
+        for future in as_completed(futures):
+            source_name = futures[future]
+            try:
+                payloads[source_name] = future.result()
+            except Exception as exc:
+                logger.warning(
+                    "TPEx index-list source unavailable. source=%s error=%s",
+                    source_name,
+                    exc,
+                )
+
+    post_close_items = _parse_tpex_post_close_index_list(
+        payloads.get("post_close_indices"),
+        expected_trade_date=requested_trade_date,
+    )
+    post_close_by_name = {
+        str(item.get("name") or ""): item for item in post_close_items
+    }
+    main_item = post_close_by_name.get("櫃買指數") or _tpex_main_index_list_item(
+        payloads.get("market_daily")
+    )
+    tpex50_item = _parse_tpex50_index_list_item(payloads.get("tpex50"))
+    tpex200_item = _parse_tpex200_index_list_item(payloads.get("tpex200"))
+
+    return [
+        main_item or _unavailable_tpex_index_list_item("櫃買指數"),
+        tpex200_item or _unavailable_tpex_index_list_item("富櫃200指數"),
+        tpex50_item or _unavailable_tpex_index_list_item("富櫃五十指數"),
+        *[
+            post_close_by_name.get(name) or _unavailable_tpex_index_list_item(name)
+            for name in TPEX_POST_CLOSE_INDEX_NAMES
+            if name != "櫃買指數"
+        ],
     ]
 
 
@@ -3624,7 +3718,7 @@ def get_market_index_list(market: str = "TWSE", limit: int = 80) -> dict:
             }
 
     if normalized_market == "TPEX":
-        source = "tpex_openapi_daily_trading_index"
+        source = "tpex_official_post_close_indices"
         items = _fetch_tpex_index_list()
     else:
         source = "twse_openapi_mi_index"
@@ -4033,7 +4127,7 @@ def _finalize_index_intraday_contract(payload: dict) -> dict:
     }
 
 
-def get_market_index_intraday(index_id: str) -> dict:
+def _get_market_index_intraday_prefer_live(index_id: str) -> dict:
     normalized_index_id = index_id.upper()
     config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
 
@@ -4163,6 +4257,105 @@ def get_market_index_intraday(index_id: str) -> dict:
         "point_count": 0,
         "points": [],
     })
+
+
+def _index_intraday_is_live(payload: dict) -> bool:
+    source = str(payload.get("source") or "").casefold()
+    provider = str(payload.get("provider") or "").casefold()
+    if int(payload.get("point_count") or 0) <= 0:
+        return False
+    if payload.get("synthetic") is True:
+        return False
+    if source in {
+        "unavailable",
+        "taiwan_index_minute_snapshot",
+        "twse_openapi_mi_index",
+        "tpex_openapi_daily_trading_index",
+    }:
+        return False
+    return any(
+        marker in f"{source} {provider}"
+        for marker in (
+            "intraday",
+            "twse_index_5s",
+            "twse_mis",
+            "yahoo_finance_chart",
+        )
+    )
+
+
+def _attach_index_intraday_resolution(
+    payload: dict,
+    *,
+    index_id: str,
+    acquisition_policy: str,
+) -> dict:
+    # Import lazily to avoid the calendar_status -> market_chips -> indices cycle.
+    from app.market.calendar_status import build_taiwan_calendar_status
+
+    resolution = resolve_taiwan_index_quote_state(
+        intraday=payload,
+        index_snapshot={},
+        calendar_status=build_taiwan_calendar_status(),
+        index_id=index_id,
+        acquisition_policy=acquisition_policy,
+    )
+    return {
+        **payload,
+        "resolution_version": resolution["resolution_version"],
+        "resolution_id": resolution["resolution_id"],
+        "acquisition_policy": acquisition_policy,
+        "acquisition_status": (
+            "live"
+            if _index_intraday_is_live(payload)
+            else "cached"
+            if payload.get("synthetic") is True
+            or str(payload.get("source") or "")
+            == "taiwan_index_minute_snapshot"
+            else "fallback"
+            if int(payload.get("point_count") or 0) > 0
+            else "missing"
+        ),
+        "canonical_observation": resolution["current_observation"],
+        "decision_usable": resolution["decision_usable"],
+        "resolution": resolution,
+    }
+
+
+def get_market_index_intraday(
+    index_id: str,
+    acquisition_policy: str = "prefer_live",
+) -> dict:
+    normalized_index_id = str(index_id or "").strip().upper()
+    config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
+    if config is None:
+        supported = ", ".join(sorted(INDEX_CONFIG_BY_ID))
+        raise ValueError(f"index_id must be one of: {supported}.")
+    policy = normalize_index_acquisition_policy(acquisition_policy)
+    if policy == "unspecified":
+        policy = "prefer_live"
+
+    if policy == "cache_only":
+        from app.market.taiwan_index_minute import (
+            read_persisted_taiwan_index_minute_series,
+        )
+
+        payload = _finalize_index_intraday_contract(
+            read_persisted_taiwan_index_minute_series(normalized_index_id)
+        )
+    else:
+        payload = _get_market_index_intraday_prefer_live(normalized_index_id)
+
+    if policy == "require_live" and not _index_intraday_is_live(payload):
+        raise RuntimeError(
+            f"Live Taiwan index data is unavailable for {normalized_index_id}; "
+            f"resolved source={payload.get('source') or 'unavailable'}."
+        )
+    return _attach_index_intraday_resolution(
+        payload,
+        index_id=normalized_index_id,
+        acquisition_policy=policy,
+    )
 
 
 def _fetch_twse_shares_by_code() -> dict[str, int]:
@@ -4992,12 +5185,79 @@ def _market_index_summary(
     return payload
 
 
+def _attach_summary_index_resolutions(
+    db: Session,
+    payload: dict,
+    *,
+    acquisition_policy: str,
+) -> dict:
+    from app.market.taiwan_index_minute import read_taiwan_index_minute_series
+    # Import lazily to avoid the calendar_status -> market_chips -> indices cycle.
+    from app.market.calendar_status import build_taiwan_calendar_status
+
+    calendar_status = build_taiwan_calendar_status()
+    resolved_items: list[dict] = []
+    for raw_item in payload.get("indices") or []:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        index_id = str(item.get("index_id") or "").strip().upper()
+        if index_id not in INDEX_CONFIG_BY_ID:
+            resolved_items.append(item)
+            continue
+        try:
+            intraday = read_taiwan_index_minute_series(
+                db,
+                index_id=index_id,
+            )
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="indices.summary_cached_intraday_resolution",
+            )
+            intraday = None
+        resolution = resolve_taiwan_index_quote_state(
+            intraday=intraday,
+            index_snapshot=item,
+            calendar_status=calendar_status,
+            index_id=index_id,
+            acquisition_policy=acquisition_policy,
+        )
+        item.update(
+            {
+                "resolution_version": resolution["resolution_version"],
+                "resolution_id": resolution["resolution_id"],
+                "acquisition_policy": acquisition_policy,
+                "current_observation": resolution["current_observation"],
+                "official_close": {
+                    "status": resolution["official_close_status"],
+                    "value": resolution["official_close_price"],
+                    "trade_date": resolution["official_close_trade_date"],
+                    "source": resolution["official_close_source"],
+                },
+                "decision_usable": resolution["decision_usable"],
+                "resolution": resolution,
+            }
+        )
+        resolved_items.append(item)
+    return {
+        **payload,
+        "resolution_version": TAIWAN_INDEX_RESOLUTION_VERSION,
+        "acquisition_policy": acquisition_policy,
+        "indices": resolved_items,
+    }
+
+
 def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
     if force_refresh:
         logger.warning(
             "Deprecated force_refresh on GET market index summary was ignored; use the explicit POST refresh route."
         )
-    return _market_index_summary(db=db, force_refresh=False)
+    return _attach_summary_index_resolutions(
+        db,
+        _market_index_summary(db=db, force_refresh=False),
+        acquisition_policy="cache_only",
+    )
 
 
 def refresh_market_index_summary(
@@ -5006,10 +5266,14 @@ def refresh_market_index_summary(
     refresh_daily_stats: bool = False,
 ) -> dict:
     with _SUMMARY_REFRESH_LOCK:
-        return _market_index_summary(
-            db=db,
-            force_refresh=True,
-            refresh_daily_stats=refresh_daily_stats,
+        return _attach_summary_index_resolutions(
+            db,
+            _market_index_summary(
+                db=db,
+                force_refresh=True,
+                refresh_daily_stats=refresh_daily_stats,
+            ),
+            acquisition_policy="prefer_live",
         )
 
 

@@ -560,6 +560,27 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
                     now=datetime(2026, 7, 21, tzinfo=timezone.utc),
                     cache_path=cache_path,
                 )
+                twse_summary = get_taiwan_stock_event_summary(
+                    "2330",
+                    market="TWSE",
+                    reminder_days=7,
+                    now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+                    cache_path=cache_path,
+                )
+                failed_tpex_listing = list_taiwan_corporate_events(
+                    market="TPEX",
+                    date_from=date(2026, 7, 21),
+                    date_to=date(2026, 7, 31),
+                    now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+                    cache_path=cache_path,
+                )
+                successful_tpex_listing = list_taiwan_corporate_events(
+                    market="TPEX",
+                    date_from=date(2026, 8, 1),
+                    date_to=date(2026, 8, 31),
+                    now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+                    cache_path=cache_path,
+                )
 
         mops_entries = cache["providers"]["mops_conference"]["entries"]
         self.assertEqual(
@@ -575,6 +596,18 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
         self.assertEqual(source["last_failure_details"][0]["market"], "TPEX")
         self.assertEqual(source["last_failure_details"][0]["stage"], "result")
         self.assertIn("MOPS/TPEX/2026-07/result", source["warning"])
+        self.assertEqual(twse_summary["cache_status"], "current")
+        self.assertIsNone(twse_summary["warning"])
+        self.assertEqual(
+            failed_tpex_listing["sources"]["mops_conference"]["status"],
+            "degraded",
+        )
+        scoped_source = successful_tpex_listing["sources"]["mops_conference"]
+        self.assertEqual(scoped_source["status"], "current")
+        self.assertIsNone(scoped_source["last_error"])
+        self.assertEqual(scoped_source["last_failure_details"], [])
+        self.assertFalse(scoped_source["partial_success"])
+        self.assertIsNone(successful_tpex_listing["warning"])
         mops_event = next(
             call
             for call in record_event.call_args_list

@@ -13,9 +13,8 @@ from app.db.models import (
 )
 from app.market.market_chips import expected_market_chip_date
 from app.market.taiwan_rules import expected_institutional_trade_date
+from app.resource_market.fx_freshness import evaluate_fx_freshness, fx_daily_data_date
 
-
-FX_STALE_AFTER_SECONDS = 72 * 60 * 60
 FX_HISTORY_QUERY_LIMIT = 80
 FLOW_WINDOWS = (1, 5, 20)
 FX_NEUTRAL_BAND_5D_PCT = 0.15
@@ -58,9 +57,15 @@ def build_fx_flow_context(
         warnings.append("USD/TWD 20 日趨勢尚無足夠日線資料。")
     if fx["source_symbol"] == "TWD-USD":
         warnings.append("USD/TWD 日線由 TWD-USD 反向換算。")
-    if fx["age_seconds"] is not None and fx["age_seconds"] > FX_STALE_AFTER_SECONDS:
+    if fx["usd_twd"] is not None and not bool(
+        (fx.get("freshness") or {}).get("usable")
+    ):
         stale_reasons.append("fx")
-        warnings.append("USD/TWD 日線已超過 72 小時未更新。")
+        warnings.append(
+            "USD/TWD 日線未對齊最新已完成 FX session："
+            f"資料 {fx.get('data_date')}，"
+            f"預期 {(fx.get('freshness') or {}).get('expected_data_date')}。"
+        )
 
     if market_foreign["trade_date"] is None:
         missing.append("market_chip_daily.TAIEX.foreign_investor_net_value")
@@ -133,14 +138,29 @@ def build_fx_flow_context(
         "freshness": {
             "expected_market_trade_date": market_expected.isoformat(),
             "expected_stock_trade_date": stock_expected.isoformat(),
-            "fx_stale_after_seconds": FX_STALE_AFTER_SECONDS,
+            "fx_freshness_profile": "daily_trend",
+            "fx": fx.get("freshness"),
             "stale_reasons": _dedupe(stale_reasons),
         },
     }
 
 
 def _build_fx_trend(db: Session, *, now: datetime) -> dict[str, Any]:
-    points = _latest_fx_daily_points(db)
+    observed_points = _latest_fx_daily_points(db)
+    observed_latest = observed_points[0] if observed_points else None
+    expected_probe = evaluate_fx_freshness(
+        purpose="daily_trend",
+        now=now,
+        event_time=(observed_latest or {}).get("as_of"),
+        fetched_at=(observed_latest or {}).get("fetched_at"),
+        data_date=(observed_latest or {}).get("data_date"),
+    )
+    points = [
+        point
+        for point in observed_points
+        if expected_probe.expected_data_date is None
+        or point["data_date"] <= expected_probe.expected_data_date
+    ]
     latest = points[0] if points else None
     usd_twd_change_1d = _fx_change(points, days=1, inverse=False)
     usd_twd_change_5d = _fx_change(points, days=5, inverse=False)
@@ -150,6 +170,13 @@ def _build_fx_trend(db: Session, *, now: datetime) -> dict[str, Any]:
     twd_change_20d = _fx_change(points, days=20, inverse=True)
     as_of = latest["as_of"] if latest is not None else None
     age_seconds = _age_seconds(now, as_of)
+    freshness = evaluate_fx_freshness(
+        purpose="daily_trend",
+        now=now,
+        event_time=as_of,
+        fetched_at=latest.get("fetched_at") if latest is not None else None,
+        data_date=latest.get("data_date") if latest is not None else None,
+    )
     regime = _fx_regime(
         change_5d=usd_twd_change_5d,
         change_20d=usd_twd_change_20d,
@@ -160,7 +187,7 @@ def _build_fx_trend(db: Session, *, now: datetime) -> dict[str, Any]:
         else "partial"
         if usd_twd_change_5d is None
         else "stale"
-        if age_seconds is not None and age_seconds > FX_STALE_AFTER_SECONDS
+        if not freshness.usable
         else "ready"
     )
     return {
@@ -171,7 +198,10 @@ def _build_fx_trend(db: Session, *, now: datetime) -> dict[str, Any]:
         "data_date": _iso(latest["data_date"] if latest is not None else None),
         "as_of": _iso(as_of),
         "age_seconds": age_seconds,
+        "freshness": freshness.as_payload(),
         "history_points": len(points),
+        "observed_history_points": len(observed_points),
+        "excluded_provisional_points": len(observed_points) - len(points),
         "usd_twd_change_1d_pct": _round(usd_twd_change_1d),
         "usd_twd_change_5d_pct": _round(usd_twd_change_5d),
         "usd_twd_change_20d_pct": _round(usd_twd_change_20d),
@@ -203,7 +233,9 @@ def _latest_fx_daily_points(db: Session) -> list[dict[str, Any]]:
         for row in rows:
             if not _positive(row.close_price):
                 continue
-            data_date = row.bar_time.date()
+            data_date = fx_daily_data_date(row.bar_time, row.raw_payload_json)
+            if data_date is None:
+                continue
             if data_date in seen_dates:
                 continue
             close = float(row.close_price)
@@ -214,6 +246,7 @@ def _latest_fx_daily_points(db: Session) -> list[dict[str, Any]]:
                     "usd_twd": close if symbol == "USD-TWD" else 1 / close,
                     "data_date": data_date,
                     "as_of": row.bar_time,
+                    "fetched_at": row.fetched_at,
                 }
             )
             seen_dates.add(data_date)

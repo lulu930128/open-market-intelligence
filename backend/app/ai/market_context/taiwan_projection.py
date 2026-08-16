@@ -22,6 +22,7 @@ from app.market.financial_contract import (
     build_legacy_financial_contract,
 )
 from app.market.financial_metric_semantics import source_reported_financial_semantics
+from app.market.index_resolution import resolve_taiwan_index_quote_state
 from app.market.live_snapshot import classify_market_snapshot
 from app.market.monthly_revenue_continuity import analyze_monthly_revenue_continuity
 from app.market.quote_volume import build_taiwan_quote_volume_contract
@@ -163,6 +164,14 @@ FRESHNESS_DOMAIN_RESOURCES = {
 CAPABILITY_FRESHNESS_RESOURCES = {
     "daily.ohlcv": "market_daily_price",
     "technical.structure": "market_daily_price",
+    "technical.indicators": "market_daily_price",
+    "technical.swings": "market_daily_price",
+    "technical.fibonacci": "market_daily_price",
+    "technical.divergence": "market_daily_price",
+    "technical.breakout": "market_daily_price",
+    "technical.volume_profile": "market_daily_price",
+    "technical.anchored_vwap": "market_daily_price",
+    "technical.relative_strength": "market_daily_price",
     "chips.institutional": "institutional_trade_daily",
     "chips.margin": "margin_trading_daily",
     "broker_branch.summary": "broker_branch_trade_daily",
@@ -2734,7 +2743,7 @@ def _index_candidate_date(
         return None
 
 
-def resolve_taiwan_index_quote_state(
+def _legacy_resolve_taiwan_index_quote_state(
     *,
     intraday: dict[str, Any] | None,
     index_snapshot: dict[str, Any],
@@ -3043,6 +3052,12 @@ def _compact_index_quote(
         intraday=intraday,
         index_snapshot=snapshot,
         calendar_status=effective_calendar,
+        index_id=index_id,
+        acquisition_policy=str(
+            (intraday or {}).get("acquisition_policy")
+            or snapshot.get("acquisition_policy")
+            or "unspecified"
+        ),
     )
     source = str(
         resolution.get("selected_source")
@@ -3065,7 +3080,13 @@ def _compact_index_quote(
         if isinstance(change, (int, float)) and isinstance(previous_close, (int, float)) and previous_close != 0
         else snapshot.get("change_pct")
     )
-    quote_time = resolution.get("selected_event_time")
+    # A rejected stale candidate still needs an observable age.  Selection and
+    # freshness are separate concerns: the resolver may refuse to use the
+    # value while the outward contract continues to explain why it was stale.
+    quote_time = (
+        resolution.get("selected_event_time")
+        or resolution.get("last_trade_time")
+    )
     freshness = classify_market_snapshot(
         calendar_status=effective_calendar,
         quote_time=quote_time,
@@ -3270,6 +3291,11 @@ def _compact_index_quote(
         "official_close_raw": resolution["official_close_raw"],
         "official_close_display": resolution["official_close_display"],
         "official_close_precision": resolution["official_close_precision"],
+        "resolution_version": resolution["resolution_version"],
+        "resolution_id": resolution["resolution_id"],
+        "acquisition_policy": resolution["acquisition_policy"],
+        "decision_usable": resolution["decision_usable"],
+        "current_observation": resolution["current_observation"],
         "selected_candidate": resolution["selected_candidate"],
         "selection_reason": resolution["selection_reason"],
         "quote_candidates": resolution["candidates"],
@@ -3617,6 +3643,7 @@ def _build_stock_compact_evidence(
     missing: list[str],
     warnings: list[str],
     source_refs: list[dict[str, Any]],
+    technical_evidence: dict[str, Any] | None = None,
     financial_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target = {
@@ -3630,6 +3657,26 @@ def _build_stock_compact_evidence(
         technical_levels=technical_levels,
         technical_reports=technical_reports,
     )
+    technical_evidence = (
+        technical_evidence if isinstance(technical_evidence, dict) else {}
+    )
+    technical["contract_version"] = "tw_technical_current_state_v2"
+    technical["advanced_shadow"] = technical_evidence.get("structure_v2")
+    technical_indicators = technical_evidence.get("indicators")
+    technical_advanced = {
+        key: technical_evidence.get(key)
+        for key in (
+            "structure_v2",
+            "swings",
+            "fibonacci",
+            "divergence",
+            "breakout",
+            "volume_profile",
+            "anchored_vwap",
+            "relative_strength",
+        )
+        if isinstance(technical_evidence.get(key), dict)
+    }
     margin_payload = (
         _compact_row(
             latest_margin,
@@ -3865,6 +3912,55 @@ def _build_stock_compact_evidence(
         "refresh_recommended": False,
         "cache_policy": "read_only_no_refresh",
     }
+    technical_payloads = {
+        "technical.indicators": technical_indicators,
+        "technical.swings": technical_advanced.get("swings"),
+        "technical.fibonacci": technical_advanced.get("fibonacci"),
+        "technical.divergence": technical_advanced.get("divergence"),
+        "technical.breakout": technical_advanced.get("breakout"),
+        "technical.volume_profile": technical_advanced.get("volume_profile"),
+        "technical.anchored_vwap": technical_advanced.get("anchored_vwap"),
+        "technical.relative_strength": technical_advanced.get("relative_strength"),
+    }
+    for capability_id, payload in technical_payloads.items():
+        raw_status = (
+            str(payload.get("status") or "missing")
+            if isinstance(payload, dict)
+            else "missing"
+        )
+        temporal_freshness = (
+            payload.get("freshness")
+            if isinstance(payload, dict)
+            and isinstance(payload.get("freshness"), dict)
+            else {}
+        )
+        status = (
+            str(temporal_freshness.get("status") or "current")
+            if raw_status in {"ready", "ready_empty"}
+            else raw_status
+        )
+        freshness_by_capability[capability_id] = {
+            "status": status,
+            "evidence_status": raw_status,
+            "dataset": "market_daily_price",
+            "latest": (
+                payload.get("as_of")
+                if isinstance(payload, dict)
+                else technical_evidence.get("as_of")
+            )
+            or technical_evidence.get("as_of"),
+            "is_current": status not in {"missing", "stale", "unavailable"},
+            "decision_usable": raw_status in {"ready", "ready_empty"},
+            "coverage_status": (
+                "complete"
+                if raw_status in {"ready", "ready_empty"}
+                else "partial"
+                if raw_status == "partial"
+                else "missing"
+            ),
+            "refresh_recommended": False,
+            "cache_policy": "read_only_derived",
+        }
     slots = _build_tw_stock_slots(
         target=target,
         as_of=as_of,
@@ -3899,6 +3995,8 @@ def _build_stock_compact_evidence(
         "company_profile": company_profile,
         "intraday_bars": intraday_bars,
         "technical": technical,
+        "technical_indicators": technical_indicators,
+        "technical_advanced": technical_advanced,
         "chips": chips,
         "fundamentals": fundamentals,
         "events": events,

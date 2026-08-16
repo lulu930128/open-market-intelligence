@@ -954,7 +954,9 @@ export default function WatchlistRadarPanel({
   const radarV2IsActive =
     radar?.radar_engine?.mode === "active" &&
     radar.radar_engine.active_version === "radar_v2.0";
-  const radarV2Readiness = radar?.radar_v2_summary?.readiness ?? null;
+  const radarEyebrow = t(
+    radarV2IsActive ? "radar.v2.eyebrow" : "radar.eyebrow"
+  );
   const showOutcomeTools =
     !radarV2IsActive && Boolean(outcomeSummary || onOpenOutcomeHistory);
   const outcomeBusy = outcomeLoadState === "loading";
@@ -990,7 +992,7 @@ export default function WatchlistRadarPanel({
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-omi-border-subtle px-5 py-4">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-            {t("radar.eyebrow")}
+            {radarEyebrow}
           </div>
           <h3 className="mt-1 text-lg font-bold text-omi-text-strong">{t("radar.title")}</h3>
           {scopeLabel ? (
@@ -1071,93 +1073,6 @@ export default function WatchlistRadarPanel({
           ) : null}
         </div>
       </div>
-
-      {radar?.radar_engine && radar.radar_v2_summary ? (
-        <div
-          className="border-b border-omi-border-subtle bg-omi-surface-subtle px-5 py-3"
-          data-testid={
-            radarV2IsActive
-              ? "watchlist-radar-v2-active-summary"
-              : "watchlist-radar-v2-shadow-summary"
-          }
-        >
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-                  {t("radar.v2.title")}
-                </span>
-                <span className="border border-omi-info-border bg-omi-info-soft px-2 py-0.5 text-xs font-semibold text-omi-info-strong">
-                  {t(
-                    radarV2IsActive
-                      ? "radar.v2.activeBadge"
-                      : "radar.v2.shadowBadge"
-                  )}
-                </span>
-                <span className="text-xs text-omi-text-muted">
-                  {radarV2IsActive
-                    ? t("radar.v2.activeContract", {
-                        active: radar.radar_engine.active_version,
-                        rollback: radar.radar_engine.rollback_version,
-                      })
-                    : t("radar.v2.shadowContract", {
-                        active: radar.radar_engine.active_version,
-                        shadow: radar.radar_engine.shadow_version,
-                      })}
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-omi-text-muted">
-                {t(
-                  radarV2IsActive
-                    ? "radar.v2.activeNotice"
-                    : "radar.v2.shadowNotice"
-                )}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2 text-xs">
-              <span className="border border-omi-border-subtle bg-omi-surface px-2 py-1 text-omi-text-muted">
-                {t("radar.v2.summary.universeEvaluated", {
-                  count: radar.radar_v2_summary.universe_evaluated_count,
-                })}
-              </span>
-              <span className="border border-omi-warning-border bg-omi-warning-soft px-2 py-1 font-semibold text-omi-warning">
-                {t("radar.v2.summary.conflict", {
-                  count: radar.radar_v2_summary.conflict_count,
-                })}
-              </span>
-              {radarV2IsActive && radarV2Readiness ? (
-                <span
-                  className={[
-                    "border px-2 py-1 font-semibold",
-                    radarV2Readiness.validation_status === "verified"
-                      ? "border-omi-success-border bg-omi-success-soft text-omi-success"
-                      : "border-omi-warning-border bg-omi-warning-soft text-omi-warning",
-                  ].join(" ")}
-                >
-                  {t(
-                    `radar.v2.validation.${radarV2Readiness.validation_status}`
-                  )}
-                </span>
-              ) : (
-                <span className="border border-omi-border-subtle bg-omi-surface px-2 py-1 text-omi-text-muted">
-                  {t("radar.v2.summary.changed", {
-                    count: radar.radar_v2_summary.direction_changed_count,
-                  })}
-                </span>
-              )}
-              <span className="border border-omi-border-subtle bg-omi-surface px-2 py-1 text-omi-text-muted">
-                {t("radar.v2.summary.marketRegime", {
-                  regime: radarV2Label(
-                    t,
-                    "regimes",
-                    radar.radar_v2_summary.market_regime
-                  ),
-                })}
-              </span>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {radarV2IsActive ? (
         <WatchlistRadarV2OutcomePanel
@@ -1694,7 +1609,7 @@ export default function WatchlistRadarPanel({
         <div>
           <div className="border-b border-omi-border-subtle p-3">
             <StateSurface
-              eyebrow={t("radar.eyebrow")}
+              eyebrow={radarEyebrow}
               title={t("common.loading")}
               tone="loading"
               busy
@@ -1927,7 +1842,7 @@ export default function WatchlistRadarPanel({
       ) : (
         <div className="p-3">
           <StateSurface
-            eyebrow={t("radar.eyebrow")}
+            eyebrow={radarEyebrow}
             title={
               loadState === "error"
                 ? t("radar.loadError")

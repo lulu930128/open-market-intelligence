@@ -32,6 +32,7 @@ from app.routers import (
     sources,
     stocks,
     system,
+    tw_market_dashboard,
     us_market,
     watchlists,
 )
@@ -115,6 +116,11 @@ app.include_router(
 )
 app.include_router(indicators.router, prefix="/api/market/indicators", tags=["market-indicators"])
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])
+app.include_router(
+    tw_market_dashboard.router,
+    prefix="/api/market/tw-dashboard",
+    tags=["tw-market-dashboard"],
+)
 app.include_router(us_market.router, prefix="/api/us-market", tags=["us-market"])
 app.include_router(jp_market.router, prefix="/api/jp-market", tags=["jp-market"])
 app.include_router(kr_market.router, prefix="/api/kr-market", tags=["kr-market"])

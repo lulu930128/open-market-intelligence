@@ -238,6 +238,37 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertEqual(canonical["error"]["code"], "TARGET_NOT_FOUND")
         self.assertFalse(canonical["status"]["readiness"]["decision_ready"])
 
+    def test_v4_business_error_exposes_blocked_status_dimensions(self) -> None:
+        response = _v2_response(ok=False)
+        response.update(
+            {
+                "request_status": "failed",
+                "facts_ready": False,
+                "analysis_ready": False,
+                "answer_ready": False,
+                "decision_ready": False,
+                "error": {
+                    "code": "TARGET_NOT_FOUND",
+                    "message": "找不到指定標的",
+                    "retryable": False,
+                },
+            }
+        )
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        status_dimensions = canonical["evidence"]["status_dimensions"]
+        self.assertEqual(status_dimensions["service_status"], "available")
+        self.assertEqual(status_dimensions["data_quality"], "failed")
+        self.assertEqual(status_dimensions["decision_readiness"], "blocked")
+        self.assertEqual(
+            canonical["evidence"]["passport"]["status_dimensions"],
+            status_dimensions,
+        )
+
     def test_v2_remains_available_only_when_requested(self) -> None:
         response = _v2_response()
 
@@ -403,6 +434,101 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
                 "projection.omitted_capabilities",
                 " ".join(canonical["limitations"]["warnings"]),
             )
+
+    def test_v4_adapts_default_budget_but_keeps_explicit_limit_hard(self) -> None:
+        response = _v2_response()
+        response["execution"] = {
+            "diagnostics": {"fixture": "x" * 6_000},
+        }
+        response["warnings"] = ["fixture-" + ("x" * 12_000)]
+        default_selection = capability_contract.normalize_selection(
+            selection={"include": ["quote.snapshot"]},
+            output="decision_with_evidence",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="entry_decision",
+        )
+        response["query_plan"]["selection"] = default_selection
+        response["query_plan"]["target_type"] = "stock"
+
+        adaptive = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+        adaptive_bytes = len(
+            json.dumps(
+                adaptive,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+
+        self.assertTrue(adaptive["ok"])
+        self.assertEqual(
+            adaptive["projection"]["response_budget_source"],
+            "payload_default_adaptive",
+        )
+        self.assertIsNone(
+            adaptive["projection"]["requested_max_response_bytes"]
+        )
+        self.assertGreater(
+            adaptive["projection"]["effective_max_response_bytes"],
+            adaptive["projection"]["default_max_response_bytes"],
+        )
+        self.assertLessEqual(
+            adaptive["projection"]["effective_max_response_bytes"],
+            adaptive["projection"]["max_response_ceiling_bytes"],
+        )
+        self.assertEqual(
+            adaptive["projection"]["actual_response_bytes"],
+            adaptive_bytes,
+        )
+        self.assertTrue(adaptive["projection"]["budget_met"])
+
+        explicit_response = deepcopy(response)
+        explicit_selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["quote.snapshot"],
+                "max_response_bytes": 32_768,
+            },
+            output="decision_with_evidence",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="entry_decision",
+        )
+        explicit_response["query_plan"]["selection"] = explicit_selection
+        explicit = decision_envelope.for_requested_contract(
+            explicit_response,
+            requested_contract_version="omi.decision.v4",
+        )
+        explicit_bytes = len(
+            json.dumps(
+                explicit,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+
+        self.assertEqual(
+            explicit["projection"]["response_budget_source"],
+            "caller_explicit",
+        )
+        self.assertEqual(
+            explicit["projection"]["requested_max_response_bytes"],
+            32_768,
+        )
+        self.assertEqual(
+            explicit["projection"]["effective_max_response_bytes"],
+            32_768,
+        )
+        self.assertIsNone(explicit["projection"]["adaptation_reason"])
+        self.assertLessEqual(explicit_bytes, 32_768)
+        self.assertEqual(
+            explicit["projection"]["actual_response_bytes"],
+            explicit_bytes,
+        )
 
     def test_v4_hard_caps_rich_multi_capability_minimum_budget_envelope(
         self,
@@ -1852,6 +1978,14 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertTrue(canonical["execution_completed"])
         self.assertTrue(canonical["data_available"])
         self.assertEqual(canonical["quality_status"], "ready")
+        status_dimensions = canonical["evidence"]["status_dimensions"]
+        self.assertEqual(status_dimensions["service_status"], "available")
+        self.assertEqual(status_dimensions["data_quality"], "current")
+        self.assertEqual(status_dimensions["decision_readiness"], "limited")
+        self.assertEqual(
+            canonical["evidence"]["passport"]["status_dimensions"],
+            status_dimensions,
+        )
         self.assertEqual(
             canonical["capability_schema_versions"][
                 "diagnostics.source_health"

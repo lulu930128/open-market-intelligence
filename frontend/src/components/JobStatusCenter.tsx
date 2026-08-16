@@ -40,6 +40,7 @@ function getJobMarket(jobType: string): "tw" | "us" | "jp" | "kr" | "crypto" | "
   if (
     jobType.startsWith("market.") ||
     jobType.startsWith("watchlist.") ||
+    jobType === "cross_market.context_refresh" ||
     jobType === "system.stock_master_bootstrap" ||
     jobType === "scheduler.market_daily_refresh" ||
     jobType === "scheduler.market_chip_daily_refresh" ||

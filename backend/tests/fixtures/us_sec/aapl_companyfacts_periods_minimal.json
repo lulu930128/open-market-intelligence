@@ -1,0 +1,66 @@
+{
+  "_fixture_metadata": {
+    "source": "SEC EDGAR CompanyFacts",
+    "source_url": "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
+    "issuer": "Apple Inc.",
+    "cik": "0000320193",
+    "captured_from_local_raw_store_on": "2026-08-11",
+    "purpose": "Preserve a real discrete quarter, YTD period, and later-filing comparative fact for period-resolution regression tests."
+  },
+  "cik": 320193,
+  "entityName": "Apple Inc.",
+  "facts": {
+    "us-gaap": {
+      "RevenueFromContractWithCustomerExcludingAssessedTax": {
+        "label": "Revenue from Contract with Customer, Excluding Assessed Tax",
+        "description": "Amount, excluding tax collected from customer, of revenue from satisfaction of performance obligation by transferring promised good or service to customer.",
+        "units": {
+          "USD": [
+            {
+              "fy": 2025,
+              "fp": "Q2",
+              "form": "10-Q",
+              "filed": "2025-05-02",
+              "start": "2024-12-29",
+              "end": "2025-03-29",
+              "val": 95359000000,
+              "accn": "0000320193-25-000057"
+            },
+            {
+              "fy": 2026,
+              "fp": "Q2",
+              "form": "10-Q",
+              "filed": "2026-05-01",
+              "start": "2024-12-29",
+              "end": "2025-03-29",
+              "val": 95359000000,
+              "accn": "0000320193-26-000013",
+              "frame": "CY2025Q1"
+            },
+            {
+              "fy": 2026,
+              "fp": "Q2",
+              "form": "10-Q",
+              "filed": "2026-05-01",
+              "start": "2025-09-28",
+              "end": "2026-03-28",
+              "val": 254940000000,
+              "accn": "0000320193-26-000013"
+            },
+            {
+              "fy": 2026,
+              "fp": "Q2",
+              "form": "10-Q",
+              "filed": "2026-05-01",
+              "start": "2025-12-28",
+              "end": "2026-03-28",
+              "val": 111184000000,
+              "accn": "0000320193-26-000013",
+              "frame": "CY2026Q1"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
