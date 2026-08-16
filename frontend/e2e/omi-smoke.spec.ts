@@ -1819,6 +1819,71 @@ function emptyKrWatchlistReadiness(groupId: number | null) {
   };
 }
 
+function emptyUsSecInsiderTransactions(symbol: string) {
+  return {
+    contract_version: "omi.sec.insiders.v1",
+    symbol,
+    cik: null,
+    status: "missing",
+    as_of: null,
+    freshness: {
+      status: "missing",
+      last_checked_at: null,
+      last_success_at: null,
+      latest_filing_date: null,
+      latest_accession_number: null,
+      basis: "sec_ownership_filing_observation",
+      observation_window_hours: 24,
+    },
+    summary: {
+      filing_count: 0,
+      amendment_count: 0,
+      transaction_count: 0,
+      open_market_purchase_count: 0,
+      open_market_sale_count: 0,
+      open_market_purchase_shares: null,
+      open_market_sale_shares: null,
+      other_transaction_count: 0,
+      latest_transaction_date: null,
+    },
+    transactions: [],
+    quality: {
+      issue_codes: [],
+      warnings: [],
+      limitations: [
+        "Form 4 reports changes and row-level post-transaction amounts; without Forms 3 and 5, this contract does not claim a complete current insider position.",
+      ],
+    },
+    source_refs: [],
+    pagination: { limit: 100, returned_count: 0, next_cursor: null },
+  };
+}
+
+function emptyUsSecInstitutionalHoldings(symbol: string) {
+  return {
+    contract_version: "omi.sec.13f.v1",
+    symbol,
+    cik: null,
+    status: "missing",
+    as_of: null,
+    freshness: {
+      status: "missing",
+      latest_release_period: null,
+      reason: "No approved CUSIP-to-symbol projection is available for this symbol.",
+    },
+    summary: {},
+    quarters: [],
+    managers: [],
+    quality: {
+      decision_usable: false,
+      limitations: [
+        "Form 13F is a delayed quarterly filing and is not a current-position feed.",
+      ],
+    },
+    source_refs: [],
+  };
+}
+
 function completedRefreshJob() {
   const timestamp = "2026-06-15T09:30:00+08:00";
 
@@ -2552,6 +2617,33 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 
     if (/\/us-market\/sec\/[^/]+\/fundamentals$/.test(path)) {
       await fulfillJson(route, null);
+      return;
+    }
+
+    if (/\/us-market\/sec\/[^/]+\/financials$/.test(path)) {
+      await fulfillJson(route, null);
+      return;
+    }
+
+    const usSecInsiderMatch = path.match(
+      /\/us-market\/sec\/([^/]+)\/insider-transactions$/
+    );
+    if (usSecInsiderMatch) {
+      await fulfillJson(
+        route,
+        emptyUsSecInsiderTransactions(decodeURIComponent(usSecInsiderMatch[1]))
+      );
+      return;
+    }
+
+    const usSecInstitutionalMatch = path.match(
+      /\/us-market\/sec\/([^/]+)\/institutional-holdings$/
+    );
+    if (usSecInstitutionalMatch) {
+      await fulfillJson(
+        route,
+        emptyUsSecInstitutionalHoldings(decodeURIComponent(usSecInstitutionalMatch[1]))
+      );
       return;
     }
 
@@ -3498,7 +3590,7 @@ test.describe("OMI dashboard smoke", () => {
     expect(djiOhlc).toBeDefined();
     expect(djiOhlc?.url.searchParams.get("timeframe")).toBe("daily");
     expect(djiOhlc?.url.searchParams.get("bars")).toBe("60");
-    expect(djiOhlc?.url.searchParams.get("ensure_history")).toBe("true");
+    expect(djiOhlc?.url.searchParams.get("ensure_history")).toBe("false");
     expect(djiOhlc?.url.searchParams.get("outputsize")).toBe("compact");
     expect(djiOhlc?.url.searchParams.get("provider")).toBe("yahoo_chart");
     expect(

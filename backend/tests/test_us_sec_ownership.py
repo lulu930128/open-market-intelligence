@@ -269,6 +269,10 @@ class USSecForm4StoreAndServiceTests(unittest.TestCase):
         }
         with (
             patch(
+                "app.us_market.ownership_service.settings.us_sec_user_agent",
+                "Open Market Intelligence tests contact=test@example.com",
+            ),
+            patch(
                 "app.us_market.ownership_service.sec_provider.fetch_sec_submissions_payload",
                 return_value=(submissions, "https://data.sec.gov/submissions/CIK0000320193.json"),
             ) as fetch_submissions,
@@ -295,9 +299,15 @@ class USSecForm4StoreAndServiceTests(unittest.TestCase):
 
     def test_successful_observation_without_filings_is_ready_empty(self) -> None:
         empty_submissions = {"filings": {"recent": {"form": []}}}
-        with patch(
-            "app.us_market.ownership_service.sec_provider.fetch_sec_submissions_payload",
-            return_value=(empty_submissions, "https://data.sec.gov/submissions/CIK0000320193.json"),
+        with (
+            patch(
+                "app.us_market.ownership_service.settings.us_sec_user_agent",
+                "Open Market Intelligence tests contact=test@example.com",
+            ),
+            patch(
+                "app.us_market.ownership_service.sec_provider.fetch_sec_submissions_payload",
+                return_value=(empty_submissions, "https://data.sec.gov/submissions/CIK0000320193.json"),
+            ),
         ):
             result = sync_form4_symbol(self.db, symbol="AAPL", max_filings=1)
 
