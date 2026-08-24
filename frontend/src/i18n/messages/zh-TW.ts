@@ -996,6 +996,8 @@ export const zhTW = {
       fetched: "取得 {count}",
       skippedExisting: "已存在 {count}",
       partial: "部分 {count}",
+      stale: "過期 {count}",
+      missing: "缺少 {count}",
       resourceSuccess: "資源成功 {count}",
       resourceErrors: "資源失敗 {count}",
       warnings: "警告 {count}",
@@ -1025,6 +1027,7 @@ export const zhTW = {
       "market.tpex_daily_price_backfill": "上櫃日線補齊",
       "us_market.watchlist_daily_refresh": "美股自選日線補齊",
       "scheduler.us_market_daily_refresh": "排程美股日線補齊",
+      "market_data.eod_coverage_reconcile": "全市場 EOD 日線補齊",
       "us_market.watchlist_resource_refresh": "美股自選資料補齊",
       "us_market.daily_price_quality_repair": "美股日線品質修復",
       "jp_market.watchlist_resource_refresh": "日股自選資料補齊",
@@ -3076,6 +3079,10 @@ export const zhTW = {
       belowMa20: "弱於 MA20",
       maConsolidation: "均線整理",
     },
+    technicalQuality: {
+      partial: "技術事實可讀，但公司行動覆蓋尚未證明完整，不作完整決策判斷。",
+      missing: "已解析日線不足或過期，技術判斷暫不可用。",
+    },
     technicalMetrics: {
       priceVsMa20: "價格相對 MA20",
       volumeVsMa20: "量能相對 20 日均量",
@@ -3246,6 +3253,8 @@ export const zhTW = {
     errors: {
       loadFailed: "讀取美股資料失敗",
       intradayRefreshFailed: "更新美股盤中資料失敗",
+      intradayAggregationFailed: "讀取後端聚合的美股盤中週期失敗",
+      technicalResearchLoadFailed: "讀取美股技術研究資料失敗",
       dailyRefreshFailed: "更新美股日線失敗",
       secFactsRefreshFailed: "更新 SEC facts 失敗",
       profileRefreshFailed: "更新 Profile 失敗",

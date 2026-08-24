@@ -147,6 +147,29 @@ def _us_market_data_params(
     policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     params = _external_intraday_market_data_params(payload, policy=policy)
+    query_plan = (
+        policy.get("query_plan")
+        if isinstance(policy, dict) and isinstance(policy.get("query_plan"), dict)
+        else {}
+    )
+    selected_capabilities = list(
+        dict.fromkeys(
+            [
+                *(
+                    str(value)
+                    for value in query_plan.get("selected_capabilities") or []
+                    if value
+                ),
+                *(
+                    str(value)
+                    for value in query_plan.get("optional_selected_capabilities") or []
+                    if value
+                ),
+            ]
+        )
+    )
+    if selected_capabilities:
+        params["requested_capabilities"] = selected_capabilities
     requested_trade_date = requested_us_trade_date(
         payload.question,
         explicit_value=params.get("trade_date"),

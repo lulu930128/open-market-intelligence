@@ -6,10 +6,13 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service
+from app.jobs.eod_coverage import run_eod_coverage_reconcile_job
 from app.jobs.job_types import (
     CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE,
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE,
+    TAIWAN_BROKER_BRANCH_BEHAVIOR_SHADOW_JOB_TYPE,
     TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
@@ -148,6 +151,29 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 float(request.get("sleep_seconds", 0.5)),
                 int(request.get("max_stocks", 2500)),
                 int(request.get("max_runtime_seconds", 7200)),
+            ),
+            request,
+        )
+
+    if job_type == TAIWAN_BROKER_BRANCH_BEHAVIOR_SHADOW_JOB_TYPE:
+        as_of_trade_date = _parse_date(request.get("as_of_trade_date"))
+        if as_of_trade_date is None:
+            raise ValueError(
+                "Broker-branch behavior retry requires as_of_trade_date."
+            )
+        methodology_version = str(
+            request.get("methodology_version") or ""
+        ).strip()
+        if not methodology_version:
+            raise ValueError(
+                "Broker-branch behavior retry requires methodology_version."
+            )
+        return (
+            backfill_tasks.run_taiwan_broker_branch_behavior_shadow_job,
+            (
+                as_of_trade_date,
+                int(request.get("lookback_sessions", 120)),
+                methodology_version,
             ),
             request,
         )
@@ -371,6 +397,22 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 str(request.get("provider") or "auto"),
                 str(request.get("outputsize") or "compact"),
                 int(request.get("max_runtime_seconds", 120)),
+            ),
+            request,
+        )
+
+    if job_type == MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE:
+        return (
+            run_eod_coverage_reconcile_job,
+            (
+                str(request.get("market") or ""),
+                bool(request.get("repair", True)),
+                _parse_date(request.get("expected_trade_date")),
+                int(request.get("max_symbols", 250)),
+                int(request.get("max_runtime_seconds", 600)),
+                float(request.get("sleep_seconds", 1.0)),
+                int(request.get("max_consecutive_errors", 5)),
+                int(request.get("error_backoff_seconds", 1800)),
             ),
             request,
         )

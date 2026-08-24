@@ -38,8 +38,11 @@ def build_taiwan_quote_volume_contract(
     official_daily_trade_date: Any = None,
     official_daily_volume_shares: Any = None,
     official_daily_volume_source: Any = None,
+    provider: str = "twse_mis",
+    cumulative_volume_source_field: str = "v",
+    last_trade_volume_source_field: str = "tv",
 ) -> dict[str, Any]:
-    """Normalize TWSE MIS volume fields without overstating their market scope."""
+    """Normalize board-lot quote volume without overstating market scope."""
 
     snapshot_date = _date_text(snapshot_trade_date)
     official_date = _date_text(official_daily_trade_date)
@@ -110,14 +113,14 @@ def build_taiwan_quote_volume_contract(
         "provider_volume_unit": "lots",
         "volume_semantics": "session_cumulative_provider_volume",
         "volume_scope": TAIWAN_MIS_VOLUME_SCOPE,
-        "volume_source": "twse_mis",
-        "volume_source_field": "v",
+        "volume_source": provider,
+        "volume_source_field": cumulative_volume_source_field,
         "volume_status": (
             "available" if cumulative_lots is not None else "unavailable"
         ),
         "provider_volume_available": cumulative_lots is not None,
         "last_trade_volume_semantics": "provider_reported_last_match_volume",
-        "last_trade_volume_source_field": "tv",
+        "last_trade_volume_source_field": last_trade_volume_source_field,
         "last_trade_volume_status": (
             "available" if last_trade_lots is not None else "not_provided"
         ),

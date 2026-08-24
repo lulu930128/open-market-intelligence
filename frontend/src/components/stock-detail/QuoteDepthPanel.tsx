@@ -11,6 +11,7 @@ import { StateSurface } from "@/components/LoadingPlaceholders";
 import type {
   TaiwanQuoteContractReplayRead,
   TaiwanQuoteContractReplaySnapshotRead,
+  TaiwanRealtimeMarketStreamRead,
   TaiwanStockQuoteDepthLevel,
   TaiwanStockQuoteDepthPreviewMode,
   TaiwanStockQuoteDepthRead,
@@ -25,6 +26,8 @@ type QuoteDepthPanelProps = {
   quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
   quoteReplay?: TaiwanQuoteContractReplayRead | null;
   replayLoadState?: "idle" | "loading" | "success" | "error";
+  quoteStream?: TaiwanRealtimeMarketStreamRead | null;
+  quoteStreamLoadState?: QuoteDepthLoadState;
 };
 
 type QuoteDepthViewMode = "live" | "replay";
@@ -49,19 +52,6 @@ function isAuctionReplaySnapshot(
   );
 }
 
-function isPreopenReplaySnapshot(
-  snapshot: TaiwanQuoteContractReplaySnapshotRead
-) {
-  const quote = snapshot.quote;
-  return Boolean(
-    snapshot.status.startsWith("captured") &&
-      quote &&
-      (quote.session_phase === "preopen_auction" ||
-        quote.instrument_phase === "preopen_auction" ||
-        quote.instrument_phase === "opening_auction_delayed")
-  );
-}
-
 function statusClass(status: string | undefined) {
   if (status === "preview" || status === "replay") {
     return "border-sky-500/50 bg-sky-500/10 text-omi-text-strong";
@@ -78,8 +68,33 @@ function statusClass(status: string | undefined) {
   return "border-omi-border-subtle bg-omi-surface-muted text-omi-text-muted";
 }
 
-function sourceLabel(source: string | undefined) {
-  if (source === "twse_mis_quote_depth") return "TWSE MIS";
+function sourceLabel(
+  quoteDepth:
+    | Pick<
+        TaiwanStockQuoteDepthRead,
+        "source" | "primary_provider" | "primary_source_status" | "fallback_used"
+      >
+    | null
+    | undefined
+) {
+  const source = quoteDepth?.source;
+  if (source === "kgi_superpy_quote_all") return "KGI SUPER PY";
+  if (source === "twse_mis_quote_depth") {
+    if (quoteDepth?.primary_provider === "kgi_superpy" && quoteDepth.fallback_used) {
+      const primaryStatus = {
+        starting: "連線中",
+        subscribing: "訂閱中",
+        reconnecting: "重連中",
+        resubscribe_requested: "重連中",
+        reconnect_failed: "重連失敗",
+        stale: "逾時",
+        unavailable: "不可用",
+        invalid: "格式異常",
+      }[quoteDepth.primary_source_status ?? ""];
+      return primaryStatus ? `TWSE MIS · KGI ${primaryStatus}` : "TWSE MIS";
+    }
+    return "TWSE MIS";
+  }
   if (source === "omi_quote_depth_preview") return "PREVIEW / TWSE MIS";
 
   return source ?? "-";
@@ -251,9 +266,11 @@ function applyQuoteDepthPreview(
   };
 }
 
-function depthMaxSize(quoteDepth: TaiwanStockQuoteDepthRead | null) {
-  if (!quoteDepth) return 1;
-  const sizes = [...quoteDepth.bid_levels, ...quoteDepth.ask_levels]
+function depthMaxSize(
+  bidLevels: TaiwanStockQuoteDepthLevel[],
+  askLevels: TaiwanStockQuoteDepthLevel[]
+) {
+  const sizes = [...bidLevels, ...askLevels]
     .map((level) => level.size_lots)
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   return Math.max(1, ...sizes);
@@ -270,275 +287,250 @@ function formatVolumeValue(value: number | null | undefined, unit: "張" | "股"
   return `${new Intl.NumberFormat("zh-TW").format(Math.round(value))} ${unit}`;
 }
 
-function formatVolumeDifference(value: number | null | undefined) {
-  if (!isFiniteNumber(value)) return null;
-
-  const absoluteShares = Math.round(Math.abs(value));
-  if (absoluteShares % 1_000 === 0) {
-    return `${new Intl.NumberFormat("zh-TW").format(absoluteShares / 1_000)} 張`;
-  }
-
-  return `${new Intl.NumberFormat("zh-TW").format(absoluteShares)} 股`;
-}
-
-function formatOfficialVolumeValue(value: number | null | undefined) {
-  if (!isFiniteNumber(value)) return "-";
-
-  const shares = Math.round(value);
-  return shares % 1_000 === 0
-    ? formatVolumeValue(shares / 1_000, "張")
-    : formatVolumeValue(shares, "股");
-}
-
 function isFiniteNumber(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-type VolumeSummaryStatus = {
-  label: string;
-  message: string;
-  toneClass: string;
-};
-
-function volumeSummaryStatus(
-  quoteDepth: TaiwanStockQuoteDepthRead,
-  isPreview: boolean
-): VolumeSummaryStatus {
-  if (isPreview) {
-    return {
-      label: "預覽量能",
-      message: "量能數字僅供版型預覽，不供研究判斷。",
-      toneClass: "border-omi-info bg-omi-info-soft text-omi-info-strong",
-    };
-  }
-
-  const reconciliation = quoteDepth.volume_reconciliation;
-
-  if (reconciliation?.status === "scope_different") {
-    const differenceShares = formatVolumeDifference(reconciliation.difference_shares);
-    const differenceText = differenceShares ? `；目前差額 ${differenceShares}` : "";
-
-    return {
-      label: "口徑不同",
-      message: `MIS v 是正規盤整張累計，官方日量是較廣的日彙總${differenceText}。兩者都保留，但不可直接對帳。`,
-      toneClass: "border-omi-info bg-omi-info-soft text-omi-info-strong",
-    };
-  }
-
-  if (reconciliation?.status === "reconciled") {
-    return {
-      label: "已對帳",
-      message: "MIS 累計量與正式日量在容許範圍內，可供量能判斷。",
-      toneClass: "border-omi-success bg-omi-success-soft text-omi-success-strong",
-    };
-  }
-
-  if (reconciliation?.status === "mismatch") {
-    const differenceShares = formatVolumeDifference(reconciliation.difference_shares);
-    const differencePct = isFiniteNumber(reconciliation.difference_pct)
-      ? `${Math.abs(reconciliation.difference_pct).toFixed(2)}%`
-      : null;
-    const differenceText =
-      differenceShares && differencePct
-        ? `相差 ${differenceShares}（${differencePct}）`
-        : "數值未對齊";
-
-    return {
-      label: "資料異常",
-      message: `同口徑成交量${differenceText}，量能判斷暫不採用。`,
-      toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
-    };
-  }
-
-  if (reconciliation?.reason === "official_daily_volume_not_available") {
-    return {
-      label: "待正式量",
-      message: "盤中先顯示 MIS 成交量，正式日量待收盤資料。",
-      toneClass: "border-omi-border-strong bg-omi-surface text-omi-text-muted",
-    };
-  }
-
-  if (reconciliation?.reason === "trade_dates_do_not_match") {
-    return {
-      label: "日期不同",
-      message: "MIS 快照與正式日量的交易日期不同，暫不對帳。",
-      toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
-    };
-  }
-
-  if (reconciliation?.reason === "trade_date_not_available") {
-    return {
-      label: "未對帳",
-      message: "交易日期資訊不足，量能暫不供研究判斷。",
-      toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
-    };
-  }
-
-  if (reconciliation?.reason === "official_daily_volume_not_positive") {
-    return {
-      label: "正式量異常",
-      message: "正式日量不是有效正值，量能暫不供研究判斷。",
-      toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
-    };
-  }
-
-  const providerVolumeAvailable =
-    quoteDepth.provider_volume_available ??
-    isFiniteNumber(quoteDepth.cumulative_volume_lots ?? quoteDepth.total_volume_lots);
-
-  return providerVolumeAvailable
-    ? {
-        label: "未對帳",
-        message: "目前僅有 MIS 成交量，尚無可比較的正式日量。",
-        toneClass: "border-omi-border-strong bg-omi-surface text-omi-text-muted",
-      }
-    : {
-        label: "量能缺資料",
-        message: "TWSE MIS 未提供可用的累計成交量。",
-        toneClass: "border-omi-warning bg-omi-warning-soft text-omi-warning-strong",
-      };
+function formatEventClock(value: string | null | undefined) {
+  if (!value) return "--:--:--";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "--:--:--";
+  return new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(parsed);
 }
 
-function VolumeMetric({
-  label,
-  sourceField,
-  value,
-  testId,
-  className = "",
+function streamStatusLabel(
+  quoteStream: TaiwanRealtimeMarketStreamRead | null,
+  loadState: QuoteDepthLoadState
+) {
+  if (loadState === "loading") return "連線中";
+  if (loadState === "error") return "串流中斷";
+  if (!quoteStream) return "尚無串流";
+  return {
+    live: "即時",
+    starting: "啟動中",
+    subscribing: "訂閱中",
+    reconnecting: "重連中",
+    resubscribe_requested: "重連中",
+    stale: "已逾時",
+    unavailable: "不可用",
+    disabled: "未啟用",
+    not_subscribed: "未訂閱",
+  }[quoteStream.status] ?? quoteStream.status;
+}
+
+function tradeDirectionTone(direction: string) {
+  if (direction === "up") return "text-omi-market-up";
+  if (direction === "down") return "text-omi-market-down";
+  return "text-omi-text-strong";
+}
+
+function RecentTradesPanel({
+  quoteStream,
+  loadState,
 }: {
-  label: string;
-  sourceField?: string;
-  value: string;
-  testId: string;
-  className?: string;
+  quoteStream: TaiwanRealtimeMarketStreamRead | null;
+  loadState: QuoteDepthLoadState;
 }) {
-  return (
-    <div
-      className={`min-w-0 px-2.5 py-2 sm:px-3 ${className}`}
-      data-testid={testId}
-    >
-      <dt className="flex items-baseline gap-1 text-[10px] font-bold tracking-[0.08em] text-omi-text-muted">
-        <span>{label}</span>
-        {sourceField ? (
-          <span className="font-mono font-medium normal-case tracking-normal text-omi-text-muted/70">
-            {sourceField}
-          </span>
-        ) : null}
-      </dt>
-      <dd className="mt-0.5 truncate text-sm font-bold tabular-nums text-omi-text-strong">
-        {value}
-      </dd>
-    </div>
-  );
-}
-
-function hasQuoteVolumeSummary(quoteDepth: TaiwanStockQuoteDepthRead) {
-  if (quoteDepth.session_phase === "preopen_auction") return false;
-
-  const cumulativeLots = quoteDepth.cumulative_volume_lots ?? quoteDepth.total_volume_lots;
-  return (
-    isFiniteNumber(cumulativeLots) ||
-    isFiniteNumber(quoteDepth.last_trade_volume_lots) ||
-    isFiniteNumber(quoteDepth.official_daily_volume_shares) ||
-    quoteDepth.volume_status !== undefined ||
-    quoteDepth.volume_reconciliation !== undefined
-  );
-}
-
-function QuoteVolumeSummary({
-  quoteDepth,
-  isPreview,
-}: {
-  quoteDepth: TaiwanStockQuoteDepthRead;
-  isPreview: boolean;
-}) {
-  if (!hasQuoteVolumeSummary(quoteDepth)) return null;
-
-  const cumulativeLots = quoteDepth.cumulative_volume_lots ?? quoteDepth.total_volume_lots;
-  const status = volumeSummaryStatus(quoteDepth, isPreview);
+  const trades = quoteStream?.recent_trades ?? [];
+  const warning = quoteStream?.warnings[0] ?? null;
+  const isLive = quoteStream?.status === "live" && !quoteStream.is_stale;
 
   return (
     <section
-      aria-label="成交量摘要"
-      className="overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
-      data-testid="quote-volume-summary"
+      aria-label="即時成交"
+      className="flex h-full flex-col overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
+      data-testid="quote-recent-trades"
     >
-      <div className="flex items-center justify-between gap-3 border-b border-omi-border-subtle px-2.5 py-1.5 sm:px-3">
-        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-          成交量
+      <div className="flex items-center justify-between gap-3 border-b border-omi-border-subtle px-3 py-2">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-omi-text-muted">
+            即時成交
+          </div>
+          <div className="mt-0.5 text-[11px] text-omi-text-muted">
+            KGI callback · 最近 {quoteStream?.limits.recent_trades ?? 60} 筆記憶體緩衝
+          </div>
         </div>
         <span
-          className={`inline-flex shrink-0 items-center border px-1.5 py-0.5 text-[10px] font-bold ${status.toneClass}`}
-          data-testid="quote-volume-status"
+          className={[
+            "inline-flex shrink-0 items-center border px-1.5 py-0.5 text-[10px] font-bold",
+            isLive
+              ? "border-omi-success bg-omi-success-soft text-omi-success-strong"
+              : "border-omi-border-strong bg-omi-surface text-omi-text-muted",
+          ].join(" ")}
+          data-testid="quote-recent-trades-status"
         >
-          {status.label}
+          {streamStatusLabel(quoteStream, loadState)}
         </span>
       </div>
-      <dl className="grid grid-cols-2">
-        <VolumeMetric
-          label="最近一筆"
-          sourceField={quoteDepth.last_trade_volume_source_field ?? "tv"}
-          value={formatVolumeValue(quoteDepth.last_trade_volume_lots, "張")}
-          testId="quote-volume-last-trade"
-          className="border-r border-omi-border-subtle"
-        />
-        <VolumeMetric
-          label="正規盤累計"
-          sourceField={quoteDepth.volume_source_field ?? "v"}
-          value={formatVolumeValue(cumulativeLots, "張")}
-          testId="quote-volume-cumulative"
-        />
-        <VolumeMetric
-          label="正式日量"
-          value={formatOfficialVolumeValue(quoteDepth.official_daily_volume_shares)}
-          testId="quote-volume-official"
-          className="col-span-2 border-t border-omi-border-subtle"
-        />
-      </dl>
-      <div
-        className="border-t border-omi-border-subtle px-2.5 py-1.5 text-[11px] leading-4 text-omi-text-muted sm:px-3"
-        data-testid="quote-volume-message"
-      >
-        {status.message}
+
+      <div className="grid grid-cols-[5.25rem_minmax(5rem,1fr)_minmax(4.5rem,0.8fr)_minmax(5rem,0.9fr)] gap-2 border-b border-omi-border-subtle px-3 py-1.5 text-[10px] font-bold tracking-[0.08em] text-omi-text-muted">
+        <span>時間</span>
+        <span className="text-right">成交價</span>
+        <span className="text-right">單量</span>
+        <span className="text-right">累計</span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {trades.length > 0 ? (
+          trades.map((trade) => (
+            <div
+              key={trade.event_id}
+              className="grid min-h-8 grid-cols-[5.25rem_minmax(5rem,1fr)_minmax(4.5rem,0.8fr)_minmax(5rem,0.9fr)] items-center gap-2 border-b border-omi-border-subtle/70 px-3 text-xs tabular-nums last:border-b-0"
+              data-testid="quote-recent-trade-row"
+            >
+              <span className="font-mono text-[11px] text-omi-text-muted">
+                {formatEventClock(trade.event_time)}
+              </span>
+              <span className={`text-right font-bold ${tradeDirectionTone(trade.price_direction)}`}>
+                {formatPrice(trade.price)}
+              </span>
+              <span className="text-right font-semibold text-omi-text-strong">
+                {formatVolumeValue(trade.volume_lots, "張")}
+              </span>
+              <span className="text-right text-omi-text-muted">
+                {formatVolumeValue(trade.total_volume_lots, "張")}
+              </span>
+            </div>
+          ))
+        ) : (
+          <div className="flex h-full min-h-[140px] items-center justify-center px-4 text-center">
+            <div>
+              <div className="text-xs font-semibold text-omi-text-strong">
+                {loadState === "loading" ? "等待凱基成交流" : "尚無正式成交事件"}
+              </div>
+              <div className="mt-1 text-[10px] leading-4 text-omi-text-muted">
+                {quoteStream?.status === "not_subscribed"
+                  ? "選取標的並建立 viewer lease 後才會開始收集。"
+                  : "試撮事件不會混入正式成交列表。"}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="border-t border-omi-border-subtle px-3 py-1.5 text-[10px] leading-4 text-omi-text-muted">
+        {warning ?? "紅綠僅表示相對前一筆觀察價變動，不代表主動買進或賣出。"}
       </div>
     </section>
   );
 }
 
-function QuoteAuctionSummary({
+function AuctionDetailsPanel({
   quoteDepth,
+  quoteStream,
+  loadState,
+  isReplay,
   isPreview,
+  replayLabel,
+  replaySnapshots,
 }: {
-  quoteDepth: TaiwanStockQuoteDepthRead;
+  quoteDepth: TaiwanStockQuoteDepthRead | null;
+  quoteStream: TaiwanRealtimeMarketStreamRead | null;
+  loadState: QuoteDepthLoadState;
+  isReplay: boolean;
   isPreview: boolean;
+  replayLabel: string | null;
+  replaySnapshots: TaiwanQuoteContractReplaySnapshotRead[];
 }) {
-  const isAuction =
-    quoteDepth.session_phase === "preopen_auction" ||
-    quoteDepth.session_phase === "closing_auction";
-  if (!isAuction) return null;
-
-  const available =
-    quoteDepth.indicative_match_available === true &&
-    isFiniteNumber(quoteDepth.indicative_match_price) &&
-    isFiniteNumber(quoteDepth.indicative_match_volume_lots);
-  const phaseLabel =
-    quoteDepth.session_phase === "closing_auction" ? "收盤試撮" : "開盤試撮";
-  const statusLabel = isPreview ? "預覽" : available ? "試算揭露" : "來源未提供";
-  const statusClassName = isPreview
+  const observations = !isReplay && !isPreview ? quoteStream?.auction_observations ?? [] : [];
+  const replayRows = isReplay
+    ? [...replaySnapshots]
+        .filter(isAuctionReplaySnapshot)
+        .reverse()
+        .map((snapshot) => ({
+          eventId: `replay:${snapshot.capture_slot}`,
+          eventTime:
+            snapshot.quote?.auction_event_time ??
+            snapshot.quote_time ??
+            snapshot.scheduled_at,
+          bestBidPrice:
+            snapshot.quote?.auction_best_bid ??
+            snapshot.quote?.best_bid_price ??
+            null,
+          bestAskPrice:
+            snapshot.quote?.auction_best_ask ??
+            snapshot.quote?.best_ask_price ??
+            null,
+          indicativePrice:
+            snapshot.quote?.indicative_match_price ?? null,
+          indicativeVolume: snapshot.quote?.indicative_match_volume_lots ?? null,
+        }))
+    : [];
+  const quoteIsAuction = Boolean(
+    quoteDepth &&
+      (quoteDepth.session_phase === "preopen_auction" ||
+        quoteDepth.session_phase === "closing_auction")
+  );
+  const snapshotAvailable = Boolean(
+    quoteIsAuction &&
+      quoteDepth &&
+      (quoteDepth.indicative_match_available ||
+        isFiniteNumber(quoteDepth.indicative_match_price) ||
+        isFiniteNumber(quoteDepth.indicative_match_volume_lots))
+  );
+  const rows =
+    replayRows.length > 0
+      ? replayRows
+      : observations.length > 0
+      ? observations.map((observation) => ({
+          eventId: observation.event_id,
+          eventTime: observation.event_time,
+          bestBidPrice: observation.best_bid_price,
+          bestAskPrice: observation.best_ask_price,
+          indicativePrice: observation.indicative_match_price,
+          indicativeVolume: observation.indicative_match_volume_lots,
+        }))
+      : snapshotAvailable && quoteDepth
+        ? [
+            {
+              eventId: `snapshot:${quoteDepth.stock_id}:${quoteDepth.quote_time ?? "unknown"}`,
+              eventTime: quoteDepth.quote_time,
+              bestBidPrice: quoteDepth.best_bid_price,
+              bestAskPrice: quoteDepth.best_ask_price,
+              indicativePrice: quoteDepth.indicative_match_price ?? null,
+              indicativeVolume: quoteDepth.indicative_match_volume_lots ?? null,
+            },
+          ]
+        : [];
+  const isLive = observations.length > 0 && quoteStream?.status === "live" && !quoteStream.is_stale;
+  const statusLabel = isPreview
+    ? "預覽"
+    : isReplay
+      ? "保存快照"
+      : isLive
+        ? "即時"
+        : rows.length > 0
+          ? "最近快照"
+          : streamStatusLabel(quoteStream, loadState);
+  const statusClassName = isPreview || isReplay
     ? "border-omi-info bg-omi-info-soft text-omi-info-strong"
-    : available
+    : isLive
       ? "border-omi-success bg-omi-success-soft text-omi-success-strong"
-      : "border-omi-warning bg-omi-warning-soft text-omi-warning-strong";
+      : "border-omi-border-strong bg-omi-surface text-omi-text-muted";
+  const sourceDescription = isPreview
+    ? "版型預覽資料"
+    : isReplay
+      ? `${replayLabel ?? "保存的試撮快照"} · 全部依時間合併`
+      : `KGI callback · 最近 ${quoteStream?.limits.auction_observations ?? 120} 筆記憶體緩衝`;
 
   return (
     <section
-      aria-label={`${phaseLabel}摘要`}
-      className="overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
-      data-testid="quote-auction-summary"
+      aria-label="試撮明細"
+      className="flex h-full flex-col overflow-hidden border border-omi-border-subtle bg-omi-surface-muted"
+      data-testid="quote-auction-details"
     >
-      <div className="flex items-center justify-between gap-3 border-b border-omi-border-subtle px-2.5 py-1.5 sm:px-3">
-        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-          {phaseLabel}
+      <div className="flex items-center justify-between gap-3 border-b border-omi-border-subtle px-3 py-2">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-omi-text-muted">
+            試撮明細
+          </div>
+          <div className="mt-0.5 text-[11px] text-omi-text-muted">
+            {sourceDescription}
+          </div>
         </div>
         <span
           className={`inline-flex shrink-0 items-center border px-1.5 py-0.5 text-[10px] font-bold ${statusClassName}`}
@@ -547,28 +539,59 @@ function QuoteAuctionSummary({
           {statusLabel}
         </span>
       </div>
-      <dl className="grid grid-cols-2">
-        <VolumeMetric
-          label="試算參考價"
-          sourceField={quoteDepth.indicative_match_price_source_field ?? "pz"}
-          value={formatPrice(quoteDepth.indicative_match_price)}
-          testId="quote-auction-price"
-          className="border-r border-omi-border-subtle"
-        />
-        <VolumeMetric
-          label="試算參考量"
-          sourceField={quoteDepth.indicative_match_volume_source_field ?? "ps"}
-          value={formatVolumeValue(quoteDepth.indicative_match_volume_lots, "張")}
-          testId="quote-auction-volume"
-        />
-      </dl>
-      <div
-        className="border-t border-omi-border-subtle px-2.5 py-1.5 text-[11px] leading-4 text-omi-text-muted sm:px-3"
-        data-testid="quote-auction-message"
-      >
-        {available || isPreview
-          ? "試算價量是模擬撮合結果，尚非實際成交；上下五檔張數是未成交委託量。"
-          : "TWSE MIS 本次快照未提供有效試算價量；仍可查看已揭露的五檔委託張數。"}
+      <div className="min-h-0 flex-1 overflow-x-auto">
+        <div className="flex h-full min-w-[31rem] flex-col">
+          <div className="grid grid-cols-[5.25rem_repeat(4,minmax(4.25rem,1fr))] gap-2 border-b border-omi-border-subtle px-3 py-1.5 text-[10px] font-bold tracking-[0.06em] text-omi-text-muted">
+            <span>時間</span>
+            <span className="text-right">買進</span>
+            <span className="text-right">賣出</span>
+            <span className="text-right">試撮價</span>
+            <span className="text-right">試撮量</span>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {rows.length > 0 ? (
+              rows.map((row) => (
+                <div
+                  key={row.eventId}
+                  className="grid min-h-8 grid-cols-[5.25rem_repeat(4,minmax(4.25rem,1fr))] items-center gap-2 border-b border-omi-border-subtle/70 px-3 text-xs tabular-nums last:border-b-0"
+                  data-testid="quote-auction-detail-row"
+                >
+                  <span className="font-mono text-[11px] text-omi-text-muted">
+                    {formatEventClock(row.eventTime)}
+                  </span>
+                  <span className={`text-right font-semibold ${depthPriceTone(row.bestBidPrice, quoteDepth?.previous_close).textClass}`}>
+                    {formatPrice(row.bestBidPrice)}
+                  </span>
+                  <span className={`text-right font-semibold ${depthPriceTone(row.bestAskPrice, quoteDepth?.previous_close).textClass}`}>
+                    {formatPrice(row.bestAskPrice)}
+                  </span>
+                  <span className={`text-right font-bold ${depthPriceTone(row.indicativePrice, quoteDepth?.previous_close).textClass}`}>
+                    {formatPrice(row.indicativePrice)}
+                  </span>
+                  <span className="text-right font-semibold text-omi-text-strong">
+                    {formatVolumeValue(row.indicativeVolume, "張")}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <div className="flex h-full min-h-[140px] items-center justify-center px-4 text-center">
+                <div>
+                  <div className="text-xs font-semibold text-omi-text-strong">
+                    尚無試撮明細
+                  </div>
+                  <div className="mt-1 text-[10px] leading-4 text-omi-text-muted">
+                    {isReplay
+                      ? "目前標的沒有可用的保存快照。"
+                      : "試撮時段收到 KGI callback 後會列出試撮價量。"}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="border-t border-omi-border-subtle px-3 py-1.5 text-[10px] leading-4 text-omi-text-muted">
+        試撮價量是模擬撮合結果，尚非正式成交；結束後顯示保存快照。
       </div>
     </section>
   );
@@ -631,7 +654,7 @@ function DepthSideRow({
   const barAnchor = side === "ask" ? "left-2" : "right-2";
 
   return (
-    <div className="relative grid min-h-7 grid-cols-2 items-center gap-3 overflow-hidden border-t border-omi-border-subtle px-2 text-xs tabular-nums">
+    <div className="relative grid min-h-7 flex-1 grid-cols-2 items-center gap-3 overflow-hidden border-t border-omi-border-subtle px-2 text-xs tabular-nums">
       <div
         aria-hidden="true"
         className={`absolute inset-y-1 ${barAnchor} ${tone.barClass}`}
@@ -670,7 +693,7 @@ function DepthSide({
   const total = sideTotal(levels);
 
   return (
-    <div className="min-w-0 overflow-hidden border border-omi-border-subtle bg-omi-surface-muted">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden border border-omi-border-subtle bg-omi-surface-muted">
       <div className="grid grid-cols-2 gap-3 px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-omi-text-muted">
         {side === "bid" ? (
           <>
@@ -684,7 +707,7 @@ function DepthSide({
           </>
         )}
       </div>
-      <div className="min-h-[140px]">
+      <div className="flex min-h-0 flex-1 flex-col">
         {levels.length > 0 ? (
           levels.map((level) => (
             <DepthSideRow
@@ -697,7 +720,7 @@ function DepthSide({
           ))
         ) : (
           <div
-            className="flex min-h-[140px] items-center justify-center border-t border-omi-border-subtle px-3 text-center"
+            className="flex h-full min-h-[140px] items-center justify-center border-t border-omi-border-subtle px-3 text-center"
             data-testid={`quote-depth-${side}-empty`}
           >
             <div>
@@ -755,27 +778,28 @@ export default function QuoteDepthPanel({
   quoteDepthPreviewMode = null,
   quoteReplay = null,
   replayLoadState = "idle",
+  quoteStream = null,
+  quoteStreamLoadState = "idle",
 }: QuoteDepthPanelProps) {
   const [viewSelection, setViewSelection] =
     useState<QuoteDepthViewSelection | null>(null);
-  const replaySnapshot = useMemo(
-    () => {
-      const snapshots = [...(quoteReplay?.snapshots ?? [])].reverse();
-      return (
-        snapshots.find(isPreopenReplaySnapshot) ??
-        snapshots.find(isAuctionReplaySnapshot) ??
-        null
-      );
-    },
+  const replayAuctionSnapshots = useMemo(
+    () => (quoteReplay?.snapshots ?? []).filter(isAuctionReplaySnapshot),
     [quoteReplay]
   );
+  const replaySnapshot = replayAuctionSnapshots.at(-1) ?? null;
   const replayQuote = replaySnapshot?.quote ?? null;
   const replayAvailable = replayQuote !== null;
-  const viewKey = `${quoteDepth?.stock_id ?? "empty"}:${quoteReplay?.trade_date ?? "none"}`;
+  const viewKey = quoteDepth?.stock_id ?? quoteStream?.stock_id ?? quoteReplay?.stock_id ?? "empty";
   const viewMode =
     viewSelection?.key === viewKey ? viewSelection.mode : "live";
 
   const activePreviewMode = quoteDepthPreviewMode;
+  const isCurrentAuction = Boolean(
+    quoteDepth &&
+      (quoteDepth.session_phase === "preopen_auction" ||
+        quoteDepth.session_phase === "closing_auction")
+  );
   const replayDisplayQuote = replayQuote
     ? {
         ...replayQuote,
@@ -790,27 +814,51 @@ export default function QuoteDepthPanel({
         },
       }
     : null;
-  const displayQuoteDepth =
-    activePreviewMode === null && viewMode === "replay"
-      ? replayDisplayQuote
-      : applyQuoteDepthPreview(quoteDepth, activePreviewMode);
   const isPreview = activePreviewMode !== null;
-  const isReplay = activePreviewMode === null && viewMode === "replay";
-  const showAuctionSummary = Boolean(
-    displayQuoteDepth &&
-      (displayQuoteDepth.session_phase === "preopen_auction" ||
-        displayQuoteDepth.session_phase === "closing_auction")
+  const isAuctionView = activePreviewMode === "preopen" ||
+    (activePreviewMode === null && viewMode === "replay");
+  const useReplaySnapshot = Boolean(
+    activePreviewMode === null &&
+      viewMode === "replay" &&
+      !isCurrentAuction &&
+      replayDisplayQuote
   );
-  const showVolumeSummary = Boolean(
-    displayQuoteDepth && hasQuoteVolumeSummary(displayQuoteDepth)
-  );
-  const showSummaryColumn = showAuctionSummary || showVolumeSummary;
-  const status = displayQuoteDepth?.freshness.status;
+  const isReplay = useReplaySnapshot;
+  const displayQuoteDepth = isPreview
+    ? applyQuoteDepthPreview(quoteDepth, activePreviewMode)
+    : useReplaySnapshot
+      ? replayDisplayQuote
+      : quoteDepth;
+  const streamDepth =
+    !isPreview &&
+    !isReplay &&
+    quoteStream !== null &&
+    (quoteDepth === null || quoteStream.stock_id === quoteDepth.stock_id) &&
+    quoteStream.status === "live" &&
+    !quoteStream.is_stale &&
+    quoteStream.capability_status.depth === "available" &&
+    quoteStream.depth !== null &&
+    !quoteStream.depth.is_stale
+      ? quoteStream.depth
+      : null;
+  const status = streamDepth?.freshness_status ?? displayQuoteDepth?.freshness.status;
   const phaseLabel = displayQuoteDepth?.phase_label ?? "五檔";
-  const bidLevels = displayQuoteDepth?.bid_levels ?? [];
-  const askLevels = displayQuoteDepth?.ask_levels ?? [];
+  const bidLevels: TaiwanStockQuoteDepthLevel[] = streamDepth
+    ? streamDepth.bid_levels.map(({ level, price, size_lots }) => ({
+        level,
+        price,
+        size_lots,
+      }))
+    : displayQuoteDepth?.bid_levels ?? [];
+  const askLevels: TaiwanStockQuoteDepthLevel[] = streamDepth
+    ? streamDepth.ask_levels.map(({ level, price, size_lots }) => ({
+        level,
+        price,
+        size_lots,
+      }))
+    : displayQuoteDepth?.ask_levels ?? [];
   const showDepth = bidLevels.length > 0 || askLevels.length > 0;
-  const maxSize = depthMaxSize(displayQuoteDepth);
+  const maxSize = depthMaxSize(bidLevels, askLevels);
   const indicativePrice =
     displayQuoteDepth?.indicative_match_available &&
     isFiniteNumber(displayQuoteDepth.indicative_match_price)
@@ -827,8 +875,9 @@ export default function QuoteDepthPanel({
     displayQuoteDepth.previous_close !== 0
       ? (headlineChange! / displayQuoteDepth.previous_close) * 100
       : displayQuoteDepth?.change_pct;
-  const message =
-    displayQuoteDepth?.freshness.message ??
+  const message = streamDepth
+    ? `KGI 即時串流五檔 · ${formatEventClock(streamDepth.event_time)}`
+    : displayQuoteDepth?.freshness.message ??
     (loadState === "loading"
       ? "五檔資料載入中。"
       : loadState === "error"
@@ -836,7 +885,9 @@ export default function QuoteDepthPanel({
         : "尚無五檔資料。");
   const isError = loadState === "error" && !displayQuoteDepth;
   const footerStatus = displayQuoteDepth?.freshness.is_stale || showDepth ? message : phaseLabel;
-  const observationTimeLabel = displayQuoteDepth?.quote_time
+  const observationTimeLabel = streamDepth?.event_time
+    ? formatDateTime(streamDepth.event_time)
+    : displayQuoteDepth?.quote_time
     ? formatDateTime(displayQuoteDepth.quote_time)
     : displayQuoteDepth?.presentation_trade_date
       ? `交易日 ${displayQuoteDepth.presentation_trade_date}`
@@ -866,7 +917,7 @@ export default function QuoteDepthPanel({
               </span>
             ) : null}
             <span className="text-[11px] text-omi-text-muted">
-              {sourceLabel(displayQuoteDepth?.source)}
+              {streamDepth ? "KGI SUPER PY · STREAM" : sourceLabel(displayQuoteDepth)}
             </span>
           </div>
         </div>
@@ -882,62 +933,53 @@ export default function QuoteDepthPanel({
 
       {activePreviewMode === null ? (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-y border-omi-border-subtle py-2">
-          <div className="inline-flex border border-omi-border bg-omi-surface-subtle p-0.5">
+          <div className="grid w-full max-w-[18rem] grid-cols-2 border border-omi-border bg-omi-surface-subtle p-0.5">
             <button
               type="button"
               data-testid="quote-depth-mode-live"
+              aria-pressed={viewMode === "live"}
               onClick={() => setViewSelection({ key: viewKey, mode: "live" })}
               className={[
-                "h-7 px-2.5 text-xs font-semibold transition",
+                "h-7 px-2.5 text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-omi-info",
                 viewMode === "live"
                   ? "bg-omi-control text-omi-text-inverse"
                   : "text-omi-text-muted hover:bg-omi-surface",
               ].join(" ")}
             >
-              即時
+              即時成交
             </button>
             <button
               type="button"
               data-testid="quote-depth-mode-replay"
-              disabled={!replayAvailable}
+              aria-pressed={viewMode === "replay"}
               onClick={() => setViewSelection({ key: viewKey, mode: "replay" })}
               className={[
-                "h-7 px-2.5 text-xs font-semibold transition",
+                "h-7 px-2.5 text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-omi-info",
                 viewMode === "replay"
                   ? "bg-omi-control text-omi-text-inverse"
                   : "text-omi-text-muted hover:bg-omi-surface",
-                !replayAvailable
-                  ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                  : "",
               ].join(" ")}
             >
-              試撮快照
+              試撮
             </button>
           </div>
           <span className="text-[11px] text-omi-text-muted" data-testid="quote-depth-replay-coverage">
             {replayLoadState === "loading"
               ? "快照索引讀取中"
               : replayAvailable
-                ? `${quoteReplay?.trade_date ?? "-"} · ${quoteReplay?.captured_count ?? 0}/${
-                    quoteReplay?.required_count ?? 0
-                  } slots`
+                ? `${quoteReplay?.trade_date ?? "-"} · ${replayAuctionSnapshots.length} 筆試撮快照`
                 : "目前標的無試撮快照"}
           </span>
         </div>
       ) : null}
 
       <div
-        className={[
-          "mt-3 grid gap-3",
-          showSummaryColumn
-            ? "lg:grid-cols-[minmax(0,2fr)_minmax(13rem,1fr)] lg:items-start"
-            : "",
-        ].join(" ")}
+        className="mt-3 grid gap-3 lg:grid-cols-[minmax(18rem,0.88fr)_minmax(22rem,1.12fr)] lg:items-stretch"
         data-testid="quote-depth-content"
       >
-        <div className="min-w-0" data-testid="quote-depth-book-column">
+        <div className="h-[18rem] min-w-0" data-testid="quote-depth-book-column">
           {showDepth ? (
-            <div className="grid grid-cols-2 gap-2" data-testid="quote-depth-book">
+            <div className="grid h-full grid-cols-2 gap-2" data-testid="quote-depth-book">
               <DepthSide
                 levels={bidLevels}
                 maxSize={maxSize}
@@ -971,16 +1013,28 @@ export default function QuoteDepthPanel({
           ) : null}
         </div>
 
-        {showSummaryColumn && displayQuoteDepth ? (
-          <div className="min-w-0 space-y-3" data-testid="quote-depth-summary-column">
-            {showAuctionSummary ? (
-              <QuoteAuctionSummary quoteDepth={displayQuoteDepth} isPreview={isPreview} />
-            ) : null}
-            {showVolumeSummary ? (
-              <QuoteVolumeSummary quoteDepth={displayQuoteDepth} isPreview={isPreview} />
-            ) : null}
-          </div>
-        ) : null}
+        <div className="h-[18rem] min-w-0" data-testid="quote-depth-summary-column">
+          {isAuctionView ? (
+            <AuctionDetailsPanel
+              quoteDepth={displayQuoteDepth}
+              quoteStream={quoteStream}
+              loadState={quoteStreamLoadState}
+              isReplay={isReplay}
+              isPreview={isPreview}
+              replayLabel={
+                isReplay
+                  ? `${quoteReplay?.trade_date ?? "-"} · ${replayAuctionSnapshots.length} 筆`
+                  : null
+              }
+              replaySnapshots={replayAuctionSnapshots}
+            />
+          ) : (
+            <RecentTradesPanel
+              quoteStream={quoteStream}
+              loadState={quoteStreamLoadState}
+            />
+          )}
+        </div>
       </div>
 
       {displayQuoteDepth ? (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -65,8 +66,12 @@ COMPLETED_SESSION_SEMANTICS = {
     "final_snapshot",
 }
 OBSERVATION_TIME_KEYS = {
+    "end_at",
+    "event_at",
     "event_time",
     "quote_time",
+    "selected_event_at",
+    "start_at",
     "to_time",
     "bar_time",
     "time",
@@ -77,13 +82,49 @@ PRICE_KEYS = {
     "price",
     "latest_price",
     "last_price",
+    "last_trade_price",
     "close",
     "close_price",
+    "open_price",
+    "high_price",
+    "low_price",
     "best_bid_price",
     "best_ask_price",
     "bid",
     "ask",
 }
+
+
+def _numeric_observation(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _has_price_observation(value: Any, *, depth: int = 0) -> bool:
+    if depth > 6:
+        return False
+    if isinstance(value, dict):
+        if any(
+            key in value and _numeric_observation(value.get(key))
+            for key in PRICE_KEYS
+        ):
+            return True
+        return any(
+            _has_price_observation(child, depth=depth + 1)
+            for child in value.values()
+            if isinstance(child, (dict, list))
+        )
+    if isinstance(value, list):
+        return any(
+            _has_price_observation(child, depth=depth + 1)
+            for child in value[-100:]
+            if isinstance(child, (dict, list))
+        )
+    return False
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -218,10 +259,7 @@ def _has_observation(value: Any, *, depth: int = 0) -> bool:
     if depth > 6:
         return False
     if isinstance(value, dict):
-        if any(
-            key in value and isinstance(value.get(key), (int, float))
-            for key in PRICE_KEYS
-        ):
+        if _has_price_observation(value, depth=depth):
             return True
         for key in ("points", "bars", "series"):
             child = value.get(key)
@@ -646,13 +684,7 @@ def classify_observation(
         "last_trade_available",
         "actual_trade_price_available",
     )
-    observed_price_available = bool(
-        isinstance(value, dict)
-        and any(
-            value.get(key) is not None
-            for key in ("last_trade_price", "last_price", "latest_price", "price")
-        )
-    )
+    observed_price_available = _has_price_observation(value)
     actual_price_usable = bool(
         explicit_actual_price_usable
         if explicit_actual_price_usable is not None

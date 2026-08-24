@@ -102,7 +102,7 @@ def ensure_symbol_exists(db: Session, market: str, symbol: str) -> str | None:
 
 
 def average_cost(holding: PortfolioHolding) -> float | None:
-    if holding.quantity <= 0:
+    if holding.quantity <= 0 or holding.cost_amount is None:
         return None
     return holding.cost_amount / holding.quantity
 
@@ -124,6 +124,7 @@ def position_context_for_holding(holding: PortfolioHolding) -> dict[str, Any]:
         "quantity": holding.quantity,
         "cost_amount": holding.cost_amount,
         "currency": holding.currency,
+        "holding_source": holding.source,
         "strategy_horizon": holding.strategy_horizon,
         "opened_at": holding.opened_at.isoformat() if isinstance(holding.opened_at, date) else None,
     }
@@ -140,6 +141,8 @@ def holding_to_dict(holding: PortfolioHolding) -> dict[str, Any]:
         "cost_amount": holding.cost_amount,
         "currency": holding.currency,
         "average_cost": average_cost(holding),
+        "source": holding.source,
+        "source_updated_at": holding.source_updated_at,
         "note": holding.note,
         "tags": holding.tags,
         "strategy_horizon": holding.strategy_horizon,
@@ -169,6 +172,8 @@ def create_holding(db: Session, payload: PortfolioHoldingCreate) -> dict[str, An
         strategy_horizon=payload.strategy_horizon,
         opened_at=payload.opened_at,
         is_active=payload.is_active,
+        source="manual",
+        source_updated_at=None,
     )
     db.add(holding)
     try:
@@ -232,6 +237,10 @@ def update_holding(
 
     if "currency" in update_data and update_data["currency"] is not None:
         update_data["currency"] = update_data["currency"].strip().upper()
+
+    if {"quantity", "cost_amount", "currency"} & update_data.keys():
+        holding.source = "manual"
+        holding.source_updated_at = None
 
     for key, value in update_data.items():
         setattr(holding, key, value)

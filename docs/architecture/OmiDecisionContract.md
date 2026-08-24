@@ -278,7 +278,7 @@ Registry 目前涵蓋：
   technical structure、source health、data freshness。
 - 台股：三大法人、融資券、券商分點、股權分散、營收、財報、跨市場 context、
   market breadth。
-- 美股：quote/intraday、daily price、SEC company facts。
+- 美股：quote/intraday、daily price、technical indicators／structure、SEC company facts；technical quality會保留raw price basis、corporate-action coverage、warm-up與decision-usability限制。
 - Crypto：ticker/quote、OHLCV、order book、derivatives。
 
 缺資料或 stale 時，backend 只為該 capability 建立一個 deterministic

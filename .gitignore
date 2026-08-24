@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+.venv-kgi/
+errMsg.ini
 venv/
 env/
 
@@ -41,6 +43,8 @@ Thumbs.db
 .codex/*
 !.codex/agents/
 !.codex/agents/*.toml
+.codex-remote-attachments/
+/source-checkpoint.json
 
 # Node / Next.js future frontend
 node_modules/

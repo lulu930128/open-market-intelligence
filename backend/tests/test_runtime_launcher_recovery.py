@@ -91,3 +91,31 @@ def test_launcher_rebuilds_frontend_after_bounded_backend_port_reselection() -> 
     assert "Stop-FrontendService" in recovery_body
     assert "Start-Backend" in recovery_body
     assert "Start-Frontend" in recovery_body
+
+
+def test_launcher_uses_stable_frontend_bundling_and_bounded_health_recovery() -> None:
+    launcher_text = LAUNCHER.read_text(encoding="utf-8-sig")
+
+    assert '$script:FrontendDevBundlerArgument = "--webpack"' in launcher_text
+    assert "$script:FrontendHealthRecoveryGraceSeconds = 30" in launcher_text
+    assert "$script:FrontendHealthStableResetSeconds = 600" in launcher_text
+    assert "$script:MaxFrontendHealthRecoveryAttempts = 1" in launcher_text
+
+    start_body = launcher_text.split("function Start-Frontend", 1)[1].split(
+        "function Start-Services", 1
+    )[0]
+    assert "$script:FrontendDevBundlerArgument" in start_body
+    assert "-Arguments $frontendArguments" in start_body
+
+    recovery_body = launcher_text.split(
+        "function Invoke-FrontendHealthRecovery", 1
+    )[1].split("function Stop-Services", 1)[0]
+    assert "Stop-FrontendService" in recovery_body
+    assert "Clear-FrontendDevOutput" in recovery_body
+    assert "Start-Frontend" in recovery_body
+
+    timer_body = launcher_text.split("$script:Timer.add_Tick({", 1)[1].split(
+        "$script:ActivationTimer =", 1
+    )[0]
+    assert "$frontendProc -and (-not $script:IsPackagedRelease)" in timer_body
+    assert "Invoke-FrontendHealthRecovery" in timer_body

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 import zipfile
 
@@ -281,6 +281,8 @@ class USSec13FEngineTests(unittest.TestCase):
 
     def test_authenticated_mapping_paces_batches(self) -> None:
         cusips = [f"{index:09d}" for index in range(101)]
+        clock = Mock()
+        clock.monotonic.side_effect = [0.0, 0.1, 0.26]
 
         def response_for(jobs, **_kwargs):
             return (
@@ -298,11 +300,7 @@ class USSec13FEngineTests(unittest.TestCase):
                 "app.us_market.ownership_13f_mapping.fetch_openfigi_mappings",
                 side_effect=response_for,
             ) as fetch,
-            patch(
-                "app.us_market.ownership_13f_mapping.time.monotonic",
-                side_effect=[0.0, 0.1, 0.26],
-            ),
-            patch("app.us_market.ownership_13f_mapping.time.sleep") as sleep,
+            patch("app.us_market.ownership_13f_mapping.time", clock),
         ):
             result = sync_13f_identifier_mappings(
                 self.db,
@@ -311,12 +309,14 @@ class USSec13FEngineTests(unittest.TestCase):
             )
 
         self.assertEqual(fetch.call_count, 2)
-        sleep.assert_called_once_with(0.16)
+        clock.sleep.assert_called_once_with(0.16)
         self.assertEqual(result["processed_count"], 101)
         self.assertEqual(result["status_counts"], {"unmapped": 101})
         self.assertEqual(result["retry_count"], 0)
 
     def test_mapping_retries_one_rate_limited_batch(self) -> None:
+        clock = Mock()
+        clock.monotonic.return_value = 0.0
         context = ProviderRequestContext(
             market="us",
             provider="openfigi",
@@ -348,11 +348,7 @@ class USSec13FEngineTests(unittest.TestCase):
                 "app.us_market.ownership_13f_mapping.fetch_openfigi_mappings",
                 side_effect=[rate_limited, success],
             ) as fetch,
-            patch(
-                "app.us_market.ownership_13f_mapping.time.monotonic",
-                return_value=0.0,
-            ),
-            patch("app.us_market.ownership_13f_mapping.time.sleep") as sleep,
+            patch("app.us_market.ownership_13f_mapping.time", clock),
         ):
             result = sync_13f_identifier_mappings(
                 self.db,
@@ -361,7 +357,7 @@ class USSec13FEngineTests(unittest.TestCase):
             )
 
         self.assertEqual(fetch.call_count, 2)
-        sleep.assert_called_once_with(2.0)
+        clock.sleep.assert_called_once_with(2.0)
         self.assertEqual(result["processed_count"], 1)
         self.assertEqual(result["retry_count"], 1)
 

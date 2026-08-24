@@ -358,6 +358,11 @@ def _compact_result(value: Any) -> dict[str, Any]:
             summary["latest_point"] = points[-1]
         if "point_count" not in summary:
             summary["point_count"] = len(value["points"])
+    resolved_market_data = value.get("_resolved_market_data")
+    if isinstance(resolved_market_data, dict):
+        summary["_resolved_market_data"] = agentic_common._json_value(
+            resolved_market_data
+        )
     if "metrics" in value and "metric_count" not in summary and isinstance(value["metrics"], list):
         summary["metric_count"] = len(value["metrics"])
     return summary
@@ -614,10 +619,17 @@ def _execute_tool(
         session_scope = str(args.get("session_scope") or "regular").strip().lower()
         if session_scope not in {"regular", "extended", "all"}:
             session_scope = "regular"
+        interval = str(
+            args.get("interval") or args.get("intraday_interval") or "1m"
+        ).strip().lower()
+        if interval not in {"1m", "5m", "15m", "30m", "1h", "4h"}:
+            interval = "1m"
         return us_market_service.get_us_intraday_trend(
             symbol=symbol,
             session_scope=session_scope,
+            interval=interval,
             db=db,
+            persist_history=False,
         )
 
     if tool_name == "us.refresh_daily_price":

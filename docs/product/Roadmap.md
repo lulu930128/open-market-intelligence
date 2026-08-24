@@ -1,57 +1,161 @@
-# Roadmap
+﻿# Roadmap
 
-本 roadmap 只描述產品化方向與近期技術債收斂順序；不是承諾日期表。若任務和這裡衝突，先回到 `ProductVision.md`、`OperatingModel.md` 與 repo `AGENTS.md` 判斷。
+本 Roadmap 描述 OMI 的長期技術收斂順序，不是日期承諾表。
+
+若任務與本文件衝突，先回到 `ProductVision.md`、`OperatingModel.md`、`QualityBar.md` 與 repo `AGENTS.md` 判斷。
 
 ## 北極星
 
-OMI 要成為台股優先、本機優先、可驗證的市場研究工作台。AI decision core 應能基於可信 evidence 產出條件化決策輔助，並清楚揭露資料限制。
+OMI 要成為本機優先、可驗證、可跨 provider 的市場研究工作台。
 
-## 近期主線
+台股是 primary / reference market。
+美股是 first-class research market。
+其他市場逐步建立在同一套 Market Data Foundation 上。
 
-1. 固定產品主線
-   讓 README、AGENTS、`docs/product/` 與 agent-run 文件對齊：台股核心、其他市場 context layer、非自動交易、freshness/partial/missing 可見、backend 擁有市場邏輯。
+AI decision 必須建立在可信 evidence 之上，而不是靠 provider-specific shortcut 或 consumer-side fallback。
 
-2. 完成 market payload contract
-   將 `market_data_params`、`payload_level`、slot envelope、slot status、consumer rules 與 backend projection 穩定化。MCP、Frontend、Kuro 都應只消費 backend contract，不自行補資料。
+## M1 — Market Data Foundation
 
-3. 強化 AI decision core
-   確保回答包含情境、回測區、進場條件、失效條件、風險處理、反證與資料限制。缺資料時先補資料或明確回報缺口。
+建立 provider-neutral 市場資料地基。
 
-4. 收斂 frontend 資訊架構
-   逐步把 dashboard 大元件中的純 helper、routing/state、slot rendering、market type 與 API contract 抽到 shared modules。保留台股為設計基準，避免每加一個市場就複製一套互不相容 UI。
+目標：
 
-5. 補齊跨市場 context layer
-   以台股 contract 為基準，逐步讓 US/JP/KR/crypto 的 compact evidence、slots、freshness 與 payload trimming 對齊。市場特有資料要保留差異，但用共同 envelope 對外呈現。
+- Canonical Observation contract。
+- InstrumentKey / SourceLineage。
+- Quote / Depth / Auction / Bar / Trading Status。
+- Provider Capability Status。
+- Resolver / Control Plane。
+- `cache_only / prefer_live / require_live / completed_session`。
+- Provider Health / Dataset Health / Resolved Evidence Health。
+- Dataset Registry v1。
+- Capability `advertised => projection exists` contract test。
 
-## Milestone
+遷移原則：
 
-### M1：產品基線可引用
+- 不 Big Bang rewrite。
+- 新 canonical path 先 shadow。
+- outward API 第一階段維持 compatibility。
+- feature flag cutover。
 
-- `docs/product/` 有非空且一致的產品方向。
-- 架構變更前可用文件判斷是否偏離主線。
-- 方向保護規則能明確反駁不穩定需求。
+## M2 — TW / US Market Data Integration
 
-### M2：Payload Contract 可測
+讓台股、美股真正共用 Foundation。
 
-- Backend compact evidence 的 slot envelope 有 schema invariant tests。
-- `payload_level` 對大型 payload 有明確裁切行為。
-- Public slim result 能投影 slots，consumer 不需要讀 backend internals。
+### Taiwan
 
-### M3：Frontend Shell 可維護
+- KGI TW 直接輸出 Canonical Observation。
+- TWSE MIS 直接輸出 Canonical Observation。
+- 移除新功能對 KGI->MIS masquerading 的依賴。
+- Viewer Lease / Research Lease。
+- preopen / opening handoff / regular / close acceptance。
+- depth / auction / quote semantics。
 
-- 市場 routing/type/helper 不依附 sidebar 或 dashboard 大元件。
-- Slot rendering 與資料 completeness 呈現有共用規則。
-- Market dashboard 的新增市場成本下降，且不引入前端市場邏輯。
+### United States
 
-### M4：跨市場資料成熟
+- KGI US quote integration。
+- Yahoo / AlphaVantage canonical alignment。
+- regular / premarket / after-hours semantics。
+- Level 1 contract。
+- US provider policy / fallback。
+- 美股正式 first-class research outward support。
 
-- US/JP/KR/crypto 至少具備可比較的 compact evidence 與 freshness。
-- Planned/missing/not_applicable 能被 UI 與 external consumer 正確呈現。
-- 重要 provider failure 有 source health 或 provider events 可追蹤。
+2026-08-23 source checkpoint：US capability truth gate、Yahoo／Alpha Vantage
+canonical adapters、market-owned provider descriptors、bounded shadow／compare 與
+neutral resolved projection seam 已完成；production canary／on、KGI US live 與
+consumer cutover仍未驗收。
+
+## M3 — Data Reliability / Trading Status / Repair
+
+處理「知道壞了但補不回來」的資料生命週期問題。
+
+目標：
+
+- Instrument Trading Status。
+- Market Session 與 Trading Status 分離。
+- TW daily price repair owner。
+- US bounded refresh owner。
+- expected date + trading eligibility。
+- source-health current/request/persisted convergence。
+- TAIEX/TPEX live index reliability。
+- stale / partial / not-applicable semantics。
+- Dataset Registry 擴充到 production datasets。
+
+## M4 — Account / Portfolio Plane
+
+將私人帳戶正式從 Market Data 分離。
+
+目標：
+
+- KGI Account capability diagnostics。
+- 503 / unavailable semantics。
+- PositionObservation。
+- CostBasisObservation。
+- CashObservation。
+- partial / complete sync。
+- destructive replace guard。
+- unknown cost integrity。
+- Portfolio Valuation 使用 Market Data Resolver + FX。
+- legacy cost semantics audit。
+
+不以「帳戶 API 成功」作為 Market Data readiness 條件。
+
+## M5 — Research / Decision Alignment
+
+在 Foundation 穩定後再收斂研究層。
+
+目標：
+
+- Shared Technical Engine 使用 Canonical OHLCV。
+- US `technical.structure` 真正實作或 truthful disable。
+- TW/US technical contract 對齊。
+- ADR / cross-market relation 雙向 resolver。
+- fundamentals provider limitations 清楚化。
+- evidence / capability readiness 與 Decision v4 對齊。
+- scenario / counter-evidence / risk 只使用 resolved evidence。
+
+## M6 — Consumer / UX Convergence
+
+讓 UI / MCP / Kuro 完全只依賴 backend-owned contract。
+
+目標：
+
+- Frontend 不自行 provider/freshness inference。
+- MCP research lease 由 backend 取得。
+- Kuro 使用同一 evidence/decision contract。
+- TW / US detail panel 共用資訊架構。
+- 資料品質與 provider/fallback 狀態清楚但不佔滿 UI。
+- mobile / desktop 穩定。
+
+## M7 — Secondary Markets
+
+JP / KR / Crypto / Resource 逐步遷移到共同 Foundation。
+
+原則：
+
+- 不複製 provider selection architecture。
+- 不為了「所有市場平等」犧牲 TW/US production quality。
+- 先 canonical / freshness / health，再擴充 AI feature。
 
 ## 暫緩項目
 
-- 自動交易與下單。
-- 把其他市場升級成與台股平等的主線產品。
-- 全市場、無邊界、無 freshness policy 的大量 backfill。
-- 未定義 trust/budget policy 的新聞、事件、付費資料或 AI memory 自動寫入。
+- AI 自主交易。
+- 無界全市場 KGI subscription。
+- 無 freshness policy 的大量 backfill。
+- 未定義 trust/budget 的付費資料與自動寫入。
+- 為單一 provider 重寫 public contract。
+- Foundation 未穩定前大規模 frontend redesign。
+- Foundation 未穩定前把所有歷史 service 一次搬家。
+
+## Milestone 完成原則
+
+每一 Milestone 都必須有：
+
+- 明確 owner。
+- contract / schema。
+- regression tests。
+- runtime/data smoke。
+- failure semantics。
+- rollback / feature flag（若涉及 cutover）。
+- current docs 同步。
+
+「看起來能跑」不是完成條件。

@@ -131,7 +131,7 @@ def list_us_daily_prices(
     return ordered_rows[offset : offset + limit]
 
 
-def _list_us_ohlc_source_rows(
+def list_us_ohlc_source_rows(
     db: Session,
     *,
     symbol: str,
@@ -147,3 +147,57 @@ def _list_us_ohlc_source_rows(
         offset=0,
     )
     return sorted(rows, key=lambda row: row.trade_date)
+
+
+def list_us_ohlc_source_rows_for_symbols(
+    db: Session,
+    *,
+    symbols: list[str],
+    from_date: date,
+    to_date: date,
+) -> dict[str, list[USDailyPrice]]:
+    """Load bounded provider rows for multiple canonical symbols in one query."""
+
+    normalized_symbols = list(
+        dict.fromkeys(
+            normalized
+            for symbol in symbols
+            if (normalized := normalize_us_symbol(symbol))
+        )
+    )
+    if len(normalized_symbols) > 500:
+        raise ValueError("symbols must contain at most 500 canonical symbols")
+    if not normalized_symbols:
+        return {}
+    candidate_owner: dict[str, str] = {}
+    for normalized_symbol in normalized_symbols:
+        for candidate in us_symbol_storage_candidates(normalized_symbol):
+            candidate_owner.setdefault(candidate, normalized_symbol)
+    rows = (
+        db.query(USDailyPrice)
+        .filter(USDailyPrice.symbol.in_(tuple(candidate_owner)))
+        .filter(USDailyPrice.trade_date >= from_date)
+        .filter(USDailyPrice.trade_date <= to_date)
+        .order_by(USDailyPrice.trade_date.asc())
+        .all()
+    )
+    canonical_rows: dict[str, dict[tuple[str, date], USDailyPrice]] = {
+        symbol: {} for symbol in normalized_symbols
+    }
+    for row in rows:
+        owner = candidate_owner.get(row.symbol)
+        if owner is None:
+            continue
+        key = (row.provider, row.trade_date)
+        current = canonical_rows[owner].get(key)
+        if current is None or (row.symbol == owner and current.symbol != owner):
+            canonical_rows[owner][key] = row
+    return {
+        symbol: sorted(items.values(), key=lambda row: row.trade_date)
+        for symbol, items in canonical_rows.items()
+    }
+
+
+# Compatibility alias for older internal callers. New code uses the public,
+# cache-only read name so research modules do not depend on private helpers.
+_list_us_ohlc_source_rows = list_us_ohlc_source_rows

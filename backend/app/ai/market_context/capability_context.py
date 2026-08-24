@@ -5,6 +5,7 @@ from typing import Any
 
 from app.ai import capability_contract
 from app.ai.evidence_passport import build_evidence_passport
+from app.config import settings
 
 
 CAPABILITIES: tuple[dict[str, Any], ...] = (
@@ -271,6 +272,26 @@ def read_capability_status(
         params.get("scope_type") or params.get("target_type") or ""
     ).strip().lower()
     rows = [dict(item) for item in CAPABILITIES]
+    if settings.omi_atlas_shadow_enabled:
+        for row in rows:
+            if row.get("id") != "news_events":
+                continue
+            row.update(
+                {
+                    "status": "connected_shadow_readonly",
+                    "provider": "Open Intel Atlas",
+                    "cadence": "atlas_scheduler_owned",
+                    "outward_target": "stock,us_stock,market",
+                    "payload_ref": "evidence.data.news.events",
+                    "notes": (
+                        "Local REST shadow context only; Atlas owns source refresh, "
+                        "event identity, attribution, deduplication, coverage, and freshness."
+                    ),
+                }
+            )
+            row.pop("blocking_reason", None)
+            row.pop("next_fill", None)
+            break
     if requested_id:
         rows = [row for row in rows if row["id"].lower() == requested_id]
     if market_filter:

@@ -1085,6 +1085,202 @@ function quoteDepthResponse(stockId: string) {
   };
 }
 
+function usMarketResearchResponse(symbol: string) {
+  const quality = {
+    status: "partial",
+    facts_usable: true,
+    decision_usable: false,
+    bar_count: 220,
+    facts_minimum_bars: 60,
+    decision_minimum_bars: 200,
+    corporate_action_coverage: "unknown",
+    freshness_status: "current",
+    reason_codes: ["CORPORATE_ACTION_COVERAGE_UNKNOWN"],
+  };
+
+  return {
+    kind: "us_market_research",
+    schema_version: "omi.us_market.research.v1",
+    market: "US",
+    symbol,
+    status: "partial",
+    as_of: "2026-08-21",
+    technical_indicators: {
+      kind: "technical_indicators",
+      schema_version: "omi.technical_indicators.v1",
+      algorithm_version: "playwright.fixture.v1",
+      market: "US",
+      symbol,
+      timeframe: "1d",
+      price_basis: "unadjusted",
+      status: "partial",
+      as_of: "2026-08-21",
+      bar_count: 220,
+      current: {
+        time: "2026-08-21",
+        close: 226.8,
+        change_pct: 0.42,
+        volume: 48_000_000,
+        moving_averages: { ma5: 224.5, ma20: 219.3, ma60: 211.7 },
+        price_vs_ma20_pct: 3.42,
+        volume_vs_ma20_pct: 8.1,
+      },
+      quality,
+    },
+    technical_structure: {
+      kind: "technical_structure",
+      schema_version: "omi.technical_structure.v1",
+      status: "partial",
+      as_of: "2026-08-21",
+      selected_title: "Bullish stack",
+      trend_state: "bullish_stack",
+      breakout_state: "inside_range",
+      metrics: {
+        price_vs_ma20_pct: 3.42,
+        volume_vs_ma20_pct: 8.1,
+        day_change_pct: 0.42,
+      },
+      quality,
+    },
+    corporate_action_coverage: {
+      status: "unknown",
+      observed_event_count: 0,
+      completeness_checkpoint: null,
+    },
+    market_coverage: { full_market_ready: false },
+    missing: ["corporate_action_completeness"],
+    warnings: ["Playwright fixture keeps decision usability fail-closed."],
+  };
+}
+
+function realtimeQuoteStreamResponse(stockId: string) {
+  const price = stockId === "2303" ? 52.4 : 1_015;
+  return {
+    kind: "taiwan_realtime_quote_stream",
+    contract_version: "omi.tw.realtime_stream.v2",
+    stock_id: stockId,
+    provider: "kgi_superpy",
+    source: "kgi_superpy_quote_all",
+    status: "live",
+    active_leases: 1,
+    sequence: 2,
+    generated_at: "2026-06-15T01:30:02Z",
+    event_time: "2026-06-15T09:30:02+08:00",
+    received_at: "2026-06-15T01:30:02Z",
+    session_phase: "regular",
+    selection_reason: "active_kgi_viewer_or_acceptance_lease",
+    fallback_used: false,
+    is_stale: false,
+    capability_status: {
+      recent_trades: "available",
+      auction_observations: "empty",
+      minute_kbars: "available",
+      depth_metrics: "available",
+      depth: "available",
+      latency: "available",
+    },
+    limits: {
+      recent_trades: 60,
+      auction_observations: 120,
+      minute_kbars: 120,
+    },
+    recent_trades: [
+      {
+        event_id: `trade:${stockId}:2`,
+        sequence: 2,
+        event_time: "2026-06-15T09:30:02+08:00",
+        received_at: "2026-06-15T01:30:02Z",
+        manager_ingested_at: "2026-06-15T01:30:02.010Z",
+        session_phase: "regular",
+        provider_delay_raw: 10,
+        provider_delay_unit: "unknown",
+        price,
+        volume_lots: 12,
+        total_volume_lots: 12_000,
+        amount: price * 12,
+        price_direction: "up",
+        direction_semantics: "price_change_from_previous_observed_trade",
+      },
+    ],
+    auction_observations: [],
+    minute_kbars: [],
+    depth_metrics: {
+      event_time: "2026-06-15T09:30:02+08:00",
+      received_at: "2026-06-15T01:30:02Z",
+      best_bid_price: price - 0.1,
+      best_ask_price: price + 0.1,
+      spread: 0.2,
+      spread_pct: (0.2 / price) * 100,
+      top5_bid_volume_lots: 500,
+      top5_ask_volume_lots: 450,
+      top5_imbalance: 50 / 950,
+      top5_imbalance_formula:
+        "(bid_volume_lots-ask_volume_lots)/(bid_volume_lots+ask_volume_lots)",
+      diff_bid_volume_lots: [5, 2, 0, -1, 3],
+      diff_ask_volume_lots: [-2, 1, 0, 2, -3],
+      simtrade: false,
+    },
+    depth: {
+      provider: "kgi_superpy",
+      source: "kgi_superpy_quote_all",
+      capability: "level_5",
+      state: "available",
+      event_time: "2026-06-15T09:30:02+08:00",
+      received_at: "2026-06-15T01:30:02Z",
+      manager_ingested_at: "2026-06-15T01:30:02.010Z",
+      stream_sampled_at: "2026-06-15T01:30:02.020Z",
+      freshness_status: "live",
+      is_stale: false,
+      age_seconds: 0.02,
+      bid_levels: Array.from({ length: 5 }, (_, index) => ({
+        level: index + 1,
+        price: price - 0.1 * (index + 1),
+        price_state: "limit_price",
+        size_shares: (100 - index * 10) * 1_000,
+        size_lots: 100 - index * 10,
+      })),
+      ask_levels: Array.from({ length: 5 }, (_, index) => ({
+        level: index + 1,
+        price: price + 0.1 * (index + 1),
+        price_state: "limit_price",
+        size_shares: (120 - index * 10) * 1_000,
+        size_lots: 120 - index * 10,
+      })),
+    },
+    latency: {
+      event_at: "2026-06-15T09:30:02+08:00",
+      bridge_received_at: "2026-06-15T01:30:02Z",
+      manager_ingested_at: "2026-06-15T01:30:02.010Z",
+      stream_sampled_at: "2026-06-15T01:30:02.020Z",
+      event_to_bridge_ms: 0,
+      bridge_to_manager_ms: 10,
+      manager_to_stream_ms: 10,
+      event_to_stream_ms: 20,
+      provider_delay_raw: 10,
+      provider_delay_unit: "unknown",
+      provider_delay_semantics: "provider_reported_raw_value_unit_not_verified",
+    },
+    diagnostic_counters: {
+      callback_count: 2,
+      baseline_only_count: 1,
+      cumulative_advanced_count: 1,
+      same_cumulative_count: 0,
+      decreasing_cumulative_count: 0,
+      missing_cumulative_count: 0,
+      invalid_cumulative_count: 0,
+      trade_addition_count: 1,
+      auction_addition_count: 0,
+      trade_signature_suppression_count: 0,
+      auction_signature_suppression_count: 0,
+      non_trade_suppression_count: 0,
+      trial_leak_count: 0,
+      cross_date_rejected_count: 0,
+    },
+    diagnostic_events: [],
+    warnings: [],
+  };
+}
+
 function emptyQuoteReplayResponse(stockId: string) {
   const requiredSlots = ["08:30", "08:50", "08:55", "08:58", "08:59"];
   return {
@@ -2345,6 +2541,55 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (path.endsWith("/market/realtime-quote-leases") && method === "POST") {
+      const payload = route.request().postDataJSON() as { stock_id?: string };
+      await fulfillJson(route, {
+        lease_id: `playwright-${payload.stock_id ?? "unknown"}`,
+        stock_id: payload.stock_id ?? "unknown",
+        provider: "kgi_superpy",
+        status: "live",
+        expires_in_seconds: 60,
+        fallback_source: "twse_mis_quote_depth",
+        message: "Playwright fixture lease",
+        error: null,
+      });
+      return;
+    }
+
+    const taiwanQuoteLeaseMatch = path.match(
+      /\/market\/realtime-quote-leases\/([^/]+)$/
+    );
+    if (taiwanQuoteLeaseMatch && method === "PATCH") {
+      const stockId = decodeURIComponent(taiwanQuoteLeaseMatch[1]).replace(
+        /^playwright-/,
+        ""
+      );
+      await fulfillJson(route, {
+        lease_id: decodeURIComponent(taiwanQuoteLeaseMatch[1]),
+        stock_id: stockId,
+        provider: "kgi_superpy",
+        status: "live",
+        expires_in_seconds: 60,
+        fallback_source: "twse_mis_quote_depth",
+        message: "Playwright fixture heartbeat",
+        error: null,
+      });
+      return;
+    }
+    if (taiwanQuoteLeaseMatch && method === "DELETE") {
+      await route.fulfill({ status: 204, body: "" });
+      return;
+    }
+
+    if (/\/market\/realtime-quotes\/[^/]+\/stream$/.test(path)) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Playwright uses snapshot fallback" }),
+      });
+      return;
+    }
+
     const taiwanQuoteDepthMatch = path.match(/\/market\/quote-depth\/([^/]+)$/);
     const taiwanQuoteReplayMatch = path.match(
       /\/market\/quote-depth\/([^/]+)\/replay$/
@@ -2552,6 +2797,19 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
         market: watchlistItem?.market ?? stockMaster.market,
         instrument_type: watchlistItem?.instrument_type ?? stockMaster.instrument_type,
       });
+      return;
+    }
+
+    const taiwanRealtimeQuoteMatch = path.match(
+      /\/market\/realtime-quotes\/([^/]+)$/
+    );
+    if (taiwanRealtimeQuoteMatch) {
+      await fulfillJson(
+        route,
+        realtimeQuoteStreamResponse(
+          decodeURIComponent(taiwanRealtimeQuoteMatch[1])
+        )
+      );
       return;
     }
 
@@ -3336,6 +3594,15 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 
     if (path.includes("/us-market/watchlists/items")) {
       await fulfillJson(route, usWatchlistItems);
+      return;
+    }
+
+    const usMarketResearchMatch = path.match(/\/us-market\/research\/([^/]+)$/);
+    if (usMarketResearchMatch) {
+      await fulfillJson(
+        route,
+        usMarketResearchResponse(decodeURIComponent(usMarketResearchMatch[1]))
+      );
       return;
     }
 
@@ -4682,12 +4949,14 @@ test.describe("OMI dashboard smoke", () => {
 
     await expect(quoteDepthPanel).toContainText("52.4");
     await expect(chartCard).toContainText("成交量(股)");
-    await expect(page.getByTestId("quote-volume-last-trade")).toContainText("320 張");
-    await expect(page.getByTestId("quote-volume-cumulative")).toContainText("12,000 張");
-    await expect(page.getByTestId("quote-volume-official")).toContainText("12,300 張");
-    await expect(page.getByTestId("quote-volume-status")).toHaveText("口徑不同");
-    await expect(page.getByTestId("quote-depth-bid-empty")).toContainText("目前無有效買價");
-    await expect(page.getByTestId("quote-depth-mode-replay")).toBeDisabled();
+    await expect(page.getByTestId("quote-volume-summary")).toHaveCount(0);
+    await expect(page.getByTestId("quote-recent-trades")).toContainText("即時成交");
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("52.4");
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("12 張");
+    await expect(page.getByTestId("quote-depth-bid-empty")).toHaveCount(0);
+    await expect(page.getByTestId("quote-depth-book-column")).toContainText("52.3");
+    await expect(page.getByTestId("quote-depth-mode-replay")).toBeEnabled();
+    await expect(page.getByTestId("quote-depth-mode-replay")).toHaveText("試撮");
     await expect(page.getByTestId("quote-depth-replay-coverage")).toHaveText(
       "目前標的無試撮快照"
     );
@@ -4701,7 +4970,7 @@ test.describe("OMI dashboard smoke", () => {
         return (
           Math.abs(bookBox.y - summaryBox.y) <= 1 &&
           summaryBox.x >= bookBox.x + bookBox.width &&
-          bookBox.width > summaryBox.width
+          summaryBox.width > bookBox.width
         );
       })
       .toBe(true);
@@ -4755,6 +5024,16 @@ test.describe("OMI dashboard smoke", () => {
         message: "Captured auction snapshot",
       },
     };
+    const closingAuctionQuote = {
+      ...auctionQuote,
+      session_phase: "closing_auction",
+      instrument_phase: "closing_auction",
+      phase_label: "收盤撮合",
+      quote_time: "2026-06-15T13:28:55+08:00",
+      fetched_at: "2026-06-15T13:28:56+08:00",
+      indicative_match_price: 1_015,
+      indicative_match_volume_lots: 3_120,
+    };
     await mockOmiApi(page, {
       apiResponder: ({ path }) => {
         if (path.endsWith("/market/quote-depth/2330/replay")) {
@@ -4764,12 +5043,12 @@ test.describe("OMI dashboard smoke", () => {
               stock_id: "2330",
               trade_date: "2026-06-15",
               timezone: "UTC+08:00",
-              required_slots: ["08:59", "09:00"],
+              required_slots: ["08:59", "13:28"],
               required_count: 2,
-              captured_count: 1,
-              coverage_ratio: 0.5,
-              complete: false,
-              missing_slots: ["09:00"],
+              captured_count: 2,
+              coverage_ratio: 1,
+              complete: true,
+              missing_slots: [],
               snapshots: [
                 {
                   capture_slot: "08:59",
@@ -4782,7 +5061,17 @@ test.describe("OMI dashboard smoke", () => {
                   error: null,
                   quote: auctionQuote,
                 },
-                { capture_slot: "09:00", status: "missing", quote: null },
+                {
+                  capture_slot: "13:28",
+                  status: "captured",
+                  scheduled_at: "2026-06-15T13:28:00+08:00",
+                  captured_at: "2026-06-15T13:28:56+08:00",
+                  quote_time: "2026-06-15T13:28:55+08:00",
+                  freshness_status: "snapshot",
+                  refresh_outcome: "updated",
+                  error: null,
+                  quote: closingAuctionQuote,
+                },
               ],
               source: "taiwan_quote_contract_snapshot",
               replay_semantics:
@@ -4801,12 +5090,18 @@ test.describe("OMI dashboard smoke", () => {
     const panel = page.getByTestId("quote-depth-panel");
     await expect(page.getByTestId("quote-depth-mode-replay")).toBeEnabled();
     await expect(page.getByTestId("quote-depth-replay-coverage")).toContainText(
-      "1/2 slots"
+      "2 筆試撮快照"
     );
     await page.getByTestId("quote-depth-mode-replay").click();
-    await expect(panel).toContainText("試撮快照 08:59");
+    await expect(panel).toContainText("試撮快照 13:28");
     await expect(panel).toContainText("保存回放");
-    await expect(page.getByTestId("quote-auction-price")).toContainText("1,010");
+    await expect(page.getByTestId("quote-auction-details")).toContainText("試撮明細");
+    await expect(page.getByTestId("quote-auction-detail-row")).toHaveCount(2);
+    await expect(page.getByTestId("quote-auction-details")).toContainText("1,010");
+    await expect(page.getByTestId("quote-auction-details")).toContainText("2,046 張");
+    await expect(page.getByTestId("quote-auction-details")).toContainText("1,015");
+    await expect(page.getByTestId("quote-auction-details")).toContainText("3,120 張");
+    await expect(page.getByTestId("quote-volume-summary")).toHaveCount(0);
     await expect
       .poll(async () => {
         const bookBox = await page.getByTestId("quote-depth-book-column").boundingBox();
@@ -4817,7 +5112,9 @@ test.describe("OMI dashboard smoke", () => {
         return (
           Math.abs(bookBox.y - auctionBox.y) <= 1 &&
           auctionBox.x >= bookBox.x + bookBox.width &&
-          bookBox.width > auctionBox.width
+          auctionBox.width / bookBox.width >= 1.2 &&
+          auctionBox.width / bookBox.width <= 1.35 &&
+          Math.abs(bookBox.height - auctionBox.height) <= 1
         );
       })
       .toBe(true);
@@ -4837,6 +5134,191 @@ test.describe("OMI dashboard smoke", () => {
     await page.getByTestId("quote-depth-mode-live").click();
     await expect(panel).toContainText("Regular");
     await expect(panel).not.toContainText("保存回放");
+  });
+
+  test("Taiwan quote depth prioritizes the realtime trade tape", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await mockOmiApi(page);
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const panel = page.getByTestId("quote-depth-panel");
+    await panel.scrollIntoViewIfNeeded();
+    await expect(page.getByTestId("quote-depth-mode-live")).toHaveText("即時成交");
+    await expect(page.getByTestId("quote-depth-mode-replay")).toHaveText("試撮");
+    await expect(page.getByTestId("quote-recent-trades-status")).toHaveText("即時");
+    await expect(panel).toContainText("KGI SUPER PY · STREAM");
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("1,015");
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("12 張");
+    await expect(page.getByTestId("quote-volume-summary")).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const bookBox = await page.getByTestId("quote-depth-book-column").boundingBox();
+        const tradeBox = await page
+          .getByTestId("quote-depth-summary-column")
+          .boundingBox();
+        if (!bookBox || !tradeBox) return false;
+        return (
+          Math.abs(bookBox.y - tradeBox.y) <= 1 &&
+          tradeBox.x >= bookBox.x + bookBox.width &&
+          tradeBox.width / bookBox.width >= 1.2 &&
+          tradeBox.width / bookBox.width <= 1.35 &&
+          Math.abs(bookBox.height - tradeBox.height) <= 1
+        );
+      })
+      .toBe(true);
+  });
+
+  test("Taiwan quote depth renders realtime stream before the GET baseline completes", async ({
+    page,
+  }) => {
+    let quoteDepthRequestFinished = false;
+    page.on("requestfinished", (request) => {
+      if (new URL(request.url()).pathname.endsWith("/market/quote-depth/2330")) {
+        quoteDepthRequestFinished = true;
+      }
+    });
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) =>
+        path.endsWith("/market/quote-depth/2330")
+          ? { body: quoteDepthResponse("2330"), delayMs: 3_000 }
+          : null,
+    });
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const panel = page.getByTestId("quote-depth-panel");
+    await expect(panel).toContainText("KGI SUPER PY · STREAM", { timeout: 2_000 });
+    await expect(panel).toContainText("1,014.9", { timeout: 2_000 });
+    expect(quoteDepthRequestFinished).toBe(false);
+  });
+
+  test("Taiwan quote depth keeps realtime stream usable when the GET baseline fails", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) =>
+        path.endsWith("/market/quote-depth/2330")
+          ? { body: { detail: "fixture baseline unavailable" }, status: 503 }
+          : null,
+    });
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const panel = page.getByTestId("quote-depth-panel");
+    await expect(panel).toContainText("KGI SUPER PY · STREAM");
+    await expect(panel).toContainText("1,014.9");
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("1,015");
+    await expect(panel).not.toContainText("五檔資料讀取失敗");
+  });
+
+  test("Taiwan quote depth isolates stream and GET state across rapid symbol switches", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      apiResponder: ({ path }) =>
+        path.endsWith("/market/quote-depth/2303")
+          ? { body: quoteDepthResponse("2303"), delayMs: 3_000 }
+          : null,
+    });
+    await page.goto("/?market=tw&group_id=7&stock_id=2330&radar_mode=action", {
+      waitUntil: "domcontentloaded",
+    });
+
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    await expect(page.locator('[data-ranking-stock-id="2303"]')).toBeVisible();
+    await page.locator('[data-ranking-stock-id="2330"]').click();
+    const panel = page.getByTestId("quote-depth-panel");
+    await expect(panel).toContainText("KGI SUPER PY · STREAM");
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("1,015");
+
+    await page.locator('[data-ranking-stock-id="2303"]').click();
+    await expect(page.getByRole("heading", { level: 2 }).filter({ hasText: "2303" })).toBeVisible();
+    await expect(panel).toContainText("KGI SUPER PY · STREAM", { timeout: 2_000 });
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("52.4", {
+      timeout: 2_000,
+    });
+    await expect(panel).not.toContainText("1,015");
+
+    await page.locator('[data-ranking-stock-id="2330"]').click();
+    await expect(page.getByRole("heading", { level: 2 }).filter({ hasText: "2330" })).toBeVisible();
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("1,015", {
+      timeout: 2_000,
+    });
+    await expect(panel).not.toContainText("52.4");
+
+    await page.waitForTimeout(3_200);
+    await expect(page.getByTestId("quote-recent-trade-row")).toContainText("1,015");
+    await expect(panel).not.toContainText("52.4");
+  });
+
+  test("Taiwan quote depth switches the right column to live auction details", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const auctionQuote = {
+      ...quoteDepthResponse("2330"),
+      session_phase: "preopen_auction",
+      instrument_phase: "preopen_auction",
+      phase_label: "試撮",
+      quote_time: "2026-06-15T08:59:55+08:00",
+      indicative_match_available: true,
+      indicative_match_price: 1_015,
+      indicative_match_volume_lots: 2_046,
+    };
+    const auctionStream = {
+      ...realtimeQuoteStreamResponse("2330"),
+      event_time: "2026-06-15T08:59:55+08:00",
+      capability_status: {
+        ...realtimeQuoteStreamResponse("2330").capability_status,
+        auction_observations: "available",
+      },
+      auction_observations: [
+        {
+          event_id: "auction:2330:1",
+          sequence: 1,
+          event_time: "2026-06-15T08:59:55+08:00",
+          received_at: "2026-06-15T00:59:55Z",
+          indicative_match_price: 1_015,
+          indicative_match_volume_lots: 2_046,
+          best_bid_price: 1_010,
+          best_ask_price: 1_020,
+          top5_bid_volume_lots: 3_135,
+          top5_ask_volume_lots: 2_180,
+          top5_imbalance: 0.18,
+          diff_bid_volume_lots: [5, 2, 0, -1, 3],
+          diff_ask_volume_lots: [-2, 1, 0, 2, -3],
+          semantics: "indicative_auction_observation_not_formal_trade",
+        },
+      ],
+    };
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/quote-depth/2330")) return { body: auctionQuote };
+        if (path.endsWith("/market/realtime-quotes/2330")) return { body: auctionStream };
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    await expect(page.getByTestId("quote-depth-panel")).toContainText("試撮");
+    await expect(page.getByTestId("quote-recent-trades-status")).toHaveText("即時");
+    await page.getByTestId("quote-depth-mode-replay").click();
+    await expect(page.getByTestId("quote-depth-mode-replay")).toHaveText("試撮");
+    await expect(page.getByTestId("quote-auction-status")).toHaveText("即時");
+    const auctionRow = page.getByTestId("quote-auction-detail-row");
+    await expect(auctionRow).toContainText("08:59:55");
+    await expect(auctionRow).toContainText("1,010");
+    await expect(auctionRow).toContainText("1,020");
+    await expect(auctionRow).toContainText("1,015");
+    await expect(auctionRow).toContainText("2,046 張");
+    await expect(page.getByTestId("quote-volume-summary")).toHaveCount(0);
   });
 
   test("Taiwan intermediate desktop keeps Technical directly reachable", async ({ page }) => {
@@ -6500,7 +6982,14 @@ test.describe("OMI dashboard smoke", () => {
 
     await expect(page.getByRole("heading", { name: "Market Dashboard" })).toBeVisible();
     expect(await portfolioResponse.json()).toEqual({ unexpected: true });
-    await expect(page.getByText("持股資料格式錯誤，請重新整理。")).toBeVisible();
+    const sidebar = page.getByRole("complementary").first();
+    const statusToggle = sidebar.getByRole("button", { name: /更新狀態/ });
+    await expect(page.getByText("持股讀取失敗，詳情請看更新狀態。")).toBeVisible();
+    await expect(statusToggle.locator(".omi-job-status-pill-attention")).toContainText("1");
+    await expect(page.getByText("持股資料格式錯誤，請重新整理。")).toHaveCount(0);
+    await statusToggle.click();
+    await expect(sidebar.getByText("持股資料讀取失敗")).toBeVisible();
+    await expect(sidebar.getByText("持股資料格式錯誤，請重新整理。")).toBeVisible();
     await expect(page.getByRole("button", { name: "開啟 OMI 即時問答" })).toBeVisible();
     expect(pageErrors).toEqual([]);
   });

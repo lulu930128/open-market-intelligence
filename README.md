@@ -209,6 +209,40 @@ if (-not (Test-Path .env.local)) {
 
 完成後回到 repo root 執行 `.\Start-OMI-Launcher.cmd`。
 
+### 選配：凱基 SuperPy 選取個股即時行情
+
+KGI SuperPy 的行情能力只用於「目前正在查看的台股」之即時成交、五檔與試撮。Frontend 會建立有 TTL 的 viewer lease；第一個 viewer 出現才啟動隔離子程序並訂閱該檔，最後一個 viewer 離開就退訂。KGI 尚未收到合格 event、斷線或過期時，backend 會維持既有 TWSE MIS／本機快照來源並在 quote contract 揭露 fallback。
+
+同一個隔離 runtime 也提供明確按鈕觸發的唯讀持股同步：台股使用 `Account.InventorySum`，美股使用 `SubAccount.StockPositionReport`。同步成功後只覆蓋所選市場的 `portfolio_holding`；provider、登入、權限或 payload 驗證失敗時不改既有資料。美股介面未提供成本時會保留為 `null`，不以市價冒充成本。此 bridge 不接受任何下單命令。若登入只有一個證券／複委託帳號會自動選用；有多個帳號時，以 `KGI_SUPERPY_TW_ACCOUNT`／`KGI_SUPERPY_US_ACCOUNT` 明確指定。
+
+KGI 登入不使用 API key，但官方 `login(person_id, person_pwd, simulation)` 仍會先驗證 Windows CA 憑證環境，通過後才會建立行情 token 與 `Quote` 服務。首次使用前請完成[官方前置準備](https://superpy.kgieworld.com.tw/kgipythonapi/guide/tw/prefix)中的憑證元件安裝、CA 憑證申請與 API 資格，並用「憑證小幫手」確認 ActiveX／憑證環境檢測均通過；若出現 `CheckCAComponent` 或 `CoCreateInstance` 失敗，請先重新安裝憑證支援元件，再測試 OMI。
+
+KGI SDK 使用獨立的 **64-bit Python 3.12** 環境，避免把其大型依賴與交易物件載入主 backend。OMI 不以關閉 TLS 驗證來迴避憑證錯誤；安裝腳本會優先透過 Windows `py` launcher 尋找 Python 3.12，並拒絕其他版本：
+
+```powershell
+cd "C:\project\Open Market Intelligence"
+.\scripts\setup-kgi-superpy.ps1
+```
+
+如果 `.venv-kgi` 是先前由其他 Python 版本建立，明確重建一次：
+
+```powershell
+.\scripts\setup-kgi-superpy.ps1 -Recreate
+```
+
+KGI SDK 與 CA 環境都準備完成後，只在 repo root 的本機 `.env` 填寫：
+
+```dotenv
+ENABLE_KGI_SUPERPY_QUOTE=true
+KGI_SUPERPY_PERSON_ID=你的身分證字號
+KGI_SUPERPY_PASSWORD=你的登入密碼
+KGI_SUPERPY_SIMULATION=false
+```
+
+預設 interpreter 是 `.venv-kgi\Scripts\python.exe`；需要自訂時，`KGI_SUPERPY_PYTHON` 也必須指向 64-bit Python 3.12 的隔離環境。其他 lease、freshness 與 timeout 參數見 [`.env.example`](.env.example)。請勿把真實憑證提交到 Git，也不要把這些欄位放到 `frontend/.env.local`。
+
+KGI `Quote` 與 `Data` 的權限分開。OMI 提供明示且有界的 `POST /api/market/kgi-data/{stock_id}/backfill`，白名單只包含盤中快照、當日成交明細、歷史分 K 與分價量；單次最多四個 provider request、每項最多 500 列、分價量最多 5 天。回應會逐項標示 `available`、`empty`、`plan_restricted` 或 `failed`，不會因帳號未開通某張 Data table 而把其他成功資料隱藏。此 endpoint 回傳 bounded raw records，尚未寫入 canonical 歷史資料表。
+
 第一次啟動空白資料庫時，backend 會排入一次有界的台股代號初始化工作，從 TWSE／TPEx 官方來源建立本機 `stock_master`。Repository 與 Windows 安裝包都不包含開發者的 SQLite、watchlist 或股票代號 seed；若 provider 暫時失敗，應用仍會啟動，錯誤會保留在更新工作與來源紀錄中。
 
 </details>

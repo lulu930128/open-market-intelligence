@@ -1,0 +1,58 @@
+{
+  "effective_mode": "compare",
+  "lease_baseline": {
+    "total_active_leases": 0
+  },
+  "lease_cleanup": {
+    "total_active_leases": 0
+  },
+  "raw_payload": "must-not-leak",
+  "lease_id": "lease-secret-fixture",
+  "account_id": "must-not-leak",
+  "steps": [
+    {
+      "symbol": "2330",
+      "samples": [
+        {
+          "captured_offset_ms": 100,
+          "capability_status": {"depth": "warming"},
+          "depth": null,
+          "latency": {"event_to_bridge_ms": null, "bridge_to_manager_ms": 8, "manager_to_stream_ms": 5, "event_to_stream_ms": null},
+          "diagnostic_counters": {"callback_count": 1, "baseline_only_count": 1}
+        },
+        {
+          "captured_offset_ms": 620,
+          "capability_status": {"depth": "available"},
+          "depth": {"is_stale": false, "bid_levels": [{"level": 1}], "ask_levels": [{"level": 1}]},
+          "latency": {"event_to_bridge_ms": 12, "bridge_to_manager_ms": 9, "manager_to_stream_ms": 6, "event_to_stream_ms": 27},
+          "diagnostic_counters": {"callback_count": 5, "baseline_only_count": 1, "cumulative_advanced_count": 2, "same_cumulative_count": 1, "decreasing_cumulative_count": 1, "trade_addition_count": 2, "non_trade_suppression_count": 2}
+        }
+      ],
+      "raw_payload": "must-not-leak"
+    },
+    {
+      "symbol": "2303",
+      "samples": [
+        {
+          "captured_offset_ms": 450,
+          "capability_status": {"depth": "available"},
+          "depth": {"is_stale": false, "bid_levels": [{"level": 1}], "ask_levels": []},
+          "latency": {"event_to_bridge_ms": 15, "bridge_to_manager_ms": 10, "manager_to_stream_ms": 7, "event_to_stream_ms": 32},
+          "diagnostic_counters": {"callback_count": 3, "baseline_only_count": 1, "cumulative_advanced_count": 1, "same_cumulative_count": 1, "trade_addition_count": 1, "non_trade_suppression_count": 1}
+        }
+      ]
+    },
+    {
+      "symbol": "2330",
+      "samples": [
+        {
+          "captured_offset_ms": 520,
+          "capability_status": {"depth": "available"},
+          "depth": {"is_stale": false, "bid_levels": [], "ask_levels": [{"level": 1}]},
+          "latency": {"event_to_bridge_ms": 11, "bridge_to_manager_ms": 8, "manager_to_stream_ms": 5, "event_to_stream_ms": 24},
+          "diagnostic_counters": {"callback_count": 2, "baseline_only_count": 1, "cumulative_advanced_count": 1, "trade_addition_count": 1}
+        }
+      ]
+    }
+  ]
+}

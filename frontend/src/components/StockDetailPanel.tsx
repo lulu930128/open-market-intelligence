@@ -351,8 +351,10 @@ export default function StockDetailPanel({
   const {
     quoteDepth,
     quoteReplay,
+    quoteStream,
     loadState: quoteDepthLoadState,
     replayLoadState: quoteReplayLoadState,
+    quoteStreamLoadState,
   } = useTaiwanQuoteDepth({
     enabled: !isIndexProduct,
     stockId,
@@ -1725,8 +1727,10 @@ export default function StockDetailPanel({
             <QuoteDepthPanel
               quoteDepth={quoteDepth}
               quoteReplay={quoteReplay}
+              quoteStream={quoteStream}
               loadState={quoteDepthLoadState}
               replayLoadState={quoteReplayLoadState}
+              quoteStreamLoadState={quoteStreamLoadState}
               quoteDepthPreviewMode={quoteDepthPreviewMode}
             />
           </div>

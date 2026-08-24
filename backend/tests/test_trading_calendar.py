@@ -23,10 +23,15 @@ from app.jp_market.trading_calendar import (
 )
 from app.market.trading_calendar import is_taiwan_trading_day, latest_released_trading_day
 from app.us_market.trading_calendar import (
+    expected_us_daily_price_date,
+    is_us_early_close_day,
     is_us_trading_day,
     next_us_trading_day,
     previous_us_trading_day,
+    us_daily_price_release_time,
     us_market_holiday_name,
+    us_post_market_close_time,
+    us_session_close_time,
 )
 from app.kr_market.trading_calendar import (
     is_kr_trading_day,
@@ -215,6 +220,31 @@ class MarketCalendarStatusTests(unittest.TestCase):
         self.assertFalse(after_hours["session"]["is_polling_window"])
         self.assertTrue(after_hours["session"]["is_extended_polling_window"])
         self.assertTrue(after_hours["session"]["is_after_close"])
+
+    def test_us_verified_early_close_changes_session_and_release_windows(self) -> None:
+        timezone = ZoneInfo("America/New_York")
+        early_close_date = date(2026, 11, 27)
+
+        self.assertTrue(is_us_early_close_day(early_close_date))
+        self.assertEqual(us_session_close_time(early_close_date), time(13, 0))
+        self.assertEqual(us_post_market_close_time(early_close_date), time(17, 0))
+        self.assertEqual(us_daily_price_release_time(early_close_date), time(13, 5))
+        self.assertFalse(is_us_early_close_day(date(2026, 11, 30)))
+
+        status = build_us_calendar_status(
+            now=datetime(2026, 11, 27, 14, 0, tzinfo=timezone),
+        )
+        self.assertEqual(status["phase"], "after_hours")
+        self.assertEqual(status["session"]["close_time"], "13:00")
+        self.assertEqual(status["session"]["after_hours_close_time"], "17:00")
+        self.assertTrue(status["session"]["is_early_close"])
+        self.assertEqual(status["release_windows"]["us_daily_price"]["status"], "released")
+        self.assertEqual(
+            expected_us_daily_price_date(
+                now=datetime(2026, 11, 27, 13, 6, tzinfo=timezone),
+            ),
+            early_close_date,
+        )
 
     def test_kr_status_reports_weekend_and_daily_release_window(self) -> None:
         timezone = ZoneInfo("Asia/Seoul")

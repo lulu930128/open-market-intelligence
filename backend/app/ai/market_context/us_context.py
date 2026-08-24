@@ -31,8 +31,10 @@ from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 from app.us_market.trading_calendar import (
     US_MARKET_TIMEZONE,
-    US_SESSION_CLOSE_TIME,
+    is_us_early_close_day,
+    us_session_close_time,
 )
+from app.us_market.volume_semantics import summarize_intraday_volume
 
 
 @dataclass(frozen=True)
@@ -53,7 +55,11 @@ def _latest_tool_result(tool_runs: list[dict[str, Any]], tool_name: str) -> dict
         if run.get("tool") == tool_name and run.get("status") == "success":
             summary = run.get("result_summary")
             if isinstance(summary, dict):
-                return summary
+                result = dict(summary)
+                resolved_market_data = summary.pop("_resolved_market_data", None)
+                if isinstance(resolved_market_data, dict):
+                    result["_resolved_market_data"] = resolved_market_data
+                return result
     return None
 
 
@@ -98,14 +104,8 @@ def _us_intraday_compact(
     raw_points = intraday_summary.get("points") if isinstance(intraday_summary.get("points"), list) else []
     points = [point for point in raw_points if isinstance(point, dict)]
     compact_points = points[-point_limit:]
-    volume_unit = (
-        intraday_summary.get("volume_unit")
-        or (
-            "shares"
-            if any(point.get("volume") is not None for point in compact_points)
-            else None
-        )
-    )
+    compact_volume = summarize_intraday_volume(compact_points)
+    volume_unit = intraday_summary.get("volume_unit") or compact_volume["volume_unit"]
     latest = intraday_summary.get("latest_point") if isinstance(intraday_summary.get("latest_point"), dict) else None
     if latest is None and points:
         latest = points[-1]
@@ -193,7 +193,12 @@ def _us_intraday_compact(
                 ),
                 "volume_status": (
                     intraday_summary.get("volume_status")
-                    or ("available" if volume_unit else "not_provided")
+                    or compact_volume["volume_status"]
+                ),
+                "volume_coverage": (
+                    intraday_summary.get("volume_coverage")
+                    if isinstance(intraday_summary.get("volume_coverage"), dict)
+                    else compact_volume["volume_coverage"]
                 ),
             }
         },
@@ -362,7 +367,7 @@ def _us_daily_quote(
     close_time = (
         datetime.combine(
             latest_daily.trade_date,
-            US_SESSION_CLOSE_TIME,
+            us_session_close_time(latest_daily.trade_date),
             tzinfo=US_MARKET_TIMEZONE,
         ).isoformat()
         if latest_daily
@@ -505,6 +510,39 @@ def read_us_stock_context(
     instrument_type = us_instrument_type(normalized_symbol)
     is_index = instrument_type == "index"
     tool_runs = tool_runs or []
+    requested_capability_values = (
+        market_data_params.get("requested_capabilities")
+        if isinstance(market_data_params, dict)
+        else None
+    )
+    requested_capabilities = (
+        tuple(
+            dict.fromkeys(
+                str(value)
+                for value in requested_capability_values
+                if str(value).strip()
+            )
+        )
+        if isinstance(requested_capability_values, list)
+        else None
+    )
+    requested_capability_set = frozenset(requested_capabilities or ())
+    selection_bounded = requested_capabilities is not None
+
+    def wants(*capabilities: str) -> bool:
+        return not selection_bounded or bool(
+            requested_capability_set.intersection(capabilities)
+        )
+
+    needs_daily = wants("quote.snapshot", "daily.ohlcv", "technical.structure")
+    needs_profile = wants("company.profile")
+    needs_sec = wants("fundamentals.financials")
+    needs_insider = wants("ownership.insider_transactions")
+    needs_institutional = wants("ownership.distribution")
+    needs_corporate_actions = wants("corporate.actions")
+    needs_short_volume = wants("market.short_volume")
+    needs_chart = wants("daily.ohlcv", "technical.structure")
+    needs_research = wants("technical.structure")
     daily_limit = _market_data_int(market_data_params, "daily_limit", 10, minimum=1, maximum=200)
     timeframe = _market_data_str(market_data_params, "timeframe", "daily") or "daily"
     bars = _market_data_int(market_data_params, "bars", 90, minimum=1, maximum=5000)
@@ -532,16 +570,24 @@ def read_us_stock_context(
         .filter(USStockMaster.symbol == normalized_symbol)
         .first()
     )
-    daily_rows = dependencies.us_market_service.list_us_daily_prices(
-        db=db,
-        symbol=normalized_symbol,
-        from_date=requested_trade_date_value,
-        to_date=requested_trade_date_value,
-        limit=daily_limit,
+    daily_rows = (
+        dependencies.us_market_service.list_us_daily_prices(
+            db=db,
+            symbol=normalized_symbol,
+            from_date=requested_trade_date_value,
+            to_date=requested_trade_date_value,
+            limit=daily_limit,
+        )
+        if needs_daily
+        else []
     )
     latest_daily = _select_latest_daily(daily_rows)
     selected_daily_provider = latest_daily.provider if latest_daily else None
-    profile = None if is_index else dependencies.latest_profile(db, normalized_symbol)
+    profile = (
+        None
+        if is_index or not needs_profile
+        else dependencies.latest_profile(db, normalized_symbol)
+    )
     sec_summary: dict[str, Any] | None = None
     financial_contract: dict[str, Any] | None = None
     insider_transactions: dict[str, Any] | None = None
@@ -549,7 +595,7 @@ def read_us_stock_context(
     sec_warning: str | None = None
     insider_warning: str | None = None
     institutional_warning: str | None = None
-    if not is_index:
+    if not is_index and needs_sec:
         try:
             sec_summary = dependencies.us_market_service.get_us_sec_fundamental_summary(
                 db=db,
@@ -566,6 +612,7 @@ def read_us_stock_context(
         except Exception as exc:
             contract_warning = f"US SEC financial contract unavailable: {exc}"
             sec_warning = f"{sec_warning}; {contract_warning}" if sec_warning else contract_warning
+    if not is_index and needs_insider:
         try:
             insider_transactions = (
                 dependencies.us_market_service.get_us_sec_insider_transactions(
@@ -576,6 +623,7 @@ def read_us_stock_context(
             )
         except Exception as exc:
             insider_warning = f"US SEC Form 4 contract unavailable: {exc}"
+    if not is_index and needs_institutional:
         try:
             candidate = dependencies.us_market_service.get_us_sec_institutional_holdings(
                 db,
@@ -586,17 +634,35 @@ def read_us_stock_context(
         except Exception as exc:
             institutional_warning = f"US SEC Form 13F contract unavailable: {exc}"
 
-    corporate_actions = [] if is_index else dependencies.us_market_service.list_us_corporate_actions(
-        db=db,
-        symbol=normalized_symbol,
-        limit=10,
+    corporate_actions = (
+        []
+        if is_index or not needs_corporate_actions
+        else dependencies.us_market_service.list_us_corporate_actions(
+            db=db,
+            symbol=normalized_symbol,
+            limit=10,
+        )
     )
-    short_volume_rows = [] if is_index else dependencies.us_market_service.list_us_short_volumes(
-        db=db,
-        symbol=normalized_symbol,
-        limit=10,
+    short_volume_rows = (
+        []
+        if is_index or not needs_short_volume
+        else dependencies.us_market_service.list_us_short_volumes(
+            db=db,
+            symbol=normalized_symbol,
+            limit=10,
+        )
     )
-    gaps = dependencies.scan_us_stock_gaps(db, normalized_symbol)
+    if selection_bounded:
+        try:
+            gaps = dependencies.scan_us_stock_gaps(
+                db,
+                normalized_symbol,
+                requested_capabilities=requested_capabilities,
+            )
+        except TypeError:
+            gaps = dependencies.scan_us_stock_gaps(db, normalized_symbol)
+    else:
+        gaps = dependencies.scan_us_stock_gaps(db, normalized_symbol)
     source_health = dependencies.us_market_service.build_us_source_health(
         db=db,
         symbol=normalized_symbol,
@@ -652,47 +718,110 @@ def read_us_stock_context(
             f"{requested_trade_date}; OMI did not fall back to another date."
         )
     if requested_trade_date is not None and latest_daily is not None:
-        warnings.append(
-            "US daily close time is projected from the regular 16:00 "
-            "America/New_York schedule; the local fallback calendar does not "
-            "model special early-close sessions."
-        )
+        if is_us_early_close_day(latest_daily.trade_date):
+            warnings.append(
+                "US daily close time uses the verified NYSE 13:00 "
+                "America/New_York early-close schedule for this trade date."
+            )
 
     if include_intraday and intraday_summary is None:
         try:
+            requested_interval = (
+                _requested_intraday_interval(market_data_params, default="1m")
+                or "1m"
+            )
             intraday_summary = dependencies.us_market_service.get_us_intraday_trend(
                 symbol=normalized_symbol,
                 session_scope=session_scope,
+                interval=requested_interval,
                 db=db,
+                persist_history=False,
             )
         except Exception as exc:
             if "us_intraday_trend" not in missing:
                 missing.append("us_intraday_trend")
             warnings.append(f"US intraday trend unavailable: {exc}")
 
+    resolved_market_data: dict[str, Any] = {}
+    if isinstance(intraday_summary, dict):
+        intraday_summary = dict(intraday_summary)
+        resolved_candidate = intraday_summary.pop("_resolved_market_data", None)
+        if isinstance(resolved_candidate, dict):
+            resolved_market_data = resolved_candidate
+
     intraday_requested = include_intraday or intraday_summary is not None
 
     chart: dict[str, Any] = {}
-    try:
-        chart = dependencies.us_market_service.list_us_ohlc_chart_data(
+    if needs_chart:
+        try:
+            chart = dependencies.us_market_service.list_us_ohlc_chart_data(
+                db=db,
+                symbol=normalized_symbol,
+                timeframe=timeframe,
+                bars=bars,
+                ensure_history=False,
+                include_intraday=False,
+                outputsize="compact",
+                adjusted=False,
+                provider=provider,
+                to_date=requested_trade_date_value,
+            )
+            if intraday_requested and session_scope != "regular":
+                chart["requested_session_scope"] = session_scope
+            if not chart.get("point_count") and "us_ohlc_chart" not in missing:
+                missing.append("us_ohlc_chart")
+        except Exception as exc:
+            missing.append("us_ohlc_chart")
+            warnings.append(f"US OHLC chart unavailable: {exc}")
+
+    daily_canary_builder = getattr(
+        dependencies.us_market_service,
+        "get_us_daily_resolved_canary",
+        None,
+    )
+    if callable(daily_canary_builder) and chart:
+        daily_resolved_candidate = daily_canary_builder(
             db=db,
             symbol=normalized_symbol,
-            timeframe=timeframe,
-            bars=bars,
-            ensure_history=False,
-            include_intraday=False,
-            outputsize="compact",
-            adjusted=False,
-            provider=provider,
-            to_date=requested_trade_date_value,
+            legacy_chart=chart,
+            instrument_type=instrument_type,
+            venue=getattr(stock, "exchange", None) if stock is not None else None,
         )
-        if intraday_requested and session_scope != "regular":
-            chart["requested_session_scope"] = session_scope
-        if not chart.get("point_count") and "us_ohlc_chart" not in missing:
-            missing.append("us_ohlc_chart")
-    except Exception as exc:
-        missing.append("us_ohlc_chart")
-        warnings.append(f"US OHLC chart unavailable: {exc}")
+        if isinstance(daily_resolved_candidate, dict):
+            resolved_market_data.update(daily_resolved_candidate)
+
+    resolved_research: dict[str, Any] = {}
+    research_builder = getattr(
+        dependencies.us_market_service,
+        "build_us_market_research",
+        None,
+    )
+    if callable(research_builder) and requested_trade_date is None and needs_research:
+        try:
+            research_candidate = research_builder(
+                db,
+                symbol=normalized_symbol,
+                bars=min(max(bars, 260), 500),
+                now=dependencies.now(),
+                include_market_coverage=not selection_bounded,
+            )
+            if isinstance(research_candidate, dict):
+                resolved_daily = research_candidate.get("daily_ohlcv")
+                if isinstance(resolved_daily, dict) and resolved_daily:
+                    resolved_market_data["daily_ohlcv"] = resolved_daily
+                indicators = research_candidate.get("technical_indicators")
+                structure = research_candidate.get("technical_structure")
+                coverage = research_candidate.get("market_coverage")
+                if isinstance(indicators, dict):
+                    resolved_research["technical_indicators"] = indicators
+                if isinstance(structure, dict):
+                    resolved_research["technical_structure"] = structure
+                if isinstance(coverage, dict):
+                    resolved_research["market_coverage"] = coverage
+                for warning in research_candidate.get("warnings") or []:
+                    warnings.append(str(warning))
+        except Exception as exc:
+            warnings.append(f"US technical research unavailable: {exc}")
 
     for entry in source_health.get("entries") or []:
         if not isinstance(entry, dict) or entry.get("status") != "stale":
@@ -734,14 +863,18 @@ def read_us_stock_context(
             }
         )
 
-    _append_source_ref_once(source_refs, {"type": "table", "name": "us_daily_price"})
-    if not is_index:
+    if daily_rows:
+        _append_source_ref_once(source_refs, {"type": "table", "name": "us_daily_price"})
+    if not is_index and needs_profile:
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_company_profile"})
+    if not is_index and needs_sec:
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_sec_company_fact"})
+    if not is_index and needs_insider:
         _append_source_ref_once(
             source_refs,
             {"type": "table", "name": "us_sec_ownership_transaction"},
         )
+    if not is_index and needs_institutional:
         _append_source_ref_once(
             source_refs,
             {"type": "table", "name": "us_sec_13f_symbol_quarter"},
@@ -1016,6 +1149,16 @@ def read_us_stock_context(
             )
         )
     envelope["data"]["compact"]["intraday_bars"] = intraday_bars
+    if resolved_research:
+        envelope["data"]["resolved_research"] = resolved_research
+        envelope["data"]["compact"]["technical_indicators"] = (
+            resolved_research.get("technical_indicators")
+        )
+        envelope["data"]["compact"]["technical"] = (
+            resolved_research.get("technical_structure")
+        )
+    if resolved_market_data:
+        envelope["data"]["resolved_market_data"] = resolved_market_data
     envelope["evidence_passport"] = build_evidence_passport(
         kind="us_stock_context",
         as_of=envelope["as_of"],

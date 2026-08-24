@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime, timezone
 import unittest
 from unittest.mock import patch
@@ -565,6 +566,30 @@ class USMarketSourceParsingTests(unittest.TestCase):
             ["pre_market", "after_hours"],
         )
 
+    def test_parse_yahoo_intraday_zero_filled_extended_volume_is_unknown(self) -> None:
+        payload = deepcopy(YAHOO_CHART_INTRADAY_EXTENDED_SAMPLE)
+        payload["chart"]["result"][0]["indicators"]["quote"][0]["volume"] = [
+            0,
+            1000,
+            0,
+        ]
+
+        trend = parse_yahoo_intraday_prices(
+            payload,
+            symbol="mu",
+            source_url="https://example.test/chart/MU?includePrePost=true",
+            session_scope="all",
+        )
+
+        self.assertIsNone(trend["points"][0]["volume"])
+        self.assertEqual(trend["points"][0]["volume_status"], "provider_unavailable")
+        self.assertEqual(trend["points"][1]["volume"], 1000)
+        self.assertIsNone(trend["points"][2]["volume"])
+        self.assertEqual(trend["volume_status"], "partial")
+        self.assertEqual(trend["volume_semantics"], "partial_interval_shares")
+        self.assertEqual(trend["volume_coverage"]["extended_unavailable_point_count"], 2)
+        self.assertTrue(any("zero-filled" in warning for warning in trend["warnings"]))
+
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
     def test_get_us_intraday_trend_uses_yahoo_chart_payload(self, mock_fetch) -> None:
         mock_fetch.return_value = (
@@ -581,6 +606,36 @@ class USMarketSourceParsingTests(unittest.TestCase):
         self.assertEqual(trend["point_count"], 2)
         self.assertEqual(trend["points"][-1]["price"], 91.35)
         self.assertIn(trend["source_status"]["status"], {"ok", "degraded"})
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_get_us_intraday_trend_can_read_with_db_without_persisting_history(
+        self,
+        mock_fetch,
+    ) -> None:
+        mock_fetch.return_value = (
+            YAHOO_CHART_INTRADAY_SAMPLE,
+            "https://example.test/chart/MU",
+        )
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        db = Session(engine)
+        try:
+            with patch.object(
+                us_market_service,
+                "_persist_us_intraday_history",
+            ) as persist_history:
+                trend = get_us_intraday_trend(
+                    symbol="mu",
+                    db=db,
+                    persist_history=False,
+                )
+        finally:
+            db.close()
+            engine.dispose()
+
+        persist_history.assert_not_called()
+        self.assertEqual(trend["point_count"], 2)
+        self.assertIsNotNone(trend["volume_pace"])
 
     def test_us_intraday_source_status_detects_stopped_live_data(self) -> None:
         payload = {
@@ -866,6 +921,16 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 },
             ],
             "source_url": "https://example.test/chart/MU?range=1d&interval=1m",
+            "_resolved_market_data": {
+                "quote_snapshot": {
+                    "schema_version": "omi.market.quote.snapshot.v1",
+                    "selected_provider": "yahoo_chart",
+                },
+                "intraday_bars": {
+                    "schema_version": "omi.market.bars.v1",
+                    "returned_bar_count": 2,
+                },
+            },
         }
 
         with patch(
@@ -889,7 +954,13 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 },
             )
 
-        mock_intraday.assert_called_once_with(symbol="MU", session_scope="all", db=self.db)
+        mock_intraday.assert_called_once_with(
+            symbol="MU",
+            session_scope="all",
+            interval="1m",
+            db=self.db,
+            persist_history=False,
+        )
         compact = context["data"]["compact"]
         self.assertEqual(context["as_of"], "2026-06-02T09:31:00-04:00")
         self.assertEqual(compact["quote"]["price"], 91.35)
@@ -904,6 +975,13 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             1,
         )
         self.assertNotIn("us_intraday_trend", context["missing"])
+        self.assertEqual(
+            context["data"]["resolved_market_data"]["quote_snapshot"][
+                "schema_version"
+            ],
+            "omi.market.quote.snapshot.v1",
+        )
+        self.assertNotIn("_resolved_market_data", context["summary"]["intraday"])
 
     @patch("app.ai.agentic_tools.us_market_service.get_us_intraday_trend")
     def test_read_us_stock_context_selects_exact_historical_close(
@@ -1488,12 +1566,16 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             ],
         )
 
-        ranking = get_us_watchlist_ranking(
-            self.db,
-            group_id=group.id,
-            rank_by="change_pct",
-            sort_order="desc",
-        )
+        with patch(
+            "app.us_market.service.expected_us_daily_price_date",
+            return_value=date(2026, 5, 29),
+        ):
+            ranking = get_us_watchlist_ranking(
+                self.db,
+                group_id=group.id,
+                rank_by="change_pct",
+                sort_order="desc",
+            )
 
         self.assertEqual(ranking["requested_symbol_count"], 2)
         self.assertEqual(ranking["ranked_count"], 2)
@@ -1502,12 +1584,77 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertTrue(ranking["is_full"])
         self.assertEqual(
             ranking["ranking_semantics"],
-            "latest_completed_daily_rows",
+            "resolved_completed_daily_bars",
         )
         self.assertEqual(ranking["results"][0]["symbol"], "AAPL")
         self.assertEqual(ranking["results"][0]["change_pct"], 10.0)
+        self.assertEqual(ranking["results"][0]["selected_provider"], "yahoo_chart")
+        self.assertEqual(ranking["results"][0]["selected_source"], "yahoo.chart.1d")
+        self.assertEqual(ranking["results"][0]["selected_session"], "closed")
+        self.assertEqual(ranking["results"][0]["price_basis"], "raw_unadjusted")
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
         self.assertEqual(self.db.query(MarketDailyPrice).count(), 0)
+
+    def test_us_watchlist_ranking_uses_resolver_priority_and_raw_price_basis(self) -> None:
+        upsert_us_symbol_records(
+            self.db,
+            parse_symbol_directories(
+                nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
+                other_listed_text=OTHER_LISTED_SAMPLE,
+                sec_company_payload=SEC_TICKERS_SAMPLE,
+            ),
+        )
+        group = create_us_watchlist_group(
+            self.db,
+            USWatchlistGroupCreate(group_name="Resolver Ownership"),
+        )
+        create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
+        )
+        records: list[USDailyPriceRecord] = []
+        for provider, closes, adjusted_closes in (
+            ("yahoo_chart", (100.0, 110.0), (90.0, 99.0)),
+            ("alphavantage", (101.0, 120.0), (80.0, 85.0)),
+        ):
+            for trade_date, close, adjusted_close in zip(
+                (date(2026, 5, 28), date(2026, 5, 29)),
+                closes,
+                adjusted_closes,
+                strict=True,
+            ):
+                records.append(
+                    USDailyPriceRecord(
+                        provider=provider,
+                        symbol="AAPL",
+                        trade_date=trade_date,
+                        open_price=close - 1,
+                        high_price=close + 1,
+                        low_price=close - 2,
+                        close_price=close,
+                        adjusted_close=adjusted_close,
+                        trade_volume=1000,
+                        dividend_amount=None,
+                        split_coefficient=None,
+                        source_url=None,
+                        raw_payload_hash=f"{provider}-{trade_date.isoformat()}",
+                    )
+                )
+        upsert_us_daily_price_records(self.db, records)
+
+        with patch(
+            "app.us_market.service.expected_us_daily_price_date",
+            return_value=date(2026, 5, 29),
+        ):
+            ranking = get_us_watchlist_ranking(self.db, group_id=group.id)
+
+        row = ranking["results"][0]
+        self.assertEqual(row["selected_provider"], "yahoo_chart")
+        self.assertEqual(row["close"], 110.0)
+        self.assertEqual(row["previous_close"], 100.0)
+        self.assertEqual(row["change_pct"], 10.0)
+        self.assertEqual(row["price_basis"], "raw_unadjusted")
+        self.assertFalse(row["fallback_used"])
 
     def test_us_watchlist_technical_radar_flags_ohlcv_breakout(self) -> None:
         symbol_records = parse_symbol_directories(
@@ -1563,13 +1710,17 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         )
         upsert_us_daily_price_records(self.db, records)
 
-        radar = get_us_watchlist_technical_radar(
-            self.db,
-            group_id=group.id,
-            mode="breakout",
-            max_results=5,
-            calculation_limit=80,
-        )
+        with patch(
+            "app.us_market.service._latest_distinct_us_daily_rows",
+            side_effect=AssertionError("Radar must not read legacy provider rows."),
+        ):
+            radar = get_us_watchlist_technical_radar(
+                self.db,
+                group_id=group.id,
+                mode="breakout",
+                max_results=5,
+                calculation_limit=80,
+            )
 
         self.assertEqual(radar["market"], "US")
         self.assertEqual(radar["radar_count"], 1)
@@ -1598,6 +1749,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 provider="yahoo_chart",
                 symbol="AAPL",
                 trade_date=date(2026, 6, 5),
+                open_price=99.0,
+                high_price=101.0,
+                low_price=98.0,
                 close_price=100.0,
                 trade_volume=1000,
                 raw_payload_hash="aapl-1",
@@ -1640,6 +1794,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 provider="yahoo_chart",
                 symbol="AAPL",
                 trade_date=date(2026, 6, 5),
+                open_price=99.0,
+                high_price=101.0,
+                low_price=98.0,
                 close_price=100.0,
                 trade_volume=1000,
                 raw_payload_hash="aapl-1",
@@ -1682,6 +1839,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                     provider="yahoo_chart",
                     symbol="AAPL",
                     trade_date=date(2026, 6, 5),
+                    open_price=99.0,
+                    high_price=101.0,
+                    low_price=98.0,
                     close_price=100.0,
                     trade_volume=1000,
                     fetched_at=datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc),
@@ -1691,6 +1851,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                     provider="yahoo_chart",
                     symbol="AAPL",
                     trade_date=date(2026, 6, 8),
+                    open_price=100.0,
+                    high_price=102.0,
+                    low_price=99.0,
                     close_price=101.0,
                     trade_volume=50,
                     fetched_at=datetime(2026, 6, 8, 14, 0, tzinfo=timezone.utc),
@@ -1918,6 +2081,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                     provider="yahoo_chart",
                     symbol="AAPL",
                     trade_date=date(2026, 5, 29),
+                    open_price=99.0,
+                    high_price=101.0,
+                    low_price=98.0,
                     close_price=100.0,
                     trade_volume=1000,
                     raw_payload_hash="aapl-1",
@@ -1926,6 +2092,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                     provider="yahoo_chart",
                     symbol="IBM",
                     trade_date=date(2026, 5, 29),
+                    open_price=189.0,
+                    high_price=191.0,
+                    low_price=188.0,
                     close_price=190.0,
                     trade_volume=4000,
                     raw_payload_hash="ibm-1",
@@ -1934,7 +2103,10 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         )
         self.db.commit()
 
-        with patch("app.us_market.service._get_us_intraday_overlay") as mock_overlay:
+        with patch(
+            "app.us_market.service.expected_us_daily_price_date",
+            return_value=date(2026, 5, 29),
+        ), patch("app.us_market.service._get_us_intraday_overlay") as mock_overlay:
             mock_overlay.return_value = {
                 "time": "2026-06-05T13:45:00-04:00",
                 "session": "regular",
@@ -3299,26 +3471,26 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         yahoo_mock.assert_called_once_with(db=self.db, symbol="MU", outputsize="full")
         self.assertEqual(result["provider"], "yahoo_chart")
 
-    def test_auto_daily_refresh_falls_back_to_yahoo_after_alphavantage_error(self) -> None:
-        yahoo_result = {
+    def test_auto_daily_refresh_falls_back_to_alphavantage_after_yahoo_error(self) -> None:
+        alpha_result = {
             "status": "success",
-            "provider": "yahoo_chart",
+            "provider": "alphavantage",
             "symbol": "MU",
             "fetched_count": 2,
             "inserted_count": 1,
             "updated_count": 1,
-            "message": "US daily prices refreshed from Yahoo chart.",
+            "message": "US daily prices refreshed from Alpha Vantage.",
         }
 
         with (
             patch("app.us_market.service.settings.alphavantage_api_key", "demo"),
             patch(
                 "app.us_market.service.refresh_us_daily_prices_from_alphavantage",
-                side_effect=USMarketDataFetchError("premium feature"),
+                return_value=alpha_result,
             ) as alpha_mock,
             patch(
                 "app.us_market.service.refresh_us_daily_prices_from_yahoo_chart",
-                return_value=yahoo_result,
+                side_effect=USMarketDataFetchError("Yahoo unavailable"),
             ) as yahoo_mock,
         ):
             result = refresh_us_daily_prices(
@@ -3335,8 +3507,8 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             adjusted=False,
         )
         yahoo_mock.assert_called_once_with(db=self.db, symbol="MU", outputsize="compact")
-        self.assertEqual(result["provider"], "yahoo_chart")
-        self.assertIn("Alpha Vantage auto refresh failed first", result["message"])
+        self.assertEqual(result["provider"], "alphavantage")
+        self.assertIn("Yahoo chart auto refresh failed first", result["message"])
 
     def test_us_monthly_ohlc_skips_refresh_when_local_points_are_enough(self) -> None:
         records = [

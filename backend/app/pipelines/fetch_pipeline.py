@@ -415,6 +415,7 @@ def refresh_source(db: Session, source_id: int, trade_date: date | None = None) 
         db=db,
         raw_result_id=raw_result_id,
         parser_type=source.parser_type,
+        trade_date_override=trade_date,
     )
 
     return {

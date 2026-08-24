@@ -24,6 +24,7 @@ from app.routers import (
     kr_market,
     jobs,
     market,
+    market_data,
     portfolio,
     raw_results,
     reports,
@@ -109,6 +110,11 @@ app.include_router(crypto_market.router, prefix="/api/crypto-market", tags=["cry
 app.include_router(resource_market.router, prefix="/api/resource-market", tags=["resource-market"])
 app.include_router(dispatch.router, prefix="/api/dispatch", tags=["dispatch"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
+app.include_router(
+    market_data.router,
+    prefix="/api/market-data",
+    tags=["market-data"],
+)
 app.include_router(
     cross_market.router,
     prefix="/api/market/cross-market",

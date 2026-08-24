@@ -4,8 +4,8 @@
 
 - 任務代號：`tw-preopen-chatgpt-mcp-dashboard-20260814`
 - 建立日期：2026-08-14
-- 狀態：Backend implementation 進行中；MCP/widget 尚未完成
-- 主要規格來源：`C:\Users\thoma\Downloads\OMI_TW_Preopen_Backend_ChatGPT_MCP_App_Engineering_Spec_v2_20260814.txt`
+- 狀態：M13.4 K-line source implementation 已完成；正式 runtime adoption 與逐股驗收待辦
+- 主要規格來源：`%USERPROFILE%\Downloads\OMI_TW_Preopen_Backend_ChatGPT_MCP_App_Engineering_Spec_v2_20260814.txt`
 - 主要程式庫：`C:\project\Open Market Intelligence`
 - MCP adapter 程式庫：`C:\GPT_MCPtool\OMI_search`
 - 預定 ChatGPT widget 位置：`C:\GPT_MCPtool\OMI_search\ui\tw-market-dashboard\`
@@ -456,3 +456,66 @@ UI resource 使用版本化 URI，預設候選為 `ui://omi/tw-market-dashboard/
 5. 底部只有「全螢幕」與「下單介面」兩個主要操作；後者只能展開 disabled／disconnected `OrderShell`。
 6. Widget typecheck、tests、production build、desktop regression 與 360／390／430／560／768 browser smoke 通過。
 7. `omi_search` component-scoped runtime 採用與 ChatGPT mobile host 驗收完成後，M12 才可標記 user-visible complete。
+
+## 2026-08-16 M13：Fullscreen 雙市場唯讀工作台
+
+### Goal
+
+- 將 ChatGPT fullscreen presentation 擴充為台股核心、美股 context 的雙市場研究工作台；原始 OMI frontend 只作資訊架構與互動參考，不直接搬入其寫入型 sidebar。
+- 主畫面只提供 backend-owned 的市場概況、唯讀自選樹、個股詳情、實際 K 線、freshness／warnings 與台股／美股事件行事曆。
+- 在原版右側研究欄底部預留「手動委託」狀態格；目前只顯示未連線狀態，不提供可輸入或可送出的委託控制。
+- 先做 Professional K-line feasibility gate；只有可保留原版的核心操作便利性時才啟用，否則沿用 focused actual-OHLC K 線。
+
+### Non-goals
+
+- 本階段不串接券商 API、不取得交易權限、不建立訂單、不模擬撮合，也不新增任何 backend／MCP 寫入工具。
+- 不提供自動下單、AI 代為送單、背景送單、排程委託或由 model 直接觸發的交易執行路徑。
+- 不搬入持股管理、分組管理、新增／刪除／改名群組、加入／移除股票或設定頁；自選群組與股票只讀取及選取。
+- 不為了顯示「專業模式」加入無作用的 toolbar、假週期、前端重算指標或不完整 drawing controls。
+- 不讓美股取代台股產品主線；市場 switch 只在 `tw`／`us` 之間切換，台股仍為預設。
+
+### Hard constraints
+
+- 現階段所有 business-data tools 必須維持 `readOnlyHint=true`，且 widget 不直接連 OMI backend、券商或外部 provider。
+- 手動委託預留格只提供 layout anchor 與 `BROKER NOT CONNECTED`／「券商尚未連線」狀態；不得 render 可編輯 price／quantity／side 欄位或 enabled submit control。
+- 未來手動委託必須成為獨立 milestone，先完成 broker authentication、account scope、order preview、explicit confirmation、idempotency、audit trail、failure reconciliation 與 emergency disable；不得沿用 read-only tool 假裝送單。
+- 未來若由 widget 呼叫委託工具，model-visible read tools 與 consequential write tool 必須分離；write tool 預設只允許 app UI 呼叫，且 server 仍需自行執行 authorization、validation 與 confirmation。
+- Fullscreen layout 依 host 實際 `displayMode`、viewport、`maxHeight` 與 safe area 適應；不得把 `fullscreen` 等同於固定 desktop 寬度。
+- Professional K-line 只能使用 backend 回傳的 OHLC／indicator data。若導入 chart engine，必須保持 CSP 可控、bundle 可接受、無 direct network、快速切股不殘留舊 series。
+- 低對比黑色視覺只降低容器與分隔線對比；漲跌、`stale`、`partial`、`missing`、provider failure 與交易未連線狀態仍需可辨識。
+
+### Frontend reservation
+
+- `>=1180px`：忠實沿用原始 OMI 桌面骨架，固定約 300px 左 sidebar；內容區上方是市場概況，下方為中央個股／K 線與右側技術研究欄。
+- `761px–1179px`：保留左 sidebar，中央個股與右側技術研究改為上下排列，不用極窄 rail 壓縮 chart。
+- `<=760px`：sidebar、market tape、個股研究與技術研究依序垂直排列；既有 inline／mobile V2 不受 fullscreen CSS 影響。
+- 手動委託預留格位於技術研究欄底部，selection identity 跟隨目前 detail；「選到股票」不等於建立委託，未來仍須由使用者重新確認市場、帳戶、方向、價格、數量與有效期間。
+
+### Professional K-line acceptance gate
+
+只有同時符合下列條件才顯示「專業模式」入口：
+
+1. 支援 candlestick、今日／日／週／月週期、滑鼠或觸控 zoom／pan、crosshair OHLCV、volume 與 reset／fit content。
+2. MA／indicator 值來自 backend contract 或既有 canonical calculation，不在 widget 建立第二套市場邏輯。
+3. 快速切換股票、週期與 display mode 時沒有 stale series、ResizeObserver loop、水平溢出或 iframe 高度回授。
+4. 主要操作在 ChatGPT fullscreen host 與 standalone preview 都可用；keyboard focus、reduced motion 與 touch target 通過基本可及性檢查。
+5. Production bundle、初始化時間與記憶體使用不讓研究工作台明顯劣化。
+
+若任一必要條件不成立，正式 fullscreen 不顯示 Professional Mode，只保留目前實際 OHLC K 線與 backend moving averages；這不是 completion blocker。
+
+### Done criteria
+
+1. Fullscreen 只出現台股／美股、唯讀自選、calendar、detail／K-line、freshness／warnings 與未連線手動委託預留格；無持股或管理／寫入表單。
+2. 台股與美股都使用 backend-owned、MCP read-only contract；缺 contract 的市場或區塊顯示明確 unavailable，不用前端假資料補齊。
+3. Calendar 脫離 settings，成為獨立單格，並顯示來源、coverage、freshness 與 warning。
+4. Desktop、tablet 與 mobile breakpoint 均無水平溢出，研究區不被未連線委託預留位擠壓。
+5. 未連接 broker 時，enabled trade controls 與 order write tool calls 均為 0。
+6. Professional K-line 通過 gate 才交付；未通過時有可驗證的 fallback，且不影響 M13 其餘完成條件。
+
+### 2026-08-16 K-line phase outcome
+
+- Fullscreen 個股研究改用與原版 OMI 相同的 `lightweight-charts` 5.2 chart engine，不再以簡化 SVG 冒充專業互動圖表；inline／mobile V2 presentation 仍保留既有 chart branch。
+- Backend focused detail contract 升級為 `omi.tw_stock_dashboard_detail.v2`：日／週／月沿用 backend 聚合 OHLC，今日使用最新持久化 1 分 K session，且所有 read path 固定 `refresh=false`／cache-only。
+- Widget 已提供台股紅漲綠跌 candlestick、MA5／20／60、成交量副圖、十字線 OHLCV、左右拖曳、滑輪／pinch zoom、左右／放大縮小按鈕、最新與全部；今日時間軸固定以 `Asia/Taipei` 顯示。
+- 本階段只完成 chart engine 與 timeframe contract。下一階段才處理多檔股票快速切換、每股資料品質差異與 A → B → C stale-series regression；不得因單一 3711 preview 通過就宣稱所有個股已驗收。
+- Source、schema snapshot、targeted tests、adapter regression、production build 與 isolated browser 已驗證；未經授權沒有重啟 backend／`omi_search`，因此 ChatGPT host 尚未採用此版。

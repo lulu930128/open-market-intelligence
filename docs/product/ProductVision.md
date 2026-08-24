@@ -1,58 +1,156 @@
-# Product Vision
+﻿# Product Vision
 
-本文件是 Open Market Intelligence（OMI）的長期產品基線。內容整理自 repo `README.md`、repo-level `AGENTS.md` 與既有 agent-run 文件；若和更上層 agent instructions 衝突，以 `AGENTS.md` 為準。
+本文件是 Open Market Intelligence（OMI）的長期產品基線。若和 repo `AGENTS.md` 衝突，以較新的 repo instructions 為準。
 
 ## 產品定位
 
-OMI 是本機優先的市場情報與交易決策研究工作台。它的核心不是「預測漲跌」，而是把市場資料、技術位階、資料新鮮度、風險條件與反證整理成可檢查的決策輔助。
+OMI 是本機優先、evidence-first 的市場情報與交易決策研究工作台。
 
-OMI 以 Apache License 2.0 開源。開源範圍涵蓋專案原始碼、文件與專案素材；第三方相依套件及從市場 provider 抓取的資料仍受其各自授權與使用條款約束。
+它的核心不是「預測下一根 K 線」，而是讓使用者能在同一個系統中：
 
-台股是核心市場。美股、日股、韓股、加密貨幣與商品資料是台股研究的 context layer；除非使用者明確改變策略，其他市場不應取代台股成為產品主線。
+- 取得可信且可追溯的市場資料。
+- 知道資料是否 live、delayed、stale、partial、missing 或 unavailable。
+- 比較不同 provider 與跨市場 evidence，而不必自己理解底層來源差異。
+- 使用技術、籌碼、基本面與跨市場脈絡形成可檢查的研究判斷。
+- 產出情境、回測區、確認條件、失效條件、風險與反證。
+- 將研究結果交給人做最後決策，而不是把 AI 變成自動交易機器。
 
-OMI 不是自動交易系統，不做自動下單、不代替使用者執行交易，也不把研究建議包裝成保證結果。
+OMI 的雙核心是：
+
+1. **Market Data Foundation**：Canonical Observation、Resolver、freshness、repair、source health、trading status 與 source lineage。
+2. **Research / Decision Core**：技術、籌碼、基本面、跨市場、情境、風險與 AI decision。
+
+## 市場定位
+
+### 台股
+
+台股是 OMI 的 primary / reference market。
+
+這代表：
+
+- 台股優先擁有最完整資料覆蓋與 production validation。
+- UI、資料模型與市場語意優先從台股建立 reference implementation。
+- 新市場若沒有特殊理由，應優先對齊台股已驗證的共同 contract。
+
+「台股優先」不代表其他市場只能當附屬資訊。
+
+### 美股
+
+美股是 first-class research market。
+
+OMI 應支援美股獨立研究需求，包括：
+
+- regular / premarket / after-hours quote semantics。
+- 日線與盤中 OHLCV。
+- technical structure。
+- fundamentals / SEC / provider-specific limitations。
+- ADR / cross-market relation。
+- watchlist / portfolio valuation。
+- KGI、Yahoo、AlphaVantage 等多來源 evidence。
+
+美股可以服務台股隔夜 context，也可以單獨成為研究標的。
+
+### 其他市場
+
+日股、韓股、Crypto、Resource 與其他市場預設是 secondary / context markets。
+
+它們可以逐步升級，但不應各自建立一套無法和 TW/US 共用的資料 contract。
 
 ## 主要使用者與場景
 
-主要使用者是需要在本機環境中做市場研究、看盤、追蹤 watchlist、整理技術決策稿與檢查資料品質的投資研究者。
+主要使用者是需要在本機做市場研究、看盤、追蹤 watchlist、管理研究上下文、檢查資料品質與形成交易計畫的人。
 
-核心日常流程：
+核心流程：
 
-- 盤前：確認市場日曆、資料來源健康度、關注清單與前一交易日狀態。
-- 盤中：查看台股 watchlist、K 線、雷達、籌碼與 source health，必要時用 OMI dock 提問。
-- 盤後：整理市場概況、個股技術位階、資料缺口與隔日觀察條件。
-- 決策：產出情境、回測區、進場條件、失效條件、停損/停利、續抱/減碼與反證。
-- 驗證：讓 stale、partial、missing、best-effort 與 provider failure 都可見。
+- 盤前：市場 session、前一交易日、隔夜市場、watchlist、資料健康度。
+- 盤中：行情、深度/Level 1、K 線、族群、Radar、technical 與 source health。
+- 盤後：official close、籌碼、基本面、資料 repair、隔日觀察條件。
+- 跨市場：TW/US/ADR/FX/sector relation。
+- 持倉：Position 與 Market Data Resolver 結合後估值；Account 與行情故障彼此隔離。
+- 決策：形成 scenario、entry confirmation、invalidation、risk、counter-evidence。
 
 ## 核心體驗
 
-第一屏應該是可操作的研究工作台，而不是 landing page。使用者打開 OMI 後應能立刻看到：
+第一屏應是可操作的研究工作台，不是 landing page。
 
-- 目前選定市場與 watchlist。
-- 台股優先的 detail panel、K 線/技術資料與 radar。
-- OMI dock 可針對目前 context 產出結構化決策輔助。
-- 資料新鮮度、來源狀態、缺口與警告。
+使用者打開 OMI 後應能迅速回答：
 
-UI 要支援高頻掃描、比較與反覆操作；設計語氣應是安靜、密集、穩定的研究工具，而不是行銷展示。
+- 現在是哪個市場 session？
+- 我看到的價格是 live 還是 fallback？
+- 目前 selected symbol 的資料是否完整？
+- 哪些族群/標的值得深入？
+- 這筆研究成立的條件與失效點是什麼？
+- 哪些資料缺口正在影響判斷？
 
-## 方向保護
+UI 應保持安靜、高密度、可掃描、可反覆操作。
 
-以下方向需要被主動反駁或改成更安全版本：
+## 市場資料產品原則
 
-- 把 OMI 做成單句買賣建議或猜漲跌工具。
-- 隱藏 stale、partial、missing、provider failure 或 best-effort。
-- 讓 frontend、MCP adapter、Kuro 或其他外部工具重做 backend 的市場邏輯。
-- 讓 GET/read path 隱性觸發昂貴 refresh、大量 quota、報告寫入或 AI memory 寫入。
-- 把其他市場提升成和台股平等的核心市場，除非使用者明確重新定義產品策略。
-- 將展示層需求凌駕於資料可信度、架構邊界與可驗證性之上。
+OMI 不把「有一個數字」當作「有可信資料」。
+
+每個重要 outward result 都應盡量保留：
+
+- provider / source。
+- event time / received or fetched time。
+- market session。
+- instrument trading status。
+- freshness / delay。
+- partial / finalized。
+- fallback chain / selection reason。
+- warnings / missing / provider failures。
+
+OMI 的資料來源可以增加，但新增 provider 不應增加 consumer 複雜度。
+
+Provider 只提供 Observation；OMI Resolver 決定最後使用哪一筆 evidence。
+
+## AI 與研究
+
+AI 是 Research / Decision Core 的重要組成，但不是市場資料 truth 的 owner。
+
+AI 不應：
+
+- 自己 call provider。
+- 自己推斷 freshness。
+- 自己把 missing 補成零。
+- 自己重新實作 market session / trading status。
+- 自己繞過 capability readiness。
+
+AI 應建立在 backend 已解析的 evidence 之上。
+
+## Broker / Account 邊界
+
+Broker Quote、Historical Data、Account/Portfolio 必須是不同 capability。
+
+OMI 可以整合券商作為市場資料來源與私人帳戶來源，但：
+
+- Quote failure 與 Account failure 分開。
+- Account 503 不代表市場行情不可用。
+- Position / Cost / Cash 是 Account truth。
+- Price / FX 是 Market Data truth。
+- Portfolio Valuation 是兩者的 join。
+- 不做 AI 自主交易。
+
+任何未來下單功能必須是明確使用者操作、獨立 Execution Plane、可追蹤且不可被 research pipeline 自動觸發。
 
 ## 非目標
 
-- 不做自動交易、下單機器人或保證績效的投資建議。
-- 不追求一次塞滿所有市場資料；先完成 bounded、可驗證、可解釋的資料 contract。
-- 不把外部 API refresh 變成無限制全市場抓取。
-- 不為 demo 視覺效果犧牲資料缺口可見性。
+- 自動交易或保證績效。
+- 隱藏資料缺口。
+- 為 demo 合成假行情。
+- 把 frontend / MCP / Kuro 變成第二套市場後端。
+- 為每個市場複製一份互不相容的 service architecture。
+- 無界全市場 backfill。
+- 讓 provider-specific payload 直接變成 OMI canonical truth。
+- 為了短期功能速度長期保留 provider masquerading。
 
 ## 成功樣貌
 
-OMI 的成功標準是：使用者能在同一個本機工作台中看到可信資料、知道資料缺口、追蹤市場 context，並用 AI decision core 產出可回測、可反駁、可執行風險管理的研究結論。
+OMI 成功時：
+
+- 使用者可在 TW 與 US 進行真正獨立、可驗證的研究。
+- 新 provider 可以接入而不改變 consumer contract。
+- 資料出問題時能明確知道是 provider、dataset、instrument status 還是 resolver 問題。
+- stale 資料有明確 repair owner；不能補的資料會如實顯示。
+- AI/MCP/UI 看到同一套 backend-owned market semantics。
+- Account 與行情互相隔離，Portfolio valuation 不會因單一 provider failure 污染。
+- 產品可在本機長期運行，也能逐步開源、安裝與擴充。

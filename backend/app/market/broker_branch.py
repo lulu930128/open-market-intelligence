@@ -1,10 +1,33 @@
 from dataclasses import dataclass
 from datetime import date, datetime
+import logging
 
 import requests
 from sqlalchemy.orm import Session
 
-from app.db.models import BrokerBranchTradeDaily, RawFetchResult, SourceRegistry
+from app.db.models import (
+    BrokerBranchSnapshotQuality,
+    BrokerBranchTradeDaily,
+    RawFetchResult,
+    SourceRegistry,
+)
+from app.market.broker_branch_quality import (
+    BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+    BROKER_BRANCH_COVERAGE_CENSORED,
+    BROKER_BRANCH_COVERAGE_INVALID,
+    BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+    BROKER_BRANCH_COVERAGE_PARTIAL,
+    BROKER_BRANCH_COVERAGE_PROVIDER_FAILURE,
+    BROKER_BRANCH_FETCH_EMPTY,
+    BROKER_BRANCH_FETCH_INVALID,
+    BROKER_BRANCH_FETCH_PARTIAL,
+    BROKER_BRANCH_FETCH_PROVIDER_DATE_MISMATCH,
+    BROKER_BRANCH_FETCH_PROVIDER_FAILURE,
+    BROKER_BRANCH_FETCH_SUCCESS,
+    NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+    NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+    upsert_broker_branch_snapshot_quality,
+)
 from app.market.providers import http_get
 from app.market.taiwan_rules import TAIWAN_BROKER_BRANCH_RELEASE_TIME
 from app.market.trading_calendar import latest_released_trading_day
@@ -17,8 +40,7 @@ NSTOCK_BRANCH_SOURCE_NAME = "nStock Broker Branch Top 15"
 BRANCH_DAILY_READY_TIME = TAIWAN_BROKER_BRANCH_RELEASE_TIME
 
 
-class BrokerBranchFetchError(RuntimeError):
-    pass
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -27,7 +49,20 @@ class BrokerBranchFetchResult:
     status_code: int
     content_type: str | None
     raw_text: str
-    payload: dict
+    payload: object | None
+
+
+class BrokerBranchFetchError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: str = "provider_failure",
+        fetch_result: BrokerBranchFetchResult | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+        self.fetch_result = fetch_result
 
 
 def _get_or_create_source(db: Session) -> SourceRegistry:
@@ -65,18 +100,42 @@ def _fetch_nstock_branch_top15(stock_id: str) -> BrokerBranchFetchResult:
             },
             timeout=20,
         )
-        response.raise_for_status()
-        payload = response.json()
     except requests.RequestException as exc:
-        raise BrokerBranchFetchError(f"分點資料來源連線失敗：{exc}") from exc
-    except ValueError as exc:
-        raise BrokerBranchFetchError("分點資料來源回傳格式不是有效 JSON。") from exc
+        raise BrokerBranchFetchError(
+            f"分點資料來源連線失敗：{exc}",
+            failure_kind="provider_failure",
+        ) from exc
 
-    return BrokerBranchFetchResult(
+    transport_result = BrokerBranchFetchResult(
         url=response.url,
         status_code=response.status_code,
         content_type=response.headers.get("content-type"),
         raw_text=response.text,
+        payload=None,
+    )
+    try:
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise BrokerBranchFetchError(
+            f"分點資料來源連線失敗：{exc}",
+            failure_kind="provider_failure",
+            fetch_result=transport_result,
+        ) from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise BrokerBranchFetchError(
+            "分點資料來源回傳格式不是有效 JSON。",
+            failure_kind="invalid",
+            fetch_result=transport_result,
+        ) from exc
+
+    return BrokerBranchFetchResult(
+        url=transport_result.url,
+        status_code=transport_result.status_code,
+        content_type=transport_result.content_type,
+        raw_text=transport_result.raw_text,
         payload=payload,
     )
 
@@ -171,6 +230,142 @@ def _parse_branch_rows(payload_data: dict) -> list[dict]:
     return list(rows_by_branch.values())
 
 
+def _add_raw_fetch_result(
+    db: Session,
+    *,
+    source_id: int,
+    fetch_result: BrokerBranchFetchResult,
+    error_message: str | None = None,
+) -> RawFetchResult:
+    raw_result = RawFetchResult(
+        source_id=source_id,
+        url=fetch_result.url,
+        method="GET",
+        status_code=fetch_result.status_code,
+        content_type=fetch_result.content_type,
+        content_hash=sha256_text(fetch_result.raw_text),
+        raw_text=fetch_result.raw_text,
+        parser_version="nstock_broker_branch_top15_v2",
+        error_message=error_message,
+    )
+    db.add(raw_result)
+    db.flush()
+    return raw_result
+
+
+def _base_quality_warnings() -> list[str]:
+    return [
+        "ranked_top_n_absence_is_censored",
+        "includes_block_trades_unverified",
+    ]
+
+
+def _commit_or_rollback(db: Session) -> None:
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _normalize_observation_rows(rows: list[dict]) -> tuple[list[dict], int]:
+    normalized: list[dict] = []
+    invalid_identity_count = 0
+    for row in rows:
+        branch_code = str(row.get("branch_code") or "").strip()
+        if not branch_code:
+            invalid_identity_count += 1
+            continue
+        item = dict(row)
+        item["branch_code"] = branch_code
+        item["branch_name"] = str(item.get("branch_name") or "").strip()
+        if item.get("buy_lots") == 0:
+            item["buy_avg_price"] = None
+        if item.get("sell_lots") == 0:
+            item["sell_avg_price"] = None
+        normalized.append(item)
+    return normalized, invalid_identity_count
+
+
+def _persist_fetch_failure_quality(
+    db: Session,
+    *,
+    source: SourceRegistry,
+    stock_id: str,
+    expected_trade_date: date,
+    error: BrokerBranchFetchError,
+) -> None:
+    """Persist failure evidence without replacing an already usable selection."""
+    try:
+        raw_result = None
+        if error.fetch_result is not None:
+            raw_result = _add_raw_fetch_result(
+                db,
+                source_id=source.id,
+                fetch_result=error.fetch_result,
+                error_message=str(error),
+            )
+
+        selected = (
+            db.query(BrokerBranchSnapshotQuality)
+            .filter(BrokerBranchSnapshotQuality.source_id == source.id)
+            .filter(BrokerBranchSnapshotQuality.stock_id == stock_id)
+            .filter(
+                BrokerBranchSnapshotQuality.expected_trade_date
+                == expected_trade_date
+            )
+            .one_or_none()
+        )
+        if selected is None or not (
+            selected.coverage_status
+            in {
+                BROKER_BRANCH_COVERAGE_CENSORED,
+                BROKER_BRANCH_COVERAGE_PARTIAL,
+            }
+            and selected.observed_branch_count > 0
+        ):
+            is_invalid = error.failure_kind == "invalid"
+            upsert_broker_branch_snapshot_quality(
+                db,
+                source_id=source.id,
+                raw_result_id=raw_result.id if raw_result is not None else None,
+                stock_id=stock_id,
+                expected_trade_date=expected_trade_date,
+                provider_trade_date=None,
+                fetched_at=(
+                    raw_result.fetched_at if raw_result is not None else None
+                ),
+                coverage_mode=BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+                buy_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+                sell_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+                observed_branch_count=0,
+                absence_semantics=BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+                coverage_status=(
+                    BROKER_BRANCH_COVERAGE_INVALID
+                    if is_invalid
+                    else BROKER_BRANCH_COVERAGE_PROVIDER_FAILURE
+                ),
+                fetch_status=(
+                    BROKER_BRANCH_FETCH_INVALID
+                    if is_invalid
+                    else BROKER_BRANCH_FETCH_PROVIDER_FAILURE
+                ),
+                source_contract_version=NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+                includes_block_trades=None,
+                warnings=(*_base_quality_warnings(), error.failure_kind),
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning(
+            "Failed to persist broker-branch failure quality stock_id=%s "
+            "expected_trade_date=%s.",
+            stock_id,
+            expected_trade_date,
+            exc_info=True,
+        )
+
+
 def probe_broker_branch_release(stock_id: str = "2330") -> dict:
     """Read the provider's latest release date without mutating local storage."""
     fetch_result = _fetch_nstock_branch_top15(stock_id=stock_id)
@@ -210,7 +405,24 @@ def fetch_and_store_broker_branch_daily(
     force: bool = False,
 ) -> list[BrokerBranchTradeDaily]:
     source = _get_or_create_source(db)
-    fetch_result = _fetch_nstock_branch_top15(stock_id=stock_id)
+    expected_trade_date = requested_trade_date or expected_broker_branch_trade_date()
+    try:
+        fetch_result = _fetch_nstock_branch_top15(stock_id=stock_id)
+    except BrokerBranchFetchError as exc:
+        _persist_fetch_failure_quality(
+            db,
+            source=source,
+            stock_id=stock_id,
+            expected_trade_date=expected_trade_date,
+            error=exc,
+        )
+        raise
+
+    raw_result = _add_raw_fetch_result(
+        db,
+        source_id=source.id,
+        fetch_result=fetch_result,
+    )
     payload_data = (
         fetch_result.payload.get("data")
         if isinstance(fetch_result.payload, dict)
@@ -218,19 +430,178 @@ def fetch_and_store_broker_branch_daily(
     )
 
     if not isinstance(payload_data, dict):
-        raise BrokerBranchFetchError("分點資料來源回傳格式缺少 data 物件。")
+        error = BrokerBranchFetchError(
+            "分點資料來源回傳格式缺少 data 物件。",
+            failure_kind="invalid",
+            fetch_result=fetch_result,
+        )
+        raw_result.error_message = str(error)
+        upsert_broker_branch_snapshot_quality(
+            db,
+            source_id=source.id,
+            raw_result_id=raw_result.id,
+            stock_id=stock_id,
+            expected_trade_date=expected_trade_date,
+            provider_trade_date=None,
+            fetched_at=raw_result.fetched_at,
+            coverage_mode=BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+            buy_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            sell_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            observed_branch_count=0,
+            absence_semantics=BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+            coverage_status=BROKER_BRANCH_COVERAGE_INVALID,
+            fetch_status=BROKER_BRANCH_FETCH_INVALID,
+            source_contract_version=NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+            includes_block_trades=None,
+            warnings=(*_base_quality_warnings(), "missing_data_object"),
+        )
+        _commit_or_rollback(db)
+        raise error
 
     try:
-        rows = _parse_branch_rows(payload_data)
+        parsed_rows = _parse_branch_rows(payload_data)
     except ValueError as exc:
-        raise BrokerBranchFetchError(str(exc)) from exc
+        error = BrokerBranchFetchError(
+            str(exc),
+            failure_kind="invalid",
+            fetch_result=fetch_result,
+        )
+        raw_result.error_message = str(error)
+        upsert_broker_branch_snapshot_quality(
+            db,
+            source_id=source.id,
+            raw_result_id=raw_result.id,
+            stock_id=stock_id,
+            expected_trade_date=expected_trade_date,
+            provider_trade_date=parse_date(payload_data.get("更新日期")),
+            fetched_at=raw_result.fetched_at,
+            coverage_mode=BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+            buy_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            sell_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            observed_branch_count=0,
+            absence_semantics=BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+            coverage_status=BROKER_BRANCH_COVERAGE_INVALID,
+            fetch_status=BROKER_BRANCH_FETCH_INVALID,
+            source_contract_version=NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+            includes_block_trades=None,
+            warnings=(*_base_quality_warnings(), "payload_schema_invalid"),
+        )
+        _commit_or_rollback(db)
+        raise error from exc
+
+    provider_trade_date = parse_date(payload_data.get("更新日期"))
+    payload_stock_id = str(payload_data.get("股票代號") or "").strip()
+    if payload_stock_id != stock_id:
+        error = BrokerBranchFetchError(
+            "Broker branch payload stock id does not match the requested target.",
+            failure_kind="invalid",
+            fetch_result=fetch_result,
+        )
+        raw_result.error_message = str(error)
+        upsert_broker_branch_snapshot_quality(
+            db,
+            source_id=source.id,
+            raw_result_id=raw_result.id,
+            stock_id=stock_id,
+            expected_trade_date=expected_trade_date,
+            provider_trade_date=provider_trade_date,
+            fetched_at=raw_result.fetched_at,
+            coverage_mode=BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+            buy_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            sell_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            observed_branch_count=0,
+            absence_semantics=BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+            coverage_status=BROKER_BRANCH_COVERAGE_INVALID,
+            fetch_status=BROKER_BRANCH_FETCH_INVALID,
+            source_contract_version=NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+            includes_block_trades=None,
+            warnings=(*_base_quality_warnings(), "stock_id_mismatch"),
+        )
+        _commit_or_rollback(db)
+        raise error
+
+    rows, invalid_identity_count = _normalize_observation_rows(parsed_rows)
+    quality_warnings = _base_quality_warnings()
+    if invalid_identity_count:
+        quality_warnings.append(
+            f"invalid_identity_rows:{invalid_identity_count}"
+        )
 
     if not rows:
+        all_rows_invalid = bool(parsed_rows) and invalid_identity_count == len(
+            parsed_rows
+        )
+        raw_result.error_message = (
+            "Broker branch payload contains no valid branch identity."
+            if all_rows_invalid
+            else None
+        )
+        upsert_broker_branch_snapshot_quality(
+            db,
+            source_id=source.id,
+            raw_result_id=raw_result.id,
+            stock_id=stock_id,
+            expected_trade_date=expected_trade_date,
+            provider_trade_date=provider_trade_date,
+            fetched_at=raw_result.fetched_at,
+            coverage_mode=BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+            buy_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            sell_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            observed_branch_count=0,
+            absence_semantics=BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+            coverage_status=(
+                BROKER_BRANCH_COVERAGE_INVALID
+                if all_rows_invalid
+                else BROKER_BRANCH_COVERAGE_PARTIAL
+            ),
+            fetch_status=(
+                BROKER_BRANCH_FETCH_INVALID
+                if all_rows_invalid
+                else BROKER_BRANCH_FETCH_EMPTY
+            ),
+            source_contract_version=NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+            includes_block_trades=None,
+            warnings=(
+                *quality_warnings,
+                (
+                    "no_valid_branch_identity"
+                    if all_rows_invalid
+                    else "ranked_top_n_empty_does_not_confirm_no_activity"
+                ),
+            ),
+        )
+        _commit_or_rollback(db)
+        if all_rows_invalid:
+            raise BrokerBranchFetchError(
+                "Broker branch payload contains no valid branch identity.",
+                failure_kind="invalid",
+                fetch_result=fetch_result,
+            )
         return []
 
     fetched_trade_date = rows[0]["trade_date"]
 
-    if requested_trade_date is not None and requested_trade_date != fetched_trade_date:
+    if expected_trade_date != fetched_trade_date:
+        upsert_broker_branch_snapshot_quality(
+            db,
+            source_id=source.id,
+            raw_result_id=raw_result.id,
+            stock_id=stock_id,
+            expected_trade_date=expected_trade_date,
+            provider_trade_date=fetched_trade_date,
+            fetched_at=raw_result.fetched_at,
+            coverage_mode=BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+            buy_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            sell_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            observed_branch_count=len(rows),
+            absence_semantics=BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+            coverage_status=BROKER_BRANCH_COVERAGE_PARTIAL,
+            fetch_status=BROKER_BRANCH_FETCH_PROVIDER_DATE_MISMATCH,
+            source_contract_version=NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+            includes_block_trades=None,
+            warnings=(*quality_warnings, "provider_trade_date_mismatch"),
+        )
+        _commit_or_rollback(db)
         return []
 
     existing_count = (
@@ -242,24 +613,39 @@ def fetch_and_store_broker_branch_daily(
     )
 
     if existing_count and not force:
+        upsert_broker_branch_snapshot_quality(
+            db,
+            source_id=source.id,
+            raw_result_id=raw_result.id,
+            stock_id=stock_id,
+            expected_trade_date=expected_trade_date,
+            provider_trade_date=fetched_trade_date,
+            fetched_at=raw_result.fetched_at,
+            coverage_mode=BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+            buy_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            sell_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+            observed_branch_count=len(rows),
+            absence_semantics=BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+            coverage_status=(
+                BROKER_BRANCH_COVERAGE_PARTIAL
+                if invalid_identity_count
+                else BROKER_BRANCH_COVERAGE_CENSORED
+            ),
+            fetch_status=(
+                BROKER_BRANCH_FETCH_PARTIAL
+                if invalid_identity_count
+                else BROKER_BRANCH_FETCH_SUCCESS
+            ),
+            source_contract_version=NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+            includes_block_trades=None,
+            warnings=quality_warnings,
+        )
+        _commit_or_rollback(db)
         return list_broker_branch_trades(
             db=db,
             stock_id=stock_id,
             trade_date=fetched_trade_date,
         )
-
-    raw_result = RawFetchResult(
-        source_id=source.id,
-        url=fetch_result.url,
-        method="GET",
-        status_code=fetch_result.status_code,
-        content_type=fetch_result.content_type,
-        content_hash=sha256_text(fetch_result.raw_text),
-        raw_text=fetch_result.raw_text,
-        parser_version="nstock_broker_branch_top15_v1",
-    )
-    db.add(raw_result)
-    db.flush()
 
     (
         db.query(BrokerBranchTradeDaily)
@@ -278,7 +664,34 @@ def fetch_and_store_broker_branch_daily(
         for row in rows
     ]
     db.add_all(models)
-    db.commit()
+    upsert_broker_branch_snapshot_quality(
+        db,
+        source_id=source.id,
+        raw_result_id=raw_result.id,
+        stock_id=stock_id,
+        expected_trade_date=expected_trade_date,
+        provider_trade_date=fetched_trade_date,
+        fetched_at=raw_result.fetched_at,
+        coverage_mode=BROKER_BRANCH_COVERAGE_MODE_RANKED_TOP_N,
+        buy_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+        sell_rank_limit=NSTOCK_BROKER_BRANCH_RANK_LIMIT,
+        observed_branch_count=len(rows),
+        absence_semantics=BROKER_BRANCH_ABSENCE_UNKNOWN_NOT_RANKED,
+        coverage_status=(
+            BROKER_BRANCH_COVERAGE_PARTIAL
+            if invalid_identity_count
+            else BROKER_BRANCH_COVERAGE_CENSORED
+        ),
+        fetch_status=(
+            BROKER_BRANCH_FETCH_PARTIAL
+            if invalid_identity_count
+            else BROKER_BRANCH_FETCH_SUCCESS
+        ),
+        source_contract_version=NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+        includes_block_trades=None,
+        warnings=quality_warnings,
+    )
+    _commit_or_rollback(db)
 
     return list_broker_branch_trades(
         db=db,

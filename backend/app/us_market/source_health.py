@@ -36,6 +36,7 @@ from app.observability.source_health_contract import (
     summarize_source_health,
 )
 from app.us_market.sources import normalize_us_symbol
+from app.us_market.market_data_policy import us_provider_order
 from app.us_market.sec_fundamentals.freshness import evaluate_sec_filing_freshness
 from app.us_market.sec_fundamentals.submissions import (
     SEC_SUBMISSIONS_CACHE,
@@ -48,7 +49,7 @@ from app.us_market.trading_calendar import (
 )
 
 
-DAILY_PROVIDER_ORDER = ("yahoo_chart", "alphavantage")
+DAILY_PROVIDER_ORDER = us_provider_order("daily.ohlcv")
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,11 @@
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import json
+from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.market.daily_metrics_backfill import (
     ensure_latest_daily_metrics,
@@ -27,6 +31,7 @@ from app.market.taiwan_rules import (
     normalize_refresh_profile,
     refresh_profile_step_count,
 )
+from app.db.models import StockMaster
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
@@ -45,6 +50,14 @@ from app.market.index_contract_snapshot import (
 from app.market.quote_depth import (
     get_taiwan_quote_contract_replay,
     get_taiwan_stock_quote_depth,
+)
+from app.market.kgi_market_data import backfill_taiwan_kgi_market_data
+from app.market.providers.kgi_superpy import (
+    acquire_kgi_superpy_quote_lease,
+    get_kgi_superpy_quote_lease_summary,
+    get_kgi_superpy_market_stream_snapshot,
+    heartbeat_kgi_superpy_quote_lease,
+    release_kgi_superpy_quote_lease,
 )
 from app.market.market_chips import (
     MarketChipFetchError,
@@ -116,6 +129,12 @@ from app.market.schemas import (
     OvernightImpactRead,
     ShareholdingDistributionWeeklyRead,
     StockChipCoverageRead,
+    TaiwanRealtimeQuoteLeaseCreate,
+    TaiwanRealtimeQuoteLeaseRead,
+    TaiwanRealtimeQuoteLeaseSummaryRead,
+    TaiwanRealtimeMarketStreamRead,
+    TaiwanKgiDataBackfillRead,
+    TaiwanKgiDataBackfillRequest,
     TaiwanStockQuoteDepthRead,
     TaiwanIndexContractReplayRead,
     TaiwanQuoteContractReplayRead,
@@ -1074,6 +1093,176 @@ def get_stock_quote_depth(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.get(
+    "/realtime-quote-leases/summary",
+    response_model=TaiwanRealtimeQuoteLeaseSummaryRead,
+)
+def get_realtime_quote_lease_summary():
+    return get_kgi_superpy_quote_lease_summary()
+
+
+@router.post(
+    "/realtime-quote-leases",
+    response_model=TaiwanRealtimeQuoteLeaseRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_realtime_quote_lease(
+    request: TaiwanRealtimeQuoteLeaseCreate,
+    db: Session = Depends(get_db),
+):
+    stock_id = str(request.stock_id or "").strip()
+    if not stock_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="stock_id is required.",
+        )
+    stock_exists = (
+        db.query(StockMaster.stock_id)
+        .filter(StockMaster.stock_id == stock_id)
+        .first()
+        is not None
+    )
+    if not stock_exists:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown Taiwan stock id: {stock_id}",
+        )
+    return acquire_kgi_superpy_quote_lease(
+        stock_id,
+        owner_kind=request.owner_kind,
+    )
+
+
+@router.patch(
+    "/realtime-quote-leases/{lease_id}",
+    response_model=TaiwanRealtimeQuoteLeaseRead,
+)
+def heartbeat_realtime_quote_lease(lease_id: str):
+    lease = heartbeat_kgi_superpy_quote_lease(lease_id)
+    if lease is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Realtime quote lease was not found or has expired.",
+        )
+    return lease
+
+
+@router.delete(
+    "/realtime-quote-leases/{lease_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_realtime_quote_lease(lease_id: str):
+    release_kgi_superpy_quote_lease(lease_id)
+    return None
+
+
+@router.post(
+    "/kgi-data/{stock_id}/backfill",
+    response_model=TaiwanKgiDataBackfillRead,
+)
+def backfill_kgi_market_data(
+    stock_id: str,
+    request: TaiwanKgiDataBackfillRequest,
+    db: Session = Depends(get_db),
+):
+    normalized = str(stock_id or "").strip()
+    stock_exists = (
+        db.query(StockMaster.stock_id)
+        .filter(StockMaster.stock_id == normalized)
+        .first()
+        is not None
+    )
+    if not stock_exists:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown Taiwan stock id: {normalized}",
+        )
+    try:
+        return backfill_taiwan_kgi_market_data(
+            stock_id=normalized,
+            request=request,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+def _taiwan_realtime_sse_event(event: str, data: dict[str, Any]) -> str:
+    payload = json.dumps(data, ensure_ascii=False, default=str, separators=(",", ":"))
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+async def _iter_taiwan_realtime_quote_sse(
+    request: Request,
+    *,
+    stock_id: str,
+    interval_ms: int,
+):
+    interval_seconds = interval_ms / 1000
+    while not await request.is_disconnected():
+        payload = TaiwanRealtimeMarketStreamRead.model_validate(
+            get_kgi_superpy_market_stream_snapshot(stock_id)
+        ).model_dump(mode="json")
+        yield _taiwan_realtime_sse_event("snapshot", payload)
+        await asyncio.sleep(interval_seconds)
+
+
+@router.get(
+    "/realtime-quotes/{stock_id}",
+    response_model=TaiwanRealtimeMarketStreamRead,
+)
+def get_realtime_quote_stream_snapshot(
+    stock_id: str,
+    recent_trade_limit: int = Query(default=40, ge=1, le=60),
+    auction_limit: int = Query(default=40, ge=1, le=120),
+    kbar_limit: int = Query(default=60, ge=1, le=120),
+    diagnostic_limit: int = Query(default=0, ge=0, le=240),
+):
+    try:
+        return get_kgi_superpy_market_stream_snapshot(
+            stock_id,
+            recent_trade_limit=recent_trade_limit,
+            auction_limit=auction_limit,
+            kbar_limit=kbar_limit,
+            diagnostic_limit=diagnostic_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/realtime-quotes/{stock_id}/stream")
+async def stream_realtime_quote_snapshots(
+    request: Request,
+    stock_id: str,
+    interval_ms: int = Query(default=500, ge=250, le=5000),
+):
+    try:
+        get_kgi_superpy_market_stream_snapshot(stock_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    return StreamingResponse(
+        _iter_taiwan_realtime_quote_sse(
+            request,
+            stock_id=stock_id,
+            interval_ms=interval_ms,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get(

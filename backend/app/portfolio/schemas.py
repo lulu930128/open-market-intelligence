@@ -39,9 +39,11 @@ class PortfolioHoldingRead(BaseModel):
     symbol: str
     symbol_name: str | None = None
     quantity: float
-    cost_amount: float
+    cost_amount: float | None
     currency: str
     average_cost: float | None = None
+    source: str
+    source_updated_at: datetime | None = None
     note: str | None = None
     tags: str | None = None
     strategy_horizon: str | None = None
@@ -56,5 +58,24 @@ class PortfolioHoldingSummaryRead(BaseModel):
     market: PortfolioMarket
     holding_count: int
     total_cost_amount: float
+    cost_basis_count: int
+    missing_cost_basis_count: int
     currencies: list[str]
     holdings: list[PortfolioHoldingRead]
+
+
+class KgiPortfolioSyncRequest(BaseModel):
+    market: Literal["tw", "us"]
+
+
+class KgiPortfolioSyncRead(BaseModel):
+    market: Literal["tw", "us"]
+    status: Literal["synced"]
+    source: Literal["kgi_superpy"]
+    holding_count: int
+    created_count: int
+    updated_count: int
+    removed_count: int
+    missing_cost_basis_count: int
+    warnings: list[str] = Field(default_factory=list)
+    source_updated_at: datetime

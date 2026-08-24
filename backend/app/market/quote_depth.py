@@ -4,12 +4,14 @@ from copy import deepcopy
 from concurrent.futures import Future
 from datetime import date, datetime, time, timezone
 import json
+import logging
 from threading import RLock
 import time as monotonic_time
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import (
     MarketDailyPrice,
     SourceRegistry,
@@ -19,6 +21,17 @@ from app.db.models import (
     utc_now,
 )
 from app.market.providers import http_get
+from app.market.providers.kgi_canonical import (
+    canonical_snapshot_from_kgi,
+    kgi_quote_is_indicative,
+)
+from app.market.providers.kgi_superpy import (
+    KGI_SUPERPY_PROVIDER,
+    KGI_SUPERPY_SOURCE,
+    KgiSuperPyQuoteSnapshot,
+    get_kgi_superpy_quote_snapshot,
+)
+from app.market.providers.twse_mis_canonical import canonical_snapshot_from_twse_mis
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.live_snapshot import market_status_from_session
 from app.market.quote_volume import build_taiwan_quote_volume_contract
@@ -34,12 +47,21 @@ from app.market.twse_mis_observation import (
     resolve_twse_mis_actual_trade,
     resolve_twse_mis_observation,
 )
+from app.market_data.comparison import (
+    CANONICAL_COMPARISON_METRICS,
+    build_telemetry_event,
+    compare_legacy_to_canonical,
+)
+from app.market_data.contracts import InstrumentKey, InstrumentType, Market
 
 
 TWSE_MIS_PROVIDER = "twse_mis"
 TWSE_MIS_SOURCE = "twse_mis_quote_depth"
 TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TWSE_MIS_REFERER_URL = "https://mis.twse.com.tw/stock/fibest.jsp"
+KGI_SUPERPY_SOURCE_URL = (
+    "https://superpy.kgieworld.com.tw/kgipythonapi/guide/tw/quoteSubscribeAll"
+)
 QUOTE_DEPTH_CACHE_TTL_SECONDS = 4.75
 TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS = 180
 TWSE_MIS_CIRCUIT_FAILURE_THRESHOLD = 3
@@ -80,6 +102,9 @@ PHASE_LABELS = {
     "post_close_snapshot": "收盤快照",
     "market_closed": "休市",
 }
+
+logger = logging.getLogger(__name__)
+runtime_logger = logging.getLogger("uvicorn.error")
 
 _QUOTE_DEPTH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _TWSE_MIS_GUARD_LOCK = RLock()
@@ -642,6 +667,114 @@ def _snapshot_values_from_message(
     }
 
 
+def _join_kgi_depth(values: Any) -> str:
+    if not isinstance(values, (list, tuple)):
+        return ""
+    return "_".join(str(value) for value in values[:5])
+
+
+def _kgi_quote_to_mis_message(
+    *,
+    stock: StockMaster,
+    quote: dict[str, Any],
+    session_phase: str,
+) -> dict[str, Any]:
+    raw_datetime = str(quote.get("datetime") or "").strip()
+    if len(raw_datetime) != 14 or not raw_datetime.isdigit():
+        raise ValueError("KGI SuperPy quote datetime must use YYYYMMDDHHMMSS.")
+    if str(quote.get("symbol") or "").strip() != stock.stock_id:
+        raise ValueError("KGI SuperPy quote symbol does not match the requested stock.")
+    odd_lot = str(quote.get("odd_lot") or "").strip().lower()
+    if odd_lot in {"1", "true", "yes", "on"}:
+        raise ValueError("KGI SuperPy odd-lot quotes are outside the v1 contract.")
+
+    close = _as_float(quote.get("close"))
+    price_change = _as_float(quote.get("price_chg"))
+    previous_close = (
+        close - price_change
+        if close is not None and price_change is not None
+        else None
+    )
+    simtrade = _as_int(quote.get("simtrade")) or 0
+    is_trial = kgi_quote_is_indicative(quote, session=session_phase)
+    indicative_status_source = (
+        "simtrade" if simtrade == 1 else "session+total_volume" if is_trial else None
+    )
+    event_time = raw_datetime[8:]
+    return {
+        "c": stock.stock_id,
+        "n": stock.stock_name,
+        "ch": f"kgi_{stock.stock_id}.tw",
+        "d": raw_datetime[:8],
+        "t": f"{event_time[:2]}:{event_time[2:4]}:{event_time[4:6]}",
+        "o": quote.get("open"),
+        "h": quote.get("high"),
+        "l": quote.get("low"),
+        "z": "-" if is_trial else quote.get("close"),
+        "y": previous_close,
+        "v": quote.get("total_volume"),
+        "tv": None if is_trial else quote.get("volume"),
+        "b": _join_kgi_depth(quote.get("bid_prices")),
+        "g": _join_kgi_depth(quote.get("bid_volumes")),
+        "a": _join_kgi_depth(quote.get("ask_prices")),
+        "f": _join_kgi_depth(quote.get("ask_volumes")),
+        "ts": "1" if is_trial else "0",
+        "pz": quote.get("close") if is_trial else None,
+        "ps": quote.get("volume") if is_trial else None,
+        "_kgi_indicative_status_source": indicative_status_source,
+        "suspend": quote.get("suspend"),
+    }
+
+
+def _snapshot_values_from_kgi_quote(
+    *,
+    stock: StockMaster,
+    session_phase: str,
+    quote: dict[str, Any],
+) -> dict[str, Any]:
+    message = _kgi_quote_to_mis_message(
+        stock=stock,
+        quote=quote,
+        session_phase=session_phase,
+    )
+    received_at_raw = str(quote.get("received_at") or "").strip()
+    try:
+        received_at = datetime.fromisoformat(received_at_raw.replace("Z", "+00:00"))
+        if received_at.tzinfo is None:
+            received_at = received_at.replace(tzinfo=timezone.utc)
+        received_at = received_at.astimezone(timezone.utc)
+    except ValueError:
+        received_at = utc_now()
+    raw_payload = {
+        "provider": KGI_SUPERPY_PROVIDER,
+        "source": KGI_SUPERPY_SOURCE,
+        "data": quote,
+        "normalized_message": message,
+    }
+    values = _snapshot_values_from_message(
+        stock=stock,
+        session_phase=session_phase,
+        message=message,
+        source_url=KGI_SUPERPY_SOURCE_URL,
+        payload={"msgArray": [message]},
+        fetched_at=received_at,
+    )
+    values.update(
+        {
+            "provider": KGI_SUPERPY_PROVIDER,
+            "source": KGI_SUPERPY_SOURCE,
+            "source_url": KGI_SUPERPY_SOURCE_URL,
+            "exchange_channel": f"kgi_{stock.stock_id}.tw",
+            "raw_payload_json": json.dumps(
+                raw_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+    )
+    return values
+
+
 def _upsert_quote_snapshot(
     db: Session,
     values: dict[str, Any],
@@ -732,6 +865,11 @@ def _raw_message_for_row(
         payload = json.loads(row.raw_payload_json)
     except (TypeError, ValueError):
         return None
+    normalized_message = (
+        payload.get("normalized_message") if isinstance(payload, dict) else None
+    )
+    if isinstance(normalized_message, dict):
+        return normalized_message
     messages = payload.get("msgArray") if isinstance(payload, dict) else None
     message = messages[0] if isinstance(messages, list) and messages else None
     return message if isinstance(message, dict) else None
@@ -849,15 +987,36 @@ def _auction_indicative_contract(
     available = price is not None and volume_lots is not None
     partial = (price is not None or volume_lots is not None) and not available
     status = "available" if available else "partial" if partial else "not_provided"
+    is_kgi = row is not None and row.provider == KGI_SUPERPY_PROVIDER
     return {
         "available": available,
         "price": price,
         "volume_lots": volume_lots,
         "status": status,
-        "source": TWSE_MIS_SOURCE if available or partial else None,
-        "price_source_field": "pz" if price is not None else None,
-        "volume_source_field": "ps" if volume_lots is not None else None,
-        "status_source_field": "ts" if is_trial_snapshot else None,
+        "source": (
+            KGI_SUPERPY_SOURCE
+            if (available or partial) and is_kgi
+            else TWSE_MIS_SOURCE
+            if available or partial
+            else None
+        ),
+        "price_source_field": (
+            "close" if price is not None and is_kgi else "pz" if price is not None else None
+        ),
+        "volume_source_field": (
+            "volume"
+            if volume_lots is not None and is_kgi
+            else "ps"
+            if volume_lots is not None
+            else None
+        ),
+        "status_source_field": (
+            str(message.get("_kgi_indicative_status_source") or "simtrade")
+            if is_trial_snapshot and is_kgi
+            else "ts"
+            if is_trial_snapshot
+            else None
+        ),
     }
 
 
@@ -1007,10 +1166,16 @@ def _price_semantics_contract(
         and row is not None
         and selected_trade_row.id != row.id
     )
+    provider_trade_field = (
+        "close"
+        if selected_trade_row is not None
+        and selected_trade_row.provider == KGI_SUPERPY_PROVIDER
+        else "z"
+    )
     actual_trade_price_source = (
-        "same_session_snapshot_z"
+        f"same_session_snapshot_{provider_trade_field}"
         if actual_trade_price_cached
-        else "current_snapshot_z"
+        else f"current_snapshot_{provider_trade_field}"
         if current_row_has_trade
         else None
     )
@@ -1449,6 +1614,13 @@ def _row_to_response(
             daily_volume_row.trade_volume if daily_volume_row is not None else None
         ),
         official_daily_volume_source=daily_volume_source,
+        provider=row.provider,
+        cumulative_volume_source_field=(
+            "total_volume" if row.provider == KGI_SUPERPY_PROVIDER else "v"
+        ),
+        last_trade_volume_source_field=(
+            "volume" if row.provider == KGI_SUPERPY_PROVIDER else "tv"
+        ),
     )
 
     return {
@@ -1542,6 +1714,155 @@ def _row_to_response(
     }
 
 
+def _with_kgi_primary_metadata(
+    payload: dict[str, Any],
+    *,
+    primary: KgiSuperPyQuoteSnapshot | None,
+    primary_status: str | None = None,
+    primary_error: str | None = None,
+) -> dict[str, Any]:
+    if primary is None or primary.active_leases <= 0:
+        return payload
+
+    status = primary_status or primary.status
+    error = primary_error if primary_error is not None else primary.error
+    used_primary = payload.get("provider") == KGI_SUPERPY_PROVIDER
+    source_chain = [KGI_SUPERPY_SOURCE]
+    secondary_source = str(payload.get("source") or "").strip()
+    if secondary_source and secondary_source not in source_chain:
+        source_chain.append(secondary_source)
+    payload.update(
+        {
+            "source_chain": source_chain,
+            "primary_provider": KGI_SUPERPY_PROVIDER,
+            "primary_source_status": "live" if used_primary else status,
+            "primary_source_error": None if used_primary else error,
+            "fallback_used": not used_primary,
+            "fallback_reason": None if used_primary else f"kgi_superpy_{status}",
+        }
+    )
+    return payload
+
+
+def _canonical_market_data_mode() -> str:
+    return settings.canonical_market_data_mode
+
+
+def _canonical_instrument_key(stock: StockMaster) -> InstrumentKey:
+    instrument_type = InstrumentType(str(stock.instrument_type or "").strip().lower())
+    return InstrumentKey(
+        market=Market.TW,
+        symbol=stock.stock_id,
+        instrument_type=instrument_type,
+        venue=str(stock.market or "").strip().upper() or None,
+    )
+
+
+def _flag_enabled(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _record_canonical_shadow_event(event: Any) -> None:
+    try:
+        CANONICAL_COMPARISON_METRICS.record(event)
+    except Exception:
+        pass
+    try:
+        runtime_logger.info(
+            "canonical_market_data_shadow %s",
+            event.model_dump_json(),
+        )
+    except Exception:
+        pass
+
+
+def _run_canonical_quote_shadow(
+    *,
+    provider: str,
+    stock: StockMaster,
+    session_phase: str,
+    raw_observation: dict[str, Any],
+    legacy_values: dict[str, Any],
+    fetched_at: datetime | None = None,
+) -> None:
+    """Run bounded same-payload shadow work without changing legacy output."""
+
+    mode = _canonical_market_data_mode()
+    if mode == "off":
+        return
+    try:
+        instrument = _canonical_instrument_key(stock)
+        if provider == KGI_SUPERPY_PROVIDER:
+            canonical = canonical_snapshot_from_kgi(
+                instrument=instrument,
+                quote=raw_observation,
+                session=session_phase,
+                received_at=fetched_at,
+            )
+            trial = kgi_quote_is_indicative(
+                raw_observation,
+                session=session_phase,
+            )
+            semantics = {
+                "trial": trial,
+                "indicative_price": raw_observation.get("close") if trial else None,
+                "indicative_volume_lots": (
+                    raw_observation.get("volume") if trial else None
+                ),
+                "suspend_hint": _flag_enabled(raw_observation.get("suspend")),
+            }
+        elif provider == TWSE_MIS_PROVIDER:
+            if fetched_at is None:
+                raise ValueError("MIS canonical shadow requires fetched_at")
+            canonical = canonical_snapshot_from_twse_mis(
+                instrument=instrument,
+                message=raw_observation,
+                session=session_phase,
+                fetched_at=fetched_at,
+                expected_trade_date=legacy_values.get("trade_date"),
+            )
+            trial = str(raw_observation.get("ts") or "").strip() not in {"", "0"}
+            semantics = {
+                "trial": trial,
+                "indicative_price": raw_observation.get("pz") if trial else None,
+                "indicative_volume_lots": raw_observation.get("ps") if trial else None,
+            }
+            if "suspend" in raw_observation:
+                semantics["suspend_hint"] = _flag_enabled(
+                    raw_observation.get("suspend")
+                )
+        else:
+            raise ValueError("Unsupported canonical shadow provider")
+
+        result = (
+            compare_legacy_to_canonical(
+                legacy=legacy_values,
+                canonical=canonical,
+                semantics=semantics,
+            )
+            if mode == "compare"
+            else None
+        )
+        event = build_telemetry_event(
+            mode=mode,
+            provider=provider,
+            market_phase=session_phase,
+            result=result,
+        )
+        _record_canonical_shadow_event(event)
+    except Exception as exc:
+        try:
+            event = build_telemetry_event(
+                mode=mode,
+                provider=provider,
+                market_phase=session_phase,
+                error_code=type(exc).__name__,
+            )
+            _record_canonical_shadow_event(event)
+        except Exception:
+            pass
+
+
 def get_taiwan_stock_quote_depth(
     *,
     db: Session,
@@ -1556,10 +1877,55 @@ def get_taiwan_stock_quote_depth(
     if phase == "closed_waiting_preopen":
         return _empty_response(stock=stock, phase=phase, now=now)
 
-    cache_key = f"{normalized_stock_id}:{phase}:{int(refresh)}"
+    primary = (
+        get_kgi_superpy_quote_snapshot(normalized_stock_id)
+        if phase in LIVE_DEPTH_PHASES
+        else None
+    )
+    primary_token = "secondary"
+    if primary is not None and primary.active_leases > 0:
+        primary_token = str(
+            primary.quote.get("datetime")
+            if primary.quote is not None
+            else primary.status
+        )
+    cache_key = f"{normalized_stock_id}:{phase}:{int(refresh)}:{primary_token}"
     cached = _cache_get(cache_key)
     if cached is not None:
-        return cached
+        return _with_kgi_primary_metadata(cached, primary=primary)
+
+    primary_status = primary.status if primary is not None else None
+    primary_error = primary.error if primary is not None else None
+    if primary is not None and primary.quote is not None:
+        try:
+            values = _snapshot_values_from_kgi_quote(
+                stock=stock,
+                session_phase=phase,
+                quote=primary.quote,
+            )
+            _run_canonical_quote_shadow(
+                provider=KGI_SUPERPY_PROVIDER,
+                stock=stock,
+                session_phase=phase,
+                raw_observation=primary.quote,
+                legacy_values=values,
+            )
+            row, refresh_outcome = _upsert_quote_snapshot(db, values)
+            response = _row_to_response(
+                db,
+                row,
+                phase=phase,
+                now=now,
+                refresh_outcome=refresh_outcome,
+            )
+            return _cache_set(
+                cache_key,
+                _with_kgi_primary_metadata(response, primary=primary),
+            )
+        except Exception as exc:
+            db.rollback()
+            primary_status = "invalid"
+            primary_error = str(exc) or type(exc).__name__
 
     source_error: str | None = None
     source_error_detail: dict[str, Any] | None = None
@@ -1578,15 +1944,29 @@ def get_taiwan_stock_quote_depth(
                 payload=payload,
                 fetched_at=fetched_at,
             )
+            _run_canonical_quote_shadow(
+                provider=TWSE_MIS_PROVIDER,
+                stock=stock,
+                session_phase=phase,
+                raw_observation=message,
+                legacy_values=values,
+                fetched_at=fetched_at,
+            )
             row, refresh_outcome = _upsert_quote_snapshot(db, values)
+            response = _row_to_response(
+                db,
+                row,
+                phase=phase,
+                now=now,
+                refresh_outcome=refresh_outcome,
+            )
             return _cache_set(
                 cache_key,
-                _row_to_response(
-                    db,
-                    row,
-                    phase=phase,
-                    now=now,
-                    refresh_outcome=refresh_outcome,
+                _with_kgi_primary_metadata(
+                    response,
+                    primary=primary,
+                    primary_status=primary_status,
+                    primary_error=primary_error,
                 ),
             )
         except Exception as exc:
@@ -1595,29 +1975,41 @@ def get_taiwan_stock_quote_depth(
 
     latest = _latest_snapshot(db, normalized_stock_id)
     if latest is None:
-        return _cache_set(
-            cache_key,
-            _empty_response(
-                stock=stock,
-                phase=phase,
-                source_error=source_error,
-                source_error_detail=source_error_detail,
-                now=now,
-                refresh_outcome="failed" if source_error else "not_attempted",
-            ),
-        )
-
-    return _cache_set(
-        cache_key,
-        _row_to_response(
-            db,
-            latest,
+        response = _empty_response(
+            stock=stock,
             phase=phase,
             source_error=source_error,
             source_error_detail=source_error_detail,
             now=now,
             refresh_outcome="failed" if source_error else "not_attempted",
-            suppress_depth=phase == "closed_waiting_preopen",
+        )
+        return _cache_set(
+            cache_key,
+            _with_kgi_primary_metadata(
+                response,
+                primary=primary,
+                primary_status=primary_status,
+                primary_error=primary_error,
+            ),
+        )
+
+    response = _row_to_response(
+        db,
+        latest,
+        phase=phase,
+        source_error=source_error,
+        source_error_detail=source_error_detail,
+        now=now,
+        refresh_outcome="failed" if source_error else "not_attempted",
+        suppress_depth=phase == "closed_waiting_preopen",
+    )
+    return _cache_set(
+        cache_key,
+        _with_kgi_primary_metadata(
+            response,
+            primary=primary,
+            primary_status=primary_status,
+            primary_error=primary_error,
         ),
     )
 

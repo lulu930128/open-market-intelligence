@@ -1,0 +1,323 @@
+"""Pure Dataset Registry v1 for canonical market-data lifecycle truth."""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from enum import Enum
+
+from pydantic import Field, model_validator
+
+from app.market_data.contracts import (
+    CanonicalModel,
+    DatasetHealth,
+    DatasetHealthStatus,
+    Market,
+)
+
+
+class DatasetFrequency(str, Enum):
+    EVENT = "event"
+    INTRADAY = "intraday"
+    DAILY = "daily"
+
+
+class ExpectedStatePolicy(str, Enum):
+    CURRENT_SESSION = "current_session"
+    LATEST_COMPLETED_SESSION = "latest_completed_session"
+    REQUESTED_OR_LATEST_COMPLETED = "requested_or_latest_completed"
+
+
+class EligibilityPolicy(str, Enum):
+    LISTED_INSTRUMENT_AND_TRADING_DAY = "listed_instrument_and_trading_day"
+    LISTED_INSTRUMENT_MARKET_DAY_AND_INSTRUMENT_ELIGIBLE = (
+        "listed_instrument_market_day_and_instrument_eligible"
+    )
+    LISTED_INSTRUMENT = "listed_instrument"
+
+
+class RefreshBounds(CanonicalModel):
+    max_calls: int = Field(ge=1, le=500)
+    timeout_seconds: int = Field(ge=1, le=120)
+    max_symbols: int = Field(ge=1, le=500)
+    max_range_days: int = Field(ge=1, le=3650)
+
+
+class DatasetSpec(CanonicalModel):
+    registry_version: str = "omi.market.dataset_registry.v1"
+    dataset_id: str = Field(min_length=1, max_length=128)
+    schema_version: str = Field(min_length=1, max_length=64)
+    market: Market
+    scope_kind: str = Field(min_length=1, max_length=64)
+    owner: str = Field(min_length=1, max_length=128)
+    read_operation: str = Field(min_length=1, max_length=192)
+    projection_id: str = Field(min_length=1, max_length=128)
+    capability_ids: tuple[str, ...]
+    frequency: DatasetFrequency
+    expected_state_policy: ExpectedStatePolicy
+    eligibility_policy: EligibilityPolicy
+    storage_reference: str | None = Field(default=None, max_length=192)
+    refreshable: bool = False
+    refresh_operation: str | None = Field(default=None, max_length=128)
+    refresh_bounds: RefreshBounds | None = None
+    postcondition: str = Field(min_length=1, max_length=256)
+    repairable: bool = False
+
+    @model_validator(mode="after")
+    def _validate_lifecycle_contract(self) -> DatasetSpec:
+        if not self.capability_ids:
+            raise ValueError("dataset requires at least one capability mapping")
+        if self.refreshable:
+            if not self.refresh_operation:
+                raise ValueError("refreshable dataset requires refresh_operation")
+            if self.refresh_bounds is None:
+                raise ValueError("refreshable dataset requires refresh_bounds")
+        elif self.refresh_operation is not None or self.refresh_bounds is not None:
+            raise ValueError("non-refreshable dataset cannot advertise refresh metadata")
+        if self.repairable and not self.refreshable:
+            raise ValueError("repairable dataset must be refreshable")
+        return self
+
+
+class DatasetRegistry:
+    def __init__(self, specs: tuple[DatasetSpec, ...]) -> None:
+        by_id = {spec.dataset_id: spec for spec in specs}
+        if len(by_id) != len(specs):
+            raise ValueError("dataset IDs must be unique")
+        self._specs = specs
+        self._by_id = by_id
+
+    def get(self, dataset_id: str) -> DatasetSpec:
+        try:
+            return self._by_id[dataset_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown market dataset: {dataset_id}") from exc
+
+    def all(self) -> tuple[DatasetSpec, ...]:
+        return self._specs
+
+
+INTERNAL_DATASET_REFRESH_OPERATIONS = frozenset(
+    {
+        "tw.reconcile_full_market_eod",
+        "us.reconcile_full_market_eod",
+    }
+)
+
+
+def evaluate_dataset_health(
+    spec: DatasetSpec,
+    *,
+    expected_date: date | None,
+    latest_date: date | None,
+    checked_at: datetime,
+    eligible: bool | None,
+    partial: bool = False,
+    provider_available: bool = True,
+) -> DatasetHealth:
+    """Evaluate health from caller-supplied calendar/storage facts without I/O."""
+
+    if eligible is False:
+        status = DatasetHealthStatus.NOT_APPLICABLE
+        detail_code = "DATASET_NOT_ELIGIBLE"
+    elif eligible is None:
+        status = DatasetHealthStatus.UNKNOWN
+        detail_code = "ELIGIBILITY_UNKNOWN"
+    elif not provider_available:
+        status = DatasetHealthStatus.UNAVAILABLE
+        detail_code = "PROVIDER_UNAVAILABLE"
+    elif latest_date is None:
+        status = DatasetHealthStatus.MISSING
+        detail_code = "LATEST_DATE_MISSING"
+    elif partial:
+        status = DatasetHealthStatus.PARTIAL
+        detail_code = "DATASET_PARTIAL"
+    elif expected_date is None:
+        status = DatasetHealthStatus.UNKNOWN
+        detail_code = "EXPECTED_DATE_UNKNOWN"
+    elif latest_date < expected_date:
+        status = DatasetHealthStatus.STALE
+        detail_code = "LATEST_DATE_BEHIND_EXPECTED"
+    else:
+        status = DatasetHealthStatus.HEALTHY
+        detail_code = "DATASET_CURRENT"
+    return DatasetHealth(
+        dataset_id=spec.dataset_id,
+        market=spec.market,
+        status=status,
+        expected_date=expected_date,
+        latest_date=latest_date,
+        checked_at=checked_at,
+        refreshable=spec.refreshable,
+        refresh_operation=spec.refresh_operation,
+        detail_code=detail_code,
+    )
+
+
+DATASET_REGISTRY = DatasetRegistry(
+    (
+        DatasetSpec(
+            dataset_id="tw.quote.snapshot",
+            schema_version="omi.market.quote.v1",
+            market=Market.TW,
+            scope_kind="stock",
+            owner="app.market.quote_depth",
+            read_operation="get_taiwan_stock_quote_depth",
+            projection_id="quote.snapshot.stock.TW",
+            capability_ids=("quote.snapshot",),
+            frequency=DatasetFrequency.EVENT,
+            expected_state_policy=ExpectedStatePolicy.CURRENT_SESSION,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT_AND_TRADING_DAY,
+            storage_reference="taiwan_stock_quote_snapshot",
+            postcondition="Return a quote snapshot or a truthful unavailable/partial state.",
+        ),
+        DatasetSpec(
+            dataset_id="tw.intraday.bars",
+            schema_version="omi.market.bar.v1",
+            market=Market.TW,
+            scope_kind="stock",
+            owner="app.market.intraday",
+            read_operation="get_market_intraday_history",
+            projection_id="intraday.bars.stock.TW",
+            capability_ids=("intraday.bars",),
+            frequency=DatasetFrequency.INTRADAY,
+            expected_state_policy=ExpectedStatePolicy.CURRENT_SESSION,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT_AND_TRADING_DAY,
+            storage_reference="market_intraday_bar",
+            postcondition="Return bounded bars or a truthful unavailable/partial state.",
+        ),
+        DatasetSpec(
+            dataset_id="tw.daily.ohlcv",
+            schema_version="omi.market.bar.v1",
+            market=Market.TW,
+            scope_kind="stock",
+            owner="app.market.daily_prices",
+            read_operation="get_stock_daily_prices",
+            projection_id="daily.ohlcv.stock.TW",
+            capability_ids=("daily.ohlcv", "technical.structure"),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.REQUESTED_OR_LATEST_COMPLETED,
+            eligibility_policy=(
+                EligibilityPolicy.LISTED_INSTRUMENT_MARKET_DAY_AND_INSTRUMENT_ELIGIBLE
+            ),
+            storage_reference="market_daily_price",
+            refreshable=True,
+            refresh_operation="tw.refresh_daily_price",
+            refresh_bounds=RefreshBounds(
+                max_calls=1,
+                timeout_seconds=30,
+                max_symbols=1,
+                max_range_days=3650,
+            ),
+            postcondition="Latest stored trade date reaches the bounded requested/expected date.",
+            repairable=True,
+        ),
+        DatasetSpec(
+            dataset_id="us.intraday.bars",
+            schema_version="omi.market.bar.v1",
+            market=Market.US,
+            scope_kind="us_stock",
+            owner="app.us_market.service",
+            read_operation="get_us_stock_intraday_trend",
+            projection_id="intraday.bars.us_stock.US",
+            capability_ids=("quote.snapshot", "intraday.bars"),
+            frequency=DatasetFrequency.INTRADAY,
+            expected_state_policy=ExpectedStatePolicy.CURRENT_SESSION,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT_AND_TRADING_DAY,
+            storage_reference="request_scoped_provider_result",
+            refreshable=True,
+            refresh_operation="us.read_intraday_trend",
+            refresh_bounds=RefreshBounds(
+                max_calls=1,
+                timeout_seconds=25,
+                max_symbols=1,
+                max_range_days=5,
+            ),
+            postcondition="Return bounded current-session bars or a truthful provider limitation.",
+        ),
+        DatasetSpec(
+            dataset_id="us.daily.ohlcv",
+            schema_version="omi.market.bar.v1",
+            market=Market.US,
+            scope_kind="us_stock",
+            owner="app.us_market.service",
+            read_operation="get_us_daily_prices",
+            projection_id="daily.ohlcv.us_stock.US",
+            capability_ids=("daily.ohlcv",),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.REQUESTED_OR_LATEST_COMPLETED,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT,
+            storage_reference="us_daily_price",
+            refreshable=True,
+            refresh_operation="us.refresh_daily_price",
+            refresh_bounds=RefreshBounds(
+                max_calls=1,
+                timeout_seconds=30,
+                max_symbols=1,
+                max_range_days=3650,
+            ),
+            postcondition="Latest stored trade date reaches the bounded requested/expected date.",
+            repairable=True,
+        ),
+        DatasetSpec(
+            dataset_id="tw.daily.ohlcv.full_market",
+            schema_version="omi.market.eod_coverage.v1",
+            market=Market.TW,
+            scope_kind="full_market_stock_universe",
+            owner="app.market_data.eod_coverage",
+            read_operation="cached_eod_coverage_projection",
+            projection_id="daily.ohlcv.full_market.TW",
+            capability_ids=("daily.ohlcv",),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.LATEST_COMPLETED_SESSION,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT,
+            storage_reference="market_dataset_coverage_checkpoint+market_daily_price",
+            refreshable=True,
+            refresh_operation="tw.reconcile_full_market_eod",
+            refresh_bounds=RefreshBounds(
+                max_calls=2,
+                timeout_seconds=120,
+                max_symbols=2,
+                max_range_days=1,
+            ),
+            postcondition="All active TWSE/TPEx ordinary stocks are classified current, partial, stale, or missing for the expected completed session.",
+            repairable=True,
+        ),
+        DatasetSpec(
+            dataset_id="us.daily.ohlcv.full_market",
+            schema_version="omi.market.eod_coverage.v1",
+            market=Market.US,
+            scope_kind="full_market_stock_universe",
+            owner="app.market_data.eod_coverage",
+            read_operation="cached_eod_coverage_projection",
+            projection_id="daily.ohlcv.full_market.US",
+            capability_ids=("daily.ohlcv",),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.LATEST_COMPLETED_SESSION,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT,
+            storage_reference="market_dataset_coverage_checkpoint+us_daily_price",
+            refreshable=True,
+            refresh_operation="us.reconcile_full_market_eod",
+            refresh_bounds=RefreshBounds(
+                max_calls=250,
+                timeout_seconds=120,
+                max_symbols=250,
+                max_range_days=5,
+            ),
+            postcondition="The official active US stock universe has a durable bounded progress checkpoint for the expected completed session.",
+            repairable=True,
+        ),
+    )
+)
+
+
+__all__ = [
+    "DATASET_REGISTRY",
+    "DatasetFrequency",
+    "DatasetRegistry",
+    "DatasetSpec",
+    "EligibilityPolicy",
+    "ExpectedStatePolicy",
+    "INTERNAL_DATASET_REFRESH_OPERATIONS",
+    "RefreshBounds",
+    "evaluate_dataset_health",
+]

@@ -1,3 +1,8 @@
+param(
+    [ValidateSet("Run", "Activate", "Exit", "RestartServices")]
+    [string]$LauncherAction = "Run"
+)
+
 $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -68,6 +73,10 @@ $script:AppDisplayName = "OMI_search"
 $script:TrayIcon = $null
 $script:ActivationEventName = "OpenMarketIntelligenceLauncherActivate"
 $script:ActivationEvent = $null
+$script:ExitEventName = "OpenMarketIntelligenceLauncherExit"
+$script:ExitEvent = $null
+$script:RestartEventName = "OpenMarketIntelligenceLauncherRestartServices"
+$script:RestartEvent = $null
 $script:ActivationTimer = $null
 $script:TaskbarListener = $null
 $script:IsPackagedRelease = Test-Path -LiteralPath (Join-Path $script:RepoRoot "release-manifest.json")
@@ -96,6 +105,16 @@ $script:DashboardAutoOpened = $false
 $script:DefaultFrontendHost = "127.0.0.1"
 $script:DefaultFrontendPort = 3000
 $script:FrontendPortSearchSpan = 1000
+$script:FrontendDevBundlerArgument = "--webpack"
+$script:FrontendHealthRecoveryGraceSeconds = 30
+$script:FrontendHealthStableResetSeconds = 600
+$script:MaxFrontendHealthRecoveryAttempts = 1
+$script:FrontendHealthRecoveryAttempts = 0
+$script:FrontendHealthUnhealthySinceUtc = $null
+$script:FrontendHealthHealthySinceUtc = $null
+$script:FrontendHealthRecoveryInProgress = $false
+$script:FrontendHealthRecoveryExhaustedLogged = $false
+$script:FrontendHealthRecoveryAdoptedLogged = $false
 $script:DefaultBackendHost = "127.0.0.1"
 $script:DefaultBackendPort = 8400
 $script:BackendPortSearchSpan = 1000
@@ -167,36 +186,73 @@ catch [System.Threading.AbandonedMutexException] {
 }
 
 if (-not $script:OwnsMutex) {
-    $activationSignaled = $false
+    $requestedEventName = switch ($LauncherAction) {
+        "Exit" { $script:ExitEventName }
+        "RestartServices" { $script:RestartEventName }
+        default { $script:ActivationEventName }
+    }
+    $requestedAction = switch ($LauncherAction) {
+        "Exit" { "exit" }
+        "RestartServices" { "service restart" }
+        default { "activation" }
+    }
+    $actionSignaled = $false
     try {
-        $existingActivationEvent = [System.Threading.EventWaitHandle]::OpenExisting($script:ActivationEventName)
+        $existingActionEvent = [System.Threading.EventWaitHandle]::OpenExisting($requestedEventName)
         try {
-            $activationSignaled = $existingActivationEvent.Set()
+            $actionSignaled = $existingActionEvent.Set()
         }
         finally {
-            $existingActivationEvent.Dispose()
+            $existingActionEvent.Dispose()
         }
     }
     catch {
-        Write-LauncherLog "Existing launcher activation signal failed. error=$($_.Exception.Message)" "WARN"
+        Write-LauncherLog "Existing launcher $requestedAction signal failed. error=$($_.Exception.Message)" "WARN"
     }
 
-    if ($activationSignaled) {
-        Write-LauncherLog "$($script:AppDisplayName) launcher activation requested; the existing tray instance will re-register its icon."
+    if ($actionSignaled) {
+        Write-LauncherLog "$($script:AppDisplayName) launcher $requestedAction requested through the existing tray owner."
     }
     else {
-        Write-LauncherLog "$($script:AppDisplayName) launcher start requested but an existing tray instance is already running and could not be activated; services were not restarted." "WARN"
-        Show-Message "$($script:AppDisplayName) is already running, but its tray icon could not be restored automatically. End the existing launcher process before starting it again."
+        Write-LauncherLog "$($script:AppDisplayName) launcher $requestedAction requested but the existing tray instance did not expose the required control event." "WARN"
+        if ($LauncherAction -in @("Run", "Activate")) {
+            Show-Message "$($script:AppDisplayName) is already running, but its tray icon could not be restored automatically. End the existing launcher process before starting it again."
+        }
     }
 
     $script:Mutex.Dispose()
-    exit 0
+    if ($actionSignaled) {
+        exit 0
+    }
+    exit 2
+}
+
+if ($LauncherAction -in @("Exit", "RestartServices")) {
+    Write-LauncherLog "Launcher action '$LauncherAction' found no existing tray owner; no service lifecycle action was required." "WARN"
+    if ($script:OwnsMutex) {
+        $script:Mutex.ReleaseMutex()
+    }
+    $script:Mutex.Dispose()
+    if ($LauncherAction -eq "Exit") {
+        exit 0
+    }
+    exit 3
 }
 
 $script:ActivationEvent = New-Object System.Threading.EventWaitHandle(
     $false,
     [System.Threading.EventResetMode]::AutoReset,
     $script:ActivationEventName
+)
+$script:ExitEvent = New-Object System.Threading.EventWaitHandle(
+    $false,
+    [System.Threading.EventResetMode]::AutoReset,
+    $script:ExitEventName
+)
+$script:RestartEvent = New-Object System.Threading.EventWaitHandle(
+    $false,
+    [System.Threading.EventResetMode]::AutoReset,
+    $script:RestartEventName
 )
 
 Write-LauncherLog "Launcher started. repo_root=$($script:RepoRoot)"
@@ -412,7 +468,8 @@ function Initialize-ServiceEnvironment {
         Set-ProcessEnvironmentValue -Name "NEXT_PUBLIC_API_BASE_URL" -Value ""
     }
 
-    Write-LauncherLog "Service environment initialized. backend=$($script:BackendBaseUrl) frontend=$($script:DashboardUrl) proxy_path=$($script:ApiProxyPath) backend_reload=$($script:BackendReload)"
+    $frontendDevBundler = if ($script:IsPackagedRelease) { "packaged" } else { $script:FrontendDevBundlerArgument.TrimStart("-") }
+    Write-LauncherLog "Service environment initialized. backend=$($script:BackendBaseUrl) frontend=$($script:DashboardUrl) proxy_path=$($script:ApiProxyPath) backend_reload=$($script:BackendReload) frontend_dev_bundler=$frontendDevBundler"
 }
 
 function Initialize-ReleaseEnvironment {
@@ -1407,11 +1464,24 @@ function Start-Frontend {
         throw "npm.cmd was not found on PATH. Install Node.js/npm or open the launcher from a shell with npm available."
     }
 
-    Write-LauncherLog "Starting frontend with $($npm.Source) on $($script:DashboardUrl)."
+    # The formal long-running Windows launcher favors route stability over the
+    # faster Turbopack startup path. Manual development can still opt into the
+    # package.json default directly.
+    $frontendArguments = @(
+        "run",
+        "dev",
+        "--",
+        $script:FrontendDevBundlerArgument,
+        "--hostname",
+        $script:FrontendHost,
+        "--port",
+        ([string]$script:FrontendPort)
+    )
+    Write-LauncherLog "Starting frontend with $($npm.Source) on $($script:DashboardUrl). bundler=$($script:FrontendDevBundlerArgument.TrimStart('-'))"
     $script:FrontendProcess = Start-LoggedService `
         -ServiceName "frontend" `
         -FilePath $npm.Source `
-        -Arguments @("run", "dev", "--", "--hostname", $script:FrontendHost, "--port", ([string]$script:FrontendPort)) `
+        -Arguments $frontendArguments `
         -WorkingDirectory $script:FrontendDir
     Write-LauncherLog "Frontend started pid=$($script:FrontendProcess.Id)."
 }
@@ -1533,6 +1603,74 @@ function Stop-FrontendService {
     }
 }
 
+function Clear-FrontendDevOutput {
+    if ($script:IsPackagedRelease) {
+        return
+    }
+
+    $frontendRoot = [System.IO.Path]::GetFullPath($script:FrontendDir).TrimEnd('\')
+    $nextOutputRoot = [System.IO.Path]::GetFullPath((Join-Path $frontendRoot ".next"))
+    $devOutputPath = [System.IO.Path]::GetFullPath((Join-Path $nextOutputRoot "dev"))
+    $expectedPrefix = $frontendRoot + '\'
+    if ((-not $devOutputPath.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) -or
+        (-not ([System.IO.Path]::GetDirectoryName($devOutputPath)).Equals($nextOutputRoot, [System.StringComparison]::OrdinalIgnoreCase)) -or
+        ([System.IO.Path]::GetFileName($devOutputPath) -ne "dev")) {
+        throw "Refusing to clear unexpected frontend dev output path: $devOutputPath"
+    }
+    if (-not (Test-Path -LiteralPath $devOutputPath)) {
+        Write-LauncherLog "Frontend dev output reset skipped because the directory does not exist. path=$devOutputPath"
+        return
+    }
+
+    $devOutputItem = Get-Item -LiteralPath $devOutputPath -Force
+    if (-not [string]::IsNullOrWhiteSpace([string]$devOutputItem.LinkType)) {
+        throw "Refusing to clear linked frontend dev output path: $devOutputPath link_type=$($devOutputItem.LinkType)"
+    }
+
+    Remove-Item -LiteralPath $devOutputPath -Recurse -Force
+    Write-LauncherLog "Frontend dev output reset. path=$devOutputPath" "WARN"
+}
+
+function Invoke-FrontendHealthRecovery {
+    if ($script:IsPackagedRelease -or
+        $script:IsShuttingDown -or
+        $script:FrontendHealthRecoveryInProgress) {
+        return $false
+    }
+
+    if ($script:FrontendHealthRecoveryAttempts -ge $script:MaxFrontendHealthRecoveryAttempts) {
+        if (-not $script:FrontendHealthRecoveryExhaustedLogged) {
+            Write-LauncherLog "Frontend health recovery exhausted. attempts=$($script:FrontendHealthRecoveryAttempts) max_attempts=$($script:MaxFrontendHealthRecoveryAttempts)" "ERROR"
+            $script:FrontendHealthRecoveryExhaustedLogged = $true
+        }
+        return $false
+    }
+
+    $script:FrontendHealthRecoveryInProgress = $true
+    $script:FrontendHealthRecoveryAttempts += 1
+    try {
+        Write-LauncherLog (
+            "Frontend remained unhealthy while its tracked process was running. " +
+            "attempt=$($script:FrontendHealthRecoveryAttempts)/$($script:MaxFrontendHealthRecoveryAttempts) " +
+            "grace_seconds=$($script:FrontendHealthRecoveryGraceSeconds) url=$($script:FrontendHealthUrl)"
+        ) "WARN"
+        Stop-FrontendService
+        Clear-FrontendDevOutput
+        Start-Frontend
+        $script:FrontendHealthUnhealthySinceUtc = [DateTime]::UtcNow
+        $script:FrontendHealthHealthySinceUtc = $null
+        $script:FrontendHealthRecoveryAdoptedLogged = $false
+        return $true
+    }
+    catch {
+        Write-LauncherLog "Frontend health recovery failed. error=$($_.Exception.Message)" "ERROR"
+        return $false
+    }
+    finally {
+        $script:FrontendHealthRecoveryInProgress = $false
+    }
+}
+
 function Stop-Services {
     Stop-FrontendService
     Stop-BackendService
@@ -1541,9 +1679,43 @@ function Stop-Services {
 function Restart-Services {
     Write-LauncherLog "Restart requested."
     $script:BackendPortRecoveryAttempts = 0
+    $script:FrontendHealthRecoveryAttempts = 0
+    $script:FrontendHealthUnhealthySinceUtc = $null
+    $script:FrontendHealthHealthySinceUtc = $null
+    $script:FrontendHealthRecoveryExhaustedLogged = $false
+    $script:FrontendHealthRecoveryAdoptedLogged = $false
     Stop-Services
     Start-Sleep -Seconds 1
     Start-Services
+}
+
+function Exit-Launcher {
+    param([Parameter(Mandatory = $true)][string]$Reason)
+
+    if ($script:IsShuttingDown) {
+        return
+    }
+
+    $script:IsShuttingDown = $true
+    Write-LauncherLog "Exit requested. reason=$Reason"
+    if ($null -ne $script:Timer) {
+        $script:Timer.Stop()
+    }
+    if ($null -ne $script:ActivationTimer) {
+        $script:ActivationTimer.Stop()
+    }
+    if ($null -ne $script:NotifyIcon) {
+        $script:NotifyIcon.Visible = $false
+    }
+    try {
+        Stop-Services
+    }
+    catch {
+        Write-LauncherLog "Service shutdown failed during launcher exit. reason=$Reason error=$($_.Exception.Message)" "ERROR"
+    }
+    finally {
+        [System.Windows.Forms.Application]::Exit()
+    }
 }
 
 function Open-Url {
@@ -1617,24 +1789,7 @@ $openLogsItem.add_Click({ Open-LogsFolder })
 $exitItem = New-Object System.Windows.Forms.MenuItem
 $exitItem.Text = "Exit Launcher"
 $exitItem.add_Click({
-    if ($script:IsShuttingDown) {
-        return
-    }
-
-    $script:IsShuttingDown = $true
-    Write-LauncherLog "Exit requested from tray menu."
-    $script:Timer.Stop()
-    $script:ActivationTimer.Stop()
-    $script:NotifyIcon.Visible = $false
-    try {
-        Stop-Services
-    }
-    catch {
-        Write-LauncherLog "Service shutdown failed during launcher exit. error=$($_.Exception.Message)" "ERROR"
-    }
-    finally {
-        [System.Windows.Forms.Application]::Exit()
-    }
+    Exit-Launcher -Reason "tray-menu"
 })
 
 [void]$script:Menu.MenuItems.Add($script:TitleItem)
@@ -1669,6 +1824,44 @@ $script:Timer.add_Tick({
     $frontendHttp = Test-FrontendOk
     $backendProc = Test-ProcessRunning $script:BackendProcess
     $frontendProc = Test-ProcessRunning $script:FrontendProcess
+
+    if ($frontendHttp) {
+        $script:FrontendHealthUnhealthySinceUtc = $null
+        if ($null -eq $script:FrontendHealthHealthySinceUtc) {
+            $script:FrontendHealthHealthySinceUtc = [DateTime]::UtcNow
+        }
+        if ($script:FrontendHealthRecoveryAttempts -gt 0 -and
+            (-not $script:FrontendHealthRecoveryAdoptedLogged)) {
+            Write-LauncherLog "Frontend health recovery adopted. attempts=$($script:FrontendHealthRecoveryAttempts) selected=$($script:DashboardUrl)"
+            $script:FrontendHealthRecoveryAdoptedLogged = $true
+        }
+        $healthySeconds = ([DateTime]::UtcNow - $script:FrontendHealthHealthySinceUtc).TotalSeconds
+        if ($script:FrontendHealthRecoveryAttempts -gt 0 -and
+            $healthySeconds -ge $script:FrontendHealthStableResetSeconds) {
+            Write-LauncherLog "Frontend remained healthy past the stable reset threshold; clearing prior recovery count. healthy_seconds=$([int]$healthySeconds) threshold_seconds=$($script:FrontendHealthStableResetSeconds)"
+            $script:FrontendHealthRecoveryAttempts = 0
+            $script:FrontendHealthRecoveryExhaustedLogged = $false
+            $script:FrontendHealthRecoveryAdoptedLogged = $false
+        }
+    }
+    elseif ($frontendProc -and (-not $script:IsPackagedRelease)) {
+        $script:FrontendHealthHealthySinceUtc = $null
+        $script:FrontendHealthRecoveryAdoptedLogged = $false
+        if ($null -eq $script:FrontendHealthUnhealthySinceUtc) {
+            $script:FrontendHealthUnhealthySinceUtc = [DateTime]::UtcNow
+        }
+        $unhealthySeconds = ([DateTime]::UtcNow - $script:FrontendHealthUnhealthySinceUtc).TotalSeconds
+        if ($unhealthySeconds -ge $script:FrontendHealthRecoveryGraceSeconds) {
+            if (Invoke-FrontendHealthRecovery) {
+                return
+            }
+        }
+    }
+    else {
+        $script:FrontendHealthUnhealthySinceUtc = $null
+        $script:FrontendHealthHealthySinceUtc = $null
+        $script:FrontendHealthRecoveryAdoptedLogged = $false
+    }
 
     $backendState = if ($backendHttp) { "API OK" } elseif ($backendProc) { "API starting" } else { "API stopped" }
     $frontendState = if ($frontendHttp) { "UI OK" } elseif ($frontendProc) { "UI starting" } else { "UI stopped" }
@@ -1710,6 +1903,14 @@ $script:Timer.add_Tick({
 $script:ActivationTimer = New-Object System.Windows.Forms.Timer
 $script:ActivationTimer.Interval = 250
 $script:ActivationTimer.add_Tick({
+    if ($null -ne $script:ExitEvent -and $script:ExitEvent.WaitOne(0)) {
+        Exit-Launcher -Reason "command-event"
+        return
+    }
+    if ($null -ne $script:RestartEvent -and $script:RestartEvent.WaitOne(0)) {
+        Restart-Services
+        return
+    }
     if ($null -ne $script:ActivationEvent -and $script:ActivationEvent.WaitOne(0)) {
         Restore-TrayIcon -Reason "secondary-launch"
     }
@@ -1733,6 +1934,12 @@ $script:ActivationTimer.add_Tick({
     if ($null -ne $script:ActivationEvent) {
         $script:ActivationEvent.Dispose()
     }
+    if ($null -ne $script:ExitEvent) {
+        $script:ExitEvent.Dispose()
+    }
+    if ($null -ne $script:RestartEvent) {
+        $script:RestartEvent.Dispose()
+    }
     if ($script:OwnsMutex) {
         $script:Mutex.ReleaseMutex()
     }
@@ -1743,7 +1950,7 @@ $script:ActivationTimer.add_Tick({
 Start-Services
 $script:Timer.Start()
 $script:ActivationTimer.Start()
-Write-LauncherLog "Tray recovery initialized. activation_event=$($script:ActivationEventName) taskbar_message=$($script:TaskbarListener.TaskbarCreatedMessage)"
+Write-LauncherLog "Tray recovery initialized. activation_event=$($script:ActivationEventName) exit_event=$($script:ExitEventName) restart_event=$($script:RestartEventName) taskbar_message=$($script:TaskbarListener.TaskbarCreatedMessage)"
 $script:NotifyIcon.ShowBalloonTip(3000, $script:AppDisplayName, "$($script:AppDisplayName) is running in the system tray.", [System.Windows.Forms.ToolTipIcon]::Info)
 
 [System.Windows.Forms.Application]::Run()

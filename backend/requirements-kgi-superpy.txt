@@ -1,0 +1,2 @@
+# Isolated read-only KGI runtime. Do not merge into backend/requirements.txt.
+kgisuperpy==2.1.0

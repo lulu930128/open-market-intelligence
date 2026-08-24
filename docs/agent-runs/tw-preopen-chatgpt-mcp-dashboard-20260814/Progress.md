@@ -2,18 +2,19 @@
 
 ## 目前狀態
 
-- 任務狀態：`m12_mobile_v2_technical_validation_complete`
+- 任務狀態：`m13_kline_source_validated_per_stock_pending`
 - Production implementation：`backend_mcp_widget_added`
-- Runtime adoption：`backend_and_omi_search_adopted`
+- Runtime adoption：`previous_dashboard_build_adopted_m13_4_pending`
 - ChatGPT Developer Mode 驗收：`not_started`
 - 真實盤前驗收：`not_observed`
 - M9 改版：`technical_validation_complete_but_scope_rejected`
 - M10 修正：`technical_validation_complete_user_validation_pending`
 - M11 自選股 Tree：`technical_validation_complete_user_validation_pending`
 - M12 Mobile V2：`technical_validation_complete_user_chatgpt_mobile_validation_pending`
-- 最後更新：2026-08-16 02:00 +08:00
+- M13 Fullscreen 雙市場：`kline_core_source_validated_runtime_and_per_stock_pending`
+- 最後更新：2026-08-16
 
-Backend 已新增 cache-only dashboard、symbol search 與 stock detail contract，並將既有 scheduler live gate 提前至 08:30。`OMI_search` MCP Apps resources/tools 與 React widget 已完成 isolated implementation/validation，正式 OMI backend 與 `omi_search` local runtime 亦已採用新 contract；Git commit、ChatGPT Developer Mode 與真實盤前驗收仍未完成。
+Backend 已新增 cache-only dashboard、symbol search 與 stock detail contract，並將既有 scheduler live gate 提前至 08:30。`OMI_search` MCP Apps resources/tools 與 React widget 已完成 isolated implementation/validation；正式 local runtime 目前採用的是 M13.4 之前的 build，detail v2 與互動 K-line 尚未 restart 採用。Git commit、ChatGPT Developer Mode 與真實盤前驗收仍未完成。
 
 2026-08-15 已依使用者要求完成 M9 技術實作與隔離驗證。改版先修正 watchlist scope、async ordering 與熱門族群／自選群組語意，再重排桌機與行動版資訊架構並收斂視覺；正式 ChatGPT host 主觀驗收、component restart、commit 與 push 仍保持獨立閘門。
 
@@ -27,7 +28,23 @@ M11 已依使用者要求完成自選股 frontend formalization。Backend flat g
 
 M12 Mobile V2 已完成 source、bundle、isolated browser 與正式 local runtime 採用。360／430／560／768px 均使用左側遞迴自選 Tree、右側 focused OHLC K 線的雙欄工作區，手機 Radar 不占位；1280px 桌機仍保留 Radar、direct items、technical evidence 與 disabled `OrderShell`。目前只待使用者在 ChatGPT 手機 fullscreen host 做最後主觀驗收。
 
+使用者已凍結 M13 方向：目前 fullscreen 是台股預設、美股 context 的唯讀研究工作台；持股、群組／股票管理、設定與任何 mutation 均不加入。行事曆移出設定成獨立單格。未來只允許使用者在前端逐筆手動下單，不做自動或 AI 代送；券商 API、authentication、write contract、確認與 audit 尚未完成前，只保留不含輸入欄位的 execution rail 位置。Professional K-line 採 feasibility gate，無法維持原站核心便利性時不加入，沿用目前 actual-OHLC K 線。
+
+M13.4 K-line core 已完成 source implementation：fullscreen 改用原版同類的 `lightweight-charts` 5.2，支援今日／日／週／月、MA5／20／60、成交量、十字線 OHLCV、拖曳、滑輪／pinch、工具列平移縮放、最新與全部。今日資料新增 backend detail v2 的 cache-only 1 分鐘 session，日／週／月仍由 backend 聚合。下一階段才做逐股 A → B → C 與個別資料缺口驗收；正式 runtime 尚未重啟採用。
+
 ## 本次已完成
+
+- M13.4 backend detail contract 升級至 `omi.tw_stock_dashboard_detail.v2`，新增 `today` 與 optional `intraday_chart`；只讀最新持久化 1 分 K，`refresh=false`，沒有 provider fetch、DB mutation 或 frontend timeframe aggregation。
+- 今日 K 的 technical override 會使用同一份 persisted session，前一收盤價只取早於當日 session 的 daily close，避免誤拿當日 bar；MA5／20／60 仍由 backend 計算。
+- Fullscreen K-line 改用 `lightweight-charts` 5.2：今日／日／週／月 tabs、台股紅漲綠跌 candlestick、MA5／20／60、volume pane、crosshair OHLCV、drag／wheel／pinch、left／right、zoom、latest／fit controls 與 `Asia/Taipei` 分鐘軸均完成。
+- Inline／mobile V2 branch、唯讀 Tree、technical evidence、Calendar pending 與 inert manual-order placeholder 均未刪除；沒有新增寫入、券商或自動交易能力。
+- Backend targeted `13 passed`、adapter `36 passed`、widget typecheck、`19 passed`、production build `468344 bytes`；isolated browser 已逐一切換四個週期、實測工具列平移／縮放、滑輪、左右拖曳、十字線 readout 與成交量副圖。
+- 本輪未 restart backend／`omi_search`、未 commit、未 push；正式 ChatGPT host 仍需獨立 runtime adoption gate。
+
+- 2026-08-16 新增 M13 fullscreen 長專案規格：台股／美股唯讀 workspace、獨立 Calendar tile、低對比黑色 token、responsive breakpoint 與 read-only contract gate。
+- 凍結 future manual order boundary：desktop 只預留 48px 收合 execution rail，tablet／mobile 降為底部未連線狀態；本輪沒有券商 API、委託表單、write tool 或 enabled trade control。
+- 凍結 Professional K-line acceptance gate：candlestick／line、日週月、zoom／pan、crosshair OHLC、volume、fit/reset、rapid-selection 與 fullscreen resize 全通過才顯示入口；不通過即採既有 K 線 fallback。
+- 依 OpenAI 官方 Plugin tool contract 核對 read／write 分離、side-effect annotations、confirmation 與 app-only tool visibility；正式 broker milestone 仍需 server-side authorization／validation，不以 metadata 取代。
 
 - 2026-08-16 依 OpenAI 官方文件重新核對 fullscreen、composer overlay、`requestDisplayMode` 與 host viewport context。
 - 讀取使用者 Mobile V2 HTML／計畫與 768px 參考圖；附件只作視覺參考，沒有採用其中示意數值或示意 chart。
@@ -145,6 +162,10 @@ M12 Mobile V2 已完成 source、bundle、isolated browser 與正式 local runti
 | M11 自選股 Tree Explorer | 技術驗證完成 | arbitrary-depth group recursion、lazy direct stock leaves、direct-group scope、Top 10、race guard、typecheck/tests/build 與 desktop/mobile browser smoke 已完成；使用者 preview 驗收待辦 |
 | M12 ChatGPT Mobile V2 | 技術驗證完成並採用 | compact truthful market summary、mobile Tree／actual K-line 雙欄、Radar mobile hide、disabled order disclosure、typecheck/tests/build/browser/live resource hash 已通過；使用者 ChatGPT 手機 host 驗收待辦 |
 | M12.1 Mobile host 驗收修正 | Widget 已採用／backend runtime 待採用 | 市場概況字級提高 2px、窄版 meta 防裁切與正式 resource hash 已通過；自選 0 群組已證實為正式 backend runtime 尚未載入 source 的 `watchlist.groups` contract，禁止在 frontend／adapter 補假資料 |
+| M12.2 Widget 高度穩定性 | 已完成並採用 | 移除 iframe viewport 自回授的 `100vh/100dvh` root sizing 與按鈕幾何位移；14 tests、production build、重複點擊 browser height assertion 與 live resource hash 已通過 |
+| M13.1 Fullscreen 原版骨架 | Source 技術驗證完成 | 300px sidebar、market tape、中央個股 K 線與右側 technical；移除寫入區、保留唯讀 Tree／Calendar／manual-order placeholder；runtime 待採用 |
+| M13.4 Professional K-line | K-line core source 驗證完成 | detail v2 今日／日／週／月、interactive chart、OHLCV／MA／volume／pan／zoom 已通過；逐股 rapid-selection、正式 runtime 與 ChatGPT host 待辦 |
+| M13.5 Tree selection stability | Source 與 served resource 驗證完成 | 群組預設全收合；selection 不再展開群組或改寫 scrollTop，polling 不再展開 selected path；正式 ChatGPT resource cache 驗收待辦 |
 
 ## 驗證狀態
 
@@ -174,6 +195,14 @@ M12 Mobile V2 已完成 source、bundle、isolated browser 與正式 local runti
 - Launcher UI automation 在第一次 services restart 完成後誤觸 `Exit Launcher`；startup mechanism 17 秒後自動恢復，最終 launcher PID `44672`、backend listener PID `50292`、frontend listener PID `35168` 且狀態為 `API OK; UI OK`。此後未再執行 GUI 動作。
 - M9 backend dashboard targeted tests：`11 passed`；涵蓋 active group hierarchy、inactive exclusion、industry code normalization 與 unknown/text fallback。
 - M9 schema snapshot：OMI 重新產生 contract digest `b5c8646b15007f5c08a48b182a414517c85042ad8cbe6f3d8c3e6e9cd7f07fd3`；OMI 與 `OMI_search` snapshot file SHA-256 相同。
+- M13.4 schema snapshot：detail contract 更新為 `omi.tw_stock_dashboard_detail.v2`，OMI 與 adapter 內部 digest 同為 `db95f3134ea8cc042b651783bd44610ba4ea66acca9ed81d750645415859418e`。
+- M13.4 backend targeted：`13 passed`；涵蓋 persisted latest-session filtering、今日 K cache-only read、backend MA 與前一交易日 close 排除當日 bar。
+- M13.4 widget：TypeScript typecheck 通過、`19 passed`、production build `468344 bytes`、SHA-256 `3D203A6A3F263219A3A866A2C09A862E0845CD5AA25F48D982B65750F04E908A`；`lightweight-charts` exact version `5.2.0`，npm audit 為 0 vulnerabilities。
+- M13.4 browser：3711 fixture 的今日／日／週／月均成功建立 canvas chart；今日顯示台北分鐘軸、量能柱、MA5／20／60、十字線 OHLCV，並實際操作左右拖曳、滑輪與工具列 pan／zoom。這是 chart-engine 隔離驗證，不等同逐股正式資料驗收。
+- M13.5 Tree 穩定性：移除 selection handler 的 expansion mutation、selected-path auto expansion、expanded-row／selected-row auto reveal 與 scrollTop 對齊；初始 `expandedWatchlistGroupIds` 保持空集合，手動 toggle 與「上一段／下一段」仍保留。
+- M13.5 widget：TypeScript typecheck 通過、`20 passed`、production build `467855 bytes`、SHA-256 `4B60A5ADC8D88DDE5D3FD23FD061868D4F6BBD39A0B22428B3CB2B27AB39422A`；live retained-session `resources/read` 已讀到不含舊 auto-reveal 狀態的新版 bundle。
+- M13.5 browser：群組初始 `aria-expanded=false`，點選 selection row 後仍為 `false`；只有手動 toggle 才變為 `true`。手動展開後點選 3711，renderer 建立 7 個 chart canvas、error alert 為 0。暫時預覽 server 與 tab 已結束。
+- M13.5 detail 診斷：live `8400` route 仍回 `omi.tw_stock_dashboard_detail.v1`，retained-session detail tool 因正式 schema 要求 v2 而誠實回 `isError=true`；source backend targeted `13 passed`、adapter `36 passed`，證實剩餘阻擋是 backend runtime adoption，不是 3711 資料或 K-line renderer。
 - M9 widget：TypeScript typecheck 通過、scope/order/backoff tests `7 passed`、production build 成功；單檔 resource 為 `191565 bytes`。
 - M9 `OMI_search` adapter regression：`36 passed`。
 - M9 browser：desktop 1280px 與 mobile 390px capability 均無水平溢出；資料品質展開、搜尋、自選 root/child group、stock selection、detail/chart identity 與 mobile 三工作區切換均通過。
@@ -231,6 +260,22 @@ M12 Mobile V2 已完成 source、bundle、isolated browser 與正式 local runti
 - M12.1 responsive browser：360px 與 768px 均無水平溢出或 clipped element；360px 實測市場 title 10px、timestamp 8px、index label 8px、index value 14px、change/meta 7.5px、breadth label 8px/value 9px，768px index value 為 16px。
 - M12.1 正式 runtime：Control Center 只重載 `omi_search`；新 buildId `155f55617eac266d`、listener PID `49624`、tunnel 與 upstream probes 均 Ready，整體仍為 `Ready 6/6`。
 - M12.1 live resource adoption：retained-session `initialize -> resources/read` 讀取 `ui://omi/tw-market-dashboard/v2.html`；served resource 與 production dist 均為 `231435 bytes`、SHA-256 `205C454F36F77BE302D2739670839DBDA3FC3F3CFBE0F6B17E35C9500937E4C9`。
+- M12.2 高度漂移根因：Widget root 同時使用 `html/body/#root min-height:100%`、desktop `100vh` 與 mobile `100dvh`，並讓所有 active button `translateY(1px)`；ChatGPT host 互動後重新量測 iframe 時會形成 viewport 與內容高度互相回授。Tree 展開本身只增加內部 `scrollHeight`，不是外框增高來源。
+- M12.2 修正：`html/body/#root`、desktop shell 與 mobile shell 改為內容高度 `min-height:0`；button press feedback 改用不改 geometry 的 `filter:brightness`，包含 Tree 分段按鈕。
+- M12.2 widget：TypeScript typecheck 通過、既有 12 tests 加 2 個 height／button geometry regression 共 `14 passed`、production build 成功；單檔 resource 為 `231416 bytes`。
+- M12.2 browser：390px 寬、900px iframe 下，群組展開、群組選取、股票選取、全螢幕、上一段與下一段連續操作後 `body/main/mainScrollHeight` 全程固定 `856px`；只有 bounded Tree 的 `scrollTop/scrollHeight` 依操作正常變化，按鈕 computed transform 全程為 `none`，`scrollWidth=clientWidth=375`。
+- M12.2 正式 runtime：Control Center 只重載 `omi_search`，buildId 從 `33f289c30f1a77be` 更新為 `52e3d8b4b66cd367`，listener PID `2000`、tunnel PID `51004`、upstream 與整體 `Ready 6/6` 均通過。
+- M12.2 live resource adoption：retained-session `initialize -> resources/list -> resources/read` 讀取 `ui://omi/tw-market-dashboard/v2.html`；served resource 與 production dist 均為 `231416 bytes`、SHA-256 `1340364EA04C9675AC63C8CFABB51ED61A370AF44F25CCFC4885769EE2E34985`。
+- M13 fullscreen shell 第一版：只在 `presentationDiagnostic.actualDisplayMode === "fullscreen"` 時 mount 新工作台；inline 與既有 mobile V2 DOM 保留。新版為 low-contrast black、台股 active／美股 disabled、獨立 Calendar tile、唯讀 Tree、focused actual-OHLC detail 與 inert execution rail；fullscreen DOM 不 render `OrderShell`、price／quantity／side／account 或 enabled trade controls。
+- M13 資料邊界：台股市場概況、任意深度 watchlist tree、lazy direct-stock leaves、搜尋與個股 detail 全部沿用既有 backend-owned tools；美股 dashboard 與 corporate-event Calendar focused outward contract 尚未完成，因此 UI 明確顯示「待接通」，沒有示意行情、事件或 frontend 推算。
+- M13 K-line gate：現有 widget 沒有原站 `lightweight-charts` 的日週月、zoom／pan、crosshair OHLC、volume 與 fit/reset parity；第一版不顯示 Professional Mode，只保留 tool-returned OHLC candles 與 backend MA5／20／60。
+- M13 widget 驗證：實際 source 目錄 `npm run typecheck` 通過、`16 passed`、production build `266058 bytes`，SHA-256 `E50EE2257164FBE59E26C51D06F1AFE771FDCCB32773FAF9EDD291F8368C9770`；staging／actual dist byte hash 相同。
+- M13 browser：1440／900／768／430px 均 `scrollWidth=clientWidth`；1440 使用 46px 右側 execution rail，900／768 降為底部 38px status，430 將 Tree／detail 垂直堆疊。展開 `科技／電子 → AI伺服器／ODM` 後可見 2317 葉節點，點選後顯示 `鴻海 2317`、30 根 fixture OHLC candles，fullscreen order fields 為 0、美股 disabled。
+- M13 runtime gate：本輪只採用 source 並產生 dist，沒有重啟 `omi_search`；ChatGPT host 的 live resource／buildId 尚未驗證，需另經 component-scoped restart 授權後才能標示 runtime adopted。
+- M13.1 使用者驗收修正：撤銷第一版另造的 top command shell、超小字級、Calendar 上列與 46px execution rail；fullscreen 改為原版 OMI 的 300px 左 sidebar、內容區上方 market tape、中央個股／K 線、右側 technical evidence。
+- M13.1 減法範圍：fullscreen 不 render 持股、分組管理、新增／刪除／改名群組、加入股票、設定或任何 order input；Calendar 成為 sidebar 獨立格，美股保持 disabled／pending，手動委託只剩右側底部 inert status。
+- M13.1 widget 驗證：`npm run typecheck` 通過、`17 passed`、production build `287062 bytes`，SHA-256 `C0893865DA24CD08859E71F18FAA1B99FD193BAAFCA4AEE6868EC929BF0845B5`。
+- M13.1 browser：1265px desktop 呈現 300px sidebar＋中央 chart＋右側 technical；`科技／電子 → AI伺服器／ODM → 2317` 可載入 `鴻海 2317`、30 根 OHLC candles 與 backend MA，委託輸入欄位為 0、美股 disabled。900px 與 430px 均 `scrollWidth=clientWidth`，viewport override 已 reset、preview tab 與 `43130` listener 已關閉。
 
 ## Known limitations
 
@@ -241,17 +286,29 @@ M12 Mobile V2 已完成 source、bundle、isolated browser 與正式 local runti
 - Local tunnel health 為 `Ready`，但 remote registration 與 ChatGPT connector 仍是 `NotChecked`；尚未執行 Developer Mode 驗收、commit 或 push。
 - Widget `dist/` 與 `node_modules/` 依 repo 規則保持 ignored；正式 restart 前必須先完成 production build，resource 缺失時 fail closed。
 - M10 已恢復既有 disabled 委託草稿版位；未定義券商／模擬交易 trust policy、write contract、風險控管與審計前，所有控制必須保持 disabled，且不得新增送單 side effect。
+- M13 尚未建立美股 fullscreen dashboard／Calendar 的 focused MCP outward contract；現有 widget 仍是台股 dashboard tool，不能靠 frontend 假資料完成雙市場。
+- M13 第一版的 Calendar tile 目前只呈現 backend 交易日與 session，並明確標示公司事件 contract 待接通；尚未達成 event source／coverage／freshness 的正式 Calendar 驗收條件。
+- M13.4 已導入 `lightweight-charts` 與核心 K-line interaction，但尚未完成多檔真實股票 A → B → C、missing volume、stale intraday、rapid timeframe switch 與正式 ChatGPT host resize 驗收；drawing tools 與任意 frontend indicator 設定仍明確不在本階段。
+- 正式 OMI backend listener 目前仍回傳 detail v1；在官方 launcher 採用 detail v2 source 前，`omi.read_tw_stock_dashboard_detail` 會依 output schema fail closed，不能由 frontend／MCP adapter 偽裝成 v2。
+- 未來手動委託仍缺券商 API、authentication、account scope、preview／confirmation、idempotency、audit／reconcile 與 emergency disable；右側預留格在此之前只能是 inert placeholder。
 - Backend 目前尚未提供 direct／subtree count 欄位；M11 只在 response 明確提供 optional count 時顯示，沒有在 frontend 以不完整 items 或 hierarchy 推算。若需要截圖中的群組數量，應另做 backend additive contract milestone。
 - 正式 OMI backend runtime 目前仍是舊 schema，尚未 outward 回傳 source 已具備的 `watchlist.groups`；在官方 launcher 執行 `Restart Services` 並驗證 live OpenAPI／snapshot 前，ChatGPT host 會持續誠實顯示 0 群組。
 
 ## 下一步
 
-下一步由使用者透過正式 OMI launcher 執行一次 `Restart Services`，再驗證 live OpenAPI 與 dashboard snapshot 已 outward 提供 `watchlist.groups`（目前 read-only DB 基線為 77 groups／349 items）。通過後才在 ChatGPT 手機 fullscreen host 驗證 Tree 遞迴、實際 K 線與 composer 遮擋；若 host 仍持有舊 resource，再重新連線或開新對話。remote registration、commit 與 push仍維持獨立工作包／授權閘門。
+下一步依使用者排程進入逐股 K-line 驗收：用多檔真實 detail payload 驗證快速 selection、不同資料完整度與 stale response isolation。Backend／`omi_search` component-scoped restart、ChatGPT host adoption、美股 workspace／Calendar contract、券商 API、order write、remote registration、commit 與 push仍維持各自獨立工作包／授權閘門。
 
 ## 變更紀錄
 
 ### 2026-08-16
 
+- 完成 M13.5 Tree selection stability：預設全收合，選取／輪詢不再自動展開祖先或把群組拉到頂端；加入 tool `isError` 文字抽取、20 widget tests、production build 與 live resource smoke。3711 失敗已定位為正式 backend 尚未採用 detail v2，本輪未 restart、未 commit、未 push。
+- 完成 M13.4 K-line core source：detail v2 新增 cache-only 今日 1 分 K，fullscreen 導入 `lightweight-charts` 5.2 與今日／日／週／月、MA、量能、crosshair、pan／zoom；backend 13 tests、adapter 36 tests、widget 19 tests、build 與 browser interaction smoke 通過，未 restart、未 commit、未 push。
+- 完成 M13.1 原版對齊修正：fullscreen 回到 OMI 左 sidebar／上方市場概況／中央個股 K 線／右側技術研究的骨架，只移除不需要的寫入區塊；typecheck、17 tests、287062-byte build 與 responsive browser smoke 通過，本輪仍未 restart、未 commit、未 push。
+- 完成 M13 fullscreen-only 第一版：host 確認 fullscreen 才切換低對比工作台；台股真實 Tree／detail／OHLC、獨立 Calendar pending tile、disabled 美股與 inert execution rail 已完成，inline／mobile V2 未改。
+- M13 完成 typecheck、16 widget tests、266058-byte build 與 1440／900／768／430 browser smoke；沒有水平溢出、沒有 fullscreen 委託輸入欄位，Tree 可遞迴到股票並載入 K 線。本輪未 restart、未 commit、未 push。
+- 凍結 M13 fullscreen 方向：台股／美股唯讀研究、獨立 Calendar、low-contrast black、收合 execution rail 與條件式 Professional K-line；目前沒有新增 broker／write 能力。
+- 完成 M12.2 Widget 高度穩定修正：移除 viewport 自回授與 button translate、加入 2 個 regression；連續 7 類互動後外層高度固定，14 tests、build、live resource hash 與 Ready 6/6 全部通過。
 - 完成 M12.1 host 驗收修正：市場概況各層級字級提高 2px並加入窄版防裁切；typecheck、12 widget tests、231435-byte build、360／768 browser smoke、正式 resource hash 與 Ready 6/6 均通過。
 - 證實自選 0 群組是正式 OMI backend runtime drift：live OpenAPI／snapshot 缺少 source 已存在且 11 tests 通過的 `watchlist.groups`；未在 frontend 或 thin adapter 重建 backend truth，等待官方 launcher `Restart Services` 採用。
 - 完成 M12 Mobile V2：手機使用 truthful compact market summary、左 Tree／右 actual K-line 雙欄、mobile Radar hide、fullscreen／disabled order actions；桌機原 Radar、technical evidence 與 OrderShell 保留。

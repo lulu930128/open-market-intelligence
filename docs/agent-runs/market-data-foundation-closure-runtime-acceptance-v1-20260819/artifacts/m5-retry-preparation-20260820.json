@@ -1,0 +1,168 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_retry_preparation.v1",
+  "captured_at": "2026-08-20T19:14:14.9579036+08:00",
+  "timezone": "Asia/Taipei",
+  "target_status": "READY_FOR_MANUAL_M5",
+  "foundation_runtime_accepted": false,
+  "target": {
+    "market": "TW",
+    "symbol": "2330",
+    "manual_acceptance_date": "2026-08-21"
+  },
+  "source": {
+    "checkpoint_file_sha256": "703caf9b23b79189a5db65dfb8b248686e4f2c4635c251d4f3174ab0ea573799",
+    "target_count": 14,
+    "target_mismatch_count": 0,
+    "public_contract_digest": "fec3d7d071dd7ca92d5245b94fca59d99801b901a8228f09e62cc2e9ebfdd7e2"
+  },
+  "acceptance_harness": {
+    "launcher_sha256": "faa54a5f9efe8648bd9e1780eefb4eb1579f1845c1bd4cae7493b5036bea2f8d",
+    "preflight_sha256": "75601426742c2084d7cbe3c65f5f81355c8bce629aeeef19e94a9c47a9dbfff0",
+    "mcp_smoke_sha256": "022a3ceeceb1e67c2637c2a5fa0960454c31287a931658bb5d0ac123d4ddb4dc"
+  },
+  "root_cause": {
+    "classification": "acceptance_runtime_not_reboot_persistent",
+    "summary": "The process-scoped compare launcher was replaced by the normal off-default launcher after the 2026-08-19 reboot. The 2026-08-20 preopen gate correctly stopped before any viewer lease or provider sample.",
+    "provider_semantic_failure_observed": false
+  },
+  "gates": {
+    "initial_off_baseline": {
+      "result": "passed",
+      "artifact": "m5-preflight-20260820-off-check.json"
+    },
+    "compare_bootstrap_1": {
+      "result": "passed",
+      "launcher_pid": 56716,
+      "listener_pid": 54552,
+      "artifact": "m5-preflight-20260820-compare-bootstrap-1.json"
+    },
+    "component_owned_restart": {
+      "result": "passed",
+      "launcher_pid": 56716,
+      "previous_listener_pid": 54552,
+      "listener_pid": 9764,
+      "effective_mode": "compare",
+      "artifact": "m5-preflight-20260820-compare-restart.json"
+    },
+    "compare_bootstrap_2_idempotent": {
+      "result": "passed",
+      "launcher_pid": 56716,
+      "listener_pid": 9764,
+      "restart_observed": false,
+      "artifact": "m5-preflight-20260820-compare-bootstrap-2.json"
+    },
+    "viewer_readiness": {
+      "result": "passed",
+      "provider": "kgi_superpy",
+      "before": {
+        "active_leases": 0,
+        "bridge_process_count": 0
+      },
+      "active": {
+        "active_leases": 1,
+        "bridge_process_count": 2,
+        "status": "subscribing"
+      },
+      "after_idle_cleanup": {
+        "active_leases": 0,
+        "bridge_process_count": 0,
+        "status": "not_subscribed"
+      },
+      "release_succeeded": true,
+      "artifact": "kgi-viewer-readiness-20260820.json"
+    },
+    "new_launcher_mode_identity": {
+      "off": {
+        "result": "passed",
+        "launcher_pid": 54180,
+        "listener_pid": 44568,
+        "artifact": "m5-preflight-20260820-mode-off.json"
+      },
+      "shadow": {
+        "result": "passed",
+        "launcher_pid": 8084,
+        "listener_pid": 56260,
+        "artifact": "m5-preflight-20260820-mode-shadow.json"
+      },
+      "compare": {
+        "result": "passed",
+        "launcher_pid": 56040,
+        "listener_pid": 54432,
+        "artifact": "m5-preflight-20260820-mode-compare-final.json"
+      }
+    }
+  },
+  "final_runtime": {
+    "effective_mode": "compare",
+    "health": "ok",
+    "ready": "ready",
+    "launcher_pid": 56040,
+    "listener_pid": 54432,
+    "project_root": "C:\\project\\Open Market Intelligence",
+    "python_executable": "C:\\project\\Open Market Intelligence\\.venv\\Scripts\\python.exe",
+    "viewer_active_leases": 0,
+    "kgi_bridge_process_count": 0
+  },
+  "calendar": {
+    "date": "2026-08-20",
+    "is_trading_day": true,
+    "next_trading_day": "2026-08-21",
+    "source": "TWSE Holiday Schedule OpenAPI",
+    "cache_status": "current"
+  },
+  "validation": {
+    "powershell_parser": {
+      "result": "passed",
+      "files": [
+        "scripts/omi-launcher.ps1",
+        "scripts/invoke-mdf-m5-preflight.ps1"
+      ]
+    },
+    "python_syntax": {
+      "result": "passed",
+      "file": "scripts/smoke-omi-mcp-stdio.py"
+    },
+    "artifact_json_parse": {
+      "result": "passed",
+      "file_count": 10
+    },
+    "documentation_utf8_read": {
+      "result": "passed",
+      "file_count": 4
+    },
+    "mcp_stdio_smoke": {
+      "result": "passed",
+      "protocol_version": "2025-06-18",
+      "tool_count": 3,
+      "omi_ask_present": true
+    },
+    "final_runtime_probe": {
+      "health": "ok",
+      "ready": "ready",
+      "effective_mode": "compare",
+      "viewer_status": "not_subscribed",
+      "viewer_active_leases": 0,
+      "kgi_bridge_process_count": 0
+    },
+    "git_diff_check": "passed"
+  },
+  "boundaries_observed": [
+    "quote_only",
+    "single_symbol_2330",
+    "viewer_lease_only",
+    "no_account",
+    "no_order",
+    "no_trading",
+    "no_backfill_or_repair",
+    "no_destructive_database_operation",
+    "no_raw_provider_payload_or_credentials",
+    "no_commit_or_push"
+  ],
+  "limitations": [
+    "Post-close viewer readiness proves lifecycle and cleanup only; it does not prove preopen, opening-transition, or regular-session semantics.",
+    "The launcher control-only change caused prior process identity evidence to be superseded. Off, shadow, and compare identities were re-established without an external refresh or database-write probe.",
+    "The prior same-payload shadow/compare semantic evidence remains tied to the unchanged Foundation source checkpoint; it was not re-executed through refresh=true because that path can perform an external fetch and legacy quote upsert.",
+    "Compare is process-scoped and must be re-established by the dated manual preflight after any reboot or launcher replacement."
+  ],
+  "result": "passed"
+}

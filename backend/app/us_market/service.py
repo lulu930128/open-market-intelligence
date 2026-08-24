@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+import logging
 import time
 
 import requests
@@ -26,7 +28,6 @@ from app.db.models import (
 )
 from app.observability.provider_http import translate_provider_http_errors
 from app.us_market.chart_projection import (
-    US_DAILY_CANONICAL_PROVIDER_PRIORITY,
     aggregate_daily_rows as _aggregate_us_daily_rows,
     dedupe_daily_rows_by_trade_date as _dedupe_us_daily_rows_by_trade_date,
     filter_ohlc_source_rows as _filter_us_ohlc_source_rows,
@@ -79,6 +80,19 @@ from app.us_market.providers.sec import (
     fetch_sec_submissions_payload,
 )
 from app.us_market.providers.yahoo import fetch_yahoo_chart_payload
+from app.us_market.market_data_canary import (
+    US_CANARY_MAX_BARS,
+    build_cached_daily_resolved_canary,
+    build_yahoo_intraday_resolved_canary,
+)
+from app.us_market.market_data_shadow import (
+    compare_cached_daily_legacy_to_resolved,
+    compare_yahoo_legacy_to_canonical,
+)
+from app.us_market.resolved_reads import (
+    read_resolved_us_daily_bars_for_symbols,
+)
+from app.market_data.contracts import InstrumentKey, InstrumentType, Market
 from app.us_market.sources import (
     MacroSeriesObservationRecord,
     USDailyPriceRecord,
@@ -108,7 +122,12 @@ from app.us_market.sec_fundamentals.submissions import (
     parse_sec_submissions,
     submissions_cache_path_for_session,
 )
-from app.us_market.trading_calendar import US_MARKET_TIMEZONE, previous_us_trading_day
+from app.us_market.trading_calendar import (
+    US_MARKET_TIMEZONE,
+    is_us_daily_price_finalized,
+    previous_us_trading_day,
+)
+from app.us_market.volume_semantics import summarize_intraday_volume
 from app.market.calendar_status import build_us_calendar_status, expected_us_trade_date
 from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
 from app.market.stock_volume_pace import (
@@ -122,9 +141,12 @@ from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
 )
+from app.research.technical.aggregation import aggregate_intraday_payload
+from app.us_market.research_service import build_us_market_research
 
 
 _translate_us_provider_errors = translate_provider_http_errors(USMarketDataFetchError)
+logger = logging.getLogger(__name__)
 
 
 def expected_us_daily_price_date() -> date:
@@ -890,27 +912,29 @@ def refresh_us_daily_prices(
             adjusted=adjusted,
         )
 
-    if normalized_provider == "auto" and api_key and outputsize == "compact":
+    if normalized_provider == "auto":
         try:
-            return refresh_us_daily_prices_from_alphavantage(
+            return refresh_us_daily_prices_from_yahoo_chart(
+                db=db,
+                symbol=symbol,
+                outputsize=outputsize,
+            )
+        except (USMarketConfigurationError, USMarketDataFetchError, requests.RequestException):
+            if not api_key or outputsize != "compact":
+                raise
+            fallback_result = refresh_us_daily_prices_from_alphavantage(
                 db=db,
                 symbol=symbol,
                 outputsize=outputsize,
                 adjusted=adjusted,
             )
-        except (USMarketConfigurationError, USMarketDataFetchError, requests.RequestException):
-            fallback_result = refresh_us_daily_prices_from_yahoo_chart(
-                db=db,
-                symbol=symbol,
-                outputsize=outputsize,
-            )
             fallback_result["message"] = (
-                f"{fallback_result['message']} Alpha Vantage auto refresh failed first; "
-                "used Yahoo chart fallback."
+                f"{fallback_result['message']} Yahoo chart auto refresh failed first; "
+                "used Alpha Vantage fallback."
             )
             return fallback_result
 
-    if normalized_provider == "auto" or normalized_provider == "yahoo_chart":
+    if normalized_provider == "yahoo_chart":
         return refresh_us_daily_prices_from_yahoo_chart(
             db=db,
             symbol=symbol,
@@ -921,7 +945,7 @@ def refresh_us_daily_prices(
 
 
 list_us_daily_prices = price_store.list_us_daily_prices
-_list_us_ohlc_source_rows = price_store._list_us_ohlc_source_rows
+_list_us_ohlc_source_rows = price_store.list_us_ohlc_source_rows
 
 def _refresh_us_ohlc_history_if_needed(
     db: Session,
@@ -1213,6 +1237,7 @@ def _project_us_intraday_payload(
     )
     result["has_extended_hours"] = result["extended_point_count"] > 0
     result["session_phase"] = current_points[-1].get("session") if current_points else None
+    result.update(summarize_intraday_volume(current_points))
     regular_points = [
         point for point in current_points if point.get("session", "regular") == "regular"
     ]
@@ -1268,11 +1293,245 @@ def _finalize_us_intraday_payload(
     return result
 
 
+def _observe_us_intraday_canonical_shadow(
+    *,
+    payload: dict,
+    parsed_payload: dict,
+    symbol: str,
+    session_scope: str,
+    fetched_at: datetime,
+) -> dict[str, dict] | None:
+    mode = _us_canonical_shadow_mode(symbol)
+    if mode is None:
+        return None
+    result_rows = payload.get("chart", {}).get("result") or []
+    result = result_rows[0] if result_rows and isinstance(result_rows[0], dict) else {}
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    venue = str(meta.get("exchangeName") or "").strip().upper()
+    if not venue:
+        logger.info(
+            "US canonical shadow skipped: provider venue missing",
+            extra={
+                "omi_market_data": {
+                    "market": "US",
+                    "provider": "yahoo_chart",
+                    "symbol": symbol,
+                    "mode": mode,
+                    "status": "skipped",
+                    "reason_code": "VENUE_MISSING",
+                }
+            },
+        )
+        return None
+    resolved_market_data: dict[str, dict] | None = None
+    try:
+        instrument = InstrumentKey(
+            market=Market.US,
+            symbol=symbol,
+            instrument_type=InstrumentType.STOCK,
+            venue=venue,
+        )
+        comparison = compare_yahoo_legacy_to_canonical(
+            instrument=instrument,
+            payload=payload,
+            legacy=parsed_payload,
+            fetched_at=fetched_at,
+            session_scope=session_scope,
+            mode=mode,
+        )
+        if (
+            mode in {"canary", "on"}
+            and comparison is not None
+            and comparison.status == "matched"
+        ):
+            resolved_market_data = build_yahoo_intraday_resolved_canary(
+                instrument=instrument,
+                payload=payload,
+                fetched_at=fetched_at,
+                session_scope=session_scope,
+            )
+    except Exception as exc:
+        logger.warning(
+            "US canonical shadow failed without changing legacy output",
+            extra={
+                "omi_market_data": {
+                    "market": "US",
+                    "provider": "yahoo_chart",
+                    "symbol": symbol,
+                    "mode": mode,
+                    "status": "error",
+                    "reason_code": type(exc).__name__,
+                }
+            },
+        )
+        return None
+    if comparison is not None:
+        logger.info(
+            "US canonical shadow observed symbol=%s status=%s compared_fields=%s "
+            "mismatches=%s",
+            symbol,
+            comparison.status,
+            comparison.compared_fields,
+            ",".join(comparison.mismatches) or "none",
+            extra={"omi_market_data": asdict(comparison)},
+        )
+    return resolved_market_data or None
+
+
+def _us_canonical_shadow_mode(symbol: str) -> str | None:
+    mode = (
+        settings.us_canonical_market_data_mode
+        or settings.canonical_market_data_mode
+    )
+    if mode == "off":
+        return None
+    canary_symbols = {
+        normalized
+        for item in settings.us_canonical_shadow_symbols.split(",")
+        if (normalized := normalize_us_symbol(item))
+    }
+    if mode == "on":
+        return mode
+    if len(canary_symbols) > settings.us_canonical_canary_max_symbols:
+        logger.error(
+            "US canonical rollout disabled: allowlist exceeds configured bound",
+            extra={
+                "omi_market_data": {
+                    "market": "US",
+                    "mode": mode,
+                    "status": "disabled",
+                    "reason_code": "CANARY_SYMBOL_BOUND_EXCEEDED",
+                    "symbol_count": len(canary_symbols),
+                    "max_symbols": settings.us_canonical_canary_max_symbols,
+                }
+            },
+        )
+        return None
+    return mode if normalize_us_symbol(symbol) in canary_symbols else None
+
+
+def get_us_daily_resolved_canary(
+    db: Session,
+    *,
+    symbol: str,
+    legacy_chart: dict,
+    instrument_type: str,
+    venue: str | None,
+) -> dict[str, dict] | None:
+    """Build a fail-closed daily canary from finalized cache rows only."""
+
+    mode = _us_canonical_shadow_mode(symbol)
+    if mode is None or legacy_chart.get("timeframe") != "daily":
+        return None
+    normalized_venue = str(venue or "").strip().upper()
+    if not normalized_venue:
+        logger.info(
+            "US daily canonical shadow skipped: instrument venue missing",
+            extra={
+                "omi_market_data": {
+                    "market": "US",
+                    "symbol": symbol,
+                    "mode": mode,
+                    "status": "skipped",
+                    "reason_code": "VENUE_MISSING",
+                }
+            },
+        )
+        return None
+
+    def parsed_date(value: object) -> date | None:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    from_date = parsed_date(legacy_chart.get("from_date"))
+    to_date = parsed_date(legacy_chart.get("to_date"))
+    expected_trade_date = parsed_date(legacy_chart.get("expected_data_date"))
+    if from_date is None or to_date is None or expected_trade_date is None:
+        return None
+    legacy_points = legacy_chart.get("points")
+    legacy_points = legacy_points if isinstance(legacy_points, list) else []
+    canary_bar_count = min(max(len(legacy_points), 1), US_CANARY_MAX_BARS)
+
+    comparison = None
+    resolved = None
+    try:
+        source_rows = _list_us_ohlc_source_rows(
+            db=db,
+            symbol=symbol,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        finalized_rows = [
+            row
+            for row in source_rows
+            if not _is_yahoo_range_max_record(row)
+            and is_us_daily_price_finalized(
+                trade_date=row.trade_date,
+                fetched_at=row.fetched_at,
+            )
+        ]
+        resolved = build_cached_daily_resolved_canary(
+            instrument=InstrumentKey(
+                market=Market.US,
+                symbol=symbol,
+                instrument_type=InstrumentType(instrument_type),
+                venue=normalized_venue,
+            ),
+            rows=finalized_rows,
+            expected_trade_date=expected_trade_date,
+            now=datetime.now(timezone.utc),
+            max_bars=canary_bar_count,
+        )
+        if not resolved:
+            return None
+        comparison = compare_cached_daily_legacy_to_resolved(
+            legacy={**legacy_chart, "points": legacy_points[-canary_bar_count:]},
+            resolved=resolved,
+        )
+    except Exception as exc:
+        logger.warning(
+            "US daily canonical shadow failed without changing legacy output",
+            extra={
+                "omi_market_data": {
+                    "market": "US",
+                    "symbol": symbol,
+                    "mode": mode,
+                    "status": "error",
+                    "reason_code": type(exc).__name__,
+                }
+            },
+        )
+        return None
+
+    logger.info(
+        "US daily canonical shadow observed symbol=%s status=%s "
+        "compared_fields=%s mismatches=%s",
+        symbol,
+        comparison.status,
+        comparison.compared_fields,
+        ",".join(comparison.mismatches) or "none",
+        extra={"omi_market_data": asdict(comparison)},
+    )
+    if mode not in {"canary", "on"} or comparison.status != "matched":
+        return None
+    return {"daily_ohlcv": resolved}
+
+
 def get_us_intraday_trend(
     *,
     symbol: str,
     session_scope: str = "regular",
+    interval: str = "1m",
     db: Session | None = None,
+    persist_history: bool = True,
 ) -> dict:
     if session_scope not in {"regular", "extended", "all"}:
         raise ValueError("session_scope must be one of: regular, extended, all.")
@@ -1282,10 +1541,14 @@ def get_us_intraday_trend(
     cached = _get_us_intraday_cache(cache_key)
 
     if cached is not None:
-        return _finalize_us_intraday_payload(
-            cached,
-            db=db,
-            symbol=normalized_symbol,
+        return aggregate_intraday_payload(
+            _finalize_us_intraday_payload(
+                cached,
+                db=db,
+                symbol=normalized_symbol,
+                session_scope=session_scope,
+            ),
+            interval=interval,
             session_scope=session_scope,
         )
 
@@ -1309,13 +1572,23 @@ def get_us_intraday_trend(
             include_prepost=session_scope != "regular",
             resource="intraday_price",
         )
+        canonical_fetched_at = datetime.now(timezone.utc)
         parsed_payload = parse_yahoo_intraday_prices(
             yahoo_payload,
             symbol=normalized_symbol,
             source_url=source_url,
             session_scope=session_scope,
         )
-        if db is not None:
+        resolved_market_data = _observe_us_intraday_canonical_shadow(
+            payload=yahoo_payload,
+            parsed_payload=parsed_payload,
+            symbol=normalized_symbol,
+            session_scope=session_scope,
+            fetched_at=canonical_fetched_at,
+        )
+        if resolved_market_data:
+            parsed_payload["_resolved_market_data"] = resolved_market_data
+        if db is not None and persist_history:
             parsed_payload = _persist_us_intraday_history(
                 db,
                 symbol=normalized_symbol,
@@ -1346,10 +1619,14 @@ def get_us_intraday_trend(
             ),
         )
 
-    return _finalize_us_intraday_payload(
-        payload,
-        db=db,
-        symbol=normalized_symbol,
+    return aggregate_intraday_payload(
+        _finalize_us_intraday_payload(
+            payload,
+            db=db,
+            symbol=normalized_symbol,
+            session_scope=session_scope,
+        ),
+        interval=interval,
         session_scope=session_scope,
     )
 
@@ -1895,9 +2172,25 @@ _compact_us_intraday_points = watchlist_metrics._compact_us_intraday_points
 _parse_us_row_trade_date = watchlist_metrics._parse_us_row_trade_date
 _us_row_trade_date = watchlist_metrics._us_row_trade_date
 
+
+def _read_us_watchlist_resolved_daily_batch(
+    db: Session,
+    *,
+    symbols: list[str],
+    bars: int,
+) -> dict[str, dict]:
+    return read_resolved_us_daily_bars_for_symbols(
+        db=db,
+        symbols=symbols,
+        bars=bars,
+        expected_trade_date=expected_us_daily_price_date(),
+        now=datetime.now(timezone.utc),
+    )
+
 def _us_watchlist_workflow_dependencies() -> watchlist_workflows.USWatchlistWorkflowDependencies:
     return watchlist_workflows.USWatchlistWorkflowDependencies(
         expected_daily_price_date=expected_us_daily_price_date,
+        resolved_daily_batch_loader=_read_us_watchlist_resolved_daily_batch,
         intraday_overlay_loader=_get_us_intraday_overlay,
         refresh_daily_prices=refresh_us_daily_prices,
         ensure_stock=_ensure_us_stock_exists,
@@ -1958,6 +2251,7 @@ def _get_us_intraday_overlay(
         "change_pct": change_pct,
         "volume": volume,
         "source": intraday.get("source"),
+        "provider": "yahoo_chart",
         "session_scope": intraday.get("session_scope"),
         "has_extended_hours": bool(intraday.get("has_extended_hours")),
         "points": _compact_us_intraday_points(points),
@@ -2017,24 +2311,48 @@ def get_us_watchlist_technical_radar(
         if normalize_us_symbol(row.get("symbol"))
     ]
     histories: dict[str, list[TechnicalRadarBar]] = {}
+    dependencies = _us_watchlist_workflow_dependencies()
+    resolved_daily_by_symbol = dependencies.resolved_daily_batch_loader(
+        db=db,
+        symbols=symbols,
+        bars=calculation_limit,
+    )
 
     for symbol in symbols:
-        daily_rows = _latest_distinct_us_daily_rows(
-            db=db,
-            symbol=symbol,
-            limit=calculation_limit,
-        )
-        histories[symbol] = [
-            TechnicalRadarBar(
-                trade_date=row.trade_date,
-                open=row.open_price,
-                high=row.high_price,
-                low=row.low_price,
-                close=_close_value(row),
-                volume=row.trade_volume,
+        resolved_daily = resolved_daily_by_symbol.get(symbol, {})
+        history: list[TechnicalRadarBar] = []
+        for bar in resolved_daily.get("bars") or []:
+            if not isinstance(bar, dict):
+                continue
+            trade_date = _parse_us_row_trade_date(bar.get("start_at"))
+            open_price = watchlist_workflows._finite_float(bar.get("open_price"))
+            high_price = watchlist_workflows._finite_float(bar.get("high_price"))
+            low_price = watchlist_workflows._finite_float(bar.get("low_price"))
+            close_price = watchlist_workflows._finite_float(bar.get("close_price"))
+            volume_value = watchlist_workflows._finite_float(bar.get("volume"))
+            if (
+                trade_date is None
+                or open_price is None
+                or high_price is None
+                or low_price is None
+                or close_price is None
+            ):
+                continue
+            history.append(
+                TechnicalRadarBar(
+                    trade_date=trade_date,
+                    open=open_price,
+                    high=high_price,
+                    low=low_price,
+                    close=close_price,
+                    volume=(
+                        int(volume_value)
+                        if volume_value is not None and volume_value >= 0
+                        else None
+                    ),
+                )
             )
-            for row in daily_rows
-        ]
+        histories[symbol] = history
 
     radar = build_technical_watchlist_radar(
         ranking=ranking,

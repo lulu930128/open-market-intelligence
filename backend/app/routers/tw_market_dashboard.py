@@ -73,9 +73,9 @@ def read_tw_market_dashboard_stock_detail(
     stock_id: str,
     timeframe: str = Query(
         default="daily",
-        pattern="^(daily|weekly|monthly)$",
+        pattern="^(today|daily|weekly|monthly)$",
     ),
-    bars: int = Query(default=90, ge=20, le=240),
+    bars: int = Query(default=90, ge=20, le=500),
     db: Session = Depends(get_db),
 ):
     try:

@@ -1,0 +1,58 @@
+{
+  "schema_version": "omi.market_data_foundation.acceptance_extension_checkpoint.v1",
+  "captured_at": "2026-08-24T20:06:58.4657913+08:00",
+  "base_checkpoint_artifact": "docs/agent-runs/market-data-foundation-closure-runtime-acceptance-v1-20260819/artifacts/source-checkpoint.json",
+  "base_checkpoint_sha256": "8acbaea6fa4566416c67dc1e1745e4a080e2b6ee8e341fd1c0edc501f56badf2",
+  "validation": {
+    "compileall": "passed",
+    "targeted_backend": "7 passed in the canonical-LF dark-boundary and extension overlay guard after the release integration refresh",
+    "frontend_lint": "passed",
+    "frontend_e2e": "58 passed against the production build on isolated port 3221 with controlled fixtures",
+    "frontend_build": "passed including TypeScript and static page generation",
+    "offline_acceptance_harness": "passed with 10 categorized callbacks across 3 switch steps",
+    "full_backend_pre_checkpoint": "post-rebase validation isolated three checkpoint-drift failures; the first post-fix sandbox run reached 100 percent before pytest cleanup hit WinError 5",
+    "full_safe_validation": "passed in .tmp/validation/20260824-195959: compileall; 2107 pytest tests; frontend lint, tsc, build; git diff check",
+    "checkpoint_guard": "passed through SourceOnly preflight with 28 extension targets, 13 superseded base targets, and zero mismatches",
+    "result": "passed"
+  },
+  "coverage": {
+    "target_count": 28,
+    "supersedes_matching_base_entries": true,
+    "reason": "Adds the bounded M5 remediation surface, current acceptance launcher dependency, and later validated source evolution without rewriting the dated base checkpoint.",
+    "excluded_self_referential_harness": "scripts/invoke-mdf-m5-preflight.ps1 is self-hashed at runtime and excluded because it embeds this checkpoint SHA-256."
+  },
+  "dependency_notes": [
+    "scripts/omi-launcher.ps1 was pre-existing dirty worktree state; it is captured as an acceptance dependency and was not edited by this remediation.",
+    "Source digests use canonical LF bytes so Windows core.autocrlf checkout state cannot create false checkpoint drift."
+  ],
+  "files": [
+    {"path": "backend/app/config.py", "sha256": "ec1c9099b6f961f6b4d8f1dcde8449d250716237466615817da28db16241402d"},
+    {"path": "backend/app/ai/market_context/taiwan_stock.py", "sha256": "88952f6afe61931fb73278a0d16f6d15a1f336155fff3686fc05af2005fbe1ba"},
+    {"path": "backend/app/market/quote_depth.py", "sha256": "b1fe876f98deb8d822038c375389504e95972a711f4f62f16c4746f416002764"},
+    {"path": "backend/app/ai/capability_contract.py", "sha256": "61819682980f41f4d119bece7e8147e096e3cad10bc7be162827c7c9dc199f69"},
+    {"path": "backend/app/runtime.py", "sha256": "9227c3b0dfc761af04ff4f9ca8d535a3a70459e358bd16faf3e2b001c578e4bf"},
+    {"path": "backend/app/market/providers/kgi_canonical.py", "sha256": "ad396697011c499feb9b6154cf7efc1b51827ffbc240c9fe02b028f2be4a18ce"},
+    {"path": "backend/app/market/providers/kgi_superpy.py", "sha256": "b218c4c63a2192db2e2dc57cb11668145faabc561033c29c06fcda75148446d9"},
+    {"path": "backend/app/market/schemas.py", "sha256": "487802f0378ff5be00f726c59f6ed358eb50b0c1702576768f7af9b1dd6a899d"},
+    {"path": "backend/app/routers/market.py", "sha256": "e3bc4c3cb5fc79f01018f85f3eb207c819e95760fb82cc61b08ddc4299be13f3"},
+    {"path": "backend/app/market/index_resolution.py", "sha256": "9daf1492202085850ea299825c605c6ae083207097daccaad979577f473ddd7b"},
+    {"path": "backend/app/market/tw_market_dashboard.py", "sha256": "e8e386fa953128225179f7f1af7fc3b937e637a0fe6fa131cd2f0931fda55695"},
+    {"path": "backend/app/market/tw_market_dashboard_schemas.py", "sha256": "b4f43d5aa653a9bfa86373f1cbec72848e892e18e2e5379976dca06bbcc0dc97"},
+    {"path": "backend/tests/test_kgi_superpy_quote.py", "sha256": "6a05c26b705a3c92a890ef4b972cb3f0785d124385fd6e1f31fe418225ef5473"},
+    {"path": "backend/tests/test_taiwan_index_resolution.py", "sha256": "557267e02cdf1fd280500083833d06e6ecff0d427566679528d89843b7c1443d"},
+    {"path": "backend/tests/test_tw_market_dashboard.py", "sha256": "f18faa05ed95e067717f5b8f09e36b165b3a9b09b761ab84235dd1db4489cb69"},
+    {"path": "backend/tests/test_taiwan_stock_quote_depth.py", "sha256": "99c2244c2dcb17997f3bc80646a7c64d215ba6a6190ddf97defe6bf09ccdd171"},
+    {"path": "backend/tests/test_runtime.py", "sha256": "a4ea0bd794289816f69b8e66f0df336817901e196db4c9b67c9daba6e43b759b"},
+    {"path": "backend/tests/test_ai_tool_boundaries.py", "sha256": "f35867c592259f6865a30e01f2dbd6153b02cee42d40171e0a5200b0757c54a8"},
+    {"path": "backend/tests/test_market_data_v2_dark_boundary.py", "sha256": "9d5c26ecf227affac8e33ae8446e74cab89963ee5cac9892b411cb14dabf88bc"},
+    {"path": "frontend/src/components/stock-detail/useTaiwanQuoteDepth.ts", "sha256": "a11ee269e308e4a6769db61f6b050a179b26a390e4acdc4d380bfa269c1bde27"},
+    {"path": "frontend/src/components/stock-detail/QuoteDepthPanel.tsx", "sha256": "3c45ee068f8a70f4875d1020e9fb767d7d45ecc01ae9c26e125d660a7562ebde"},
+    {"path": "frontend/src/types/market.ts", "sha256": "7bf144b6d121e3769b0dbbafdb0531e39b337a64cebb12ead00dfeeeef0acdb0"},
+    {"path": "frontend/e2e/omi-smoke.spec.ts", "sha256": "349d21f314f3e080388a299c76f1b7335ae72a91de45e4a917f2fe2ea41e3294"},
+    {"path": "agents/omi_mcp_server/tw_market_dashboard_contract_snapshot.json", "sha256": "d76d19dd68b846738779fbab83daf6c53fb69586feace3f1da5917c4a3137c13"},
+    {"path": "scripts/omi-launcher.ps1", "sha256": "be975eaabf3f7ae38d83283a00a88f92a78c63a336afcab57d9336d77c05b399"},
+    {"path": "scripts/invoke-mdf-m5-live-session.ps1", "sha256": "2f58b97b25f88cb860a5452d32cacf97efc195dc02ff06f73211735bbfa3e3c6"},
+    {"path": "scripts/test-invoke-mdf-m5-live-session.ps1", "sha256": "0980b61eaf838af970640895576b6349f3720e913f07319d06410a49a09562c9"},
+    {"path": "docs/agent-runs/tw-realtime-market-state-remediation-20260824/fixtures/m5-offline-session.json", "sha256": "beaeb0a2c396f36389ba0fe9068e099a3d3af9ff5df08f1f2a1efbc35b5b289c"}
+  ]
+}

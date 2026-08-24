@@ -196,6 +196,9 @@ PROVIDER_CONTRACTS_BY_SCOPE_CAPABILITY: dict[
     ("portfolio", "portfolio.valuation"): ("portfolio_context",),
     ("us_macro", "macro.series"): ("fred_macro",),
     ("us_macro", "macro.observations"): ("fred_macro",),
+    ("stock", "news.events"): ("news_events",),
+    ("us_stock", "news.events"): ("news_events",),
+    ("market", "news.events"): ("news_events",),
 }
 
 

@@ -62,18 +62,26 @@ TIME_KEYS = {
     "bar_time",
     "date",
     "data_date",
+    "end_at",
+    "event_at",
     "event_time",
     "latest_data_date",
     "observation_date",
     "quote_time",
+    "selected_event_at",
+    "start_at",
     "timestamp",
     "trade_date",
 }
 OBSERVATION_TIMESTAMP_KEYS = {
     "as_of",
     "bar_time",
+    "end_at",
+    "event_at",
     "event_time",
     "quote_time",
+    "selected_event_at",
+    "start_at",
     "timestamp",
 }
 UNIT_KEYS = {
@@ -316,7 +324,10 @@ def _series_points(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
 def _point_time(point: dict[str, Any]) -> datetime | None:
     for key in (
         "bar_time",
+        "event_at",
         "event_time",
+        "end_at",
+        "start_at",
         "quote_time",
         "timestamp",
         "time",
@@ -564,7 +575,24 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
         issues.append("missing_interval")
     if interval_mismatch:
         issues.append("interval_mismatch")
-    if len(timestamps) <= 1 and points:
+    declared_point_count = _first_semantic_value(
+        value,
+        keys={
+            "available_bar_count",
+            "original_point_count",
+            "point_count",
+            "source_point_count",
+        },
+    )
+    try:
+        declared_point_count = int(declared_point_count)
+    except (TypeError, ValueError):
+        declared_point_count = None
+    if (
+        len(timestamps) <= 1
+        and points
+        and (declared_point_count is None or declared_point_count <= 1)
+    ):
         issues.append("insufficient_series_points")
     status = (
         "unknown"
@@ -578,6 +606,7 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
     return {
         "status": status,
         "point_count_inspected": len(points),
+        "declared_point_count": declared_point_count,
         "timestamp_count": len(timestamps),
         "expected_interval_seconds": expected_seconds,
         "observed_median_interval_seconds": observed_median,
@@ -1253,7 +1282,14 @@ def _quality_for_capability(
         ),
         "event_time": _first_semantic_value(
             payload,
-            keys={"event_time", "provider_event_time", "bar_time"},
+            keys={
+                "event_at",
+                "event_time",
+                "provider_event_time",
+                "bar_time",
+                "end_at",
+                "selected_event_at",
+            },
         ),
         "release_at": _first_semantic_value(
             payload,

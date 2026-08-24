@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, time
 from hashlib import sha256
 from math import isfinite
@@ -17,6 +17,8 @@ from app.db.models import (
     TaiwanIntradayStockState,
     WatchlistGroup,
 )
+from app.market.intraday import get_market_intraday_history
+from app.market.indices import get_market_index_summary
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     previous_taiwan_trading_day,
@@ -32,7 +34,7 @@ from app.watchlists.service import list_groups, list_items
 
 TW_MARKET_DASHBOARD_VERSION = "omi.tw_market_dashboard.v1"
 TW_SYMBOL_SEARCH_VERSION = "omi.tw_symbol_search.v1"
-TW_STOCK_DASHBOARD_DETAIL_VERSION = "omi.tw_stock_dashboard_detail.v1"
+TW_STOCK_DASHBOARD_DETAIL_VERSION = "omi.tw_stock_dashboard_detail.v2"
 SUPPORTED_MARKETS = ("TWSE", "TPEX")
 INDEX_ID_BY_MARKET = {"TWSE": "TAIEX", "TPEX": "TPEX"}
 INDEX_ESTIMATE_METHOD_VERSION = "omi.tw_preopen_index_estimate.proxy.v1"
@@ -214,6 +216,16 @@ def _build_breadth(
     universe = len(market_stocks)
     coverage = advance + decline + unchanged
     unknown = universe - coverage
+    unknown_observations = [
+        item for item in observations if item["status"] != "observed"
+    ]
+    raw_reason_counts = Counter(
+        str(item.get("reason") or "reason_unknown")
+        for item in unknown_observations
+    )
+    state_missing = raw_reason_counts.get("state_missing", 0)
+    reason_unknown = raw_reason_counts.get("reason_unknown", 0)
+    state_not_observed = max(unknown - state_missing - reason_unknown, 0)
     as_of_values = [item["as_of"] for item in observed if item["as_of"] is not None]
     warnings: list[str] = []
     if session_phase == "preopen_pending":
@@ -251,6 +263,17 @@ def _build_breadth(
         "unchanged": unchanged,
         "unknown": unknown,
         "coverage_ratio": coverage / universe if universe else 0.0,
+        "coverage_reason_counts": {
+            "classified": coverage,
+            "state_missing": state_missing,
+            "state_not_observed": state_not_observed,
+            "reason_unknown": reason_unknown,
+            "valid_no_trade": None,
+            "not_tradable": None,
+            "provider_missing": None,
+            "mapping_error": None,
+        },
+        "raw_unknown_reason_counts": dict(sorted(raw_reason_counts.items())),
         "as_of": max(as_of_values) if as_of_values else None,
         "warnings": warnings,
     }
@@ -645,6 +668,171 @@ def _build_index_estimates(
     return estimates
 
 
+def _build_resolved_indices(
+    db: Session,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
+    try:
+        summary = get_market_index_summary(db)
+    except Exception as exc:
+        return [], {}, [f"Resolved Taiwan index cache is unavailable: {exc}"]
+
+    resolved: list[dict[str, Any]] = []
+    resolved_breadth: dict[str, dict[str, Any]] = {}
+    for raw_item in summary.get("indices") or []:
+        if not isinstance(raw_item, dict):
+            continue
+        resolution = raw_item.get("resolution")
+        if not isinstance(resolution, dict):
+            continue
+        selected_candidate = resolution.get("selected_candidate")
+        official = bool(resolution.get("official_close_confirmed"))
+        resolved.append(
+            {
+                "index_id": str(raw_item.get("index_id") or ""),
+                "market": str(raw_item.get("market") or ""),
+                "status": str(resolution.get("coverage_status") or "missing"),
+                "value": _number(resolution.get("selected_value")),
+                "change": _number(raw_item.get("change")),
+                "change_pct": _number(raw_item.get("change_pct")),
+                "event_time": resolution.get("selected_event_time"),
+                "trade_date": resolution.get("selected_trade_date"),
+                "source": resolution.get("selected_source"),
+                "provider": resolution.get("selected_provider"),
+                "selected_candidate": selected_candidate,
+                "authority": str(
+                    resolution.get("selected_authority") or "unknown"
+                ),
+                "finalization": str(
+                    resolution.get("selected_finalization") or "unknown"
+                ),
+                "official_source": bool(resolution.get("official_source")),
+                "official_close_confirmed": bool(
+                    resolution.get("official_close_confirmed")
+                ),
+                "provisional_estimate": bool(
+                    resolution.get("provisional_estimate")
+                ),
+                "selection_reason": str(
+                    resolution.get("selection_reason") or "no_eligible_candidate"
+                ),
+                "acquisition_policy": str(
+                    resolution.get("acquisition_policy")
+                    or summary.get("acquisition_policy")
+                    or "cache_only"
+                ),
+                "resolution_version": str(
+                    resolution.get("resolution_version")
+                    or summary.get("resolution_version")
+                    or "unknown"
+                ),
+                "resolution_id": str(resolution.get("resolution_id") or ""),
+                "official_close_status": str(
+                    resolution.get("official_close_status") or "not_available_yet"
+                ),
+                "official": official,
+                "provisional": not official,
+                "decision_usable": bool(resolution.get("decision_usable")),
+                "warnings": [
+                    str(warning)
+                    for warning in resolution.get("warnings") or []
+                ],
+            }
+        )
+        raw_breadth = raw_item.get("breadth")
+        if not isinstance(raw_breadth, dict):
+            continue
+        market = str(raw_breadth.get("market") or raw_item.get("market") or "")
+        if not market:
+            continue
+        advance = int(raw_breadth.get("advance_count") or 0)
+        decline = int(raw_breadth.get("decline_count") or 0)
+        unchanged = int(raw_breadth.get("unchanged_count") or 0)
+        coverage = int(
+            raw_breadth.get("classified_count")
+            or raw_breadth.get("coverage_count")
+            or (advance + decline + unchanged)
+        )
+        universe = int(raw_breadth.get("total_count") or coverage)
+        unknown = int(
+            raw_breadth.get("unknown_count")
+            if raw_breadth.get("unknown_count") is not None
+            else max(universe - coverage, 0)
+        )
+        missing_count = (
+            int(raw_breadth.get("missing_count") or 0)
+            if "missing_count" in raw_breadth
+            else None
+        )
+        not_received = (
+            min(missing_count, unknown) if missing_count is not None else None
+        )
+        received_unclassified = (
+            max(unknown - not_received, 0)
+            if not_received is not None
+            else None
+        )
+        reason_unknown = (
+            0 if not_received is not None else unknown
+        )
+        resolved_breadth[market] = {
+            "market": market,
+            "status": str(raw_breadth.get("status") or "missing"),
+            "session_phase": str(
+                raw_breadth.get("market_session") or "unknown"
+            ),
+            "price_semantics": str(
+                raw_breadth.get("price_semantics") or "unavailable"
+            ),
+            "provisional": bool(raw_breadth.get("is_provisional")),
+            "decision_usable": bool(raw_breadth.get("decision_usable")),
+            "universe": universe,
+            "coverage": coverage,
+            "advance": advance,
+            "decline": decline,
+            "unchanged": unchanged,
+            "unknown": unknown,
+            "coverage_ratio": (
+                coverage / universe if universe else 0.0
+            ),
+            "coverage_reason_counts": {
+                "classified": coverage,
+                "not_received": not_received,
+                "received_unclassified": received_unclassified,
+                "reason_unknown": reason_unknown,
+                "valid_no_trade": None,
+                "not_tradable": None,
+                "provider_missing": None,
+                "mapping_error": None,
+            },
+            "raw_unknown_reason_counts": {
+                key: value
+                for key, value in {
+                    "not_received": not_received,
+                    "received_unclassified": received_unclassified,
+                    "reason_unknown": reason_unknown,
+                }.items()
+                if value is not None and value > 0
+            },
+            "as_of": raw_breadth.get("snapshot_as_of")
+            or raw_breadth.get("as_of"),
+            "scope": raw_breadth.get("scope"),
+            "source": raw_breadth.get("source"),
+            "trade_date": raw_breadth.get("trade_date"),
+            "failed_batch_count": (
+                int(raw_breadth.get("failed_batch_count") or 0)
+                if "failed_batch_count" in raw_breadth
+                else None
+            ),
+            "warnings": [
+                str(warning) for warning in raw_breadth.get("warnings") or []
+            ],
+        }
+    warnings = [str(warning) for warning in summary.get("warnings") or []]
+    if not resolved:
+        warnings.append("No resolved Taiwan index evidence is available in cache.")
+    return resolved, resolved_breadth, list(dict.fromkeys(warnings))
+
+
 def build_tw_market_dashboard(
     db: Session,
     *,
@@ -698,6 +886,11 @@ def build_tw_market_dashboard(
         session_phase=session_phase,
         trade_date=trade_date,
     )
+    (
+        resolved_indices,
+        resolved_breadth,
+        resolved_index_warnings,
+    ) = _build_resolved_indices(db)
     trade_date_floor = datetime.combine(
         trade_date,
         time.min,
@@ -722,6 +915,7 @@ def build_tw_market_dashboard(
         for warning in item["warnings"]
     ]
     warnings.extend(watchlist["warnings"])
+    warnings.extend(resolved_index_warnings)
     if freshness_status in {"delayed", "stale", "missing"}:
         warnings.append(f"Dashboard snapshot freshness is {freshness_status}.")
     if any(item["status"] != "partial" for item in indices):
@@ -744,7 +938,11 @@ def build_tw_market_dashboard(
         },
         "as_of": newest_as_of,
         "indices": indices,
+        "resolved_indices": resolved_indices,
+        "headline_index_field": "resolved_indices",
         "breadth": breadth,
+        "resolved_breadth": resolved_breadth,
+        "headline_breadth_field": "resolved_breadth",
         "hot_groups": hot_groups,
         "watchlist": watchlist,
         "freshness": {
@@ -759,6 +957,8 @@ def build_tw_market_dashboard(
         "limitations": [
             "The dashboard read path is cache-only and never triggers provider refresh.",
             "Preopen observations and all index estimates are provisional and not decision-usable.",
+            "The legacy indices field contains proxy estimates; resolved_indices is the authoritative headline projection.",
+            "The legacy breadth field is an intraday-state compatibility projection; resolved_breadth preserves the index-summary breadth owner and scope.",
             "Hot groups use current StockMaster industry/category membership.",
         ],
     }
@@ -829,7 +1029,12 @@ def build_dashboard_moving_average_series(
     periods = (5, 20, 60)
     output: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
-        item: dict[str, Any] = {"time": row.get("time")}
+        raw_time = row.get("time")
+        item: dict[str, Any] = {
+            "time": raw_time.isoformat()
+            if isinstance(raw_time, (date, datetime))
+            else str(raw_time or "")
+        }
         for period in periods:
             start = index - period + 1
             window = closes[start : index + 1] if start >= 0 else []
@@ -841,6 +1046,98 @@ def build_dashboard_moving_average_series(
             )
         output.append(item)
     return output
+
+
+def _dashboard_point_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        aware_value = _aware_taipei(value)
+        return aware_value.date() if aware_value is not None else None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _dashboard_previous_close(
+    points: Iterable[dict[str, Any]],
+    *,
+    trade_date: date | None,
+) -> float | None:
+    for point in reversed(list(points)):
+        point_date = _dashboard_point_date(point.get("time"))
+        if trade_date is not None and (point_date is None or point_date >= trade_date):
+            continue
+        close = _number(point.get("close"))
+        if close is not None:
+            return close
+    return None
+
+
+def _dashboard_intraday_chart(
+    db: Session,
+    *,
+    stock_id: str,
+    bars: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    history = get_market_intraday_history(
+        db=db,
+        stock_id=stock_id,
+        interval="1m",
+        range_value="5d",
+        refresh=False,
+    )
+    dated_points: list[tuple[date, dict[str, Any]]] = []
+    for point in history.get("points") or []:
+        raw_time = point.get("time")
+        try:
+            parsed_time = (
+                raw_time
+                if isinstance(raw_time, datetime)
+                else datetime.fromisoformat(str(raw_time))
+            )
+        except (TypeError, ValueError):
+            continue
+        point_time = _aware_taipei(parsed_time)
+        if point_time is None:
+            continue
+        dated_points.append((point_time.date(), point))
+
+    trade_date = max((item[0] for item in dated_points), default=None)
+    session_points = [
+        point
+        for point_date, point in dated_points
+        if point_date == trade_date
+    ][-bars:]
+    source = str(history.get("source") or "market_intraday_bar_cache")
+    volume_semantics = str(
+        history.get("volume_semantics")
+        or "latest_trade_date_interval_bar_sum"
+    )
+    chart = {
+        "source": source,
+        "interval": str(history.get("effective_interval") or "1m"),
+        "trade_date": trade_date,
+        "point_count": len(session_points),
+        "cache_status": str(history.get("cache_status") or "persisted_miss"),
+        "cache_hit": bool(history.get("cache_hit")),
+        "volume_unit": str(history.get("canonical_volume_unit") or "shares"),
+        "volume_semantics": volume_semantics,
+        "points": session_points,
+    }
+    return chart, {
+        "source": source,
+        "previous_close": None,
+        "point_count": len(session_points),
+        "points": [
+            {
+                **point,
+                "price": point.get("close"),
+            }
+            for point in session_points
+        ],
+    }
 
 
 def build_tw_dashboard_stock_detail(
@@ -864,29 +1161,58 @@ def build_tw_dashboard_stock_detail(
         raise TaiwanDashboardStockNotFoundError(
             f"Active Taiwan stock id='{normalized_stock_id}' was not found."
         )
-    if normalized_timeframe not in {"daily", "weekly", "monthly"}:
-        raise ValueError("timeframe must be one of: daily, weekly, monthly.")
+    if normalized_timeframe not in {"today", "daily", "weekly", "monthly"}:
+        raise ValueError(
+            "timeframe must be one of: today, daily, weekly, monthly."
+        )
 
+    historical_timeframe = (
+        "daily" if normalized_timeframe == "today" else normalized_timeframe
+    )
+    historical_bars = min(bars, 90) if normalized_timeframe == "today" else bars
     include_intraday = normalized_timeframe == "daily"
     chart = list_stock_ohlc_chart_data(
         db=db,
         stock_id=normalized_stock_id,
-        timeframe=normalized_timeframe,
-        bars=bars,
+        timeframe=historical_timeframe,
+        bars=historical_bars,
         ensure_history=False,
         include_intraday=include_intraday,
     )
+    intraday_chart = None
+    intraday_override = None
+    moving_average_points = chart.get("points") or []
+    if normalized_timeframe == "today":
+        intraday_chart, intraday_override = _dashboard_intraday_chart(
+            db,
+            stock_id=normalized_stock_id,
+            bars=bars,
+        )
+        daily_points = chart.get("points") or []
+        intraday_override["previous_close"] = _dashboard_previous_close(
+            daily_points,
+            trade_date=intraday_chart.get("trade_date"),
+        )
+        moving_average_points = intraday_chart.get("points") or []
+
     technical = build_stock_technical_report(
         db=db,
         stock_id=normalized_stock_id,
         timeframe=normalized_timeframe,
-        include_intraday=include_intraday,
+        include_intraday=include_intraday or normalized_timeframe == "today",
+        intraday_override=intraday_override,
     )
     warnings = list(
         dict.fromkeys(
             [
                 *[str(value) for value in chart.get("warnings") or []],
                 *[str(value) for value in technical.get("warnings") or []],
+                *(
+                    ["Cached intraday history is unavailable for the latest session."]
+                    if normalized_timeframe == "today"
+                    and not (intraday_chart or {}).get("points")
+                    else []
+                ),
             ]
         )
     )
@@ -900,13 +1226,15 @@ def build_tw_dashboard_stock_detail(
         "bars": bars,
         "cache_only": True,
         "chart": chart,
+        "intraday_chart": intraday_chart,
         "moving_averages": build_dashboard_moving_average_series(
-            chart.get("points") or []
+            moving_average_points
         ),
         "technical": technical,
         "warnings": warnings,
         "limitations": [
             "This read path uses cached local OHLC, intraday, and technical evidence only.",
+            "The today timeframe uses the latest persisted one-minute trading session and does not refresh providers.",
             "Missing or stale history is returned truthfully and never backfilled by this GET request.",
         ],
     }

@@ -25,6 +25,7 @@ SUMMARY_COUNT_KEYS = (
     "requested_count",
     "requested_stock_count",
     "requested_symbol_count",
+    "attempted_count",
     "total_count",
     "total_symbol_count",
     "symbol_count",
@@ -41,6 +42,10 @@ SUMMARY_COUNT_KEYS = (
     "unevaluable_count",
     "remaining_due_count",
     "current_count",
+    "partial_count",
+    "stale_count",
+    "missing_count",
+    "universe_count",
     "refreshed_symbol_count",
     "complete_symbol_count",
     "partial_symbol_count",
@@ -63,6 +68,13 @@ SUMMARY_COUNT_KEYS = (
     "source_attempt_count",
     "source_success_count",
     "source_error_count",
+    "quality_rows_created",
+    "quality_rows_updated",
+    "rows_read",
+    "profiles_written",
+    "profiles_deleted",
+    "candidate_session_count",
+    "high_coverage_session_count",
 )
 FAILED_RESULT_ITEM_LIMIT = 4
 

@@ -190,6 +190,7 @@ CAPABILITY_IDS = [
     "events.upcoming",
     "events.calendar",
     "events.history",
+    "news.events",
     "regulation.disposition",
     "regulation.trading_restrictions",
     "market.sectors",

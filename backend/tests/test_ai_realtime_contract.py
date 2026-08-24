@@ -234,6 +234,34 @@ class AiRealtimeContractTests(unittest.TestCase):
         self.assertTrue(result["decision_usable"])
         self.assertFalse(result["refresh_recommended"])
 
+    def test_neutral_us_quote_projection_matches_latest_completed_session(
+        self,
+    ) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "kind": "us_quote_snapshot",
+                "schema_version": "omi.market.quote.snapshot.v1",
+                "selected_event_at": "2026-07-24T16:01:00-04:00",
+                "selected_provider": "yahoo_chart",
+                "quote": {
+                    "market": "US",
+                    "symbol": "AAPL",
+                    "trade_state": "trade_observed",
+                    "last_trade_price": "213.88",
+                    "event_at": "2026-07-24T16:01:00-04:00",
+                    "fetched_at": "2026-07-25T12:00:00-04:00",
+                },
+            },
+            market="US",
+            realtime_policy="prefer_live",
+            now=datetime(2026, 7, 25, 16, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "latest_completed_session")
+        self.assertEqual(result["event_time"], "2026-07-24T20:01:00+00:00")
+        self.assertTrue(result["price_decision_usable"])
+        self.assertTrue(result["decision_usable"])
+
     def test_old_us_close_label_cannot_override_expected_session_date(
         self,
     ) -> None:

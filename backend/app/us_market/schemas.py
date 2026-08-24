@@ -145,9 +145,12 @@ class USIntradayTrendPointRead(BaseModel):
     session: str = "regular"
     price: float
     volume: int | None = None
+    volume_status: str | None = None
     open: float | None = None
     high: float | None = None
     low: float | None = None
+    finalized: bool | None = None
+    is_partial: bool | None = None
 
 
 class USIntradaySourceStatusRead(BaseModel):
@@ -167,6 +170,14 @@ class USIntradayTrendRead(BaseModel):
     stock_id: str
     symbol: str | None = None
     source: str
+    interval: str = "1m"
+    source_interval: str = "1m"
+    effective_interval: str = "1m"
+    source_point_count: int = 0
+    sampling_mode: str = "source"
+    aggregation_method: str = "session_anchored_ohlcv.v1"
+    bar_finalization_status: str = "completed"
+    partial_bar_count: int = 0
     session_scope: str = "regular"
     session_phase: str | None = None
     has_extended_hours: bool = False
@@ -180,9 +191,29 @@ class USIntradayTrendRead(BaseModel):
     regular_session_close_time: str | None = None
     point_count: int
     points: list[USIntradayTrendPointRead]
+    volume_unit: str | None = None
+    volume_semantics: str | None = None
+    volume_status: str = "not_provided"
+    volume_coverage: dict = Field(default_factory=dict)
     volume_pace: dict | None = None
     source_status: USIntradaySourceStatusRead
     source_url: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class USMarketResearchRead(BaseModel):
+    kind: str
+    schema_version: str
+    market: str
+    symbol: str
+    status: str
+    as_of: str | None = None
+    daily_ohlcv: dict = Field(default_factory=dict)
+    technical_indicators: dict = Field(default_factory=dict)
+    technical_structure: dict = Field(default_factory=dict)
+    corporate_action_coverage: dict = Field(default_factory=dict)
+    market_coverage: dict = Field(default_factory=dict)
+    missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -636,6 +667,12 @@ class USWatchlistRankingItemRead(BaseModel):
     volume: int | None = None
     status: str
     source: str | None = None
+    selected_provider: str | None = None
+    selected_source: str | None = None
+    selected_session: str | None = None
+    selection_reason: str | None = None
+    fallback_used: bool = False
+    price_basis: str = "raw_unadjusted"
     has_extended_hours: bool = False
     intraday_previous_close: float | None = None
     intraday_points: list[dict] = Field(default_factory=list)

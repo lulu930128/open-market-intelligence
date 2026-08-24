@@ -1,0 +1,74 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_source_recovery.v1",
+  "captured_at": "2026-08-24T09:11:07+08:00",
+  "timezone": "Asia/Taipei",
+  "result": "source_validated_runtime_adopted_live_gates_pending",
+  "source_ownership": {
+    "02a_foundation_target_mismatch_count_at_completion": 0,
+    "stale_checkpoint_target_mismatch_count": 14,
+    "ownership_conclusion": "all_detected_drift_postdated_02a_completion",
+    "old_checkpoint_sha256": "99f95233bb35afb033bcce7c0f959a00eb74b785c4734608b80e0f153e80a39d",
+    "old_checkpoint_artifact": "artifacts/source-checkpoint-20260821.json",
+    "current_checkpoint_sha256": "6f2e0e8724704b83a22a63750583e6a5d4d2ed7a4a8d651e0332b9e64d1c543e",
+    "target_count": 30,
+    "target_mismatch_count": 0,
+    "validation_result": "passed"
+  },
+  "source_changes": {
+    "closing_auction_classifier": "unchanged cumulative paired callbacks remain trial evidence; only cumulative advance can create a new actual trade",
+    "closing_auction_live_retest": "pending",
+    "mcp_capability_contract": "news.events synchronized into the repo MCP capability enum",
+    "stale_guard_allowlist": "removed"
+  },
+  "validation": {
+    "foundation_targeted_pytest": "167 passed, 233 subtests passed in 6.82s",
+    "mcp_contract_pytest": "33 passed, 2 subtests passed in 0.20s",
+    "checkpoint_guard_pytest": "7 passed in 1.94s",
+    "official_backend_pytest": "2096 passed, 801 warnings in 248.56s",
+    "compileall": "passed",
+    "git_diff_check": "passed",
+    "official_wrapper_log_directory": ".tmp/validation/20260824-085844",
+    "sandbox_limitation": "pytest temp lock and session cleanup were denied by sandbox ACL; the official normal-Windows-permission wrapper passed"
+  },
+  "acceptance_harness": {
+    "preflight_sha256": "e1a9dd44d5d1ea36a87828c64a6b9b8f9e0b4d562a6887b72fe4fff23b7530e9",
+    "frontend_readiness_fix": "bounded 30 second readiness retry with attempts, elapsed seconds and last error evidence",
+    "parser_result": "passed"
+  },
+  "runtime": {
+    "effective_mode": "compare",
+    "source_adopted": true,
+    "calendar_date": "2026-08-24",
+    "calendar_phase_at_final_preflight": "regular",
+    "calendar_result": "passed",
+    "health_ready_public_contract": "passed",
+    "frontend_mcp": "passed",
+    "prepare_artifact": "artifacts/m5-preflight-20260824-090349-790.json",
+    "final_preflight_artifact": "artifacts/m5-preflight-20260824-090641-554.json"
+  },
+  "blocking_state": {
+    "code": "EXTERNAL_VIEWER_BASELINE_CONFLICT",
+    "external_symbol": "3711",
+    "target_2330_active_leases": 0,
+    "global_kgi_bridge_process_count": 2,
+    "automation_owned_lease_created": false,
+    "external_lease_released": false,
+    "external_process_terminated": false,
+    "required_action": "viewer owner must exit normally and allow the global bridge baseline to return to zero before the next preflight"
+  },
+  "session_gates": {
+    "preopen_20260824": "not_executed_window_missed",
+    "opening_20260824": "not_executed_window_missed",
+    "regular_20260824": "not_executed_prerequisites_not_passed",
+    "rollback": "not_executed",
+    "foundation_closure": "not_allowed"
+  },
+  "next_runbook": "M5RetryRunbook20260825.md",
+  "automation_status": "PAUSED",
+  "commit_push_authorized": false,
+  "limitations": [
+    "source regression does not replace live closing-auction acceptance",
+    "later-session evidence cannot replace missed preopen or opening gates",
+    "external viewer ownership was not modified"
+  ]
+}

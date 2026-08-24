@@ -52,6 +52,9 @@ CRITICAL_TABLES = {
     "taiwan_etf_pcf_snapshot",
     "taiwan_etf_pcf_component",
     "taiwan_etf_inav_snapshot",
+    "market_dataset_coverage_checkpoint",
+    "broker_branch_snapshot_quality",
+    "broker_branch_behavior_feature_snapshot",
     "us_sec_dataset_release",
     "us_sec_ingestion_checkpoint",
     "us_sec_13f_warehouse_partition",
@@ -69,8 +72,8 @@ class DatabaseModelContractTests(unittest.TestCase):
     def test_single_registry_configures_all_current_mappers(self) -> None:
         configure_mappers()
 
-        self.assertEqual(len(Base.metadata.tables), 128)
-        self.assertEqual(len(list(Base.registry.mappers)), 128)
+        self.assertEqual(len(Base.metadata.tables), 131)
+        self.assertEqual(len(list(Base.registry.mappers)), 131)
         self.assertTrue(CRITICAL_TABLES.issubset(Base.metadata.tables))
 
     def test_all_foreign_keys_resolve_inside_shared_metadata(self) -> None:
@@ -80,7 +83,7 @@ class DatabaseModelContractTests(unittest.TestCase):
             for foreign_key in table.foreign_keys
         ]
 
-        self.assertEqual(len(foreign_keys), 94)
+        self.assertEqual(len(foreign_keys), 98)
         for foreign_key in foreign_keys:
             with self.subTest(foreign_key=str(foreign_key)):
                 self.assertIn(foreign_key.column.table.name, Base.metadata.tables)

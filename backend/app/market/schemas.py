@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -883,6 +883,286 @@ class TaiwanStockQuoteDepthFreshnessRead(BaseModel):
     source_error_detail: dict[str, Any] | None = None
 
 
+class TaiwanRealtimeQuoteLeaseCreate(BaseModel):
+    stock_id: str
+    owner_kind: Literal["frontend_viewer", "acceptance_probe"] = "frontend_viewer"
+
+
+class TaiwanRealtimeQuoteLeaseRead(BaseModel):
+    lease_id: str | None = None
+    stock_id: str
+    provider: str
+    owner_kind: Literal["frontend_viewer", "acceptance_probe"]
+    status: str
+    expires_in_seconds: int | None = None
+    fallback_source: str
+    message: str
+    error: str | None = None
+
+
+class TaiwanRealtimeQuoteLeaseSummaryRead(BaseModel):
+    provider: str
+    total_active_leases: int
+    active_symbol_count: int
+    leases_by_owner_kind: dict[str, int]
+    leases_by_symbol: dict[str, int]
+    bridge_process_running: bool
+    idle_shutdown_pending: bool
+    subscription_worker_count: int
+
+
+class TaiwanRealtimeTradeRead(BaseModel):
+    event_id: str
+    sequence: int
+    event_time: datetime | None = None
+    received_at: datetime
+    manager_ingested_at: datetime | None = None
+    session_phase: str | None = None
+    provider_delay_raw: Any | None = None
+    provider_delay_unit: Literal["unknown"] = "unknown"
+    price: float
+    volume_lots: int
+    total_volume_lots: int | None = None
+    amount: float | None = None
+    price_direction: str
+    direction_semantics: str
+
+
+class TaiwanRealtimeAuctionObservationRead(BaseModel):
+    event_id: str
+    sequence: int
+    event_time: datetime | None = None
+    received_at: datetime
+    manager_ingested_at: datetime | None = None
+    session_phase: str | None = None
+    provider_delay_raw: Any | None = None
+    provider_delay_unit: Literal["unknown"] = "unknown"
+    indicative_match_price: float | None = None
+    indicative_match_volume_lots: int | None = None
+    best_bid_price: float | None = None
+    best_ask_price: float | None = None
+    top5_bid_volume_lots: int | None = None
+    top5_ask_volume_lots: int | None = None
+    top5_imbalance: float | None = None
+    diff_bid_volume_lots: list[int | None] = Field(default_factory=list)
+    diff_ask_volume_lots: list[int | None] = Field(default_factory=list)
+    semantics: str
+
+
+class TaiwanRealtimeMinuteKBarRead(BaseModel):
+    event_id: str
+    sequence: int
+    event_time: datetime
+    received_at: datetime
+    timeframe_minutes: int
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume_lots: int | None = None
+    average_price: float | None = None
+    total_amount: float | None = None
+
+
+class TaiwanRealtimeDepthMetricsRead(BaseModel):
+    event_time: datetime | None = None
+    received_at: datetime
+    best_bid_price: float | None = None
+    best_ask_price: float | None = None
+    spread: float | None = None
+    spread_pct: float | None = None
+    top5_bid_volume_lots: int | None = None
+    top5_ask_volume_lots: int | None = None
+    top5_imbalance: float | None = None
+    top5_imbalance_formula: str | None = None
+    diff_bid_volume_lots: list[int | None] = Field(default_factory=list)
+    diff_ask_volume_lots: list[int | None] = Field(default_factory=list)
+    simtrade: bool = False
+
+
+class TaiwanRealtimeDepthLevelRead(BaseModel):
+    level: int
+    price: float | None = None
+    price_state: str
+    size_shares: float | None = None
+    size_lots: float | None = None
+
+
+class TaiwanRealtimeDepthRead(BaseModel):
+    provider: str
+    source: str
+    capability: str
+    state: str
+    event_time: datetime | None = None
+    received_at: datetime | None = None
+    manager_ingested_at: datetime | None = None
+    stream_sampled_at: datetime
+    freshness_status: str
+    is_stale: bool
+    age_seconds: float | None = None
+    bid_levels: list[TaiwanRealtimeDepthLevelRead] = Field(default_factory=list)
+    ask_levels: list[TaiwanRealtimeDepthLevelRead] = Field(default_factory=list)
+
+
+class TaiwanRealtimeLatencyRead(BaseModel):
+    event_at: datetime | None = None
+    bridge_received_at: datetime | None = None
+    manager_ingested_at: datetime | None = None
+    stream_sampled_at: datetime
+    event_to_bridge_ms: float | None = None
+    bridge_to_manager_ms: float | None = None
+    manager_to_stream_ms: float | None = None
+    event_to_stream_ms: float | None = None
+    provider_delay_raw: Any | None = None
+    provider_delay_unit: Literal["unknown"] = "unknown"
+    provider_delay_semantics: Literal[
+        "provider_reported_raw_value_unit_not_verified"
+    ] = "provider_reported_raw_value_unit_not_verified"
+
+
+class TaiwanRealtimeCallbackDiagnosticRead(BaseModel):
+    sequence: int
+    event_time: datetime | None = None
+    received_at: datetime
+    manager_ingested_at: datetime | None = None
+    session_phase: str | None = None
+    provider_trial_flag: bool = False
+    actual_trade_evidence: bool = False
+    cumulative_volume_lots: int | None = None
+    previous_cumulative_volume_lots: int | None = None
+    cumulative_relation: Literal[
+        "baseline",
+        "advanced",
+        "unchanged",
+        "decreased",
+        "missing",
+        "invalid",
+        "cross_date_rejected",
+    ]
+    projection_action: Literal[
+        "baseline_only",
+        "trade_added",
+        "auction_added",
+        "same_cumulative_suppressed",
+        "decreasing_cumulative_suppressed",
+        "trade_signature_suppressed",
+        "auction_signature_suppressed",
+        "non_trade_suppressed",
+        "cross_date_rejected",
+    ]
+    projection_event_id: str | None = None
+
+
+class TaiwanRealtimeDiagnosticCountersRead(BaseModel):
+    callback_count: int = Field(default=0, ge=0)
+    baseline_only_count: int = Field(default=0, ge=0)
+    cumulative_advanced_count: int = Field(default=0, ge=0)
+    same_cumulative_count: int = Field(default=0, ge=0)
+    decreasing_cumulative_count: int = Field(default=0, ge=0)
+    missing_cumulative_count: int = Field(default=0, ge=0)
+    invalid_cumulative_count: int = Field(default=0, ge=0)
+    trade_addition_count: int = Field(default=0, ge=0)
+    auction_addition_count: int = Field(default=0, ge=0)
+    trade_signature_suppression_count: int = Field(default=0, ge=0)
+    auction_signature_suppression_count: int = Field(default=0, ge=0)
+    non_trade_suppression_count: int = Field(default=0, ge=0)
+    trial_leak_count: int = Field(default=0, ge=0)
+    cross_date_rejected_count: int = Field(default=0, ge=0)
+
+
+class TaiwanRealtimeMarketStreamRead(BaseModel):
+    kind: str
+    contract_version: str
+    stock_id: str
+    provider: str
+    source: str
+    status: str
+    active_leases: int
+    sequence: int
+    generated_at: datetime
+    event_time: datetime | None = None
+    received_at: datetime | None = None
+    session_phase: str | None = None
+    selection_reason: str
+    fallback_used: bool = False
+    is_stale: bool
+    capability_status: dict[str, str] = Field(default_factory=dict)
+    limits: dict[str, int] = Field(default_factory=dict)
+    recent_trades: list[TaiwanRealtimeTradeRead] = Field(default_factory=list)
+    auction_observations: list[TaiwanRealtimeAuctionObservationRead] = Field(
+        default_factory=list
+    )
+    minute_kbars: list[TaiwanRealtimeMinuteKBarRead] = Field(default_factory=list)
+    depth_metrics: TaiwanRealtimeDepthMetricsRead | None = None
+    depth: TaiwanRealtimeDepthRead | None = None
+    latency: TaiwanRealtimeLatencyRead | None = None
+    diagnostic_counters: TaiwanRealtimeDiagnosticCountersRead = Field(
+        default_factory=TaiwanRealtimeDiagnosticCountersRead
+    )
+    diagnostic_events: list[TaiwanRealtimeCallbackDiagnosticRead] = Field(
+        default_factory=list
+    )
+    warnings: list[str] = Field(default_factory=list)
+
+
+TaiwanKgiDataResource = Literal[
+    "market_snapshot",
+    "today_trades",
+    "minute_kbars",
+    "price_volume",
+]
+
+
+class TaiwanKgiDataBackfillRequest(BaseModel):
+    resources: list[TaiwanKgiDataResource] = Field(
+        default_factory=lambda: [
+            "market_snapshot",
+            "today_trades",
+            "minute_kbars",
+            "price_volume",
+        ],
+        min_length=1,
+        max_length=4,
+    )
+    trade_date: date | None = None
+    timeframe_minutes: Literal[1, 3, 5, 15, 30, 60] = 1
+    price_volume_days: int = Field(default=1, ge=1, le=5)
+    limit: int = Field(default=200, ge=1, le=500)
+
+    @model_validator(mode="after")
+    def deduplicate_resources(self):
+        self.resources = list(dict.fromkeys(self.resources))
+        return self
+
+
+class TaiwanKgiDataResourceRead(BaseModel):
+    resource: TaiwanKgiDataResource
+    status: str
+    table: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    row_count: int = 0
+    returned_count: int = 0
+    truncated: bool = False
+    columns: list[str] = Field(default_factory=list)
+    records: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+
+
+class TaiwanKgiDataBackfillRead(BaseModel):
+    kind: str = "taiwan_kgi_data_backfill"
+    contract_version: str = "tw-kgi-data-v1"
+    stock_id: str
+    provider: str = "kgi_superpy"
+    status: str
+    trade_date: date
+    requested_at: datetime
+    provider_request_count: int
+    resources: list[TaiwanKgiDataResourceRead]
+    warnings: list[str] = Field(default_factory=list)
+    persistence: str = "none_raw_bounded_response"
+    read_path_side_effects: bool = False
+
+
 class TaiwanStockQuoteVolumeReconciliationRead(BaseModel):
     reference_dataset: str = "market_daily_price"
     reference_source: str | None = None
@@ -908,6 +1188,11 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     provider: str
     source: str
     source_url: str | None = None
+    source_chain: list[str] = Field(default_factory=list)
+    primary_provider: str | None = None
+    primary_source_status: str | None = None
+    primary_source_error: str | None = None
+    fallback_reason: str | None = None
     exchange_channel: str | None = None
     session_phase: str
     presentation_trade_date: date | None = None

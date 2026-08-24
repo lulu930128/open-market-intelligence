@@ -39,17 +39,18 @@ from app.market.trading_calendar import (
 )
 from app.market.exchange_calendar_cache import market_calendar_cache_metadata
 from app.us_market.trading_calendar import (
-    US_DAILY_PRICE_RELEASE_TIME,
     US_MARKET_TIMEZONE,
-    US_POST_MARKET_CLOSE_TIME,
     US_PRE_MARKET_OPEN_TIME,
-    US_SESSION_CLOSE_TIME,
     US_SESSION_OPEN_TIME,
     expected_us_daily_price_date,
+    is_us_early_close_day,
     is_us_trading_day,
     next_us_trading_day,
     previous_us_trading_day,
+    us_daily_price_release_time,
     us_market_holiday_name,
+    us_post_market_close_time,
+    us_session_close_time,
 )
 from app.kr_market.trading_calendar import (
     KRX_CALENDAR_SOURCE,
@@ -202,6 +203,8 @@ def _us_session_phase(
     *,
     local_now: datetime,
     is_trading_day: bool,
+    session_close_time: time,
+    post_market_close_time: time,
 ) -> str:
     if not is_trading_day:
         return "market_closed"
@@ -211,9 +214,9 @@ def _us_session_phase(
         return "pre_market_pending"
     if current_time < US_SESSION_OPEN_TIME:
         return "pre_market"
-    if current_time < US_SESSION_CLOSE_TIME:
+    if current_time < session_close_time:
         return "regular"
-    if current_time < US_POST_MARKET_CLOSE_TIME:
+    if current_time < post_market_close_time:
         return "after_hours"
     return "post_close"
 
@@ -446,15 +449,20 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         include_value=is_trading_day,
     )
     next_trading_day = next_us_trading_day(current_date, include_value=False)
+    session_close_time = us_session_close_time(current_date)
+    post_market_close_time = us_post_market_close_time(current_date)
+    daily_release_time = us_daily_price_release_time(current_date)
     phase = _us_session_phase(
         local_now=local_now,
         is_trading_day=is_trading_day,
+        session_close_time=session_close_time,
+        post_market_close_time=post_market_close_time,
     )
     release_windows = {
         "us_daily_price": _release_window(
             key="us_daily_price",
             label="US daily price",
-            release_time=US_DAILY_PRICE_RELEASE_TIME,
+            release_time=daily_release_time,
             expected_trade_date=expected_us_daily_price_date(now=local_now),
             local_now=local_now,
             current_date=current_date,
@@ -490,8 +498,10 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         "session": {
             "pre_market_open_time": US_PRE_MARKET_OPEN_TIME.strftime("%H:%M"),
             "open_time": US_SESSION_OPEN_TIME.strftime("%H:%M"),
-            "close_time": US_SESSION_CLOSE_TIME.strftime("%H:%M"),
-            "after_hours_close_time": US_POST_MARKET_CLOSE_TIME.strftime("%H:%M"),
+            "close_time": session_close_time.strftime("%H:%M"),
+            "after_hours_close_time": post_market_close_time.strftime("%H:%M"),
+            "is_early_close": is_us_early_close_day(current_date),
+            "schedule_source": "nyse_published_calendar.v1",
             "next_session_start_at": next_session_start_at.isoformat(),
             "is_polling_window": phase == "regular",
             "is_extended_polling_window": phase in {"pre_market", "after_hours"},
@@ -504,7 +514,10 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             now=local_now,
             fallback_source=US_CALENDAR_FALLBACK_SOURCE,
             fallback_verified_years=set(),
-            fallback_limit="Rule-based NYSE fallback does not model emergency closures or special sessions.",
+            fallback_limit=(
+                "Published NYSE early closes are modeled for 2026-2028; "
+                "emergency closures and unpublished special sessions remain unsupported."
+            ),
         ),
     }
 

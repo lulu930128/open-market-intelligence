@@ -1,198 +1,234 @@
 ﻿# Open Market Intelligence AGENTS.md
 
-本檔是 Open Market Intelligence repo-level agent instructions。它放在 repo root，並繼承全域 `~\.codex\AGENTS.md` 與 `C:\project\AGENTS.md` 的基本工作準則。
+本檔是 Open Market Intelligence（OMI）repo-level agent instructions。它繼承全域 `~\.codex\AGENTS.md` 與 `C:\project\AGENTS.md`；若規則衝突，以更具體、更新且已確認的 repo / product 文件為準。
 
-使用者可見的 Codex 回覆、交付摘要與固定欄位標題預設使用繁體中文；程式碼、指令、log、error、identifier 與市場資料來源名稱保留原文。
+使用者可見的 Codex 回覆、交付摘要與固定欄位標題預設使用繁體中文；程式碼、指令、log、error、identifier 與 provider 名稱保留原文。
 
 ## 專案定位
 
-Open Market Intelligence（OMI）是本機優先的市場情報與交易決策研究工作台。
+OMI 是本機優先、evidence-first 的市場情報與交易決策研究工作台。
 
 長期方向：
 
-- 目前優先服務使用者自己的投資研究流程。
-- 架構、版面與啟動方式要朝未來可開源、可安裝、可被其他人實用的產品品質前進。
-- AI decision core 是產品核心；看盤 UI、資料整理、指標、報告與跨市場 context 都是支援 AI 做出技術決策的基礎設施。
-- 台股永遠是核心市場。美股、日股、韓股、港股與其他市場是台股研究的延伸 context layer；除非有市場特性必須因地制宜，資料模型、UI 結構、API contract 與分析流程應盡量對齊台股。
+- 目前優先服務使用者自己的實際投資研究流程，同時維持可開源、可安裝、可長期維護的產品品質。
+- OMI 的雙核心是：
+  1. **Market Data Foundation**：可信市場資料、Canonical Observation、Resolver、freshness、repair、source health 與資料 lineage。
+  2. **Research / Decision Core**：技術、籌碼、基本面、跨市場關係、情境、風險、反證與 AI decision。
+- 台股是 OMI 的 **primary / reference market**：資料完整度、UI pattern、市場語意與驗證標準優先以台股建立。
+- 美股是 OMI 的 **first-class research market**：可以獨立進行行情、技術、基本面、跨市場與持倉研究，不再被限制成只服務台股 context。
+- 日股、韓股、Crypto、Resource 與其他市場預設是 secondary / context markets；可以逐步升級，但不得因擴充而建立互不相容的市場資料架構。
+- 不同市場可以有不同 microstructure、session、provider、depth 與 regulation，但共同市場資料必須優先走共用 Canonical / Resolver contract。
 
-OMI 不是自動交易系統。它只能做研究、情境判斷、技術位階推演、資料補齊與決策輔助；不得設計或暗示自動下單、代替使用者執行交易。
+OMI 不做自主交易。任何未來 broker execution 若存在，必須是獨立 Execution Plane、明確使用者動作、可追蹤、可取消，且不得讓 AI 自主下單或以研究結果直接觸發交易。
 
-## 最終產品文件
+## Current Truth 文件
 
-`docs/product/` 是 OMI 的長期產品方向文件區。非平凡功能、產品判斷、重大 UI/API/資料邊界調整開始前，若下列文件已有使用者填寫內容，要先讀取並對齊：
+非平凡功能、產品判斷、重大 UI/API/資料邊界調整開始前，依序讀取：
 
 - `docs/product/ProductVision.md`
 - `docs/product/OperatingModel.md`
 - `docs/product/QualityBar.md`
 - `docs/product/Roadmap.md`
+- `docs/architecture/BackendArchitecture.md`
+- 若涉及 outward AI contract，再讀 `docs/architecture/OmiDecisionContract.md`
 
-空白模板不是產品事實。若文件仍未填寫，以本 `AGENTS.md`、既有程式與使用者當次需求為準；若當次需求和已填寫產品方向衝突，先反駁並提出較穩定方案。
+`docs/agent-runs/*` 是歷史任務紀錄，不是 current product truth。舊文件中的「US 只能是台股 context layer」、「service 直接擁有 fallback」或其他過時假設，不得覆蓋上述 current truth。
 
-## 方向保護與反駁責任
+空白模板不是產品事實。若當次需求與已填寫的 current truth 衝突，要先指出衝突、影響與較穩定方案。
 
-- 如果需求會把 OMI 變成「猜漲跌」工具，必須反駁。正確方向是根據 evidence、技術位階、情境、回測區、進場條件、失效條件、停損/停利、續抱/減碼與反證來做決策輔助。
-- 如果需求會把其他市場提升成與台股平等的核心市場，必須先指出這會偏離產品定位；除非使用者明確改變策略，否則要維持台股核心、其他市場輔助。
-- 如果需求要求隱藏 stale、partial、missing、best-effort 或 provider failure，必須反駁。資料新鮮度與缺口要可見。
-- 如果需求會繞過 trust policy、直接寫入 report/memory、消耗大量外部 quota、污染本機 DB，或讓 GET/read path 產生昂貴 side effect，必須暫停並提出安全替代方案。
-- OMI 可以自主補外部資料，也可以使用外部 API；這是正常能力，不需要每次等待使用者手動批准。實作時仍要維持 bounded refresh：有明確目標、資料範圍、成本/次數/timeout 邊界、來源紀錄與失敗回報，避免無限制全市場抓取或隱性大量回補。
-- 如果需求會讓 MCP adapter、frontend 或 Kuro 端重做 OMI backend 的市場邏輯，必須反駁。市場資料、AI reasoning、freshness、tool orchestration 的真相來源應留在 OMI backend。
+## 架構憲法
 
-## 架構邊界
+以下 invariant 長期有效，除非使用者明確重新定義產品架構。
 
-- Backend dependency、provider HTTP、source-health 與 transaction ownership 的完整契約見 `docs/architecture/BackendArchitecture.md`。
-- `backend/app/ai/` 是 AI evidence、question routing、decision core、answer contract 與 OMI AI 行為的主要位置。
-- 使用者可見的 OMI 回答文字與 structured answer contract，優先在 backend AI 層處理；frontend 只負責呈現與互動，不應重做判斷邏輯。
-- `agents/` 只放外部 agent adapter，例如 MCP。Adapter 要保持 thin：呼叫 backend API，不直接 import database、不複製市場邏輯。
-- `frontend/` 是 Next.js UI。修改前先讀 `frontend/AGENTS.md`；此 repo 使用新版 Next.js，不能只靠舊知識猜 API。
-- `data/open_market_intelligence.db` 是本機 SQLite 狀態；不得在未確認前刪除、重建或覆蓋。
-- DB schema 變更必須走明確 migration，不得用臨時欄位或 silent schema drift 解決。
+### Market Data
+
+- Provider 不得偽裝成其他 Provider。
+- Provider adapter 只負責 IO、登入/訂閱、payload parsing、provider-specific error normalization 與產生 Canonical Observation。
+- Consumer 不得自行選 provider、重做 fallback、freshness 或 trading status。
+- Cross-provider fallback、selection、realtime policy、lease lifecycle、freshness 與 dataset health 由 backend Control / Resolution Plane 擁有。
+- Market Data 的依賴方向是：
+
+```text
+Provider / Integration
+        ↓
+Canonical Observation
+        ↓
+Resolution / Control Plane
+        ↓
+Market / Research Services
+        ↓
+AI / API
+        ↓
+Frontend / MCP / Kuro / external consumer
+```
+
+- `KGI -> 假 MIS payload -> MIS semantic owner` 只能作 legacy compatibility，不得作新功能方向。
+- 新增 KGI US、Yahoo、AlphaVantage、TWSE MIS 或未來 provider 時，都先轉成 provider-neutral observation，再進 Resolver。
+- Unknown 不得默認成零。
+- No Quote 不代表 No Trade。
+- No Trade 不代表 Suspended。
+- Market Session 與 Instrument Trading Status 必須分開。
+- Freshness 必須考慮 instrument trading eligibility。
+- 所有 selected evidence 必須保留 provider、source、event time、fetched/received time、fallback 與 selection reason。
+- Provider Health、Dataset Health、Resolved Evidence Health 是三種不同狀態，不得混成一個「來源正常/異常」。
+
+### Dataset Lifecycle
+
+- Dataset 的 expected date、eligibility、owner、refresh operation、postcondition 與 stale rule 應由明確 registry / contract 擁有。
+- 能發現 stale 不等於已具備 repair path；不得把「可偵測」描述成「可自癒」。
+- Bounded refresh 必須有 target、range、timeout、call budget、provider lineage、結果摘要與失敗回報。
+- `cache_only` read path 不得偷偷啟動 provider fetch 或 subscription。
+- `require_live` 可在 policy 與 budget 允許時建立 bounded research lease，但不得擴成無界全市場 subscription。
+- 背景 collector 只能服務明確 bounded universe。
+
+### Capability
+
+- Advertised capability 必須真的有對應 projection。
+- 若 capability 宣告 refreshable，必須存在可執行 refresh operation 與 bounded policy。
+- CI / contract test 應保護 `advertised => projection exists`。
+- Planned、missing、not_applicable、unavailable、plan_restricted、rate_limited 等狀態必須如實 outward，不得用 placeholder 假裝 supported。
+
+### Account / Portfolio
+
+- KGI Quote、KGI Data、KGI Account 是不同 capability，即使共用 SDK/runtime 也不得共用單一健康燈號。
+- Account / Portfolio 是獨立 Account Plane，不屬於 Market Data Provider path。
+- Position / Cost / Cash 來自 Account Plane；市場價格與 FX 來自 Market Data Resolver。
+- Account 503 不代表 Quote 故障。
+- Account refresh 失敗不得把既有持倉 destructive replace 成空。
+- Unknown cost basis 不得轉成 0；cost unknown 時 unrealized PnL 也應 unknown。
+
+## 產品方向保護
+
+- 如果需求會把 OMI 變成「猜漲跌」或保證績效工具，必須反駁。正確方向是 evidence、情境、回測區、進場條件、失效條件、風險、反證與資料限制。
+- 如果需求要求隱藏 stale、partial、missing、provider failure、best-effort 或 fallback，必須反駁。
+- 如果需求讓 frontend、MCP、Kuro 或其他 consumer 重做 backend 市場邏輯，必須反駁。
+- 如果需求讓 provider adapter 直接決定跨 provider fallback、寫 DB 或承擔 AI decision logic，必須反駁。
+- 如果需求會造成無界 backfill、稀缺 quota 浪費、資料污染、不可逆 schema/data 操作或秘密外洩，必須先停止並提出安全方案。
+- 不因「台股是 reference market」而阻止美股成為正式研究市場；但新增市場仍應優先對齊共同 Canonical / Resolver / outward contract。
+
+## Backend 邊界
+
+- Backend dependency、Market Data Foundation、provider HTTP、source health 與 transaction ownership 以 `docs/architecture/BackendArchitecture.md` 為準。
+- `backend/app/ai/` 擁有 AI evidence、question routing、decision core、answer contract 與 capability orchestration。
+- `backend/app/market/` 保留台股 market-specific services / policies。
+- `backend/app/us_market/` 保留美股 market-specific services / policies。
+- 共通 Canonical Observation、Resolver、provider policy、dataset registry 與 shared freshness primitives 應放在穩定的 shared market-data boundary，不反向依賴單一市場 service。
+- `agents/` 只放 thin external adapter，例如 MCP；不得直接 import DB、provider 或複製市場邏輯。
+- `frontend/` 是研究工作台呈現與互動層；修改前先讀 `frontend/AGENTS.md`。
+- `data/open_market_intelligence.db` 是本機狀態；未確認前不得刪除、重建或覆蓋。
+- DB schema 變更必須走 migration，不得 silent schema drift。
 
 ## Runtime 與 Port
 
-- 目前 backend 預設是 `127.0.0.1:8400`，frontend 預設是 `3000`。
-- 不要沿用舊的 `8300` 假設；遇到 README、MCP 文件或 `.codex` 設定還寫 `8300` 時，要先用目前 launcher / README / env-driven config 驗證。
-- Backend port 由 `OMI_BACKEND_PORT` 或 `APP_PORT` 決定，預設偏好值是 `8400`；Frontend port 由 `OMI_FRONTEND_PORT` 或 `FRONTEND_PORT` 決定，預設偏好值是 `3000`。
-- `8400` / `3000` 是偏好 port，不是保證會使用的 port。Launcher 會偵測 Windows TCP excluded range、既有 listener 與 bind failure，必要時自動選下一個可用 port，並把實際 backend URL 同步到 `APP_PORT`、`OMI_BACKEND_PORT`、`API_PROXY_TARGET` 與 frontend proxy env。
-- 若 localhost 行為看起來不一致，要先看 `logs/launcher/<date>/launcher.log` 的 `selected=` 記錄與 tray menu 的 Open API Health / Open Dashboard，不要先假設固定是 `8400` 或 `3000`。
+- Backend 偏好 `127.0.0.1:8400`，Frontend 偏好 `3000`。
+- `8400` / `3000` 是 preferred port，不是永久保證。
+- Launcher 會處理 Windows excluded range、既有 listener 與 bind failure，必要時選下一個可用 port。
+- 遇到 localhost 行為不一致時，先看 launcher log 的實際 `selected=` 與 runtime env，不要沿用舊 `8300` 假設。
 
 ## AI Decision Contract
 
-OMI AI 的回答應優先輸出可行的技術決策結構，而不是單句建議。
+OMI AI 回答優先輸出可驗證的研究決策結構，而不是單句建議。
 
-回答應盡量包含：
+應盡量包含：
 
-- 目前狀態：價格、趨勢、量價、時間框架、資料日期與 freshness。
-- 情境：看多、觀望、風險、失效等 scenario。
-- 回測區：可能回測的位置、支撐/壓力、均線、VWAP、量價區、前高低或其他可驗證位階。
-- 進場條件：需要看到哪些確認訊號，而不是直接說「會漲所以買」。
-- 失效條件：跌破哪裡、量價如何惡化、哪個 evidence 會推翻原判斷。
-- 風險與部位：停損、停利、減碼、續抱、等待條件。
-- 反證：和主要判斷相反的 evidence。
-- 資料限制：缺資料、stale、partial、provider failure、best-effort。
+- 目前狀態：價格、趨勢、量價、時間框架、資料日期、session、freshness。
+- 情境：偏多、偏空、觀望、風險、失效。
+- 回測區：支撐/壓力、均線、VWAP、量價區、前高低或其他可驗證位階。
+- 進場/確認條件：需要看到哪些 evidence 成立。
+- 失效條件與反證。
+- 風險與部位處理。
+- provider、missing、partial、stale、fallback 與 best-effort 限制。
 
-如果 evidence 不足，OMI 可以先用 tool 補資料；tool 仍失敗時，必須清楚回報缺口，不得編造資料。
+`omi.decision.v4` 是 outward decision contract。底層 Market Data Foundation 可以重構，但不得讓 HTTP / SSE / MCP 各自長出不同業務語意。
 
-## 資料新鮮度與 Tool Refresh
+## 資料刷新與 Realtime Policy
 
-- 預設流程是先查本機資料與 freshness；若資料不足或過舊，OMI 可以自行使用外部 API 做 bounded refresh，再重建 evidence。
-- 對台股資料，優先維持交易日、休市、日界線與 session awareness 的一致性。
-- 外部 API / 資料刷新要有邊界：避免無限制回補、重複消耗 quota、在使用者不知情下啟動大量 job。
-- 既有 refresh policy 允許的市場資料 cache/backfill 可以自動寫入；產生報告、寫入 AI memory、呼叫 LLM、消耗付費或稀缺 quota 的操作，必須確認現有 trust/budget/policy。沒有明確政策時，採保守預設。
-- source health、provider events、warnings、missing data 要成為 AI 回答與 UI 可見狀態的一部分。
+統一使用 backend policy：
 
-## Kuro / 外部工具整合
+- `cache_only`：禁止為即時性啟動 provider fetch/subscription。
+- `prefer_live`：優先 live，失敗可 fallback，但必須揭露 semantics。
+- `require_live`：允許 bounded live acquisition / research lease；未達 live 必須明確標記 policy 未滿足。
+- completed-session 類需求不得無意義地啟動 KGI subscription。
 
-- OMI 要提供穩定、可被外部工具呼叫的 AI contract，例如 backend API 與 MCP `omi.ask`。
-- Kuro 或其他工具可以向 OMI 提出需求，例如「今天整個市場分析」或「某檔股票技術決策稿」。
-- OMI 負責用自己的資料與 tool 產出結構化市場分析；Kuro 負責呈現、語音化、提醒與任務牆，不應在 Kuro 端重做市場分析。
-- 外部 adapter 不應直接讀寫 OMI DB。需要資料時走 OMI backend API。
+Frontend viewer lease、AI/MCP research lease、background collector lease 是不同 lifecycle，但 provider selection 仍由 Control Plane 擁有。
 
-## Frontend / UX 原則
+## Kuro / MCP / External Consumer
 
-- UI 是交易研究工作台，不是展示用 landing page。
-- 優先保持資訊密度、掃描效率、版面穩定、圖表可讀性與操作節奏。
-- 台股畫面是其他市場畫面的設計基準；新增市場時先對齊台股的資料結構與 UI pattern。
-- 不要把同一個控制重複放在多個位置；如果 sidebar 已有 selection/action row，新增控制要融入既有節奏。
-- 專業 K 線、OMI dock、Radar、Watchlist、資料面板都要避免文字溢出、控制重疊、圖表遮擋與 mobile/desktop 版面崩壞。
+- OMI 提供穩定 backend API 與 MCP `omi.ask` / read tools。
+- MCP 保持 thin，不自行判斷 market semantics、freshness、provider fallback 或 repair。
+- Kuro 負責 persona、語音、提醒與工作流；市場分析 truth 留在 OMI backend。
+- Consumer 若需要更多資料，只能提高 bounded selection / policy 再問 backend，不自行 call provider。
+
+## Frontend / UX
+
+- UI 是高密度研究工作台，不是 landing page。
+- 台股仍是 UI reference implementation；美股可有等級相同的正式研究體驗，但共用資訊架構與 contract。
+- 市場特有差異應由 backend contract 明確暴露，不靠 frontend 猜。
+- 不要重複 selection/action control。
+- K 線、Radar、Watchlist、Decision Dock、資料面板要維持 desktop/mobile 可讀、可掃描與穩定。
 
 ## 修改前檢查
 
 修改前先確認：
 
-- 需求屬於 backend AI、market data、frontend UI、MCP adapter、database migration、launcher/runtime config 或 docs 哪一層。
-- 是否有既有測試覆蓋；先搜尋相關 tests。
-- 是否有交易日、freshness、provider fallback、cache 或 DB side effect。
-- 是否會影響 Kuro / MCP / external caller 的 API contract。
-- 是否有舊 port、舊 checkout、stale process 或錯誤 interpreter 的風險。
+- 任務屬於 Provider、Canonical、Resolver/Control、Market Service、Research/AI、Frontend、MCP、Account/Portfolio、DB、Runtime 或 Docs 哪一層。
+- 是否存在 nested `AGENTS.md`、product docs、architecture contract 與相關 tests。
+- 是否影響 Market Session、Trading Status、freshness、provider fallback、dataset repair、source health 或 Account state。
+- 是否影響 outward `omi.decision.v4`、MCP snapshot、Kuro 或 frontend public contract。
+- worktree 是否有既有修改，需與其共存而不是 revert。
+- 是否存在舊 port、stale runtime、錯 interpreter、KGI isolated runtime 或 provider entitlement 風險。
 
-## 驗證命令
+## 驗證
 
-依修改範圍執行最相關檢查。
+依修改範圍選最小足夠驗證。
 
-驗證預算：
+- Docs / prompt / AGENTS / template：UTF-8 讀回與 `git diff --check`。
+- 局部 backend：compile/syntax + targeted tests。
+- Market Data Foundation、API contract、freshness、DB、scheduler、MCP、cross-market、Account/Portfolio：相關 regression、API/data smoke 與安全 validation profile。
+- Frontend：lint/typecheck/build；只有實際 UI 風險時再加 browser/screenshot/e2e。
+- 外部大量 refresh、付費/稀缺 quota、發布、發送、交易或破壞性操作：先確認。
 
-- 只改 docs、prompt、AGENTS、模板：UTF-8 讀回與 `git diff --check` 即可；不要跑 backend/frontend runtime。
-- 只改文案、label、i18n 或小型描述：做相關字串搜尋與 diff 檢查；除非改到可編譯檔案，否則不要跑全套。
-- 改 backend 局部邏輯：跑 compile/syntax 與最接近的 targeted tests。
-- 改 AI answer contract、freshness、DB、scheduler、market data、MCP/API 或跨市場邊界：跑相關 regression、API/data smoke 與安全驗證 profile。
-- 改 frontend 互動、圖表或版面：依風險跑 lint/typecheck/build；只有需要驗證實際 UI 時才加 browser/screenshot/e2e。
-- 觸發外部 API 大量 refresh、付費 quota、寫入報告/記憶、發送/發布或破壞性資料操作：先確認，再驗證。
-
-預設先用安全驗證工具，避免直接啟動長駐 backend runtime、Next dev server、Playwright browser 或 crypto WebSocket collector 導致 Codex 對話卡住：
+預設使用：
 
 ```powershell
 cd "C:\project\Open Market Intelligence"
 .\scripts\run-safe-validation.ps1 -Profile quick
 ```
 
-常用 profile：
+常用：
 
 ```powershell
 .\scripts\run-safe-validation.ps1 -Profile backend
-.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs backend\tests\test_crypto_market.py
 .\scripts\run-safe-validation.ps1 -Profile frontend
 .\scripts\run-safe-validation.ps1 -Profile full
 ```
 
-`run-safe-validation.ps1` 會替每個步驟設定 timeout、集中 log 到 `.tmp\validation\<timestamp>`，並提示固定敏感 port（`3000`、`3100`、`8400`、`8427`）與 `.env` / `frontend/.env.local` 目前指定 port 是否已有 listener。`-IncludeE2E`、`-IncludeBuild`、`-StopPortOwners -Force` 都必須明確指定；不要把 e2e、build 或清 port owner 當成預設動作。只有在需要驗證真實 browser/runtime 行為時才加 `-IncludeE2E`，並保留短 timeout。
-
-以下分散命令作為 fallback 或精準除錯使用；不要在不知道 runtime 狀態時直接全量串起來跑。
-
-Backend：
-
-```powershell
-cd "C:\project\Open Market Intelligence"
-.\.venv\Scripts\python.exe -m compileall backend\app
-.\scripts\run-backend-tests.ps1
-```
-
-Frontend：
-
-```powershell
-cd "C:\project\Open Market Intelligence\frontend"
-npm run lint
-npm exec tsc -- --noEmit --incremental false
-npm run build
-npm run test:e2e
-```
-
-API spot checks：
-
-```powershell
-Invoke-RestMethod "http://127.0.0.1:8400/api/system/health"
-Invoke-RestMethod "http://127.0.0.1:8400/api/system/provider-events?limit=20"
-Invoke-RestMethod "http://127.0.0.1:8400/api/system/source-health-snapshots?market=tw"
-Invoke-RestMethod "http://127.0.0.1:8400/api/market/intraday/2330"
-Invoke-RestMethod "http://127.0.0.1:8400/api/market/technical/2330?timeframe=today"
-Invoke-RestMethod "http://127.0.0.1:8400/api/watchlists/groups/1/radar?mode=action&max_results=8"
-Invoke-RestMethod "http://127.0.0.1:8400/api/market/tw-futures/latest?symbols=TXF&refresh=true&session=auto"
-```
-
-如果只改局部，選最小有效驗證；如果碰到 AI answer contract、freshness、database、routing 或 cross-market 邏輯，要加跑相關 regression tests。
+不要把 E2E、build、長駐 runtime、全量外部 refresh 或清 port owner 當預設動作。
 
 ## Git Hygiene
 
-- 不要 commit `.env`、`.env.local`、`.venv`、`node_modules`、`.next`、local SQLite database、logs、cache、downloaded private data。
-- commit/push 前先檢查 staged diff，避免混入 private data、暫存檔、產物或大型資料。
-- 使用者沒有明確要求時，不要 commit 或 push。
+- 不 commit `.env`、secret、local DB、cache、logs、venv、node_modules、build output、private memory 或 runtime state。
+- 使用 git 前先看 branch/status/diff。
+- 使用者沒有明確要求時，不 commit、不 push。
+- 不 revert 未經要求的既有 worktree 變更。
 
 ## Project Subagents
 
-本 repo 提供 read-only custom subagents，只有在使用者明確要求 subagents、parallel review 或指定 agent 名稱時才使用；不要自動啟動。
+只有使用者明確要求 subagents、parallel review 或指定 agent 名稱時才使用。
 
-- `omi-ai-decision-reviewer`：審查 AI decision core、answer contract、MCP/API 行為、OMI dock 與 Kuro-facing OMI 回答。
-- `omi-data-freshness-reviewer`：審查市場資料 freshness、外部 API refresh、provider health、交易日/日界線、cache/backfill 與 stale data bug。
+- `omi-ai-decision-reviewer`
+- `omi-data-freshness-reviewer`
 
-這些 subagents 預設用於讀取、探索、審查與回報 findings。除非 parent task 明確要求它們實作局部修正，否則不應修改檔案。
+Subagent 預設用於讀取、探索與 review；不要讓多個 agent 未協調地修改同一批檔案。
+
 ## 長任務文件
 
-大型任務可建立：
+大型任務可以建立：
 
 - `docs/agent-runs/<task>/Prompt.md`
 - `docs/agent-runs/<task>/Plan.md`
 - `docs/agent-runs/<task>/Progress.md`
 
-這些檔案應記錄目標、限制、milestone、驗證與決策。不要把單次任務的進度塞進 repo root `AGENTS.md`。
+它們記錄單次任務；不可取代 current truth，也不要把任務進度塞回 repo root `AGENTS.md`。
 
-
-
+完成後回報 changed files、驗證結果、剩餘風險與必要的下一步。

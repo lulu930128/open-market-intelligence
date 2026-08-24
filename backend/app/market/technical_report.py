@@ -764,6 +764,7 @@ def _build_today_report(
     db: Session,
     stock_id: str,
     include_intraday: bool,
+    intraday_override: dict[str, Any] | None = None,
     parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
     technical_parameters = parameters or get_technical_analysis_parameters()
@@ -859,7 +860,9 @@ def _build_today_report(
             "source_refs": _technical_source_refs(timeframe="today", include_intraday=False),
         }
 
-    if include_intraday:
+    if intraday_override is not None:
+        intraday = intraday_override
+    elif include_intraday:
         intraday = get_intraday_trend(db=db, stock_id=stock_id)
     else:
         missing.append("intraday_trend")
@@ -1661,6 +1664,7 @@ def build_stock_technical_report(
     stock_id: str,
     timeframe: str = "daily",
     include_intraday: bool = True,
+    intraday_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_timeframe = timeframe.strip().lower()
     normalized_stock_id = stock_id.strip()
@@ -1672,6 +1676,7 @@ def build_stock_technical_report(
                 db=db,
                 stock_id=normalized_stock_id,
                 include_intraday=include_intraday,
+                intraday_override=intraday_override,
                 parameters=technical_parameters,
             )
         )

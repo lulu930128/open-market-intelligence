@@ -614,6 +614,66 @@ flowchart LR
 - 2026-08-16：以 live viewport `<=820px` 啟用 mobile layout，涵蓋 ChatGPT mobile fullscreen 已觀察的 768px CSS viewport。
 - 2026-08-16：成交金額與 detail 漲跌幅目前不在 focused contract；第一版不在 frontend 推算或假造，後續若必要再做 backend additive contract。
 
+## M13：Fullscreen 雙市場唯讀工作台
+
+### M13.0 Contract 與版面凍結
+
+- Scope：盤點台股 dashboard、美股 watchlist／detail、台美 corporate events 與現有 MCP outward tools；凍結 `interactive-decoupled` read-only tool plan。
+- Layout：以原始 OMI frontend 為基準，`>=1180px` 使用 300px 左 sidebar、內容區上方市場摘要、中央個股／K 線與右側技術研究；Calendar 放在 sidebar 獨立格，tablet／mobile 做單欄降階。
+- Visual tokens：`canvas #080909`、`surface #0d0f10`、`raised #121416`、`rule #24282b`、`text #d2d5d7`、`muted #777e83`；只用資料語意色標示行情與資料限制。
+- Signature：保留原版研究工作台的明確欄位邊界；右側技術研究欄底部只放手動委託預留狀態，不做大型 disabled 表單。
+- 驗收：read／write 能力清冊、資料 owner、layout breakpoint、Calendar contract 與 future order trust boundary 都有文件化決策。
+- 驗證：`rg` 檢查現有 endpoints／tools／UI write forms；`git diff --check`。
+
+### M13.1 Backend／MCP 雙市場唯讀 contract
+
+- Scope：新增或對齊 backend-owned 台股／美股 workspace、symbol search、focused detail 與 Calendar read projection；MCP adapter 只做 schema 與 HTTP projection。
+- Acceptance：台股預設、美股 context；所有 business-data tools 都是 bounded、cache-aware、idempotent read，不觸發 broker、DB mutation、provider write 或昂貴隱性 refresh。
+- Acceptance：Calendar 支援 `tw`／`us`，保留 source、coverage、freshness、warning；缺 provider 時回傳 missing／degraded，不 fabricated event。
+- Validation：targeted backend contract tests、adapter schema／annotation tests、retained-session `initialize -> tools/list -> tools/call` smoke。
+
+### M13.2 Fullscreen shell 與唯讀研究流程
+
+- Scope：在現有 React widget 以原始 OMI 桌面骨架重組 `tw`／`us` switch、獨立 Calendar、唯讀 Tree、focused detail、K 線與 technical evidence；只移除原站 sidebar 的寫入／非目標區塊。
+- Acceptance：持股、分組管理、加入股票、設定與所有 mutation controls 都不 render；Tree group／stock selection 仍可操作。
+- Acceptance：host `displayMode` 與 viewport 是兩個獨立訊號；fullscreen 在 768px 仍採適合寬度的 layout，不強塞 1200px workstation。
+- Validation：widget typecheck／tests／production build；360／430／768／1024／1280 browser screenshot 與 overflow／selection／Calendar smoke。
+
+### M13.3 未連線手動委託插槽
+
+- Scope：只在右側技術研究欄底部建立手動委託預留格與未連線說明，沿用目前 selection identity；不新增券商 dependency、credential、form state 或 tool call。
+- Acceptance：broker 未連線時 enabled trade controls 為 0、order write calls 為 0、DOM 沒有可編輯 side／price／quantity／account 欄位。
+- Future gate：券商 API 完成後另建 milestone；write contract 與 read tools 分離，預設 app-only visibility，加入 authorization、order preview、逐筆 explicit confirmation、idempotency key、audit／reconcile 與 emergency disable，且永遠不支援自動下單。
+- Validation：static DOM assertion、bridge call spy、desktop／mobile browser smoke。
+
+### M13.4 Professional K-line feasibility gate
+
+- Scope：把原站 `lightweight-charts` 核心能力抽成 widget-compatible implementation；不得直接移植 Next-only shell、設定寫入或前端市場邏輯。
+- K-line phase：backend detail v2 新增 cache-only 今日 1 分 K；日／週／月維持 backend aggregation。Widget 提供 candlestick、MA5／20／60、volume pane、crosshair OHLCV、drag／wheel／pinch、left／right、zoom、latest／fit controls 與台北時間軸。
+- Per-stock phase：以多檔真實 payload 驗證快速 A → B → C selection、不同 point count／missing volume／stale session、舊 tool response isolation 與 series cleanup；這一段在使用者確認 chart interaction 後另行處理。
+- Acceptance：今日／日／週／月、zoom／pan、crosshair OHLCV、volume、fit/reset、backend MA、resize／rapid-selection correctness 與 touch／keyboard usability全部通過，才可把完整 M13.4 標為完成。
+- Validation：bundle size／load smoke、rapid A → B → C series adoption、fullscreen resize、touch/keyboard、no-network CSP 與 screenshot comparison。
+- Fallback：任一核心便利性或穩定性 gate 不通過，保留 cache-only actual-OHLC chart，但移除有問題的週期或互動入口；M13 不因此 blocked。
+
+### M13 Stop-and-fix rules
+
+- 若 widget 或 adapter 直接連券商、backend DB 或 provider，立即停止並回到 owner boundary。
+- 若手動委託預留格出現 enabled control、可輸入委託欄位或 write tool，而 broker trust milestone 尚未完成，立即移除並恢復 inert placeholder。
+- 若 model 可直接選取或呼叫未來 order submission tool，停止；交易執行只能由使用者在 app UI 逐筆確認。
+- 若 Professional K-line 只有視覺按鈕但缺實際 zoom／crosshair／timeframe 行為，不得標示為專業模式。
+- 若 chart bundle 或 resize behavior 讓 fullscreen widget 回到高度漂移、明顯卡頓或資料 stale overwrite，採 fallback，不為完成度硬留功能。
+
+### M13 Decisions
+
+- 2026-08-16：目前產品面維持唯讀；手動下單是券商 API 與 trust contract 完成後的獨立 consequential-write milestone，不屬於本輪實作。
+- 2026-08-16：使用者否決另造 fullscreen shell；改為忠實沿用原始 OMI 的左 sidebar／上方市場帶／中央個股 K 線／右側技術研究結構，只移除持股、群組管理、股票管理、設定與其他寫入控制。
+- 2026-08-16：手動委託預留位置改在右側技術研究欄底部，不使用極窄 execution rail，也不占用大型 disabled 表單。
+- 2026-08-16：Professional K-line 是條件式 enhancement，不是 fullscreen 上線阻擋項；方便性與穩定性不足就不加入。
+- 2026-08-16：M13 第一版只在 host 實際回報 `displayMode=fullscreen` 時 mount 新 DOM；inline 與既有 mobile V2 不共用 fullscreen shell。台股沿用現有 contract，美股與 corporate-event Calendar 在 focused read contract 完成前只顯示 disabled／pending 狀態，不放示意資料。
+- 2026-08-16：K-line core 採原版同版 `lightweight-charts` 5.2；backend 統一擁有 timeframe、aggregation、moving averages、cache/freshness 與 previous-close 語意，widget 只做互動呈現。
+- 2026-08-16：今日 K 只讀最新持久化 1 分鐘 session，不讓 detail GET 隱性 refresh provider；若本機 cache 缺資料，UI 顯示 empty／warning，不用日 K 或假資料冒充今日 K。
+- 2026-08-16：Watchlist Tree 的 selection、expansion 與 scroll position 是三個獨立狀態；預設所有群組收合，selection／polling／detail tool result 不得自動展開祖先或改寫 Tree scrollTop。
+
 ## 驗證總表
 
 ### OMI backend

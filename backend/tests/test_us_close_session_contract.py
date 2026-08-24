@@ -260,7 +260,46 @@ class USQuoteSessionContractTests(unittest.TestCase):
         intraday.assert_called_once_with(
             symbol="AAPL",
             session_scope="all",
+            interval="1m",
             db=ANY,
+            persist_history=False,
+        )
+
+    def test_intraday_execution_and_plan_forward_requested_interval(self) -> None:
+        plan, warnings = agentic_planning.plan_us_stock_tools(
+            question="AAPL 5 minute chart",
+            symbol="AAPL",
+            target={"type": "us_stock", "id": "AAPL"},
+            gaps={"missing": ["us_intraday_trend"]},
+            budget={
+                "max_calls": 2,
+                "max_external_fetches": 1,
+                "max_total_seconds": 20,
+            },
+            can_call_llm=False,
+            requested_capabilities=("intraday.bars",),
+            session_scope="all",
+            intraday_interval="5m",
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(plan["tool_plan"][0]["args"]["interval"], "5m")
+        with patch.object(
+            agentic_execution.us_market_service,
+            "get_us_intraday_trend",
+            return_value={"effective_interval": "5m"},
+        ) as intraday:
+            agentic_execution._execute_tool(
+                db=object(),
+                tool_name="us.read_intraday_trend",
+                args=plan["tool_plan"][0]["args"],
+            )
+        intraday.assert_called_once_with(
+            symbol="AAPL",
+            session_scope="all",
+            interval="5m",
+            db=ANY,
+            persist_history=False,
         )
 
 

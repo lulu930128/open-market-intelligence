@@ -1,0 +1,45 @@
+{
+  "schema_version": "omi.market_data_integration_v2.02a_validation.v1",
+  "captured_at": "2026-08-21T23:34:42.4479780+08:00",
+  "state": "02A_SOURCE_COMPLETE_DARK",
+  "source_manifest": "artifacts/02a-source-manifest.json",
+  "validation": {
+    "compileall": "passed",
+    "targeted_02a": "65 passed in 2.25s",
+    "related_market_data_and_ai_boundary": "136 passed in 11.58s",
+    "dark_boundary": "7 passed",
+    "full_backend": "1980 passed, 801 warnings in 233.43s",
+    "full_backend_log_directory": ".tmp/validation/20260821-232937",
+    "git_diff_check": "passed"
+  },
+  "isolation": {
+    "foundation_target_count": 30,
+    "foundation_target_mismatch_count": 0,
+    "protected_file_mismatch_count": 0,
+    "unexpected_production_import_count": 0,
+    "market_data_init_exported": false,
+    "public_contract_changed_by_02a": false,
+    "frontend_changed_by_02a": false,
+    "mcp_changed_by_02a": false
+  },
+  "side_effects": {
+    "real_provider_calls": 0,
+    "real_research_leases_created": 0,
+    "runtime_mutations": 0,
+    "db_writes_or_migrations": 0,
+    "account_or_order_calls": 0,
+    "commit_or_push": false
+  },
+  "runner_note": {
+    "restricted_attempt_log_directory": ".tmp/validation/20260821-231954",
+    "restricted_attempt_result": "pytest_sessionfinish_basetemp_cleanup_failed_with_winerror_5_after_suite_reached_100_percent",
+    "authoritative_windows_attempt_result": "passed"
+  },
+  "limitations": [
+    "DARK_UNWIRED_SOURCE_ONLY",
+    "NO_REAL_PROVIDER_OR_RUNTIME_ACCEPTANCE",
+    "FOUNDATION_1_1_CLOSING_DEFECT_AND_FORMAL_SESSION_GATES_REMAIN_SEPARATE",
+    "02B_REQUIRES_SEPARATE_AUTHORIZATION_AFTER_FOUNDATION_CLOSURE"
+  ],
+  "result": "passed"
+}

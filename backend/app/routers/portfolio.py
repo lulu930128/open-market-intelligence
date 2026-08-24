@@ -5,7 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.portfolio import service
+from app.portfolio import kgi_sync
 from app.portfolio.schemas import (
+    KgiPortfolioSyncRead,
+    KgiPortfolioSyncRequest,
     PortfolioHoldingCreate,
     PortfolioHoldingRead,
     PortfolioHoldingSummaryRead,
@@ -17,6 +20,8 @@ router = APIRouter()
 
 
 def _handle_portfolio_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, kgi_sync.KgiPortfolioUnavailableError):
+        return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
     if isinstance(exc, service.PortfolioHoldingNotFoundError):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     if isinstance(exc, service.PortfolioSymbolNotFoundError):
@@ -62,7 +67,15 @@ def holdings_summary(
     return {
         "market": normalized_market,
         "holding_count": len(holdings),
-        "total_cost_amount": sum(float(item["cost_amount"]) for item in holdings),
+        "total_cost_amount": sum(
+            float(item["cost_amount"])
+            for item in holdings
+            if item.get("cost_amount") is not None
+        ),
+        "cost_basis_count": sum(1 for item in holdings if item.get("cost_amount") is not None),
+        "missing_cost_basis_count": sum(
+            1 for item in holdings if item.get("cost_amount") is None
+        ),
         "currencies": sorted(
             {
                 str(item["currency"])
@@ -72,6 +85,17 @@ def holdings_summary(
         ),
         "holdings": holdings,
     }
+
+
+@router.post("/holdings/kgi-sync", response_model=KgiPortfolioSyncRead)
+def sync_kgi_holdings(
+    payload: KgiPortfolioSyncRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return kgi_sync.sync_kgi_holdings(db, market=payload.market)
+    except service.PortfolioError as exc:
+        raise _handle_portfolio_error(exc) from exc
 
 
 @router.post(

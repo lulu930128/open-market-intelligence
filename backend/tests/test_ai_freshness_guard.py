@@ -3189,7 +3189,9 @@ class AiFreshnessGuardTests(unittest.TestCase):
             intraday.assert_called_once_with(
                 symbol="TSM",
                 session_scope="regular",
+                interval="1m",
                 db=db,
+                persist_history=False,
             )
             refresh_daily.assert_called_once()
             self.assertEqual(response["target"]["type"], "us_stock")

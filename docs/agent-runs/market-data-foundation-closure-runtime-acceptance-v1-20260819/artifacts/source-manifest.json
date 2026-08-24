@@ -1,0 +1,52 @@
+{
+  "contract_version": "omi.market.foundation.closure.source_manifest.v1",
+  "captured_at": "2026-08-19T21:40:11+08:00",
+  "repo_root": "C:\\project\\Open Market Intelligence",
+  "branch": "codex/tw-etf-provider-normalization",
+  "head": "aa65e65424f2d5de7255c4168a18ded9f8794301",
+  "dirty_status_entries_before_closure_docs": 63,
+  "authorization": {
+    "source_implementation": true,
+    "runtime_mode_restart": true,
+    "bounded_live_viewer_lease": true,
+    "account_or_order": false,
+    "commit_or_push": false
+  },
+  "target_files": [
+    {
+      "path": "backend/app/market_data/resolution.py",
+      "sha256": "d8b6544456e02d44c15d2f07bc6d905367abd73f976455ff0c4dd5859c6d2cb3"
+    },
+    {
+      "path": "backend/app/market_data/registry.py",
+      "sha256": "4093169c6872d5784760fd262bc238a0f53fd102aa9f596adde5a11295dc1469"
+    },
+    {
+      "path": "backend/app/ai/capability_contract.py",
+      "sha256": "605943dc8d057cc51d57ff80aab8c5c28900430992072e8a0b61b8f1cc831df3"
+    },
+    {
+      "path": "backend/tests/test_market_data_resolution.py",
+      "sha256": "a4bf4c878996da4ce4c256e8fc7f34f9860c269a87aebb35d95000ae15ea6c84"
+    },
+    {
+      "path": "backend/tests/test_market_data_registry.py",
+      "sha256": "03a141ddc1a9d0f6999a957a164439d4729d362706b72ac8af474946667c3ad3"
+    },
+    {
+      "path": "backend/tests/test_ai_capability_resolution_registry.py",
+      "sha256": "2799c55d9b8cc57dca9192a69f445644e9e39c27728ecada8faa7e4e91234762"
+    }
+  ],
+  "runtime_baseline": {
+    "launcher_pid": 42700,
+    "backend_wrapper_pid": 69668,
+    "backend_listener_pid": 66124,
+    "backend_url": "http://127.0.0.1:8400",
+    "frontend_wrapper_pid": 26684,
+    "frontend_listener_pid": 55704,
+    "frontend_url": "http://127.0.0.1:3000",
+    "public_catalog_sha256": "ebe6233ae0b3023a358e6976fc6bff4485879e74fa8e1ef0d132bb1438e2eb66",
+    "accepted_for_post_change_runtime": false
+  }
+}

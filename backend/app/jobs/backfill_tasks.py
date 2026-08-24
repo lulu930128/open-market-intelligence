@@ -10,6 +10,9 @@ from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock
 from app.market.broker_branch_market_refresh import (
     refresh_taiwan_broker_branch_market,
 )
+from app.market.broker_branch_behavior import (
+    materialize_broker_branch_behavior_shadow,
+)
 from app.market.daily_metrics_backfill import (
     ensure_daily_metrics,
     ensure_latest_daily_metrics,
@@ -275,6 +278,25 @@ def run_taiwan_broker_branch_market_refresh_job(
             max_runtime_seconds=max_runtime_seconds,
             progress=progress,
             job_run_id=job_id,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_taiwan_broker_branch_behavior_shadow_job(
+    job_id: int,
+    as_of_trade_date: date,
+    lookback_sessions: int,
+    methodology_version: str,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Preparing broker-branch shadow behavior materialization.")
+        return materialize_broker_branch_behavior_shadow(
+            db,
+            as_of_trade_date=as_of_trade_date,
+            lookback_sessions=lookback_sessions,
+            methodology_version=methodology_version,
+            progress=progress,
         )
 
     run_tracked_job(job_id, worker)

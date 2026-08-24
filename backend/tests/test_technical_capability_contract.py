@@ -24,14 +24,18 @@ TECHNICAL_CAPABILITIES = (
 
 
 class TechnicalCapabilityContractTests(unittest.TestCase):
-    def test_new_capabilities_are_taiwan_stock_read_only_derived_contracts(self) -> None:
+    def test_technical_capabilities_keep_explicit_market_scopes(self) -> None:
         for capability_id in TECHNICAL_CAPABILITIES:
             with self.subTest(capability_id=capability_id):
                 spec = capability_contract.CAPABILITIES[capability_id]
                 self.assertEqual(spec.domain, "technical")
                 self.assertEqual(spec.slot, "technical")
-                self.assertEqual(spec.scopes, ("stock",))
-                self.assertEqual(spec.markets, ("TW",))
+                if capability_id == "technical.indicators":
+                    self.assertEqual(spec.scopes, ("stock", "us_stock"))
+                    self.assertEqual(spec.markets, ("TW", "US"))
+                else:
+                    self.assertEqual(spec.scopes, ("stock",))
+                    self.assertEqual(spec.markets, ("TW",))
                 self.assertEqual(spec.side_effect_policy, "read_only")
                 self.assertIn(
                     capability_id,
@@ -179,6 +183,45 @@ class TechnicalCapabilityContractTests(unittest.TestCase):
         self.assertEqual(volume_profile["projection_level"], "summary")
         self.assertEqual(volume_profile["bins_included"], 0)
         self.assertEqual(len(volume_profile["high_volume_nodes"]), 3)
+
+    def test_response_budget_keeps_neutral_us_technical_quality(self) -> None:
+        indicator = decision_envelope_v4._brief_capability_summary(
+            "technical.indicators",
+            {
+                "schema_version": "omi.research.technical.indicators.v1",
+                "market": "US",
+                "symbol": "AAPL",
+                "status": "partial",
+                "as_of": "2026-08-21T16:00:00-04:00",
+                "current": {
+                    "close": 225.4,
+                    "moving_averages": {"ma20": 220.0},
+                    "price_vs_ma20_pct": 2.45,
+                },
+                "quality": {
+                    "facts_usable": True,
+                    "decision_usable": False,
+                    "reason_codes": ["CORPORATE_ACTION_COVERAGE_INCOMPLETE"],
+                },
+            },
+        )
+        structure = decision_envelope_v4._brief_capability_summary(
+            "technical.structure",
+            {
+                "schema_version": "omi.research.technical.structure.v1",
+                "market": "US",
+                "symbol": "AAPL",
+                "status": "partial",
+                "trend_state": "bullish_stack",
+                "metrics": {"price_vs_ma20_pct": 2.45},
+                "quality": {"decision_usable": False},
+            },
+        )
+
+        self.assertEqual(indicator["current"]["moving_averages"]["ma20"], 220.0)
+        self.assertFalse(indicator["quality"]["decision_usable"])
+        self.assertEqual(structure["trend_state"], "bullish_stack")
+        self.assertFalse(structure["quality"]["decision_usable"])
 
 
 if __name__ == "__main__":

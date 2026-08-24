@@ -6,6 +6,7 @@ from typing import Any
 from app.ai import capability_contract, pipeline_progress
 from app.ai.ask_stage_models import ToolStageState
 from app.ai.market_date_request import requested_us_trade_date
+from app.ai.market_payload_contract import requested_intraday_interval
 from app.ai.schemas import AiAskRequest
 
 
@@ -106,6 +107,9 @@ def execute_tool_stages(
     ).strip().lower()
     if us_session_scope not in {"regular", "extended", "all"}:
         us_session_scope = "regular"
+    us_intraday_interval = (
+        requested_intraday_interval(us_market_params, default="1m") or "1m"
+    )
 
     if (
         scope_type == "us_stock"
@@ -127,6 +131,7 @@ def execute_tool_stages(
                     else None
                 ),
                 session_scope=us_session_scope,
+                intraday_interval=us_intraday_interval,
                 force_selected_capabilities=continuation_selected,
                 progress_callback=progress_callback,
             ),

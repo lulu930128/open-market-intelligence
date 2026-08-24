@@ -15,6 +15,7 @@ from app.market.taiwan_industries import normalize_tw_industry_label
 from app.market.tw_intraday_state import persist_taiwan_intraday_stock_states
 from app.market.tw_market_dashboard import (
     build_dashboard_moving_average_series,
+    _dashboard_previous_close,
     build_tw_dashboard_stock_detail,
     build_tw_market_dashboard,
     estimate_cap_weighted_index,
@@ -176,6 +177,24 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertEqual(tpex["coverage"], 1)
         self.assertEqual(tpex["unknown"], 1)
         self.assertEqual(tpex["status"], "partial")
+        self.assertEqual(
+            tpex["coverage_reason_counts"]["state_missing"],
+            1,
+        )
+        self.assertIsNone(
+            tpex["coverage_reason_counts"]["valid_no_trade"]
+        )
+        self.assertEqual(
+            sum(
+                int(tpex["coverage_reason_counts"][key] or 0)
+                for key in (
+                    "state_missing",
+                    "state_not_observed",
+                    "reason_unknown",
+                )
+            ),
+            tpex["unknown"],
+        )
 
         self.assertEqual(payload["hot_groups"][0]["group_id"], "TWSE:24")
         self.assertEqual(payload["hot_groups"][0]["group_key"], "24")
@@ -202,6 +221,115 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertTrue(
             all(not item["decision_usable"] for item in payload["indices"])
         )
+
+    def test_dashboard_uses_existing_resolved_index_projection_as_headline(
+        self,
+    ) -> None:
+        self._seed_preopen_state()
+        resolved_summary = {
+            "resolution_version": "tw.index.resolution.v1",
+            "acquisition_policy": "cache_only",
+            "warnings": [],
+            "indices": [
+                {
+                    "index_id": "TAIEX",
+                    "market": "TWSE",
+                    "change": 123.4,
+                    "change_pct": 0.5,
+                    "breadth": {
+                        "market": "TWSE",
+                        "status": "partial",
+                        "market_session": "regular",
+                        "price_semantics": "actual_trade_only",
+                        "is_provisional": True,
+                        "decision_usable": True,
+                        "scope": "registered_universe",
+                        "source": "twse_mis_live_breadth_partial",
+                        "trade_date": "2026-08-14",
+                        "snapshot_as_of": "2026-08-14T09:59:59+08:00",
+                        "advance_count": 50,
+                        "decline_count": 35,
+                        "unchanged_count": 5,
+                        "classified_count": 90,
+                        "total_count": 100,
+                        "unknown_count": 10,
+                        "missing_count": 6,
+                        "failed_batch_count": 1,
+                        "warnings": ["One MIS batch failed."],
+                    },
+                    "resolution": {
+                        "resolution_version": "tw.index.resolution.v1",
+                        "resolution_id": "resolution-1",
+                        "acquisition_policy": "cache_only",
+                        "selected_candidate": "intraday_last_trade",
+                        "selected_value": 24_321.5,
+                        "selected_source": "twse_index_5s_intraday",
+                        "selected_provider": "twse",
+                        "selected_authority": "official_exchange",
+                        "selected_finalization": "intraday",
+                        "official_source": True,
+                        "official_close_confirmed": False,
+                        "provisional_estimate": False,
+                        "selected_event_time": "2026-08-14T09:59:59+08:00",
+                        "selected_trade_date": "2026-08-14",
+                        "selection_reason": (
+                            "active_session_prefers_intraday_last_trade"
+                        ),
+                        "official_close_status": "not_available_yet",
+                        "decision_usable": True,
+                        "coverage_status": "complete",
+                        "warnings": [],
+                    },
+                }
+            ],
+        }
+
+        with patch(
+            "app.market.tw_market_dashboard.get_market_index_summary",
+            return_value=resolved_summary,
+        ) as summary_read:
+            payload = build_tw_market_dashboard(
+                self.db,
+                now=datetime(2026, 8, 14, 10, 0, tzinfo=TAIWAN_TZ),
+            )
+
+        summary_read.assert_called_once_with(self.db)
+        parsed = TaiwanMarketDashboardRead.model_validate(payload)
+        self.assertEqual(parsed.headline_index_field, "resolved_indices")
+        self.assertEqual(parsed.headline_breadth_field, "resolved_breadth")
+        self.assertEqual(len(parsed.resolved_indices), 1)
+        self.assertEqual(parsed.resolved_indices[0].value, 24_321.5)
+        self.assertEqual(
+            parsed.resolved_indices[0].selected_candidate,
+            "intraday_last_trade",
+        )
+        self.assertFalse(parsed.resolved_indices[0].official)
+        self.assertEqual(parsed.resolved_indices[0].provider, "twse")
+        self.assertEqual(
+            parsed.resolved_indices[0].authority,
+            "official_exchange",
+        )
+        self.assertEqual(parsed.resolved_indices[0].finalization, "intraday")
+        self.assertTrue(parsed.resolved_indices[0].official_source)
+        self.assertFalse(parsed.resolved_indices[0].official_close_confirmed)
+        self.assertFalse(parsed.resolved_indices[0].provisional_estimate)
+        self.assertTrue(parsed.resolved_indices[0].decision_usable)
+        resolved_breadth = parsed.resolved_breadth["TWSE"]
+        self.assertEqual(resolved_breadth.scope, "registered_universe")
+        self.assertEqual(resolved_breadth.coverage, 90)
+        self.assertEqual(resolved_breadth.unknown, 10)
+        self.assertEqual(
+            resolved_breadth.coverage_reason_counts["not_received"],
+            6,
+        )
+        self.assertEqual(
+            resolved_breadth.coverage_reason_counts["received_unclassified"],
+            4,
+        )
+        self.assertIsNone(
+            resolved_breadth.coverage_reason_counts["provider_missing"]
+        )
+        self.assertTrue(all(not item.official for item in parsed.indices))
 
     def test_preopen_pending_does_not_reuse_indicative_rows_as_observed(self) -> None:
         self._seed_preopen_state()
@@ -350,6 +478,82 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertEqual(series[-1]["ma5"], 18.0)
         self.assertEqual(series[-1]["ma20"], 10.5)
         self.assertIsNone(series[-1]["ma60"])
+
+    def test_today_chart_previous_close_excludes_the_current_trade_date(self) -> None:
+        points = [
+            {"time": date(2026, 8, 13), "close": 98.0},
+            {"time": date(2026, 8, 14), "close": 101.0},
+        ]
+
+        previous_close = _dashboard_previous_close(
+            points,
+            trade_date=date(2026, 8, 14),
+        )
+
+        self.assertEqual(previous_close, 98.0)
+
+    def test_today_stock_detail_uses_latest_persisted_intraday_session(self) -> None:
+        self._seed_preopen_state()
+        cached_history = {
+            "source": "market_intraday_bar_cache",
+            "effective_interval": "1m",
+            "cache_status": "persisted_hit",
+            "cache_hit": True,
+            "canonical_volume_unit": "shares",
+            "volume_semantics": "latest_trade_date_interval_bar_sum",
+            "points": [
+                {
+                    "time": "2026-08-13T13:30:00+08:00",
+                    "open": 99.0,
+                    "high": 100.0,
+                    "low": 98.0,
+                    "close": 99.5,
+                    "volume": 1000,
+                },
+                {
+                    "time": "2026-08-14T09:00:00+08:00",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.5,
+                    "close": 100.5,
+                    "volume": 2000,
+                },
+                {
+                    "time": "2026-08-14T09:01:00+08:00",
+                    "open": 100.5,
+                    "high": 102.0,
+                    "low": 100.0,
+                    "close": 101.5,
+                    "volume": 3000,
+                },
+            ],
+        }
+
+        with patch(
+            "app.market.tw_market_dashboard.get_market_intraday_history",
+            return_value=cached_history,
+        ) as read_history:
+            payload = build_tw_dashboard_stock_detail(
+                self.db,
+                stock_id="2330",
+                timeframe="today",
+                bars=20,
+            )
+
+        read_history.assert_called_once_with(
+            db=self.db,
+            stock_id="2330",
+            interval="1m",
+            range_value="5d",
+            refresh=False,
+        )
+        TaiwanDashboardStockDetailRead.model_validate(payload)
+        self.assertEqual(payload["version"], "omi.tw_stock_dashboard_detail.v2")
+        self.assertEqual(payload["timeframe"], "today")
+        self.assertEqual(payload["intraday_chart"]["trade_date"], date(2026, 8, 14))
+        self.assertEqual(payload["intraday_chart"]["point_count"], 2)
+        self.assertEqual(len(payload["moving_averages"]), 2)
+        self.assertTrue(payload["cache_only"])
 
     def test_routes_are_registered_under_focused_market_prefix(self) -> None:
         paths = {route.path for route in app.routes}

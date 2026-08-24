@@ -34,6 +34,7 @@ from app.us_market.schemas import (
     USCompanyProfileRead,
     USCorporateActionRead,
     USIntradayTrendRead,
+    USMarketResearchRead,
     USOhlcChartRead,
     USResourceRefreshResultRead,
     USSecCompanyFactRead,
@@ -78,6 +79,7 @@ from app.us_market.service import (
     build_us_source_health,
     get_us_company_profile,
     get_us_intraday_trend,
+    build_us_market_research,
     get_us_sec_fundamental_summary,
     get_us_sec_financial_contract,
     get_us_stock,
@@ -956,9 +958,32 @@ def get_us_ohlc_chart_data(
 def get_us_intraday_trend_api(
     symbol: str,
     session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
+    interval: str = Query(default="1m", pattern="^(1m|5m|15m|30m|1h|4h)$"),
     db: Session = Depends(get_db),
 ):
-    return get_us_intraday_trend(symbol=symbol, session_scope=session_scope, db=db)
+    return get_us_intraday_trend(
+        symbol=symbol,
+        session_scope=session_scope,
+        interval=interval,
+        db=db,
+    )
+
+
+@router.get("/research/{symbol}", response_model=USMarketResearchRead)
+def get_us_market_research_api(
+    symbol: str,
+    bars: int = Query(default=260, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """Read bounded research from cached resolved evidence without provider IO."""
+
+    try:
+        return build_us_market_research(db, symbol=symbol, bars=bars)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post("/sec/{symbol}/refresh-facts", response_model=USSecFactRefreshResultRead)

@@ -222,10 +222,23 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         domain="quote",
         slot="quote",
         scopes=(*ALL_INSTRUMENT_SCOPES, "crypto_market"),
-        paths=("compact.quote", "data.quote"),
+        paths=(
+            "data.resolved_market_data.quote_snapshot",
+            "compact.quote",
+            "data.quote",
+        ),
         fields=(
             "kind",
             "status",
+            "schema_version",
+            "compatibility_schema_versions",
+            "selected_source",
+            "selected_event_at",
+            "facts_usable",
+            "research_usable",
+            "limitations",
+            "candidates",
+            "quote",
             "price",
             "latest_price",
             "last_price",
@@ -393,7 +406,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "timezone",
         ),
         default_fields=(
+            "kind",
             "status",
+            "schema_version",
+            "compatibility_schema_versions",
+            "selected_source",
+            "selected_event_at",
+            "facts_usable",
+            "research_usable",
+            "limitations",
+            "candidates",
+            "quote",
             "price",
             "latest_price",
             "last_price",
@@ -786,6 +809,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         slot="intraday",
         scopes=(*ALL_INSTRUMENT_SCOPES, "market", "crypto_market"),
         paths=(
+            "data.resolved_market_data.intraday_bars",
             "compact.intraday_bars",
             "compact.index_intraday",
             "compact.intraday_chart",
@@ -799,6 +823,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "as_of",
             "enabled",
             "kind",
+            "schema_version",
+            "compatibility_schema_versions",
+            "selected_provider",
+            "selected_source",
+            "selected_event_at",
+            "selection_reason",
+            "facts_usable",
+            "research_usable",
+            "limitations",
+            "candidates",
+            "available_bar_count",
             "payload_level",
             "date",
             "interval",
@@ -931,6 +966,17 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "as_of",
             "enabled",
             "kind",
+            "schema_version",
+            "compatibility_schema_versions",
+            "selected_provider",
+            "selected_source",
+            "selected_event_at",
+            "selection_reason",
+            "facts_usable",
+            "research_usable",
+            "limitations",
+            "candidates",
+            "available_bar_count",
             "payload_level",
             "interval",
             "requested_interval",
@@ -1066,6 +1112,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         slot="daily_chart",
         scopes=ALL_INSTRUMENT_SCOPES,
         paths=(
+            "data.resolved_market_data.daily_ohlcv",
             "compact.chart",
             "data.chart",
             "compact.daily_chart",
@@ -1075,6 +1122,21 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
         fields=(
             "as_of",
+            "kind",
+            "schema_version",
+            "compatibility_schema_versions",
+            "status",
+            "selected_provider",
+            "selected_source",
+            "selected_event_at",
+            "fallback_used",
+            "selection_reason",
+            "facts_usable",
+            "research_usable",
+            "limitations",
+            "candidates",
+            "available_bar_count",
+            "interval",
             "latest_data_date",
             "expected_data_date",
             "point_count",
@@ -1107,6 +1169,21 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
         default_fields=(
             "as_of",
+            "kind",
+            "schema_version",
+            "compatibility_schema_versions",
+            "status",
+            "selected_provider",
+            "selected_source",
+            "selected_event_at",
+            "fallback_used",
+            "selection_reason",
+            "facts_usable",
+            "research_usable",
+            "limitations",
+            "candidates",
+            "available_bar_count",
+            "interval",
             "latest_data_date",
             "expected_data_date",
             "point_count",
@@ -1151,8 +1228,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         capability_id="technical.structure",
         domain="technical",
         slot="technical",
-        scopes=ALL_INSTRUMENT_SCOPES,
+        scopes=("stock", "us_stock", "tw_index", "tw_futures"),
+        markets=("TW", "US"),
         paths=(
+            "data.resolved_research.technical_structure",
             "compact.technical",
             "compact.analysis",
             "data.technical",
@@ -1198,6 +1277,23 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "score_contracts",
             "contract_version",
             "advanced_shadow",
+            "kind",
+            "schema_version",
+            "algorithm_version",
+            "market",
+            "symbol",
+            "timeframe",
+            "status",
+            "trend_state",
+            "breakout_state",
+            "current_state",
+            "metrics",
+            "invalidation",
+            "counter_evidence",
+            "limitations",
+            "quality",
+            "input_quality",
+            "lineage",
         ),
         default_fields=(
             "analysis",
@@ -1232,16 +1328,40 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "score_contracts",
             "contract_version",
             "advanced_shadow",
+            "kind",
+            "schema_version",
+            "algorithm_version",
+            "market",
+            "symbol",
+            "timeframe",
+            "status",
+            "trend_state",
+            "breakout_state",
+            "current_state",
+            "metrics",
+            "invalidation",
+            "counter_evidence",
+            "limitations",
+            "quality",
+            "input_quality",
+            "lineage",
         ),
         default_limit=20,
+        schema_version="omi.research.technical.structure.v1",
+        frequency="daily",
+        event_time_basis="latest_resolved_completed_market_period",
+        unit_semantics="market_currency_price_shares_volume_percent_oscillators",
+        title="Technical structure snapshot",
+        description="Provider-neutral technical structure with explicit data usability, price basis, lineage, and market-specific profile.",
     ),
     CapabilitySpec(
         capability_id="technical.indicators",
         domain="technical",
         slot="technical",
-        scopes=("stock",),
-        markets=("TW",),
+        scopes=("stock", "us_stock"),
+        markets=("TW", "US"),
         paths=(
+            "data.resolved_research.technical_indicators",
             "compact.technical_indicators",
             "data.technical_indicators",
             "data.technical_evidence.indicators",
@@ -1263,6 +1383,18 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "missing",
             "warnings",
             "source_refs",
+            "algorithm_version",
+            "market",
+            "symbol",
+            "timeframe",
+            "bar_count",
+            "profile",
+            "warmup",
+            "period_completeness",
+            "current",
+            "quality",
+            "input_quality",
+            "lineage",
         ),
         default_fields=(
             "schema_version",
@@ -1278,14 +1410,26 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "missing",
             "warnings",
             "source_refs",
+            "algorithm_version",
+            "market",
+            "symbol",
+            "timeframe",
+            "bar_count",
+            "profile",
+            "warmup",
+            "period_completeness",
+            "current",
+            "quality",
+            "input_quality",
+            "lineage",
         ),
         default_limit=40,
-        schema_version="tw.technical.indicators.v3",
+        schema_version="omi.research.technical.indicators.v1",
         frequency="daily",
-        event_time_basis="completed_market_period_and_explicit_intraday_partial",
-        unit_semantics="TWD_price_shares_volume_percent_oscillators",
-        title="Taiwan technical indicator snapshot",
-        description="Versioned daily, weekly, and monthly indicator values with methods, warm-up, period completeness, and price-basis disclosure.",
+        event_time_basis="latest_resolved_completed_market_period",
+        unit_semantics="market_currency_price_shares_volume_percent_oscillators",
+        title="Technical indicator snapshot",
+        description="Versioned provider-neutral indicators with methods, warm-up, price basis, lineage, and data-usability disclosure.",
     ),
     CapabilitySpec(
         capability_id="technical.swings",
@@ -1668,7 +1812,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "Bounded SEC Form 4 transaction-ledger evidence with transaction-code, "
             "amendment, derivative, source, and freshness semantics."
         ),
-        markets=("us",),
+        markets=("US",),
         frequency="event",
         unit_semantics="shares_and_usd_per_share",
         event_time_basis="transaction_date_and_filing_date",
@@ -2104,6 +2248,76 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         },
     ),
     CapabilitySpec(
+        capability_id="news.events",
+        schema_version="omi.external.news_events.v1",
+        domain=None,
+        slot="news_events",
+        scopes=("stock", "us_stock", "market"),
+        paths=("compact.atlas_context", "data.atlas_context"),
+        fields=(
+            "kind",
+            "schema_version",
+            "status",
+            "mode",
+            "provider",
+            "contract_version",
+            "profile",
+            "generated_at",
+            "atlas_generated_at",
+            "target",
+            "query",
+            "event_count",
+            "returned_count",
+            "events",
+            "freshness",
+            "coverage",
+            "warnings",
+            "missing",
+            "source_refs",
+            "facts_usable",
+            "decision_usable",
+            "absence_interpretation",
+            "limitations",
+            "reason_code",
+        ),
+        default_fields=(
+            "kind",
+            "schema_version",
+            "status",
+            "mode",
+            "provider",
+            "contract_version",
+            "profile",
+            "generated_at",
+            "atlas_generated_at",
+            "target",
+            "query",
+            "event_count",
+            "returned_count",
+            "events",
+            "freshness",
+            "coverage",
+            "warnings",
+            "missing",
+            "source_refs",
+            "facts_usable",
+            "decision_usable",
+            "absence_interpretation",
+            "limitations",
+            "reason_code",
+        ),
+        default_limit=5,
+        title="External news and event evidence",
+        description=(
+            "Bounded, source-attributed Open Intel Atlas context. It is supplemental "
+            "shadow evidence and never changes OMI market facts or decision scores."
+        ),
+        frequency="atlas_scheduler_owned",
+        unit_semantics="source_attributed_external_event_evidence",
+        event_time_basis="atlas_event_and_evidence_timestamps",
+        side_effect_policy="read_only_local_service",
+    ),
+    CapabilitySpec(
         capability_id="market.short_volume",
         domain=None,
         slot="flows_liquidity",
@@ -2264,6 +2478,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "freshness",
         ),
         default_limit=10,
+        markets=("TW",),
     ),
     CapabilitySpec(
         capability_id="market.indices",
@@ -4541,9 +4756,9 @@ def _default_capabilities(scope_type: str, question_intent: str) -> tuple[str, .
             "company.profile",
             "quote.snapshot",
             "daily.ohlcv",
+            "technical.indicators",
             "technical.structure",
             "fundamentals.financials",
-            "ownership.insider_transactions",
             "corporate.actions",
             "market.short_volume",
             "data.freshness",
@@ -5389,7 +5604,16 @@ def _bounded_value(value: Any, *, limit: int, depth: int = 0) -> Any:
 def _series_point_sort_key(point: Any) -> datetime:
     if not isinstance(point, dict):
         return datetime.min.replace(tzinfo=timezone.utc)
-    for key in ("bar_time", "event_time", "time", "date", "trade_date"):
+    for key in (
+        "bar_time",
+        "event_at",
+        "event_time",
+        "end_at",
+        "start_at",
+        "time",
+        "date",
+        "trade_date",
+    ):
         raw_value = point.get(key)
         if isinstance(raw_value, datetime):
             parsed = raw_value
@@ -5426,9 +5650,13 @@ def _normalize_intraday_order(value: dict[str, Any]) -> dict[str, Any]:
         output["latest_point"] = rows[-1]
         output["event_time"] = (
             rows[-1].get("event_time")
+            or rows[-1].get("event_at")
             or rows[-1].get("bar_time")
+            or rows[-1].get("end_at")
+            or rows[-1].get("start_at")
             or rows[-1].get("time")
             or output.get("event_time")
+            or output.get("selected_event_at")
         )
     return output
 
@@ -5687,17 +5915,26 @@ def _reconcile_projected_series_counts(
         return value
     value["returned_point_count"] = len(rows)
     point_count = value.get("point_count")
+    if not isinstance(point_count, int):
+        point_count = value.get("available_bar_count")
+    if isinstance(point_count, int):
+        value.setdefault("point_count", point_count)
     value["truncated"] = bool(
-        isinstance(point_count, int) and point_count > len(rows)
+        value.get("truncated") is True
+        or isinstance(point_count, int)
+        and point_count > len(rows)
     )
     if capability_id == "intraday.bars" and rows:
         value["latest_point"] = rows[-1]
         value["event_time"] = (
             rows[-1].get("event_time")
+            or rows[-1].get("event_at")
             or rows[-1].get("bar_time")
+            or rows[-1].get("end_at")
+            or rows[-1].get("start_at")
             or rows[-1].get("time")
             if isinstance(rows[-1], dict)
-            else None
+            else value.get("selected_event_at")
         )
     return value
 

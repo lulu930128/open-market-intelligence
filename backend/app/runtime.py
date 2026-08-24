@@ -51,6 +51,10 @@ class RuntimeCoordinator:
         if self.started:
             return
 
+        logger.info(
+            "Market Data Foundation runtime mode=%s.",
+            settings.canonical_market_data_mode,
+        )
         try:
             if not self.schema_lock.acquire(
                 timeout_seconds=settings.runtime_schema_lock_timeout_seconds,

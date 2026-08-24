@@ -1,74 +1,381 @@
-# Operating Model
+﻿# Operating Model
 
-本文件定義 OMI 的長期責任邊界與日常運作模型。它不是單次任務計畫；修改架構、contract、UI 資訊架構或市場資料流程時，應先對齊這裡的邊界。
+本文件定義 OMI 的長期責任邊界與運作模型。它不是單次任務計畫。
 
-## 責任分層
+## 1. 核心責任分層
 
-Backend 是市場資料、freshness、AI reasoning、tool orchestration 與 answer contract 的真相來源。
+OMI backend 是市場資料語意、資料品質、Research/Decision 與 outward contract 的真相來源。
 
-Frontend 是研究工作台的呈現與互動層。它可以決定 layout、loading、顯示密度與互動節奏，但不應重做市場判斷、freshness 規則、資料補齊策略或 AI decision logic。
+主要平面：
 
-`agents/` 只放外部 adapter，例如 MCP。Adapter 應保持 thin：轉送 request、整理 schema、呼叫 backend API，不直接讀寫 DB，也不複製市場資料邏輯。
+```text
+Provider / Integration Plane
+        ↓
+Canonical Observation Plane
+        ↓
+Resolution / Control Plane
+        ↓
+Market / Research Plane
+        ↓
+AI / API
+        ↓
+Frontend / MCP / Kuro
+```
 
-Kuro 或其他外部工具負責呈現、語音化、提醒與工作流串接；市場分析與資料 contract 仍由 OMI backend 提供。
+旁邊獨立：
 
-## 資料與刷新模型
+```text
+Broker Account
+    ↓
+Account / Portfolio Plane
+    ↓
+Position / Cost / Cash
+    ↓
+Portfolio Valuation
+    ↑
+Market Data Resolver
+```
 
-OMI 採本機優先資料模型，`data/open_market_intelligence.db` 是本機狀態，不得在未確認前刪除、重建或覆蓋。
+## 2. Provider / Integration Plane
 
-資料讀取流程應先檢查本機資料與 freshness；若資料不足或過舊，backend 可以執行 bounded refresh。bounded refresh 必須有明確目標、資料範圍、成本/次數/timeout 邊界、來源紀錄與失敗回報。
+負責：
 
-Read path 預設要輕量。昂貴 refresh、付費或稀缺 quota、報告寫入、AI memory 寫入與發送/發布行為必須有明確 policy 或使用者確認。
+- HTTP / WebSocket / SDK / subprocess。
+- provider login / reconnect。
+- subscribe / unsubscribe。
+- raw payload parsing。
+- provider-specific error / entitlement normalization。
+- 產生 provider-neutral Canonical Observation。
 
-## 開源與發行模型
+不得：
 
-OMI 原始碼以 Apache License 2.0 開源，NOTICE 著作權人為盧星豪。Windows 發行包不得夾帶 build machine 的 SQLite、watchlist、token、log 或股票主檔 seed；空白安裝首次啟動時，由 backend 建立可追蹤、有明確來源與請求次數上限的 TWSE／TPEx 股票代號 bootstrap job。
+- 自行決定跨 provider fallback。
+- 自行判斷 AI decision readiness。
+- 直接把 provider payload 當 OMI canonical truth。
+- 直接寫 Market/AI DB 狀態，除非透過明確 service/transaction owner。
+- 偽裝成其他 provider。
 
-第三方相依套件保留各自授權。市場與 provider 回傳資料不因 OMI 採 Apache-2.0 而被重新授權；發行與文件必須保留這個邊界。
+KGI、TWSE MIS、Yahoo、AlphaVantage 都遵守同一原則。
 
-## 市場模型
+## 3. Canonical Observation Plane
 
-台股是主線市場，資料模型、UI pattern、AI decision contract 與驗證標準先以台股為基準。
+Canonical Observation 是不同 provider 之間的共同市場資料語意。
 
-其他市場是 context layer。新增市場時應優先對齊共同 contract：target、quote、daily chart、intraday、fundamentals、flows/liquidity、derivatives、data_quality 與 slot status，而不是各市場各自長出不相容 payload。
+核心類型應包含：
 
-市場差異可以存在，但差異要留在 backend adapter/service 層，並透過 slot status、capability、payload_level 與 warnings 暴露給 consumer。
+- InstrumentKey
+- QuoteObservation
+- DepthObservation
+- AuctionObservation
+- BarObservation
+- TradingStatusObservation
+- ProviderCapabilityStatus
+- SourceLineage
 
-## AI Decision Contract
+市場特有欄位可以保留為 bounded metadata，但 consumer 不直接依賴 provider raw schema。
 
-OMI AI 的輸出應優先是結構化決策輔助，而不是單句方向。
+## 4. Resolution / Control Plane
 
-標準回答應盡量包含：
+這一層是「OMI 目前應相信什麼」的 owner。
 
-- 目前狀態與資料日期。
-- 看多、觀望、風險與失效情境。
-- 回測區、支撐/壓力、均線、VWAP、量價區或前高低。
-- 進場確認條件。
-- 失效條件與反證。
-- 停損、停利、減碼、續抱或等待條件。
-- freshness、missing、partial、provider failure 與 best-effort 限制。
+負責：
 
-如果 evidence 不足，backend 可以先用 tool 補資料；tool 失敗時必須回報缺口，不得編造。
+- provider policy。
+- candidate selection。
+- cross-provider fallback。
+- realtime policy。
+- viewer / research / collector lease lifecycle。
+- cache policy。
+- market session。
+- instrument trading status resolution。
+- freshness。
+- dataset health。
+- repair planning。
+- source health aggregation。
+- selected evidence lineage。
 
-## Consumer Contract
+Consumer 不得重做這些行為。
 
-所有 consumer 應使用 backend 回傳的 answer contract：
+## 5. Market / Research Plane
 
-- ChatGPT/MCP 優先讀 canonical `answer`、`evidence.data` 與
-  `evidence.capability_status`；`analysis.human_answer` 只作 legacy
-  compatibility fallback。
-- Kuro 預設使用 summary/compact payload，語音化核心 slot，不展開大量原始資料。
-- Frontend 以 `evidence.capability_status` 作 readiness 唯一權威，決定
-  completeness、警告、disabled/loading/expandable state；舊
-  `result.data.slots`／`evidence.slots` 只作相容 fallback，不把 readiness
-  解讀成市場建議。
+Market-specific service 負責市場差異：
 
-需要更多資料時，consumer 應提高 `market_data_params.payload_level` 或調整 bounded params 重新詢問 backend，不應在 adapter 或 UI 自行補資料。
+- trading calendar。
+- tick / volume semantics。
+- session 特性。
+- regulation。
+- official data release。
+- market-specific fundamentals / flow / derivatives。
 
-## 變更流程
+共用 Research engine 處理可跨市場共用的算法，例如基於 Canonical OHLCV 的：
 
-非平凡變更要先判斷層級：backend AI、market data、frontend UI、MCP adapter、database migration、launcher/runtime config 或 docs。
+- MA
+- RSI
+- MACD
+- ATR
+- KDJ
+- Bollinger
+- technical structure
 
-牽涉 contract、freshness、DB、scheduler、tool policy 或跨市場邊界時，應同步更新相關測試與 agent-run 文件，避免只改單一 call site。
+除非市場差異真的改變算法語意，否則不要複製 TW / US 兩套相同 technical engine。
 
-若臨時需求會破壞上述邊界，應先指出衝突與風險，再提供較穩定的替代方案。
+## 6. Frontend
+
+Frontend 是研究工作台呈現與互動層。
+
+它可以擁有：
+
+- layout。
+- selection。
+- loading UX。
+- display density。
+- interaction state。
+- viewer lease 的「使用者正在觀看」意圖。
+
+它不得擁有：
+
+- provider priority。
+- fallback。
+- freshness。
+- trading status inference。
+- repair policy。
+- AI decision logic。
+
+Frontend 要求即時資料時，對 backend 表達 `require_live` / viewer intent，不直接指定 KGI。
+
+## 7. MCP / External Adapter
+
+`agents/` 保持 thin。
+
+MCP / external adapter：
+
+- 轉送 public request。
+- 保留 schema / transport compatibility。
+- 不直接讀 DB。
+- 不直接呼叫 provider。
+- 不重算 market semantics。
+- 不自行擴張 refresh scope。
+
+`omi.decision.v4` 與 backend public tools 是 outward business contract。
+
+## 8. Kuro
+
+Kuro 是 OMI consumer。
+
+Kuro 負責：
+
+- persona。
+- TTS。
+- reminders。
+- UI / desktop interaction。
+- workflow composition。
+
+Kuro 不重做市場研究、provider fallback、freshness 或 Portfolio valuation。
+
+## 9. 市場定位
+
+### Taiwan
+
+台股是 primary / reference market，優先 production coverage 與驗證。
+
+### United States
+
+美股是 first-class research market，與台股共用 Market Data Foundation / Research contract，但保留美股 session、provider、Level 1、SEC/IFRS 等差異。
+
+### Secondary Markets
+
+JP / KR / Crypto / Resource 預設為 secondary / context market。新增能力時優先使用共同 canonical/outward contract，不建立平行架構。
+
+## 10. Realtime Policy
+
+Backend public policy：
+
+### cache_only
+
+- 只讀現有 evidence。
+- 不啟動 provider fetch / subscription。
+
+### prefer_live
+
+- 優先 live / current。
+- 可 fallback 到 completed session / cache。
+- 必須標示 fallback 與 freshness semantics。
+
+### require_live
+
+- 可啟動 bounded external acquisition。
+- 可建立 ephemeral research lease。
+- 無法取得 live 時明確回報 policy unmet。
+- 不得把上一交易日資料冒充 live。
+
+### completed_session
+
+- 只需要最近完成 session。
+- 不應啟動即時 subscription。
+
+## 11. Lease Model
+
+### Viewer Lease
+
+- 由 UI 使用意圖觸發。
+- persistent + heartbeat。
+- selected symbol lifecycle。
+
+### Research Lease
+
+- 由 AI/MCP `require_live` 觸發。
+- request-scoped。
+- bounded symbol count。
+- bounded timeout。
+- request completion 後 release。
+
+### Collector Lease
+
+- 只給明確 bounded universe。
+- 不得演變成無界全市場 KGI subscription。
+
+## 12. Dataset Lifecycle
+
+資料 read 先判斷：
+
+1. dataset 是否應存在。
+2. instrument 是否 eligible。
+3. current evidence 是否滿足 expected state。
+4. 若不滿足，是否有 bounded repair operation。
+5. repair 成功後是否滿足 postcondition。
+
+Dataset contract 應集中定義：
+
+- owner。
+- frequency。
+- expected date。
+- trading eligibility。
+- refresh operation。
+- refresh scope。
+- postcondition。
+- health rule。
+- stale rule。
+
+Freshness 能發現 stale 不代表系統有 repair 能力；兩者必須分開呈現。
+
+## 13. Health Model
+
+### Provider Health
+
+某 provider / capability 本身狀態。
+
+例：
+
+- KGI TW Quote live。
+- KGI Account 503。
+- Yahoo rate_limited。
+
+### Dataset Health
+
+Canonical dataset 是否達到 OMI 預期。
+
+例：
+
+Yahoo stale 但 AlphaVantage current 時，US daily dataset 仍可 current。
+
+### Resolved Evidence Health
+
+這次 request 最後 selected evidence 是否可用。
+
+不得用 fallback provider 的問題污染 selected evidence 狀態。
+
+## 14. Trading Status
+
+Market Session 與 Instrument Trading Status 分開。
+
+例：
+
+```text
+TW Market = REGULAR
+2344 = TRADABLE
+8105 = STOP_TRADING
+```
+
+沒有 quote 時不能自行推論：
+
+- 尚未成交。
+- 停牌。
+- provider fail。
+
+Trading Status 必須由明確 evidence resolve。
+
+## 15. Account / Portfolio
+
+Account Plane 管理：
+
+- AccountStatus
+- PositionObservation
+- CostBasisObservation
+- CashObservation
+
+Portfolio sync 原則：
+
+- success + complete 才可 destructive replace provider-owned state。
+- partial 不 destructive replace。
+- provider 503 / unavailable 時保留既有 state。
+- confirmed empty 才代表 truly empty。
+- unknown cost != zero cost。
+
+Portfolio Valuation：
+
+```text
+Position
++ Resolved Market Quote
++ FX
+= Valuation
+```
+
+## 16. Trust / Side Effects
+
+Read path 預設輕量。
+
+可自動執行的 bounded refresh 必須符合既有 trust/budget/policy。
+
+以下操作仍需明確 policy 或使用者確認：
+
+- 大量外部 quota。
+- 報告/記憶寫入。
+- 發送/發布。
+- 交易。
+- destructive DB/data operation。
+- secrets / machine-wide settings。
+
+## 17. Consumer Contract
+
+Consumer 應直接讀 backend-owned：
+
+- readiness。
+- evidence data。
+- capability status。
+- freshness。
+- provider failures。
+- limitations。
+- fill/continuation plan。
+
+Consumer 不得從 UI label、空欄位或 provider 名稱自行推導市場狀態。
+
+## 18. 變更流程
+
+非平凡變更先判斷 owner：
+
+- Provider
+- Canonical
+- Resolver / Control
+- Dataset lifecycle
+- Market-specific service
+- Research / AI
+- Account / Portfolio
+- Frontend
+- MCP
+- DB
+- Runtime
+- Docs
+
+跨 owner 修改要同步更新 contract tests。
+
+歷史 `docs/agent-runs` 不回寫新世界觀；current truth 只放在 repo AGENTS、product docs 與 architecture docs。

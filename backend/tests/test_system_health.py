@@ -22,6 +22,37 @@ class SystemHealthTests(unittest.TestCase):
         self.assertEqual(runtime["backend_dir"], str(PROJECT_ROOT / "backend"))
         self.assertEqual(runtime["python_executable"], sys.executable)
         self.assertTrue(runtime["python_version"])
+        self.assertEqual(
+            runtime["canonical_market_data_mode"],
+            settings.canonical_market_data_mode,
+        )
+        expected_us_canary_count = len(
+            {
+                item.strip().upper()
+                for item in settings.us_canonical_shadow_symbols.split(",")
+                if item.strip()
+            }
+        )
+        expected_us_mode = (
+            settings.us_canonical_market_data_mode
+            or settings.canonical_market_data_mode
+        )
+        self.assertEqual(runtime["us_canonical_market_data_mode"], expected_us_mode)
+        self.assertEqual(runtime["canonical_market_data_rollout_stage"], expected_us_mode)
+        self.assertEqual(
+            runtime["us_canonical_shadow_enabled"],
+            expected_us_mode != "off"
+            and expected_us_canary_count > 0,
+        )
+        self.assertEqual(
+            runtime["us_canonical_shadow_symbol_count"],
+            expected_us_canary_count,
+        )
+        self.assertEqual(
+            runtime["us_canonical_market_data_enabled"],
+            expected_us_mode != "off"
+            and (expected_us_mode == "on" or expected_us_canary_count > 0),
+        )
 
     def test_liveness_check_does_not_depend_on_runtime_or_database(self) -> None:
         payload = liveness_check()

@@ -777,6 +777,43 @@ def _compact_fill_jobs(
     ]
 
 
+def _compact_already_attempted_actions(
+    fill_plan: dict[str, Any],
+    *,
+    limit: int,
+    required: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            key: deepcopy(action[key])
+            for key in (
+                "capability",
+                "status",
+                "status_class",
+                "payload_included",
+                "resolution_type",
+                "reason",
+                "refresh_strategy",
+                "refresh_possible_now",
+                "refresh_requires_market_open",
+                "writes_market_cache",
+                "operation",
+                "provider",
+                "target",
+                "error_message",
+                "retryable",
+            )
+            if key in action
+        }
+        for action in _list(fill_plan.get("already_attempted_actions"))
+        if isinstance(action, dict)
+        and (
+            required is None
+            or str(action.get("capability") or "") in required
+        )
+    ][:limit]
+
+
 def _compact_continuation(continuation: dict[str, Any]) -> None:
     fill_plan = _dict(continuation.get("fill_plan"))
     actions = [
@@ -836,6 +873,10 @@ def _compact_continuation(continuation: dict[str, Any]) -> None:
         "actions": actions,
         "jobs": _compact_fill_jobs(fill_plan, limit=8),
         "deferred_actions": deferred_actions,
+        "already_attempted_actions": _compact_already_attempted_actions(
+            fill_plan,
+            limit=8,
+        ),
         "partition": _compact_fill_partition(fill_plan),
         "action_count": fill_plan.get("action_count", len(actions)),
         "auto_executed": fill_plan.get("auto_executed", False),
@@ -1068,6 +1109,10 @@ def _emergency_compact_envelope(envelope: dict[str, Any]) -> None:
             for action in _list(fill_plan.get("deferred_actions"))[:4]
             if isinstance(action, dict)
         ],
+        "already_attempted_actions": _compact_already_attempted_actions(
+            fill_plan,
+            limit=4,
+        ),
         "partition": _compact_fill_partition(fill_plan),
         "action_count": fill_plan.get("action_count", 0),
         "auto_executed": fill_plan.get("auto_executed", False),
@@ -1297,6 +1342,10 @@ def _hard_cap_envelope(
             "actions": [],
             "jobs": _compact_fill_jobs(fill_plan, limit=4),
             "deferred_actions": [],
+            "already_attempted_actions": _compact_already_attempted_actions(
+                fill_plan,
+                limit=4,
+            ),
             "partition": _compact_fill_partition(fill_plan),
             "action_count": fill_plan.get("action_count", 0),
             "auto_executed": fill_plan.get("auto_executed", False),
@@ -1663,11 +1712,23 @@ def _brief_capability_summary(
             "projection_level": "summary",
         }
     if capability_id == "quote.snapshot":
+        neutral_quote = _dict(value.get("quote"))
         return {
             **_summary_dict(
                 value,
                 fields=(
+                    "kind",
+                    "schema_version",
+                    "compatibility_schema_versions",
                     "status",
+                    "selected_provider",
+                    "selected_source",
+                    "selected_event_at",
+                    "fallback_used",
+                    "selection_reason",
+                    "facts_usable",
+                    "research_usable",
+                    "limitations",
                     "price",
                     "latest_price",
                     "last_price",
@@ -1775,6 +1836,33 @@ def _brief_capability_summary(
                     "selection_reason",
                 ),
             ),
+            **(
+                {
+                    "quote": _summary_dict(
+                        neutral_quote,
+                        fields=(
+                            "market",
+                            "symbol",
+                            "venue",
+                            "instrument_type",
+                            "trade_date",
+                            "currency",
+                            "state",
+                            "trade_state",
+                            "last_trade_price",
+                            "open_price",
+                            "high_price",
+                            "low_price",
+                            "previous_close",
+                            "event_at",
+                            "received_at",
+                            "fetched_at",
+                        ),
+                    )
+                }
+                if neutral_quote
+                else {}
+            ),
             "projection_level": "summary",
         }
     if capability_id in {"daily.ohlcv", "intraday.bars"}:
@@ -1828,6 +1916,17 @@ def _brief_capability_summary(
             **_summary_dict(
                 value,
                 fields=(
+                    "kind",
+                    "schema_version",
+                    "compatibility_schema_versions",
+                    "selected_provider",
+                    "selected_source",
+                    "selected_event_at",
+                    "selection_reason",
+                    "facts_usable",
+                    "research_usable",
+                    "limitations",
+                    "available_bar_count",
                     "as_of",
                     "latest_data_date",
                     "expected_data_date",
@@ -1907,6 +2006,13 @@ def _brief_capability_summary(
             **_summary_dict(
                 value,
                 fields=(
+                    "kind",
+                    "schema_version",
+                    "algorithm_version",
+                    "market",
+                    "symbol",
+                    "timeframe",
+                    "status",
                     "contract_version",
                     "as_of",
                     "trade_date",
@@ -1916,6 +2022,17 @@ def _brief_capability_summary(
                     "momentum",
                     "provider",
                     "source",
+                    "selected_title",
+                    "trend_state",
+                    "breakout_state",
+                    "current_state",
+                    "metrics",
+                    "invalidation",
+                    "counter_evidence",
+                    "limitations",
+                    "quality",
+                    "input_quality",
+                    "lineage",
                 ),
             ),
             "analysis": _summary_dict(
@@ -2011,9 +2128,14 @@ def _brief_capability_summary(
                 fields=(
                     "kind",
                     "schema_version",
+                    "algorithm_version",
                     "status",
                     "stock_id",
+                    "market",
+                    "symbol",
+                    "timeframe",
                     "as_of",
+                    "bar_count",
                     "price_basis",
                     "currency",
                     "price_unit",
@@ -2023,6 +2145,13 @@ def _brief_capability_summary(
                     "warnings",
                     "source_refs",
                     "freshness",
+                    "profile",
+                    "warmup",
+                    "period_completeness",
+                    "current",
+                    "quality",
+                    "input_quality",
+                    "lineage",
                 ),
             ),
             "timeframes": summarized_timeframes,
@@ -2703,6 +2832,11 @@ def _compact_to_required_core(
             and action.get("refresh_strategy")
             in {"reader_fetch", "granular_tool"}
         ],
+        "already_attempted_actions": _compact_already_attempted_actions(
+            fill_plan,
+            limit=4,
+            required=required_set,
+        ),
         "partition": _compact_fill_partition(fill_plan),
         "action_count": fill_plan.get("action_count", len(compact_actions)),
         "auto_executed": fill_plan.get("auto_executed", False),
@@ -2710,7 +2844,11 @@ def _compact_to_required_core(
     }
     envelope["continuation"] = (
         {"fill_plan": compact_fill_plan}
-        if compact_actions or compact_fill_plan["deferred_actions"]
+        if (
+            compact_actions
+            or compact_fill_plan["deferred_actions"]
+            or compact_fill_plan["already_attempted_actions"]
+        )
         else {}
     )
     limitations = _dict(envelope.get("limitations"))

@@ -6,9 +6,11 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.db.session import SessionLocal
 from app.jobs import backfill_tasks, service as job_service
+from app.jobs.eod_coverage import enqueue_eod_coverage_reconcile
 from app.jobs.job_types import (
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     KR_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    TAIWAN_BROKER_BRANCH_BEHAVIOR_SHADOW_JOB_TYPE,
     TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
@@ -44,6 +46,11 @@ from app.market.tw_corporate_events import (
 from app.market.broker_branch_market_refresh import (
     get_taiwan_broker_branch_market_coverage,
 )
+from app.market.broker_branch import expected_broker_branch_trade_date
+from app.market.broker_branch_behavior import (
+    BROKER_BRANCH_BEHAVIOR_MAX_LOOKBACK_SESSIONS,
+    BROKER_BRANCH_BEHAVIOR_METHODOLOGY_V0,
+)
 from app.market.market_chips import normalize_market_chip_index_ids
 from app.market.taiwan_market_state import persist_taiwan_market_minute_state
 from app.market.taiwan_index_minute import (
@@ -59,6 +66,7 @@ from app.market.indices import (
     refresh_market_index_summary,
 )
 from app.market.source_health import build_taiwan_source_health
+from app.market_data.eod_coverage import should_enqueue_eod_reconcile
 from app.market.tw_intraday_state import (
     persist_taiwan_intraday_stock_states,
 )
@@ -1091,6 +1099,107 @@ def _add_taiwan_broker_branch_market_refresh_job(scheduler: Any) -> bool:
     return True
 
 
+def enqueue_taiwan_broker_branch_behavior_shadow() -> None:
+    now = datetime.now(_timezone())
+    as_of_trade_date = expected_broker_branch_trade_date(now=now)
+    lookback_sessions = max(
+        2,
+        min(
+            int(
+                settings.scheduler_tw_broker_branch_behavior_lookback_sessions
+            ),
+            BROKER_BRANCH_BEHAVIOR_MAX_LOOKBACK_SESSIONS,
+        ),
+    )
+    db = SessionLocal()
+    try:
+        coverage = get_taiwan_broker_branch_market_coverage(
+            db,
+            trade_date=as_of_trade_date,
+        )
+        expected_count = int(coverage.get("expected_count") or 0)
+        covered_count = int(coverage.get("covered_count") or 0)
+        coverage_ratio = (
+            covered_count / expected_count if expected_count > 0 else 0.0
+        )
+        if coverage_ratio < 0.95:
+            logger.info(
+                "Skipped broker-branch shadow behavior date=%s because raw "
+                "coverage is below 95%% covered=%s expected=%s ratio=%.4f.",
+                as_of_trade_date,
+                covered_count,
+                expected_count,
+                coverage_ratio,
+            )
+            return
+
+        request = {
+            "schedule": "tw_broker_branch_behavior_shadow",
+            "mode": "shadow",
+            "advertised": False,
+            "decision_usable": False,
+            "as_of_trade_date": as_of_trade_date.isoformat(),
+            "lookback_sessions": lookback_sessions,
+            "methodology_version": BROKER_BRANCH_BEHAVIOR_METHODOLOGY_V0,
+            "raw_coverage": {
+                "covered_count": covered_count,
+                "expected_count": expected_count,
+                "coverage_ratio": coverage_ratio,
+            },
+            "external_fetches": 0,
+        }
+        target = (
+            f"{as_of_trade_date.isoformat()}|"
+            f"{BROKER_BRANCH_BEHAVIOR_METHODOLOGY_V0}"
+        )
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type=TAIWAN_BROKER_BRANCH_BEHAVIOR_SHADOW_JOB_TYPE,
+            target=target,
+            request=request,
+            progress_total=1,
+            message="Queued broker-branch shadow behavior materialization.",
+            task=backfill_tasks.run_taiwan_broker_branch_behavior_shadow_job,
+            task_args=(
+                as_of_trade_date,
+                lookback_sessions,
+                BROKER_BRANCH_BEHAVIOR_METHODOLOGY_V0,
+            ),
+            reuse_success_within_seconds=86400,
+        )
+        logger.info(
+            "Broker-branch shadow behavior %s job_id=%s date=%s "
+            "coverage=%s/%s.",
+            "queued" if created else "deduped",
+            job.id,
+            as_of_trade_date,
+            covered_count,
+            expected_count,
+        )
+    finally:
+        db.close()
+
+
+def _add_taiwan_broker_branch_behavior_shadow_job(scheduler: Any) -> bool:
+    if not settings.enable_tw_broker_branch_behavior_shadow_scheduler:
+        return False
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_tw_broker_branch_behavior_shadow_time
+    )
+    scheduler.add_job(
+        enqueue_taiwan_broker_branch_behavior_shadow,
+        trigger="cron",
+        day_of_week=settings.scheduler_tw_broker_branch_refresh_day_of_week,
+        hour=hour,
+        minute=minute,
+        id="tw_broker_branch_behavior_shadow",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    return True
+
+
 def enqueue_taiwan_stock_detail_daily_startup_catchup() -> None:
     enqueue_market_daily_refresh(allow_non_trading_day=True)
     enqueue_market_margin_daily_refresh(allow_non_trading_day=True)
@@ -1961,6 +2070,74 @@ def _add_market_chip_margin_refresh_job(scheduler: Any) -> bool:
     return True
 
 
+def enqueue_market_eod_coverage_reconcile() -> None:
+    markets = [item.upper() for item in _split_csv(settings.scheduler_eod_coverage_markets)]
+    for market in markets:
+        if market not in {"TW", "US"}:
+            logger.warning("Skipping unsupported EOD coverage scheduler market=%s.", market)
+            continue
+        db = SessionLocal()
+        try:
+            if not should_enqueue_eod_reconcile(db, market=market):
+                continue
+            job, created = enqueue_eod_coverage_reconcile(
+                db,
+                market=market,
+                repair=True,
+                max_symbols=(
+                    settings.scheduler_eod_coverage_us_max_symbols_per_run
+                    if market == "US"
+                    else 2
+                ),
+                max_runtime_seconds=(
+                    settings.scheduler_eod_coverage_us_max_runtime_seconds
+                    if market == "US"
+                    else 120
+                ),
+                sleep_seconds=(
+                    settings.scheduler_eod_coverage_us_sleep_seconds
+                    if market == "US"
+                    else 0
+                ),
+                max_consecutive_errors=(
+                    settings.scheduler_eod_coverage_us_max_consecutive_errors
+                    if market == "US"
+                    else 2
+                ),
+                error_backoff_seconds=settings.scheduler_eod_coverage_error_backoff_seconds,
+                message="Queued by full-market EOD coverage scheduler.",
+            )
+            logger.info(
+                "Full-market EOD coverage reconcile market=%s %s job_id=%s.",
+                market,
+                "queued" if created else "deduped",
+                job.id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to inspect or enqueue full-market EOD coverage market=%s.",
+                market,
+            )
+        finally:
+            db.close()
+
+
+def _add_market_eod_coverage_reconcile_job(scheduler: Any) -> bool:
+    if not settings.enable_eod_coverage_scheduler:
+        return False
+    scheduler.add_job(
+        enqueue_market_eod_coverage_reconcile,
+        trigger="interval",
+        minutes=max(int(settings.scheduler_eod_coverage_interval_minutes), 5),
+        id="market_eod_coverage_reconcile",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
 def start_scheduler() -> Any | None:
     if (
         not settings.enable_scheduler
@@ -1971,12 +2148,14 @@ def start_scheduler() -> Any | None:
         and not settings.enable_tw_corporate_event_scheduler
         and not settings.enable_us_corporate_event_scheduler
         and not settings.enable_tw_broker_branch_scheduler
+        and not settings.enable_tw_broker_branch_behavior_shadow_scheduler
         and not settings.enable_taiwan_market_index_scheduler
         and not settings.enable_taiwan_quote_contract_scheduler
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
         and not settings.enable_watchlist_radar_scheduler
+        and not settings.enable_eod_coverage_scheduler
     ):
         logger.info("Job scheduler disabled.")
         return None
@@ -2062,6 +2241,9 @@ def start_scheduler() -> Any | None:
     taiwan_broker_branch_refresh_enabled = (
         _add_taiwan_broker_branch_market_refresh_job(scheduler)
     )
+    taiwan_broker_branch_behavior_shadow_enabled = (
+        _add_taiwan_broker_branch_behavior_shadow_job(scheduler)
+    )
     watchlist_radar_snapshot_enabled = _add_watchlist_radar_auto_snapshot_job(scheduler)
     taiwan_market_index_collector_enabled = _add_taiwan_market_index_collector_job(
         scheduler
@@ -2082,6 +2264,9 @@ def start_scheduler() -> Any | None:
     market_chip_margin_refresh_enabled = _add_market_chip_margin_refresh_job(
         scheduler
     )
+    market_eod_coverage_reconcile_enabled = _add_market_eod_coverage_reconcile_job(
+        scheduler
+    )
     taiwan_stock_detail_daily_refresh_enabled = (
         _add_taiwan_stock_detail_daily_refresh_jobs(scheduler)
     )
@@ -2092,6 +2277,27 @@ def start_scheduler() -> Any | None:
         scheduler
     )
     scheduler.start()
+    logger.info(
+        "Full-market EOD coverage scheduler enabled=%s markets=%s interval=%sm.",
+        market_eod_coverage_reconcile_enabled,
+        settings.scheduler_eod_coverage_markets,
+        max(int(settings.scheduler_eod_coverage_interval_minutes), 5),
+    )
+    logger.info(
+        "Broker-branch shadow behavior scheduler enabled=%s time=%s "
+        "lookback_sessions=%s advertised=false.",
+        taiwan_broker_branch_behavior_shadow_enabled,
+        settings.scheduler_tw_broker_branch_behavior_shadow_time,
+        min(
+            max(
+                int(
+                    settings.scheduler_tw_broker_branch_behavior_lookback_sessions
+                ),
+                2,
+            ),
+            BROKER_BRANCH_BEHAVIOR_MAX_LOOKBACK_SESSIONS,
+        ),
+    )
     logger.info(
         "Taiwan market index summary collector interval=%ss; post-close "
         "reconciliation=%sm until=%s; enabled=%s.",

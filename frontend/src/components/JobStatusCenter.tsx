@@ -20,7 +20,16 @@ type JobMarketFilter = "all" | "tw" | "us" | "jp" | "kr" | "crypto";
 
 const NON_RETRYABLE_JOB_TYPES = new Set(["market.tw_futures_quote_refresh"]);
 
-function getJobMarket(jobType: string): "tw" | "us" | "jp" | "kr" | "crypto" | "other" {
+function getJobMarket(
+  jobType: string,
+  target?: string | null
+): "tw" | "us" | "jp" | "kr" | "crypto" | "other" {
+  if (jobType === "market_data.eod_coverage_reconcile") {
+    if (target?.startsWith("TW:")) return "tw";
+    if (target?.startsWith("US:")) return "us";
+    return "other";
+  }
+
   if (jobType.startsWith("us_market.") || jobType === "scheduler.us_market_daily_refresh") {
     return "us";
   }
@@ -272,6 +281,34 @@ function formatShortText(value: string | null, maxLength = 220) {
 }
 
 function formatResultSummary(job: JobRunRead, t: TranslationFunction) {
+  if (job.job_type === "market_data.eod_coverage_reconcile") {
+    const universeCount = getResultNumber(job, "universe_count");
+    const currentCount = getResultNumber(job, "current_count");
+    const partialCount = getResultNumber(job, "partial_count");
+    const staleCount = getResultNumber(job, "stale_count");
+    const missingCount = getResultNumber(job, "missing_count");
+    const parts: string[] = [];
+
+    if (universeCount !== null && currentCount !== null) {
+      parts.push(
+        t("jobs.result.completed", {
+          current: currentCount,
+          total: universeCount,
+        })
+      );
+    }
+    if (partialCount !== null && partialCount > 0) {
+      parts.push(t("jobs.result.partial", { count: partialCount }));
+    }
+    if (staleCount !== null && staleCount > 0) {
+      parts.push(t("jobs.result.stale", { count: staleCount }));
+    }
+    if (missingCount !== null && missingCount > 0) {
+      parts.push(t("jobs.result.missing", { count: missingCount }));
+    }
+    return parts;
+  }
+
   const requestedCount = getFirstResultNumber(job, [
     "requested_count",
     "requested_stock_count",
@@ -545,7 +582,7 @@ export default function JobStatusCenter({
       const marketRows =
         market === "all"
           ? rows
-          : rows.filter((job) => getJobMarket(job.job_type) === market);
+          : rows.filter((job) => getJobMarket(job.job_type, job.target) === market);
 
       setJobs(marketRows.slice(0, 20));
       setErrorMessage(null);

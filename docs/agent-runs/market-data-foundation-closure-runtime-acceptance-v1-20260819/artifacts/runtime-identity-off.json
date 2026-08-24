@@ -1,0 +1,29 @@
+{
+  "schema_version": "omi.market_data_foundation.runtime_identity.v1",
+  "captured_at": "2026-08-19T22:20:17.7161177+08:00",
+  "source_checkpoint_sha256": "703caf9b23b79189a5db65dfb8b248686e4f2c4635c251d4f3174ab0ea573799",
+  "latest_source_write_at": "2026-08-19T22:14:14.2521327+08:00",
+  "effective_mode": "off",
+  "launcher": {
+    "pid": 69976,
+    "executable": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "script": "C:\\project\\Open Market Intelligence\\scripts\\omi-launcher.ps1",
+    "started_at": "2026-08-19T22:19:55.387187+08:00"
+  },
+  "backend": {
+    "listener_pid": 61168,
+    "parent_pid": 71484,
+    "url": "http://127.0.0.1:8400",
+    "python": "C:\\project\\Open Market Intelligence\\.venv\\Scripts\\python.exe",
+    "started_at": "2026-08-19T22:19:59.462419+08:00"
+  },
+  "frontend": {
+    "listener_pid": 55704,
+    "url": "http://127.0.0.1:3000",
+    "api_proxy_target": "http://127.0.0.1:8400",
+    "health": "ok"
+  },
+  "health": "ok",
+  "public_contract_digest": "fec3d7d071dd7ca92d5245b94fca59d99801b901a8228f09e62cc2e9ebfdd7e2",
+  "result": "passed"
+}

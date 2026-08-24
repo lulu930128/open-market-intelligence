@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.market.schemas import MarketOhlcChartRead, TechnicalReportRead
 
@@ -39,8 +39,39 @@ class TaiwanDashboardBreadthRead(BaseModel):
     unchanged: int
     unknown: int
     coverage_ratio: float
+    coverage_reason_counts: dict[str, int | None] = Field(default_factory=dict)
+    raw_unknown_reason_counts: dict[str, int] = Field(default_factory=dict)
+    scope: str | None = None
+    source: str | None = None
+    trade_date: date | None = None
+    failed_batch_count: int | None = None
     as_of: datetime | None = None
     warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_coverage_reconciliation(self):
+        if self.advance + self.decline + self.unchanged != self.coverage:
+            raise ValueError(
+                "advance + decline + unchanged must equal breadth coverage"
+            )
+        if self.coverage + self.unknown != self.universe:
+            raise ValueError("coverage + unknown must equal breadth universe")
+        if self.coverage_reason_counts:
+            classified = self.coverage_reason_counts.get("classified")
+            if classified != self.coverage:
+                raise ValueError(
+                    "coverage_reason_counts.classified must equal coverage"
+                )
+            explained_unknown = sum(
+                value
+                for key, value in self.coverage_reason_counts.items()
+                if key != "classified" and value is not None
+            )
+            if explained_unknown != self.unknown:
+                raise ValueError(
+                    "known coverage reason counts must reconcile to unknown"
+                )
+        return self
 
 
 class TaiwanDashboardIndexEstimateRead(BaseModel):
@@ -68,6 +99,39 @@ class TaiwanDashboardIndexEstimateRead(BaseModel):
     decision_usable: Literal[False] = False
     warnings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+
+
+class TaiwanDashboardResolvedIndexRead(BaseModel):
+    index_id: str
+    market: str
+    status: str
+    value: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    event_time: datetime | None = None
+    trade_date: date | None = None
+    source: str | None = None
+    provider: str | None = None
+    selected_candidate: str | None = None
+    authority: Literal[
+        "official_exchange",
+        "provider",
+        "derived_proxy",
+        "unknown",
+    ]
+    finalization: Literal["intraday", "provisional", "final", "unknown"]
+    official_source: bool
+    official_close_confirmed: bool
+    provisional_estimate: bool
+    selection_reason: str
+    acquisition_policy: Literal["cache_only"] = "cache_only"
+    resolution_version: str
+    resolution_id: str
+    official_close_status: str
+    official: bool
+    provisional: bool
+    decision_usable: bool
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TaiwanDashboardGroupRead(BaseModel):
@@ -136,7 +200,15 @@ class TaiwanMarketDashboardRead(BaseModel):
     session: TaiwanDashboardSessionRead
     as_of: datetime | None = None
     indices: list[TaiwanDashboardIndexEstimateRead]
+    resolved_indices: list[TaiwanDashboardResolvedIndexRead] = Field(
+        default_factory=list
+    )
+    headline_index_field: Literal["resolved_indices"] = "resolved_indices"
     breadth: dict[str, TaiwanDashboardBreadthRead]
+    resolved_breadth: dict[str, TaiwanDashboardBreadthRead] = Field(
+        default_factory=dict
+    )
+    headline_breadth_field: Literal["resolved_breadth"] = "resolved_breadth"
     hot_groups: list[TaiwanDashboardGroupRead]
     watchlist: TaiwanDashboardWatchlistRead
     freshness: TaiwanDashboardFreshnessRead
@@ -161,18 +233,44 @@ class TaiwanDashboardSymbolSearchRead(BaseModel):
 
 
 class TaiwanDashboardMovingAveragePointRead(BaseModel):
-    time: date
+    time: str
     ma5: float | None = None
     ma20: float | None = None
     ma60: float | None = None
+
+
+class TaiwanDashboardIntradayChartPointRead(BaseModel):
+    time: datetime
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: int | None = None
+    volume_status: str = "not_provided"
+    is_partial: bool = False
+    finalized: bool = False
+
+
+class TaiwanDashboardIntradayChartRead(BaseModel):
+    source: str
+    interval: str
+    trade_date: date | None = None
+    point_count: int
+    cache_status: str
+    cache_hit: bool
+    volume_unit: str = "shares"
+    volume_semantics: str
+    points: list[TaiwanDashboardIntradayChartPointRead] = Field(
+        default_factory=list
+    )
 
 
 class TaiwanDashboardStockDetailRead(BaseModel):
     kind: Literal["omi.tw_stock_dashboard_detail"] = (
         "omi.tw_stock_dashboard_detail"
     )
-    version: Literal["omi.tw_stock_dashboard_detail.v1"] = (
-        "omi.tw_stock_dashboard_detail.v1"
+    version: Literal["omi.tw_stock_dashboard_detail.v2"] = (
+        "omi.tw_stock_dashboard_detail.v2"
     )
     stock_id: str
     stock_name: str | None = None
@@ -181,6 +279,7 @@ class TaiwanDashboardStockDetailRead(BaseModel):
     bars: int
     cache_only: Literal[True] = True
     chart: MarketOhlcChartRead
+    intraday_chart: TaiwanDashboardIntradayChartRead | None = None
     moving_averages: list[TaiwanDashboardMovingAveragePointRead] = Field(
         default_factory=list
     )

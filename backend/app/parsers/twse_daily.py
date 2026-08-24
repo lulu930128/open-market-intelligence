@@ -96,7 +96,11 @@ def _fallback_trade_date(raw_result: RawFetchResult) -> date:
     return fetched_at.astimezone(TAIPEI_TZ).date()
 
 
-def parse_twse_daily_raw(raw_result: RawFetchResult) -> tuple[list[dict], int]:
+def parse_twse_daily_raw(
+    raw_result: RawFetchResult,
+    *,
+    fallback_trade_date: date | None = None,
+) -> tuple[list[dict], int]:
     if not raw_result.raw_text:
         raise ValueError("raw_text is empty.")
 
@@ -105,7 +109,7 @@ def parse_twse_daily_raw(raw_result: RawFetchResult) -> tuple[list[dict], int]:
     if not isinstance(payload, list):
         raise ValueError("TWSE daily payload should be a JSON list.")
 
-    fallback_date = _fallback_trade_date(raw_result)
+    fallback_date = fallback_trade_date or _fallback_trade_date(raw_result)
 
     parsed_rows: list[dict] = []
     skipped_count = 0

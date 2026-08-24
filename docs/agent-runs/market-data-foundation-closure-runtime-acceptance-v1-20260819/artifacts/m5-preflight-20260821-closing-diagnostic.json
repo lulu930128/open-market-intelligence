@@ -1,0 +1,38 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_preflight.v1",
+  "captured_at": "2026-08-21T13:24:00.9861193+08:00",
+  "timezone": "Asia/Taipei",
+  "expected_date": "2026-08-21",
+  "runtime_action": "Check",
+  "expected_mode": "compare",
+  "target": {
+    "market": "TW",
+    "symbol": "2330"
+  },
+  "source": {
+    "checkpoint_file_sha256": "99f95233bb35afb033bcce7c0f959a00eb74b785c4734608b80e0f153e80a39d",
+    "target_count": 30,
+    "target_mismatch_count": 0,
+    "public_contract_digest": "fec3d7d071dd7ca92d5245b94fca59d99801b901a8228f09e62cc2e9ebfdd7e2",
+    "branch": "codex/tw-etf-provider-normalization",
+    "head": "aa65e65424f2d5de7255c4168a18ded9f8794301",
+    "dirty_count": 72
+  },
+  "acceptance_harness": {
+    "launcher_sha256": "faa54a5f9efe8648bd9e1780eefb4eb1579f1845c1bd4cae7493b5036bea2f8d",
+    "preflight_sha256": "455a1c944fbfadec7f96beffffc1ad1d5a9183fa68a35df9fa11108280c14d9c",
+    "mcp_smoke_sha256": "022a3ceeceb1e67c2637c2a5fa0960454c31287a931658bb5d0ac123d4ddb4dc"
+  },
+  "runtime": null,
+  "calendar": null,
+  "public_contract": null,
+  "frontend": null,
+  "mcp": null,
+  "viewer_baseline": null,
+  "viewer_readiness": null,
+  "result": "failed",
+  "failure_code": "RUNTIME_IDENTITY_MISMATCH",
+  "failure_reason": "[RUNTIME_IDENTITY_MISMATCH] Backend listener lineage did not resolve to the official OMI launcher.",
+  "limitations": [],
+  "completed_at": "2026-08-21T13:24:01.2492183+08:00"
+}

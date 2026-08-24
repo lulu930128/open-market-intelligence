@@ -35,6 +35,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 "app.runtime.enqueue_stock_master_bootstrap_if_needed",
                 return_value=(None, False),
             ) as enqueue_stock_master_bootstrap,
+            patch("app.runtime.logger.info") as log_info,
         ):
             coordinator = RuntimeCoordinator(
                 schema_lock=schema_lock,
@@ -55,6 +56,10 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         start_auto_refresh.assert_awaited_once_with()
         start_collectors.assert_awaited_once_with()
         enqueue_stock_master_bootstrap.assert_called_once_with()
+        log_info.assert_any_call(
+            "Market Data Foundation runtime mode=%s.",
+            settings.canonical_market_data_mode,
+        )
         self.assertEqual(coordinator.scheduler, "scheduler")
         self.assertTrue(coordinator.background_leader)
         self.assertTrue(coordinator.started)

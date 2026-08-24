@@ -6,13 +6,8 @@ from datetime import date, datetime, timezone
 from app.db.models import USDailyPrice
 from app.market.ohlc_overlay import aggregate_ohlc_points
 from app.us_market.sources import USDailyPriceRecord
+from app.us_market.market_data_policy import us_provider_priority
 from app.us_market.trading_calendar import is_us_daily_price_finalized
-
-
-US_DAILY_CANONICAL_PROVIDER_PRIORITY = {
-    "yahoo_chart": 20,
-    "alphavantage": 10,
-}
 
 
 def is_yahoo_range_max_url(source_url: str | None) -> bool:
@@ -71,7 +66,7 @@ def daily_canonical_sort_key(row: USDailyPrice) -> tuple[int, float, int, int]:
     return (
         daily_row_completeness_score(row),
         datetime_sort_value(row.fetched_at),
-        US_DAILY_CANONICAL_PROVIDER_PRIORITY.get(row.provider, 0),
+        -us_provider_priority(row.provider, "daily.ohlcv"),
         row.id or 0,
     )
 

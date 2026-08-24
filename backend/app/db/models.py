@@ -686,6 +686,96 @@ class SourceHealthSnapshot(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class MarketDatasetCoverageCheckpoint(Base):
+    __tablename__ = "market_dataset_coverage_checkpoint"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_id",
+            "scope_key",
+            "expected_trade_date",
+            "universe_hash",
+            name="uq_market_dataset_coverage_identity",
+        ),
+        CheckConstraint(
+            "universe_count >= 0 AND current_count >= 0 AND partial_count >= 0 "
+            "AND stale_count >= 0 AND missing_count >= 0",
+            name="ck_market_dataset_coverage_non_negative",
+        ),
+        CheckConstraint(
+            "current_count + partial_count + stale_count + missing_count = universe_count",
+            name="ck_market_dataset_coverage_partition",
+        ),
+        Index(
+            "ix_market_dataset_coverage_latest",
+            "market",
+            "dataset_id",
+            "scope_key",
+            "expected_trade_date",
+            "checked_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    checkpoint_version: Mapped[str] = mapped_column(
+        String(64),
+        default="omi.market.eod_coverage.v1",
+    )
+    dataset_id: Mapped[str] = mapped_column(String(128), index=True)
+    market: Mapped[str] = mapped_column(String(16), index=True)
+    scope_kind: Mapped[str] = mapped_column(String(64), index=True)
+    scope_key: Mapped[str] = mapped_column(String(128), index=True)
+    expected_trade_date: Mapped[date] = mapped_column(Date, index=True)
+    latest_data_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    universe_source: Mapped[str] = mapped_column(String(128))
+    universe_hash: Mapped[str] = mapped_column(String(64), index=True)
+    universe_count: Mapped[int] = mapped_column(Integer, default=0)
+    current_count: Mapped[int] = mapped_column(Integer, default=0)
+    partial_count: Mapped[int] = mapped_column(Integer, default=0)
+    stale_count: Mapped[int] = mapped_column(Integer, default=0)
+    missing_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+
+    repair_status: Mapped[str] = mapped_column(String(32), default="idle", index=True)
+    repair_provider: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    cursor_symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempted_count: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    consecutive_error_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_run.id"),
+        nullable=True,
+        index=True,
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+
 class MarketDailyPrice(Base):
     __tablename__ = "market_daily_price"
 
@@ -2569,6 +2659,214 @@ class BrokerBranchTradeDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class BrokerBranchSnapshotQuality(Base):
+    __tablename__ = "broker_branch_snapshot_quality"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stock_id",
+            "expected_trade_date",
+            name="uq_broker_branch_snapshot_quality_selected_state",
+        ),
+        CheckConstraint(
+            "observed_branch_count >= 0",
+            name="ck_broker_branch_snapshot_quality_observed_non_negative",
+        ),
+        CheckConstraint(
+            "buy_rank_limit IS NULL OR buy_rank_limit > 0",
+            name="ck_broker_branch_snapshot_quality_buy_rank_positive",
+        ),
+        CheckConstraint(
+            "sell_rank_limit IS NULL OR sell_rank_limit > 0",
+            name="ck_broker_branch_snapshot_quality_sell_rank_positive",
+        ),
+        Index(
+            "ix_broker_branch_snapshot_quality_date_status",
+            "expected_trade_date",
+            "coverage_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+    raw_result_id: Mapped[int | None] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=True,
+        index=True,
+    )
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    expected_trade_date: Mapped[date] = mapped_column(Date, index=True)
+    provider_trade_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        index=True,
+    )
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        index=True,
+    )
+
+    coverage_mode: Mapped[str] = mapped_column(String(32), index=True)
+    buy_rank_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sell_rank_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    observed_branch_count: Mapped[int] = mapped_column(Integer, default=0)
+    absence_semantics: Mapped[str] = mapped_column(String(40), index=True)
+    coverage_status: Mapped[str] = mapped_column(String(32), index=True)
+    fetch_status: Mapped[str] = mapped_column(String(40), index=True)
+    source_contract_version: Mapped[str] = mapped_column(String(80), index=True)
+    includes_block_trades: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    warnings_json: Mapped[str] = mapped_column(Text, default="[]")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+
+class BrokerBranchBehaviorFeatureSnapshot(Base):
+    __tablename__ = "broker_branch_behavior_feature_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "branch_identity_key",
+            "scope_type",
+            "scope_id",
+            "as_of_trade_date",
+            "lookback_sessions",
+            "methodology_version",
+            name="uq_broker_branch_behavior_feature_identity",
+        ),
+        CheckConstraint(
+            "observation_count >= 0 AND eligible_initial_count >= 0 "
+            "AND reobserved_count >= 0 AND opposite_observed_count >= 0 "
+            "AND same_direction_observed_count >= 0 AND censored_count >= 0 "
+            "AND session_count >= 0 AND stock_count >= 0",
+            name="ck_broker_branch_behavior_counts_non_negative",
+        ),
+        CheckConstraint(
+            "reobserved_count + censored_count = eligible_initial_count",
+            name="ck_broker_branch_behavior_eligible_partition",
+        ),
+        CheckConstraint(
+            "opposite_observed_count + same_direction_observed_count = "
+            "reobserved_count",
+            name="ck_broker_branch_behavior_reobserved_partition",
+        ),
+        Index(
+            "ix_broker_branch_behavior_feature_latest",
+            "source_id",
+            "as_of_trade_date",
+            "history_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+    branch_identity_key: Mapped[str] = mapped_column(String(96), index=True)
+    branch_code: Mapped[str] = mapped_column(String(20))
+    scope_type: Mapped[str] = mapped_column(String(20))
+    scope_id: Mapped[str] = mapped_column(String(64))
+    as_of_trade_date: Mapped[date] = mapped_column(Date, index=True)
+    lookback_sessions: Mapped[int] = mapped_column(Integer)
+    methodology_version: Mapped[str] = mapped_column(String(80), index=True)
+
+    observation_count: Mapped[int] = mapped_column(Integer, default=0)
+    eligible_initial_count: Mapped[int] = mapped_column(Integer, default=0)
+    reobserved_count: Mapped[int] = mapped_column(Integer, default=0)
+    opposite_observed_count: Mapped[int] = mapped_column(Integer, default=0)
+    same_direction_observed_count: Mapped[int] = mapped_column(Integer, default=0)
+    censored_count: Mapped[int] = mapped_column(Integer, default=0)
+    session_count: Mapped[int] = mapped_column(Integer, default=0)
+    stock_count: Mapped[int] = mapped_column(Integer, default=0)
+    gross_visible_lots: Mapped[int] = mapped_column(BigInteger, default=0)
+    net_visible_lots: Mapped[int] = mapped_column(BigInteger, default=0)
+
+    reappearance_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reappearance_interval_low: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    reappearance_interval_high: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    reverse_given_reappearance_rate: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    reverse_interval_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reverse_interval_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    same_direction_given_reappearance_rate: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    same_direction_interval_low: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    same_direction_interval_high: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    censored_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    censored_interval_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    censored_interval_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gross_netting_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    observed_sequence_persistence: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    max_stock_observation_share: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    candidate_session_count: Mapped[int] = mapped_column(Integer, default=0)
+    high_coverage_session_count: Mapped[int] = mapped_column(Integer, default=0)
+    universe_count: Mapped[int] = mapped_column(Integer, default=0)
+    min_session_coverage_ratio: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    coverage_status: Mapped[str] = mapped_column(String(40))
+    history_status: Mapped[str] = mapped_column(String(40), index=True)
+    calibration_status: Mapped[str] = mapped_column(String(40))
+    decision_usable: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    source_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
+    price_source_as_of: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+    )
+    derived_as_of: Mapped[date] = mapped_column(Date, index=True)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+    )
+    input_fingerprint: Mapped[str] = mapped_column(String(64))
+    warnings_json: Mapped[str] = mapped_column(Text, default="[]")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+
 class ShareholdingDistributionWeekly(Base):
     __tablename__ = "shareholding_distribution_weekly"
 
@@ -3320,8 +3618,10 @@ class PortfolioHolding(Base):
     symbol_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
 
     quantity: Mapped[float] = mapped_column(Float)
-    cost_amount: Mapped[float] = mapped_column(Float)
+    cost_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     currency: Mapped[str] = mapped_column(String(10), index=True)
+    source: Mapped[str] = mapped_column(String(40), default="manual", index=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)

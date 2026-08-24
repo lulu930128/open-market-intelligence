@@ -16,8 +16,23 @@ from app.observability.schemas import ProviderEventRead, SourceHealthSnapshotRea
 router = APIRouter()
 
 
+def _us_canonical_shadow_symbol_count() -> int:
+    return len(
+        {
+            item.strip().upper()
+            for item in settings.us_canonical_shadow_symbols.split(",")
+            if item.strip()
+        }
+    )
+
+
 @router.get("/health")
 def health_check():
+    us_canary_symbol_count = _us_canonical_shadow_symbol_count()
+    us_canonical_mode = (
+        settings.us_canonical_market_data_mode
+        or settings.canonical_market_data_mode
+    )
     return {
         "status": "ok",
         "app_name": settings.app_name,
@@ -27,6 +42,22 @@ def health_check():
             "backend_dir": str(PROJECT_ROOT / "backend"),
             "python_executable": sys.executable,
             "python_version": sys.version.split()[0],
+            "canonical_market_data_mode": settings.canonical_market_data_mode,
+            "us_canonical_market_data_mode": us_canonical_mode,
+            "canonical_market_data_rollout_stage": us_canonical_mode,
+            "us_canonical_market_data_enabled": (
+                us_canonical_mode != "off"
+                and (
+                    us_canonical_mode == "on"
+                    or us_canary_symbol_count > 0
+                )
+            ),
+            "us_canonical_shadow_enabled": (
+                us_canonical_mode != "off"
+                and us_canary_symbol_count > 0
+            ),
+            "us_canonical_shadow_symbol_count": us_canary_symbol_count,
+            "us_canonical_canary_max_symbols": settings.us_canonical_canary_max_symbols,
         },
     }
 

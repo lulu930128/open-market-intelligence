@@ -29,6 +29,7 @@ from app.market.quote_depth import (
     resolve_taiwan_stock_quote_phase,
 )
 from app.market.schemas import TaiwanStockQuoteDepthRead
+from app.market.providers.kgi_superpy import KgiSuperPyQuoteSnapshot
 from app.market.trading_calendar import TAIWAN_TZ
 
 
@@ -895,6 +896,210 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertEqual(result["freshness"]["source_error"], "MIS down")
         self.assertTrue(result["freshness"]["is_stale"])
         self.assertEqual(result["best_bid_price"], 2410.0)
+
+    def test_kgi_live_quote_is_primary_for_an_active_viewer(self) -> None:
+        now = datetime(2026, 6, 30, 9, 5, 13, tzinfo=TAIWAN_TZ)
+        primary = KgiSuperPyQuoteSnapshot(
+            quote={
+                "exchange": "TWStock",
+                "symbol": "2330",
+                "delay_time": 0.002,
+                "odd_lot": False,
+                "datetime": "20260630090512",
+                "open": 2380.0,
+                "high": 2420.0,
+                "low": 2375.0,
+                "close": 2410.0,
+                "volume": 750,
+                "total_volume": 49540.0,
+                "bid_prices": [2410, 2405, 2400, 2395, 2390],
+                "bid_volumes": [978, 1150, 1399, 599, 924],
+                "ask_prices": [2415, 2420, 2425, 2430, 2435],
+                "ask_volumes": [2, 209, 209, 3, 1],
+                "price_chg": 40.0,
+                "pct_chg": 1.69,
+                "simtrade": 0,
+                "suspend": 0,
+                "received_at": "2026-06-30T01:05:12.100000+00:00",
+            },
+            status="live",
+            error=None,
+            active_leases=1,
+        )
+
+        with (
+            patch(
+                "app.market.quote_depth.get_kgi_superpy_quote_snapshot",
+                return_value=primary,
+            ),
+            patch("app.market.quote_depth.http_get") as http_get,
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        http_get.assert_not_called()
+        self.assertEqual(result["provider"], "kgi_superpy")
+        self.assertEqual(result["source"], "kgi_superpy_quote_all")
+        self.assertEqual(result["primary_source_status"], "live")
+        self.assertFalse(result["fallback_used"])
+        self.assertEqual(result["previous_close"], 2370.0)
+        self.assertEqual(result["best_bid_size_lots"], 978)
+        self.assertEqual(len(result["bid_levels"]), 5)
+        self.assertEqual(result["volume_source"], "kgi_superpy")
+        self.assertEqual(result["volume_source_field"], "total_volume")
+        self.assertEqual(result["last_trade_volume_source_field"], "volume")
+        TaiwanStockQuoteDepthRead.model_validate(result)
+
+    def test_kgi_warming_state_falls_back_to_mis_visibly(self) -> None:
+        now = datetime(2026, 6, 30, 9, 5, 13, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 1, 5, 13, tzinfo=timezone.utc)
+        primary = KgiSuperPyQuoteSnapshot(
+            quote=None,
+            status="subscribing",
+            error=None,
+            active_leases=1,
+        )
+
+        with (
+            patch(
+                "app.market.quote_depth.get_kgi_superpy_quote_snapshot",
+                return_value=primary,
+            ),
+            patch("app.market.quote_depth.utc_now", return_value=fetched_at),
+            patch(
+                "app.market.quote_depth.http_get",
+                return_value=FakeResponse(sample_payload()),
+            ),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        self.assertEqual(result["provider"], "twse_mis")
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(result["primary_provider"], "kgi_superpy")
+        self.assertEqual(result["primary_source_status"], "subscribing")
+        self.assertEqual(result["fallback_reason"], "kgi_superpy_subscribing")
+        self.assertEqual(
+            result["source_chain"],
+            ["kgi_superpy_quote_all", "twse_mis_quote_depth"],
+        )
+        TaiwanStockQuoteDepthRead.model_validate(result)
+
+    def test_kgi_simtrade_maps_to_trial_match_without_fake_last_trade(self) -> None:
+        now = datetime(2026, 6, 30, 8, 59, 1, tzinfo=TAIWAN_TZ)
+        primary = KgiSuperPyQuoteSnapshot(
+            quote={
+                "exchange": "TWStock",
+                "symbol": "2330",
+                "delay_time": 0.001,
+                "odd_lot": False,
+                "datetime": "20260630085900",
+                "open": 0,
+                "high": 0,
+                "low": 0,
+                "close": 2412.5,
+                "volume": 2046,
+                "total_volume": 0,
+                "bid_prices": [2410, 2405, 2400, 2395, 2390],
+                "bid_volumes": [978, 1150, 1399, 599, 924],
+                "ask_prices": [2415, 2420, 2425, 2430, 2435],
+                "ask_volumes": [2, 209, 209, 3, 1],
+                "price_chg": 42.5,
+                "pct_chg": 1.79,
+                "simtrade": 1,
+                "suspend": 0,
+                "received_at": "2026-06-30T00:59:00.100000+00:00",
+            },
+            status="live",
+            error=None,
+            active_leases=1,
+        )
+
+        with (
+            patch(
+                "app.market.quote_depth.get_kgi_superpy_quote_snapshot",
+                return_value=primary,
+            ),
+            patch("app.market.quote_depth.http_get") as http_get,
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        http_get.assert_not_called()
+        self.assertEqual(result["provider"], "kgi_superpy")
+        self.assertTrue(result["indicative_match_available"])
+        self.assertEqual(result["indicative_match_price"], 2412.5)
+        self.assertEqual(result["indicative_match_volume_lots"], 2046)
+        self.assertEqual(result["indicative_match_price_source_field"], "close")
+        self.assertEqual(result["indicative_match_status_source_field"], "simtrade")
+        self.assertFalse(result["last_trade_available"])
+        self.assertIsNone(result["last_trade_price"])
+        TaiwanStockQuoteDepthRead.model_validate(result)
+
+    def test_kgi_zero_cumulative_preopen_quote_cannot_become_trade(self) -> None:
+        now = datetime(2026, 6, 30, 8, 35, 1, tzinfo=TAIWAN_TZ)
+        primary = KgiSuperPyQuoteSnapshot(
+            quote={
+                "exchange": "TWStock",
+                "symbol": "2330",
+                "delay_time": 0.001,
+                "odd_lot": False,
+                "datetime": "20260630083500",
+                "open": 0,
+                "high": 0,
+                "low": 0,
+                "close": 2412.5,
+                "volume": 2046,
+                "total_volume": 0,
+                "bid_prices": [2410, 2405, 2400, 2395, 2390],
+                "bid_volumes": [978, 1150, 1399, 599, 924],
+                "ask_prices": [2415, 2420, 2425, 2430, 2435],
+                "ask_volumes": [2, 209, 209, 3, 1],
+                "price_chg": 42.5,
+                "pct_chg": 1.79,
+                "simtrade": 0,
+                "suspend": 0,
+                "received_at": "2026-06-30T00:35:00.100000+00:00",
+            },
+            status="live",
+            error=None,
+            active_leases=1,
+        )
+
+        with (
+            patch(
+                "app.market.quote_depth.get_kgi_superpy_quote_snapshot",
+                return_value=primary,
+            ),
+            patch("app.market.quote_depth.http_get") as http_get,
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
+
+        http_get.assert_not_called()
+        self.assertEqual(result["provider"], "kgi_superpy")
+        self.assertTrue(result["indicative_match_available"])
+        self.assertEqual(result["indicative_match_price"], 2412.5)
+        self.assertEqual(
+            result["indicative_match_status_source_field"],
+            "session+total_volume",
+        )
+        self.assertFalse(result["last_trade_available"])
+        self.assertIsNone(result["last_trade_price"])
+        self.assertFalse(result["actual_trade_occurred"])
+        TaiwanStockQuoteDepthRead.model_validate(result)
 
 
 if __name__ == "__main__":

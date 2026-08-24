@@ -91,6 +91,43 @@ def _resolution_id(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:24]
 
 
+def _index_candidate_authority(
+    *,
+    source: Any,
+    provider: Any,
+) -> str:
+    identity = " ".join(
+        part.casefold()
+        for part in (str(source or "").strip(), str(provider or "").strip())
+        if part
+    )
+    if any(
+        marker in identity
+        for marker in (
+            "derived",
+            "estimate",
+            "proxy",
+            "synthetic",
+            "snapshot_aggregation",
+        )
+    ):
+        return "derived_proxy"
+    if any(
+        marker in identity
+        for marker in (
+            "twse_index_5s",
+            "twse_openapi",
+            "tpex_openapi",
+            "market_index_daily_stat",
+            "twse_mis",
+        )
+    ) or str(provider or "").strip().casefold() in {"twse", "tpex"}:
+        return "official_exchange"
+    if identity:
+        return "provider"
+    return "unknown"
+
+
 def _intraday_official_candidate(
     intraday: dict[str, Any] | None,
     *,
@@ -127,6 +164,7 @@ def _intraday_official_candidate(
         "event_time": _json_value(observed_at),
         "trade_date": trade_date.isoformat() if trade_date else None,
         "source": observation.get("provider") or intraday.get("source"),
+        "provider": observation.get("provider") or intraday.get("provider"),
         "eligible": eligible,
         "confirmation_evidence": (
             "intraday_official_close_observation" if eligible else None
@@ -307,6 +345,7 @@ def resolve_taiwan_index_quote_state(
             ),
             "trade_date": summary_candidate["trade_date"],
             "source": official_source or None,
+            "provider": snapshot.get("provider"),
             "eligible": summary_official_confirmed,
             "confirmation_evidence": (
                 "explicit_official_status"
@@ -432,6 +471,41 @@ def resolve_taiwan_index_quote_state(
             and selected_candidate.get("candidate") != "official_close"
         )
     )
+    selected_source = (
+        selected_candidate.get("source")
+        if isinstance(selected_candidate, dict)
+        else None
+    )
+    selected_provider = (
+        selected_candidate.get("provider")
+        if isinstance(selected_candidate, dict)
+        else None
+    )
+    selected_authority = _index_candidate_authority(
+        source=selected_source,
+        provider=selected_provider,
+    )
+    selected_finalization = (
+        "unknown"
+        if selected_candidate is None
+        else "final"
+        if selected_candidate.get("candidate") == "official_close"
+        and official_close_status in {"confirmed", "confirmed_latest_session"}
+        else "intraday"
+        if phase in {"regular", "regular_live", "closing_auction"}
+        else "final"
+        if official_close_status == "confirmed_latest_session"
+        and selected_authority == "official_exchange"
+        else "provisional"
+    )
+    selected_official_source = selected_authority == "official_exchange"
+    selected_official_close_confirmed = bool(
+        selected_finalization == "final"
+        and selected_candidate is not None
+        and selected_candidate.get("candidate") == "official_close"
+        and official_close_status in {"confirmed", "confirmed_latest_session"}
+    )
+    selected_provisional_estimate = selected_finalization == "provisional"
     resolution_core = {
         "version": TAIWAN_INDEX_RESOLUTION_VERSION,
         "index_id": str(index_id or snapshot.get("index_id") or "").upper()
@@ -446,11 +520,13 @@ def resolve_taiwan_index_quote_state(
             else None
         ),
         "selected_value": selected_value,
-        "selected_source": (
-            selected_candidate.get("source")
-            if isinstance(selected_candidate, dict)
-            else None
-        ),
+        "selected_source": selected_source,
+        "selected_provider": selected_provider,
+        "selected_authority": selected_authority,
+        "selected_finalization": selected_finalization,
+        "official_source": selected_official_source,
+        "official_close_confirmed": selected_official_close_confirmed,
+        "provisional_estimate": selected_provisional_estimate,
         "selected_event_time": (
             selected_candidate.get("event_time")
             if isinstance(selected_candidate, dict)
@@ -505,6 +581,9 @@ def resolve_taiwan_index_quote_state(
                 "observed_at": resolution_core["selected_event_time"],
                 "trade_date": selected_trade_date,
                 "source": resolution_core["selected_source"],
+                "provider": resolution_core["selected_provider"],
+                "authority": resolution_core["selected_authority"],
+                "finalization": resolution_core["selected_finalization"],
                 "semantics": quote_semantics,
                 "decision_usable": decision_usable,
             }

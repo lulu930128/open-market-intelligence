@@ -1,5 +1,7 @@
 from collections.abc import Callable
+from datetime import date
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -55,15 +57,66 @@ def _stock_names_by_id(db: Session, stock_ids: list[str]) -> dict[str, str | Non
     }
 
 
-def parse_twse_daily_raw_result(db: Session, raw_result_id: int) -> dict:
+def _guard_market_daily_replacement(
+    db: Session,
+    *,
+    source_id: int,
+    parsed_rows: list[dict],
+    minimum_existing_rows: int = 50,
+    minimum_retained_ratio: float = 0.8,
+) -> None:
+    """Fail before delete when a same-day official payload regresses sharply."""
+
+    incoming_by_date: dict[object, set[str]] = {}
+    for row in parsed_rows:
+        trade_date = row.get("trade_date")
+        stock_id = str(row.get("stock_id") or "").strip()
+        if trade_date is None or not stock_id:
+            continue
+        incoming_by_date.setdefault(trade_date, set()).add(stock_id)
+
+    for trade_date, incoming_stock_ids in incoming_by_date.items():
+        existing_count = (
+            db.query(func.count(func.distinct(MarketDailyPrice.stock_id)))
+            .filter(MarketDailyPrice.source_id == source_id)
+            .filter(MarketDailyPrice.trade_date == trade_date)
+            .scalar()
+            or 0
+        )
+        incoming_count = len(incoming_stock_ids)
+        if existing_count < minimum_existing_rows:
+            continue
+        minimum_count = int(existing_count * minimum_retained_ratio)
+        if incoming_count < minimum_count:
+            raise ValueError(
+                "Refusing destructive market daily replacement: "
+                f"source_id={source_id} trade_date={trade_date} "
+                f"incoming_count={incoming_count} existing_count={existing_count} "
+                f"minimum_count={minimum_count}."
+            )
+
+
+def parse_twse_daily_raw_result(
+    db: Session,
+    raw_result_id: int,
+    trade_date_override: date | None = None,
+) -> dict:
     raw_result = get_raw_result(db, raw_result_id)
 
-    parsed_rows, skipped_count = parse_twse_daily_raw(raw_result)
+    parsed_rows, skipped_count = parse_twse_daily_raw(
+        raw_result,
+        fallback_trade_date=trade_date_override,
+    )
 
     if not parsed_rows:
         raise ValueError("No valid rows parsed from raw result.")
 
     trade_dates = sorted({row["trade_date"] for row in parsed_rows})
+    _guard_market_daily_replacement(
+        db,
+        source_id=raw_result.source_id,
+        parsed_rows=parsed_rows,
+    )
 
     # Remove old parsed rows from the same raw result to prevent stale data
     # when parser logic changes.
@@ -107,6 +160,11 @@ def parse_tpex_daily_quotes_raw_result(db: Session, raw_result_id: int) -> dict:
         raise ValueError("No valid rows parsed from raw result.")
 
     trade_dates = sorted({row["trade_date"] for row in parsed_rows})
+    _guard_market_daily_replacement(
+        db,
+        source_id=raw_result.source_id,
+        parsed_rows=parsed_rows,
+    )
 
     (
         db.query(MarketDailyPrice)
@@ -610,6 +668,7 @@ def parse_raw_result_by_parser_type(
     db: Session,
     raw_result_id: int,
     parser_type: str | None,
+    trade_date_override: date | None = None,
 ) -> dict:
     if parser_type is None:
         raise ValueError("parser_type is required.")
@@ -619,4 +678,10 @@ def parse_raw_result_by_parser_type(
     if parser is None:
         raise ValueError(f"No parser registered for parser_type='{parser_type}'.")
 
+    if parser_type == "twse_daily_trading":
+        return parse_twse_daily_raw_result(
+            db,
+            raw_result_id,
+            trade_date_override=trade_date_override,
+        )
     return parser(db, raw_result_id)

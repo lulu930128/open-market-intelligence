@@ -44,7 +44,7 @@ def _load_snapshot() -> dict[str, Any]:
         "dashboard_contract_version": "omi.tw_market_dashboard.v1",
         "symbol_search_contract_version": "omi.tw_symbol_search.v1",
         "stock_detail_contract_version": (
-            "omi.tw_stock_dashboard_detail.v1"
+            "omi.tw_stock_dashboard_detail.v2"
         ),
         "dashboard_output_schema": (
             TaiwanMarketDashboardRead.model_json_schema()

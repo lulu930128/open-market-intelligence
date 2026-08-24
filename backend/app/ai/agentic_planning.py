@@ -73,6 +73,7 @@ def _fallback_plan(
     question: str,
     requested_trade_date: str | None = None,
     session_scope: str = "regular",
+    intraday_interval: str = "1m",
 ) -> dict[str, Any]:
     missing = set(gaps.get("missing") or [])
     required = set(gaps.get("required_capabilities") or missing)
@@ -86,6 +87,7 @@ def _fallback_plan(
                 "args": {
                     "symbol": symbol,
                     "session_scope": session_scope,
+                    "interval": intraday_interval,
                 },
                 "reason": "The question asks for ADR/latest trading context.",
             }
@@ -165,6 +167,7 @@ def _selected_us_plan(
     requested_capabilities: tuple[str, ...],
     requested_trade_date: str | None = None,
     session_scope: str = "regular",
+    intraday_interval: str = "1m",
     force_selected_capabilities: bool = False,
 ) -> dict[str, Any]:
     missing = set(gaps.get("missing") or [])
@@ -189,6 +192,7 @@ def _selected_us_plan(
                 args = {
                     "symbol": symbol,
                     "session_scope": session_scope,
+                    "interval": intraday_interval,
                 }
             elif requirement == "us_daily_price":
                 tool_name = "us.refresh_daily_price"
@@ -639,10 +643,14 @@ def plan_us_stock_tools(
     requested_capabilities: tuple[str, ...] | None = None,
     requested_trade_date: str | None = None,
     session_scope: str = "regular",
+    intraday_interval: str = "1m",
     force_selected_capabilities: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     normalized_symbol = normalize_us_symbol(symbol)
+    normalized_intraday_interval = str(intraday_interval).strip().lower()
+    if normalized_intraday_interval not in {"1m", "5m", "15m", "30m", "1h", "4h"}:
+        normalized_intraday_interval = "1m"
 
     if requested_capabilities is not None:
         return _normalize_plan(
@@ -652,6 +660,7 @@ def plan_us_stock_tools(
                 requested_capabilities=requested_capabilities,
                 requested_trade_date=requested_trade_date,
                 session_scope=session_scope,
+                intraday_interval=normalized_intraday_interval,
                 force_selected_capabilities=force_selected_capabilities,
             ),
             default_symbol=normalized_symbol,
@@ -677,6 +686,7 @@ def plan_us_stock_tools(
             for step in normalized_plan.get("tool_plan") or []:
                 if step.get("tool") == "us.read_intraday_trend":
                     step.setdefault("args", {})["session_scope"] = session_scope
+                    step["args"]["interval"] = normalized_intraday_interval
             return normalized_plan, warnings
         except llm.OpenAILLMError as exc:
             warnings.append(f"OMI LLM tool planner failed; used deterministic fallback. Error: {exc}")
@@ -688,6 +698,7 @@ def plan_us_stock_tools(
             question=question,
             requested_trade_date=requested_trade_date,
             session_scope=session_scope,
+            intraday_interval=normalized_intraday_interval,
         ),
         default_symbol=normalized_symbol,
         provider="fallback",

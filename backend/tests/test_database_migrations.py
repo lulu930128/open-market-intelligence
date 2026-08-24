@@ -73,6 +73,57 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("us_watchlist_item", table_names)
             self.assertIn("job_run", table_names)
             self.assertIn("broker_branch_trade_daily", table_names)
+            self.assertIn("broker_branch_snapshot_quality", table_names)
+            broker_branch_quality_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns(
+                    "broker_branch_snapshot_quality"
+                )
+            }
+            self.assertTrue(
+                {
+                    "source_id",
+                    "raw_result_id",
+                    "stock_id",
+                    "expected_trade_date",
+                    "provider_trade_date",
+                    "coverage_mode",
+                    "observed_branch_count",
+                    "absence_semantics",
+                    "coverage_status",
+                    "fetch_status",
+                    "source_contract_version",
+                    "warnings_json",
+                }.issubset(broker_branch_quality_columns)
+            )
+            self.assertIn(
+                "broker_branch_behavior_feature_snapshot",
+                table_names,
+            )
+            behavior_feature_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns(
+                    "broker_branch_behavior_feature_snapshot"
+                )
+            }
+            self.assertTrue(
+                {
+                    "branch_identity_key",
+                    "as_of_trade_date",
+                    "lookback_sessions",
+                    "methodology_version",
+                    "eligible_initial_count",
+                    "reobserved_count",
+                    "opposite_observed_count",
+                    "same_direction_observed_count",
+                    "censored_count",
+                    "reverse_given_reappearance_rate",
+                    "history_status",
+                    "calibration_status",
+                    "decision_usable",
+                    "input_fingerprint",
+                }.issubset(behavior_feature_columns)
+            )
             self.assertIn("market_index_daily_stat", table_names)
             self.assertIn("taiwan_market_minute_state", table_names)
             self.assertIn("market_chip_daily", table_names)
@@ -114,6 +165,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("taiwan_futures_daily_bar", table_names)
             self.assertIn("provider_event", table_names)
             self.assertIn("source_health_snapshot", table_names)
+            self.assertIn("market_dataset_coverage_checkpoint", table_names)
             self.assertIn("app_setting", table_names)
             self.assertIn("crypto_ticker_snapshot", table_names)
             self.assertIn("crypto_order_book_snapshot", table_names)
@@ -156,6 +208,13 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("radar_outcome_event_link", table_names)
             self.assertIn("radar_backtest_run", table_names)
             self.assertIn("portfolio_holding", table_names)
+            portfolio_columns = {
+                column["name"]: column
+                for column in inspect(engine).get_columns("portfolio_holding")
+            }
+            self.assertIn("source", portfolio_columns)
+            self.assertIn("source_updated_at", portfolio_columns)
+            self.assertTrue(portfolio_columns["cost_amount"]["nullable"])
             self.assertIn("taiwan_etf_profile", table_names)
             self.assertIn("taiwan_etf_nav_daily", table_names)
             self.assertIn("taiwan_etf_pcf_snapshot", table_names)

@@ -169,11 +169,19 @@ def scan_us_stock_gaps(
         else set(required_us_capabilities(question, instrument_type=instrument_type))
     )
     satisfied_capabilities = satisfied_capabilities or set()
-    latest_daily = _latest_us_daily_price(db, normalized_symbol)
-    profile = _latest_profile(db, normalized_symbol)
-    sec_metric_count = _sec_metric_count(db, normalized_symbol)
+    needs_daily = "us_daily_price" in required_capabilities
+    needs_profile = "us_company_profile" in required_capabilities
+    needs_sec = "us_sec_company_fact" in required_capabilities
+    needs_corporate_actions = "us_corporate_action" in required_capabilities
+    latest_daily = (
+        _latest_us_daily_price(db, normalized_symbol) if needs_daily else None
+    )
+    profile = _latest_profile(db, normalized_symbol) if needs_profile else None
+    sec_metric_count = _sec_metric_count(db, normalized_symbol) if needs_sec else 0
     corporate_action_count, corporate_action_fetched_at = (
         _corporate_action_summary(db, normalized_symbol)
+        if needs_corporate_actions
+        else (0, None)
     )
     missing: list[str] = []
     warnings: list[str] = []
@@ -404,6 +412,7 @@ def run_us_stock_tool_session(
     requested_capabilities: tuple[str, ...] | None = None,
     requested_trade_date: str | None = None,
     session_scope: str = "regular",
+    intraday_interval: str = "1m",
     force_selected_capabilities: bool = False,
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
@@ -440,6 +449,7 @@ def run_us_stock_tool_session(
         requested_capabilities=requested_capabilities,
         requested_trade_date=requested_trade_date,
         session_scope=session_scope,
+        intraday_interval=intraday_interval,
         force_selected_capabilities=force_selected_capabilities,
     )
     plan["budget"] = budget

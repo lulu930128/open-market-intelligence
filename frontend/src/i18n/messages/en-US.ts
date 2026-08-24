@@ -990,6 +990,8 @@ export const enUS = {
       fetched: "Fetched {count}",
       skippedExisting: "Existing {count}",
       partial: "Partial {count}",
+      stale: "Stale {count}",
+      missing: "Missing {count}",
       resourceSuccess: "Resources OK {count}",
       resourceErrors: "Resource errors {count}",
       warnings: "Warnings {count}",
@@ -1018,6 +1020,7 @@ export const enUS = {
       "market.tpex_daily_price_backfill": "TPEx daily bar backfill",
       "us_market.watchlist_daily_refresh": "US watchlist daily bar refresh",
       "scheduler.us_market_daily_refresh": "Scheduled US daily bar refresh",
+      "market_data.eod_coverage_reconcile": "Full-market EOD daily bar coverage",
       "us_market.watchlist_resource_refresh": "US watchlist resource refresh",
       "us_market.daily_price_quality_repair": "US daily bar quality repair",
       "jp_market.watchlist_resource_refresh": "Japan watchlist resource refresh",
@@ -2811,6 +2814,10 @@ export const enUS = {
       belowMa20: "Below MA20",
       maConsolidation: "MA consolidation",
     },
+    technicalQuality: {
+      partial: "Technical facts are readable, but corporate-action coverage is not proven complete; decision use remains blocked.",
+      missing: "Resolved daily bars are insufficient or stale; technical judgment is unavailable.",
+    },
     technicalMetrics: {
       priceVsMa20: "Price vs MA20",
       volumeVsMa20: "Volume vs 20-day average",
@@ -2982,6 +2989,8 @@ export const enUS = {
     errors: {
       loadFailed: "Failed to load US stock data",
       intradayRefreshFailed: "Failed to refresh US intraday data",
+      intradayAggregationFailed: "Failed to load backend-aggregated US intraday bars",
+      technicalResearchLoadFailed: "Failed to load US technical research",
       dailyRefreshFailed: "Failed to refresh US daily data",
       secFactsRefreshFailed: "Failed to refresh SEC facts",
       profileRefreshFailed: "Failed to refresh profile",

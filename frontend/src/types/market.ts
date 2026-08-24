@@ -235,9 +235,11 @@ export type PortfolioHoldingRead = {
   symbol: string;
   symbol_name: string | null;
   quantity: number;
-  cost_amount: number;
+  cost_amount: number | null;
   currency: string;
   average_cost: number | null;
+  source: string;
+  source_updated_at: string | null;
   note: string | null;
   tags: string | null;
   strategy_horizon: string | null;
@@ -246,6 +248,19 @@ export type PortfolioHoldingRead = {
   position_context: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+};
+
+export type KgiPortfolioSyncRead = {
+  market: "tw" | "us";
+  status: "synced";
+  source: "kgi_superpy";
+  holding_count: number;
+  created_count: number;
+  updated_count: number;
+  removed_count: number;
+  missing_cost_basis_count: number;
+  warnings: string[];
+  source_updated_at: string;
 };
 
 export type WatchlistBackfillStockResult = {
@@ -1274,6 +1289,8 @@ export type IntradayTrendResponse = {
   source_interval?: string | null;
   effective_interval?: string | null;
   source_point_count?: number | null;
+  aggregation_method?: string | null;
+  bar_finalization_status?: string | null;
   trade_date?: string | null;
   coverage_status?: string | null;
   session_scope?: string;
@@ -1367,6 +1384,12 @@ export type TaiwanStockQuoteDepthRead = {
   provider: string;
   source: string;
   source_url: string | null;
+  source_chain?: string[];
+  primary_provider?: string | null;
+  primary_source_status?: string | null;
+  primary_source_error?: string | null;
+  fallback_reason?: string | null;
+  fallback_used?: boolean;
   exchange_channel: string | null;
   session_phase: string;
   presentation_trade_date?: string | null;
@@ -1447,6 +1470,202 @@ export type TaiwanStockQuoteDepthRead = {
   actual_trade_price_source?: string | null;
   actual_trade_price_as_of?: string | null;
   freshness: TaiwanStockQuoteDepthFreshness;
+};
+
+export type TaiwanRealtimeQuoteLeaseRead = {
+  lease_id: string | null;
+  stock_id: string;
+  provider: string;
+  owner_kind: "frontend_viewer" | "acceptance_probe";
+  status: string;
+  expires_in_seconds: number | null;
+  fallback_source: string;
+  message: string;
+  error: string | null;
+};
+
+export type TaiwanRealtimeTradeRead = {
+  event_id: string;
+  sequence: number;
+  event_time: string | null;
+  received_at: string;
+  manager_ingested_at: string | null;
+  session_phase: string | null;
+  provider_delay_raw: unknown;
+  provider_delay_unit: "unknown";
+  price: number;
+  volume_lots: number;
+  total_volume_lots: number | null;
+  amount: number | null;
+  price_direction: "up" | "down" | "flat" | string;
+  direction_semantics: string;
+};
+
+export type TaiwanRealtimeAuctionObservationRead = {
+  event_id: string;
+  sequence: number;
+  event_time: string | null;
+  received_at: string;
+  manager_ingested_at: string | null;
+  session_phase: string | null;
+  provider_delay_raw: unknown;
+  provider_delay_unit: "unknown";
+  indicative_match_price: number | null;
+  indicative_match_volume_lots: number | null;
+  best_bid_price: number | null;
+  best_ask_price: number | null;
+  top5_bid_volume_lots: number | null;
+  top5_ask_volume_lots: number | null;
+  top5_imbalance: number | null;
+  diff_bid_volume_lots: Array<number | null>;
+  diff_ask_volume_lots: Array<number | null>;
+  semantics: string;
+};
+
+export type TaiwanRealtimeMinuteKBarRead = {
+  event_id: string;
+  sequence: number;
+  event_time: string;
+  received_at: string;
+  timeframe_minutes: number;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume_lots: number | null;
+  average_price: number | null;
+  total_amount: number | null;
+};
+
+export type TaiwanRealtimeDepthMetricsRead = {
+  event_time: string | null;
+  received_at: string;
+  best_bid_price: number | null;
+  best_ask_price: number | null;
+  spread: number | null;
+  spread_pct: number | null;
+  top5_bid_volume_lots: number | null;
+  top5_ask_volume_lots: number | null;
+  top5_imbalance: number | null;
+  top5_imbalance_formula: string | null;
+  diff_bid_volume_lots: Array<number | null>;
+  diff_ask_volume_lots: Array<number | null>;
+  simtrade: boolean;
+};
+
+export type TaiwanRealtimeDepthLevelRead = {
+  level: number;
+  price: number | null;
+  price_state: string;
+  size_shares: number | null;
+  size_lots: number | null;
+};
+
+export type TaiwanRealtimeDepthRead = {
+  provider: string;
+  source: string;
+  capability: string;
+  state: string;
+  event_time: string | null;
+  received_at: string | null;
+  manager_ingested_at: string | null;
+  stream_sampled_at: string;
+  freshness_status: string;
+  is_stale: boolean;
+  age_seconds: number | null;
+  bid_levels: TaiwanRealtimeDepthLevelRead[];
+  ask_levels: TaiwanRealtimeDepthLevelRead[];
+};
+
+export type TaiwanRealtimeLatencyRead = {
+  event_at: string | null;
+  bridge_received_at: string | null;
+  manager_ingested_at: string | null;
+  stream_sampled_at: string;
+  event_to_bridge_ms: number | null;
+  bridge_to_manager_ms: number | null;
+  manager_to_stream_ms: number | null;
+  event_to_stream_ms: number | null;
+  provider_delay_raw: unknown;
+  provider_delay_unit: "unknown";
+  provider_delay_semantics: "provider_reported_raw_value_unit_not_verified";
+};
+
+export type TaiwanRealtimeCallbackDiagnosticRead = {
+  sequence: number;
+  event_time: string | null;
+  received_at: string;
+  manager_ingested_at: string | null;
+  session_phase: string | null;
+  provider_trial_flag: boolean;
+  actual_trade_evidence: boolean;
+  cumulative_volume_lots: number | null;
+  previous_cumulative_volume_lots: number | null;
+  cumulative_relation:
+    | "baseline"
+    | "advanced"
+    | "unchanged"
+    | "decreased"
+    | "missing"
+    | "invalid"
+    | "cross_date_rejected";
+  projection_action:
+    | "baseline_only"
+    | "trade_added"
+    | "auction_added"
+    | "same_cumulative_suppressed"
+    | "decreasing_cumulative_suppressed"
+    | "trade_signature_suppressed"
+    | "auction_signature_suppressed"
+    | "non_trade_suppressed"
+    | "cross_date_rejected";
+  projection_event_id: string | null;
+};
+
+export type TaiwanRealtimeDiagnosticCountersRead = {
+  callback_count: number;
+  baseline_only_count: number;
+  cumulative_advanced_count: number;
+  same_cumulative_count: number;
+  decreasing_cumulative_count: number;
+  missing_cumulative_count: number;
+  invalid_cumulative_count: number;
+  trade_addition_count: number;
+  auction_addition_count: number;
+  trade_signature_suppression_count: number;
+  auction_signature_suppression_count: number;
+  non_trade_suppression_count: number;
+  trial_leak_count: number;
+  cross_date_rejected_count: number;
+};
+
+export type TaiwanRealtimeMarketStreamRead = {
+  kind: string;
+  contract_version: string;
+  stock_id: string;
+  provider: string;
+  source: string;
+  status: string;
+  active_leases: number;
+  sequence: number;
+  generated_at: string;
+  event_time: string | null;
+  received_at: string | null;
+  session_phase: string | null;
+  selection_reason: string;
+  fallback_used: boolean;
+  is_stale: boolean;
+  capability_status: Record<string, string>;
+  limits: Record<string, number>;
+  recent_trades: TaiwanRealtimeTradeRead[];
+  auction_observations: TaiwanRealtimeAuctionObservationRead[];
+  minute_kbars: TaiwanRealtimeMinuteKBarRead[];
+  depth_metrics: TaiwanRealtimeDepthMetricsRead | null;
+  depth: TaiwanRealtimeDepthRead | null;
+  latency: TaiwanRealtimeLatencyRead | null;
+  diagnostic_counters: TaiwanRealtimeDiagnosticCountersRead;
+  diagnostic_events: TaiwanRealtimeCallbackDiagnosticRead[];
+  warnings: string[];
 };
 
 export type TaiwanQuoteContractReplaySnapshotRead = {
@@ -2939,6 +3158,76 @@ export type USOhlcChartRead = {
   freshness_status: "current" | "stale" | "missing" | "future" | string;
   is_current: boolean;
   refresh_recommended: boolean;
+};
+
+export type USTechnicalQualityRead = {
+  status: "available" | "partial" | "missing" | string;
+  facts_usable: boolean;
+  decision_usable: boolean;
+  bar_count: number;
+  facts_minimum_bars: number;
+  decision_minimum_bars: number;
+  corporate_action_coverage: string;
+  freshness_status: string;
+  reason_codes: string[];
+};
+
+export type USTechnicalIndicatorsRead = {
+  kind: "technical_indicators" | string;
+  schema_version: string;
+  algorithm_version: string;
+  market: string;
+  symbol: string;
+  timeframe: string;
+  price_basis: string;
+  status: string;
+  as_of: string | null;
+  bar_count: number;
+  current: {
+    time?: string | null;
+    close?: number | null;
+    change_pct?: number | null;
+    volume?: number | null;
+    moving_averages?: Record<string, number | null>;
+    price_vs_ma20_pct?: number | null;
+    volume_vs_ma20_pct?: number | null;
+  };
+  quality: USTechnicalQualityRead;
+};
+
+export type USTechnicalStructureRead = {
+  kind: "technical_structure" | string;
+  schema_version: string;
+  status: string;
+  as_of: string | null;
+  selected_title: string;
+  trend_state: "bullish_stack" | "below_ma20" | "ma_consolidation" | "insufficient" | string;
+  breakout_state: string;
+  metrics: {
+    price_vs_ma20_pct?: number | null;
+    volume_vs_ma20_pct?: number | null;
+    day_change_pct?: number | null;
+  };
+  quality: USTechnicalQualityRead;
+};
+
+export type USMarketResearchRead = {
+  kind: "us_market_research" | string;
+  schema_version: string;
+  market: "US" | string;
+  symbol: string;
+  status: string;
+  as_of: string | null;
+  technical_indicators: USTechnicalIndicatorsRead;
+  technical_structure: USTechnicalStructureRead;
+  corporate_action_coverage: {
+    status: string;
+    observed_event_count: number;
+    completeness_checkpoint: string | null;
+  };
+  market_coverage: Record<string, unknown>;
+  missing: string[];
+  warnings: string[];
 };
 
 export type USSecCompanyFactRead = {

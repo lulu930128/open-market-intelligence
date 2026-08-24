@@ -19,6 +19,7 @@ ProgressCallback = Callable[[int | None, int | None, str | None], None]
 @dataclass(frozen=True)
 class USWatchlistWorkflowDependencies:
     expected_daily_price_date: Callable[[], date]
+    resolved_daily_batch_loader: Callable[..., dict[str, dict]]
     intraday_overlay_loader: Callable[..., dict | None]
     refresh_daily_prices: Callable[..., dict]
     ensure_stock: Callable[..., USStockMaster]
@@ -29,10 +30,26 @@ class USWatchlistWorkflowDependencies:
 
 _close_value = watchlist_metrics._close_value
 _latest_distinct_us_daily_rows = watchlist_metrics._latest_distinct_us_daily_rows
+_parse_us_row_trade_date = watchlist_metrics._parse_us_row_trade_date
 _us_row_trade_date = watchlist_metrics._us_row_trade_date
 get_us_watchlist_group = watchlist_store.get_us_watchlist_group
 _get_us_descendant_group_ids = watchlist_store._get_us_descendant_group_ids
 list_us_watchlist_symbols = watchlist_store.list_us_watchlist_symbols
+
+
+def _finite_float(value) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed and parsed not in {float("inf"), float("-inf")} else None
+
+
+def _resolved_daily_bars(payload: dict) -> list[dict]:
+    bars = payload.get("bars")
+    if not isinstance(bars, list):
+        return []
+    return [bar for bar in bars if isinstance(bar, dict)]
 
 def _us_ranking_freshness(
     rows: list[dict],
@@ -125,15 +142,29 @@ def get_us_watchlist_ranking(
     } if symbols else {}
     rows: list[dict] = []
     intraday_overlay_attempts = 0
+    resolved_daily_by_symbol = dependencies.resolved_daily_batch_loader(
+        db=db,
+        symbols=symbols,
+        bars=2,
+    )
 
     for item in unique_items:
         symbol = normalize_us_symbol(item.symbol)
         stock = stocks_by_symbol.get(symbol)
-        price_rows = _latest_distinct_us_daily_rows(db=db, symbol=symbol, limit=2)
-        latest = price_rows[0] if price_rows else None
-        previous = price_rows[1] if len(price_rows) > 1 else None
-        close = _close_value(latest)
-        previous_close = _close_value(previous)
+        resolved_daily = resolved_daily_by_symbol.get(symbol, {})
+        price_bars = _resolved_daily_bars(resolved_daily)
+        latest = price_bars[-1] if price_bars else None
+        previous = price_bars[-2] if len(price_bars) > 1 else None
+        close = _finite_float(latest.get("close_price")) if latest else None
+        previous_close = (
+            _finite_float(previous.get("close_price")) if previous else None
+        )
+        volume_value = _finite_float(latest.get("volume")) if latest else None
+        volume = (
+            int(volume_value)
+            if volume_value is not None and volume_value >= 0
+            else None
+        )
         change = (
             close - previous_close
             if close is not None and previous_close is not None
@@ -156,16 +187,26 @@ def get_us_watchlist_ranking(
             "exchange": stock.exchange if stock is not None else None,
             "asset_type": stock.asset_type if stock is not None else None,
             "group_id": item.group_id,
-            "trade_date": latest.trade_date if latest is not None else None,
+            "trade_date": (
+                _parse_us_row_trade_date(latest.get("start_at"))
+                if latest is not None
+                else None
+            ),
             "time": None,
-            "session": None,
+            "session": resolved_daily.get("selected_session"),
             "close": close,
             "previous_close": previous_close,
             "change": change,
             "change_pct": change_pct,
-            "volume": latest.trade_volume if latest is not None else None,
+            "volume": volume,
             "status": "ready" if close is not None else "no_data",
-            "source": None,
+            "source": resolved_daily.get("selected_source"),
+            "selected_provider": resolved_daily.get("selected_provider"),
+            "selected_source": resolved_daily.get("selected_source"),
+            "selected_session": resolved_daily.get("selected_session"),
+            "selection_reason": resolved_daily.get("selection_reason"),
+            "fallback_used": bool(resolved_daily.get("fallback_used")),
+            "price_basis": "raw_unadjusted",
             "has_extended_hours": False,
             "intraday_previous_close": None,
             "intraday_points": [],
@@ -189,6 +230,11 @@ def get_us_watchlist_ranking(
                 row["change"] = overlay["change"]
                 row["change_pct"] = overlay["change_pct"]
                 row["source"] = overlay["source"]
+                row["selected_provider"] = overlay.get("provider")
+                row["selected_source"] = overlay.get("source")
+                row["selected_session"] = overlay.get("session")
+                row["selection_reason"] = "INTRADAY_OVERLAY_SELECTED"
+                row["fallback_used"] = False
                 row["has_extended_hours"] = overlay["has_extended_hours"]
                 row["intraday_previous_close"] = overlay["previous_close"]
                 row["intraday_points"] = overlay["points"]
@@ -260,7 +306,7 @@ def get_us_watchlist_ranking(
         "ranking_semantics": (
             "live_intraday_rows"
             if is_live
-            else "latest_completed_daily_rows"
+            else "resolved_completed_daily_bars"
         ),
         "results": rows,
     }

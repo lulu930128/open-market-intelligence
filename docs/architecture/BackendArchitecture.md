@@ -1,122 +1,610 @@
-# OMI Backend Architecture
+﻿# OMI Backend Architecture
 
-本文件描述 Open Market Intelligence backend 的穩定責任邊界。它是長期架構參考，不取代 `AGENTS.md` 的產品規則，也不取代單次維護任務的 `Progress.md`。
+本文件描述 Open Market Intelligence backend 的長期穩定責任邊界。
 
-## 依賴方向
+它是 current architecture truth，不取代 repo `AGENTS.md` 的產品規則，也不取代單次 `docs/agent-runs/*` 任務紀錄。
+
+## 1. 高階依賴方向
+
+OMI backend 的長期依賴方向：
 
 ```text
-FastAPI app / runtime
+FastAPI / Runtime / Jobs
         |
         v
-routers -> market services -> provider adapters / parsers
-                    |                    |
-                    v                    v
-              SQLAlchemy models   provider_http -> http_client
-                    |
-                    v
-        provider events / source-health snapshots
-
-AI tools -> backend market services and contracts
-frontend / MCP / Kuro -> backend HTTP API only
+Public Routers / AI Entry
+        |
+        v
+Market / Research Services
+        |
+        v
+Resolution / Control Plane
+        |
+        v
+Canonical Observation Layer
+        |
+        v
+Provider / Integration Adapters
+        |
+        v
+External Providers / Broker SDK
 ```
 
-依賴只應沿箭頭方向前進。Provider adapter 不讀寫 DB；router 不重做市場邏輯；frontend、MCP 與 Kuro 不複製 freshness、provider fallback 或 AI decision logic。
+資料 outward：
 
-## Runtime 與 API
+```text
+Provider
+  ↓
+Canonical Observation
+  ↓
+Resolver
+  ↓
+Market / Research
+  ↓
+AI / API
+  ↓
+Frontend / MCP / Kuro
+```
 
-- `backend/app/main.py` 只建立 FastAPI app、middleware、exception handler 與 route registry。
-- `backend/app/runtime.py` 擁有 startup/shutdown lifecycle。每個 process 先以 `schema.lock` 序列化 Alembic upgrade；正常啟動只使用 migration，不呼叫 `Base.metadata.create_all()`。
-- 各 API process 以 `background.lock` 非阻塞競選背景 ownership；只有 leader 執行 interrupted-job recovery、scheduler、Crypto auto-refresh 與 realtime collectors，follower 保持可服務 API。shutdown 只停止並釋放本 process 實際持有的元件與 lock。
-- 空白 `stock_master` 只由 background leader 排入一次 `system.stock_master_bootstrap` job；job 先註冊預設 source catalog，再以有界的 TWSE／TPEx 官方來源建立本機代號。這個工作不得阻塞 API startup，既有非空主檔不得被首次安裝流程覆寫，失敗必須保留在 job 與 source fetch log。
-- `backend/app/routers/` 只負責 HTTP schema、參數、status code 與 service dispatch。跨市場共用的 error/job pattern 放在 `market_family_helpers.py`。
-- 大型 router 可依 route family 拆成 subrouter，例如 Taiwan index 與 futures routes 分別由 `tw_market_indices.py`、`tw_market_futures.py` 擁有；原 router 應 include subrouter 並保留既有 handler import seam。
-- Router 不擁有 SQLAlchemy transaction，不直接呼叫 `commit()`、`rollback()` 或 `flush()`；transaction recovery 與 job persistence 留在 service/domain owner。
-- Router 不 import `requests` 或辨識 provider transport exception；transport failure 必須先在 service boundary 轉成市場 domain error，再由 router 映射既有 HTTP status/detail。
-- Public route、method、query parameter 與 response shape 預設向後相容；共用 helper 不得改變 request envelope。
-- Router 搬移後必須比較 OpenAPI operation ID、response model 與 path/method inventory，不能只以 route 數量判定相容。
-- Watchlist Radar snapshot 由 scheduler/job/service 鏈路擁有：預設涵蓋所有 active group，保存前驗證預期交易日，重跑區分 created/existing，並以收盤後 reconciliation 補足漏跑；router 與 GET read path 不隱性建立快照。
+Account 另外獨立：
 
-## Market Service
+```text
+Broker Account Provider
+        ↓
+Account Plane
+        ↓
+Position / Cost / Cash
+        ↓
+Portfolio Valuation
+        ↑
+Market Data Resolver / FX
+```
 
-- `market/` 是台股核心；`us_market/`、`jp_market/`、`kr_market/`、`crypto_market/` 與 `resource_market/` 是 context layers。
-- Service 擁有 normalization、fallback、upsert、bounded refresh、resource aggregation 與市場特有 policy。
-- Parser 與 provider adapter 保持純 IO / payload conversion，不接受 SQLAlchemy `Session`。
-- Taiwan stateless read paths 使用 `market/providers/`；provider identity、resource、target 與 bounded timeout 由 adapter 統一提供。需要 cookie/session 的期貨與 history/backfill workflow 保留 stateful transport boundary。
-- Taiwan futures quote/daily refresh 由 `tw_futures.py` 擁有 transaction，失敗時 rollback 並重新拋出；provider fallback job lifecycle 由 `tw_futures_jobs.py` 協調 `jobs.service`，不放在 router。
-- US、JP、KR provider 都使用各市場的 `providers/` namespace。Service 直接 import provider fetcher，讓 provider ownership 可被辨識與獨立測試。
-- US、JP、KR `sources.py` 不直接執行 provider HTTP；舊 `fetch_*` 名稱保留為 forwarding wrapper，保護既有 import seam。US `fetch_symbol_directories()` 只組合 NASDAQ/SEC provider payload 與既有 parser。
-- US、JP、KR 的 provider exception 與 symbol normalization 分別放在 `errors.py`、`symbols.py`，provider 與 parser 共同依賴純 contract，禁止互相反向 import。
-- 對外 service entrypoint 使用 `translate_provider_http_errors()` 將未處理的 `requests.RequestException` 轉成各市場 `MarketDataFetchError`；既有 provider-specific domain error 不重包裝，原 transport error 保留為 cause。
-- US、JP、KR OHLC aggregation/projection 分別放在 `chart_projection.py`；transaction-owning refresh、cache 與 public service entrypoint 留在 `service.py` façade。
-- Crypto 與 resource 的 bounded REST request 使用各自 `providers/` namespace。Crypto realtime/WebSocket lifecycle、persistence 與 stateful refresh 不因 REST adapter 拆分而移動。
+依賴只沿箭頭方向前進。
 
-## Provider HTTP Contract
+## 2. 架構不變量
 
-- `backend/app/http_client.py` 是最低層 transport，只管理 `requests.Session` 與 `OMI_HTTP_TRUST_ENV`。
-- `backend/app/observability/provider_http.py` 是市場 provider request contract，負責：
-  - 明確 `market/provider/resource/target` identity；
-  - 必填且大於零的 bounded timeout；
-  - `timeout`、`rate_limited`、`blocked`、`failed`、`error` 分類；
-  - `Retry-After` 秒數或 HTTP-date 解析；
-  - 不含 query secret 的 safe source URL；
-  - 可交給 `record_provider_event()` 的結構化欄位。
-- Provider HTTP 層不得直接寫 DB。事件是否落庫由擁有 transaction 的 service、job 或 pipeline 決定。
-- Service fallback 若已取得 canonical `ProviderHttpFailure`，使用 `provider_fallback.py` 另開短生命週期 session 寫入 `event_type=fallback`。此 telemetry 是 best-effort，不得 commit/rollback 呼叫端 transaction，也不得因自身寫入失敗取代市場 fallback。
-- `translate_provider_http_errors()` 只提供 service boundary translation；它不得吞掉非 transport error，且 exception chaining 必須讓 `provider_http_failure()` 仍能取回結構化 failure。
-- Stateful multi-request flow 可使用 `http_client.new_session()`，但仍須明確 timeout、錯誤分類與來源資訊。
+- Provider 不得偽裝成其他 provider。
+- Consumer 不得自行選 provider。
+- Cross-provider fallback 只由 Resolution / Control Plane 擁有。
+- Unknown 不默認成 0。
+- No Quote != No Trade。
+- No Trade != Suspended。
+- Market Session != Instrument Trading Status。
+- Freshness 要考慮 instrument eligibility。
+- Selected evidence 保留完整 lineage。
+- Provider Health / Dataset Health / Resolved Evidence Health 分開。
+- Account failure 與 Market Data failure 分開。
+- Advertised capability 必須真的有 projection。
 
-## Provider Events 與 Source Health
+## 3. Runtime / FastAPI
 
-- `provider_health.py` 負責 event persistence、event summary、entry enrichment 與 snapshot sync。
-- 複合 provider key，例如 `krx_data+yahoo_chart`，會匹配其中任一 provider event；`all` 仍是 wildcard。
-- `source_health_contract.py` 只提供跨市場共用 primitives：UTC 產生時間、daily freshness lag、row status 與 summary counting。
-- 各市場 module 保留交易日曆、session、required/not-applicable、秒級 freshness 與 provider-specific reason，不把市場差異塞進通用 helper。
-- Source-health 不得隱藏 `stale`、`empty`、`partial`、`disabled`、`rate_limited` 或 recent provider errors。
-- Persisted source-health read contract 會回傳 `snapshot_age_seconds` 與 `snapshot_is_stale`；GET 只揭露 snapshot 本身是否過期，不在讀取路徑隱性重算或刷新全市場資料。
-- JP `/api/jp-market/source-health` 預設是 `availability_only`。日本交易所假日曆尚未建模時，不得自動宣稱 daily data 為 `current`；只有提供 `expected_daily_price_date` 才做精確判定。
+- `backend/app/main.py` 只建立 FastAPI app、middleware、exception handlers 與 route registry。
+- `backend/app/runtime.py` 擁有 startup/shutdown lifecycle。
+- migration / schema ownership 延續 Alembic-only 原則；正常啟動不以 `Base.metadata.create_all()` 取代 migration。
+- background leader lock、scheduler、collector ownership 由 runtime/job boundary 管理。
+- follower process 不應重複執行 background collector。
+- shutdown 只停止本 process 實際持有的 runtime resource。
 
-## Transaction Ownership
+## 4. Router
 
-目前 repo 的 service contract 採下列規則：
+`backend/app/routers/`：
 
-- Query/read helper 不 commit。Source-health snapshot 只由明示 sync/maintenance owner 保存；list/read route 只計算 age，不產生寫入。
-- `upsert_*`、`refresh_*`、job worker 與 maintenance pipeline 是 transaction owner；它們可以 commit，失敗時必須 rollback 或讓上層 owner rollback。
-- 直接擁有 `commit()` 的 service owner 必須在 commit failure 時 `rollback()` 並重新拋出，避免 session 留在 failed transaction 狀態。
-- Transaction-owning refresh 若允許 provider/cache fallback，必須先恢復 session 再執行 fallback query；router 不補做 session recovery。
-- Provider adapter、parser、payload contract 與 source-health pure helper 不持有 transaction。
-- `record_provider_event(..., commit=...)` 與 `sync_source_health_snapshots(..., commit=...)` 必須明確選擇 transaction 行為。
-- Composite refresh 必須隔離單一 provider/symbol failure，不得因 event recording 失敗而提交半套 market data。
+負責：
 
-新增 service 時不要同時提供「有時 commit、有時只 mutate」的隱性模式。若需要讓呼叫端擁有 transaction，應增加明確參數或拆成 `mutate_*` 與 transaction-owning wrapper。
+- HTTP schema。
+- query/body validation。
+- status code。
+- service dispatch。
+- outward response projection。
 
-## AI 與 Consumer Contract
+不得：
 
-- `backend/app/ai/market_payload_contract.py` 擁有 payload level、bounded intraday points 與 slot completeness primitives。
-- `answer_localization.py`、`answer_data_limits.py` 與 `answer_scenarios.py` 分別擁有 locale/text、資料限制/confidence cap、scenario/counter-evidence 純投影；`answer_composer.py` 保留高階組裝與相容 re-export。
-- `backend/app/ai/market_context/common.py` 擁有 source-ref 去重、freshness、resource counting 與 compact slot/context 純投影；tool registry、schema、budget、planner 與 execution policy 仍留在原 façade。
-- Backend AI 層擁有 evidence、freshness、tool orchestration、human answer 與 decision contract。
-- Consumer 只呈現 backend contract；不得依 UI 狀態自行推論 freshness 或重做 provider fallback。
+- 直接 import provider SDK/requests。
+- 自己做 provider fallback。
+- 自己重算 freshness/trading status。
+- 擁有 market/business transaction logic。
+- 直接 commit/rollback/flush。
 
-## Database Model Registry
+Public route / method / response shape 預設向後相容。
 
-- `backend/app/db/models.py` 保持唯一 ORM model registry，`Base.metadata` 是 model contract；Alembic revision head 是 deployed schema 的唯一啟動真相來源。
-- 目前不按 domain 拆 model 檔案：model import 密度、foreign-key resolution 與 migration discovery 的風險高於檔案縮短的收益。
-- 未來若重新評估，必須先保護 `app.db.models` import set、table metadata、constraint/index identity 與 Alembic discovery；不得建立第二個 `Base`。
-- 本次 evidence 與決策記錄在 `docs/agent-runs/backend-architecture-consolidation-20260713/DatabaseModelDecision.md`。
+## 5. Provider / Integration Layer
 
-## 驗證層級
+Provider adapter 負責：
 
-- Pure contract：`test_provider_http.py`、`test_source_health_contract.py`。
-- Provider/event integration：`test_provider_fallback.py`、`test_provider_health.py`、`test_market_provider_adapters.py`、`test_taiwan_index_provider_adapters.py`、`test_crypto_resource_provider_adapters.py`。
-- 市場 contract：`test_market_source_health.py`、`test_us_market_data.py`、`test_jp_market_data.py`、`test_kr_market_data.py`、`test_crypto_market.py`、`test_resource_market.py`。
-- 架構 contract：`test_market_transaction_contracts.py`、`test_market_chart_projections.py`、`test_ai_answer_pure_modules.py`、`test_ai_market_context_projection.py`、`test_api_contract_inventory.py`、`test_database_model_contract.py`。
-- Router transport boundary 與跨市場 error translation：`test_api_contract_inventory.py`、`test_provider_http.py`、`test_market_provider_adapters.py`。
-- Taiwan futures job/fallback contract：`test_taiwan_futures_jobs.py`。
-- Watchlist Radar daily snapshot/coverage contract：`test_watchlist_radar_automation.py`、`test_calendar_status_integration.py`。
-- Runtime/schema ownership：`test_runtime.py`、`test_runtime_lock.py`、`test_database_migrations.py`。
-- 跨模組修改完成後使用 `scripts/run-safe-validation.ps1 -Profile backend` 跑完整 backend regression。
-- GitHub backend CI 使用 `pytest -p no:cacheprovider backend/tests`，與 repo-local backend profile 採相同 collection surface。
+- HTTP / SDK / WebSocket / subprocess。
+- login / reconnect。
+- subscribe / unsubscribe。
+- bounded timeout。
+- provider raw payload parsing。
+- provider-specific error / entitlement normalization。
+- 安全 source metadata。
+- 轉成 Canonical Observation。
 
-## 後續拆分原則
+Provider adapter 不負責：
 
-大型 service/module 只按穩定責任拆分，不按行數拆分。優先順序是 provider adapter、payload projection、source-health projection、schema conversion，並保留原 import seam。避免同時重寫 service、route 與 response contract。
+- 跨 provider priority。
+- fallback。
+- AI readiness。
+- market decision。
+- DB transaction。
+- 偽裝另一 provider schema。
+
+### KGI
+
+KGI 可以有一個 shared isolated runtime，但能力分成：
+
+```text
+KGI Quote Port
+KGI Data Port
+KGI Account Port
+```
+
+它們可共用登入/runtime，不共用單一 capability health。
+
+例如：
+
+```text
+KGI TW Quote = live
+KGI Historical KBar = plan_restricted
+KGI Account = unavailable/503
+```
+
+這是合法狀態。
+
+## 6. Canonical Observation Layer
+
+Shared boundary：`backend/app/market_data/`。Foundation v1 已建立 typed contracts、pure resolution、Dataset Registry 與 bounded comparison primitives；production consumer cutover 尚未發生。
+
+核心 contracts：
+
+### InstrumentKey
+
+- market
+- symbol
+- instrument_type
+- venue / listing；listed instrument 必填，避免同 market/symbol collision
+
+### SourceLineage
+
+- provider
+- source
+- event_time
+- received_at / fetched_at
+- capability-aware authority class
+- cache_hit
+- provider latency optional
+- raw contract version optional
+
+### QuoteObservation
+
+- instrument
+- lineage
+- trade_date
+- last_trade_price
+- last_trade_volume
+- cumulative_volume
+- open/high/low/previous_close
+- currency
+- trade observation state：unknown / awaiting_first_trade / indicative_observed / trade_observed
+- quote status
+
+### DepthObservation
+
+- depth_capability: none / level1 / level5
+- bid levels
+- ask levels
+- best bid/ask
+- spread
+
+### AuctionObservation
+
+- opening / closing
+- indicative price
+- indicative volume
+- provisional semantics
+
+### BarObservation
+
+- interval
+- start/end time
+- OHLCV
+- finalization：provisional / final / corrected / unknown
+
+### TradingStatusObservation
+
+Instrument tradability 只表示標的是否可交易：
+
+- UNKNOWN
+- TRADABLE
+- HALTED
+- SUSPENDED
+- DELISTED
+- NOT_APPLICABLE
+
+以下維度不可塞回 tradability：
+
+- Market Session：pre-open、opening auction、continuous、closing auction、post-close、closed。
+- Trade Observation State：awaiting first trade、indicative observed、trade observed、unknown。
+- Regulatory Flags：attention、disposition、abnormal、restricted。
+
+### ProviderResourceHealth
+
+Provider resource health 保留獨立維度：enablement、connection、entitlement、operational request health、evidence freshness；不得用單一 status 壓平原因。
+
+## 7. Resolution / Control Plane
+
+Resolution / Control Plane 是 market evidence selection 的唯一 owner。
+
+負責：
+
+- provider policy registry。
+- candidate collection。
+- provider selection。
+- fallback。
+- realtime policy。
+- lease lifecycle。
+- cache policy。
+- freshness。
+- trading-status resolution。
+- dataset health。
+- repair planning。
+- source-health aggregation。
+- selected evidence lineage。
+
+Public policy 使用需求語意，不直接暴露 provider：
+
+- cache_only
+- prefer_live
+- require_live
+
+`completed_session` 在 Foundation v1 是 internal data requirement，尚未加入 public `omi.decision.v4` request enum。
+
+## 8. Lease Lifecycle
+
+### Viewer Lease
+
+用途：Frontend selected symbol。
+
+- persistent。
+- heartbeat。
+- user-view lifecycle。
+
+### Research Lease
+
+用途：AI / MCP `require_live`。
+
+- request-scoped。
+- bounded symbol count。
+- bounded callback wait。
+- request completion release。
+- provider unavailable 時由 Resolver fallback。
+
+### Collector Lease
+
+用途：少量明確 bounded anchors。
+
+禁止無界全市場 subscription。
+
+## 9. Market-specific Services
+
+### Taiwan
+
+`backend/app/market/` 保留台股市場差異：
+
+- TWSE/TPEX calendar。
+- preopen/open/close microstructure。
+- official close。
+- regulation。
+- futures/options。
+- chips / broker branch。
+- TW-specific dataset rules。
+
+### United States
+
+`backend/app/us_market/` 保留：
+
+- US market calendar。
+- premarket/regular/after-hours。
+- corporate actions。
+- SEC / FINRA / FRED integration。
+- US-specific symbol / exchange / fundamentals semantics。
+
+TW 與 US 都依賴共通 Canonical / Resolver，而不是互相複製 fallback architecture。
+
+## 10. Shared Research
+
+基於 Canonical OHLCV 的技術計算應優先共用：
+
+- MA
+- RSI
+- MACD
+- ATR
+- KDJ
+- Bollinger
+- technical structure
+
+市場差異只在真正會改變演算法語意的 policy。
+
+## 11. Dataset Registry
+
+Dataset Registry 是資料 lifecycle source of truth。
+
+每個 production dataset 應能定義：
+
+- dataset_id。
+- market。
+- owner service。
+- frequency。
+- expected-state policy。
+- trading eligibility。
+- refresh operation。
+- refresh scope / budget。
+- postcondition。
+- health rule。
+- stale rule。
+- capability mapping。
+
+用途：
+
+- freshness。
+- source health。
+- repair。
+- AI fill plan。
+- scheduler ownership。
+
+避免同一 dataset 的規則散在 freshness、scheduler、repair 與 capability registry。
+
+Completed-session 全市場 EOD 使用獨立 durable coverage checkpoint：
+
+- TW universe 是 active TWSE／TPEx ordinary stocks；repair 由兩個 official bulk source 擁有。
+- US universe 是 active Nasdaq Trader non-ETF、non-test stocks；沒有 bulk daily provider 時，只允許 bounded、可續跑的 per-symbol shard，且不得宣稱單次全市場完成。
+- checkpoint 保存 expected date、universe hash、current／partial／stale／missing、cursor、error budget 與 retry boundary；`JobRun` 只保存單次 execution evidence。
+- cache-only GET 不得計算 provider freshness 或啟動 repair；scheduler-only full-market operation 不進 AI fill allowlist。
+
+## 12. Freshness / Health
+
+分三層：
+
+### Provider Health
+
+provider / capability 本身是否正常。
+
+### Dataset Health
+
+Canonical dataset 是否達到預期。
+
+### Resolved Evidence Health
+
+這次 request selected evidence 是否可用。
+
+Persisted health 與 request-local health 可以分開保存，但 outward 必須有明確 effective semantics。
+
+## 13. Trading Status
+
+Trading Status 不屬於 Quote。
+
+Quote unavailable 時，不得直接推斷停牌或 awaiting first trade。
+
+Trading Status Resolver 可組合：
+
+- official exchange / regulator evidence。
+- broker provider hint。
+- quote observation。
+- market session。
+
+官方 evidence 優先。
+
+## 14. Provider HTTP Contract
+
+`backend/app/http_client.py` 保持最低層 transport。
+
+`backend/app/observability/provider_http.py` 負責：
+
+- market/provider/resource/target identity。
+- bounded timeout。
+- timeout/rate_limited/blocked/failed/error classification。
+- Retry-After。
+- safe source URL。
+- provider event metadata。
+
+Provider HTTP 層不直接寫 DB。
+Provider event persistence 由 service/job transaction owner 決定。
+
+## 15. Source Health Persistence
+
+Persisted source-health snapshot 與 request-local observation 不應互相取代。
+
+建議 outward 可區分：
+
+- request_health。
+- persisted_health。
+- effective_health。
+
+GET read path 不應為了「讓 health 看起來新」隱性重跑全市場 provider refresh。
+
+## 16. Transaction Ownership
+
+- Query/read helper 不 commit。
+- Provider adapter / canonical conversion / pure freshness helper 不持有 transaction。
+- `upsert_*`、`refresh_*`、job worker、maintenance pipeline 是明確 transaction owner。
+- transaction-owning service commit failure 必須 rollback 並 rethrow。
+- provider telemetry persistence 不得污染 caller transaction。
+- composite refresh 隔離單一 provider/symbol failure。
+- 不提供「有時 commit、有時不 commit」的隱性 API；需要時拆 mutate / owning wrapper。
+
+## 17. Account / Portfolio Plane
+
+`backend/app/portfolio/` 不再被視為 Market Data provider branch。
+
+Account Provider 提供：
+
+- AccountStatus
+- PositionObservation
+- CostBasisObservation
+- CashObservation
+
+Sync rules：
+
+- complete success 才 destructive replace provider-owned state。
+- partial 保留未確認 state。
+- 503/unavailable 保留既有 state。
+- confirmed empty 才真正清空 provider-owned holdings。
+- unknown cost 不轉 0。
+
+Portfolio Valuation 永遠透過 Market Data Resolver 取得市場價。
+
+## 18. AI / Capability Contract
+
+`backend/app/ai/` 擁有：
+
+- target resolution。
+- capability selection。
+- bounded query plan。
+- evidence projection。
+- decision core。
+- answer contract。
+- continuation/fill plan。
+
+AI 不直接選 provider。
+
+Capability Registry 必須有 contract test：
+
+```text
+advertised capability + scope
+=> projection exists
+```
+
+Refreshable capability 另要求：
+
+```text
+=> refresh operation exists
+```
+
+`omi.decision.v4` 維持 public business contract；底層 provider/canonical migration 不應迫使 HTTP/SSE/MCP 分叉。
+
+## 19. Frontend / MCP / Kuro
+
+### Frontend
+
+只呈現 backend contract 與發出 viewer intent。
+
+### MCP
+
+thin adapter，只轉送 public contract。
+
+### Kuro
+
+consumer，只負責 persona/workflow/presentation。
+
+三者都不得：
+
+- 直接讀 OMI DB。
+- 自行 call market provider。
+- 自行做 freshness/fallback/trading-status inference。
+
+## 20. Migration Strategy
+
+Market Data Foundation 採 Strangler Pattern。
+
+### Phase 1 — Contract
+
+新增 canonical contract，不改 runtime behavior。
+
+### Phase 2 — Provider Shadow
+
+KGI TW / MIS 同時產 legacy + canonical shadow。
+
+### Phase 3 — Resolver Shadow
+
+比較 legacy selection 與 new resolver selection。
+
+### Phase 4 — Research Lease
+
+AI/MCP require_live 可取得 bounded KGI research lease。
+
+### Phase 5 — Consumer Cutover
+
+依序切 AI/MCP、backend API、frontend。
+
+### Phase 6 — Dataset Registry
+
+先納入 TW/US quote、intraday、daily price，再擴大。
+
+### Phase 7 — Capability Validation
+
+CI 保護 truthful capability。
+
+### Phase 8 — Legacy Removal
+
+全部驗收後才刪 provider masquerading / legacy fallback。
+
+### Foundation v1 source status（2026-08-19）
+
+- Phase 1 typed contract：source-complete。
+- Phase 2 KGI TW / MIS direct canonical adapter 與同 payload shadow/compare seam：source-complete，預設 mode `off`。
+- Pure resolver、internal `completed_session` 與 acquisition port contract：source-complete；尚未接 production Research Lease。
+- Dataset Registry v1：保留 TW quote/intraday/daily 與 US intraday/daily 五個 per-target 核心 dataset，另註冊 TW/US 兩個 full-market EOD coverage lifecycle dataset。
+- Capability projection validation：TW/US core fixture registrations 已建立；`technical.indicators` 與 `technical.structure` 已有 US resolved daily research projection，US full-market aggregates仍受 coverage gate 阻擋。
+- Runtime adoption、KGI live smoke、canary/on、consumer cutover、DB persistence：尚未驗收，也不屬於本次 source-complete。
+
+### US first-class Foundation source status（2026-08-23）
+
+- US capability truth gate已修正：market.breadth在真實US projection完成前只宣告TW，US target會truthful unsupported。
+- Shared provider policy可接受market owner注入的US quote／intraday／daily descriptors；Yahoo／Alpha Vantage catalog仍由app.us_market擁有，shared Foundation不持有production provider catalog。
+- Yahoo chart 1m／1d與Alpha Vantage daily已有pure canonical adapters，輸出provider-neutral quote／bars、US session mapping、timezone-aware lineage、bar finalization與raw price basis；adapter不做IO、DB write或fallback。
+- US resolved quote／bars已有neutral schema projection seam；legacy TW-named schema只列compatibility，不再作新US canonical identity。
+- Yahoo intraday在canonical mode shadow／compare時重用同一已取得payload做bounded comparison；off不執行canonical conversion，shadow／compare不改legacy selected outward result。
+- Production AI／API已可在compare canary通過後消費resolved US quote／intraday／daily projection；KGI US live仍因source readiness未通過而fail closed。
+
+### US first-class Shared Research 與 consumer convergence（2026-08-23）
+
+- `app.research.technical` 是provider-neutral pure research boundary；TW compatibility wrapper與US engine共用SMA-seeded EMA、Wilder RSI、MACD、KD與PVO numerical primitives。
+- Versioned `MarketAnalysisProfile` 分開US／TW的windows、minimum bars、currency、calendar、timezone、session、benchmark、price basis與corporate-action policy；US v1使用MA 5／10／20／50／60／200，completed daily raw-unadjusted bars。
+- `app.us_market.research_service` 只讀resolved cache，不觸發provider IO或DB write；輸出 `omi.us_market.research.v1`、`omi.research.technical.indicators.v1`與`omi.research.technical.structure.v1`。
+- US corporate-action completeness尚無checkpoint，因此AAPL等有足夠bars的technical facts可用，但 `decision_usable=false`，不得把raw-price structure描述成完整決策證據。
+- `/api/us-market/intraday/{symbol}` 由backend依America/New_York session anchor聚合1m／5m／15m／30m／1h／4h，regular、pre-market與after-hours不混桶，並揭露source/effective interval、aggregation method與partial-bar status。
+- Frontend不再用GET隱性補抓US OHLC，也不再自行產生canonical MA／technical title或professional intraday aggregation；read/refresh ownership已分開。
+- Local universe與provider-reported sector/industry coverage已有versioned gate；因expected full universe、standard taxonomy與effective membership date尚未證明，US `market.breadth`、`market.sectors`與`market.hot_groups`繼續truthful unsupported。
+
+## 21. 驗證層級
+
+至少建立以下 contract tests：
+
+- Canonical serialization。
+- KGI TW / MIS adapter。
+- KGI US / Yahoo / AlphaVantage adapter（後續 integration milestone）。
+- Resolver primary/fallback。
+- require_live / prefer_live / cache_only。
+- Viewer / Research Lease lifecycle（後續 integration milestone）。
+- Trading Status。
+- Dataset expected / stale / not-applicable。
+- Provider / Dataset / Resolved Health。
+- Capability advertised/projection consistency。
+- Account partial/503/unknown cost。
+- API/MCP contract inventory。
+
+跨 Market Data Foundation 修改後，使用 repo safe validation wrapper 與最接近 regression tests。
+
+## 22. 後續拆分原則
+
+大型檔案只按穩定責任拆，不按行數拆。
+
+優先抽離：
+
+- provider IO。
+- canonical conversion。
+- resolver。
+- dataset lifecycle。
+- pure research projection。
+- outward schema conversion。
+
+避免同一批同時：
+
+- 重寫 provider。
+- 改 public route。
+- 改 DB。
+- 改 frontend。
+- 刪 legacy compatibility。
+
+先建立可驗證 seam，再逐步 cutover。

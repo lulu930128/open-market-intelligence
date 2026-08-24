@@ -1,0 +1,60 @@
+{
+  "schema_version": "omi.market_data_integration_v2.02a_source_baseline.v1",
+  "captured_at": "2026-08-21T23:04:22.6801788+08:00",
+  "repo": "C:\\project\\Open Market Intelligence",
+  "branch": "codex/tw-etf-provider-normalization",
+  "head": "aa65e65424f2d5de7255c4168a18ded9f8794301",
+  "dirty_status_entries": 72,
+  "source_attachment": {
+    "path": "%USERPROFILE%\\Downloads\\02A_Market_Data_Control_Plane_Research_Lease_v1_20260821.txt",
+    "sha256": "f39b0809371f540dd857dc2de1742f0264877e638406786bb204890479fd54bc"
+  },
+  "foundation_reference": {
+    "artifact": "docs/agent-runs/market-data-foundation-closure-runtime-acceptance-v1-20260819/artifacts/source-checkpoint.json",
+    "checkpoint_evidence_sha256": "99f95233bb35afb033bcce7c0f959a00eb74b785c4734608b80e0f153e80a39d",
+    "validation_result": "passed",
+    "expected_target_count": 30,
+    "observed_target_count": 30,
+    "current_mismatch_count": 0,
+    "closure_eligible": false,
+    "closure_blockers": [
+      "CLOSING_AUCTION_TRIAL_LEAKAGE_IN_REALTIME_STREAM",
+      "FORMAL_PREOPEN_OPENING_REGULAR_CLEANUP_ROLLBACK_PENDING"
+    ]
+  },
+  "protected_files": [
+    {
+      "path": "backend/app/market_data/__init__.py",
+      "sha256": "36bb9f5b5343c5a2f18f55d81325df6bedd5486a7acef1d07857542622336643"
+    },
+    {
+      "path": "backend/app/ai/query_plan.py",
+      "sha256": "439e8974b233f010bb38253e901a7bec36c4c8bc09de1d8f2ad04280f6e390bf"
+    },
+    {
+      "path": "backend/app/ai/market_context/taiwan_stock.py",
+      "sha256": "84cef277d3b800ecb953fa315e8a8d4e22cc7d3131e418c58f502e1f043d4268"
+    },
+    {
+      "path": "agents/omi_mcp_server/public_contract_snapshot.json",
+      "sha256": "bd99a936506802f3cddee58eb59c41b16e779a0786c37b24c65ff898239d481e"
+    }
+  ],
+  "planned_dark_modules": [
+    "backend/app/market_data/provider_policy.py",
+    "backend/app/market_data/research_lease.py",
+    "backend/app/market_data/control_plane.py",
+    "backend/app/market_data/acquisition_observability.py"
+  ],
+  "planned_modules_existed_before_02a": false,
+  "production_import_matches_before_02a": [],
+  "safety": {
+    "production_wiring": false,
+    "real_provider_calls": 0,
+    "research_leases_created": 0,
+    "db_writes": 0,
+    "runtime_mutations": 0,
+    "commit_or_push": false
+  },
+  "result": "passed"
+}

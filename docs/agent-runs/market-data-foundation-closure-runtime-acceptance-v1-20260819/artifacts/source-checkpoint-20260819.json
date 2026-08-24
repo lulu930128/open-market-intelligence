@@ -1,0 +1,76 @@
+{
+  "schema_version": "omi.market_data_foundation.source_checkpoint.v1",
+  "captured_at": "2026-08-19T22:18:45.3610667+08:00",
+  "branch": "codex/tw-etf-provider-normalization",
+  "head": "aa65e65424f2d5de7255c4168a18ded9f8794301",
+  "public_contract_digest": "fec3d7d071dd7ca92d5245b94fca59d99801b901a8228f09e62cc2e9ebfdd7e2",
+  "public_contract_file_sha256": "bd99a936506802f3cddee58eb59c41b16e779a0786c37b24c65ff898239d481e",
+  "validation": {
+    "profile": "backend",
+    "log_directory": ".tmp/validation/20260819-221432",
+    "compileall": "passed",
+    "pytest": "1911 passed, 801 warnings in 237.67s",
+    "git_diff_check": "passed",
+    "result": "passed"
+  },
+  "files": [
+    {
+      "path": "backend/app/market_data/resolution.py",
+      "sha256": "f9d52e19c4932eb9ed6882b0029dbe87bce86aefdbace79206b42fd3b4a8831e"
+    },
+    {
+      "path": "backend/app/market_data/registry.py",
+      "sha256": "01171ba39232655dad37c9a02ea2a33d681c5e917944cbc90d53ede9619b334b"
+    },
+    {
+      "path": "backend/app/ai/capability_contract.py",
+      "sha256": "3a5d08ad612ea74f3e6f1aeb93a5dcce0c7c939634d14b701c997dfaa1969844"
+    },
+    {
+      "path": "backend/app/runtime.py",
+      "sha256": "8cbed8101dbe1b5a0311d56337a244df2c19fad8bf259a758e7ce5b9f24ac626"
+    },
+    {
+      "path": "backend/app/routers/system.py",
+      "sha256": "cdaf5dbec125dc474770b1e83b5c0390b77349c5991460a43983651a8209b22f"
+    },
+    {
+      "path": "backend/app/market/quote_depth.py",
+      "sha256": "4d0263014da74fcd741932e223f94aad83ee7b0f62e0ccee404e7736c11b78de"
+    },
+    {
+      "path": "backend/tests/test_market_data_resolution.py",
+      "sha256": "3284e50c93f01c5a667d854580d8124be29ba8e9d3e17192fbdf04be54e24ca2"
+    },
+    {
+      "path": "backend/tests/test_market_data_registry.py",
+      "sha256": "3287e19ed40b5516f1304c1f498d85f06815dea360d5a913dc471d0f327dafc0"
+    },
+    {
+      "path": "backend/tests/test_runtime.py",
+      "sha256": "b33646a829e2980daa1b5aaca7dfeeacaf430f0d9a81d92ca73d4c78e6565290"
+    },
+    {
+      "path": "backend/tests/test_ai_tool_boundaries.py",
+      "sha256": "0667f832ab34a7b835b1d160a9ba35a8ea85a16c2c5b4c4a653691adc5d0e3b0"
+    },
+    {
+      "path": "backend/tests/test_us_sec_13f_engine.py",
+      "sha256": "f149e3f8fdfbf6e44b52958d3472071bf0d0d3344873b0dddde8c26b7143e10d"
+    },
+    {
+      "path": "backend/tests/test_system_health.py",
+      "sha256": "981dd567994b7a376cc77c8e2e7f2859c2d688ec92c864dd29994bb84bd0dc3e"
+    },
+    {
+      "path": "backend/tests/test_market_data_shadow_comparison.py",
+      "sha256": "2829a231f4dcaf211ed8e42592a6e18dc63beb3e8f22145ab5353a6c10577738"
+    },
+    {
+      "path": "agents/omi_mcp_server/public_contract_snapshot.json",
+      "sha256": "bd99a936506802f3cddee58eb59c41b16e779a0786c37b24c65ff898239d481e"
+    }
+  ],
+  "runtime_adoption": "pending",
+  "commit_push_authorized": false
+}

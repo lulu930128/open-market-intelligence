@@ -14,6 +14,9 @@ from app.market.broker_branch import (
     ensure_broker_branch_daily,
     probe_broker_branch_release,
 )
+from app.market.broker_branch_quality import (
+    reconcile_nstock_snapshot_quality_from_trade_rows,
+)
 from app.market.tw_universe import (
     TAIWAN_STOCK_INSTRUMENT_TYPE,
     TAIWAN_STOCK_MARKETS,
@@ -103,6 +106,27 @@ def _record_collection_event(
         )
 
 
+def _reconcile_existing_snapshot_quality(
+    db: Session,
+    *,
+    trade_date: date,
+    covered_stock_ids: set[str],
+) -> dict[str, int | str]:
+    try:
+        result = reconcile_nstock_snapshot_quality_from_trade_rows(
+            db,
+            source_name=NSTOCK_BRANCH_SOURCE_NAME,
+            expected_trade_date=trade_date,
+            stock_ids=sorted(covered_stock_ids),
+            max_stocks=max(len(covered_stock_ids), 1),
+        )
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
 def refresh_taiwan_broker_branch_market(
     db: Session,
     *,
@@ -124,6 +148,11 @@ def refresh_taiwan_broker_branch_market(
         db,
         trade_date=trade_date,
         universe=universe,
+    )
+    quality_reconciliation = _reconcile_existing_snapshot_quality(
+        db,
+        trade_date=trade_date,
+        covered_stock_ids=covered_before,
     )
     missing = [stock_id for stock_id in universe if stock_id not in covered_before]
     request_budget = max(int(max_stocks), 1)
@@ -148,6 +177,7 @@ def refresh_taiwan_broker_branch_market(
             "error_count": 0,
             "error_samples_are_capped": False,
             "errors": [],
+            "quality_reconciliation": quality_reconciliation,
         }
         _record_collection_event(
             db,
@@ -180,6 +210,7 @@ def refresh_taiwan_broker_branch_market(
             "error_count": 0,
             "error_samples_are_capped": False,
             "errors": [],
+            "quality_reconciliation": quality_reconciliation,
         }
 
     probe_stock_id = "2330" if "2330" in universe else universe[0]
@@ -204,6 +235,7 @@ def refresh_taiwan_broker_branch_market(
             "error_count": 1,
             "error_samples_are_capped": False,
             "errors": [{"stock_id": probe_stock_id, "error": str(exc)}],
+            "quality_reconciliation": quality_reconciliation,
         }
         _record_collection_event(
             db,
@@ -236,6 +268,7 @@ def refresh_taiwan_broker_branch_market(
             "error_count": 0,
             "error_samples_are_capped": False,
             "errors": [],
+            "quality_reconciliation": quality_reconciliation,
         }
         _record_collection_event(
             db,
@@ -338,6 +371,7 @@ def refresh_taiwan_broker_branch_market(
         "error_count": error_count,
         "error_samples_are_capped": error_count > len(errors),
         "errors": errors,
+        "quality_reconciliation": quality_reconciliation,
         "max_stocks": request_budget,
         "max_runtime_seconds": runtime_limit,
         "sleep_seconds": delay_seconds,

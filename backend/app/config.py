@@ -1,5 +1,8 @@
 ﻿from pathlib import Path
 
+from typing import Literal
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -170,6 +173,9 @@ class Settings(BaseSettings):
     scheduler_tw_broker_branch_max_runtime_seconds: int = 7200
     scheduler_tw_broker_branch_reconcile_interval_minutes: int = 30
     scheduler_tw_broker_branch_reconcile_until: str = "20:00"
+    enable_tw_broker_branch_behavior_shadow_scheduler: bool = False
+    scheduler_tw_broker_branch_behavior_shadow_time: str = "20:15"
+    scheduler_tw_broker_branch_behavior_lookback_sessions: int = 120
     enable_tw_stock_detail_scheduler: bool = True
     scheduler_tw_institutional_refresh_time: str = "20:05"
     scheduler_tw_margin_refresh_time: str = "21:05"
@@ -202,6 +208,14 @@ class Settings(BaseSettings):
     scheduler_us_market_refresh_outputsize: str = "compact"
     scheduler_us_market_refresh_adjusted: bool = False
     scheduler_us_market_refresh_sleep_seconds: float = 12.0
+    enable_eod_coverage_scheduler: bool = True
+    scheduler_eod_coverage_markets: str = "TW,US"
+    scheduler_eod_coverage_interval_minutes: int = 30
+    scheduler_eod_coverage_us_max_symbols_per_run: int = 250
+    scheduler_eod_coverage_us_max_runtime_seconds: int = 600
+    scheduler_eod_coverage_us_sleep_seconds: float = 1.0
+    scheduler_eod_coverage_us_max_consecutive_errors: int = 5
+    scheduler_eod_coverage_error_backoff_seconds: int = 1800
     enable_us_corporate_event_scheduler: bool = True
     scheduler_us_corporate_event_refresh_hours: int = 3
     us_corporate_event_http_timeout_seconds: int = 20
@@ -263,6 +277,24 @@ class Settings(BaseSettings):
     finmind_token: str | None = None
     alphavantage_api_key: str | None = None
     fred_api_key: str | None = None
+    enable_kgi_superpy_quote: bool = False
+    canonical_market_data_mode: Literal["off", "shadow", "compare"] = "off"
+    us_canonical_market_data_mode: Literal[
+        "off", "shadow", "compare", "canary", "on"
+    ] | None = None
+    us_canonical_shadow_symbols: str = ""
+    us_canonical_canary_max_symbols: int = Field(default=5, ge=1, le=50)
+    kgi_superpy_person_id: str | None = None
+    kgi_superpy_password: str | None = None
+    kgi_superpy_simulation: bool = False
+    kgi_superpy_python: str | None = None
+    kgi_superpy_tw_account: str | None = None
+    kgi_superpy_us_account: str | None = None
+    kgi_superpy_quote_stale_seconds: int = 180
+    kgi_superpy_lease_ttl_seconds: int = 60
+    kgi_superpy_idle_shutdown_seconds: int = 120
+    kgi_superpy_start_timeout_seconds: float = 30.0
+    kgi_superpy_command_timeout_seconds: float = 45.0
     kgi_api_key: str | None = None
     kgi_api_secret: str | None = None
     kgi_account: str | None = None
@@ -322,6 +354,12 @@ class Settings(BaseSettings):
     crypto_market_long_short_ratio_period: str = "5m"
     crypto_market_long_short_ratio_limit: int = 30
     omi_http_trust_env: bool = False
+    omi_atlas_shadow_enabled: bool = False
+    omi_atlas_api_base_url: str = "http://127.0.0.1:8790"
+    omi_atlas_timeout_seconds: float = Field(default=1.5, ge=0.2, le=10.0)
+    omi_atlas_max_events: int = Field(default=5, ge=1, le=12)
+    omi_atlas_max_evidence_per_event: int = Field(default=3, ge=1, le=5)
+    omi_atlas_lookback_hours: int = Field(default=168, ge=1, le=720)
     openai_api_key: str | None = None
     openai_llm_api_key: str | None = None
     omi_openai_env_file: str | None = None
@@ -334,7 +372,7 @@ class Settings(BaseSettings):
     omi_ai_trust_token: str | None = None
 
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / ".env",
+        env_file=(PROJECT_ROOT / ".env", PROJECT_ROOT / ".env.runtime"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

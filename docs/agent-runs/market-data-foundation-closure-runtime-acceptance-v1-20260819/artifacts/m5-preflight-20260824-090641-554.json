@@ -1,0 +1,157 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_preflight.v1",
+  "captured_at": "2026-08-24T09:06:41.5561375+08:00",
+  "timezone": "Asia/Taipei",
+  "expected_date": "2026-08-24",
+  "runtime_action": "Check",
+  "expected_mode": "compare",
+  "target": {
+    "market": "TW",
+    "symbol": "2330"
+  },
+  "source": {
+    "checkpoint_file_sha256": "6f2e0e8724704b83a22a63750583e6a5d4d2ed7a4a8d651e0332b9e64d1c543e",
+    "target_count": 30,
+    "target_mismatch_count": 0,
+    "public_contract_digest": "63f5197dc03e258d4f6f113000fe6baffc4055da82fa06dba8ca994869bdf717",
+    "branch": "codex/tw-etf-provider-normalization",
+    "head": "aa65e65424f2d5de7255c4168a18ded9f8794301",
+    "dirty_count": 170
+  },
+  "acceptance_harness": {
+    "launcher_sha256": "faa54a5f9efe8648bd9e1780eefb4eb1579f1845c1bd4cae7493b5036bea2f8d",
+    "preflight_sha256": "a633eb78f48b22d304ac70d0cc528f9d5d27a698ca9ed2df4e439f578756d867",
+    "mcp_smoke_sha256": "022a3ceeceb1e67c2637c2a5fa0960454c31287a931658bb5d0ac123d4ddb4dc"
+  },
+  "runtime": {
+    "backend_url": "http://127.0.0.1:8400",
+    "frontend_url": "http://127.0.0.1:3000",
+    "launcher_log": "logs\\launcher\\2026-08-24\\launcher.log",
+    "listener_pid": 33624,
+    "launcher_pid": 21368,
+    "effective_mode": "compare",
+    "health": "ok",
+    "ready": "ready",
+    "project_root": "C:\\project\\Open Market Intelligence",
+    "python": "C:\\project\\Open Market Intelligence\\.venv\\Scripts\\python.exe",
+    "started_launcher_pid": null,
+    "previous_listener_pid": null,
+    "lineage": [
+      {
+        "depth": 0,
+        "pid": 33624,
+        "parent_pid": 60392,
+        "created_at": "2026-08-24T09:04:00.0041520+08:00",
+        "executable": "C:\\miniconda3\\python.exe",
+        "command_line": "\"C:\\project\\Open Market Intelligence\\.venv\\Scripts\\python.exe\"  -m uvicorn app.main:app --host 127.0.0.1 --port 8400 "
+      },
+      {
+        "depth": 1,
+        "pid": 60392,
+        "parent_pid": 8212,
+        "created_at": "2026-08-24T09:03:59.9988440+08:00",
+        "executable": "C:\\project\\Open Market Intelligence\\.venv\\Scripts\\python.exe",
+        "command_line": "\"C:\\project\\Open Market Intelligence\\.venv\\Scripts\\python.exe\"  -m uvicorn app.main:app --host 127.0.0.1 --port 8400 "
+      },
+      {
+        "depth": 2,
+        "pid": 8212,
+        "parent_pid": 7016,
+        "created_at": "2026-08-24T09:03:59.9658240+08:00",
+        "executable": "C:\\WINDOWS\\System32\\cmd.exe",
+        "command_line": "\"C:\\WINDOWS\\System32\\cmd.exe\" /d /s /c \"\"C:\\project\\Open Market Intelligence\\.venv\\Scripts\\python.exe\" -m uvicorn app.main:app --host 127.0.0.1 --port 8400 >> \"C:\\project\\Open Market Intelligence\\logs\\backend\\2026-08-24\\backend.log\" 2>&1\""
+      },
+      {
+        "depth": 3,
+        "pid": 7016,
+        "parent_pid": 21368,
+        "created_at": "2026-08-24T09:03:59.7051530+08:00",
+        "executable": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "command_line": "\"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"C:\\project\\Open Market Intelligence\\scripts\\run-service-logged.ps1\" -ServiceName \"backend\" -RepoRoot \"C:\\project\\Open Market Intelligence\" -WorkingDirectory \"C:\\project\\Open Market Intelligence\\backend\" -FilePath \"C:\\project\\Open Market Intelligence\\.venv\\Scripts\\python.exe\" -ArgumentsJsonBase64 WyItbSIsInV2aWNvcm4iLCJhcHAubWFpbjphcHAiLCItLWhvc3QiLCIxMjcuMC4wLjEiLCItLXBvcnQiLCI4NDAwIl0= -LauncherPid 21368 "
+      },
+      {
+        "depth": 4,
+        "pid": 21368,
+        "parent_pid": 34868,
+        "created_at": "2026-08-24T09:03:55.9171380+08:00",
+        "executable": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "command_line": "\"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File \"C:\\project\\Open Market Intelligence\\scripts\\omi-launcher.ps1\" -LauncherAction Run"
+      }
+    ]
+  },
+  "calendar": {
+    "date": "2026-08-24",
+    "is_trading_day": true,
+    "phase": "regular",
+    "reason": "trading_day",
+    "next_trading_day": "2026-08-25",
+    "source": "TWSE Holiday Schedule OpenAPI",
+    "cache_status": "current",
+    "verified_years": [
+      2025,
+      2026
+    ],
+    "warning": null,
+    "result": "passed"
+  },
+  "public_contract": {
+    "expected_digest": "63f5197dc03e258d4f6f113000fe6baffc4055da82fa06dba8ca994869bdf717",
+    "live_digest": "63f5197dc03e258d4f6f113000fe6baffc4055da82fa06dba8ca994869bdf717",
+    "omi_ask_present": true,
+    "result": "passed"
+  },
+  "frontend": {
+    "status": "ok",
+    "frontend_dir": "C:\\project\\Open Market Intelligence\\frontend",
+    "api_proxy_target": "http://127.0.0.1:8400",
+    "attempts": 1,
+    "wait_seconds": 0.014,
+    "last_error": null,
+    "result": "passed"
+  },
+  "mcp": {
+    "result": "passed",
+    "protocol_version": "2025-06-18",
+    "server_name": "omi-mcp-server",
+    "tool_count": 3,
+    "omi_ask_present": true
+  },
+  "viewer_baseline": {
+    "stream": {
+      "provider": "kgi_superpy",
+      "stock_id": "2330",
+      "status": "not_subscribed",
+      "active_leases": 0,
+      "sequence": 0,
+      "event_time": null,
+      "received_at": null,
+      "is_stale": false,
+      "capability_status": {
+        "recent_trades": "empty",
+        "auction_observations": "empty",
+        "minute_kbars": "empty",
+        "depth_metrics": "empty"
+      },
+      "warning_count": 0
+    },
+    "bridge_processes": [
+      {
+        "pid": 52772,
+        "parent_pid": 33624,
+        "created_at": "2026-08-24T09:04:21.2883310+08:00"
+      },
+      {
+        "pid": 58540,
+        "parent_pid": 52772,
+        "created_at": "2026-08-24T09:04:21.3145260+08:00"
+      }
+    ],
+    "result": "failed"
+  },
+  "viewer_readiness": null,
+  "result": "failed",
+  "failure_code": "VIEWER_BASELINE_NOT_CLEAN",
+  "failure_reason": "[VIEWER_BASELINE_NOT_CLEAN] Viewer/KGI process baseline was not clean.",
+  "limitations": [],
+  "completed_at": "2026-08-24T09:06:44.3369236+08:00"
+}

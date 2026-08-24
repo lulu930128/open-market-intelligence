@@ -1,0 +1,30 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_preopen_fix_source_validation.v1",
+  "captured_at": "2026-08-21T09:17:00+08:00",
+  "source_checkpoint_sha256": "99f95233bb35afb033bcce7c0f959a00eb74b785c4734608b80e0f153e80a39d",
+  "official_wrapper": ".\\scripts\\run-safe-validation.ps1 -Profile backend",
+  "log_directory": ".tmp/validation/20260821-091318",
+  "compileall": {
+    "result": "passed",
+    "duration_seconds": 0
+  },
+  "pytest": {
+    "result": "passed",
+    "tests": 1915,
+    "warnings": 801,
+    "duration_seconds": 233.56
+  },
+  "git_diff_check": {
+    "result": "passed",
+    "duration_seconds": 0
+  },
+  "initial_sandbox_attempt": {
+    "result": "runner_cleanup_failed",
+    "product_assertion_failure_markers": 0,
+    "reason": "pytest cleanup_dead_symlinks could not read the sandbox-created basetemp ACL"
+  },
+  "interpretation": "The clean normal-Windows run proves the earlier non-zero exit was an execution-sandbox ACL cleanup limitation, not an OMI product regression.",
+  "external_provider_calls_added": false,
+  "ports_stopped": false,
+  "result": "passed"
+}

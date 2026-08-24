@@ -13,10 +13,14 @@ from app.us_market.errors import USMarketDataFetchError
 from app.us_market.providers import alphavantage, finra, fred, nasdaq, sec, yahoo
 from app.us_market.symbols import normalize_us_symbol
 from app.us_market.trading_calendar import (
-    US_POST_MARKET_CLOSE_TIME,
     US_PRE_MARKET_OPEN_TIME,
-    US_SESSION_CLOSE_TIME,
     US_SESSION_OPEN_TIME,
+    us_post_market_close_time,
+    us_session_close_time,
+)
+from app.us_market.volume_semantics import (
+    normalize_yahoo_intraday_volume,
+    summarize_intraday_volume,
 )
 
 
@@ -93,17 +97,17 @@ def _minutes(value: time) -> int:
 
 US_PRE_MARKET_OPEN_MINUTES = _minutes(US_PRE_MARKET_OPEN_TIME)
 US_SESSION_OPEN_MINUTES = _minutes(US_SESSION_OPEN_TIME)
-US_SESSION_CLOSE_MINUTES = _minutes(US_SESSION_CLOSE_TIME)
-US_POST_MARKET_CLOSE_MINUTES = _minutes(US_POST_MARKET_CLOSE_TIME)
 
 
 def _us_intraday_session(value: datetime) -> str:
     minutes = value.hour * 60 + value.minute
+    session_close_minutes = _minutes(us_session_close_time(value.date()))
+    post_market_close_minutes = _minutes(us_post_market_close_time(value.date()))
     if US_PRE_MARKET_OPEN_MINUTES <= minutes < US_SESSION_OPEN_MINUTES:
         return "pre_market"
-    if US_SESSION_OPEN_MINUTES <= minutes <= US_SESSION_CLOSE_MINUTES:
+    if US_SESSION_OPEN_MINUTES <= minutes <= session_close_minutes:
         return "regular"
-    if US_SESSION_CLOSE_MINUTES < minutes <= US_POST_MARKET_CLOSE_MINUTES:
+    if session_close_minutes < minutes <= post_market_close_minutes:
         return "after_hours"
     return "off_session"
 
@@ -818,12 +822,18 @@ def parse_yahoo_intraday_prices(
             continue
 
         point_time = datetime.fromtimestamp(int(timestamp), tz=tz)
+        session = _us_intraday_session(point_time)
+        volume, volume_status = normalize_yahoo_intraday_volume(
+            _parse_int(_list_value(volumes, index)),
+            session=session,
+        )
         all_points.append(
             {
                 "time": point_time.isoformat(),
-                "session": _us_intraday_session(point_time),
+                "session": session,
                 "price": price,
-                "volume": _parse_int(_list_value(volumes, index)),
+                "volume": volume,
+                "volume_status": volume_status,
                 "open": _parse_float(_list_value(opens, index)),
                 "high": _parse_float(_list_value(highs, index)),
                 "low": _parse_float(_list_value(lows, index)),
@@ -843,6 +853,18 @@ def parse_yahoo_intraday_prices(
     warnings: list[str] = []
     if session_scope != "regular" and extended_point_count == 0:
         warnings.append("Yahoo chart did not return extended-hours points for this request.")
+    zero_filled_extended_count = sum(
+        1
+        for point in points
+        if point.get("session") in {"pre_market", "after_hours"}
+        and point.get("volume_status") == "provider_unavailable"
+    )
+    if zero_filled_extended_count:
+        warnings.append(
+            "Yahoo extended-hours volume is zero-filled by the provider; "
+            "OMI returned unknown volume instead of traded zero."
+        )
+    volume_metadata = summarize_intraday_volume(points)
 
     previous_close = (
         _parse_float(meta.get("chartPreviousClose"))
@@ -869,6 +891,7 @@ def parse_yahoo_intraday_prices(
         "regular_session_close_time": (
             latest_regular_point.get("time") if latest_regular_point else None
         ),
+        **volume_metadata,
         "point_count": len(points),
         "points": points,
         "source_url": source_url,

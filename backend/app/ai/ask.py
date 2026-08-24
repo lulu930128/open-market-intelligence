@@ -25,6 +25,7 @@ from app.ai import (
     tools,
 )
 from app.ai.schemas import AiAskRequest
+from app.ai.market_context import atlas_context
 from app.portfolio import service as portfolio_service
 
 
@@ -314,6 +315,18 @@ def ask(
             requested_contract_version=payload.contract_version,
         )
 
+    user_selection = dict(payload.selection)
+    atlas_selection = (
+        atlas_context.selection_with_atlas_shadow(
+            user_selection,
+            scope_type=scope_type,
+        )
+        if payload.contract_version == "omi.decision.v4"
+        else user_selection
+    )
+    if atlas_selection != user_selection:
+        payload = payload.model_copy(update={"selection": atlas_selection})
+
     effective_mode = _effective_mode(requested_mode, scope_type, policy, warnings)
     execution_plan = query_plan.build_query_plan(
         payload=payload,
@@ -328,7 +341,7 @@ def ask(
         else {}
     )
     explicit_domain_selection = bool(
-        payload.selection
+        user_selection
         or execution_plan.matched_positive_terms
         or execution_plan.matched_negative_terms
         or any(
@@ -437,6 +450,14 @@ def ask(
     warnings = mode_result.warnings
 
     response_target = _resolution_target(resolution)
+    if (
+        payload.contract_version == "omi.decision.v4"
+        and atlas_context.atlas_selected(execution_plan.selection)
+    ):
+        atlas_context.attach_to_result(
+            result,
+            atlas_context.read_shadow_context(target=response_target),
+        )
     assembled = ask_stages.assemble_response_analysis(
         result=result,
         freshness_result=freshness_result,

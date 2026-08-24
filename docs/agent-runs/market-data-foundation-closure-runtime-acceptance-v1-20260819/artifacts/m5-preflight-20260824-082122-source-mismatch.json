@@ -1,0 +1,108 @@
+{
+  "schema_version": "omi.market_data_foundation.source_mismatch.v1",
+  "captured_at": "2026-08-24T08:21:37.5171265+08:00",
+  "timezone": "Asia/Taipei",
+  "stage": "m5_preflight",
+  "expected_date": "2026-08-24",
+  "target": {
+    "market": "TW",
+    "symbol": "2330"
+  },
+  "checkpoint": {
+    "path": "artifacts/source-checkpoint.json",
+    "sha256": "99f95233bb35afb033bcce7c0f959a00eb74b785c4734608b80e0f153e80a39d",
+    "validation_result": "passed",
+    "target_count": 30,
+    "mismatch_count": 14
+  },
+  "mismatches": [
+    {
+      "path": "backend/app/config.py",
+      "expected_sha256": "44a49385928968c787db2b9c93a2f3869840beda7c09324fb36fb4f6eba8cbe2",
+      "actual_sha256": "f7be5ebf0ec08f05409b33ccfeace960f0d4e614302c433ae00074c4e700f75b"
+    },
+    {
+      "path": "backend/app/market_data/contracts.py",
+      "expected_sha256": "0ecfaac0acf671823ba2ba0003da0070f30d125f1ed8b8733ef4bd378ae8216c",
+      "actual_sha256": "10d5e3c6d9c9e69ab13818afa875d944723733b6b4bbb7dbe8d0792fd140d4a0"
+    },
+    {
+      "path": "backend/app/market_data/resolution.py",
+      "expected_sha256": "f9d52e19c4932eb9ed6882b0029dbe87bce86aefdbace79206b42fd3b4a8831e",
+      "actual_sha256": "cd5cec4712cfd6a8c920112a1e68ce8a57c52e4f7394f34a2e07d0f9ef26855d"
+    },
+    {
+      "path": "backend/app/market_data/registry.py",
+      "expected_sha256": "01171ba39232655dad37c9a02ea2a33d681c5e917944cbc90d53ede9619b334b",
+      "actual_sha256": "fb6dc2ea72821537f641a61412218ddab04c2f7432a2a311fd0a97c965861bc5"
+    },
+    {
+      "path": "backend/app/ai/capability_contract.py",
+      "expected_sha256": "3a5d08ad612ea74f3e6f1aeb93a5dcce0c7c939634d14b701c997dfaa1969844",
+      "actual_sha256": "a775cf7c7fbe3c11cd4e368f75c5f2c49a5515accafcc7ce971ca691178a03a9"
+    },
+    {
+      "path": "backend/app/ai/capability_projection_registry.py",
+      "expected_sha256": "14a044e869443d40ddabf7dfdf807efd27bfede67aceee9824437b8ff1a88c02",
+      "actual_sha256": "ce40f8d51ec839cb12dd8f1ab7676dfd1290f0a962369f618b1476678e34347f"
+    },
+    {
+      "path": "backend/app/routers/system.py",
+      "expected_sha256": "cdaf5dbec125dc474770b1e83b5c0390b77349c5991460a43983651a8209b22f",
+      "actual_sha256": "2a156f02568f1b269359c2c2fcde20a5ba53371b23aa84b0e8e382fa2b08967b"
+    },
+    {
+      "path": "backend/tests/test_market_data_resolution.py",
+      "expected_sha256": "3284e50c93f01c5a667d854580d8124be29ba8e9d3e17192fbdf04be54e24ca2",
+      "actual_sha256": "0b4b6998b29b4991700f9d6b41c1a077e640d68353b3bbcb27c1258470cebc11"
+    },
+    {
+      "path": "backend/tests/test_market_data_registry.py",
+      "expected_sha256": "3287e19ed40b5516f1304c1f498d85f06815dea360d5a913dc471d0f327dafc0",
+      "actual_sha256": "b125f2ae22fd6d6fba645e5ba55552328cc8b3b4020669c15d3143e33df909f6"
+    },
+    {
+      "path": "backend/tests/test_market_data_shadow_comparison.py",
+      "expected_sha256": "2829a231f4dcaf211ed8e42592a6e18dc63beb3e8f22145ab5353a6c10577738",
+      "actual_sha256": "97854435837bad9749bfd3826d594217d3b8712d1e0e8f1dfb0a69bd57be7ea7"
+    },
+    {
+      "path": "backend/tests/test_ai_capability_resolution_registry.py",
+      "expected_sha256": "2799c55d9b8cc57dca9192a69f445644e9e39c27728ecada8faa7e4e91234762",
+      "actual_sha256": "b3e7562f541f37851b0fe9d1f89399fd2f3b206204a509749295489831088252"
+    },
+    {
+      "path": "backend/tests/test_ai_tool_boundaries.py",
+      "expected_sha256": "0667f832ab34a7b835b1d160a9ba35a8ea85a16c2c5b4c4a653691adc5d0e3b0",
+      "actual_sha256": "ac5c2d3e1a8dd70c9de3316fb4be9a5d1da3cc17e98d311023d868521df7f1a2"
+    },
+    {
+      "path": "backend/tests/test_system_health.py",
+      "expected_sha256": "981dd567994b7a376cc77c8e2e7f2859c2d688ec92c864dd29994bb84bd0dc3e",
+      "actual_sha256": "55ccca89e3ae757b6b57b9f43fea4d9e043902926fc77313759949f6d97cdf11"
+    },
+    {
+      "path": "agents/omi_mcp_server/public_contract_snapshot.json",
+      "expected_sha256": "bd99a936506802f3cddee58eb59c41b16e779a0786c37b24c65ff898239d481e",
+      "actual_sha256": "b09406ef024ddaf7c2ac888f73d7805d6c5df19128fecd007b96681eb7dcca25"
+    }
+  ],
+  "runtime_preparation_attempted": false,
+  "calendar_checked": false,
+  "calendar_not_checked_reason": "Ordered fail-closed source gate failed before calendar/runtime checks.",
+  "viewer_lease_created": false,
+  "provider_sample_taken": false,
+  "prohibited_actions": {
+    "account_or_order": false,
+    "backfill_or_repair": false,
+    "db_write_probe": false,
+    "refresh_true": false,
+    "raw_payload_saved": false,
+    "unknown_lease_released": false,
+    "process_killed": false,
+    "commit_or_push": false
+  },
+  "failure_code": "FOUNDATION_TARGET_CHANGED",
+  "failure_reason": "14 of 30 checkpoint target files differ from the accepted source fingerprint.",
+  "result": "failed"
+}

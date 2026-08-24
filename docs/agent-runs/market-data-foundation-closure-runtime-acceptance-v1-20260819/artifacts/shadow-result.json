@@ -1,0 +1,42 @@
+{
+  "schema_version": "omi.market_data_foundation.mode_acceptance.v1",
+  "captured_at": "2026-08-19T22:21:13.9949087+08:00",
+  "source_checkpoint_sha256": "703caf9b23b79189a5db65dfb8b248686e4f2c4635c251d4f3174ab0ea573799",
+  "effective_mode": "shadow",
+  "target": {
+    "market": "TW",
+    "symbol": "2330",
+    "session": "post_close_snapshot",
+    "request": "/api/market/quote-depth/2330?refresh=true"
+  },
+  "provider": "twse_mis",
+  "stable_response_sha256": "f11a91a285ed97f42a6371cbf5ea33925532db20abce783091121c0a2997bc2a",
+  "matches_off": true,
+  "duration_ms": 393.41,
+  "telemetry": {
+    "event_delta": 1,
+    "contract_version": "omi.market.shadow_telemetry.v1",
+    "status": "validated",
+    "mismatch_count": 0,
+    "categories": [],
+    "reason_codes": []
+  },
+  "additional_external_call_delta": null,
+  "additional_subscription_delta": null,
+  "additional_db_write_delta": null,
+  "db_file": {
+    "length_before": 23578857472,
+    "length_after": 23578857472,
+    "last_write_changed": false
+  },
+  "source_side_effect_proof": {
+    "seam_has_db_or_session_argument": false,
+    "same_payload_adapter_test": "passed",
+    "external_fetch_mock_call_count": 0
+  },
+  "result": "passed",
+  "limitations": [
+    "No dedicated provider-call, subscription, or DB-write counter exists for the canonical seam; null is preserved instead of reported as zero.",
+    "Pass combines runtime outward/telemetry evidence with the pure same-payload seam test that has no DB/session handle and performs no external fetch."
+  ]
+}
