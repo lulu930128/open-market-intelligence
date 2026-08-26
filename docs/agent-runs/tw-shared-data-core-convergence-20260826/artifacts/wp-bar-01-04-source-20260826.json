@@ -1,0 +1,38 @@
+{
+  "artifact_version": "omi.agent_run.evidence.v1",
+  "recorded_at": "2026-08-26T13:29:16+08:00",
+  "packages": ["BAR-01", "BAR-02", "BAR-03", "BAR-04"],
+  "status": "SOURCE_COMPLETE",
+  "implemented": [
+    "market-owned NStock and Yahoo descriptors, adapters, and acquisition executor",
+    "typed MarketIntradayBarLineage storage and additive migration 0070",
+    "explicit transaction ownership and mandatory repository reread",
+    "cache-only GET paths and bounded explicit POST refresh",
+    "outward resolved health, rejection, limitation, and derived lineage projection",
+    "platform-owned tw.intraday.bars lifecycle contract"
+  ],
+  "validation": [
+    {
+      "scope": "focused platform migration catalog api",
+      "result": "46 passed, 69 warnings, 60 subtests passed"
+    },
+    {
+      "scope": "V3 intraday contract quote cold-read registry",
+      "result": "154 passed, 1 failed; failure was QUALITY_FUTURE_TIMESTAMP in an inconsistent test clock"
+    },
+    {
+      "scope": "corrected cold-read fixture",
+      "result": "1 passed"
+    },
+    {
+      "scope": "compileall and diff check",
+      "result": "passed"
+    }
+  ],
+  "pending": [
+    "provider live IO",
+    "named runtime adoption",
+    "user database migration",
+    "frontend typecheck in final cross-surface validation"
+  ]
+}

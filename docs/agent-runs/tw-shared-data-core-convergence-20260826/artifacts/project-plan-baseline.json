@@ -1,0 +1,52 @@
+{
+  "schema_version": "omi.agent_run.project_plan_baseline.v1",
+  "job_id": "2a57c0ff-c928-49da-9c7c-9509bef30333",
+  "plan_version": "2026-08-26.6",
+  "branch": "codex/tw-etf-provider-normalization",
+  "program_status": "ready_for_implementation",
+  "current_gate": "G1",
+  "next_work_package": "KGI-03",
+  "work_package_count": 24,
+  "source_complete_packages": [
+    "BASE-01",
+    "BASE-02",
+    "CORE-01",
+    "CORE-02",
+    "CORE-03",
+    "KGI-01",
+    "KGI-02"
+  ],
+  "deferred_packages": [
+    "TAIL-03"
+  ],
+  "required_program_gates": [
+    "G0_CURRENT_TRUTH",
+    "G1_CONTRACT",
+    "G2_VERTICAL_SLICE",
+    "G3_CROSS_SURFACE",
+    "G4_RUNTIME_ADOPTION",
+    "G5_LIVE_SESSION",
+    "G6_DEBT_CLOSEOUT"
+  ],
+  "production_code_changed_by_planning_checkpoint": false,
+  "runtime_checked_by_planning_checkpoint": false,
+  "live_session_checked_by_planning_checkpoint": false,
+  "explicit_runtime_authority_required": true,
+  "planning_validation": {
+    "package_index_count": 24,
+    "package_sets_consistent": true,
+    "referenced_targeted_test_files": 25,
+    "missing_targeted_test_files": 0,
+    "strict_utf8_and_structure": "pass",
+    "json_parse": "pass",
+    "whitespace_check": "pass",
+    "production_tests_run": false
+  },
+  "truth_rules": [
+    "source_complete_is_not_runtime_adopted",
+    "runtime_ready_is_not_live_accepted",
+    "missed_session_stays_pending",
+    "unknown_is_not_zero",
+    "trial_is_not_trade"
+  ]
+}

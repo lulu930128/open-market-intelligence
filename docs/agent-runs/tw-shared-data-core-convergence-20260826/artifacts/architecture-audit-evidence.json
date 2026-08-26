@@ -1,0 +1,48 @@
+{
+  "schema_version": "omi.agent_run.architecture_audit.v1",
+  "job_id": "2a57c0ff-c928-49da-9c7c-9509bef30333",
+  "audit_date": "2026-08-26",
+  "branch": "codex/tw-etf-provider-normalization",
+  "scope": "source_and_test_architecture_audit",
+  "production_code_changed": false,
+  "runtime_checked": false,
+  "live_session_checked": false,
+  "worktree": {
+    "dirty_before_audit": true,
+    "overlapping_existing_file": "backend/app/market/intraday.py",
+    "preservation_rule": "do_not_modify_or_revert_existing_hunks"
+  },
+  "verified": {
+    "gateway_depth_auction_application_wiring_missing": true,
+    "resolver_depth_auction_contract_exists": true,
+    "public_quote_repository_is_mis_only": true,
+    "router_direct_kgi_lease_binding_exists": true,
+    "quote_depth_owns_legacy_selection_and_transaction": true,
+    "intraday_owns_nstock_yahoo_fallback_and_persistence": true,
+    "current_index_breadth_orchestration_is_legacy_owned": true,
+    "quality_requirement_central_enforcement_missing": true,
+    "dataset_health_freshness_is_not_evaluated": true,
+    "ai_company_profile_direct_orm_query_exists": true
+  },
+  "validation": {
+    "strict_utf8_readback": "pass",
+    "json_parse": "pass",
+    "markdown_fences": "pass",
+    "new_file_whitespace_check": "pass",
+    "git_diff_check": "pass_with_existing_line_ending_warnings",
+    "production_tests_run": false
+  },
+  "additional_get_side_effect_surfaces": [
+    "/api/market/intraday/{stock_id}",
+    "/api/market/intraday/{stock_id}/history",
+    "/api/market/quote-depth/{stock_id}",
+    "/api/market/indices/{index_id}/intraday"
+  ],
+  "pending": [
+    "runtime_source_adoption",
+    "kgi_live_entitlement_and_payload",
+    "m5_regular_closing_symbol_switch_cleanup",
+    "cross_surface_runtime_truth_parity",
+    "implementation_validation"
+  ]
+}
