@@ -1,0 +1,72 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_preflight.v2",
+  "captured_at": "2026-08-26T09:03:36.7276567+08:00",
+  "timezone": "Asia/Taipei",
+  "expected_date": "2026-08-26",
+  "runtime_action": "SourceOnly",
+  "expected_mode": "compare",
+  "target": {
+    "market": "TW",
+    "symbol": "2330"
+  },
+  "source": {
+    "checkpoint_file_sha256": "8acbaea6fa4566416c67dc1e1745e4a080e2b6ee8e341fd1c0edc501f56badf2",
+    "target_count": 30,
+    "target_mismatch_count": 0,
+    "public_contract_digest": "63f5197dc03e258d4f6f113000fe6baffc4055da82fa06dba8ca994869bdf717",
+    "extension_checkpoint_file_sha256": "29a74a6472285c17e7933276ecbd1f855a1a2b447762c306eb24380ffb9a34c6",
+    "extension_target_count": 30,
+    "extension_target_mismatch_count": 0,
+    "convergence_checkpoint_file_sha256": "377f20f4b39f5b1122bf81d9edc73d8487eb1df1edfde84cc697fbb2f274a155",
+    "convergence_target_count": 14,
+    "convergence_target_mismatch_count": 0,
+    "convergence_superseded_extension_target_count": 11,
+    "effective_extension_target_count": 33,
+    "extension_superseded_base_target_count": 18,
+    "branch": "codex/tw-etf-provider-normalization",
+    "head": "6d508c7021c1050680262ce4a83f5b33e9f5eda7",
+    "dirty_count": 148
+  },
+  "acceptance_harness": {
+    "launcher_sha256": "be975eaabf3f7ae38d83283a00a88f92a78c63a336afcab57d9336d77c05b399",
+    "preflight_sha256": "8c07bc01e7c4402f95652d35d30c720aa8a119eb4fddb0d8aaa91408d1d72f0a",
+    "mcp_smoke_sha256": "022a3ceeceb1e67c2637c2a5fa0960454c31287a931658bb5d0ac123d4ddb4dc",
+    "live_session_sha256": "9644bbc6c4e71124d8ee7ed7da862cb0aac878f89e12f1100e263337307da775",
+    "live_session_test_sha256": "ad8356f4518048d8b478490fec86682d98cabb492aec91ad2ea935f8857de41a"
+  },
+  "runtime": {
+    "result": "not_run",
+    "reason": "SourceOnly validates the dated source checkpoint and acceptance harness without reading or mutating runtime state."
+  },
+  "calendar": {
+    "result": "not_run",
+    "reason": "SourceOnly validates the dated source checkpoint and acceptance harness without reading or mutating runtime state."
+  },
+  "public_contract": {
+    "result": "not_run",
+    "reason": "SourceOnly validates the dated source checkpoint and acceptance harness without reading or mutating runtime state."
+  },
+  "frontend": {
+    "result": "not_run",
+    "reason": "SourceOnly validates the dated source checkpoint and acceptance harness without reading or mutating runtime state."
+  },
+  "mcp": {
+    "result": "not_run",
+    "reason": "SourceOnly validates the dated source checkpoint and acceptance harness without reading or mutating runtime state."
+  },
+  "viewer_baseline": {
+    "result": "not_run",
+    "reason": "SourceOnly validates the dated source checkpoint and acceptance harness without reading or mutating runtime state."
+  },
+  "viewer_readiness": {
+    "result": "not_run",
+    "reason": "SourceOnly validates the dated source checkpoint and acceptance harness without reading or mutating runtime state."
+  },
+  "result": "passed",
+  "failure_code": null,
+  "failure_reason": null,
+  "limitations": [
+    "Runtime identity, calendar, frontend, MCP, viewer leases, and bridge cleanup remain unverified until the same-day runtime stages."
+  ],
+  "completed_at": "2026-08-26T09:03:50.4055907+08:00"
+}

@@ -1,24 +1,25 @@
 {
   "schema_version": "omi.market_data_foundation.acceptance_extension_checkpoint.v1",
-  "captured_at": "2026-08-24T20:06:58.4657913+08:00",
+  "captured_at": "2026-08-26T10:25:16+08:00",
   "base_checkpoint_artifact": "docs/agent-runs/market-data-foundation-closure-runtime-acceptance-v1-20260819/artifacts/source-checkpoint.json",
   "base_checkpoint_sha256": "8acbaea6fa4566416c67dc1e1745e4a080e2b6ee8e341fd1c0edc501f56badf2",
   "validation": {
     "compileall": "passed",
-    "targeted_backend": "7 passed in the canonical-LF dark-boundary and extension overlay guard after the release integration refresh",
+    "targeted_backend": "7 passed in the canonical-LF dark-boundary and clean realtime/convergence overlay guard",
     "frontend_lint": "passed",
     "frontend_e2e": "58 passed against the production build on isolated port 3221 with controlled fixtures",
     "frontend_build": "passed including TypeScript and static page generation",
-    "offline_acceptance_harness": "passed with 10 categorized callbacks across 3 switch steps",
+    "offline_acceptance_harness": "passed with 10 categorized callbacks across 3 switch steps; live URL interpolation guard passed after the 2026-08-26 bounded harness repair",
     "full_backend_pre_checkpoint": "post-rebase validation isolated three checkpoint-drift failures; the first post-fix sandbox run reached 100 percent before pytest cleanup hit WinError 5",
     "full_safe_validation": "passed in .tmp/validation/20260824-195959: compileall; 2107 pytest tests; frontend lint, tsc, build; git diff check",
-    "checkpoint_guard": "passed through SourceOnly preflight with 28 extension targets, 13 superseded base targets, and zero mismatches",
+    "post_extension_backend": "2106 tests passed across isolated Windows pytest batches; one unchanged launcher subprocess tmp_path test was blocked by the managed sandbox ACL before test execution",
+    "checkpoint_guard": "passed through isolated SourceOnly preflight with 28 realtime targets, 13 convergence targets, 8 convergence overrides, 33 effective targets, 18 superseded base targets, and zero mismatches",
     "result": "passed"
   },
   "coverage": {
     "target_count": 28,
     "supersedes_matching_base_entries": true,
-    "reason": "Adds the bounded M5 remediation surface, current acceptance launcher dependency, and later validated source evolution without rewriting the dated base checkpoint.",
+    "reason": "Adds the bounded M5 remediation surface and current acceptance launcher dependency without rewriting the dated base checkpoint; later TW Data Core changes are supplied by the separate convergence overlay.",
     "excluded_self_referential_harness": "scripts/invoke-mdf-m5-preflight.ps1 is self-hashed at runtime and excluded because it embeds this checkpoint SHA-256."
   },
   "dependency_notes": [
@@ -51,8 +52,8 @@
     {"path": "frontend/e2e/omi-smoke.spec.ts", "sha256": "349d21f314f3e080388a299c76f1b7335ae72a91de45e4a917f2fe2ea41e3294"},
     {"path": "agents/omi_mcp_server/tw_market_dashboard_contract_snapshot.json", "sha256": "d76d19dd68b846738779fbab83daf6c53fb69586feace3f1da5917c4a3137c13"},
     {"path": "scripts/omi-launcher.ps1", "sha256": "be975eaabf3f7ae38d83283a00a88f92a78c63a336afcab57d9336d77c05b399"},
-    {"path": "scripts/invoke-mdf-m5-live-session.ps1", "sha256": "2f58b97b25f88cb860a5452d32cacf97efc195dc02ff06f73211735bbfa3e3c6"},
-    {"path": "scripts/test-invoke-mdf-m5-live-session.ps1", "sha256": "0980b61eaf838af970640895576b6349f3720e913f07319d06410a49a09562c9"},
+    {"path": "scripts/invoke-mdf-m5-live-session.ps1", "sha256": "9644bbc6c4e71124d8ee7ed7da862cb0aac878f89e12f1100e263337307da775"},
+    {"path": "scripts/test-invoke-mdf-m5-live-session.ps1", "sha256": "ad8356f4518048d8b478490fec86682d98cabb492aec91ad2ea935f8857de41a"},
     {"path": "docs/agent-runs/tw-realtime-market-state-remediation-20260824/fixtures/m5-offline-session.json", "sha256": "beaeb0a2c396f36389ba0fe9068e099a3d3af9ff5df08f1f2a1efbc35b5b289c"}
   ]
 }

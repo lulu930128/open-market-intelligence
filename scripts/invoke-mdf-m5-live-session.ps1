@@ -302,7 +302,7 @@ function Get-LiveSteps {
                 Throw-HarnessFailure -Code "INVALID_SYMBOL" -Message "Invalid Taiwan symbol: $symbol"
             }
             $encodedSymbol = [uri]::EscapeDataString($symbol)
-            $preLeaseSnapshot = Invoke-JsonRequest -Method GET -Url "$normalizedUrl/api/market/realtime-quotes/$encodedSymbol?diagnostic_limit=0" -TimeoutSeconds 5
+            $preLeaseSnapshot = Invoke-JsonRequest -Method GET -Url "$normalizedUrl/api/market/realtime-quotes/${encodedSymbol}?diagnostic_limit=0" -TimeoutSeconds 5
             $diagnosticBaseline = Get-PropertyValue $preLeaseSnapshot "diagnostic_counters"
             $lease = Invoke-JsonRequest -Method POST -Url "$normalizedUrl/api/market/realtime-quote-leases" -Body @{
                 stock_id = $symbol
@@ -319,7 +319,7 @@ function Get-LiveSteps {
             $nextHeartbeatMs = 15000
             while ($stepClock.Elapsed.TotalSeconds -lt $StepDurationSeconds) {
                 try {
-                    $snapshot = Invoke-JsonRequest -Method GET -Url "$normalizedUrl/api/market/realtime-quotes/$encodedSymbol?diagnostic_limit=120" -TimeoutSeconds 5
+                    $snapshot = Invoke-JsonRequest -Method GET -Url "$normalizedUrl/api/market/realtime-quotes/${encodedSymbol}?diagnostic_limit=120" -TimeoutSeconds 5
                     $snapshot | Add-Member -NotePropertyName "captured_offset_ms" -NotePropertyValue ([int]$stepClock.Elapsed.TotalMilliseconds) -Force
                     $samples.Add($snapshot)
                 }

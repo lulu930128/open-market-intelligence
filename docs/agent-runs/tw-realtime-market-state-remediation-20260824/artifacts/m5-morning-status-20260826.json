@@ -1,0 +1,82 @@
+{
+  "schema_version": "omi.mdf.m5.acceptance_status.v1",
+  "captured_at": "2026-08-26T09:10:26.3777998+08:00",
+  "trade_date": "2026-08-26",
+  "overall_status": "partial",
+  "source": {
+    "status": "passed",
+    "base_checkpoint_sha256": "8acbaea6fa4566416c67dc1e1745e4a080e2b6ee8e341fd1c0edc501f56badf2",
+    "realtime_extension_checkpoint_sha256": "29a74a6472285c17e7933276ecbd1f855a1a2b447762c306eb24380ffb9a34c6",
+    "convergence_checkpoint_sha256": "377f20f4b39f5b1122bf81d9edc73d8487eb1df1edfde84cc697fbb2f274a155",
+    "effective_extension_target_count": 33,
+    "mismatch_count": 0,
+    "artifact": "m5-source-only-post-live-url-fix-20260826-0903.json"
+  },
+  "runtime": {
+    "status": "passed",
+    "backend_url": "http://127.0.0.1:8400",
+    "frontend_url": "http://127.0.0.1:3000",
+    "listener_pid": 47556,
+    "launcher_pid": 51752,
+    "effective_mode": "compare",
+    "health": "ok",
+    "ready": "ready",
+    "public_contract_digest_match": true,
+    "frontend_proxy": "passed",
+    "mcp": "passed",
+    "total_active_leases": 0,
+    "bridge_process_running": false,
+    "subscription_worker_count": 0,
+    "artifact": "m5-restartservices-owned-normal-windows-20260826-0857.json"
+  },
+  "gates": {
+    "preopen": {
+      "status": "pending",
+      "reason": "Full viewer readiness and callback sampling did not complete before the 08:58 Opening window. Readiness evidence is not a Preopen pass."
+    },
+    "opening": {
+      "status": "pending",
+      "reason": "The first bounded live attempt exposed a task-owned PowerShell URL interpolation defect before lease acquisition. The repaired checkpoint and full Check completed after the 09:02 stop time, so Regular evidence cannot substitute."
+    },
+    "regular_callback_integrity": {
+      "status": "passed",
+      "artifact": "session-regular-20260826.json",
+      "callback_count": 147,
+      "unique_cumulative_advances": 27,
+      "trade_additions": 27,
+      "same_cumulative_suppressions": 119,
+      "decreasing_cumulative_suppressions": 0,
+      "trial_leak_count": 0,
+      "request_error_count": 0,
+      "first_useful_depth_ms": 6147
+    },
+    "regular_symbol_switch": {
+      "status": "passed",
+      "artifact": "session-regular-symbol-switch-20260826.json",
+      "symbols": ["2330", "2317", "2330"],
+      "first_useful_depth_ms": [530, 2559, 2568],
+      "request_error_count": 0,
+      "trial_leak_count": 0
+    },
+    "market_state": {
+      "status": "passed",
+      "artifact": "market-state-regular-20260826.json",
+      "resolved_index_authority": "passed",
+      "breadth_reconciliation": "passed"
+    },
+    "closing": {
+      "status": "pending",
+      "reason": "The independent 13:25 closing-auction and 13:30 formal-match window has not occurred yet."
+    }
+  },
+  "rollback": {
+    "status": "pending",
+    "reason": "Compare-to-off rollback is deferred until the remaining obtainable Closing gate is complete."
+  },
+  "artifact_policy": {
+    "lease_ids_included": false,
+    "raw_provider_payload_included": false,
+    "credentials_included": false,
+    "private_identity_included": false
+  }
+}

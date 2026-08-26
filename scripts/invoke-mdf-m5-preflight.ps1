@@ -6,7 +6,8 @@ param(
     [string]$ExpectedMode = "compare",
     [string]$ExpectedDate = (Get-Date -Format "yyyy-MM-dd"),
     [string]$ExpectedCheckpointSha256 = "8acbaea6fa4566416c67dc1e1745e4a080e2b6ee8e341fd1c0edc501f56badf2",
-    [string]$ExpectedExtensionCheckpointSha256 = "91d03b633749a0f98da6bf16ce2d4e43ac481bebb339ddd3ffd94cd9f9c621dd",
+    [string]$ExpectedExtensionCheckpointSha256 = "2ec7456200c310a778621df31747974cc468839c560d025680d870bc7d478619",
+    [string]$ExpectedConvergenceCheckpointSha256 = "460903c9692e09e3e81315b12a6c39fac3f36fcfa3eb5c4176516b4190e453ba",
     [string]$Symbol = "2330",
     [switch]$RunViewerReadiness,
     [ValidateRange(15, 180)][int]$StartupTimeoutSeconds = 90,
@@ -25,6 +26,7 @@ $script:TaskRoot = Join-Path $script:RepoRoot "docs\agent-runs\market-data-found
 $script:CheckpointPath = Join-Path $script:TaskRoot "artifacts\source-checkpoint.json"
 $script:ExtensionTaskRoot = Join-Path $script:RepoRoot "docs\agent-runs\tw-realtime-market-state-remediation-20260824"
 $script:ExtensionCheckpointPath = Join-Path $script:ExtensionTaskRoot "artifacts\acceptance-extension-checkpoint.json"
+$script:ConvergenceCheckpointPath = Join-Path $script:RepoRoot "docs\agent-runs\tw-market-data-platform-convergence-20260825\artifacts\foundation-extension-checkpoint.json"
 $script:ArtifactsRoot = Join-Path $script:TaskRoot "artifacts"
 $script:LauncherMutexName = "OpenMarketIntelligenceLauncher"
 $script:ExpectedProjectRoot = $script:RepoRoot.TrimEnd('\')
@@ -290,6 +292,7 @@ function Start-OfficialLauncher {
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $null = $startInfo.EnvironmentVariables.Count
     $startInfo.EnvironmentVariables["CANONICAL_MARKET_DATA_MODE"] = $Mode
     $process = [System.Diagnostics.Process]::Start($startInfo)
     if ($null -eq $process) {
@@ -661,6 +664,9 @@ function Test-SourceCheckpoint {
     if ($ExpectedExtensionCheckpointSha256 -notmatch '^[0-9a-fA-F]{64}$') {
         Throw-GateFailure -Code "EXTENSION_CHECKPOINT_NOT_CAPTURED" -Message "ExpectedExtensionCheckpointSha256 must be replaced after validation."
     }
+    if ($ExpectedConvergenceCheckpointSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        Throw-GateFailure -Code "CONVERGENCE_CHECKPOINT_NOT_CAPTURED" -Message "ExpectedConvergenceCheckpointSha256 must be replaced after validation."
+    }
     $actualExtensionHash = Get-Sha256 -Path $script:ExtensionCheckpointPath
     if ($actualExtensionHash -ne $ExpectedExtensionCheckpointSha256.ToLowerInvariant()) {
         Throw-GateFailure -Code "EXTENSION_CHECKPOINT_CHANGED" -Message "Expected extension checkpoint $ExpectedExtensionCheckpointSha256 but found $actualExtensionHash."
@@ -669,13 +675,31 @@ function Test-SourceCheckpoint {
     if ([string]$extension.validation.result -ne "passed") {
         Throw-GateFailure -Code "EXTENSION_VALIDATION_NOT_PASSED" -Message "Extension checkpoint validation result must be passed; found $([string]$extension.validation.result)."
     }
+    $actualConvergenceHash = Get-Sha256 -Path $script:ConvergenceCheckpointPath
+    if ($actualConvergenceHash -ne $ExpectedConvergenceCheckpointSha256.ToLowerInvariant()) {
+        Throw-GateFailure -Code "CONVERGENCE_CHECKPOINT_CHANGED" -Message "Expected convergence checkpoint $ExpectedConvergenceCheckpointSha256 but found $actualConvergenceHash."
+    }
+    $convergence = Get-Content -LiteralPath $script:ConvergenceCheckpointPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$convergence.validation.result -ne "passed") {
+        Throw-GateFailure -Code "CONVERGENCE_VALIDATION_NOT_PASSED" -Message "Convergence checkpoint validation result must be passed; found $([string]$convergence.validation.result)."
+    }
     $extensionMismatches = @()
     $extensionPaths = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
     )
+    $effectiveExtensionEntries = @{}
     foreach ($entry in $extension.files) {
         $relativePath = [string]$entry.path
         [void]$extensionPaths.Add($relativePath)
+        $effectiveExtensionEntries[$relativePath] = $entry
+    }
+    foreach ($entry in $convergence.files) {
+        $relativePath = [string]$entry.path
+        [void]$extensionPaths.Add($relativePath)
+        $effectiveExtensionEntries[$relativePath] = $entry
+    }
+    foreach ($entry in $effectiveExtensionEntries.Values) {
+        $relativePath = [string]$entry.path
         $path = Join-Path $script:RepoRoot $relativePath
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             $extensionMismatches += [ordered]@{ path = $relativePath; expected = [string]$entry.sha256; actual = "missing" }
@@ -729,6 +753,15 @@ function Test-SourceCheckpoint {
         extension_checkpoint_file_sha256 = $actualExtensionHash
         extension_target_count = @($extension.files).Count
         extension_target_mismatch_count = 0
+        convergence_checkpoint_file_sha256 = $actualConvergenceHash
+        convergence_target_count = @($convergence.files).Count
+        convergence_target_mismatch_count = 0
+        convergence_superseded_extension_target_count = @(
+            $extension.files | Where-Object {
+                $convergence.files.path -contains [string]$_.path
+            }
+        ).Count
+        effective_extension_target_count = $effectiveExtensionEntries.Count
         extension_superseded_base_target_count = @(
             $checkpoint.files | Where-Object { $extensionPaths.Contains([string]$_.path) }
         ).Count

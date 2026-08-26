@@ -10,6 +10,14 @@ $artifactPath = Join-Path $temporaryRoot "artifact.json"
 
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
 try {
+    $harnessText = Get-Content -LiteralPath $harnessPath -Raw -Encoding UTF8
+    if ($harnessText.Contains('$encodedSymbol?diagnostic_limit=')) {
+        throw "Live URL interpolation must delimit encodedSymbol before the query string."
+    }
+    if ([regex]::Matches($harnessText, '\$\{encodedSymbol\}\?diagnostic_limit=').Count -ne 2) {
+        throw "Expected both live snapshot URLs to delimit encodedSymbol before the query string."
+    }
+
     & $harnessPath -Mode OfflineFixture -FixturePath $fixturePath -ArtifactPath $artifactPath -ExpectedMode compare | Out-Null
     if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
         throw "Offline harness returned exit code $LASTEXITCODE."
