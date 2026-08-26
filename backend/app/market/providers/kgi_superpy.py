@@ -413,6 +413,27 @@ class KgiSuperPyQuoteManager:
                 "subscription_worker_count": len(self._subscription_workers),
             }
 
+    def runtime_status(self) -> dict[str, Any]:
+        """Return redacted quote runtime readiness for market-owned planning."""
+        configuration_error = self._configuration_error()
+        with self._lock:
+            process = self._process
+            process_running = process is not None and process.poll() is None
+        return {
+            "enabled": self.enabled,
+            "configured": self.enabled and configuration_error is None,
+            "process_running": process_running,
+            "status": (
+                "disabled"
+                if not self.enabled
+                else "unavailable"
+                if configuration_error is not None
+                else "connected"
+                if process_running
+                else "ready_to_connect"
+            ),
+        }
+
     def snapshot(self, symbol: str) -> KgiSuperPyQuoteSnapshot:
         normalized = self._normalize_symbol(symbol)
         if not self.enabled:
@@ -1801,6 +1822,10 @@ def release_kgi_superpy_quote_lease(lease_id: str) -> dict[str, Any] | None:
 
 def get_kgi_superpy_quote_lease_summary() -> dict[str, Any]:
     return _KGI_SUPERPY_MANAGER.lease_summary()
+
+
+def get_kgi_superpy_quote_runtime_status() -> dict[str, Any]:
+    return _KGI_SUPERPY_MANAGER.runtime_status()
 
 
 def get_kgi_superpy_quote_snapshot(stock_id: str) -> KgiSuperPyQuoteSnapshot:

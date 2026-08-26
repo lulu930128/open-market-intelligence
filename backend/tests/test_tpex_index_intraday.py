@@ -93,7 +93,7 @@ class TpexIndexIntradayTests(unittest.TestCase):
                 trade_date=date(2026, 7, 30),
             )
 
-    def test_tpex_intraday_prefers_official_series_and_merges_final_mis(
+    def test_tpex_intraday_merges_official_series_and_current_snapshot(
         self,
     ) -> None:
         official = {
@@ -138,22 +138,9 @@ class TpexIndexIntradayTests(unittest.TestCase):
             ],
         }
 
-        with (
-            patch.object(
-                indices,
-                "_fetch_twse_index_5s_intraday",
-                return_value=official,
-            ),
-            patch.object(
-                indices,
-                "_fetch_mis_index_intraday",
-                return_value=mis,
-            ),
-            patch.object(indices, "_fetch_yahoo_index_intraday") as yahoo,
-        ):
-            result = indices.get_market_index_intraday("TPEX")
-
-        yahoo.assert_not_called()
+        result = indices._finalize_index_intraday_contract(
+            indices._merge_index_intraday_snapshot(official, mis)
+        )
         self.assertEqual(
             result["source"],
             "tpex_index_5s_twse_mis_snapshot",

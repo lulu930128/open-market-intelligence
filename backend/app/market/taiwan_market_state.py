@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
+import json
 from statistics import median
 from typing import Any
 
@@ -18,6 +19,7 @@ from app.market.trading_calendar import (
 SUPPORTED_MARKETS = {"TWSE", "TPEX"}
 INDEX_ID_BY_MARKET = {"TWSE": "TAIEX", "TPEX": "TPEX"}
 TAIWAN_SESSION_CLOSE = time(13, 30)
+MARKET_MINUTE_CALCULATION_VERSION = "tw.market.minute_state.derived.v2"
 
 
 def _as_float(value: Any) -> float | None:
@@ -58,6 +60,95 @@ def _as_trade_date(value: Any) -> date | None:
         except ValueError:
             return None
     return None
+
+
+def _market_minute_component_lineage(
+    *,
+    item: dict[str, Any],
+    breadth: dict[str, Any],
+) -> dict[str, Any]:
+    current_core = (
+        item.get("current_data_core")
+        if isinstance(item.get("current_data_core"), dict)
+        else {}
+    )
+    index_component = (
+        current_core.get("index")
+        if isinstance(current_core.get("index"), dict)
+        else item.get("current_observation")
+        if isinstance(item.get("current_observation"), dict)
+        else item
+    )
+    breadth_component = (
+        current_core.get("breadth")
+        if isinstance(current_core.get("breadth"), dict)
+        else breadth
+    )
+    component_inputs = (
+        ("index_snapshot", index_component, _as_float(item.get("close")) is not None),
+        (
+            "market_breadth",
+            breadth_component,
+            any(
+                breadth.get(field) is not None
+                for field in (
+                    "advance_count",
+                    "decline_count",
+                    "unchanged_count",
+                    "trade_value",
+                )
+            ),
+        ),
+    )
+    components: list[dict[str, Any]] = []
+    event_times: list[datetime] = []
+    required_domains: list[str] = []
+    for domain, component, required in component_inputs:
+        if required:
+            required_domains.append(domain)
+        if not isinstance(component, dict):
+            continue
+        raw_result_id = component.get("raw_result_id")
+        event_value = component.get("as_of") or component.get("snapshot_as_of")
+        event_at = _as_taiwan_datetime(event_value, naive_is_local=True)
+        if event_at is not None:
+            event_times.append(event_at)
+        components.append(
+            {
+                "domain": domain,
+                "provider": component.get("provider"),
+                "source": component.get("source"),
+                "raw_result_id": raw_result_id,
+                "event_at": event_at.isoformat() if event_at is not None else None,
+            }
+        )
+    raw_result_ids = list(
+        dict.fromkeys(
+            str(component["raw_result_id"])
+            for component in components
+            if component.get("raw_result_id")
+        )
+    )
+    component_by_domain = {component["domain"]: component for component in components}
+    lineage_complete = bool(required_domains) and all(
+        component_by_domain.get(domain, {}).get("raw_result_id")
+        and component_by_domain.get(domain, {}).get("provider")
+        and component_by_domain.get(domain, {}).get("source")
+        and component_by_domain.get(domain, {}).get("event_at")
+        for domain in required_domains
+    )
+    time_skew_seconds = (
+        int((max(event_times) - min(event_times)).total_seconds())
+        if event_times
+        else None
+    )
+    return {
+        "components": components,
+        "raw_result_ids": raw_result_ids,
+        "event_times": [value.isoformat() for value in event_times],
+        "time_skew_seconds": time_skew_seconds,
+        "lineage_complete": lineage_complete,
+    }
 
 
 def _minute_at_for_payload(
@@ -290,6 +381,10 @@ def persist_taiwan_market_minute_state(
             minute_at=minute_at,
         )
         cumulative_trade_value = trade_value_contract["value"]
+        component_lineage = _market_minute_component_lineage(
+            item=item,
+            breadth=breadth,
+        )
         existing = (
             db.query(TaiwanMarketMinuteState)
             .filter(TaiwanMarketMinuteState.market == market)
@@ -361,6 +456,8 @@ def persist_taiwan_market_minute_state(
             quality_status = "partial"
         else:
             quality_status = "missing"
+        if quality_status == "ready" and not component_lineage["lineage_complete"]:
+            quality_status = "partial"
         official_flag = (
             breadth_quality_status == "ready"
             and breadth_scope == "full_market"
@@ -380,7 +477,9 @@ def persist_taiwan_market_minute_state(
             "session_status": session_status,
             "breadth_session_phase": breadth_session_phase,
             "breadth_contract_version": breadth_contract_version,
-            "breadth_decision_usable": breadth_decision_usable,
+            "breadth_decision_usable": bool(
+                breadth_decision_usable and component_lineage["lineage_complete"]
+            ),
             "breadth_is_provisional": breadth_is_provisional,
             "breadth_snapshot_as_of": _as_taiwan_datetime(
                 breadth.get("snapshot_as_of") or breadth.get("as_of"),
@@ -420,6 +519,24 @@ def persist_taiwan_market_minute_state(
             "source_url": breadth.get("source_url") or item.get("source_url"),
             "official_flag": official_flag,
             "derived_flag": True,
+            "component_raw_result_ids_json": json.dumps(
+                component_lineage["raw_result_ids"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "component_sources_json": json.dumps(
+                component_lineage["components"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "component_event_times_json": json.dumps(
+                component_lineage["event_times"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "component_time_skew_seconds": component_lineage["time_skew_seconds"],
+            "calculation_version": MARKET_MINUTE_CALCULATION_VERSION,
+            "lineage_complete": component_lineage["lineage_complete"],
             "updated_at": utc_now(),
         }
         row = existing
@@ -445,6 +562,12 @@ def persist_taiwan_market_minute_state(
                 "breadth_status": breadth_quality_status,
                 "trade_value_quality_status": trade_value_quality_status,
                 "quality_status": quality_status,
+                "component_raw_result_ids": component_lineage["raw_result_ids"],
+                "component_time_skew_seconds": component_lineage[
+                    "time_skew_seconds"
+                ],
+                "calculation_version": MARKET_MINUTE_CALCULATION_VERSION,
+                "lineage_complete": component_lineage["lineage_complete"],
             }
         )
 
@@ -478,7 +601,7 @@ def _complete_minute_groups(
 
 def _has_usable_trade_value(row: TaiwanMarketMinuteState) -> bool:
     status = str(row.trade_value_quality_status or "unknown").strip().lower()
-    return row.cumulative_trade_value is not None and (
+    return bool(row.lineage_complete) and row.cumulative_trade_value is not None and (
         status in {"ready", "estimated"}
         or status == "unknown"
     )
@@ -785,11 +908,25 @@ def read_taiwan_market_volume_state(
                 "source_category": row.source_category,
                 "official_flag": row.official_flag,
                 "derived_flag": row.derived_flag,
+                "component_raw_result_ids": (
+                    json.loads(row.component_raw_result_ids_json)
+                    if row.component_raw_result_ids_json
+                    else []
+                ),
+                "component_time_skew_seconds": row.component_time_skew_seconds,
+                "calculation_version": row.calculation_version,
+                "lineage_complete": bool(row.lineage_complete),
             }
         )
     warnings: list[str] = []
     if current_value is None:
         warnings.append("TWSE and TPEX cumulative trade value are not both available at the selected minute.")
+        if any(
+            not bool(row.lineage_complete) for row in selected_rows.values()
+        ):
+            warnings.append(
+                "One or more derived minute-state components lack canonical raw lineage."
+            )
     elif trade_value_uses_estimate:
         warnings.append(
             "Combined cumulative trade value includes provider-derived estimates; "
@@ -925,6 +1062,7 @@ def read_taiwan_market_volume_state(
 
 
 __all__ = [
+    "MARKET_MINUTE_CALCULATION_VERSION",
     "persist_taiwan_market_minute_state",
     "read_taiwan_market_volume_state",
 ]

@@ -39,6 +39,15 @@ class InstitutionalHoldingRatio:
     source_url: str
     fetched_at: datetime
     history: list[InstitutionalHoldingRatioPoint]
+    classification: str = "compatibility_cache"
+    lineage_status: str = "raw_receipt_not_persisted"
+    canonical_truth: bool = False
+    decision_usable: bool = False
+    raw_receipt_id: str | None = None
+    limitations: tuple[str, ...] = (
+        "NSTOCK_HOLDING_RATIO_COMPATIBILITY_CACHE",
+        "RAW_RECEIPT_NOT_PERSISTED",
+    )
 
 
 def _parse_ratio(value: str | None) -> float | None:

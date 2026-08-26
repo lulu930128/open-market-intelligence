@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
@@ -20,11 +22,13 @@ from app.market.providers.tw_official_daily import (
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market_data.contracts import (
     CanonicalModel,
+    DatasetHealth,
     InstrumentKey,
     InstrumentType,
     Market,
     MarketSession,
     ProviderResourceHealth,
+    ResolvedEvidenceHealth,
     ResolvedEvidenceStatus,
 )
 from app.market_data.gateway import BarAcquisitionResult, MarketDataGateway
@@ -49,6 +53,33 @@ from app.market_data.provider_catalog import (
 
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
+
+
+@dataclass(frozen=True, slots=True)
+class TaiwanDailyPriceEvidence:
+    trade_date: date
+    stock_id: str
+    stock_name: str | None
+    trade_volume: int | None
+    trade_value: Decimal | None
+    open_price: Decimal
+    high_price: Decimal
+    low_price: Decimal
+    close_price: Decimal
+    price_change: Decimal | None
+    transaction_count: int | None
+    provider: str
+    source: str
+    event_at: datetime | None
+    raw_result_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaiwanLatestDailyEvidence:
+    daily: TaiwanDailyPriceEvidence | None
+    resolved_health: ResolvedEvidenceHealth
+    dataset_health: DatasetHealth | None
+    limitations: tuple[str, ...]
 
 
 class TaiwanDailyRefreshResult(CanonicalModel):
@@ -219,6 +250,55 @@ def read_taiwan_official_daily(
         reader=TaiwanCompletedDailyCandidateReader(
             repository
         ),
+    )
+
+
+def read_taiwan_latest_daily_evidence(
+    db: Session,
+    stock_id: str,
+    *,
+    requested_at: datetime | None = None,
+) -> TaiwanLatestDailyEvidence:
+    """Project the latest canonical official bar for AI/valuation consumers."""
+
+    result = read_taiwan_official_daily(
+        db,
+        stock_id=stock_id,
+        limit=1,
+        requested_at=requested_at,
+    )
+    bar = result.resolved.bars[-1] if result.resolved.bars else None
+    daily = None
+    limitations = list(result.limitations)
+    if bar is not None:
+        trade_volume = None
+        if bar.volume is not None:
+            if bar.volume.unit.value == "share":
+                trade_volume = int(bar.volume.value)
+            else:
+                limitations.append("DAILY_VOLUME_NOT_NORMALIZED_TO_SHARES")
+        daily = TaiwanDailyPriceEvidence(
+            trade_date=bar.end_at.astimezone(TAIWAN_TZ).date(),
+            stock_id=bar.instrument.symbol,
+            stock_name=bar.instrument_name,
+            trade_volume=trade_volume,
+            trade_value=bar.turnover_value,
+            open_price=bar.open_price,
+            high_price=bar.high_price,
+            low_price=bar.low_price,
+            close_price=bar.close_price,
+            price_change=bar.price_change,
+            transaction_count=bar.trade_count,
+            provider=bar.lineage.provider,
+            source=bar.lineage.source,
+            event_at=bar.lineage.event_at,
+            raw_result_id=bar.lineage.raw_receipt_id,
+        )
+    return TaiwanLatestDailyEvidence(
+        daily=daily,
+        resolved_health=result.resolved.health,
+        dataset_health=result.dataset_health,
+        limitations=tuple(dict.fromkeys(limitations)),
     )
 
 
@@ -416,10 +496,13 @@ def refresh_taiwan_official_daily(
 
 
 __all__ = [
+    "TaiwanDailyPriceEvidence",
     "TaiwanDailyRefreshResult",
+    "TaiwanLatestDailyEvidence",
     "TaiwanOfficialDailyPlatform",
     "build_taiwan_daily_read_requirement",
     "build_taiwan_daily_cache_requirement",
     "read_taiwan_official_daily",
+    "read_taiwan_latest_daily_evidence",
     "refresh_taiwan_official_daily",
 ]

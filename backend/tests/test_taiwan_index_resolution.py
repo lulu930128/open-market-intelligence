@@ -237,9 +237,9 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
                 "read_persisted_taiwan_index_minute_series",
                 return_value=cached,
             ),
-            patch.object(
-                indices,
-                "_get_market_index_intraday_prefer_live",
+            patch(
+                "app.market.tw_current_market_operations."
+                "build_current_market_executors",
             ) as live_reader,
         ):
             result = indices.get_market_index_intraday(
@@ -249,8 +249,8 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
 
         live_reader.assert_not_called()
         self.assertEqual(result["acquisition_policy"], "cache_only")
-        self.assertEqual(result["acquisition_status"], "cached")
-        self.assertIn("resolution_id", result)
+        self.assertEqual(result["acquisition_status"], "not_attempted")
+        self.assertFalse(result["read_path_side_effects"])
 
     def test_require_live_rejects_cached_fallback(self) -> None:
         cached = {
@@ -268,16 +268,22 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
                 }
             ],
         }
-        with patch.object(
-            indices,
-            "_get_market_index_intraday_prefer_live",
-            return_value=cached,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "Live Taiwan index"):
-                indices.get_market_index_intraday(
-                    "TAIEX",
-                    acquisition_policy="require_live",
-                )
+        with patch(
+            "app.market.tw_current_market_operations."
+            "build_current_market_executors",
+        ) as live_reader:
+            result = indices.get_market_index_intraday(
+                "TAIEX",
+                acquisition_policy="require_live",
+            )
+
+        live_reader.assert_not_called()
+        self.assertEqual(result["acquisition_policy"], "cache_only")
+        self.assertEqual(result["requested_acquisition_policy"], "require_live")
+        self.assertIn(
+            "GET_ACQUISITION_POLICY_OVERRIDDEN_TO_CACHE_ONLY",
+            result["warnings"],
+        )
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from app.market.quote_contract_health import (
 from app.market.taiwan_market_state import SUPPORTED_MARKETS
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.taiwan_rules import (
+    TAIWAN_DATASET_DAILY_PRICE,
     TAIWAN_DATASET_FINANCIAL_METRICS,
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_MARGIN_TRADING,
@@ -34,6 +35,8 @@ from app.market.taiwan_rules import (
     expected_financial_metrics_period,
     is_equity_only_dataset_required,
 )
+from app.market.tw_daily_freshness import read_taiwan_daily_freshness
+from app.market_data.contracts import DatasetHealthStatus
 from app.observability.provider_health import (
     enrich_source_health_entries,
     sync_source_health_snapshots,
@@ -820,6 +823,51 @@ def _dataset_entry(
     calendar_status: dict[str, Any],
     now: datetime | None,
 ) -> TaiwanSourceHealthEntry:
+    if spec.key == TAIWAN_DATASET_DAILY_PRICE:
+        evidence = read_taiwan_daily_freshness(
+            db,
+            stock_id=stock_id,
+            checked_at=now,
+        )
+        source_status = {
+            DatasetHealthStatus.HEALTHY: ("current", True, "ok"),
+            DatasetHealthStatus.STALE: ("stale", False, "stale"),
+            DatasetHealthStatus.PARTIAL: ("partial", False, "partial"),
+            DatasetHealthStatus.MISSING: ("empty", False, "empty"),
+            DatasetHealthStatus.NOT_APPLICABLE: (
+                "not_applicable",
+                True,
+                "not_applicable",
+            ),
+            DatasetHealthStatus.UNAVAILABLE: ("error", False, "unavailable"),
+            DatasetHealthStatus.UNKNOWN: ("unknown", False, "unknown"),
+        }[evidence.health.status]
+        return TaiwanSourceHealthEntry(
+            resource=spec.key,
+            label=spec.label,
+            frequency=spec.frequency,
+            target=_target(stock_id=stock_id),
+            status=source_status[0],
+            ok=source_status[1],
+            row_count=evidence.row_count,
+            latest_data_date=evidence.latest_date,
+            latest_updated_at=evidence.latest_updated_at,
+            expected_data_date=evidence.health.expected_date,
+            freshness_lag_days=_freshness_lag(
+                evidence.health.expected_date,
+                evidence.latest_date,
+            ),
+            data_quality=source_status[2],
+            reason=(
+                "Projected from canonical Taiwan daily DatasetHealth: "
+                f"{evidence.health.detail_code or evidence.health.status.value}."
+            ),
+            health_dimensions={
+                "dataset": evidence.health.model_dump(mode="json"),
+                "owner": "app.market.tw_daily_freshness",
+                "limitations": list(evidence.limitations),
+            },
+        )
     required = is_equity_only_dataset_required(spec, stock)
     target = _target(stock_id=stock_id)
     window = _release_window(calendar_status, spec.key)

@@ -10,7 +10,7 @@ from app.db.session import SessionLocal
 from app.market.quote_contract_health import (
     resolve_taiwan_quote_contract_universe,
 )
-from app.market.quote_depth import (
+from app.market.quote_contract_capture import (
     TAIWAN_QUOTE_CONTRACT_SLOTS,
     capture_taiwan_quote_contract_snapshot,
 )

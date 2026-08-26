@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -43,6 +44,7 @@ from app.market_data.contracts import (
 )
 from app.market_data.gateway import (
     MarketDataGateway,
+    QuoteAcquisitionPort,
     QuoteCandidateBatch,
 )
 from app.market_data.integration_contracts import (
@@ -55,6 +57,7 @@ from app.market_data.integration_contracts import (
     SnapshotCapabilityRequest,
 )
 from app.market_data.policies import DataPurpose, RealtimePolicy
+from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2
 from app.market_data.registry import DATASET_REGISTRY, evaluate_dataset_health
 from app.market_data.resolution import ResolutionCandidate
 
@@ -114,6 +117,8 @@ def build_taiwan_public_quote_requirement(
     instrument: InstrumentKey,
     policy: RealtimePolicy,
     requested_at: datetime,
+    bounds: RequestBounds | None = None,
+    require_actual_trade: bool = True,
 ) -> DataRequirementV2:
     if requested_at.tzinfo is None or requested_at.utcoffset() is None:
         raise ValueError("requested_at must be timezone-aware")
@@ -127,11 +132,19 @@ def build_taiwan_public_quote_requirement(
         RealtimePolicy.PREFER_LIVE,
         RealtimePolicy.REQUIRE_LIVE,
     }
+    effective_bounds = bounds or RequestBounds(
+        max_provider_attempts=1 if acquiring else 0,
+        max_external_calls=1 if acquiring else 0,
+        max_subscriptions=0,
+        timeout_seconds=10,
+        max_candidates=2,
+        max_rows=1,
+    )
     return DataRequirementV2(
         target=InstrumentTarget(instrument=instrument),
         request=SnapshotCapabilityRequest(
             capability_id=TW_PUBLIC_LAST_TRADE_CAPABILITY_ID,
-            required_fields=("last_trade_price",),
+            required_fields=("last_trade_price",) if require_actual_trade else (),
         ),
         purpose=DataPurpose.VIEWER,
         realtime_policy=policy,
@@ -141,17 +154,11 @@ def build_taiwan_public_quote_requirement(
             max_age_seconds=PUBLIC_QUOTE_MAX_AGE_SECONDS
         ),
         quality=QualityRequirement(
-            required_fields=("last_trade_price",),
-            allow_partial=False,
+            required_fields=("last_trade_price",) if require_actual_trade else (),
+            allow_partial=not require_actual_trade,
+            require_canonical_lineage=True,
         ),
-        bounds=RequestBounds(
-            max_provider_attempts=1 if acquiring else 0,
-            max_external_calls=1 if acquiring else 0,
-            max_subscriptions=0,
-            timeout_seconds=10,
-            max_candidates=1,
-            max_rows=1,
-        ),
+        bounds=effective_bounds,
     )
 
 
@@ -169,20 +176,35 @@ class TaiwanPublicQuoteCandidateReader:
             raise ValueError("public quote requires snapshot capability")
         if requirement.request.capability_id != TW_PUBLIC_LAST_TRADE_CAPABILITY_ID:
             raise ValueError("public quote capability mismatch")
-        stored = self._repository.load_latest_quote(
-            requirement.target.instrument
+        stored_reads = self._repository.load_quote_candidates(
+            requirement.target.instrument,
+            max_candidates=requirement.bounds.max_candidates,
         )
-        observation = stored.observation
-        limitations = list(stored.limitations)
-        candidates: tuple = ()
-        rejections: tuple[CandidateRowRejection, ...] = ()
-        freshness = EvidenceFreshness.MISSING
+        limitations = [
+            limitation
+            for stored in stored_reads
+            for limitation in stored.limitations
+        ]
+        candidates: list[ResolutionCandidate] = []
+        rejections: list[CandidateRowRejection] = []
+        provider_health: list[ProviderResourceHealth] = []
+        freshness_values: list[EvidenceFreshness] = []
         expected_trade_date = taiwan_presentation_session(
             requirement.requested_at
         )["trade_date"]
         partial = False
-        latest_date = observation.trade_date if observation is not None else None
-        if observation is not None:
+        latest_dates = [
+            stored.observation.trade_date
+            for stored in stored_reads
+            if stored.observation is not None
+            and stored.observation.trade_date is not None
+        ]
+        latest_date = max(latest_dates) if latest_dates else None
+        for stored in stored_reads:
+            observation = stored.observation
+            if observation is None:
+                partial = partial or stored.storage_row_id is not None
+                continue
             missing_fields = tuple(
                 field
                 for field in requirement.request.required_fields
@@ -202,7 +224,7 @@ class TaiwanPublicQuoteCandidateReader:
                     observation.trade_date
                     or requirement.requested_at.astimezone(TAIWAN_TZ).date()
                 )
-                rejections = (
+                rejections.append(
                     CandidateRowRejection(
                         provider=observation.lineage.provider,
                         source=observation.lineage.source,
@@ -211,9 +233,10 @@ class TaiwanPublicQuoteCandidateReader:
                         event_date=event_date,
                         reason_code="QUOTE_REQUIRED_FIELD_MISSING",
                         missing_fields=tuple(dict.fromkeys(missing_fields)),
-                    ),
+                    )
                 )
                 limitations.append("PUBLIC_LAST_TRADE_REQUIRED_FIELD_MISSING")
+                freshness = EvidenceFreshness.MISSING
             else:
                 assert event_at is not None
                 age_seconds = (
@@ -233,32 +256,48 @@ class TaiwanPublicQuoteCandidateReader:
                     freshness = EvidenceFreshness.FRESH
                 else:
                     freshness = EvidenceFreshness.STALE
-                candidates = (
+                candidates.append(
                     ResolutionCandidate(
                         observation=observation,
                         freshness=freshness,
                         provider_priority=stored.provider_priority,
                         session=requirement.session,
-                    ),
+                    )
                 )
+            freshness_values.append(freshness)
+            provider_health.append(
+                ProviderResourceHealth(
+                    provider=observation.lineage.provider,
+                    market=Market.TW,
+                    capability=TW_PUBLIC_LAST_TRADE_CAPABILITY_ID,
+                    enablement=EnablementStatus.ENABLED,
+                    connection=ConnectionStatus.UNKNOWN,
+                    entitlement=EntitlementStatus.UNKNOWN,
+                    operational=OperationalStatus.UNKNOWN,
+                    freshness=freshness,
+                    checked_at=requirement.requested_at,
+                    detail_code="PERSISTED_PUBLIC_QUOTE_CANDIDATE",
+                )
+            )
         spec = DATASET_REGISTRY.get(TW_PUBLIC_QUOTE_DATASET_ID)
-        provider_health = (
-            ProviderResourceHealth(
-                provider=TWSE_MIS_QUOTE_PROVIDER,
-                market=Market.TW,
-                capability=TW_PUBLIC_LAST_TRADE_CAPABILITY_ID,
-                enablement=EnablementStatus.ENABLED,
-                connection=ConnectionStatus.UNKNOWN,
-                entitlement=EntitlementStatus.UNKNOWN,
-                operational=OperationalStatus.UNKNOWN,
-                freshness=freshness,
-                checked_at=requirement.requested_at,
-                detail_code="PERSISTED_PUBLIC_QUOTE_CANDIDATE",
-            ),
-        )
+        if not provider_health:
+            provider_health.append(
+                ProviderResourceHealth(
+                    provider=TWSE_MIS_QUOTE_PROVIDER,
+                    market=Market.TW,
+                    capability=TW_PUBLIC_LAST_TRADE_CAPABILITY_ID,
+                    enablement=EnablementStatus.ENABLED,
+                    connection=ConnectionStatus.UNKNOWN,
+                    entitlement=EntitlementStatus.UNKNOWN,
+                    operational=OperationalStatus.UNKNOWN,
+                    freshness=EvidenceFreshness.MISSING,
+                    checked_at=requirement.requested_at,
+                    detail_code="PERSISTED_PUBLIC_QUOTE_CANDIDATE_MISSING",
+                )
+            )
         return QuoteCandidateBatch(
-            candidates=candidates,
-            provider_health=provider_health,
+            candidates=tuple(candidates),
+            provider_health=tuple(provider_health),
             dataset_health=evaluate_dataset_health(
                 spec,
                 expected_date=expected_trade_date,
@@ -266,9 +305,13 @@ class TaiwanPublicQuoteCandidateReader:
                 checked_at=requirement.requested_at,
                 eligible=True,
                 partial=partial,
-                stale=freshness is EvidenceFreshness.STALE,
+                stale=bool(freshness_values)
+                and all(
+                    freshness is EvidenceFreshness.STALE
+                    for freshness in freshness_values
+                ),
             ),
-            rejections=rejections,
+            rejections=tuple(rejections),
             limitations=tuple(dict.fromkeys(limitations)),
         )
 
@@ -293,31 +336,91 @@ def read_taiwan_public_last_trade_quote(
     )
 
 
+def read_taiwan_quote_snapshot(
+    db: Session,
+    *,
+    stock_id: str,
+    requested_at: datetime | None = None,
+) -> MarketDataResultV1:
+    """Read canonical quote state without requiring an actual last trade."""
+
+    effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
+    requirement = build_taiwan_public_quote_requirement(
+        instrument=_load_instrument(db, stock_id),
+        policy=RealtimePolicy.CACHE_ONLY,
+        requested_at=effective_requested_at,
+        require_actual_trade=False,
+    )
+    return MarketDataGateway().resolve_quote(
+        requirement,
+        reader=TaiwanPublicQuoteCandidateReader(TaiwanPublicQuoteRepository(db)),
+    )
+
+
+def _acquisition_bounds(
+    descriptors: tuple[ProviderCapabilityDescriptorV2, ...],
+) -> RequestBounds:
+    if not descriptors:
+        raise ValueError("public quote acquisition requires provider descriptors")
+    if len(descriptors) > 8:
+        raise ValueError("public quote descriptor catalog exceeds shared bounds")
+    if any(
+        descriptor.capability_id != TW_PUBLIC_LAST_TRADE_CAPABILITY_ID
+        for descriptor in descriptors
+    ):
+        raise ValueError("public quote descriptor capability mismatch")
+    external_calls = sum(
+        descriptor.max_external_calls_per_attempt for descriptor in descriptors
+    )
+    subscriptions = sum(
+        descriptor.max_subscriptions_per_attempt for descriptor in descriptors
+    )
+    if external_calls > 20 or subscriptions > 8:
+        raise ValueError("public quote descriptor work exceeds shared bounds")
+    return RequestBounds(
+        max_provider_attempts=len(descriptors),
+        max_external_calls=external_calls,
+        max_subscriptions=subscriptions,
+        timeout_seconds=max(descriptor.max_timeout_seconds for descriptor in descriptors),
+        max_candidates=max(2, len(descriptors)),
+        max_rows=max(1, len(descriptors)),
+    )
+
+
 def acquire_taiwan_public_last_trade_quote(
     db: Session,
     *,
     stock_id: str,
     policy: RealtimePolicy,
     requested_at: datetime | None = None,
-    acquisition: TaiwanPublicQuoteAcquisitionExecutor | None = None,
+    acquisition: QuoteAcquisitionPort | None = None,
+    descriptors: Iterable[ProviderCapabilityDescriptorV2] | None = None,
 ) -> MarketDataResultV1:
     if policy not in {
         RealtimePolicy.PREFER_LIVE,
         RealtimePolicy.REQUIRE_LIVE,
     }:
         raise ValueError("refresh policy must be prefer_live or require_live")
+    descriptor_catalog = (
+        (TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,)
+        if descriptors is None
+        else tuple(descriptors)
+    )
+    if descriptors is not None and acquisition is None:
+        raise ValueError("custom public quote descriptors require an acquisition port")
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
     requirement = build_taiwan_public_quote_requirement(
         instrument=_load_instrument(db, stock_id),
         policy=policy,
         requested_at=effective_requested_at,
+        bounds=_acquisition_bounds(descriptor_catalog),
     )
     return MarketDataGateway().resolve_quote(
         requirement,
         reader=TaiwanPublicQuoteCandidateReader(
             TaiwanPublicQuoteRepository(db)
         ),
-        descriptors=(TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,),
+        descriptors=descriptor_catalog,
         acquisition_port=acquisition or TaiwanPublicQuoteAcquisitionExecutor(),
         transaction_port=TaiwanPublicQuoteTransaction(db),
     )
@@ -517,4 +620,5 @@ __all__ = [
     "project_taiwan_public_last_trade_quote",
     "read_taiwan_public_quote_projection",
     "read_taiwan_public_last_trade_quote",
+    "read_taiwan_quote_snapshot",
 ]

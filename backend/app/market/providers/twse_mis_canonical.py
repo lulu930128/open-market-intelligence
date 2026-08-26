@@ -163,6 +163,7 @@ def canonical_snapshot_from_twse_mis(
     session: str | MarketSession,
     fetched_at: datetime,
     expected_trade_date: date | None = None,
+    auction_type: AuctionType | None = None,
 ) -> CanonicalMarketSnapshot:
     """Normalize one already-acquired MIS message without I/O or persistence."""
 
@@ -251,18 +252,27 @@ def canonical_snapshot_from_twse_mis(
         state=ObservationState.INDICATIVE if trial else ObservationState.AVAILABLE,
     )
 
+    resolved_auction_type = auction_type
+    if resolved_auction_type is None:
+        if session_value is MarketSession.CLOSING_AUCTION:
+            resolved_auction_type = AuctionType.CLOSING
+        elif session_value in {
+            MarketSession.PRE_OPEN,
+            MarketSession.OPENING_AUCTION,
+        }:
+            resolved_auction_type = AuctionType.OPENING
     auction = None
     indicative_price = _decimal(message.get("pz"), positive=True)
     indicative_quantity = _lots_to_shares(message.get("ps"))
-    if trial and (indicative_price is not None or indicative_quantity is not None):
+    if (
+        trial
+        and resolved_auction_type is not None
+        and (indicative_price is not None or indicative_quantity is not None)
+    ):
         auction = AuctionObservation(
             instrument=instrument,
             lineage=lineage,
-            auction_type=(
-                AuctionType.CLOSING
-                if session_value is MarketSession.CLOSING_AUCTION
-                else AuctionType.OPENING
-            ),
+            auction_type=resolved_auction_type,
             indicative_price=indicative_price,
             indicative_quantity=indicative_quantity,
             best_bid=bids[0] if bids else None,

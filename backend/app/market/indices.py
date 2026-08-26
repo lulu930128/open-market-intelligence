@@ -49,7 +49,7 @@ from app.market.index_parsers import regular_stock_code as _regular_stock_code
 from app.market.index_parsers import signed_change as _signed_change
 from app.market.providers import fetch_json as provider_fetch_json
 from app.market.providers import http_get
-from app.market.providers import tpex, twse, twse_mis, yahoo
+from app.market.providers import tpex, twse, yahoo
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import (
     is_taiwan_trading_day,
@@ -59,7 +59,6 @@ from app.market.trading_calendar import (
 from app.market.tw_market_breadth_contract import (
     TW_MARKET_BREADTH_STOCK_STATE_VERSION,
     TW_MARKET_BREADTH_VERSION,
-    resolve_twse_mis_breadth_price_state,
     taiwan_breadth_market_session,
 )
 from app.observability.provider_fallback import observe_provider_fallback
@@ -70,9 +69,6 @@ from app.sources.defaults import (
 
 
 logger = logging.getLogger(__name__)
-YAHOO_CHART_URL = yahoo.CHART_URL
-TWSE_MIS_STOCK_INFO_URL = twse_mis.STOCK_INFO_URL
-TWSE_MIS_REFERER_URL = twse_mis.REFERER_URL
 TWSE_INDEX_LIST_URL = twse.INDEX_LIST_URL
 TWSE_DAILY_QUOTES_URL = twse.DAILY_QUOTES_URL
 TWSE_RWD_MI_INDEX_URL = twse.RWD_MI_INDEX_URL
@@ -88,8 +84,6 @@ TPEX_MARKET_HIGHLIGHT_URL = tpex.MARKET_HIGHLIGHT_URL
 TAIPEI_TZ = timezone(timedelta(hours=8))
 CACHE_TTL_SECONDS = 45
 TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS = 30
-TWSE_MIS_LIVE_BREADTH_BATCH_SIZE = 100
-TWSE_MIS_LIVE_BREADTH_MIN_CODES = 500
 INDEX_LIST_CACHE_TTL_SECONDS = 300
 TPEX_INDEX_LIST_TIMEOUT_SECONDS = 10
 MAX_INDEX_STAT_FETCH_WORKERS = 4
@@ -99,9 +93,6 @@ FINAL_INDEX_DAILY_OHLC_CACHE_TTL_SECONDS = 6 * 60 * 60
 MAX_TPEX_HISTORY_FETCH_DATES = 3_000
 TPEX_HISTORY_PERSIST_BATCH_SIZE = 50
 TPEX_MARKET_HIGHLIGHT_START_DATE = date(2007, 1, 1)
-MAX_TWSE_MIS_BREADTH_FETCH_WORKERS = 2
-TWSE_MIS_BREADTH_CIRCUIT_FAILURE_THRESHOLD = 3
-TWSE_MIS_BREADTH_CIRCUIT_COOLDOWN_SECONDS = 90
 TAIWAN_INDEX_SESSION_CLOSE_TIME = time(13, 30)
 TAIWAN_INDEX_LIVE_REFRESH_START_TIME = time(8, 30)
 TAIWAN_INDEX_LIVE_REFRESH_END_TIME = time(13, 40)
@@ -142,18 +133,12 @@ _SUMMARY_REFRESH_LOCK = Lock()
 MARKET_INDEX_SUMMARY_CACHE_PATH = settings.runtime_lock_dir / "market-index-summary.json"
 _QUOTE_STATS_CACHE: dict[str, dict[str, object]] = {}
 _INDEX_LIST_CACHE: dict[str, dict[str, object]] = {}
+_INDEX_OHLC_CACHE: dict[str, dict[str, object]] = {}
 _SHARES_CACHE: dict[str, dict[str, object]] = {}
 _CONTRIBUTION_CACHE: dict[str, dict[str, object]] = {}
 _TWSE_INDEX_5S_CACHE: dict[str, dict[str, object]] = {}
 _TWSE_INDEX_DAILY_OHLC_CACHE: dict[str, dict[str, object]] = {}
 _FINAL_INDEX_DAILY_OHLC_CACHE: dict[str, dict[str, object]] = {}
-_TWSE_MIS_LIVE_BREADTH_CACHE: dict[str, dict[str, object]] = {}
-_TWSE_MIS_LIVE_BREADTH_LAST_GOOD: dict[str, dict] = {}
-_TWSE_MIS_LIVE_STOCK_ROWS: dict[str, list[dict[str, object]]] = {}
-_TWSE_MIS_BREADTH_REFRESH_LOCK = Lock()
-_TWSE_MIS_BREADTH_CIRCUIT_FAILURES = 0
-_TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = 0.0
-_TWSE_MIS_STOCK_STATE: dict[str, dict[str, object]] = {}
 TWSE_INDEX_5S_FIELD_BY_INDEX_ID = {
     "TAIEX": "發行量加權股價指數",
     "TPEX": "櫃買指數",
@@ -716,526 +701,6 @@ def _prices_equal(left: float | None, right: float | None) -> bool:
     return abs(left - right) < 0.000001
 
 
-def _twse_mis_live_breadth_stock_codes(
-    db: Session,
-    market: str = "TWSE",
-) -> list[str]:
-    normalized_market = str(market or "").strip().upper()
-    rows = (
-        db.query(StockMaster.stock_id)
-        .filter(func.upper(StockMaster.market) == normalized_market)
-        .filter(StockMaster.instrument_type == "stock")
-        .filter(StockMaster.is_active.is_(True))
-        .order_by(StockMaster.stock_id.asc())
-        .all()
-    )
-    codes = [
-        code
-        for row in rows
-        for code in [_regular_stock_code(row.stock_id)]
-        if code is not None
-    ]
-    return list(dict.fromkeys(codes))
-
-
-def _chunked(values: list[str], size: int) -> Iterable[list[str]]:
-    for index in range(0, len(values), size):
-        yield values[index : index + size]
-
-
-def _fetch_twse_mis_stock_message_batch(
-    codes: list[str],
-    market: str = "TWSE",
-) -> list[dict]:
-    return twse_mis.fetch_stock_messages(
-        codes,
-        exchange="otc" if str(market).upper() == "TPEX" else "tse",
-        timeout_seconds=20,
-        request=http_get,
-    )
-
-
-def _fetch_twse_mis_stock_messages(
-    codes: list[str],
-    market: str = "TWSE",
-) -> tuple[list[dict], int]:
-    batches = list(_chunked(codes, TWSE_MIS_LIVE_BREADTH_BATCH_SIZE))
-
-    if not batches:
-        return [], 0
-
-    messages: list[dict] = []
-    failed_batches = 0
-    first_error: Exception | None = None
-
-    with ThreadPoolExecutor(max_workers=MAX_TWSE_MIS_BREADTH_FETCH_WORKERS) as executor:
-        futures = [
-            executor.submit(
-                _fetch_twse_mis_stock_message_batch,
-                batch,
-                market,
-            )
-            for batch in batches
-        ]
-
-        for future in as_completed(futures):
-            try:
-                messages.extend(future.result())
-            except Exception as exc:
-                if first_error is None:
-                    first_error = exc
-                failed_batches += 1
-
-    if first_error is not None:
-        observe_provider_fallback(
-            first_error,
-            operation="indices.twse_mis_breadth_refresh",
-        )
-
-    return messages, failed_batches
-
-
-def _cache_twse_mis_live_breadth(market: str, payload: dict | None) -> dict | None:
-    _TWSE_MIS_LIVE_BREADTH_CACHE[market] = {
-        "expires_at": monotonic() + TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS,
-        "payload": payload,
-    }
-    if isinstance(payload, dict):
-        _TWSE_MIS_LIVE_BREADTH_LAST_GOOD[market] = payload
-    return payload
-
-
-def _twse_mis_message_datetime(message: dict) -> datetime | None:
-    snapshot = _build_mis_snapshot_time(
-        str(message.get("d") or message.get("^") or ""),
-        str(message.get("t") or message.get("%") or ""),
-    )
-
-    if not snapshot:
-        return None
-
-    try:
-        return datetime.fromisoformat(snapshot)
-    except ValueError:
-        return None
-
-
-def _classify_twse_mis_live_breadth_message(
-    message: dict,
-    market: str = "TWSE",
-) -> dict | None:
-    code = _regular_stock_code(message.get("c"))
-
-    if code is None:
-        return None
-
-    trade_date = _parse_trade_date(message.get("d") or message.get("^"))
-    previous_close = _as_float(message.get("y"))
-    normalized_market = str(market or "TWSE").strip().upper()
-    state_key = f"{normalized_market}:{code}"
-    cached_state = _TWSE_MIS_STOCK_STATE.get(state_key)
-    snapshot_as_of = _twse_mis_message_datetime(message)
-    price_state = resolve_twse_mis_breadth_price_state(
-        trade_date=trade_date,
-        snapshot_as_of=snapshot_as_of,
-        last_trade_price=message.get("z"),
-        cumulative_volume_lots=message.get("v"),
-        indicative_price=message.get("pz"),
-        indicative_volume_lots=message.get("ps"),
-        indicative_status=message.get("ts"),
-        cached_state=cached_state,
-    )
-    latest_price = _as_float(price_state.get("current_price"))
-    cache_update = price_state.pop("cache_update", None)
-    if isinstance(cache_update, dict):
-        _TWSE_MIS_STOCK_STATE[state_key] = cache_update
-
-    direction: str | None = None
-
-    if latest_price is not None and previous_close is not None:
-        if latest_price > previous_close:
-            direction = "advance"
-        elif latest_price < previous_close:
-            direction = "decline"
-        else:
-            direction = "unchanged"
-
-    limit_up_price = _as_float(message.get("u"))
-    limit_down_price = _as_float(message.get("w"))
-    is_limit_up = (
-        latest_price is not None
-        and limit_up_price is not None
-        and latest_price >= limit_up_price
-    )
-    is_limit_down = (
-        latest_price is not None
-        and limit_down_price is not None
-        and latest_price <= limit_down_price
-    )
-    cumulative_volume_lots = _as_int(price_state.get("cumulative_volume_lots"))
-    estimated_trade_value = (
-        int(latest_price * cumulative_volume_lots * 1000)
-        if latest_price is not None
-        and cumulative_volume_lots is not None
-        and cumulative_volume_lots >= 0
-        else None
-    )
-
-    return {
-        "code": code,
-        "market": normalized_market,
-        "trade_date": trade_date,
-        "as_of": snapshot_as_of,
-        **price_state,
-        "current_price": latest_price,
-        "previous_close": previous_close,
-        "open_price": _as_float(message.get("o")),
-        "high_price": _as_float(message.get("h")),
-        "low_price": _as_float(message.get("l")),
-        "cumulative_volume_lots": cumulative_volume_lots,
-        "estimated_trade_value": estimated_trade_value,
-        "direction": direction,
-        "is_limit_up": is_limit_up,
-        "is_limit_down": is_limit_down,
-    }
-
-
-def _fetch_twse_mis_live_market_breadth_unguarded(db: Session, market: str) -> dict | None:
-    normalized_market = str(market or "").strip().upper()
-    if normalized_market not in {"TWSE", "TPEX"}:
-        return None
-
-    cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(normalized_market)
-
-    if cached and monotonic() < float(cached["expires_at"]):
-        payload = cached.get("payload")
-
-        if isinstance(payload, dict):
-            return payload
-
-        return None
-
-    codes = _twse_mis_live_breadth_stock_codes(
-        db,
-        normalized_market,
-    )
-
-    minimum_codes = (
-        TWSE_MIS_LIVE_BREADTH_MIN_CODES
-        if normalized_market == "TWSE"
-        else 250
-    )
-    if len(codes) < minimum_codes:
-        return _cache_twse_mis_live_breadth(normalized_market, None)
-
-    messages, failed_batches = _fetch_twse_mis_stock_messages(
-        codes,
-        normalized_market,
-    )
-
-    if not messages:
-        return _cache_twse_mis_live_breadth(normalized_market, None)
-
-    code_set = set(codes)
-    classified_rows = [
-        row
-        for message in messages
-        for row in [
-            _classify_twse_mis_live_breadth_message(
-                message,
-                normalized_market,
-            )
-        ]
-        if row is not None and row["code"] in code_set
-    ]
-
-    if not classified_rows:
-        return _cache_twse_mis_live_breadth(normalized_market, None)
-    _TWSE_MIS_LIVE_STOCK_ROWS[normalized_market] = [
-        dict(row) for row in classified_rows
-    ]
-
-    received_codes = {str(row["code"]) for row in classified_rows}
-    advance_count = sum(1 for row in classified_rows if row.get("direction") == "advance")
-    decline_count = sum(1 for row in classified_rows if row.get("direction") == "decline")
-    unchanged_count = sum(1 for row in classified_rows if row.get("direction") == "unchanged")
-    coverage_count = advance_count + decline_count + unchanged_count
-    total_count = len(codes)
-    unknown_count = max(total_count - coverage_count, 0)
-    missing_count = max(total_count - len(received_codes), 0)
-    as_of_values = [row.get("as_of") for row in classified_rows if row.get("as_of") is not None]
-    price_as_of_values = [
-        row.get("price_as_of")
-        for row in classified_rows
-        if row.get("price_as_of") is not None
-    ]
-    market_sessions = {
-        str(row.get("market_session") or "unknown") for row in classified_rows
-    }
-    market_session = (
-        next(iter(market_sessions)) if len(market_sessions) == 1 else "mixed"
-    )
-    trade_dates = [
-        row.get("trade_date")
-        for row in classified_rows
-        if isinstance(row.get("trade_date"), date)
-    ]
-    source_prefix = (
-        "twse_mis_tpex_live_breadth"
-        if normalized_market == "TPEX"
-        else "twse_mis_live_breadth"
-    )
-    source = (
-        source_prefix
-        if unknown_count == 0 and failed_batches == 0
-        else f"{source_prefix}_partial"
-    )
-    warnings: list[str] = []
-
-    pending_regular_session = (
-        market_session == "preopen" and coverage_count == 0
-    )
-
-    if unknown_count > 0:
-        warnings.append(
-            f"Some {normalized_market} MIS quotes did not expose a confirmed "
-            "current-session actual trade."
-        )
-
-    if failed_batches > 0:
-        warnings.append(
-            f"{failed_batches} {normalized_market} MIS quote batch(es) failed."
-        )
-    estimated_trade_values = [
-        int(row["estimated_trade_value"])
-        for row in classified_rows
-        if row.get("estimated_trade_value") is not None
-    ]
-    estimated_trade_value = (
-        sum(estimated_trade_values)
-        if estimated_trade_values
-        else None
-    )
-
-    indicative_rows = [
-        row for row in classified_rows if row.get("indicative_match_available")
-    ]
-    auction_advance_count = sum(
-        1
-        for row in indicative_rows
-        if _as_float(row.get("indicative_match_price")) is not None
-        and _as_float(row.get("previous_close")) is not None
-        and float(row["indicative_match_price"]) > float(row["previous_close"])
-    )
-    auction_decline_count = sum(
-        1
-        for row in indicative_rows
-        if _as_float(row.get("indicative_match_price")) is not None
-        and _as_float(row.get("previous_close")) is not None
-        and float(row["indicative_match_price"]) < float(row["previous_close"])
-    )
-    auction_unchanged_count = sum(
-        1
-        for row in indicative_rows
-        if _prices_equal(
-            _as_float(row.get("indicative_match_price")),
-            _as_float(row.get("previous_close")),
-        )
-    )
-    auction_coverage_count = (
-        auction_advance_count + auction_decline_count + auction_unchanged_count
-    )
-    auction_status = (
-        "provisional"
-        if market_session in {"preopen", "closing_auction"}
-        and auction_coverage_count > 0
-        else "unavailable"
-        if market_session in {"preopen", "closing_auction"}
-        else "not_applicable"
-    )
-    payload = {
-        "market": normalized_market,
-        "version": TW_MARKET_BREADTH_VERSION,
-        "state_contract_version": TW_MARKET_BREADTH_STOCK_STATE_VERSION,
-        "status": (
-            "pending_regular_session"
-            if pending_regular_session
-            else "ready"
-            if unknown_count == 0 and failed_batches == 0
-            else "partial"
-        ),
-        "market_session": market_session,
-        "price_semantics": "actual_trade_only",
-        "decision_usable": not pending_regular_session and coverage_count > 0,
-        "is_provisional": market_session in {
-            "preopen",
-            "regular",
-            "closing_auction",
-        },
-        "scope": "registered_universe",
-        "universe_definition": _market_breadth_universe_definition(
-            "registered_universe",
-            normalized_market,
-        ),
-        "label": _market_breadth_label(
-            normalized_market,
-            "registered_universe",
-        ),
-        "trade_date": max(trade_dates) if trade_dates else None,
-        "advance_count": advance_count,
-        "decline_count": decline_count,
-        "unchanged_count": unchanged_count,
-        "total_count": total_count,
-        "limit_up_count": sum(1 for row in classified_rows if row.get("is_limit_up")),
-        "limit_down_count": sum(1 for row in classified_rows if row.get("is_limit_down")),
-        "trade_value": estimated_trade_value,
-        "trade_value_is_estimate": estimated_trade_value is not None,
-        "trade_value_semantics": (
-            "estimated_latest_price_x_cumulative_volume_lots"
-            if estimated_trade_value is not None
-            else "unavailable"
-        ),
-        "trade_value_confidence": (
-            "medium" if estimated_trade_value is not None else None
-        ),
-        "source": source,
-        "as_of": max(as_of_values) if as_of_values else datetime.now(TAIPEI_TZ),
-        "snapshot_as_of": max(as_of_values) if as_of_values else None,
-        "oldest_price_as_of": min(price_as_of_values) if price_as_of_values else None,
-        "newest_price_as_of": max(price_as_of_values) if price_as_of_values else None,
-        "coverage_count": coverage_count,
-        "classified_count": coverage_count,
-        "coverage_ratio": coverage_count / total_count if total_count else 0.0,
-        "unknown_count": unknown_count,
-        "message_count": len(received_codes),
-        "missing_count": missing_count,
-        "failed_batch_count": failed_batches,
-        "auction_breadth": {
-            "market": normalized_market,
-            "status": auction_status,
-            "market_session": market_session,
-            "scope": "registered_universe",
-            "trade_date": max(trade_dates) if trade_dates else None,
-            "as_of": max(as_of_values) if as_of_values else None,
-            "advance_count": auction_advance_count,
-            "decline_count": auction_decline_count,
-            "unchanged_count": auction_unchanged_count,
-            "coverage_count": auction_coverage_count,
-            "unknown_count": max(total_count - auction_coverage_count, 0),
-            "universe_count": total_count,
-            "price_semantics": "auction_indicative",
-            "is_provisional": auction_status == "provisional",
-            "decision_usable": False,
-            "source": "twse_mis_pz_ts",
-        },
-        "warnings": warnings,
-    }
-    return _cache_twse_mis_live_breadth(normalized_market, payload)
-
-
-def reset_twse_mis_breadth_guard() -> None:
-    global _TWSE_MIS_BREADTH_CIRCUIT_FAILURES
-    global _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL
-    _TWSE_MIS_LIVE_BREADTH_CACHE.clear()
-    _TWSE_MIS_LIVE_BREADTH_LAST_GOOD.clear()
-    _TWSE_MIS_LIVE_STOCK_ROWS.clear()
-    _TWSE_MIS_STOCK_STATE.clear()
-    _TWSE_MIS_BREADTH_CIRCUIT_FAILURES = 0
-    _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = 0.0
-
-
-def get_cached_taiwan_intraday_stock_rows(
-    market: str | None = None,
-) -> list[dict[str, object]]:
-    markets = (
-        [str(market).strip().upper()]
-        if market is not None
-        else ["TWSE", "TPEX"]
-    )
-    return [
-        dict(row)
-        for normalized_market in markets
-        for row in _TWSE_MIS_LIVE_STOCK_ROWS.get(
-            normalized_market,
-            [],
-        )
-    ]
-
-
-def _stale_twse_mis_breadth(market: str, *, circuit_open: bool) -> dict | None:
-    payload = _TWSE_MIS_LIVE_BREADTH_LAST_GOOD.get(market)
-    if not isinstance(payload, dict):
-        return None
-    return {
-        **payload,
-        "source": "twse_mis_live_breadth_stale",
-        "warnings": [
-            *(payload.get("warnings") or []),
-            "TWSE MIS breadth refresh is temporarily suspended by the provider circuit breaker."
-            if circuit_open
-            else "TWSE MIS breadth refresh failed; returning the last successful snapshot.",
-        ],
-        "provider_guard": {
-            "status": "circuit_open" if circuit_open else "degraded",
-            "retry_after_seconds": max(
-                int(_TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL - monotonic()),
-                0,
-            )
-            if circuit_open
-            else None,
-        },
-    }
-
-
-def _fetch_twse_mis_live_market_breadth(db: Session, market: str) -> dict | None:
-    global _TWSE_MIS_BREADTH_CIRCUIT_FAILURES
-    global _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL
-
-    normalized_market = str(market or "").strip().upper()
-    if normalized_market not in {"TWSE", "TPEX"}:
-        return None
-    cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(normalized_market)
-    if cached and monotonic() < float(cached["expires_at"]):
-        payload = cached.get("payload")
-        return payload if isinstance(payload, dict) else None
-
-    with _TWSE_MIS_BREADTH_REFRESH_LOCK:
-        cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(normalized_market)
-        if cached and monotonic() < float(cached["expires_at"]):
-            payload = cached.get("payload")
-            return payload if isinstance(payload, dict) else None
-        if monotonic() < _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL:
-            return _stale_twse_mis_breadth(
-                normalized_market,
-                circuit_open=True,
-            )
-
-        payload = _fetch_twse_mis_live_market_breadth_unguarded(
-            db,
-            normalized_market,
-        )
-        failed_batch_count = (
-            int(payload.get("failed_batch_count") or 0)
-            if isinstance(payload, dict)
-            else 1
-        )
-        if payload is None or failed_batch_count > 0:
-            _TWSE_MIS_BREADTH_CIRCUIT_FAILURES += 1
-            if _TWSE_MIS_BREADTH_CIRCUIT_FAILURES >= TWSE_MIS_BREADTH_CIRCUIT_FAILURE_THRESHOLD:
-                _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = (
-                    monotonic() + TWSE_MIS_BREADTH_CIRCUIT_COOLDOWN_SECONDS
-                )
-            if payload is None:
-                return _stale_twse_mis_breadth(
-                    normalized_market,
-                    circuit_open=monotonic() < _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL,
-                )
-        else:
-            _TWSE_MIS_BREADTH_CIRCUIT_FAILURES = 0
-            _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = 0.0
-        return payload
-
-
 def _market_index_summary_cache_ttl(indices: list[dict]) -> int:
     for item in indices:
         breadth = item.get("breadth") if isinstance(item, dict) else None
@@ -1509,21 +974,6 @@ def _resolve_market_breadth(
     ):
         return quote_breadth
 
-    live_breadth: dict | None = None
-
-    try:
-        live_breadth = _fetch_twse_mis_live_market_breadth(db=db, market=market)
-    except Exception as exc:
-        observe_provider_fallback(exc, operation="indices.twse_mis_live_breadth")
-        live_breadth = None
-
-    if (
-        target_trade_date is not None
-        and _breadth_trade_date(live_breadth) == target_trade_date
-        and _is_plausible_market_breadth(live_breadth)
-    ):
-        return live_breadth
-
     local_breadth = _latest_market_breadth(db=db, market=market)
 
     if target_trade_date is not None:
@@ -1541,9 +991,6 @@ def _resolve_market_breadth(
         local_date is None or quote_date >= local_date
     ) and _is_plausible_market_breadth(quote_breadth):
         return quote_breadth
-
-    if _is_plausible_market_breadth(live_breadth):
-        return live_breadth
 
     if _is_plausible_market_breadth(local_breadth):
         return local_breadth
@@ -2776,69 +2223,6 @@ def _fetch_yahoo_index(config: dict) -> dict:
     }
 
 
-def _fetch_yahoo_index_intraday(config: dict) -> dict:
-    symbol = str(config["symbol"])
-    intraday_points: list[dict] = []
-    payload = yahoo.fetch_index_chart_payload(
-        symbol=symbol,
-        range_value="1d",
-        interval="1m",
-        timeout_seconds=20,
-        request=http_get,
-    )
-    result = (payload.get("chart", {}).get("result") or [None])[0]
-
-    if not result:
-        raise ValueError("Yahoo chart payload has no intraday result.")
-
-    meta = result.get("meta") or {}
-    quote_values = ((result.get("indicators") or {}).get("quote") or [{}])[0]
-    timestamps = result.get("timestamp") or []
-    offset = int(meta.get("gmtoffset") or 28800)
-    tz = timezone(timedelta(seconds=offset))
-    opens = quote_values.get("open") or []
-    highs = quote_values.get("high") or []
-    lows = quote_values.get("low") or []
-    closes = quote_values.get("close") or []
-    volumes = quote_values.get("volume") or []
-
-    for index, timestamp in enumerate(timestamps):
-        close = _as_float(_list_value(closes, index))
-
-        if close is None:
-            continue
-
-        intraday_points.append(
-            {
-                "time": datetime.fromtimestamp(int(timestamp), tz=tz).isoformat(),
-                "price": close,
-                "volume": _as_int(_list_value(volumes, index)),
-                "open": _as_float(_list_value(opens, index)),
-                "high": _as_float(_list_value(highs, index)),
-                "low": _as_float(_list_value(lows, index)),
-            }
-        )
-
-    return {
-        "stock_id": config["index_id"],
-        "symbol": symbol,
-        "source": "yahoo_finance_chart",
-        "provider": "yahoo_chart",
-        "interval": "1m",
-        "trade_date": (
-            intraday_points[-1]["time"][:10] if intraday_points else None
-        ),
-        "coverage_status": "available" if len(intraday_points) > 1 else "partial",
-        "is_partial": len(intraday_points) <= 1,
-        "volume_unit": None,
-        "volume_semantics": "provider_index_volume_not_market_trade_value",
-        "previous_close": _as_float(meta.get("chartPreviousClose"))
-        or _as_float(meta.get("regularMarketPreviousClose")),
-        "point_count": len(intraday_points),
-        "points": intraday_points,
-    }
-
-
 def _fetch_twse_index_5s_intraday(
     config: dict,
     *,
@@ -3322,87 +2706,12 @@ def _index_intraday_payload_trade_date(payload: dict) -> date | None:
     return max(point_dates, default=None)
 
 
-def _fetch_mis_index_message(config: dict) -> dict | None:
-    channel = str(config.get("mis_channel") or "").strip()
-    if not channel:
-        return None
-
-    return twse_mis.fetch_index_message(
-        channel,
-        target=str(config.get("index_id") or config.get("symbol") or channel),
-        timeout_seconds=20,
-        request=http_get,
-    )
-
-
-def _fetch_mis_index_intraday(config: dict) -> dict:
-    message = _fetch_mis_index_message(config)
-    symbol = str(config["symbol"])
-
-    if not message:
-        return {
-            "stock_id": config["index_id"],
-            "symbol": symbol,
-            "source": "twse_mis_index_snapshot",
-            "provider": "twse_mis",
-            "interval": "snapshot",
-            "coverage_status": "missing",
-            "is_partial": True,
-            "volume_unit": None,
-            "volume_semantics": "not_provided_for_cash_index",
-            "previous_close": None,
-            "point_count": 0,
-            "points": [],
-        }
-
-    latest_time = _build_mis_snapshot_time(message.get("d"), message.get("t") or message.get("%"))
-    price = _as_float(message.get("z"))
-    if latest_time is None or price is None:
-        return {
-            "stock_id": config["index_id"],
-            "symbol": symbol,
-            "source": "twse_mis_index_snapshot",
-            "provider": "twse_mis",
-            "interval": "snapshot",
-            "coverage_status": "missing",
-            "is_partial": True,
-            "volume_unit": None,
-            "volume_semantics": "not_provided_for_cash_index",
-            "previous_close": _as_float(message.get("y")),
-            "point_count": 0,
-            "points": [],
-        }
-
-    point = {
-        "time": latest_time,
-        "price": price,
-        "volume": _as_int(message.get("v") or message.get("m")),
-        "open": _as_float(message.get("o")) or price,
-        "high": _as_float(message.get("h")) or price,
-        "low": _as_float(message.get("l")) or price,
-    }
-
-    return {
-        "stock_id": config["index_id"],
-        "symbol": symbol,
-        "source": "twse_mis_index_snapshot",
-        "provider": "twse_mis",
-        "interval": "snapshot",
-        "trade_date": latest_time[:10],
-        "coverage_status": "single_snapshot",
-        "is_partial": True,
-        "volume_unit": None,
-        "volume_semantics": "snapshot_provider_value_not_market_trade_value",
-        "previous_close": _as_float(message.get("y")),
-        "point_count": 1,
-        "points": [point],
-    }
-
-
 def _merge_index_intraday_snapshot(base: dict, snapshot: dict) -> dict:
     snapshot_points = snapshot.get("points") or []
     if not snapshot_points:
         return base
+    if not (base.get("points") or []):
+        return snapshot
 
     base_trade_date = _index_intraday_payload_trade_date(base)
     snapshot_trade_date = _index_intraday_payload_trade_date(snapshot)
@@ -3741,6 +3050,24 @@ def get_market_index_list(market: str = "TWSE", limit: int = 80) -> dict:
                 "count": len(items),
                 "items": items,
             }
+
+    return {
+        "market": normalized_market,
+        "source": "cache_miss",
+        "as_of": None,
+        "count": 0,
+        "items": [],
+    }
+
+
+def refresh_market_index_list(market: str = "TWSE", limit: int = 80) -> dict:
+    normalized_market = market.upper()
+    if normalized_market not in {"TWSE", "TPEX"}:
+        raise ValueError("market must be one of: TWSE, TPEX.")
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0.")
+
+    cache_key = normalized_market
 
     if normalized_market == "TPEX":
         source = "tpex_official_post_close_indices"
@@ -4152,235 +3479,101 @@ def _finalize_index_intraday_contract(payload: dict) -> dict:
     }
 
 
-def _get_market_index_intraday_prefer_live(index_id: str) -> dict:
-    normalized_index_id = index_id.upper()
-    config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
-
-    if config is None:
-        supported = ", ".join(sorted(INDEX_CONFIG_BY_ID))
-        raise ValueError(f"index_id must be one of: {supported}.")
-
-    try:
-        official_payload = _fetch_twse_index_5s_intraday(config)
-        if official_payload.get("point_count", 0) > 0:
-            try:
-                mis_payload = _fetch_mis_index_intraday(config)
-                if mis_payload["point_count"] > 0:
-                    return _finalize_index_intraday_contract(
-                        _merge_index_intraday_snapshot(
-                            official_payload,
-                            mis_payload,
-                        )
-                    )
-            except Exception as exc:
-                observe_provider_fallback(
-                    exc,
-                    operation="indices.official_intraday_mis_merge",
-                )
-
-            return _finalize_index_intraday_contract(official_payload)
-    except Exception as exc:
-        observe_provider_fallback(exc, operation="indices.official_intraday")
-
-    yahoo_error: Exception | None = None
-    yahoo_payload: dict | None = None
-
-    try:
-        yahoo_payload = _fetch_yahoo_index_intraday(config)
-    except Exception as exc:
-        observe_provider_fallback(exc, operation="indices.yahoo_intraday")
-        yahoo_error = exc
-
-    try:
-        mis_payload = _fetch_mis_index_intraday(config)
-        if mis_payload["point_count"] > 0:
-            if yahoo_payload is not None and yahoo_payload.get("point_count", 0) > 0:
-                return _finalize_index_intraday_contract(
-                    _merge_index_intraday_snapshot(
-                        yahoo_payload,
-                        mis_payload,
-                    )
-                )
-            if normalized_index_id == "TPEX":
-                try:
-                    from app.market.taiwan_index_minute import (
-                        read_persisted_taiwan_index_minute_series,
-                    )
-
-                    persisted_payload = (
-                        read_persisted_taiwan_index_minute_series(
-                            normalized_index_id
-                        )
-                    )
-                    if persisted_payload.get("point_count", 0) > 0:
-                        return _finalize_index_intraday_contract(
-                            _merge_index_intraday_snapshot(
-                                persisted_payload,
-                                mis_payload,
-                            )
-                        )
-                except Exception as exc:
-                    observe_provider_fallback(
-                        exc,
-                        operation=(
-                            "indices.persisted_synthetic_intraday_merge"
-                        ),
-                    )
-            return _finalize_index_intraday_contract(mis_payload)
-    except Exception as exc:
-        observe_provider_fallback(exc, operation="indices.mis_intraday")
-        if yahoo_error is None:
-            yahoo_error = exc
-
-    if yahoo_payload is not None and yahoo_payload.get("point_count", 0) > 0:
-        return _finalize_index_intraday_contract(yahoo_payload)
-
-    if normalized_index_id == "TPEX":
-        try:
-            from app.market.taiwan_index_minute import (
-                read_persisted_taiwan_index_minute_series,
-            )
-
-            persisted_payload = read_persisted_taiwan_index_minute_series(
-                normalized_index_id
-            )
-            if persisted_payload.get("point_count", 0) > 0:
-                return _finalize_index_intraday_contract(
-                    persisted_payload
-                )
-        except Exception as exc:
-            observe_provider_fallback(
-                exc,
-                operation="indices.persisted_synthetic_intraday",
-            )
-
-    try:
-        fallback_payload = _index_intraday_fallback_from_list(config)
-    except Exception as exc:
-        if yahoo_error is not None:
-            raise yahoo_error from exc
-        raise
-
-    if fallback_payload is not None:
-        return _finalize_index_intraday_contract(fallback_payload)
-
-    if yahoo_error is not None:
-        raise yahoo_error
-
-    return _finalize_index_intraday_contract({
-        "stock_id": config["index_id"],
-        "symbol": config["symbol"],
-        "source": "unavailable",
-        "provider": None,
-        "interval": None,
-        "trade_date": None,
-        "coverage_status": "missing",
-        "is_partial": True,
-        "volume_unit": None,
-        "volume_semantics": "not_available",
-        "previous_close": None,
-        "point_count": 0,
-        "points": [],
-    })
-
-
-def _index_intraday_is_live(payload: dict) -> bool:
-    source = str(payload.get("source") or "").casefold()
-    provider = str(payload.get("provider") or "").casefold()
-    if int(payload.get("point_count") or 0) <= 0:
-        return False
-    if payload.get("synthetic") is True:
-        return False
-    if source in {
-        "unavailable",
-        "taiwan_index_minute_snapshot",
-        "twse_openapi_mi_index",
-        "tpex_openapi_daily_trading_index",
-    }:
-        return False
-    return any(
-        marker in f"{source} {provider}"
-        for marker in (
-            "intraday",
-            "twse_index_5s",
-            "twse_mis",
-            "yahoo_finance_chart",
-        )
-    )
-
-
-def _attach_index_intraday_resolution(
-    payload: dict,
-    *,
-    index_id: str,
-    acquisition_policy: str,
-) -> dict:
-    # Import lazily to avoid the calendar_status -> market_chips -> indices cycle.
-    from app.market.calendar_status import build_taiwan_calendar_status
-
-    resolution = resolve_taiwan_index_quote_state(
-        intraday=payload,
-        index_snapshot={},
-        calendar_status=build_taiwan_calendar_status(),
-        index_id=index_id,
-        acquisition_policy=acquisition_policy,
-    )
-    return {
-        **payload,
-        "resolution_version": resolution["resolution_version"],
-        "resolution_id": resolution["resolution_id"],
-        "acquisition_policy": acquisition_policy,
-        "acquisition_status": (
-            "live"
-            if _index_intraday_is_live(payload)
-            else "cached"
-            if payload.get("synthetic") is True
-            or str(payload.get("source") or "")
-            == "taiwan_index_minute_snapshot"
-            else "fallback"
-            if int(payload.get("point_count") or 0) > 0
-            else "missing"
-        ),
-        "canonical_observation": resolution["current_observation"],
-        "decision_usable": resolution["decision_usable"],
-        "resolution": resolution,
-    }
-
-
 def get_market_index_intraday(
     index_id: str,
-    acquisition_policy: str = "prefer_live",
+    acquisition_policy: str = "cache_only",
+    *,
+    db: Session | None = None,
 ) -> dict:
+    """Project the canonical current-index cache without provider side effects."""
+
     normalized_index_id = str(index_id or "").strip().upper()
     config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
     if config is None:
         supported = ", ".join(sorted(INDEX_CONFIG_BY_ID))
         raise ValueError(f"index_id must be one of: {supported}.")
-    policy = normalize_index_acquisition_policy(acquisition_policy)
-    if policy == "unspecified":
-        policy = "prefer_live"
+    requested_policy = normalize_index_acquisition_policy(acquisition_policy)
+    own_session = db is None
+    if db is None:
+        from app.db.session import SessionLocal
 
-    if policy == "cache_only":
-        from app.market.taiwan_index_minute import (
-            read_persisted_taiwan_index_minute_series,
+        db = SessionLocal()
+    try:
+        from app.market.tw_current_market_platform import (
+            project_taiwan_current_index,
+            read_taiwan_current_index,
         )
 
+        result = read_taiwan_current_index(db, index_id=normalized_index_id)
+        current = project_taiwan_current_index(result)
+        close = _as_float(current.get("close"))
+        event_at = current.get("as_of")
+        point = (
+            {
+                "time": event_at,
+                "price": close,
+                "volume": None,
+                "open": close,
+                "high": close,
+                "low": close,
+            }
+            if close is not None and event_at is not None
+            else None
+        )
         payload = _finalize_index_intraday_contract(
-            read_persisted_taiwan_index_minute_series(normalized_index_id)
+            {
+                "stock_id": normalized_index_id,
+                "symbol": config["symbol"],
+                "source": current.get("source") or "unavailable",
+                "provider": current.get("provider"),
+                "source_components": [
+                    {
+                        "provider": current.get("provider"),
+                        "source": current.get("source"),
+                        "raw_result_id": current.get("raw_result_id"),
+                        "event_at": event_at,
+                    }
+                ]
+                if point is not None
+                else [],
+                "interval": None,
+                "trade_date": current.get("trade_date"),
+                "coverage_status": "snapshot" if point is not None else "missing",
+                "is_partial": True,
+                "volume_unit": None,
+                "volume_semantics": "not_available_for_snapshot",
+                "previous_close": current.get("previous_close"),
+                "point_count": 1 if point is not None else 0,
+                "points": [point] if point is not None else [],
+            }
         )
-    else:
-        payload = _get_market_index_intraday_prefer_live(normalized_index_id)
-
-    if policy == "require_live" and not _index_intraday_is_live(payload):
-        raise RuntimeError(
-            f"Live Taiwan index data is unavailable for {normalized_index_id}; "
-            f"resolved source={payload.get('source') or 'unavailable'}."
-        )
-    return _attach_index_intraday_resolution(
-        payload,
-        index_id=normalized_index_id,
-        acquisition_policy=policy,
-    )
+        return {
+            **payload,
+            "acquisition_policy": "cache_only",
+            "requested_acquisition_policy": requested_policy,
+            "acquisition_status": result.acquisition.status.value,
+            "canonical_observation": current,
+            "decision_usable": current.get("decision_usable") is True,
+            "resolution": current.get("resolved_health"),
+            "warnings": list(
+                dict.fromkeys(
+                    [
+                        *payload.get("warnings", []),
+                        *current.get("limitations", []),
+                        *(
+                            ["GET_ACQUISITION_POLICY_OVERRIDDEN_TO_CACHE_ONLY"]
+                            if requested_policy not in {"cache_only", "unspecified"}
+                            else []
+                        ),
+                    ]
+                )
+            ),
+            "replay_semantics": "canonical_current_snapshot_only",
+            "read_path_side_effects": False,
+        }
+    finally:
+        if own_session:
+            db.close()
 
 
 def _fetch_twse_shares_by_code() -> dict[str, int]:
@@ -4599,6 +3792,8 @@ def get_market_index_contributions(
     index_id: str,
     limit: int = 20,
     db: Session | None = None,
+    *,
+    allow_provider_io: bool = False,
 ) -> dict:
     normalized_index_id = index_id.upper()
     config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
@@ -4614,18 +3809,38 @@ def get_market_index_contributions(
     cache_key = f"{normalized_index_id}:{normalized_limit}"
     cached = _CONTRIBUTION_CACHE.get(cache_key)
 
-    if db is None and cached and monotonic() < float(cached["expires_at"]):
+    if cached and monotonic() < float(cached["expires_at"]):
         payload = cached.get("payload")
 
         if isinstance(payload, dict):
             return payload
 
     market = str(config["market"])
-    rows, shares_by_code, source, keys = _contribution_quote_rows(market, db=db)
-    try:
-        index_item = _market_index_item_for_contribution(market)
-    except Exception as exc:
-        observe_provider_fallback(exc, operation="indices.contribution_index_quote")
+    if db is None or allow_provider_io:
+        rows, shares_by_code, source, keys = _contribution_quote_rows(
+            market,
+            db=db,
+        )
+        try:
+            index_item = _market_index_item_for_contribution(market)
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="indices.contribution_index_quote",
+            )
+            index_item = None
+    else:
+        cached_shares = _SHARES_CACHE.get(market) or {}
+        shares_by_code = (
+            dict(cached_shares.get("shares") or {})
+            if monotonic() < float(cached_shares.get("expires_at") or 0)
+            else {}
+        )
+        rows, shares_by_code, source, keys = _local_contribution_quote_rows(
+            db,
+            market=market,
+            shares_by_code=shares_by_code,
+        )
         index_item = None
     index_close = _as_float(index_item.get("close")) if index_item else None
     index_change = _as_float(index_item.get("change")) if index_item else None
@@ -4798,6 +4013,23 @@ def get_market_index_contributions(
     return payload
 
 
+def refresh_market_index_contributions(
+    index_id: str,
+    limit: int = 20,
+    db: Session | None = None,
+) -> dict:
+    """Explicit compatibility acquisition for contribution presentation."""
+
+    cache_key = f"{index_id.strip().upper()}:{min(limit, 100)}"
+    _CONTRIBUTION_CACHE.pop(cache_key, None)
+    return get_market_index_contributions(
+        index_id=index_id,
+        limit=limit,
+        db=db,
+        allow_provider_io=True,
+    )
+
+
 def _market_index_chart_freshness(
     points: list[dict],
     *,
@@ -4834,7 +4066,121 @@ def _market_index_chart_freshness(
     }
 
 
+def _cached_market_index_close_points(
+    db: Session,
+    *,
+    index_id: str,
+    timeframe: str,
+    bars: int,
+) -> list[dict]:
+    multiplier = 1 if timeframe == "daily" else 7 if timeframe == "weekly" else 31
+    rows = (
+        db.query(MarketIndexDailyStat)
+        .filter(MarketIndexDailyStat.index_id == index_id)
+        .filter(MarketIndexDailyStat.close_value.isnot(None))
+        .order_by(MarketIndexDailyStat.trade_date.desc())
+        .limit(min(bars * multiplier, MAX_INDEX_BARS))
+        .all()
+    )
+    grouped: dict[date, list[MarketIndexDailyStat]] = defaultdict(list)
+    for row in reversed(rows):
+        grouped[_index_stat_period_key(row.trade_date, timeframe)].append(row)
+
+    points: list[dict] = []
+    for period_rows in grouped.values():
+        latest = period_rows[-1]
+        points.append(
+            {
+                "time": latest.trade_date,
+                "open": None,
+                "high": None,
+                "low": None,
+                "close": latest.close_value,
+                "volume": sum(
+                    row.trade_volume
+                    for row in period_rows
+                    if row.trade_volume is not None
+                )
+                or None,
+                "trade_value": sum(
+                    row.trade_value
+                    for row in period_rows
+                    if row.trade_value is not None
+                )
+                or None,
+                "transaction_count": sum(
+                    row.transaction_count
+                    for row in period_rows
+                    if row.transaction_count is not None
+                )
+                or None,
+            }
+        )
+    return points[-bars:]
+
+
 def get_market_index_ohlc_chart_data(
+    index_id: str,
+    timeframe: str = "daily",
+    bars: int = 90,
+    db: Session | None = None,
+) -> dict:
+    normalized_index_id = index_id.upper()
+    if normalized_index_id not in INDEX_CONFIG_BY_ID:
+        supported = ", ".join(sorted(INDEX_CONFIG_BY_ID))
+        raise ValueError(f"index_id must be one of: {supported}.")
+    if timeframe not in INDEX_TIMEFRAME_INTERVALS:
+        raise ValueError("timeframe must be one of: daily, weekly, monthly.")
+    if bars <= 0 or bars > MAX_INDEX_BARS:
+        raise ValueError(f"bars must be between 1 and {MAX_INDEX_BARS}.")
+
+    cache_key = f"{normalized_index_id}:{timeframe}:{bars}"
+    cached = _INDEX_OHLC_CACHE.get(cache_key)
+    if cached and monotonic() < float(cached["expires_at"]):
+        payload = cached.get("payload")
+        if isinstance(payload, dict):
+            return payload
+
+    points = (
+        _cached_market_index_close_points(
+            db,
+            index_id=normalized_index_id,
+            timeframe=timeframe,
+            bars=bars,
+        )
+        if db is not None
+        else []
+    )
+    today = datetime.now(TAIPEI_TZ).date()
+    from_date = points[0]["time"] if points else today
+    to_date = points[-1]["time"] if points else today
+    freshness = _market_index_chart_freshness(points, timeframe=timeframe)
+    payload = {
+        "stock_id": normalized_index_id,
+        "timeframe": timeframe,
+        "bars": bars,
+        "lookback_days": max((to_date - from_date).days, 0),
+        "from_date": from_date,
+        "to_date": to_date,
+        "point_count": len(points),
+        "points": points,
+        "backfill": {
+            "status": "not_requested",
+            "reason": "read_path_is_side_effect_free",
+            "refresh_route": (
+                f"POST /api/market/indices/{normalized_index_id}/ohlc/refresh"
+            ),
+        },
+        "data_quality": "partial" if points else "missing",
+        "warnings": [
+            "Cached MarketIndexDailyStat only owns close/change and activity; open/high/low remain unknown until explicit OHLC refresh."
+        ],
+        **freshness,
+    }
+    return payload
+
+
+def refresh_market_index_ohlc_chart_data(
     index_id: str,
     timeframe: str = "daily",
     bars: int = 90,
@@ -4943,7 +4289,7 @@ def get_market_index_ohlc_chart_data(
         selected_points,
         timeframe=timeframe,
     )
-    return {
+    payload = {
         "stock_id": normalized_index_id,
         "timeframe": timeframe,
         "bars": bars,
@@ -4957,6 +4303,11 @@ def get_market_index_ohlc_chart_data(
         "warnings": warnings,
         **freshness,
     }
+    _INDEX_OHLC_CACHE[f"{normalized_index_id}:{timeframe}:{bars}"] = {
+        "expires_at": monotonic() + INDEX_LIST_CACHE_TTL_SECONDS,
+        "payload": payload,
+    }
+    return payload
 
 
 def _market_index_summary(
@@ -5281,18 +4632,111 @@ def _attach_completed_data_core_evidence(db: Session, payload: dict) -> dict:
     )
 
 
+def _shared_current_market_summary(
+    db: Session,
+    *,
+    requested_at: datetime | None = None,
+) -> dict:
+    from app.market.tw_current_market_platform import (
+        project_taiwan_current_breadth,
+        project_taiwan_current_index,
+        read_taiwan_current_breadth,
+        read_taiwan_current_index,
+    )
+
+    now = requested_at or datetime.now(TAIPEI_TZ)
+    items: list[dict] = []
+    warnings: list[str] = []
+    for config in INDEX_CONFIGS:
+        index_id = str(config["index_id"])
+        venue = str(config["market"])
+        index_result = read_taiwan_current_index(
+            db,
+            index_id=index_id,
+            requested_at=now,
+        )
+        breadth_result = read_taiwan_current_breadth(
+            db,
+            venue=venue,
+            requested_at=now,
+        )
+        current = project_taiwan_current_index(index_result)
+        breadth = project_taiwan_current_breadth(breadth_result)
+        if breadth.get("status") == "missing":
+            breadth_payload = None
+        else:
+            breadth_payload = breadth
+        close = _as_float(current.get("close"))
+        change = _as_float(current.get("change"))
+        previous_close = _as_float(current.get("previous_close"))
+        change_pct = (
+            change / previous_close * 100
+            if change is not None and previous_close not in {None, 0}
+            else None
+        )
+        item_limitations = [
+            *current.get("limitations", []),
+            *breadth.get("limitations", []),
+        ]
+        warnings.extend(str(value) for value in item_limitations if value)
+        items.append(
+            {
+                "index_id": index_id,
+                "label": config["label"],
+                "short_label": config["short_label"],
+                "market": venue,
+                "symbol": config["symbol"],
+                "source": current.get("source") or "unavailable",
+                "as_of": current.get("as_of"),
+                "time": current.get("trade_date"),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "previous_close": previous_close,
+                "change": change,
+                "change_pct": change_pct,
+                "volume": None,
+                "estimated_volume": None,
+                "trade_value": breadth.get("trade_value"),
+                "estimated_trade_value": None,
+                "ma20": None,
+                "price_vs_ma20": None,
+                "point_count": 0,
+                "points": [],
+                "breadth": breadth_payload,
+                "error_message": None if close is not None else "Current canonical cache is missing.",
+                "acquisition_policy": "cache_only",
+                "current_observation": current,
+                "decision_usable": current.get("decision_usable") is True,
+                "resolution": current.get("resolved_health"),
+                "current_data_core": {
+                    "index": current,
+                    "breadth": breadth,
+                },
+            }
+        )
+    return _with_breadth_status_contract(
+        {
+            "as_of": now,
+            "source": "shared_market_data_core",
+            "indices": items,
+            "cache_status": "canonical_cache",
+            "refresh_recommended": any(item.get("close") is None for item in items),
+            "warnings": list(dict.fromkeys(warnings)),
+            "acquisition_policy": "cache_only",
+        }
+    )
+
+
 def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
     if force_refresh:
         logger.warning(
             "Deprecated force_refresh on GET market index summary was ignored; use the explicit POST refresh route."
         )
-    return _attach_summary_index_resolutions(
+    return _attach_completed_data_core_evidence(
         db,
-        _attach_completed_data_core_evidence(
-            db,
-            _market_index_summary(db=db, force_refresh=False),
-        ),
-        acquisition_policy="cache_only",
+        _shared_current_market_summary(db),
     )
 
 
@@ -5302,18 +4746,57 @@ def refresh_market_index_summary(
     refresh_daily_stats: bool = False,
 ) -> dict:
     with _SUMMARY_REFRESH_LOCK:
-        return _attach_summary_index_resolutions(
-            db,
-            _attach_completed_data_core_evidence(
-                db,
-                _market_index_summary(
-                    db=db,
-                    force_refresh=True,
-                    refresh_daily_stats=refresh_daily_stats,
-                ),
-            ),
-            acquisition_policy="prefer_live",
+        from app.market.tw_current_market_operations import (
+            build_current_market_executors,
         )
+        from app.market.tw_current_market_platform import (
+            refresh_taiwan_current_breadth,
+            refresh_taiwan_current_index,
+        )
+
+        now = datetime.now(TAIPEI_TZ)
+        index_acquisition, breadth_acquisition = (
+            build_current_market_executors(
+                db,
+                clock=lambda: datetime.now(TAIPEI_TZ),
+            )
+        )
+        refresh_limitations: list[str] = []
+        for config in INDEX_CONFIGS:
+            index_result = refresh_taiwan_current_index(
+                db,
+                index_id=str(config["index_id"]),
+                requested_at=now,
+                acquisition=index_acquisition,
+            )
+            breadth_result = refresh_taiwan_current_breadth(
+                db,
+                venue=str(config["market"]),
+                requested_at=now,
+                acquisition=breadth_acquisition,
+            )
+            refresh_limitations.extend(index_result.limitations)
+            refresh_limitations.extend(breadth_result.limitations)
+        payload = _attach_completed_data_core_evidence(
+            db,
+            _shared_current_market_summary(db, requested_at=now),
+        )
+        payload["acquisition_policy"] = "prefer_live"
+        payload["cache_status"] = "canonical_refresh"
+        payload["warnings"] = list(
+            dict.fromkeys(
+                [
+                    *payload.get("warnings", []),
+                    *refresh_limitations,
+                    *(
+                        ["DAILY_STATS_REFRESH_REQUIRES_DEDICATED_ROUTE"]
+                        if refresh_daily_stats
+                        else []
+                    ),
+                ]
+            )
+        )
+        return payload
 
 
 def refresh_market_index_daily_stats(

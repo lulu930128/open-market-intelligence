@@ -165,6 +165,9 @@ class Settings(BaseSettings):
     tw_corporate_event_cache_path: Path = (
         DEFAULT_DB_PATH.parent / "tw_corporate_events.json"
     )
+    tw_institutional_holding_ratio_cache_path: Path = (
+        DEFAULT_DB_PATH.parent / "tw_institutional_holding_ratios.json"
+    )
     enable_tw_broker_branch_scheduler: bool = True
     scheduler_tw_broker_branch_refresh_time: str = "16:05"
     scheduler_tw_broker_branch_refresh_day_of_week: str = "mon-fri"

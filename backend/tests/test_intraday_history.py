@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, MarketIntradayBar, StockMaster
+from app.db.models import Base, StockMaster
 from app.market import intraday
 
 
@@ -44,12 +45,44 @@ def point(
         microsecond=0,
     )
     return {
-        "time": point_time.isoformat(),
+        "time": point_time,
         "price": close,
         "volume": volume,
         "open": close - 1,
         "high": close + 2,
         "low": close - 2,
+        "close": close,
+    }
+
+
+def fake_result(*, fallback_used: bool = False):
+    return SimpleNamespace(
+        resolved=SimpleNamespace(
+            health=SimpleNamespace(fallback_used=fallback_used),
+        ),
+        acquisition=SimpleNamespace(
+            status=SimpleNamespace(value="not_attempted"),
+        ),
+    )
+
+
+def projection(
+    points: list[dict],
+    *,
+    provider: str = "yahoo_finance_chart",
+    source: str = "yahoo_finance_chart",
+    source_interval: str = "1m",
+    calculation_versions: list[str] | None = None,
+) -> tuple[list[dict], dict]:
+    return points, {
+        "provider": provider,
+        "source": source,
+        "source_interval": source_interval,
+        "calculation_versions": calculation_versions or [],
+        "component_raw_result_ids": ["raw_fetch_result:1"],
+        "resolved_health": {"status": "selected"},
+        "candidate_rejections": [],
+        "limitations": [],
     }
 
 
@@ -61,111 +94,76 @@ class MarketIntradayHistoryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
-    def test_history_refresh_persists_interval_bars(self) -> None:
-        payload = {
-            "stock_id": "2330",
-            "symbol": "2330.TW",
-            "source": "yahoo_finance_chart",
-            "source_url": "https://example.test/chart",
-            "previous_close": 100,
-            "point_count": 3,
-            "points": [point(8, 59, 100), point(9, 0, 101), point(9, 1, 102)],
-        }
-
-        with patch.object(intraday, "_fetch_yahoo_intraday", return_value=payload) as fetch:
-            result = intraday.get_market_intraday_history(
+    def _read(
+        self,
+        points: list[dict],
+        *,
+        interval: str = "1m",
+        **metadata,
+    ) -> dict:
+        with (
+            patch.object(
+                intraday,
+                "read_taiwan_intraday_bars",
+                return_value=fake_result(),
+            ),
+            patch.object(
+                intraday,
+                "project_taiwan_intraday_bars",
+                return_value=projection(points, **metadata),
+            ),
+            patch.object(
+                self.db,
+                "commit",
+                side_effect=AssertionError("history GET must not commit"),
+            ),
+        ):
+            return intraday.get_market_intraday_history(
                 self.db,
                 stock_id="2330",
-                interval="1m",
+                interval=interval,
                 range_value="5d",
+                refresh=True,
             )
 
-        fetch.assert_called_once()
+    def test_history_get_projects_cache_without_refresh_or_mutation(self) -> None:
+        result = self._read([point(9, 0, 101), point(9, 1, 102)])
+
         self.assertEqual(result["point_count"], 2)
-        self.assertEqual(result["refreshed_count"], 2)
         self.assertEqual(result["points"][-1]["close"], 102)
-        self.assertEqual(
-            self.db.query(MarketIntradayBar)
-            .filter(MarketIntradayBar.stock_id == "2330")
-            .filter(MarketIntradayBar.interval == "1m")
-            .count(),
-            2,
+        self.assertEqual(result["refreshed_count"], 0)
+        self.assertEqual(result["cache_status"], "persisted_hit")
+        self.assertEqual(result["read_policy"], "cache_only")
+        self.assertEqual(result["acquisition_status"], "not_attempted")
+
+    def test_four_hour_projection_preserves_derived_lineage_metadata(self) -> None:
+        result = self._read(
+            [point(9, 0, 105, 3000), point(13, 0, 103, 3000)],
+            interval="4h",
+            source_interval="1h",
+            calculation_versions=["omi.aggregate.4h.v1"],
         )
 
-    def test_four_hour_history_aggregates_hourly_points(self) -> None:
-        payload = {
-            "stock_id": "2330",
-            "symbol": "2330.TW",
-            "source": "yahoo_finance_chart",
-            "source_url": "https://example.test/chart",
-            "previous_close": 100,
-            "point_count": 3,
-            "points": [
-                point(9, 0, 101, 1000),
-                point(10, 0, 105, 2000),
-                point(13, 30, 103, 3000),
-            ],
-        }
+        self.assertEqual(result["interval"], "4h")
+        self.assertEqual(result["source_interval"], "1h")
+        self.assertEqual(result["calculation_versions"], ["omi.aggregate.4h.v1"])
+        self.assertEqual(result["component_raw_result_ids"], ["raw_fetch_result:1"])
 
-        with patch.object(intraday, "_fetch_yahoo_intraday", return_value=payload):
-            result = intraday.get_market_intraday_history(
-                self.db,
-                stock_id="2330",
-                interval="4h",
-                range_value="5d",
-            )
-
-        self.assertEqual(result["point_count"], 2)
-        self.assertEqual(result["points"][0]["open"], 100)
-        self.assertEqual(result["points"][0]["high"], 107)
-        self.assertEqual(result["points"][0]["low"], 99)
-        self.assertEqual(result["points"][0]["close"], 105)
-        self.assertEqual(result["points"][0]["volume"], 3000)
-        self.assertEqual(result["points"][1]["close"], 103)
-
-    def test_one_minute_auto_keeps_recent_trading_days_across_calendar_gap(self) -> None:
-        payload = {
-            "stock_id": "2330",
-            "symbol": "2330.TW",
-            "source": "yahoo_finance_chart",
-            "source_url": "https://example.test/chart",
-            "previous_close": 100,
-            "point_count": 1,
-            "points": [point(9, 0, 101, days_ago=6)],
-        }
-
-        with patch.object(intraday, "_fetch_yahoo_intraday", return_value=payload):
-            result = intraday.get_market_intraday_history(
-                self.db,
-                stock_id="2330",
-                interval="1m",
-                range_value="auto",
-            )
+    def test_one_minute_cache_keeps_recent_trading_days_across_calendar_gap(self) -> None:
+        result = self._read([point(9, 0, 101, days_ago=6)])
 
         self.assertEqual(result["point_count"], 1)
         self.assertEqual(result["points"][0]["close"], 101)
 
     def test_history_keeps_multi_day_points_but_scopes_session_metrics(self) -> None:
-        payload = {
-            "stock_id": "2330",
-            "symbol": "2330.TW",
-            "source": "yahoo_finance_chart",
-            "source_url": "https://example.test/chart",
-            "points": [
+        result = self._read(
+            [
                 point(12, 0, 100, 10_000, days_ago=1),
                 point(13, 0, 100, 20_000, days_ago=1),
                 point(9, 0, 200, 1_000),
                 point(9, 1, 200, 2_000),
-            ],
-        }
-
-        with patch.object(intraday, "_fetch_yahoo_intraday", return_value=payload):
-            result = intraday.get_market_intraday_history(
-                self.db,
-                stock_id="2330",
-                interval="1m",
-                range_value="5d",
-            )
+            ]
+        )
 
         expected_trade_date = datetime.now(intraday.TAIPEI_TZ).date().isoformat()
         self.assertEqual(result["point_count"], 4)
@@ -176,87 +174,49 @@ class MarketIntradayHistoryTests(unittest.TestCase):
         self.assertEqual(result["cumulative_volume_shares"], 3_000)
         self.assertAlmostEqual(result["approx_vwap"], 200.0)
 
-    def test_five_minute_history_overlays_current_local_one_minute_aggregate(self) -> None:
-        one_minute_payload = {
-            "stock_id": "2330",
-            "symbol": "2330.TW",
-            "source": "yahoo_finance_chart",
-            "source_url": "https://example.test/one-minute",
-            "points": [
-                point(13, 15, 101, 1000),
-                point(13, 16, 102, 2000),
-                point(13, 17, 103, 3000),
-            ],
-        }
-        stale_five_minute_payload = {
-            "stock_id": "2330",
-            "symbol": "2330.TW",
-            "source": "yahoo_finance_chart",
-            "source_url": "https://example.test/five-minute",
-            "points": [point(12, 55, 99, 500)],
-        }
+    def test_five_minute_history_uses_resolved_provider_not_local_legacy_overlay(self) -> None:
+        result = self._read(
+            [point(13, 15, 103, 6000)],
+            interval="5m",
+            source_interval="5m",
+        )
 
-        with (
-            patch.object(
-                intraday,
-                "get_taiwan_disposition_status",
-                return_value={"is_active": False},
-            ),
-            patch.object(
-                intraday,
-                "_fetch_yahoo_intraday",
-                side_effect=[one_minute_payload, stale_five_minute_payload],
-            ),
-        ):
-            intraday.get_market_intraday_history(
-                self.db,
-                stock_id="2330",
-                interval="1m",
-                range_value="1d",
-            )
-            result = intraday.get_market_intraday_history(
-                self.db,
-                stock_id="2330",
-                interval="5m",
-                range_value="1d",
-            )
-
-        self.assertEqual(result["source"], "local_current_1m_aggregate")
-        self.assertEqual(result["provider"], "local_derived")
+        self.assertEqual(result["source"], "yahoo_finance_chart")
+        self.assertEqual(result["provider"], "yahoo_finance_chart")
         self.assertEqual(result["points"][-1]["close"], 103)
         self.assertEqual(result["points"][-1]["volume"], 6000)
 
-    def test_repeated_identical_intraday_refresh_reports_zero_updates(self) -> None:
-        payload = {
-            "stock_id": "2330",
-            "symbol": "2330.TW",
-            "source": "yahoo_finance_chart",
-            "source_url": "https://example.test/chart",
-            "points": [point(9, 0, 101, 1000)],
-        }
-
+    def test_repeated_cache_reads_never_report_refresh_updates(self) -> None:
+        points = [point(9, 0, 101, 1000)]
         with (
             patch.object(
                 intraday,
-                "get_taiwan_disposition_status",
-                return_value={"is_active": False},
+                "read_taiwan_intraday_bars",
+                return_value=fake_result(),
+            ) as read,
+            patch.object(
+                intraday,
+                "project_taiwan_intraday_bars",
+                return_value=projection(points),
             ),
-            patch.object(intraday, "_fetch_yahoo_intraday", return_value=payload),
         ):
             first = intraday.get_market_intraday_history(
                 self.db,
                 stock_id="2330",
                 interval="1m",
                 range_value="1d",
+                refresh=True,
             )
             second = intraday.get_market_intraday_history(
                 self.db,
                 stock_id="2330",
                 interval="1m",
                 range_value="1d",
+                refresh=True,
             )
 
-        self.assertEqual(first["refreshed_count"], 1)
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(first["refreshed_count"], 0)
         self.assertEqual(second["refreshed_count"], 0)
 
 

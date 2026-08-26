@@ -34,6 +34,7 @@ from app.market_data.contracts import (
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 KGI_PROVIDER = "kgi_superpy"
 KGI_SOURCE = "kgi_superpy_quote_all"
+KGI_RAW_CONTRACT_VERSION = "kgi.superpy.quote_all.v1"
 BOARD_LOT_SHARES = Decimal("1000")
 
 
@@ -212,6 +213,7 @@ def canonical_snapshot_from_kgi(
     quote: dict[str, Any],
     session: str | MarketSession,
     received_at: datetime | None = None,
+    auction_type: AuctionType | None = None,
 ) -> CanonicalMarketSnapshot:
     """Normalize one already-acquired KGI quote without I/O or persistence."""
 
@@ -229,7 +231,7 @@ def canonical_snapshot_from_kgi(
         provider=KGI_PROVIDER,
         source=KGI_SOURCE,
         authority=AuthorityClass.BROKER,
-        raw_contract_version="kgi.superpy.quote_all.v1",
+        raw_contract_version=KGI_RAW_CONTRACT_VERSION,
         event_at=event_at,
         received_at=normalized_received_at,
     )
@@ -295,16 +297,21 @@ def canonical_snapshot_from_kgi(
         ),
     )
 
+    resolved_auction_type = auction_type
+    if resolved_auction_type is None:
+        if session_value is MarketSession.CLOSING_AUCTION:
+            resolved_auction_type = AuctionType.CLOSING
+        elif session_value in {
+            MarketSession.PRE_OPEN,
+            MarketSession.OPENING_AUCTION,
+        }:
+            resolved_auction_type = AuctionType.OPENING
     auction = None
-    if indicative:
+    if indicative and resolved_auction_type is not None:
         auction = AuctionObservation(
             instrument=instrument,
             lineage=lineage,
-            auction_type=(
-                AuctionType.CLOSING
-                if session_value is MarketSession.CLOSING_AUCTION
-                else AuctionType.OPENING
-            ),
+            auction_type=resolved_auction_type,
             indicative_price=close,
             indicative_quantity=_lots_to_shares(quote.get("volume")),
             best_bid=bids[0] if bids else None,
@@ -347,6 +354,9 @@ def canonical_snapshot_from_kgi(
 
 
 __all__ = [
+    "KGI_PROVIDER",
+    "KGI_RAW_CONTRACT_VERSION",
+    "KGI_SOURCE",
     "canonical_snapshot_from_kgi",
     "kgi_quote_has_actual_trade_evidence",
     "kgi_quote_is_indicative",

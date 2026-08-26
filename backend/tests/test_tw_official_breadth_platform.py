@@ -374,7 +374,10 @@ def test_mixed_raw_receipts_fail_closed_instead_of_publishing_false_aggregate(
     assert result.resolved.health.status is ResolvedEvidenceStatus.POLICY_UNSATISFIED
     assert result.dataset_health is not None
     assert result.dataset_health.status is DatasetHealthStatus.MISSING
-    assert result.limitations == ("BREADTH_COMPONENT_LINEAGE_NOT_COHERENT",)
+    assert result.limitations == (
+        "BREADTH_COMPONENT_LINEAGE_NOT_COHERENT",
+        "READ_POLICY_FORBIDS_ACQUISITION",
+    )
 
 
 def test_breadth_contract_rejects_bad_partition_and_completed_provisional(

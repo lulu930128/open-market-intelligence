@@ -858,6 +858,48 @@ class MarketIntradayBar(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class MarketIntradayBarLineage(Base):
+    __tablename__ = "market_intraday_bar_lineage"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "bar_id",
+            name="uq_market_intraday_bar_lineage_bar_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    bar_id: Mapped[int] = mapped_column(
+        ForeignKey("market_intraday_bar.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    authority: Mapped[str] = mapped_column(String(30))
+    raw_contract_version: Mapped[str] = mapped_column(String(128))
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    finalization: Mapped[str] = mapped_column(String(30))
+    source_interval: Mapped[str] = mapped_column(String(16))
+    calculation_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    component_raw_result_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class TaiwanStockQuoteSnapshot(Base):
     __tablename__ = "taiwan_stock_quote_snapshot"
 
@@ -944,6 +986,158 @@ class TaiwanStockQuoteSnapshot(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanStockDepthSnapshot(Base):
+    __tablename__ = "taiwan_stock_depth_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "stock_id",
+            "event_at",
+            name="uq_tw_stock_depth_provider_stock_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"), nullable=False, index=True
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    market_session: Mapped[str] = mapped_column(String(40), index=True)
+    observation_state: Mapped[str] = mapped_column(String(30))
+    depth_capability: Mapped[str] = mapped_column(String(30))
+    raw_contract_version: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class TaiwanStockDepthLevel(Base):
+    __tablename__ = "taiwan_stock_depth_level"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            "side",
+            "level",
+            name="uq_tw_stock_depth_level_identity",
+        ),
+        CheckConstraint("side IN ('bid', 'ask')", name="ck_tw_stock_depth_level_side"),
+        CheckConstraint("level >= 1 AND level <= 20", name="ck_tw_stock_depth_level_rank"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("taiwan_stock_depth_snapshot.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    side: Mapped[str] = mapped_column(String(4), index=True)
+    level: Mapped[int] = mapped_column(Integer)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
+    quantity_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 8), nullable=True
+    )
+    quantity_unit: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    original_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 8), nullable=True
+    )
+    original_unit: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    scale: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    price_state: Mapped[str] = mapped_column(String(30))
+
+
+class TaiwanStockAuctionSnapshot(Base):
+    __tablename__ = "taiwan_stock_auction_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "stock_id",
+            "event_at",
+            "auction_type",
+            name="uq_tw_stock_auction_provider_stock_time_type",
+        ),
+        CheckConstraint("provisional = 1", name="ck_tw_stock_auction_provisional"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"), nullable=False, index=True
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    market_session: Mapped[str] = mapped_column(String(40), index=True)
+    observation_state: Mapped[str] = mapped_column(String(30))
+    auction_type: Mapped[str] = mapped_column(String(30), index=True)
+    indicative_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 8), nullable=True
+    )
+    indicative_quantity_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 8), nullable=True
+    )
+    indicative_quantity_unit: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+    indicative_original_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 8), nullable=True
+    )
+    indicative_original_unit: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+    indicative_scale: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 8), nullable=True
+    )
+    best_bid_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 8), nullable=True
+    )
+    best_bid_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    best_bid_quantity_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 8), nullable=True
+    )
+    best_bid_quantity_unit: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+    best_bid_price_state: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+    best_ask_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 8), nullable=True
+    )
+    best_ask_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    best_ask_quantity_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 8), nullable=True
+    )
+    best_ask_quantity_unit: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+    best_ask_price_state: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+    provisional: Mapped[bool] = mapped_column(Boolean, default=True)
+    raw_contract_version: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
 
 
 class TaiwanQuoteContractSnapshot(Base):
@@ -2240,6 +2434,107 @@ class MarketIndexDailyStat(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class TaiwanCurrentIndexSnapshot(Base):
+    __tablename__ = "taiwan_current_index_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "source",
+            "index_id",
+            "event_at",
+            name="uq_tw_current_index_provider_source_event",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"), index=True
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    authority: Mapped[str] = mapped_column(String(40), index=True)
+    raw_contract_version: Mapped[str] = mapped_column(String(96))
+    index_id: Mapped[str] = mapped_column(String(20), index=True)
+    venue: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    session: Mapped[str] = mapped_column(String(40), index=True)
+    close_value: Mapped[float] = mapped_column(Float)
+    price_change: Mapped[float] = mapped_column(Float)
+    trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trade_volume_unit: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    transaction_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    observation_state: Mapped[str] = mapped_column(String(24), index=True)
+    value_semantics: Mapped[str] = mapped_column(String(64))
+    finalization: Mapped[str] = mapped_column(String(24), index=True)
+    official: Mapped[bool] = mapped_column(Boolean, default=False)
+    provisional: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class TaiwanCurrentBreadthSnapshot(Base):
+    __tablename__ = "taiwan_current_breadth_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "source",
+            "venue",
+            "event_at",
+            name="uq_tw_current_breadth_provider_source_event",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"), index=True
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    authority: Mapped[str] = mapped_column(String(40), index=True)
+    raw_contract_version: Mapped[str] = mapped_column(String(96))
+    venue: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    session: Mapped[str] = mapped_column(String(40), index=True)
+    scope: Mapped[str] = mapped_column(String(64), index=True)
+    universe_source: Mapped[str] = mapped_column(String(192))
+    universe_count: Mapped[int] = mapped_column(Integer)
+    advance_count: Mapped[int] = mapped_column(Integer)
+    decline_count: Mapped[int] = mapped_column(Integer)
+    unchanged_count: Mapped[int] = mapped_column(Integer)
+    received_unclassified_count: Mapped[int] = mapped_column(Integer, default=0)
+    not_received_count: Mapped[int] = mapped_column(Integer, default=0)
+    trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    observation_state: Mapped[str] = mapped_column(String(24), index=True)
+    price_semantics: Mapped[str] = mapped_column(String(64))
+    official: Mapped[bool] = mapped_column(Boolean, default=False)
+    provisional: Mapped[bool] = mapped_column(Boolean, default=True)
+    decision_usable: Mapped[bool] = mapped_column(Boolean, default=False)
+    limitations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class TaiwanMarketMinuteState(Base):
     __tablename__ = "taiwan_market_minute_state"
 
@@ -2335,6 +2630,24 @@ class TaiwanMarketMinuteState(Base):
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     official_flag: Mapped[bool] = mapped_column(Boolean, default=False)
     derived_flag: Mapped[bool] = mapped_column(Boolean, default=True)
+    component_raw_result_ids_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    component_sources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    component_event_times_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    component_time_skew_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    calculation_version: Mapped[str | None] = mapped_column(
+        String(96),
+        nullable=True,
+    )
+    lineage_complete: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -2473,6 +2786,24 @@ class TaiwanIntradayStockState(Base):
     )
     source: Mapped[str] = mapped_column(String(120), index=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    component_raw_result_ids_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    component_sources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    component_event_times_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    component_time_skew_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    calculation_version: Mapped[str | None] = mapped_column(
+        String(96),
+        nullable=True,
+    )
+    lineage_complete: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

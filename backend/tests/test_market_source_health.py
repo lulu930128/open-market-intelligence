@@ -17,8 +17,10 @@ from app.db.models import (
     MarketChipDaily,
     MarketDailyPrice,
     MarketIntradayBar,
+    RawFetchResult,
     ShareholdingDistributionWeekly,
     SourceHealthSnapshot,
+    SourceRegistry,
     StockMaster,
     TaiwanMarketMinuteState,
     TaiwanQuoteContractSnapshot,
@@ -27,6 +29,7 @@ from app.db.models import (
 from app.market.source_health import build_taiwan_source_health
 from app.observability import provider_health
 from app.observability.provider_health import record_provider_event
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
 class TaiwanSourceHealthTests(unittest.TestCase):
@@ -45,15 +48,27 @@ class TaiwanSourceHealthTests(unittest.TestCase):
             StockMaster(
                 stock_id="2330",
                 stock_name="台積電",
-                market="上市",
+                market="TWSE",
                 instrument_type="stock",
                 updated_at=updated_at,
             )
         )
         self.db.add(
+            SourceRegistry(
+                id=1,
+                source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+                source_type="test",
+                category="market_daily_price",
+            )
+        )
+        self.db.add(RawFetchResult(id=1, source_id=1, method="GET"))
+        self.db.add(
             MarketDailyPrice(
                 source_id=1,
                 raw_result_id=1,
+                open_price=2300,
+                high_price=2320,
+                low_price=2290,
                 trade_date=date(2026, 6, 12),
                 stock_id="2330",
                 stock_name="台積電",

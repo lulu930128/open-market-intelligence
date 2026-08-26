@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Base, MarketDailyPrice, MarketIndexDailyStat, RawFetchResult, SourceRegistry
 from app.jobs import scheduler as job_scheduler
 from app.market import index_parsers, indices
+from app.market.providers import twse_mis_current_breadth, twse_mis_current_index
 
 
 def make_session() -> Session:
@@ -51,12 +52,12 @@ class FakeResponse:
 
 class MarketIndexDailyStatTests(unittest.TestCase):
     def setUp(self) -> None:
-        indices.reset_twse_mis_breadth_guard()
+        twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
         indices._FINAL_INDEX_DAILY_OHLC_CACHE.clear()
         self.db = make_session()
 
     def tearDown(self) -> None:
-        indices.reset_twse_mis_breadth_guard()
+        twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
         indices._FINAL_INDEX_DAILY_OHLC_CACHE.clear()
         self.db.close()
 
@@ -103,7 +104,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 from_date=date(2026, 1, 5),
                 to_date=date(2026, 1, 6),
             )
-            payload = indices.get_market_index_ohlc_chart_data(
+            payload = indices.refresh_market_index_ohlc_chart_data(
                 index_id="TAIEX",
                 timeframe="daily",
                 bars=2,
@@ -154,7 +155,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 from_date=date(2026, 1, 5),
                 to_date=date(2026, 1, 11),
             )
-            payload = indices.get_market_index_ohlc_chart_data(
+            payload = indices.refresh_market_index_ohlc_chart_data(
                 index_id="TAIEX",
                 timeframe="weekly",
                 bars=1,
@@ -536,7 +537,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 from_date=date(2026, 6, 11),
                 to_date=date(2026, 6, 15),
             )
-            payload = indices.get_market_index_ohlc_chart_data(
+            payload = indices.refresh_market_index_ohlc_chart_data(
                 index_id="TAIEX",
                 timeframe="daily",
                 bars=2,
@@ -596,7 +597,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             ),
             patch.object(indices, "observe_provider_fallback"),
         ):
-            payload = indices.get_market_index_ohlc_chart_data(
+            payload = indices.refresh_market_index_ohlc_chart_data(
                 index_id="TAIEX",
                 timeframe="daily",
                 bars=2,
@@ -657,7 +658,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 return_value=official_ohlc,
             ),
         ):
-            payload = indices.get_market_index_ohlc_chart_data(
+            payload = indices.refresh_market_index_ohlc_chart_data(
                 index_id="TPEX",
                 timeframe="daily",
                 bars=3,
@@ -712,7 +713,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             ),
             patch.object(indices, "observe_provider_fallback"),
         ):
-            payload = indices.get_market_index_ohlc_chart_data(
+            payload = indices.refresh_market_index_ohlc_chart_data(
                 index_id="TPEX",
                 timeframe="daily",
                 bars=3,
@@ -963,8 +964,9 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             patch.object(indices, "_fetch_recent_index_trade_values", return_value={}),
             patch.object(indices, "_persist_shared_market_index_summary"),
         ):
-            payload = indices.refresh_market_index_summary(
+            payload = indices._market_index_summary(
                 db=self.db,
+                force_refresh=True,
                 refresh_daily_stats=True,
             )
 
@@ -975,7 +977,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(taiex["trade_value"], 1_045_439_448_015)
         self.assertEqual(taiex["close"], 44999.90)
 
-    def test_legacy_completed_breadth_is_not_used_when_data_core_is_missing(self) -> None:
+    def test_legacy_summary_does_not_relabel_current_breadth_as_completed(self) -> None:
         target_date = date(2026, 7, 22)
         stale_index_date = date(2026, 7, 17)
         resolved_targets: list[tuple[str, date | None]] = []
@@ -1019,7 +1021,10 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             patch.object(indices, "_fetch_recent_index_trade_values", return_value={}),
             patch.object(indices, "_persist_shared_market_index_summary"),
         ):
-            payload = indices.refresh_market_index_summary(db=self.db)
+            payload = indices._market_index_summary(
+                db=self.db,
+                force_refresh=True,
+            )
 
         self.assertEqual(
             resolved_targets,
@@ -1027,12 +1032,9 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         )
         tpex = next(item for item in payload["indices"] if item["index_id"] == "TPEX")
         self.assertEqual(tpex["time"], stale_index_date)
-        self.assertIsNone(tpex["breadth"])
-        self.assertEqual(tpex["breadth_status"]["status"], "failed")
-        self.assertEqual(
-            tpex["data_core_projection_scope"]["official_breadth"],
-            "data_core_missing",
-        )
+        self.assertEqual(tpex["breadth"]["trade_date"], target_date)
+        self.assertEqual(tpex["breadth_status"]["status"], "ready")
+        self.assertNotIn("data_core_projection_scope", tpex)
 
     def test_get_index_summary_never_refreshes_provider_even_with_legacy_flag(self) -> None:
         original_cache = dict(indices._CACHE)
@@ -1054,7 +1056,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
 
         fetch_yahoo.assert_not_called()
         fetch_breadth.assert_not_called()
-        self.assertEqual(payload["cache_status"], "local_cache")
+        self.assertEqual(payload["cache_status"], "canonical_cache")
         self.assertTrue(payload["refresh_recommended"])
 
     def test_summary_cache_naive_timestamp_is_interpreted_as_utc(self) -> None:
@@ -1173,7 +1175,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             ),
             patch.object(indices, "_ensure_market_index_daily_stat_coverage") as ensure_coverage,
         ):
-            payload = indices.get_market_index_ohlc_chart_data(
+            payload = indices.refresh_market_index_ohlc_chart_data(
                 index_id="TAIEX",
                 timeframe="daily",
                 bars=20,
@@ -1385,8 +1387,6 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["points"][-1]["close"], 42449.70)
 
     def test_twse_mis_live_breadth_counts_classified_and_unknown_quotes(self) -> None:
-        indices._TWSE_MIS_LIVE_BREADTH_CACHE.clear()
-        indices._TWSE_MIS_STOCK_STATE.clear()
         codes = [f"{1000 + index:04d}" for index in range(1, 502)]
         messages = [
             {
@@ -1441,16 +1441,25 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             },
         ]
 
-        with (
-            patch.object(indices, "_twse_mis_live_breadth_stock_codes", return_value=codes),
-            patch.object(indices, "_fetch_twse_mis_stock_messages", return_value=(messages, 0)),
+        with patch.object(
+            twse_mis_current_breadth,
+            "_fetch_messages",
+            return_value=(messages, 0),
         ):
-            payload = indices._fetch_twse_mis_live_market_breadth(self.db, "TWSE")
+            result = twse_mis_current_breadth.read_twse_mis_current_breadth(
+                "TWSE",
+                10,
+                universe_reader=lambda _market: codes,
+            )
+        payload = result.payload
 
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["source"], "twse_mis_live_breadth_partial")
-        self.assertEqual(payload["scope"], "registered_universe")
+        self.assertEqual(
+            payload["scope"],
+            "full_market_registered_stock_universe",
+        )
         self.assertEqual(payload["label"], "上市即時廣度（註冊範圍）")
         self.assertEqual(payload["trade_date"], date(2026, 7, 9))
         self.assertEqual(payload["advance_count"], 1)
@@ -1473,7 +1482,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertTrue(payload["trade_value_is_estimate"])
         self.assertTrue(payload["warnings"])
 
-    def test_resolve_market_breadth_prefers_live_when_daily_source_is_stale(self) -> None:
+    def test_completed_breadth_does_not_fallback_to_current_provider(self) -> None:
         target_date = date(2026, 7, 9)
         stale_daily = {
             "market": "TWSE",
@@ -1487,28 +1496,8 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             "trade_value": 123,
             "source": "twse_rwd_mi_index",
         }
-        live_breadth = {
-            "market": "TWSE",
-            "trade_date": target_date,
-            "advance_count": 300,
-            "decline_count": 250,
-            "unchanged_count": 50,
-            "total_count": 1086,
-            "limit_up_count": 3,
-            "limit_down_count": 4,
-            "trade_value": None,
-            "coverage_count": 600,
-            "unknown_count": 486,
-            "source": "twse_mis_live_breadth_partial",
-        }
-
         with (
             patch.object(indices, "_fetch_market_quote_breadth", return_value=stale_daily),
-            patch.object(
-                indices,
-                "_fetch_twse_mis_live_market_breadth",
-                return_value=live_breadth,
-            ),
             patch.object(indices, "_latest_market_breadth", return_value=None),
         ):
             payload = indices._resolve_market_breadth(
@@ -1517,7 +1506,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 target_trade_date=target_date,
             )
 
-        self.assertEqual(payload, live_breadth)
+        self.assertIsNone(payload)
 
     def test_index_contributions_prefer_newer_local_daily_prices(self) -> None:
         source = SourceRegistry(
@@ -1603,7 +1592,11 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 },
             ),
         ):
-            payload = indices.get_market_index_contributions("TAIEX", limit=5, db=self.db)
+            payload = indices.refresh_market_index_contributions(
+                "TAIEX",
+                limit=5,
+                db=self.db,
+            )
 
         self.assertEqual(payload["source"], "market_daily_price:TWSE OpenAPI Daily Trading")
         self.assertEqual(payload["trade_date"], date(2026, 6, 15))
@@ -1624,6 +1617,47 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             payload["reconciliation_status"],
             {"within_tolerance", "outside_tolerance", "unavailable"},
         )
+
+    def test_index_get_surfaces_do_not_call_provider_acquisition(self) -> None:
+        indices._INDEX_LIST_CACHE.clear()
+        indices._INDEX_OHLC_CACHE.clear()
+        indices._CONTRIBUTION_CACHE.clear()
+
+        with (
+            patch.object(
+                indices,
+                "_fetch_twse_index_list",
+                side_effect=AssertionError("GET index list called provider"),
+            ),
+            patch.object(
+                indices,
+                "_fetch_yahoo_index_points",
+                side_effect=AssertionError("GET index OHLC called provider"),
+            ),
+            patch.object(
+                indices,
+                "_source_contribution_quote_rows",
+                side_effect=AssertionError("GET contribution called provider"),
+            ),
+            patch.object(
+                indices,
+                "_market_index_item_for_contribution",
+                side_effect=AssertionError("GET contribution called index provider"),
+            ),
+        ):
+            index_list = indices.get_market_index_list("TWSE")
+            chart = indices.get_market_index_ohlc_chart_data(
+                "TAIEX",
+                db=self.db,
+            )
+            contributions = indices.get_market_index_contributions(
+                "TAIEX",
+                db=self.db,
+            )
+
+        self.assertEqual(index_list["source"], "cache_miss")
+        self.assertEqual(chart["data_quality"], "missing")
+        self.assertEqual(contributions["source"], "market_daily_price:TWSE OpenAPI Daily Trading")
 
     def test_index_intraday_overlays_mis_snapshot_on_yahoo_history(self) -> None:
         yahoo_payload = {
@@ -1654,16 +1688,22 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             "m": "4911549",
         }
 
-        with (
-            patch.object(
-                indices,
-                "_fetch_twse_index_5s_intraday",
-                side_effect=ValueError("official unavailable"),
-            ),
-            patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
-            patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
+        with patch.object(
+            twse_mis_current_index.twse_mis,
+            "fetch_index_message",
+            return_value=mis_message,
         ):
-            payload = indices.get_market_index_intraday("TAIEX")
+            mis_result = twse_mis_current_index.read_twse_mis_current_index(
+                "TAIEX",
+                10,
+            )
+        assert mis_result.payload is not None
+        payload = indices._finalize_index_intraday_contract(
+            indices._merge_index_intraday_snapshot(
+                yahoo_payload,
+                mis_result.payload,
+            )
+        )
 
         self.assertEqual(payload["source"], "yahoo_finance_chart_twse_mis_snapshot")
         self.assertEqual(payload["previous_close"], 46255.26)
@@ -1694,16 +1734,22 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             "l": "45332.22",
         }
 
-        with (
-            patch.object(
-                indices,
-                "_fetch_twse_index_5s_intraday",
-                side_effect=ValueError("official unavailable"),
-            ),
-            patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
-            patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
+        with patch.object(
+            twse_mis_current_index.twse_mis,
+            "fetch_index_message",
+            return_value=mis_message,
         ):
-            payload = indices.get_market_index_intraday("TAIEX")
+            mis_result = twse_mis_current_index.read_twse_mis_current_index(
+                "TAIEX",
+                10,
+            )
+        assert mis_result.payload is not None
+        payload = indices._finalize_index_intraday_contract(
+            indices._merge_index_intraday_snapshot(
+                yahoo_payload,
+                mis_result.payload,
+            )
+        )
 
         self.assertEqual(payload["source"], "twse_mis_index_snapshot")
         self.assertEqual(payload["point_count"], 1)
@@ -1728,16 +1774,17 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             ],
         }
 
-        with (
-            patch.object(
-                indices,
-                "_fetch_twse_index_5s_intraday",
-                side_effect=ValueError("official unavailable"),
-            ),
-            patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
-            patch.object(indices, "_fetch_mis_index_message", side_effect=ConnectionError("mis offline")),
+        with patch.object(
+            twse_mis_current_index.twse_mis,
+            "fetch_index_message",
+            side_effect=ConnectionError("mis offline"),
         ):
-            payload = indices.get_market_index_intraday("TAIEX")
+            mis_result = twse_mis_current_index.read_twse_mis_current_index(
+                "TAIEX",
+                10,
+            )
+        self.assertEqual(mis_result.status, "failed")
+        payload = indices._finalize_index_intraday_contract(yahoo_payload)
 
         self.assertEqual(payload["source"], yahoo_payload["source"])
         self.assertEqual(payload["previous_close"], yahoo_payload["previous_close"])
@@ -1775,16 +1822,22 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             "l": "45332.22",
         }
 
-        with (
-            patch.object(
-                indices,
-                "_fetch_twse_index_5s_intraday",
-                side_effect=ValueError("official unavailable"),
-            ),
-            patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
-            patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
+        with patch.object(
+            twse_mis_current_index.twse_mis,
+            "fetch_index_message",
+            return_value=mis_message,
         ):
-            payload = indices.get_market_index_intraday("TAIEX")
+            mis_result = twse_mis_current_index.read_twse_mis_current_index(
+                "TAIEX",
+                10,
+            )
+        assert mis_result.payload is not None
+        payload = indices._finalize_index_intraday_contract(
+            indices._merge_index_intraday_snapshot(
+                yahoo_payload,
+                mis_result.payload,
+            )
+        )
 
         self.assertEqual(payload["source"], yahoo_payload["source"])
         self.assertEqual(payload["previous_close"], yahoo_payload["previous_close"])

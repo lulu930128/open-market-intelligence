@@ -283,7 +283,10 @@ def test_legacy_index_row_without_raw_lineage_fails_closed(db: Session) -> None:
     assert result.resolved.health.status is ResolvedEvidenceStatus.POLICY_UNSATISFIED
     assert result.dataset_health is not None
     assert result.dataset_health.status is DatasetHealthStatus.MISSING
-    assert result.limitations == ("INDEX_ROW_LINEAGE_MISSING",)
+    assert result.limitations == (
+        "INDEX_ROW_LINEAGE_MISSING",
+        "READ_POLICY_FORBIDS_ACQUISITION",
+    )
 
 
 def test_http_failure_receipt_is_durable_but_never_becomes_index_evidence(

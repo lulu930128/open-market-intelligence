@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 from sqlalchemy import MetaData, Table, inspect, select
@@ -25,7 +25,7 @@ from app.market.tw_dataset_catalog import (
     TaiwanDatasetContract,
     TaiwanDatasetLineageStatus,
 )
-from app.market_data.contracts import CanonicalModel
+from app.market_data.contracts import CanonicalModel, DatasetHealth
 
 
 class TaiwanDatasetStorageStatus(str, Enum):
@@ -62,8 +62,11 @@ class TaiwanDatasetStorageEvidence(CanonicalModel):
 
 class TaiwanDatasetPlatformProjection(CanonicalModel):
     contract_version: str = "omi.market.tw_dataset_platform_projection.v1"
+    contract_scope: Literal["storage_lineage_only"] = "storage_lineage_only"
     dataset: TaiwanDatasetContract
     storage_evidence: TaiwanDatasetStorageEvidence
+    lifecycle_health: DatasetHealth | None = None
+    limitations: tuple[str, ...] = ("FRESHNESS_REQUIRES_DATASET_POLICY",)
 
 
 def _probe(
@@ -82,7 +85,19 @@ def _probe(
 
 TW_DATASET_STORAGE_PROBES: dict[str, TaiwanDatasetStorageProbe] = {
     "tw.quote.snapshot": _probe("taiwan_stock_quote_snapshot", "fetched_at", "stock_id"),
+    "tw.quote.order_book.snapshot": _probe(
+        "taiwan_stock_depth_snapshot", "event_at", "stock_id"
+    ),
+    "tw.quote.auction.snapshot": _probe(
+        "taiwan_stock_auction_snapshot", "event_at", "stock_id"
+    ),
     "tw.intraday.bars": _probe("market_intraday_bar", "bar_time", "stock_id"),
+    "tw.market_index.current": _probe(
+        "taiwan_current_index_snapshot", "event_at", "index_id"
+    ),
+    "tw.market_breadth.current": _probe(
+        "taiwan_current_breadth_snapshot", "event_at", "venue"
+    ),
     "tw.daily.ohlcv": _probe("market_daily_price", "trade_date", "stock_id"),
     "tw.technical.daily": _probe("market_daily_price", "trade_date", "stock_id"),
     "tw.daily.ohlcv.full_market": _probe(
@@ -298,7 +313,7 @@ def read_taiwan_dataset_storage_evidence(
     )
 
 
-def read_taiwan_dataset_health(
+def read_taiwan_dataset_platform_projection(
     db: Session,
     dataset_id: str,
     *,
@@ -306,7 +321,7 @@ def read_taiwan_dataset_health(
     catalog: TaiwanDatasetCatalog = TW_DATASET_CATALOG,
     checked_at: datetime | None = None,
 ) -> TaiwanDatasetPlatformProjection:
-    """Return the catalog contract together with actual persisted evidence."""
+    """Return catalog plus storage/lineage evidence, never freshness policy."""
 
     return TaiwanDatasetPlatformProjection(
         dataset=catalog.get(dataset_id),
@@ -320,6 +335,25 @@ def read_taiwan_dataset_health(
     )
 
 
+def read_taiwan_dataset_health(
+    db: Session,
+    dataset_id: str,
+    *,
+    scope_value: str | None = None,
+    catalog: TaiwanDatasetCatalog = TW_DATASET_CATALOG,
+    checked_at: datetime | None = None,
+) -> TaiwanDatasetPlatformProjection:
+    """Compatibility alias for the explicitly named platform projection."""
+
+    return read_taiwan_dataset_platform_projection(
+        db,
+        dataset_id,
+        scope_value=scope_value,
+        catalog=catalog,
+        checked_at=checked_at,
+    )
+
+
 __all__ = [
     "TW_DATASET_STORAGE_PROBES",
     "TaiwanDatasetPlatformProjection",
@@ -327,5 +361,6 @@ __all__ = [
     "TaiwanDatasetStorageProbe",
     "TaiwanDatasetStorageStatus",
     "read_taiwan_dataset_health",
+    "read_taiwan_dataset_platform_projection",
     "read_taiwan_dataset_storage_evidence",
 ]

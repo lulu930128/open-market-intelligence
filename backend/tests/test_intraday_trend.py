@@ -14,9 +14,9 @@ class IntradayTrendTests(unittest.TestCase):
             intraday._INTRADAY_CACHE.clear()
             intraday._INTRADAY_FETCH_LOCKS.clear()
 
-    def test_concurrent_requests_share_one_provider_fetch(self):
+    def test_concurrent_requests_share_one_cache_only_projection(self):
         start_barrier = Barrier(2)
-        provider_result = {
+        cached_result = {
             "stock_id": "2330",
             "symbol": "2330.TW",
             "source": "nstock_minute_stock_data",
@@ -31,10 +31,10 @@ class IntradayTrendTests(unittest.TestCase):
             ],
         }
 
-        def fetch_provider(*, stock_id: str):
-            self.assertEqual(stock_id, "2330")
+        def load_cached_projection(*_args, **kwargs):
+            self.assertEqual(kwargs["stock_id"], "2330")
             time.sleep(0.1)
-            return provider_result
+            return intraday._cache_set(kwargs["cache_key"], cached_result)
 
         def load_trend():
             start_barrier.wait(timeout=2)
@@ -48,15 +48,14 @@ class IntradayTrendTests(unittest.TestCase):
             ),
             patch.object(
                 intraday,
-                "_fetch_nstock_intraday",
-                side_effect=fetch_provider,
-            ) as fetch_nstock,
-            patch.object(intraday, "_upsert_market_intraday_bars", return_value=1),
+                "_load_intraday_trend_uncached",
+                side_effect=load_cached_projection,
+            ) as load_uncached,
         ):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(lambda _: load_trend(), range(2)))
 
-        self.assertEqual(fetch_nstock.call_count, 1)
+        self.assertEqual(load_uncached.call_count, 1)
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[0]["point_count"], 1)
 
@@ -64,6 +63,9 @@ class IntradayTrendTests(unittest.TestCase):
         self.assertFalse(hasattr(intraday, "_fetch_mis_message"))
         self.assertFalse(hasattr(intraday, "_fetch_mis_snapshot"))
         self.assertFalse(hasattr(intraday, "_apply_mis_volume_adjustment"))
+        self.assertFalse(hasattr(intraday, "_fetch_nstock_intraday"))
+        self.assertFalse(hasattr(intraday, "_fetch_yahoo_intraday"))
+        self.assertFalse(hasattr(intraday, "_upsert_market_intraday_bars"))
 
 
 if __name__ == "__main__":

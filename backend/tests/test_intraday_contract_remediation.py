@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -45,10 +44,7 @@ from app.market.intraday import (
 from app.market.indices import _merge_index_intraday_snapshot
 from app.market.providers import twse_mis
 from app.market.quote_depth import (
-    TaiwanStockQuoteDepthCircuitOpenError,
     _freshness_for_row,
-    _guarded_mis_quote_depth_fetch,
-    reset_twse_mis_quote_depth_guard,
 )
 from app.observability.provider_http import (
     ProviderHttpError,
@@ -58,9 +54,6 @@ from app.observability.provider_http import (
 
 
 class IntradayContractRemediationTests(unittest.TestCase):
-    def tearDown(self) -> None:
-        reset_twse_mis_quote_depth_guard()
-
     def test_legacy_intraday_timeframe_alias_does_not_capture_daily_timeframes(self) -> None:
         self.assertEqual(
             requested_intraday_interval({"timeframe": "5m"}),
@@ -1687,7 +1680,17 @@ class IntradayContractRemediationTests(unittest.TestCase):
             build_us_overnight_impact_report=lambda **_kwargs: {},
             get_broker_branch_trade_summary=lambda **_kwargs: {},
             get_market_intraday_history=intraday_history,
-            read_taiwan_public_quote=quote_depth,
+            read_taiwan_quote_evidence=quote_depth,
+            acquire_taiwan_quote_evidence=quote_depth,
+            read_taiwan_latest_daily_evidence=lambda *_args, **_kwargs: SimpleNamespace(
+                trade_date=datetime.fromisoformat("2026-07-17T00:00:00+08:00").date(),
+                close_price=2330.0,
+                open_price=2320.0,
+                high_price=2340.0,
+                low_price=2310.0,
+                price_change=10.0,
+                trade_volume=1000,
+            ),
             get_taiwan_disposition_status=lambda *_args, **_kwargs: {"is_active": False},
             now=lambda: datetime.fromisoformat("2026-07-20T13:17:20+08:00"),
         )
@@ -1731,9 +1734,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
     def test_prefer_live_without_external_fetch_reads_only_persisted_intraday(
         self,
     ) -> None:
-        quote_depth = unittest.mock.Mock(
-            side_effect=AssertionError("cache-only evidence must not call TWSE MIS")
-        )
+        quote_depth = unittest.mock.Mock(return_value={})
         intraday_history = unittest.mock.Mock(
             return_value={
                 "interval": "1m",
@@ -1770,7 +1771,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
             dependencies=dependencies,
         )
 
-        quote_depth.assert_not_called()
+        quote_depth.assert_called_once_with(db=unittest.mock.ANY, stock_id="2330")
         self.assertGreaterEqual(intraday_history.call_count, 1)
         for call in intraday_history.call_args_list:
             self.assertFalse(call.kwargs["refresh"])
@@ -1948,43 +1949,6 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(freshness["fetch_age_seconds"], 40)
         self.assertEqual(freshness["status"], "stale")
 
-    def test_quote_depth_requests_for_same_stock_are_coalesced(self) -> None:
-        reset_twse_mis_quote_depth_guard()
-        result = ({"c": "2330"}, "https://example.test", {"msgArray": []})
-
-        with patch(
-            "app.market.quote_depth._fetch_mis_quote_depth",
-            return_value=result,
-        ) as fetch:
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [
-                    executor.submit(
-                        _guarded_mis_quote_depth_fetch,
-                        stock_id="2330",
-                        market="TWSE",
-                    )
-                    for _ in range(4)
-                ]
-                values = [future.result() for future in futures]
-
-        self.assertEqual(values, [result] * 4)
-        self.assertEqual(fetch.call_count, 1)
-
-    def test_quote_depth_circuit_opens_after_three_consecutive_failures(self) -> None:
-        reset_twse_mis_quote_depth_guard()
-
-        with patch(
-            "app.market.quote_depth._fetch_mis_quote_depth",
-            side_effect=RuntimeError("MIS down"),
-        ) as fetch:
-            for _ in range(3):
-                with self.assertRaisesRegex(RuntimeError, "MIS down"):
-                    _guarded_mis_quote_depth_fetch(stock_id="2330", market="TWSE")
-            with self.assertRaises(TaiwanStockQuoteDepthCircuitOpenError):
-                _guarded_mis_quote_depth_fetch(stock_id="2330", market="TWSE")
-
-        self.assertEqual(fetch.call_count, 3)
-
     def test_provider_http_diagnostics_preserve_status_type_and_content_type(self) -> None:
         response = requests.Response()
         response.status_code = 429
@@ -2084,6 +2048,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
             quote,
             {
                 "is_active": True,
+                "cache_status": "current",
                 "matching_interval_minutes": 20,
                 "start_date": "2026-07-20",
                 "end_date": "2026-07-31",
@@ -2107,7 +2072,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
 
         _apply_disposition_quote_contract(
             quote,
-            {"is_active": False},
+            {"is_active": False, "cache_status": "current"},
         )
 
         self.assertFalse(quote["last_trade_available"])

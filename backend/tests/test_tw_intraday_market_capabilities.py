@@ -17,8 +17,7 @@ from app.db.models import (
     WatchlistGroup,
     WatchlistItem,
 )
-from app.market import indices
-from app.market.providers import twse_mis
+from app.market.providers import twse_mis, twse_mis_current_breadth
 from app.market.taiwan_index_minute import (
     persist_taiwan_index_minute_snapshots,
     read_taiwan_index_minute_series,
@@ -50,10 +49,10 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=self.engine)
         self.db = Session(self.engine)
-        indices.reset_twse_mis_breadth_guard()
+        twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
 
     def tearDown(self) -> None:
-        indices.reset_twse_mis_breadth_guard()
+        twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
         self.db.close()
         self.engine.dispose()
 
@@ -96,28 +95,26 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             for index, code in enumerate(codes)
         ]
 
-        with (
-            patch.object(
-                indices,
-                "_twse_mis_live_breadth_stock_codes",
-                return_value=codes,
-            ),
-            patch.object(
-                indices,
-                "_fetch_twse_mis_stock_messages",
-                return_value=(messages, 0),
-            ) as fetch_messages,
-        ):
-            payload = indices._fetch_twse_mis_live_market_breadth_unguarded(
-                self.db,
+        with patch.object(
+            twse_mis_current_breadth,
+            "_fetch_messages",
+            return_value=(messages, 0),
+        ) as fetch_messages:
+            result = twse_mis_current_breadth.read_twse_mis_current_breadth(
                 "TPEX",
+                10,
+                universe_reader=lambda _market: codes,
             )
+        payload = result.payload
 
         self.assertIsNotNone(payload)
         assert payload is not None
-        fetch_messages.assert_called_once_with(codes, "TPEX")
+        fetch_messages.assert_called_once_with(codes, "TPEX", 10)
         self.assertEqual(payload["market"], "TPEX")
-        self.assertEqual(payload["scope"], "registered_universe")
+        self.assertEqual(
+            payload["scope"],
+            "full_market_registered_stock_universe",
+        )
         self.assertEqual(payload["advance_count"], 125)
         self.assertEqual(payload["decline_count"], 125)
         self.assertEqual(payload["unknown_count"], 0)
@@ -126,7 +123,9 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             payload["trade_value_semantics"],
             "estimated_latest_price_x_cumulative_volume_lots",
         )
-        cached = indices.get_cached_taiwan_intraday_stock_rows("TPEX")
+        cached = twse_mis_current_breadth.get_cached_current_breadth_stock_rows(
+            "TPEX"
+        )
         self.assertEqual(len(cached), 250)
         self.assertTrue(all(row["market"] == "TPEX" for row in cached))
 
@@ -648,6 +647,19 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             "estimated_trade_value": int(current_price * 100 * 1_000),
             "provider": "twse_mis",
             "source": f"twse_mis_{market.lower()}_registered_universe",
+            "raw_result_id": f"raw_fetch_result:{market}:{stock_id}",
+            "component_raw_result_ids": [
+                f"raw_fetch_result:{market}:{stock_id}"
+            ],
+            "component_sources": [
+                {
+                    "domain": "stock_quote_snapshot",
+                    "provider": "twse_mis",
+                    "source": f"twse_mis_{market.lower()}_registered_universe",
+                    "raw_result_id": f"raw_fetch_result:{market}:{stock_id}",
+                    "event_at": event_time.isoformat(),
+                }
+            ],
         }
 
     @staticmethod
@@ -684,6 +696,16 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             source_category="test",
             official_flag=not estimated,
             derived_flag=estimated,
+            component_raw_result_ids_json='["raw_fetch_result:test"]',
+            component_sources_json=(
+                '[{"domain":"market_breadth","provider":"test",'
+                '"source":"test","raw_result_id":"raw_fetch_result:test",'
+                f'"event_at":"{minute_at.isoformat()}"}}]'
+            ),
+            component_event_times_json=f'["{minute_at.isoformat()}"]',
+            component_time_skew_seconds=0,
+            calculation_version="tw.market.minute_state.derived.v2",
+            lineage_complete=True,
         )
 
 

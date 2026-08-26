@@ -535,11 +535,16 @@ class MarketBreadthRead(BaseModel):
     classified_count: int | None = None
     coverage_ratio: float | None = None
     universe_definition: dict[str, Any] | None = None
+    universe_count: int | None = None
     unknown_count: int | None = None
+    received_unclassified_count: int | None = None
     message_count: int | None = None
     missing_count: int | None = None
+    not_received_count: int | None = None
     warnings: list[str] = Field(default_factory=list)
     source: str | None = None
+    provider: str | None = None
+    raw_result_id: str | None = None
     trade_value_is_estimate: bool = False
     trade_value_semantics: str | None = None
     trade_value_confidence: str | None = None
@@ -594,6 +599,7 @@ class MarketIndexSnapshotRead(BaseModel):
     completed_official_index: dict[str, Any] | None = None
     completed_official_breadth: dict[str, Any] | None = None
     data_core: dict[str, Any] | None = None
+    current_data_core: dict[str, Any] | None = None
     data_core_projection_scope: dict[str, str] | None = None
     decision_usable: bool = False
     resolution: dict[str, Any] | None = None
@@ -633,6 +639,10 @@ class TaiwanMarketVolumeMarketRead(BaseModel):
     source_category: str
     official_flag: bool
     derived_flag: bool
+    component_raw_result_ids: list[str] = Field(default_factory=list)
+    component_time_skew_seconds: int | None = None
+    calculation_version: str | None = None
+    lineage_complete: bool = False
 
 
 class TaiwanMarketVolumeStateRead(BaseModel):
@@ -864,6 +874,10 @@ class IntradayTrendRead(BaseModel):
     canonical_observation: dict[str, Any] | None = None
     decision_usable: bool = False
     resolution: dict[str, Any] | None = None
+    bar_resolution: dict[str, Any] | None = None
+    bar_candidate_rejections: list[dict[str, Any]] = Field(default_factory=list)
+    bar_component_raw_result_ids: list[str] = Field(default_factory=list)
+    bar_calculation_versions: list[str] = Field(default_factory=list)
     points: list[IntradayTrendPointRead]
 
 
@@ -1076,6 +1090,11 @@ class TaiwanRealtimeDiagnosticCountersRead(BaseModel):
 
 
 class TaiwanRealtimeMarketStreamRead(BaseModel):
+    projection_scope: Literal["presentation_only"]
+    canonical_truth: Literal[False]
+    decision_usable: Literal[False]
+    research_usable: Literal[False]
+    provider_specific: Literal[True]
     kind: str
     contract_version: str
     stock_id: str
@@ -1414,6 +1433,12 @@ class MarketIntradayChartPointRead(BaseModel):
     elapsed_seconds: int | None = None
     is_partial: bool = False
     finalized: bool = False
+    provider: str | None = None
+    source: str | None = None
+    raw_result_id: str | None = None
+    source_interval: str | None = None
+    calculation_version: str | None = None
+    component_raw_result_ids: list[int] = Field(default_factory=list)
 
 
 class MarketIntradayVolumeReconciliationRead(BaseModel):
@@ -1504,6 +1529,13 @@ class MarketIntradayChartRead(BaseModel):
     partial_bar_count: int = 0
     indicator_eligible_point_count: int = 0
     partial_bar_policy: str = "exclude_partial_bars_from_indicators"
+    read_policy: str = "cache_only"
+    acquisition_status: str | None = None
+    resolved_health: dict[str, Any] | None = None
+    candidate_rejections: list[dict[str, Any]] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    component_raw_result_ids: list[str] = Field(default_factory=list)
+    calculation_versions: list[str] = Field(default_factory=list)
     points: list[MarketIntradayChartPointRead]
 
 
@@ -2105,7 +2137,20 @@ class InstitutionalHoldingRatioRead(BaseModel):
     source_name: str
     source_url: str
     fetched_at: datetime
-    history: list[InstitutionalHoldingRatioPointRead] = []
+    history: list[InstitutionalHoldingRatioPointRead] = Field(default_factory=list)
+    classification: Literal["compatibility_cache"] = "compatibility_cache"
+    lineage_status: Literal["raw_receipt_not_persisted"] = (
+        "raw_receipt_not_persisted"
+    )
+    canonical_truth: Literal[False] = False
+    decision_usable: Literal[False] = False
+    raw_receipt_id: None = None
+    limitations: list[str] = Field(
+        default_factory=lambda: [
+            "NSTOCK_HOLDING_RATIO_COMPATIBILITY_CACHE",
+            "RAW_RECEIPT_NOT_PERSISTED",
+        ]
+    )
 
 
 class MarginTradingDailyRead(BaseModel):

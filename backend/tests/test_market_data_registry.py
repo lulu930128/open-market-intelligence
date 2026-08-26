@@ -31,7 +31,11 @@ def test_registry_contains_per_symbol_and_full_market_eod_datasets() -> None:
     specs = DATASET_REGISTRY.all()
     assert {spec.dataset_id for spec in specs} == {
         "tw.quote.snapshot",
+        "tw.quote.order_book.snapshot",
+        "tw.quote.auction.snapshot",
         "tw.intraday.bars",
+        "tw.market_index.current",
+        "tw.market_breadth.current",
         "tw.daily.ohlcv",
         "tw.technical.daily",
         "us.intraday.bars",

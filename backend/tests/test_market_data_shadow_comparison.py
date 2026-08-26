@@ -1,53 +1,29 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from datetime import datetime, timezone
-from decimal import Decimal
-from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.db.models import StockMaster
 from app.market.providers.kgi_canonical import canonical_snapshot_from_kgi
 from app.market.providers.twse_mis_canonical import canonical_snapshot_from_twse_mis
-from app.market.quote_depth import (
-    KGI_SUPERPY_PROVIDER,
-    TWSE_MIS_PROVIDER,
-    _run_canonical_quote_shadow,
-    _snapshot_values_from_kgi_quote,
-    _snapshot_values_from_message,
+from app.market_data.comparison import BoundedComparisonMetrics, build_telemetry_event
+from app.market_data.contracts import (
+    InstrumentKey,
+    InstrumentType,
+    Market,
+    TradeObservationState,
 )
-from app.market_data.comparison import (
-    MAX_MISMATCHES,
-    BoundedComparisonMetrics,
-    MismatchCategory,
-    build_telemetry_event,
-    compare_legacy_to_canonical,
-)
-from app.market_data.contracts import InstrumentKey, InstrumentType, Market
 
 
 FETCHED_AT = datetime(2026, 6, 30, 1, 5, 13, tzinfo=timezone.utc)
-
-
-def _stock() -> StockMaster:
-    return StockMaster(
-        stock_id="2330",
-        stock_name="TSMC",
-        market="TWSE",
-        instrument_type="stock",
-    )
-
-
-def _instrument() -> InstrumentKey:
-    return InstrumentKey(
-        market=Market.TW,
-        symbol="2330",
-        instrument_type=InstrumentType.STOCK,
-        venue="TWSE",
-    )
+INSTRUMENT = InstrumentKey(
+    market=Market.TW,
+    symbol="2330",
+    instrument_type=InstrumentType.STOCK,
+    venue="TWSE",
+)
 
 
 def _kgi_quote(*, trial: bool = False) -> dict[str, object]:
@@ -66,7 +42,6 @@ def _kgi_quote(*, trial: bool = False) -> dict[str, object]:
         "bid_volumes": [978, 1150, 1399, 599, 924],
         "ask_prices": [2415, 2420, 2425, 2430, 2435],
         "ask_volumes": [2, 209, 209, 3, 1],
-        "price_chg": 42.5 if trial else 40,
         "simtrade": 1 if trial else 0,
         "suspend": 0,
         "received_at": (
@@ -101,123 +76,53 @@ def _mis_message(*, trial: bool = False) -> dict[str, str]:
 
 def test_rollout_mode_defaults_off_and_reserved_modes_fail_closed() -> None:
     assert Settings(_env_file=None).canonical_market_data_mode == "off"
-    assert Settings(_env_file=None).us_canonical_market_data_mode is None
-    for supported in ("off", "shadow", "compare", "canary", "on"):
-        assert (
-            Settings(
-                _env_file=None,
-                us_canonical_market_data_mode=supported,
-            ).us_canonical_market_data_mode
-            == supported
-        )
     for unsupported in ("canary", "on", "invalid"):
         with pytest.raises(ValidationError):
             Settings(_env_file=None, canonical_market_data_mode=unsupported)
 
 
-def test_kgi_regular_and_trial_fixtures_match_canonical_semantics() -> None:
-    for trial in (False, True):
-        quote = _kgi_quote(trial=trial)
-        phase = "preopen_auction" if trial else "regular_live"
-        legacy = _snapshot_values_from_kgi_quote(
-            stock=_stock(), session_phase=phase, quote=quote
-        )
-        canonical = canonical_snapshot_from_kgi(
-            instrument=_instrument(), quote=quote, session=phase
-        )
-        result = compare_legacy_to_canonical(
-            legacy=legacy,
-            canonical=canonical,
-            semantics={
-                "trial": trial,
-                "indicative_price": quote["close"] if trial else None,
-                "indicative_volume_lots": quote["volume"] if trial else None,
-                "suspend_hint": False,
-            },
-        )
-        if trial:
-            assert {item.field for item in result.mismatches} == {
-                "open_price",
-                "high_price",
-                "low_price",
-            }
-            assert {
-                item.reason_code for item in result.mismatches
-            } == {"LEGACY_ZERO_NORMALIZED_TO_MISSING"}
-        else:
-            assert result.matched, result.model_dump()
+def test_kgi_canonical_converter_keeps_trial_separate_from_actual_trade() -> None:
+    regular = canonical_snapshot_from_kgi(
+        instrument=INSTRUMENT,
+        quote=_kgi_quote(),
+        session="regular_live",
+    )
+    trial = canonical_snapshot_from_kgi(
+        instrument=INSTRUMENT,
+        quote=_kgi_quote(trial=True),
+        session="preopen_auction",
+    )
+
+    assert regular.quote is not None
+    assert regular.quote.trade_state is TradeObservationState.TRADE_OBSERVED
+    assert trial.quote is not None
+    assert trial.quote.trade_state is TradeObservationState.INDICATIVE_OBSERVED
+    assert trial.quote.last_trade_price is None
+    assert trial.auction is not None
+    assert trial.auction.indicative_price is not None
 
 
-def test_mis_regular_and_trial_fixtures_match_canonical_semantics() -> None:
-    for trial in (False, True):
-        message = _mis_message(trial=trial)
-        phase = "preopen_auction" if trial else "regular_live"
-        legacy = _snapshot_values_from_message(
-            stock=_stock(),
-            session_phase=phase,
-            message=message,
-            source_url="https://mis.twse.com.tw/fixture",
-            payload={"msgArray": [message]},
-            fetched_at=FETCHED_AT,
-        )
-        canonical = canonical_snapshot_from_twse_mis(
-            instrument=_instrument(),
-            message=message,
-            session=phase,
-            fetched_at=FETCHED_AT,
-            expected_trade_date=legacy["trade_date"],
-        )
-        result = compare_legacy_to_canonical(
-            legacy=legacy,
-            canonical=canonical,
-            semantics={
-                "trial": trial,
-                "indicative_price": message["pz"] if trial else None,
-                "indicative_volume_lots": message["ps"] if trial else None,
-            },
-        )
-        assert result.matched, result.model_dump()
+def test_mis_canonical_converter_keeps_trial_separate_from_actual_trade() -> None:
+    regular = canonical_snapshot_from_twse_mis(
+        instrument=INSTRUMENT,
+        message=_mis_message(),
+        session="regular_live",
+        fetched_at=FETCHED_AT,
+        expected_trade_date=FETCHED_AT.astimezone(timezone.utc).date(),
+    )
+    trial = canonical_snapshot_from_twse_mis(
+        instrument=INSTRUMENT,
+        message=_mis_message(trial=True),
+        session="preopen_auction",
+        fetched_at=FETCHED_AT,
+        expected_trade_date=FETCHED_AT.astimezone(timezone.utc).date(),
+    )
 
-
-def test_mismatch_taxonomy_is_deterministic_and_bounded() -> None:
-    quote = _kgi_quote(trial=True)
-    legacy = _snapshot_values_from_kgi_quote(
-        stock=_stock(), session_phase="preopen_auction", quote=quote
-    )
-    canonical = canonical_snapshot_from_kgi(
-        instrument=_instrument(), quote=quote, session="preopen_auction"
-    )
-    legacy.update(
-        {
-            "stock_id": "2317",
-            "trade_date": None,
-            "quote_time": FETCHED_AT,
-            "session_phase": "regular_live",
-            "last_price": 999,
-            "previous_close": 999,
-            "open_price": 999,
-            "high_price": 999,
-            "low_price": 999,
-            "total_volume_lots": 999,
-            "last_trade_volume_lots": 999,
-            "bid_levels_json": "[]",
-            "ask_levels_json": "[]",
-            "provider": "wrong",
-            "source": "wrong",
-        }
-    )
-    result = compare_legacy_to_canonical(
-        legacy=legacy,
-        canonical=canonical,
-        semantics={"trial": False, "suspend_hint": True},
-    )
-    assert len(result.mismatches) == MAX_MISMATCHES
-    assert result.truncated is True
-    categories = {mismatch.category for mismatch in result.mismatches}
-    assert MismatchCategory.IDENTITY in categories
-    assert MismatchCategory.PRICE in categories
-    assert MismatchCategory.VOLUME_UNIT in categories
-    assert MismatchCategory.DEPTH in categories
+    assert regular.quote is not None
+    assert regular.quote.trade_state is TradeObservationState.TRADE_OBSERVED
+    assert trial.quote is not None
+    assert trial.quote.trade_state is TradeObservationState.INDICATIVE_OBSERVED
+    assert trial.quote.last_trade_price is None
 
 
 def test_metric_series_and_telemetry_payloads_are_bounded_and_sanitized() -> None:
@@ -233,121 +138,3 @@ def test_metric_series_and_telemetry_payloads_are_bounded_and_sanitized() -> Non
     snapshot = metrics.snapshot()
     assert len(snapshot) <= 2
     assert any(item["provider"] == "overflow" for item in snapshot)
-
-
-def test_shadow_telemetry_uses_runtime_logger() -> None:
-    event = build_telemetry_event(
-        mode="shadow",
-        provider=KGI_SUPERPY_PROVIDER,
-        market_phase="regular_live",
-    )
-    with patch("app.market.quote_depth.runtime_logger.info") as info:
-        from app.market.quote_depth import _record_canonical_shadow_event
-
-        _record_canonical_shadow_event(event)
-
-    info.assert_called_once_with(
-        "canonical_market_data_shadow %s",
-        event.model_dump_json(),
-    )
-
-
-def test_off_mode_does_not_construct_canonical_observation() -> None:
-    values = {"stock_id": "2330"}
-    with (
-        patch("app.market.quote_depth._canonical_market_data_mode", return_value="off"),
-        patch("app.market.quote_depth.canonical_snapshot_from_kgi") as adapter,
-    ):
-        _run_canonical_quote_shadow(
-            provider=KGI_SUPERPY_PROVIDER,
-            stock=_stock(),
-            session_phase="regular_live",
-            raw_observation=_kgi_quote(),
-            legacy_values=values,
-        )
-    adapter.assert_not_called()
-    assert values == {"stock_id": "2330"}
-
-
-def test_shadow_validates_same_payload_without_comparing_or_mutating_legacy() -> None:
-    quote = _kgi_quote()
-    legacy = _snapshot_values_from_kgi_quote(
-        stock=_stock(), session_phase="regular_live", quote=quote
-    )
-    original = deepcopy(legacy)
-    with (
-        patch("app.market.quote_depth._canonical_market_data_mode", return_value="shadow"),
-        patch(
-            "app.market.quote_depth.canonical_snapshot_from_kgi",
-            wraps=canonical_snapshot_from_kgi,
-        ) as adapter,
-        patch("app.market.quote_depth.compare_legacy_to_canonical") as comparator,
-    ):
-        _run_canonical_quote_shadow(
-            provider=KGI_SUPERPY_PROVIDER,
-            stock=_stock(),
-            session_phase="regular_live",
-            raw_observation=quote,
-            legacy_values=legacy,
-        )
-    assert adapter.call_count == 1
-    assert adapter.call_args.kwargs["quote"] is quote
-    comparator.assert_not_called()
-    assert legacy == original
-
-
-def test_adapter_comparator_and_telemetry_failures_never_escape_shadow_seam() -> None:
-    quote = _kgi_quote()
-    legacy = _snapshot_values_from_kgi_quote(
-        stock=_stock(), session_phase="regular_live", quote=quote
-    )
-    original = deepcopy(legacy)
-    for failure_target in (
-        "app.market.quote_depth.canonical_snapshot_from_kgi",
-        "app.market.quote_depth.compare_legacy_to_canonical",
-        "app.market.quote_depth._record_canonical_shadow_event",
-    ):
-        with (
-            patch("app.market.quote_depth._canonical_market_data_mode", return_value="compare"),
-            patch(failure_target, side_effect=RuntimeError("fault injection")),
-        ):
-            _run_canonical_quote_shadow(
-                provider=KGI_SUPERPY_PROVIDER,
-                stock=_stock(),
-                session_phase="regular_live",
-                raw_observation=quote,
-                legacy_values=legacy,
-            )
-    assert legacy == original
-
-
-def test_compare_mode_accepts_mis_same_payload_without_external_acquisition() -> None:
-    message = _mis_message()
-    legacy = _snapshot_values_from_message(
-        stock=_stock(),
-        session_phase="regular_live",
-        message=message,
-        source_url="https://mis.twse.com.tw/fixture",
-        payload={"msgArray": [message]},
-        fetched_at=FETCHED_AT,
-    )
-    with (
-        patch("app.market.quote_depth._canonical_market_data_mode", return_value="compare"),
-        patch(
-            "app.market.quote_depth.canonical_snapshot_from_twse_mis",
-            wraps=canonical_snapshot_from_twse_mis,
-        ) as adapter,
-        patch("app.market.quote_depth.http_get") as external_fetch,
-    ):
-        _run_canonical_quote_shadow(
-            provider=TWSE_MIS_PROVIDER,
-            stock=_stock(),
-            session_phase="regular_live",
-            raw_observation=message,
-            legacy_values=legacy,
-            fetched_at=FETCHED_AT,
-        )
-    assert adapter.call_count == 1
-    assert adapter.call_args.kwargs["message"] is message
-    external_fetch.assert_not_called()
-    assert Decimal(str(legacy["last_price"])) == Decimal("2410")

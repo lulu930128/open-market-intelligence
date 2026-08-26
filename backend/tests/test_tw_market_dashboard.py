@@ -144,9 +144,9 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         group_id = self._seed_preopen_state()
         now = datetime(2026, 8, 14, 8, 35, 30, tzinfo=TAIWAN_TZ)
 
-        with patch.object(
-            indices,
-            "_fetch_twse_mis_live_market_breadth",
+        with patch(
+            "app.market.providers.twse_mis_current_breadth."
+            "read_twse_mis_current_breadth",
         ) as provider_fetch:
             payload = build_tw_market_dashboard(
                 self.db,
@@ -454,10 +454,12 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertTrue(payload["cache_only"])
         self.assertEqual(payload["stock_id"], "2330")
         self.assertIsNone(payload["chart"]["backfill"])
-        self.assertEqual(payload["chart"]["point_count"], 1)
-        self.assertIsNotNone(payload["chart"]["intraday_overlay"])
-        self.assertEqual(len(payload["moving_averages"]), 1)
-        self.assertIsNone(payload["moving_averages"][0]["ma5"])
+        # A current quote/state is not an intraday bar and must not be
+        # synthesized into the historical chart.  With no persisted OHLCV in
+        # this fixture the cache-only chart is truthfully empty.
+        self.assertEqual(payload["chart"]["point_count"], 0)
+        self.assertIsNone(payload["chart"]["intraday_overlay"])
+        self.assertEqual(payload["moving_averages"], [])
         self.assertEqual(payload["technical"]["stock_id"], "2330")
 
     def test_stock_detail_moving_averages_are_backend_computed(self) -> None:

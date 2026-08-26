@@ -16,6 +16,7 @@ from app.market_data.integration_contracts import (
     DatasetTarget,
     FreshnessRequirement,
     MarketDataResultV1,
+    QualityRequirement,
     RequestBounds,
 )
 from app.market_data.policies import DataPurpose, RealtimePolicy
@@ -113,6 +114,10 @@ def build_taiwan_official_breadth_requirement(
         session=MarketSession.CLOSED,
         requested_at=requested_at,
         freshness=FreshnessRequirement(max_age_seconds=2_678_400),
+        # Completed breadth remains useful as partial facts when the official
+        # universe contains missing or unclassified members. The Resolver still
+        # marks partial evidence research_usable=False.
+        quality=QualityRequirement(allow_partial=True),
         bounds=RequestBounds(
             max_provider_attempts=0,
             max_external_calls=0,

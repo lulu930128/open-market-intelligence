@@ -13,13 +13,9 @@ from app.db.models import (
     SourceRegistry,
     TaiwanStockQuoteSnapshot,
 )
-from app.market.tw_public_quote_contract import (
-    TWSE_MIS_QUOTE_PROVIDER,
-    TWSE_MIS_QUOTE_SOURCE_NAME,
-)
 from app.market.trading_calendar import TAIWAN_TZ
+from app.market.tw_realtime_capabilities import quote_source_binding
 from app.market_data.contracts import (
-    AuthorityClass,
     InstrumentKey,
     Market,
     MarketSession,
@@ -35,6 +31,8 @@ from app.market_data.contracts import (
 @dataclass(frozen=True, slots=True)
 class PersistedPublicQuoteRead:
     observation: QuoteObservation | None = None
+    provider: str | None = None
+    source: str | None = None
     provider_priority: int = 100
     storage_row_id: int | None = None
     raw_result_id: int | None = None
@@ -75,32 +73,29 @@ class TaiwanPublicQuoteRepository:
     def __init__(self, db: Session) -> None:
         self._db = db
 
-    def load_latest_quote(
+    def _decode_row(
         self,
         instrument: InstrumentKey,
+        row: TaiwanStockQuoteSnapshot,
     ) -> PersistedPublicQuoteRead:
-        if instrument.market is not Market.TW:
-            raise ValueError("Taiwan public quote repository requires market=TW")
-        if instrument.venue not in {"TWSE", "TPEX"}:
-            raise ValueError("Taiwan public quote venue must be TWSE or TPEX")
-        row = (
-            self._db.query(TaiwanStockQuoteSnapshot)
-            .filter(TaiwanStockQuoteSnapshot.provider == TWSE_MIS_QUOTE_PROVIDER)
-            .filter(TaiwanStockQuoteSnapshot.source == TWSE_MIS_QUOTE_SOURCE_NAME)
-            .filter(TaiwanStockQuoteSnapshot.stock_id == instrument.symbol)
-            .filter(TaiwanStockQuoteSnapshot.market == instrument.venue)
-            .order_by(
-                TaiwanStockQuoteSnapshot.quote_time.desc(),
-                TaiwanStockQuoteSnapshot.id.desc(),
-            )
-            .first()
+        binding = quote_source_binding(
+            provider=row.provider,
+            source=row.source,
         )
-        if row is None:
+        if binding is None:
             return PersistedPublicQuoteRead(
-                limitations=("PUBLIC_QUOTE_CANDIDATE_MISSING",),
+                provider=row.provider,
+                source=row.source,
+                storage_row_id=row.id,
+                raw_result_id=row.raw_result_id,
+                rows_examined=1,
+                limitations=("PUBLIC_QUOTE_SOURCE_UNSUPPORTED",),
             )
         if row.source_id is None or row.raw_result_id is None:
             return PersistedPublicQuoteRead(
+                provider=row.provider,
+                source=row.source,
+                provider_priority=binding.descriptor.priority,
                 storage_row_id=row.id,
                 rows_examined=1,
                 limitations=("PUBLIC_QUOTE_LINEAGE_MISSING",),
@@ -116,6 +111,9 @@ class TaiwanPublicQuoteRepository:
             )
         ):
             return PersistedPublicQuoteRead(
+                provider=row.provider,
+                source=row.source,
+                provider_priority=binding.descriptor.priority,
                 storage_row_id=row.id,
                 raw_result_id=row.raw_result_id,
                 rows_examined=1,
@@ -130,6 +128,9 @@ class TaiwanPublicQuoteRepository:
         )
         if joined is None:
             return PersistedPublicQuoteRead(
+                provider=row.provider,
+                source=row.source,
+                provider_priority=binding.descriptor.priority,
                 storage_row_id=row.id,
                 raw_result_id=row.raw_result_id,
                 rows_examined=1,
@@ -137,16 +138,31 @@ class TaiwanPublicQuoteRepository:
             )
         raw, source = joined
         if (
-            source.source_name != TWSE_MIS_QUOTE_SOURCE_NAME
+            source.source_name != binding.source
             or raw.source_id != source.id
             or row.source != source.source_name
-            or row.provider != TWSE_MIS_QUOTE_PROVIDER
+            or row.provider != binding.descriptor.provider_key
+            or row.raw_contract_version != binding.parser_version
+            or raw.parser_version != binding.parser_version
         ):
             return PersistedPublicQuoteRead(
+                provider=row.provider,
+                source=row.source,
+                provider_priority=binding.descriptor.priority,
                 storage_row_id=row.id,
                 raw_result_id=row.raw_result_id,
                 rows_examined=1,
                 limitations=("PUBLIC_QUOTE_SOURCE_IDENTITY_MISMATCH",),
+            )
+        if raw.content_hash is None:
+            return PersistedPublicQuoteRead(
+                provider=row.provider,
+                source=row.source,
+                provider_priority=binding.descriptor.priority,
+                storage_row_id=row.id,
+                raw_result_id=row.raw_result_id,
+                rows_examined=1,
+                limitations=("PUBLIC_QUOTE_CONTENT_HASH_MISSING",),
             )
         try:
             state = ObservationState(str(row.observation_state))
@@ -154,6 +170,9 @@ class TaiwanPublicQuoteRepository:
             trade_state = TradeObservationState(str(row.trade_state))
         except ValueError:
             return PersistedPublicQuoteRead(
+                provider=row.provider,
+                source=row.source,
+                provider_priority=binding.descriptor.priority,
                 storage_row_id=row.id,
                 raw_result_id=row.raw_result_id,
                 rows_examined=1,
@@ -161,6 +180,9 @@ class TaiwanPublicQuoteRepository:
             )
         if trade_state is TradeObservationState.TRADE_OBSERVED and row.last_price is None:
             return PersistedPublicQuoteRead(
+                provider=row.provider,
+                source=row.source,
+                provider_priority=binding.descriptor.priority,
                 storage_row_id=row.id,
                 raw_result_id=row.raw_result_id,
                 rows_examined=1,
@@ -171,6 +193,9 @@ class TaiwanPublicQuoteRepository:
             and row.last_price is not None
         ):
             return PersistedPublicQuoteRead(
+                provider=row.provider,
+                source=row.source,
+                provider_priority=binding.descriptor.priority,
                 storage_row_id=row.id,
                 raw_result_id=row.raw_result_id,
                 rows_examined=1,
@@ -181,7 +206,7 @@ class TaiwanPublicQuoteRepository:
             lineage=SourceLineage(
                 provider=row.provider,
                 source=source.source_name,
-                authority=AuthorityClass.EXCHANGE,
+                authority=binding.descriptor.authority,
                 raw_contract_version=(
                     row.raw_contract_version
                     or raw.parser_version
@@ -211,11 +236,62 @@ class TaiwanPublicQuoteRepository:
         )
         return PersistedPublicQuoteRead(
             observation=quote,
-            provider_priority=max(int(source.priority), 0),
+            provider=row.provider,
+            source=row.source,
+            provider_priority=binding.descriptor.priority,
             storage_row_id=row.id,
             raw_result_id=raw.id,
             rows_examined=1,
         )
+
+    def load_quote_candidates(
+        self,
+        instrument: InstrumentKey,
+        *,
+        max_candidates: int = 8,
+    ) -> tuple[PersistedPublicQuoteRead, ...]:
+        if instrument.market is not Market.TW:
+            raise ValueError("Taiwan public quote repository requires market=TW")
+        if instrument.venue not in {"TWSE", "TPEX"}:
+            raise ValueError("Taiwan public quote venue must be TWSE or TPEX")
+        if not 1 <= max_candidates <= 8:
+            raise ValueError("public quote max_candidates must be between 1 and 8")
+        rows = (
+            self._db.query(TaiwanStockQuoteSnapshot)
+            .filter(TaiwanStockQuoteSnapshot.stock_id == instrument.symbol)
+            .filter(TaiwanStockQuoteSnapshot.market == instrument.venue)
+            .order_by(
+                TaiwanStockQuoteSnapshot.quote_time.desc(),
+                TaiwanStockQuoteSnapshot.id.desc(),
+            )
+            .limit(32)
+            .all()
+        )
+        if not rows:
+            return (
+                PersistedPublicQuoteRead(
+                    limitations=("PUBLIC_QUOTE_CANDIDATE_MISSING",),
+                ),
+            )
+        reads: list[PersistedPublicQuoteRead] = []
+        seen_sources: set[tuple[str, str]] = set()
+        for row in rows:
+            identity = (row.provider, row.source)
+            if identity in seen_sources:
+                continue
+            seen_sources.add(identity)
+            reads.append(self._decode_row(instrument, row))
+            if len(reads) >= max_candidates:
+                break
+        return tuple(reads)
+
+    def load_latest_quote(
+        self,
+        instrument: InstrumentKey,
+    ) -> PersistedPublicQuoteRead:
+        """Compatibility single-row read; new callers should read all candidates."""
+
+        return self.load_quote_candidates(instrument, max_candidates=1)[0]
 
 
 __all__ = [

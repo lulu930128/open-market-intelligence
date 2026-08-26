@@ -74,6 +74,20 @@ def market_summary_payload(
                     "status": "ready",
                     "scope": "full_market",
                 },
+                "current_data_core": {
+                    "index": {
+                        "provider": "twse_mis",
+                        "source": "twse_mis_index_snapshot",
+                        "raw_result_id": f"raw_fetch_result:{market}:index:{trade_date}",
+                        "as_of": as_of.isoformat(),
+                    },
+                    "breadth": {
+                        "provider": "twse_mis",
+                        "source": "twse_mis_live_breadth",
+                        "raw_result_id": f"raw_fetch_result:{market}:breadth:{trade_date}",
+                        "as_of": as_of.isoformat(),
+                    },
+                },
             }
         )
     return {

@@ -267,14 +267,15 @@ class TaiwanIndexProviderAdapterTests(unittest.TestCase):
     def test_taiwan_read_paths_share_provider_transport_boundary(self) -> None:
         for module in (
             indices,
-            intraday,
             market_chips,
-            quote_depth,
             institutional_holding_ratios,
             broker_branch,
         ):
             with self.subTest(module=module.__name__):
                 self.assertIs(module.http_get, taiwan_http_get)
+
+        self.assertFalse(hasattr(intraday, "http_get"))
+        self.assertFalse(hasattr(quote_depth, "http_get"))
 
     def test_taifex_compatibility_get_keeps_provider_context(self) -> None:
         response = _response({}, status_code=503)

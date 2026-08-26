@@ -1,41 +1,25 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from concurrent.futures import Future
+from collections.abc import Iterable
 from datetime import date, datetime, time, timezone
 import json
-import logging
-from threading import RLock
-import time as monotonic_time
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.db.models import (
-    MarketDailyPrice,
-    SourceRegistry,
     StockMaster,
-    TaiwanQuoteContractSnapshot,
     TaiwanStockQuoteSnapshot,
-    utc_now,
 )
-from app.market.providers import http_get
-from app.market.providers.kgi_canonical import (
-    canonical_snapshot_from_kgi,
-    kgi_quote_is_indicative,
-)
-from app.market.providers.kgi_superpy import (
-    KGI_SUPERPY_PROVIDER,
-    KGI_SUPERPY_SOURCE,
-    KgiSuperPyQuoteSnapshot,
-    get_kgi_superpy_quote_snapshot,
-)
-from app.market.providers.twse_mis_canonical import canonical_snapshot_from_twse_mis
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.live_snapshot import market_status_from_session
 from app.market.quote_volume import build_taiwan_quote_volume_contract
-from app.observability.provider_http import provider_http_failure
+from app.market.taiwan_quote_evidence import (
+    TaiwanQuoteEvidenceBundle,
+    acquire_taiwan_quote_evidence_bundle,
+    read_taiwan_quote_evidence_bundle,
+)
+from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
@@ -47,51 +31,24 @@ from app.market.twse_mis_observation import (
     resolve_twse_mis_actual_trade,
     resolve_twse_mis_observation,
 )
-from app.market_data.comparison import (
-    CANONICAL_COMPARISON_METRICS,
-    build_telemetry_event,
-    compare_legacy_to_canonical,
+from app.market_data.contracts import (
+    Quantity,
+    QuantityUnit,
+    ResolvedEvidenceStatus,
 )
-from app.market_data.contracts import InstrumentKey, InstrumentType, Market
+from app.market_data.policies import RealtimePolicy
 
 
 TWSE_MIS_PROVIDER = "twse_mis"
 TWSE_MIS_SOURCE = "twse_mis_quote_depth"
-TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
-TWSE_MIS_REFERER_URL = "https://mis.twse.com.tw/stock/fibest.jsp"
-KGI_SUPERPY_SOURCE_URL = (
-    "https://superpy.kgieworld.com.tw/kgipythonapi/guide/tw/quoteSubscribeAll"
-)
-QUOTE_DEPTH_CACHE_TTL_SECONDS = 4.75
+KGI_SUPERPY_PROVIDER = "kgi_superpy"
+KGI_SUPERPY_SOURCE = "kgi_superpy_quote_all"
 TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS = 180
-TWSE_MIS_CIRCUIT_FAILURE_THRESHOLD = 3
-TWSE_MIS_CIRCUIT_COOLDOWN_SECONDS = 90
-TWSE_MIS_COALESCE_WINDOW_SECONDS = 2.5
 TAIWAN_QUOTE_DEPTH_WAIT_START = time(5, 0)
 TAIWAN_QUOTE_DEPTH_PREOPEN = time(8, 30)
 TAIWAN_QUOTE_DEPTH_OPEN = time(9, 0)
 TAIWAN_QUOTE_DEPTH_CLOSING_AUCTION = time(13, 25)
 TAIWAN_QUOTE_DEPTH_CLOSE = time(13, 30)
-TAIWAN_QUOTE_DEPTH_OFFICIAL_CLOSE_DEADLINE = time(13, 33)
-TAIWAN_QUOTE_CONTRACT_SLOTS = (
-    "08:30",
-    "08:50",
-    "08:55",
-    "08:58",
-    "08:59",
-    "09:00",
-    "09:01",
-    "09:02",
-    "09:05",
-    "11:00",
-    "13:24",
-    "13:28",
-    "13:30",
-    "13:31",
-    "13:32",
-    "13:33",
-    "13:34",
-)
 LIVE_DEPTH_PHASES = {"preopen_auction", "regular_live", "closing_auction"}
 POST_CLOSE_PHASES = {"post_close_snapshot", "market_closed"}
 PHASE_LABELS = {
@@ -102,71 +59,6 @@ PHASE_LABELS = {
     "post_close_snapshot": "收盤快照",
     "market_closed": "休市",
 }
-
-logger = logging.getLogger(__name__)
-runtime_logger = logging.getLogger("uvicorn.error")
-
-_QUOTE_DEPTH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_TWSE_MIS_GUARD_LOCK = RLock()
-_TWSE_MIS_INFLIGHT: dict[str, Future[tuple[dict[str, Any], str | None, dict[str, Any]]]] = {}
-_TWSE_MIS_RESULT_CACHE: dict[
-    str,
-    tuple[float, tuple[dict[str, Any], str | None, dict[str, Any]]],
-] = {}
-_TWSE_MIS_CIRCUIT_FAILURES = 0
-_TWSE_MIS_CIRCUIT_OPEN_UNTIL = 0.0
-_TWSE_MIS_CIRCUIT_LAST_ERROR: str | None = None
-
-
-class TaiwanStockQuoteDepthFetchError(RuntimeError):
-    """Raised when Taiwan stock quote depth cannot be fetched safely."""
-
-
-class TaiwanStockQuoteDepthCircuitOpenError(TaiwanStockQuoteDepthFetchError):
-    """Raised while the TWSE MIS quote-depth circuit is cooling down."""
-
-    def __init__(self, *, retry_after_seconds: int, last_error: str | None) -> None:
-        message = (
-            "TWSE MIS quote-depth circuit is open; "
-            f"retry after {retry_after_seconds}s."
-        )
-        super().__init__(message)
-        self.retry_after_seconds = retry_after_seconds
-        self.last_error = last_error
-
-
-def reset_twse_mis_quote_depth_guard() -> None:
-    global _TWSE_MIS_CIRCUIT_FAILURES
-    global _TWSE_MIS_CIRCUIT_OPEN_UNTIL
-    global _TWSE_MIS_CIRCUIT_LAST_ERROR
-    with _TWSE_MIS_GUARD_LOCK:
-        _QUOTE_DEPTH_CACHE.clear()
-        _TWSE_MIS_INFLIGHT.clear()
-        _TWSE_MIS_RESULT_CACHE.clear()
-        _TWSE_MIS_CIRCUIT_FAILURES = 0
-        _TWSE_MIS_CIRCUIT_OPEN_UNTIL = 0.0
-        _TWSE_MIS_CIRCUIT_LAST_ERROR = None
-
-
-def _cache_get(cache_key: str) -> dict[str, Any] | None:
-    cached = _QUOTE_DEPTH_CACHE.get(cache_key)
-    if cached is None:
-        return None
-
-    cached_at, payload = cached
-    if monotonic_time.monotonic() - cached_at > QUOTE_DEPTH_CACHE_TTL_SECONDS:
-        _QUOTE_DEPTH_CACHE.pop(cache_key, None)
-        return None
-
-    result = deepcopy(payload)
-    result["refresh_outcome"] = "cache_hit"
-    return result
-
-
-def _cache_set(cache_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    _QUOTE_DEPTH_CACHE[cache_key] = (monotonic_time.monotonic(), deepcopy(payload))
-    return payload
-
 
 def _as_float(value: Any) -> float | None:
     if value is None:
@@ -199,10 +91,6 @@ def _get_stock(db: Session, stock_id: str) -> StockMaster:
     if stock is None:
         raise ValueError(f"Unknown Taiwan stock id: {stock_id}")
     return stock
-
-
-def _mis_exchange(market: str | None) -> str:
-    return "otc" if str(market or "").upper() == "TPEX" else "tse"
 
 
 def _local_now(now: datetime | None = None) -> datetime:
@@ -255,37 +143,6 @@ def _expected_trade_date_for_phase(phase: str, now: datetime | None = None) -> d
         if presentation["state"] == "today_pending":
             return presentation["trade_date"]  # type: ignore[return-value]
     return previous_taiwan_trading_day(current_date, include_value=False)
-
-
-def _parse_mis_trade_date(value: Any) -> date | None:
-    text = str(value or "").strip()
-    if len(text) != 8 or not text.isdigit():
-        return None
-
-    try:
-        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
-    except ValueError:
-        return None
-
-
-def _parse_mis_datetime(message: dict[str, Any], fallback: datetime) -> datetime:
-    trade_date = _parse_mis_trade_date(message.get("d"))
-    time_text = str(message.get("t") or message.get("%") or "").strip()
-    if trade_date is None or not time_text:
-        return fallback.astimezone(TAIWAN_TZ)
-
-    parts = time_text.split(":")
-    if len(parts) != 3:
-        return fallback.astimezone(TAIWAN_TZ)
-
-    try:
-        return datetime.combine(
-            trade_date,
-            time(int(parts[0]), int(parts[1]), int(parts[2])),
-            tzinfo=TAIWAN_TZ,
-        )
-    except ValueError:
-        return fallback.astimezone(TAIWAN_TZ)
 
 
 def _split_field(value: Any) -> list[str]:
@@ -488,355 +345,6 @@ def _official_close_precision_contract(
         "official_close_precision": precision,
         "official_close_precision_semantics": "provider_decimal_preserved",
     }
-
-
-def _fetch_mis_quote_depth(
-    *,
-    stock_id: str,
-    market: str | None,
-) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
-    exchange = _mis_exchange(market)
-    response = http_get(
-        TWSE_MIS_STOCK_INFO_URL,
-        params={
-            "ex_ch": f"{exchange}_{stock_id}.tw",
-            "json": "1",
-            "delay": "0",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-            "Referer": f"{TWSE_MIS_REFERER_URL}?stock={stock_id}",
-        },
-        timeout=10,
-        omi_resource="quote_depth",
-        omi_target=stock_id,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    message = (payload.get("msgArray") or [None])[0]
-    if not isinstance(message, dict):
-        raise TaiwanStockQuoteDepthFetchError("TWSE MIS did not return quote data.")
-    return message, response.url, payload
-
-
-def _guarded_mis_quote_depth_fetch(
-    *,
-    stock_id: str,
-    market: str | None,
-) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
-    global _TWSE_MIS_CIRCUIT_FAILURES
-    global _TWSE_MIS_CIRCUIT_OPEN_UNTIL
-    global _TWSE_MIS_CIRCUIT_LAST_ERROR
-
-    leader = False
-    with _TWSE_MIS_GUARD_LOCK:
-        cached = _TWSE_MIS_RESULT_CACHE.get(stock_id)
-        now_monotonic = monotonic_time.monotonic()
-        if cached is not None:
-            cached_at, cached_result = cached
-            if now_monotonic - cached_at <= TWSE_MIS_COALESCE_WINDOW_SECONDS:
-                return deepcopy(cached_result)
-            _TWSE_MIS_RESULT_CACHE.pop(stock_id, None)
-        future = _TWSE_MIS_INFLIGHT.get(stock_id)
-        if future is None:
-            if now_monotonic < _TWSE_MIS_CIRCUIT_OPEN_UNTIL:
-                raise TaiwanStockQuoteDepthCircuitOpenError(
-                    retry_after_seconds=max(
-                        int(_TWSE_MIS_CIRCUIT_OPEN_UNTIL - now_monotonic),
-                        1,
-                    ),
-                    last_error=_TWSE_MIS_CIRCUIT_LAST_ERROR,
-                )
-            future = Future()
-            _TWSE_MIS_INFLIGHT[stock_id] = future
-            leader = True
-
-    if not leader:
-        return future.result()
-
-    try:
-        result = _fetch_mis_quote_depth(stock_id=stock_id, market=market)
-    except Exception as exc:
-        with _TWSE_MIS_GUARD_LOCK:
-            _TWSE_MIS_CIRCUIT_FAILURES += 1
-            _TWSE_MIS_CIRCUIT_LAST_ERROR = str(exc) or type(exc).__name__
-            if _TWSE_MIS_CIRCUIT_FAILURES >= TWSE_MIS_CIRCUIT_FAILURE_THRESHOLD:
-                _TWSE_MIS_CIRCUIT_OPEN_UNTIL = (
-                    monotonic_time.monotonic() + TWSE_MIS_CIRCUIT_COOLDOWN_SECONDS
-                )
-            future.set_exception(exc)
-            _TWSE_MIS_INFLIGHT.pop(stock_id, None)
-        raise
-    else:
-        with _TWSE_MIS_GUARD_LOCK:
-            _TWSE_MIS_CIRCUIT_FAILURES = 0
-            _TWSE_MIS_CIRCUIT_OPEN_UNTIL = 0.0
-            _TWSE_MIS_CIRCUIT_LAST_ERROR = None
-            _TWSE_MIS_RESULT_CACHE[stock_id] = (
-                monotonic_time.monotonic(),
-                deepcopy(result),
-            )
-            future.set_result(result)
-            _TWSE_MIS_INFLIGHT.pop(stock_id, None)
-        return result
-
-
-def _source_error_detail(exc: BaseException) -> dict[str, Any]:
-    failure = provider_http_failure(exc)
-    if failure is not None:
-        return failure.diagnostic_fields()
-    if isinstance(exc, TaiwanStockQuoteDepthCircuitOpenError):
-        return {
-            "provider": TWSE_MIS_PROVIDER,
-            "resource": "quote_depth",
-            "status": "circuit_open",
-            "exception_type": type(exc).__name__,
-            "retry_after_seconds": exc.retry_after_seconds,
-            "retry_count": 0,
-            "last_error": exc.last_error,
-        }
-    return {
-        "provider": TWSE_MIS_PROVIDER,
-        "resource": "quote_depth",
-        "status": "error",
-        "exception_type": type(exc).__name__,
-        "error_message": str(exc) or type(exc).__name__,
-        "retry_count": 0,
-    }
-
-
-def _snapshot_values_from_message(
-    *,
-    stock: StockMaster,
-    session_phase: str,
-    message: dict[str, Any],
-    source_url: str | None,
-    payload: dict[str, Any],
-    fetched_at: datetime,
-) -> dict[str, Any]:
-    market = stock.market.upper() if stock.market else None
-    exchange = _mis_exchange(market)
-    bid_levels = _parse_depth_levels(message.get("b"), message.get("g"))
-    ask_levels = _parse_depth_levels(message.get("a"), message.get("f"))
-    best_bid = _first_price_level(bid_levels)
-    best_ask = _first_price_level(ask_levels)
-    best_bid_price = _as_float(best_bid.get("price")) if best_bid else None
-    best_ask_price = _as_float(best_ask.get("price")) if best_ask else None
-    best_bid_size_lots = _as_int(best_bid.get("size_lots")) if best_bid else None
-    best_ask_size_lots = _as_int(best_ask.get("size_lots")) if best_ask else None
-    last_price = _as_float(message.get("z"))
-    previous_close = _as_float(message.get("y"))
-    change = last_price - previous_close if last_price is not None and previous_close is not None else None
-    spread = best_ask_price - best_bid_price if best_ask_price is not None and best_bid_price is not None else None
-    quote_time = _parse_mis_datetime(message, fallback=fetched_at)
-
-    return {
-        "provider": TWSE_MIS_PROVIDER,
-        "market": market,
-        "stock_id": stock.stock_id,
-        "stock_name": message.get("n") or stock.stock_name,
-        "exchange_channel": message.get("ch") or f"{exchange}_{stock.stock_id}.tw",
-        "session_phase": session_phase,
-        "trade_date": _parse_mis_trade_date(message.get("d")) or quote_time.date(),
-        "quote_time": quote_time,
-        "open_price": _as_float(message.get("o")),
-        "high_price": _as_float(message.get("h")),
-        "low_price": _as_float(message.get("l")),
-        "last_price": last_price,
-        "previous_close": previous_close,
-        "change": change,
-        "change_pct": _percent_change(change, previous_close),
-        "total_volume_lots": _as_int(message.get("v")),
-        "last_trade_volume_lots": _as_int(message.get("tv")),
-        "best_bid_price": best_bid_price,
-        "best_bid_size_lots": best_bid_size_lots,
-        "best_ask_price": best_ask_price,
-        "best_ask_size_lots": best_ask_size_lots,
-        "bid_total_size_lots": _sum_level_sizes(_limit_price_levels(bid_levels)),
-        "ask_total_size_lots": _sum_level_sizes(_limit_price_levels(ask_levels)),
-        "spread": spread,
-        "spread_pct": _percent_change(spread, best_bid_price),
-        "bid_levels_json": json.dumps(bid_levels, ensure_ascii=False, separators=(",", ":")),
-        "ask_levels_json": json.dumps(ask_levels, ensure_ascii=False, separators=(",", ":")),
-        "source": TWSE_MIS_SOURCE,
-        "source_url": source_url,
-        "raw_payload_json": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        "fetched_at": fetched_at,
-        "updated_at": fetched_at,
-    }
-
-
-def _join_kgi_depth(values: Any) -> str:
-    if not isinstance(values, (list, tuple)):
-        return ""
-    return "_".join(str(value) for value in values[:5])
-
-
-def _kgi_quote_to_mis_message(
-    *,
-    stock: StockMaster,
-    quote: dict[str, Any],
-    session_phase: str,
-) -> dict[str, Any]:
-    raw_datetime = str(quote.get("datetime") or "").strip()
-    if len(raw_datetime) != 14 or not raw_datetime.isdigit():
-        raise ValueError("KGI SuperPy quote datetime must use YYYYMMDDHHMMSS.")
-    if str(quote.get("symbol") or "").strip() != stock.stock_id:
-        raise ValueError("KGI SuperPy quote symbol does not match the requested stock.")
-    odd_lot = str(quote.get("odd_lot") or "").strip().lower()
-    if odd_lot in {"1", "true", "yes", "on"}:
-        raise ValueError("KGI SuperPy odd-lot quotes are outside the v1 contract.")
-
-    close = _as_float(quote.get("close"))
-    price_change = _as_float(quote.get("price_chg"))
-    previous_close = (
-        close - price_change
-        if close is not None and price_change is not None
-        else None
-    )
-    simtrade = _as_int(quote.get("simtrade")) or 0
-    is_trial = kgi_quote_is_indicative(quote, session=session_phase)
-    indicative_status_source = (
-        "simtrade" if simtrade == 1 else "session+total_volume" if is_trial else None
-    )
-    event_time = raw_datetime[8:]
-    return {
-        "c": stock.stock_id,
-        "n": stock.stock_name,
-        "ch": f"kgi_{stock.stock_id}.tw",
-        "d": raw_datetime[:8],
-        "t": f"{event_time[:2]}:{event_time[2:4]}:{event_time[4:6]}",
-        "o": quote.get("open"),
-        "h": quote.get("high"),
-        "l": quote.get("low"),
-        "z": "-" if is_trial else quote.get("close"),
-        "y": previous_close,
-        "v": quote.get("total_volume"),
-        "tv": None if is_trial else quote.get("volume"),
-        "b": _join_kgi_depth(quote.get("bid_prices")),
-        "g": _join_kgi_depth(quote.get("bid_volumes")),
-        "a": _join_kgi_depth(quote.get("ask_prices")),
-        "f": _join_kgi_depth(quote.get("ask_volumes")),
-        "ts": "1" if is_trial else "0",
-        "pz": quote.get("close") if is_trial else None,
-        "ps": quote.get("volume") if is_trial else None,
-        "_kgi_indicative_status_source": indicative_status_source,
-        "suspend": quote.get("suspend"),
-    }
-
-
-def _snapshot_values_from_kgi_quote(
-    *,
-    stock: StockMaster,
-    session_phase: str,
-    quote: dict[str, Any],
-) -> dict[str, Any]:
-    message = _kgi_quote_to_mis_message(
-        stock=stock,
-        quote=quote,
-        session_phase=session_phase,
-    )
-    received_at_raw = str(quote.get("received_at") or "").strip()
-    try:
-        received_at = datetime.fromisoformat(received_at_raw.replace("Z", "+00:00"))
-        if received_at.tzinfo is None:
-            received_at = received_at.replace(tzinfo=timezone.utc)
-        received_at = received_at.astimezone(timezone.utc)
-    except ValueError:
-        received_at = utc_now()
-    raw_payload = {
-        "provider": KGI_SUPERPY_PROVIDER,
-        "source": KGI_SUPERPY_SOURCE,
-        "data": quote,
-        "normalized_message": message,
-    }
-    values = _snapshot_values_from_message(
-        stock=stock,
-        session_phase=session_phase,
-        message=message,
-        source_url=KGI_SUPERPY_SOURCE_URL,
-        payload={"msgArray": [message]},
-        fetched_at=received_at,
-    )
-    values.update(
-        {
-            "provider": KGI_SUPERPY_PROVIDER,
-            "source": KGI_SUPERPY_SOURCE,
-            "source_url": KGI_SUPERPY_SOURCE_URL,
-            "exchange_channel": f"kgi_{stock.stock_id}.tw",
-            "raw_payload_json": json.dumps(
-                raw_payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-        }
-    )
-    return values
-
-
-def _upsert_quote_snapshot(
-    db: Session,
-    values: dict[str, Any],
-) -> tuple[TaiwanStockQuoteSnapshot, str]:
-    existing = (
-        db.query(TaiwanStockQuoteSnapshot)
-        .filter(TaiwanStockQuoteSnapshot.provider == values["provider"])
-        .filter(TaiwanStockQuoteSnapshot.stock_id == values["stock_id"])
-        .filter(TaiwanStockQuoteSnapshot.quote_time == values["quote_time"])
-        .first()
-    )
-
-    if existing is None:
-        row = TaiwanStockQuoteSnapshot(**values)
-        db.add(row)
-        refresh_outcome = "updated"
-    else:
-        row = existing
-        refresh_outcome = (
-            "updated"
-            if any(
-                getattr(existing, key) != value
-                for key, value in values.items()
-                if key not in {"fetched_at", "updated_at"}
-            )
-            else "unchanged"
-        )
-        for key, value in values.items():
-            setattr(row, key, value)
-
-    db.commit()
-    db.refresh(row)
-    return row, refresh_outcome
-
-
-def _latest_snapshot(db: Session, stock_id: str) -> TaiwanStockQuoteSnapshot | None:
-    return (
-        db.query(TaiwanStockQuoteSnapshot)
-        .filter(TaiwanStockQuoteSnapshot.stock_id == stock_id)
-        .order_by(TaiwanStockQuoteSnapshot.quote_time.desc())
-        .first()
-    )
-
-
-def _latest_official_daily_volume(
-    db: Session,
-    stock_id: str,
-) -> tuple[MarketDailyPrice, SourceRegistry] | None:
-    return (
-        db.query(MarketDailyPrice, SourceRegistry)
-        .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-        .filter(MarketDailyPrice.stock_id == stock_id)
-        .filter(MarketDailyPrice.trade_volume.isnot(None))
-        .filter(SourceRegistry.reliability_level == "official")
-        .order_by(
-            MarketDailyPrice.trade_date.desc(),
-            SourceRegistry.priority.asc(),
-            MarketDailyPrice.updated_at.desc(),
-            MarketDailyPrice.id.desc(),
-        )
-        .first()
-    )
 
 
 def _last_trade_volume_lots_for_row(
@@ -1189,30 +697,10 @@ def _price_semantics_contract(
         else None
     )
     snapshot_time = fetched_at
-    persisted_after_close = bool(
-        row is not None
-        and fetched_at is not None
-        and row.trade_date == fetched_at.date()
-        and fetched_at.time() >= TAIWAN_QUOTE_DEPTH_CLOSE
-    )
-    provider_observed_current_state = (
-        refresh_outcome in {"updated", "unchanged", "cache_hit"}
-        and not freshness.get("source_error")
-    )
-    closing_state_finalized = (
-        phase == "market_closed"
-        or (
-            phase == "post_close_snapshot"
-            and local_now.time()
-            >= TAIWAN_QUOTE_DEPTH_OFFICIAL_CLOSE_DEADLINE
-        )
-    )
-    official_close_available = bool(
-        closing_state_finalized
-        and current_snapshot_last_price is not None
-        and not freshness.get("source_error")
-        and (provider_observed_current_state or persisted_after_close)
-    )
+    # A realtime provider snapshot can expose the final matched trade, but it
+    # cannot promote itself to the completed official-close capability.  The
+    # canonical daily result is applied later by the market-owned bundle.
+    official_close_available = False
 
     if official_close_available:
         official_close_status = "confirmed"
@@ -1501,6 +989,7 @@ def _row_to_response(
     db: Session,
     row: TaiwanStockQuoteSnapshot,
     *,
+    official_daily_bar: Any | None = None,
     phase: str,
     source_error: str | None = None,
     source_error_detail: dict[str, Any] | None = None,
@@ -1586,15 +1075,21 @@ def _row_to_response(
         if provider_event_time is not None
         else None
     )
-    daily_volume_reference = _latest_official_daily_volume(db, row.stock_id)
-    daily_volume_row = (
-        daily_volume_reference[0]
-        if daily_volume_reference is not None
+    daily_volume = getattr(official_daily_bar, "volume", None)
+    daily_volume_shares = (
+        int(daily_volume.value)
+        if daily_volume is not None
+        and daily_volume.unit is QuantityUnit.SHARE
+        else None
+    )
+    daily_volume_trade_date = (
+        official_daily_bar.end_at.astimezone(TAIWAN_TZ).date()
+        if official_daily_bar is not None
         else None
     )
     daily_volume_source = (
-        daily_volume_reference[1].source_name
-        if daily_volume_reference is not None
+        official_daily_bar.lineage.source
+        if official_daily_bar is not None
         else None
     )
     volume_contract = build_taiwan_quote_volume_contract(
@@ -1608,11 +1103,9 @@ def _row_to_response(
             else _last_trade_volume_lots_for_row(row)
         ),
         official_daily_trade_date=(
-            daily_volume_row.trade_date if daily_volume_row is not None else None
+            daily_volume_trade_date
         ),
-        official_daily_volume_shares=(
-            daily_volume_row.trade_volume if daily_volume_row is not None else None
-        ),
+        official_daily_volume_shares=daily_volume_shares,
         official_daily_volume_source=daily_volume_source,
         provider=row.provider,
         cumulative_volume_source_field=(
@@ -1714,640 +1207,599 @@ def _row_to_response(
     }
 
 
-def _with_kgi_primary_metadata(
-    payload: dict[str, Any],
-    *,
-    primary: KgiSuperPyQuoteSnapshot | None,
-    primary_status: str | None = None,
-    primary_error: str | None = None,
-) -> dict[str, Any]:
-    if primary is None or primary.active_leases <= 0:
-        return payload
+def _resolved_quote_row(
+    db: Session,
+    result: Any,
+) -> TaiwanStockQuoteSnapshot | None:
+    quote = getattr(result.resolved, "quote", None)
+    observation_id = quote.lineage.observation_id if quote is not None else None
+    prefix = "taiwan_stock_quote_snapshot:"
+    if not observation_id or not observation_id.startswith(prefix):
+        return None
+    try:
+        row_id = int(observation_id.removeprefix(prefix))
+    except ValueError:
+        return None
+    return (
+        db.query(TaiwanStockQuoteSnapshot)
+        .filter(TaiwanStockQuoteSnapshot.id == row_id)
+        .first()
+    )
 
-    status = primary_status or primary.status
-    error = primary_error if primary_error is not None else primary.error
-    used_primary = payload.get("provider") == KGI_SUPERPY_PROVIDER
-    source_chain = [KGI_SUPERPY_SOURCE]
-    secondary_source = str(payload.get("source") or "").strip()
-    if secondary_source and secondary_source not in source_chain:
-        source_chain.append(secondary_source)
+
+def _quantity_lots(quantity: Quantity | None) -> int | None:
+    if quantity is None:
+        return None
+    if (
+        quantity.original_unit is QuantityUnit.BOARD_LOT
+        and quantity.original_value is not None
+    ):
+        return int(quantity.original_value)
+    if quantity.unit is QuantityUnit.BOARD_LOT:
+        return int(quantity.value)
+    if quantity.unit is QuantityUnit.SHARE:
+        return int(quantity.value / 1000)
+    return None
+
+
+def _depth_level_projection(level: Any) -> dict[str, Any]:
+    quantity_lots = _quantity_lots(level.quantity)
+    return {
+        "level": level.level,
+        "price": float(level.price) if level.price is not None else None,
+        "price_status": level.price_state.value,
+        "size_lots": quantity_lots,
+        "volume_lots": quantity_lots,
+        "order_count": None,
+        "order_count_status": "not_provided",
+    }
+
+
+def _apply_resolved_depth(
+    payload: dict[str, Any],
+    result: Any,
+    *,
+    phase: str,
+) -> None:
+    depth = getattr(result.resolved, "depth", None)
+    usable = bool(depth is not None and result.resolved.health.facts_usable)
+    available = usable and phase in LIVE_DEPTH_PHASES
+    depth_event_time = (
+        depth.lineage.event_at if depth is not None else None
+    )
+    bid_levels = (
+        [_depth_level_projection(level) for level in depth.bids]
+        if available
+        else []
+    )
+    ask_levels = (
+        [_depth_level_projection(level) for level in depth.asks]
+        if available
+        else []
+    )
+    depth_contract = _depth_contract(
+        bid_levels=bid_levels,
+        ask_levels=ask_levels,
+        depth_available=available,
+    )
+    best_bid = _first_price_level(bid_levels)
+    best_ask = _first_price_level(ask_levels)
     payload.update(
         {
-            "source_chain": source_chain,
-            "primary_provider": KGI_SUPERPY_PROVIDER,
-            "primary_source_status": "live" if used_primary else status,
-            "primary_source_error": None if used_primary else error,
-            "fallback_used": not used_primary,
-            "fallback_reason": None if used_primary else f"kgi_superpy_{status}",
+            "bid_levels": bid_levels,
+            "ask_levels": ask_levels,
+            "depth_available": available,
+            "best_bid_price": best_bid.get("price") if best_bid else None,
+            "best_bid_size_lots": best_bid.get("size_lots") if best_bid else None,
+            "best_ask_price": best_ask.get("price") if best_ask else None,
+            "best_ask_size_lots": best_ask.get("size_lots") if best_ask else None,
+            "bid_total_size_lots": depth_contract["top5_bid_volume_lots"],
+            "ask_total_size_lots": depth_contract["top5_ask_volume_lots"],
+            "spread": (
+                best_ask["price"] - best_bid["price"]
+                if best_bid and best_ask
+                else None
+            ),
+            "depth_event_time": depth_event_time,
+            **depth_contract,
         }
     )
-    return payload
 
 
-def _canonical_market_data_mode() -> str:
-    return settings.canonical_market_data_mode
-
-
-def _canonical_instrument_key(stock: StockMaster) -> InstrumentKey:
-    instrument_type = InstrumentType(str(stock.instrument_type or "").strip().lower())
-    return InstrumentKey(
-        market=Market.TW,
-        symbol=stock.stock_id,
-        instrument_type=instrument_type,
-        venue=str(stock.market or "").strip().upper() or None,
+def _apply_resolved_auction(payload: dict[str, Any], result: Any) -> None:
+    auction = getattr(result.resolved, "auction", None)
+    if auction is None or not result.resolved.health.facts_usable:
+        return
+    indicative_lots = _quantity_lots(auction.indicative_quantity)
+    payload.update(
+        {
+            "auction_indicative_available": auction.indicative_price is not None,
+            "auction_indicative_status": auction.state.value,
+            "auction_indicative_source": auction.lineage.source,
+            "auction_phase": auction.auction_type.value,
+            "auction_event_time": auction.lineage.event_at,
+            "indicative_match_available": auction.indicative_price is not None,
+            "indicative_match_price": (
+                float(auction.indicative_price)
+                if auction.indicative_price is not None
+                else None
+            ),
+            "indicative_match_volume_lots": indicative_lots,
+            "indicative_match_price_source_field": "canonical.indicative_price",
+            "indicative_match_volume_source_field": "canonical.indicative_quantity",
+            "indicative_match_status_source_field": "canonical.state",
+            "indicative_match_status": auction.state.value,
+            "indicative_price_available": auction.indicative_price is not None,
+            "indicative_price": (
+                float(auction.indicative_price)
+                if auction.indicative_price is not None
+                else None
+            ),
+            "indicative_bid": (
+                float(auction.best_bid.price)
+                if auction.best_bid is not None
+                and auction.best_bid.price is not None
+                else None
+            ),
+            "indicative_ask": (
+                float(auction.best_ask.price)
+                if auction.best_ask is not None
+                and auction.best_ask.price is not None
+                else None
+            ),
+            "last_trade_before_auction": bool(payload.get("last_trade_available")),
+        }
     )
 
 
-def _flag_enabled(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _record_canonical_shadow_event(event: Any) -> None:
-    try:
-        CANONICAL_COMPARISON_METRICS.record(event)
-    except Exception:
-        pass
-    try:
-        runtime_logger.info(
-            "canonical_market_data_shadow %s",
-            event.model_dump_json(),
-        )
-    except Exception:
-        pass
-
-
-def _run_canonical_quote_shadow(
+def _finalize_shared_projection_semantics(
+    payload: dict[str, Any],
     *,
-    provider: str,
-    stock: StockMaster,
-    session_phase: str,
-    raw_observation: dict[str, Any],
-    legacy_values: dict[str, Any],
-    fetched_at: datetime | None = None,
+    phase: str,
 ) -> None:
-    """Run bounded same-payload shadow work without changing legacy output."""
+    """Recompute compatibility semantics after typed depth/auction projection.
 
-    mode = _canonical_market_data_mode()
-    if mode == "off":
-        return
-    try:
-        instrument = _canonical_instrument_key(stock)
-        if provider == KGI_SUPERPY_PROVIDER:
-            canonical = canonical_snapshot_from_kgi(
-                instrument=instrument,
-                quote=raw_observation,
-                session=session_phase,
-                received_at=fetched_at,
-            )
-            trial = kgi_quote_is_indicative(
-                raw_observation,
-                session=session_phase,
-            )
-            semantics = {
-                "trial": trial,
-                "indicative_price": raw_observation.get("close") if trial else None,
-                "indicative_volume_lots": (
-                    raw_observation.get("volume") if trial else None
+    ``_row_to_response`` intentionally suppresses the legacy JSON depth columns.
+    Its first-pass semantics therefore cannot know whether Shared Data Core later
+    selected a typed depth candidate.  Keep this finalizer presentation-only and
+    derive it exclusively from already-resolved observations.
+    """
+
+    depth_available = bool(payload.get("depth_available"))
+    last_trade_available = bool(payload.get("last_trade_available"))
+    indicative_available = bool(
+        payload.get("auction_indicative_available")
+        or payload.get("indicative_match_available")
+    )
+    auction_phase = phase in {"preopen_auction", "closing_auction"}
+    auction_book_available = bool(
+        auction_phase
+        and depth_available
+        and (
+            payload.get("best_bid_price") is not None
+            or payload.get("best_ask_price") is not None
+        )
+    )
+    payload.update(
+        {
+            "auction_book_available": auction_book_available,
+            "auction_book_status": (
+                "depth_and_indicative_match"
+                if auction_book_available and indicative_available
+                else "depth_only"
+                if auction_book_available
+                else "unavailable"
+            ),
+            "auction_book_time": (
+                payload.get("depth_event_time")
+                if auction_book_available
+                else None
+            ),
+            "auction_best_bid": (
+                payload.get("best_bid_price")
+                if auction_book_available
+                else None
+            ),
+            "auction_best_ask": (
+                payload.get("best_ask_price")
+                if auction_book_available
+                else None
+            ),
+        }
+    )
+    if auction_book_available and payload.get("auction_event_time") is None:
+        payload["auction_event_time"] = payload.get("depth_event_time")
+
+    if phase == "preopen_auction":
+        semantics = (
+            "preopen_indicative_match_and_depth"
+            if indicative_available and auction_book_available
+            else "preopen_indicative_match"
+            if indicative_available
+            else "preopen_depth_only"
+            if auction_book_available
+            else "preopen_unavailable"
+        )
+        delivery_status = "live_depth_only" if depth_available else "unavailable"
+        payload["price_available"] = False
+    elif phase == "regular_live":
+        semantics = (
+            "live_trade_and_depth"
+            if last_trade_available and depth_available
+            else "delayed_current_session_trade"
+            if last_trade_available
+            and payload.get("freshness", {}).get("status") != "live"
+            else "live_trade_only"
+            if last_trade_available
+            else "live_depth_only"
+            if depth_available
+            else "current_session_unavailable"
+        )
+        delivery_status = str(
+            payload.get("freshness", {}).get("status") or "unavailable"
+        )
+        payload["price_available"] = last_trade_available
+    elif phase == "closing_auction":
+        semantics = (
+            "closing_auction_indicative_match_and_depth"
+            if indicative_available and auction_book_available
+            else "closing_auction_indicative_match"
+            if indicative_available
+            else "closing_auction_depth_only"
+            if auction_book_available
+            else "closing_auction_last_trade"
+            if last_trade_available
+            else "closing_auction_pending"
+        )
+        delivery_status = "closing_auction"
+        payload["price_available"] = last_trade_available
+    elif phase in POST_CLOSE_PHASES:
+        # Current-session MIS/KGI evidence is never promoted to the separately
+        # owned completed-session official close contract.
+        semantics = (
+            "official_close_pending"
+            if phase == "post_close_snapshot"
+            else "latest_session_close_unverified"
+        )
+        delivery_status = semantics
+        payload.update(
+            {
+                "official_close_available": False,
+                "official_close_status": (
+                    "pending"
+                    if phase == "post_close_snapshot"
+                    else "unverified_latest_session"
                 ),
-                "suspend_hint": _flag_enabled(raw_observation.get("suspend")),
+                "official_close_price": None,
+                "price_available": False,
             }
-        elif provider == TWSE_MIS_PROVIDER:
-            if fetched_at is None:
-                raise ValueError("MIS canonical shadow requires fetched_at")
-            canonical = canonical_snapshot_from_twse_mis(
-                instrument=instrument,
-                message=raw_observation,
-                session=session_phase,
-                fetched_at=fetched_at,
-                expected_trade_date=legacy_values.get("trade_date"),
-            )
-            trial = str(raw_observation.get("ts") or "").strip() not in {"", "0"}
-            semantics = {
-                "trial": trial,
-                "indicative_price": raw_observation.get("pz") if trial else None,
-                "indicative_volume_lots": raw_observation.get("ps") if trial else None,
-            }
-            if "suspend" in raw_observation:
-                semantics["suspend_hint"] = _flag_enabled(
-                    raw_observation.get("suspend")
-                )
-        else:
-            raise ValueError("Unsupported canonical shadow provider")
+        )
+    else:
+        semantics = "unavailable"
+        delivery_status = "unavailable"
+        payload["price_available"] = False
 
-        result = (
-            compare_legacy_to_canonical(
-                legacy=legacy_values,
-                canonical=canonical,
-                semantics=semantics,
-            )
-            if mode == "compare"
+    payload.update(
+        {
+            "quote_semantics": semantics,
+            "observation_semantics": semantics,
+            "delivery_status": delivery_status,
+        }
+    )
+
+
+def _component_evidence(result: Any, observation: Any) -> dict[str, Any]:
+    lineage = getattr(observation, "lineage", None)
+    return {
+        "result_kind": result.result_kind,
+        "provider": (
+            lineage.provider
+            if lineage is not None
+            else result.resolved.health.selected_provider
+        ),
+        "source": (
+            lineage.source
+            if lineage is not None
+            else result.resolved.health.selected_source
+        ),
+        "event_at": getattr(lineage, "event_at", None),
+        "lineage": (
+            lineage.model_dump(mode="json") if lineage is not None else None
+        ),
+        "resolved_health": result.resolved.health.model_dump(mode="json"),
+        "dataset_health": (
+            result.dataset_health.model_dump(mode="json")
+            if result.dataset_health is not None
             else None
-        )
-        event = build_telemetry_event(
-            mode=mode,
-            provider=provider,
-            market_phase=session_phase,
-            result=result,
-        )
-        _record_canonical_shadow_event(event)
-    except Exception as exc:
-        try:
-            event = build_telemetry_event(
-                mode=mode,
-                provider=provider,
-                market_phase=session_phase,
-                error_code=type(exc).__name__,
+        ),
+        "candidate_rejections": [
+            item.model_dump(mode="json") for item in result.candidate_rejections
+        ],
+        "limitations": list(
+            dict.fromkeys(
+                (*result.limitations, *result.resolved.health.limitations)
             )
-            _record_canonical_shadow_event(event)
-        except Exception:
-            pass
+        ),
+    }
+
+
+def _official_close_component_evidence(result: Any) -> dict[str, Any]:
+    bar = result.resolved.bars[-1] if result.resolved.bars else None
+    evidence = _component_evidence(result, bar)
+    raw_close = format(bar.close_price, "f") if bar is not None else None
+    precision = (
+        max(-bar.close_price.as_tuple().exponent, 0)
+        if bar is not None
+        else None
+    )
+    return {
+        **evidence,
+        "available": bool(bar is not None and result.resolved.health.facts_usable),
+        "price": bar.close_price if bar is not None else None,
+        "trade_date": (
+            bar.end_at.astimezone(TAIWAN_TZ).date()
+            if bar is not None
+            else None
+        ),
+        "raw": raw_close,
+        "display": raw_close,
+        "precision": precision,
+        "observation_semantics": "latest_completed_official_daily_close",
+        "decision_usable": bool(result.resolved.health.research_usable),
+    }
+
+
+def _apply_resolved_official_close(
+    response: dict[str, Any],
+    result: Any,
+    *,
+    requested_at: datetime,
+) -> None:
+    """Promote only the canonical daily owner to current official close."""
+
+    bar = result.resolved.bars[-1] if result.resolved.bars else None
+    if bar is None or not result.resolved.health.facts_usable:
+        return
+    local_now = _local_now(requested_at)
+    trade_date = bar.end_at.astimezone(TAIWAN_TZ).date()
+    expected_date = expected_daily_price_date(now=local_now)
+    phase = str(response.get("session_phase") or "")
+    if phase not in POST_CLOSE_PHASES:
+        return
+    if is_taiwan_trading_day(local_now.date()):
+        if trade_date != local_now.date():
+            return
+        status = "confirmed"
+    else:
+        if trade_date != expected_date:
+            return
+        status = "confirmed_latest_session"
+
+    raw_close = format(bar.close_price, "f")
+    response.update(
+        {
+            "official_close_available": True,
+            "official_close_status": status,
+            "official_close_price": bar.close_price,
+            "official_close_trade_date": trade_date,
+            "official_close_source": bar.lineage.source,
+            "official_close_raw": raw_close,
+            "official_close_display": raw_close,
+            "official_close_precision": max(
+                -bar.close_price.as_tuple().exponent,
+                0,
+            ),
+            "official_close_precision_semantics": (
+                "canonical_daily_decimal_preserved"
+            ),
+            "quote_semantics": (
+                "official_close"
+                if status == "confirmed"
+                else "latest_completed_session_close"
+            ),
+            "observation_semantics": (
+                "official_close"
+                if status == "confirmed"
+                else "latest_completed_session_close"
+            ),
+            "delivery_status": (
+                "official_close"
+                if status == "confirmed"
+                else "latest_completed_session"
+            ),
+            "price_available": True,
+        }
+    )
+    freshness = response.get("freshness")
+    if isinstance(freshness, dict):
+        freshness.update(
+            {
+                "status": (
+                    "official_close"
+                    if status == "confirmed"
+                    else "latest_completed_session"
+                ),
+                "is_live": False,
+                "is_stale": False,
+                "message": "Canonical official daily close is available.",
+            }
+        )
+    ohlc_summary = response.get("ohlc_summary")
+    if isinstance(ohlc_summary, dict):
+        ohlc_summary.update(
+            {
+                "last": bar.close_price,
+                "event_time": bar.lineage.event_at,
+                "semantics": "latest_completed_session",
+            }
+        )
+
+
+def project_taiwan_quote_evidence_bundle(
+    *,
+    db: Session,
+    stock_id: str,
+    bundle: TaiwanQuoteEvidenceBundle,
+) -> dict[str, Any]:
+    """Stable outward projection over independently resolved components."""
+
+    normalized_stock_id = _normalize_stock_id(stock_id)
+    stock = _get_stock(db, normalized_stock_id)
+    requested_at = _local_now(bundle.requested_at)
+    phase = resolve_taiwan_stock_quote_phase(now=requested_at)
+    quote_result = bundle.quote
+    depth_result = bundle.depth
+    auction_result = bundle.auction
+    official_close_result = bundle.official_close
+    official_daily_bar = (
+        official_close_result.resolved.bars[-1]
+        if official_close_result.resolved.bars
+        else None
+    )
+    row = _resolved_quote_row(db, quote_result)
+    response = (
+        _row_to_response(
+            db,
+            row,
+            official_daily_bar=official_daily_bar,
+            phase=phase,
+            now=requested_at,
+            suppress_depth=True,
+            refresh_outcome="not_attempted",
+        )
+        if row is not None
+        else _empty_response(
+            stock=stock,
+            phase=phase,
+            now=requested_at,
+            refresh_outcome="not_attempted",
+        )
+    )
+    _apply_resolved_depth(response, depth_result, phase=phase)
+    _apply_resolved_auction(response, auction_result)
+    _finalize_shared_projection_semantics(response, phase=phase)
+    _apply_resolved_official_close(
+        response,
+        official_close_result,
+        requested_at=requested_at,
+    )
+    selected_sources = [
+        observation.lineage.source
+        for observation in (
+            getattr(quote_result.resolved, "quote", None),
+            getattr(depth_result.resolved, "depth", None),
+            getattr(auction_result.resolved, "auction", None),
+        )
+        if observation is not None
+    ]
+    response.update(
+        {
+            "source_chain": list(dict.fromkeys(selected_sources)),
+            "primary_provider": response.get("provider"),
+            "primary_source_status": quote_result.resolved.health.status.value,
+            "primary_source_error": None,
+            "fallback_used": (
+                quote_result.resolved.health.status is ResolvedEvidenceStatus.FALLBACK
+            ),
+            "fallback_reason": (
+                quote_result.resolved.health.limitations[0]
+                if quote_result.resolved.health.limitations
+                and quote_result.resolved.health.status
+                is ResolvedEvidenceStatus.FALLBACK
+                else None
+            ),
+            "data_core_result_kinds": [
+                "quote",
+                "depth",
+                "auction",
+                "bar_series",
+            ],
+            "data_core_components": {
+                "quote.snapshot": _component_evidence(
+                    quote_result,
+                    getattr(quote_result.resolved, "quote", None),
+                ),
+                "quote.order_book": _component_evidence(
+                    depth_result,
+                    getattr(depth_result.resolved, "depth", None),
+                ),
+                "quote.auction": _component_evidence(
+                    auction_result,
+                    getattr(auction_result.resolved, "auction", None),
+                ),
+                "quote.official_close": _official_close_component_evidence(
+                    official_close_result
+                ),
+            },
+            "acquisition_scope": (
+                bundle.acquisition_scope.projection()
+                if bundle.acquisition_scope is not None
+                else None
+            ),
+            "read_policy": "cache_only",
+        }
+    )
+    return response
+
+
+def read_taiwan_quote_evidence_projection(
+    *,
+    db: Session,
+    stock_id: str,
+    requested_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Cache-only AI/API projection over the canonical quote bundle."""
+
+    bundle = read_taiwan_quote_evidence_bundle(
+        db,
+        stock_id=stock_id,
+        requested_at=_local_now(requested_at),
+    )
+    return project_taiwan_quote_evidence_bundle(
+        db=db,
+        stock_id=stock_id,
+        bundle=bundle,
+    )
+
+
+def acquire_taiwan_quote_evidence_projection(
+    *,
+    db: Session,
+    stock_id: str,
+    policy: RealtimePolicy = RealtimePolicy.PREFER_LIVE,
+    requested_at: datetime | None = None,
+    requested_capabilities: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Explicit bounded acquisition followed by the same canonical projection."""
+
+    bundle = acquire_taiwan_quote_evidence_bundle(
+        db,
+        stock_id=stock_id,
+        policy=policy,
+        requested_at=_local_now(requested_at),
+        requested_capabilities=requested_capabilities,
+    )
+    payload = project_taiwan_quote_evidence_bundle(
+        db=db,
+        stock_id=stock_id,
+        bundle=bundle,
+    )
+    payload["read_policy"] = policy.value
+    return payload
 
 
 def get_taiwan_stock_quote_depth(
     *,
     db: Session,
     stock_id: str,
-    refresh: bool = True,
+    refresh: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    normalized_stock_id = _normalize_stock_id(stock_id)
-    stock = _get_stock(db, normalized_stock_id)
-    phase = resolve_taiwan_stock_quote_phase(now=now)
+    """GET compatibility projection; ``refresh`` is intentionally inert."""
 
-    if phase == "closed_waiting_preopen":
-        return _empty_response(stock=stock, phase=phase, now=now)
-
-    primary = (
-        get_kgi_superpy_quote_snapshot(normalized_stock_id)
-        if phase in LIVE_DEPTH_PHASES
-        else None
+    del refresh
+    return read_taiwan_quote_evidence_projection(
+        db=db,
+        stock_id=stock_id,
+        requested_at=now,
     )
-    primary_token = "secondary"
-    if primary is not None and primary.active_leases > 0:
-        primary_token = str(
-            primary.quote.get("datetime")
-            if primary.quote is not None
-            else primary.status
-        )
-    cache_key = f"{normalized_stock_id}:{phase}:{int(refresh)}:{primary_token}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return _with_kgi_primary_metadata(cached, primary=primary)
-
-    primary_status = primary.status if primary is not None else None
-    primary_error = primary.error if primary is not None else None
-    if primary is not None and primary.quote is not None:
-        try:
-            values = _snapshot_values_from_kgi_quote(
-                stock=stock,
-                session_phase=phase,
-                quote=primary.quote,
-            )
-            _run_canonical_quote_shadow(
-                provider=KGI_SUPERPY_PROVIDER,
-                stock=stock,
-                session_phase=phase,
-                raw_observation=primary.quote,
-                legacy_values=values,
-            )
-            row, refresh_outcome = _upsert_quote_snapshot(db, values)
-            response = _row_to_response(
-                db,
-                row,
-                phase=phase,
-                now=now,
-                refresh_outcome=refresh_outcome,
-            )
-            return _cache_set(
-                cache_key,
-                _with_kgi_primary_metadata(response, primary=primary),
-            )
-        except Exception as exc:
-            db.rollback()
-            primary_status = "invalid"
-            primary_error = str(exc) or type(exc).__name__
-
-    source_error: str | None = None
-    source_error_detail: dict[str, Any] | None = None
-    if refresh:
-        try:
-            fetched_at = utc_now()
-            message, source_url, payload = _guarded_mis_quote_depth_fetch(
-                stock_id=normalized_stock_id,
-                market=stock.market,
-            )
-            values = _snapshot_values_from_message(
-                stock=stock,
-                session_phase=phase,
-                message=message,
-                source_url=source_url,
-                payload=payload,
-                fetched_at=fetched_at,
-            )
-            _run_canonical_quote_shadow(
-                provider=TWSE_MIS_PROVIDER,
-                stock=stock,
-                session_phase=phase,
-                raw_observation=message,
-                legacy_values=values,
-                fetched_at=fetched_at,
-            )
-            row, refresh_outcome = _upsert_quote_snapshot(db, values)
-            response = _row_to_response(
-                db,
-                row,
-                phase=phase,
-                now=now,
-                refresh_outcome=refresh_outcome,
-            )
-            return _cache_set(
-                cache_key,
-                _with_kgi_primary_metadata(
-                    response,
-                    primary=primary,
-                    primary_status=primary_status,
-                    primary_error=primary_error,
-                ),
-            )
-        except Exception as exc:
-            source_error = str(exc) or exc.__class__.__name__
-            source_error_detail = _source_error_detail(exc)
-
-    latest = _latest_snapshot(db, normalized_stock_id)
-    if latest is None:
-        response = _empty_response(
-            stock=stock,
-            phase=phase,
-            source_error=source_error,
-            source_error_detail=source_error_detail,
-            now=now,
-            refresh_outcome="failed" if source_error else "not_attempted",
-        )
-        return _cache_set(
-            cache_key,
-            _with_kgi_primary_metadata(
-                response,
-                primary=primary,
-                primary_status=primary_status,
-                primary_error=primary_error,
-            ),
-        )
-
-    response = _row_to_response(
-        db,
-        latest,
-        phase=phase,
-        source_error=source_error,
-        source_error_detail=source_error_detail,
-        now=now,
-        refresh_outcome="failed" if source_error else "not_attempted",
-        suppress_depth=phase == "closed_waiting_preopen",
-    )
-    return _cache_set(
-        cache_key,
-        _with_kgi_primary_metadata(
-            response,
-            primary=primary,
-            primary_status=primary_status,
-            primary_error=primary_error,
-        ),
-    )
-
-
-def _quote_contract_json_default(value: Any) -> Any:
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    raise TypeError(f"Unsupported quote contract snapshot value: {type(value)!r}")
-
-
-def _quote_contract_slot_time(capture_slot: str) -> time:
-    normalized = str(capture_slot or "").strip()
-    if normalized not in TAIWAN_QUOTE_CONTRACT_SLOTS:
-        raise ValueError(
-            "capture_slot must be one of: "
-            + ", ".join(TAIWAN_QUOTE_CONTRACT_SLOTS)
-        )
-    hour_text, minute_text = normalized.split(":", maxsplit=1)
-    return time(int(hour_text), int(minute_text))
-
-
-def _upsert_quote_contract_snapshot(
-    db: Session,
-    *,
-    stock_id: str,
-    trade_date: date,
-    capture_slot: str,
-    scheduled_at: datetime,
-    captured_at: datetime,
-    payload: dict[str, Any] | None,
-    error: str | None,
-) -> TaiwanQuoteContractSnapshot:
-    freshness = (
-        payload.get("freshness")
-        if isinstance(payload, dict) and isinstance(payload.get("freshness"), dict)
-        else {}
-    )
-    capture_status = (
-        "failed"
-        if payload is None
-        else "captured_degraded"
-        if error or freshness.get("source_error")
-        else "captured"
-    )
-    values = {
-        "provider": payload.get("provider") if payload else None,
-        "market": payload.get("market") if payload else None,
-        "scheduled_at": scheduled_at,
-        "captured_at": captured_at,
-        "quote_time": payload.get("quote_time") if payload else None,
-        "session_phase": payload.get("session_phase") if payload else None,
-        "capture_status": capture_status,
-        "refresh_outcome": payload.get("refresh_outcome") if payload else "failed",
-        "freshness_status": freshness.get("status"),
-        "source": (
-            str(payload.get("source") or TWSE_MIS_SOURCE)
-            if payload
-            else TWSE_MIS_SOURCE
-        ),
-        "payload_json": (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                default=_quote_contract_json_default,
-            )
-            if payload is not None
-            else None
-        ),
-        "error": error or freshness.get("source_error"),
-        "updated_at": captured_at,
-    }
-    row = (
-        db.query(TaiwanQuoteContractSnapshot)
-        .filter(TaiwanQuoteContractSnapshot.stock_id == stock_id)
-        .filter(TaiwanQuoteContractSnapshot.trade_date == trade_date)
-        .filter(TaiwanQuoteContractSnapshot.capture_slot == capture_slot)
-        .first()
-    )
-    if row is None:
-        row = TaiwanQuoteContractSnapshot(
-            stock_id=stock_id,
-            trade_date=trade_date,
-            capture_slot=capture_slot,
-            created_at=captured_at,
-            **values,
-        )
-        db.add(row)
-    else:
-        for key, value in values.items():
-            setattr(row, key, value)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-def capture_taiwan_quote_contract_snapshot(
-    *,
-    db: Session,
-    stock_id: str,
-    capture_slot: str,
-    now: datetime | None = None,
-    contract_context: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    normalized_stock_id = _normalize_stock_id(stock_id)
-    local_now = _local_now(now)
-    if not is_taiwan_trading_day(local_now.date()):
-        raise ValueError(
-            f"Taiwan quote contract capture requires a trading day: {local_now.date()}."
-        )
-    slot_time = _quote_contract_slot_time(capture_slot)
-    scheduled_at = datetime.combine(
-        local_now.date(),
-        slot_time,
-        tzinfo=TAIWAN_TZ,
-    )
-    payload: dict[str, Any] | None = None
-    error: str | None = None
-    try:
-        payload = get_taiwan_stock_quote_depth(
-            db=db,
-            stock_id=normalized_stock_id,
-            refresh=True,
-            now=local_now,
-        )
-        if isinstance(payload, dict) and contract_context:
-            payload = {
-                **payload,
-                "scheduler_contract": deepcopy(contract_context),
-            }
-    except Exception as exc:
-        db.rollback()
-        error = str(exc) or exc.__class__.__name__
-
-    row = _upsert_quote_contract_snapshot(
-        db,
-        stock_id=normalized_stock_id,
-        trade_date=local_now.date(),
-        capture_slot=capture_slot,
-        scheduled_at=scheduled_at,
-        captured_at=local_now,
-        payload=payload,
-        error=error,
-    )
-    return {
-        "stock_id": row.stock_id,
-        "trade_date": row.trade_date,
-        "capture_slot": row.capture_slot,
-        "scheduled_at": _taiwan_exchange_datetime(row.scheduled_at),
-        "captured_at": _taiwan_exchange_datetime(row.captured_at),
-        "capture_delay_seconds": int(
-            (
-                _taiwan_exchange_datetime(row.captured_at)
-                - _taiwan_exchange_datetime(row.scheduled_at)
-            ).total_seconds()
-        ),
-        "capture_status": row.capture_status,
-        "refresh_outcome": row.refresh_outcome,
-        "freshness_status": row.freshness_status,
-        "error": row.error,
-    }
-
-
-def _project_replay_quote_contract(
-    payload: dict[str, Any] | None,
-    *,
-    captured_at: datetime,
-) -> dict[str, Any] | None:
-    if not isinstance(payload, dict):
-        return None
-
-    output = dict(payload)
-    phase = str(output.get("session_phase") or "")
-    source = str(output.get("source") or "")
-    snapshot_time = (
-        output.get("snapshot_time")
-        or captured_at.isoformat()
-    )
-    provider_event_time = (
-        output.get("provider_event_time")
-        or output.get("last_trade_time")
-        or output.get("quote_time")
-    )
-    output["quote_time"] = provider_event_time
-    output.setdefault(
-        "quote_time_basis",
-        "provider_exchange_event_time",
-    )
-    output["snapshot_time"] = snapshot_time
-    output.setdefault(
-        "snapshot_time_basis",
-        "persisted_capture_time",
-    )
-    output["provider_event_time"] = provider_event_time
-    output["event_time"] = provider_event_time
-
-    if source == TWSE_MIS_SOURCE:
-        auction_phase = phase in {"preopen_auction", "closing_auction"}
-        auction_book_available = bool(
-            auction_phase and output.get("depth_available")
-        )
-        output["auction_book_available"] = auction_book_available
-        indicative_available = bool(
-            output.get("auction_indicative_available")
-            or output.get("indicative_match_available")
-        )
-        output.setdefault(
-            "auction_book_status",
-            "depth_and_indicative_match"
-            if auction_book_available and indicative_available
-            else "depth_only"
-            if auction_book_available
-            else "unavailable",
-        )
-        output.setdefault(
-            "auction_book_time",
-            snapshot_time if auction_book_available else None,
-        )
-        output.setdefault(
-            "auction_event_time",
-            snapshot_time if auction_book_available else None,
-        )
-        output.setdefault(
-            "auction_best_bid",
-            output.get("best_bid_price") if auction_book_available else None,
-        )
-        output.setdefault(
-            "auction_best_ask",
-            output.get("best_ask_price") if auction_book_available else None,
-        )
-        output.setdefault("auction_indicative_available", False)
-        output.setdefault("auction_indicative_status", "not_provided")
-        output.setdefault("indicative_match_available", False)
-        output.setdefault("indicative_match_price", None)
-        output.setdefault("indicative_match_volume_lots", None)
-        output.setdefault("indicative_unmatched_buy_volume_lots", None)
-        output.setdefault("indicative_unmatched_sell_volume_lots", None)
-        output.setdefault("indicative_match_status", "not_provided")
-        output.setdefault("indicative_price_available", False)
-        output.setdefault("indicative_price", None)
-        output.setdefault("indicative_bid", None)
-        output.setdefault("indicative_ask", None)
-        output["last_trade_before_auction"] = bool(
-            phase == "closing_auction"
-            and output.get("last_trade_available")
-        )
-
-    output["replay_projection"] = "captured_public_contract_preserved"
-    output["captured_contract_semantics"] = "persisted_public_payload"
-    return output
-
-
-def get_taiwan_quote_contract_replay(
-    *,
-    db: Session,
-    stock_id: str,
-    trade_date: date | None = None,
-) -> dict[str, Any]:
-    normalized_stock_id = _normalize_stock_id(stock_id)
-    _get_stock(db, normalized_stock_id)
-    target_trade_date = trade_date
-    if target_trade_date is None:
-        target_trade_date = (
-            db.query(TaiwanQuoteContractSnapshot.trade_date)
-            .filter(TaiwanQuoteContractSnapshot.stock_id == normalized_stock_id)
-            .order_by(TaiwanQuoteContractSnapshot.trade_date.desc())
-            .limit(1)
-            .scalar()
-        )
-
-    rows: list[TaiwanQuoteContractSnapshot] = []
-    if target_trade_date is not None:
-        rows = (
-            db.query(TaiwanQuoteContractSnapshot)
-            .filter(TaiwanQuoteContractSnapshot.stock_id == normalized_stock_id)
-            .filter(TaiwanQuoteContractSnapshot.trade_date == target_trade_date)
-            .order_by(TaiwanQuoteContractSnapshot.capture_slot.asc())
-            .all()
-        )
-    rows_by_slot = {row.capture_slot: row for row in rows}
-    slot_results: list[dict[str, Any]] = []
-    captured_count = 0
-    for capture_slot in TAIWAN_QUOTE_CONTRACT_SLOTS:
-        row = rows_by_slot.get(capture_slot)
-        if row is None:
-            slot_results.append(
-                {
-                    "capture_slot": capture_slot,
-                    "status": "missing",
-                    "quote": None,
-                }
-            )
-            continue
-        payload = (
-            json.loads(row.payload_json)
-            if row.payload_json
-            else None
-        )
-        payload = _project_replay_quote_contract(
-            payload,
-            captured_at=_taiwan_exchange_datetime(row.captured_at),
-        )
-        if row.capture_status.startswith("captured"):
-            captured_count += 1
-        slot_results.append(
-            {
-                "capture_slot": capture_slot,
-                "status": row.capture_status,
-                "scheduled_at": _taiwan_exchange_datetime(row.scheduled_at),
-                "captured_at": _taiwan_exchange_datetime(row.captured_at),
-                "quote_time": _taiwan_exchange_datetime(row.quote_time),
-                "freshness_status": row.freshness_status,
-                "refresh_outcome": row.refresh_outcome,
-                "error": row.error,
-                "quote": payload,
-            }
-        )
-    required_count = len(TAIWAN_QUOTE_CONTRACT_SLOTS)
-    missing_slots = [
-        item["capture_slot"]
-        for item in slot_results
-        if not str(item["status"]).startswith("captured")
-    ]
-    return {
-        "kind": "taiwan_quote_contract_replay",
-        "stock_id": normalized_stock_id,
-        "trade_date": target_trade_date,
-        "timezone": str(TAIWAN_TZ),
-        "required_slots": list(TAIWAN_QUOTE_CONTRACT_SLOTS),
-        "required_count": required_count,
-        "captured_count": captured_count,
-        "coverage_ratio": captured_count / required_count,
-        "complete": captured_count == required_count,
-        "missing_slots": missing_slots,
-        "snapshots": slot_results,
-        "source": "taiwan_quote_contract_snapshot",
-        "replay_semantics": (
-            "persisted_fixed_slot_evidence_projected_to_current_public_contract"
-        ),
-        "read_path_side_effects": False,
-    }

@@ -17,9 +17,9 @@ from app.db.models import (
 )
 from app.market.tw_public_quote_contract import (
     TW_PUBLIC_LAST_TRADE_CAPABILITY_ID,
-    TWSE_MIS_QUOTE_SOURCE_NAME,
     exchange_channel_for_quote,
 )
+from app.market.tw_realtime_capabilities import realtime_source_binding
 from app.market_data.contracts import (
     Market,
     MarketSession,
@@ -78,18 +78,31 @@ def _pct(change: float | None, previous_close: float | None) -> float | None:
 
 
 def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
-    if receipt.source != TWSE_MIS_QUOTE_SOURCE_NAME:
-        raise ValueError(f"unsupported Taiwan public quote source: {receipt.source}")
+    binding = realtime_source_binding(
+        provider=receipt.provider,
+        source=receipt.source,
+        resource_id=receipt.resource_id,
+    )
+    if (
+        binding is None
+        or binding.descriptor.capability_id
+        != TW_PUBLIC_LAST_TRADE_CAPABILITY_ID
+    ):
+        raise ValueError(
+            "unsupported Taiwan public quote provider/source/resource"
+        )
+    if receipt.parser_version != binding.parser_version:
+        raise ValueError("public quote receipt parser contract mismatch")
     return {
         "source_name": receipt.source,
-        "source_type": "api",
+        "source_type": binding.source_type,
         "category": "market_data",
         "endpoint_url": receipt.url,
         "enabled": True,
-        "priority": 10,
+        "priority": binding.descriptor.priority,
         "parser_type": receipt.parser_version,
-        "auth_type": "none",
-        "reliability_level": "official",
+        "auth_type": binding.auth_type,
+        "reliability_level": binding.reliability_level,
     }
 
 
@@ -98,13 +111,14 @@ class TaiwanPublicQuoteTransaction:
         self._db = db
 
     def _source(self, receipt: RawFetchReceiptV1) -> SourceRegistry:
+        defaults = _source_defaults(receipt)
         source = (
             self._db.query(SourceRegistry)
             .filter(SourceRegistry.source_name == receipt.source)
             .first()
         )
         if source is None:
-            source = SourceRegistry(**_source_defaults(receipt))
+            source = SourceRegistry(**defaults)
             self._db.add(source)
             self._db.flush()
         return source
@@ -151,6 +165,12 @@ class TaiwanPublicQuoteTransaction:
             raise ValueError("Taiwan public quote transaction requires market=TW")
         if observation.lineage.event_at is None or observation.trade_date is None:
             raise ValueError("Taiwan public quote requires event time and trade date")
+        if observation.lineage.provider != receipt.provider:
+            raise ValueError("quote observation provider does not match receipt")
+        if observation.lineage.source != receipt.source:
+            raise ValueError("quote observation source does not match receipt")
+        if observation.lineage.raw_contract_version != receipt.parser_version:
+            raise ValueError("quote observation parser contract does not match receipt")
         if observation.lineage.content_hash != receipt.content_hash:
             raise ValueError("quote observation content hash does not match receipt")
         received_at = observation.lineage.received_at or receipt.fetched_at

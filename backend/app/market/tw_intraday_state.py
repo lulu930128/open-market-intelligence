@@ -20,7 +20,8 @@ from app.db.models import (
 from app.market.trading_calendar import TAIWAN_TZ, taiwan_market_session_phase
 
 
-INTRADAY_STATE_VERSION = "tw.intraday_stock_state.v2"
+INTRADAY_STATE_VERSION = "tw.intraday_stock_state.v3"
+INTRADAY_STATE_CALCULATION_VERSION = "tw.stock.intraday.state.derived.v2"
 INTRADAY_SCREENING_VERSION = "tw.screening.intraday.v2"
 HOT_GROUPS_VERSION = "tw.market.hot_groups.v1"
 GROUP_SNAPSHOT_VERSION = "tw.market.group_snapshot.v1"
@@ -161,6 +162,114 @@ def _freshness_status(
     return "stale"
 
 
+def _component_lineage(raw: dict[str, Any], *, event_time: datetime) -> dict[str, Any]:
+    raw_ids_value = raw.get("component_raw_result_ids")
+    raw_ids = (
+        list(raw_ids_value)
+        if isinstance(raw_ids_value, (list, tuple))
+        else [raw.get("raw_result_id")]
+        if raw.get("raw_result_id")
+        else []
+    )
+    raw_ids = list(dict.fromkeys(str(value) for value in raw_ids if value))
+    sources_value = raw.get("component_sources")
+    components = (
+        [dict(value) for value in sources_value if isinstance(value, dict)]
+        if isinstance(sources_value, (list, tuple))
+        else []
+    )
+    if not components:
+        components = [
+            {
+                "domain": "stock_quote_snapshot",
+                "provider": raw.get("provider"),
+                "source": raw.get("source"),
+                "raw_result_id": raw_ids[0] if raw_ids else None,
+                "event_at": event_time.isoformat(),
+            }
+        ]
+    event_times: list[datetime] = []
+    for component in components:
+        component_time = _aware_taipei(component.get("event_at"))
+        if component_time is not None:
+            event_times.append(component_time)
+    explicit_times = raw.get("component_event_times")
+    if isinstance(explicit_times, (list, tuple)):
+        for value in explicit_times:
+            parsed = _aware_taipei(value)
+            if parsed is not None and parsed not in event_times:
+                event_times.append(parsed)
+    lineage_complete = bool(components and raw_ids) and all(
+        component.get("provider")
+        and component.get("source")
+        and component.get("raw_result_id")
+        and component.get("event_at")
+        for component in components
+    )
+    return {
+        "components": components,
+        "raw_result_ids": raw_ids,
+        "event_times": [value.isoformat() for value in event_times],
+        "time_skew_seconds": (
+            int((max(event_times) - min(event_times)).total_seconds())
+            if event_times
+            else None
+        ),
+        "lineage_complete": lineage_complete,
+    }
+
+
+def attach_current_market_lineage_to_stock_rows(
+    rows: Iterable[dict[str, Any]],
+    *,
+    summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Attach canonical breadth raw receipts to the stock rows they contain."""
+
+    lineage_by_market: dict[str, dict[str, Any]] = {}
+    for item in summary.get("indices") or []:
+        if not isinstance(item, dict):
+            continue
+        market = str(item.get("market") or "").strip().upper()
+        current_core = (
+            item.get("current_data_core")
+            if isinstance(item.get("current_data_core"), dict)
+            else {}
+        )
+        breadth = (
+            current_core.get("breadth")
+            if isinstance(current_core.get("breadth"), dict)
+            else item.get("breadth")
+            if isinstance(item.get("breadth"), dict)
+            else {}
+        )
+        if market and breadth.get("raw_result_id"):
+            lineage_by_market[market] = breadth
+
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        next_row = dict(row)
+        market = str(next_row.get("market") or "").strip().upper()
+        breadth = lineage_by_market.get(market)
+        if breadth is not None:
+            event_at = breadth.get("as_of") or breadth.get("snapshot_as_of")
+            raw_result_id = breadth.get("raw_result_id")
+            next_row["raw_result_id"] = raw_result_id
+            next_row["component_raw_result_ids"] = [raw_result_id]
+            next_row["component_event_times"] = [event_at] if event_at else []
+            next_row["component_sources"] = [
+                {
+                    "domain": "stock_quote_snapshot",
+                    "provider": breadth.get("provider"),
+                    "source": breadth.get("source"),
+                    "raw_result_id": raw_result_id,
+                    "event_at": event_at,
+                }
+            ]
+        enriched.append(next_row)
+    return enriched
+
+
 def persist_taiwan_intraday_stock_states(
     db: Session,
     *,
@@ -213,6 +322,7 @@ def persist_taiwan_intraday_stock_states(
             continue
 
         provider = str(raw.get("provider") or "twse_mis")
+        component_lineage = _component_lineage(raw, event_time=event_time)
         identity_key = (provider, market, stock_id)
         existing = existing_by_identity.get(identity_key)
         samples = _load_samples(
@@ -243,6 +353,7 @@ def persist_taiwan_intraday_stock_states(
             and current_price is not None
             and price_as_of is not None
             and session_phase in {"regular", "closing_auction", "post_close"}
+            and component_lineage["lineage_complete"]
         )
         minute_time = event_time.replace(second=0, microsecond=0)
         if decision_usable:
@@ -304,6 +415,12 @@ def persist_taiwan_intraday_stock_states(
             and existing.cumulative_volume_lots == cumulative_volume_lots
             and existing.high_price == high_price
             and existing.low_price == low_price
+            and existing.component_raw_result_ids_json
+            == json.dumps(
+                component_lineage["raw_result_ids"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         ):
             unchanged_count += 1
             continue
@@ -414,6 +531,24 @@ def persist_taiwan_intraday_stock_states(
                 or f"twse_mis_{market.lower()}_registered_universe"
             ),
             "source_url": raw.get("source_url"),
+            "component_raw_result_ids_json": json.dumps(
+                component_lineage["raw_result_ids"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "component_sources_json": json.dumps(
+                component_lineage["components"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "component_event_times_json": json.dumps(
+                component_lineage["event_times"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "component_time_skew_seconds": component_lineage["time_skew_seconds"],
+            "calculation_version": INTRADAY_STATE_CALCULATION_VERSION,
+            "lineage_complete": component_lineage["lineage_complete"],
             "updated_at": utc_now(),
         }
         if existing is None:
@@ -1118,10 +1253,12 @@ __all__ = [
     "GROUP_SNAPSHOT_VERSION",
     "INTRADAY_SCREENING_VERSION",
     "INTRADAY_STATE_VERSION",
+    "INTRADAY_STATE_CALCULATION_VERSION",
     "SUPPORTED_INTRADAY_METRICS",
     "SECTOR_SNAPSHOT_VERSION",
     "build_tw_hot_groups_snapshot",
     "build_tw_intraday_group_snapshots",
     "build_tw_intraday_screening_snapshot",
+    "attach_current_market_lineage_to_stock_rows",
     "persist_taiwan_intraday_stock_states",
 ]

@@ -15,7 +15,7 @@ from app.db.models import (
     WatchlistGroup,
     WatchlistItem,
 )
-from app.market.quote_depth import TAIWAN_QUOTE_CONTRACT_SLOTS
+from app.market.quote_contract_capture import TAIWAN_QUOTE_CONTRACT_SLOTS
 
 
 QUOTE_CONTRACT_HEALTH_VERSION = "tw.quote.health.v1"

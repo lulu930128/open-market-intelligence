@@ -22,6 +22,9 @@ from app.market.providers.tw_disposition import (
     fetch_tpex_dispositions,
     fetch_twse_dispositions,
 )
+from app.market.tw_instrument_trading_policy import (
+    resolve_taiwan_instrument_trading_policy,
+)
 from app.observability.provider_health import record_provider_event
 from app.observability.provider_http import provider_http_failure
 from app.runtime_lock import ProcessFileLock
@@ -382,6 +385,7 @@ def get_taiwan_disposition_status(
     }
     if selected:
         base.update(selected)
+    base.update(resolve_taiwan_instrument_trading_policy(base).projection())
     return base
 
 

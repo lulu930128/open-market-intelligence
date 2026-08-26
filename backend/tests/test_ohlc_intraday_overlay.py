@@ -7,12 +7,18 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, MarketDailyPrice, StockMaster, USDailyPrice
-from app.db.models import RawFetchResult, SourceRegistry
+from app.db.models import (
+    Base,
+    MarketDailyPrice,
+    RawFetchResult,
+    SourceRegistry,
+    StockMaster,
+    USDailyPrice,
+)
 from app.market.ohlc_overlay import aggregate_ohlc_points
 from app.market.service import list_stock_ohlc_chart_data
-from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 from app.us_market.service import list_us_ohlc_chart_data
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
 def make_session() -> Session:
