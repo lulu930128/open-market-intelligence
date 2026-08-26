@@ -59,15 +59,18 @@ from app.market.taiwan_index_minute import (
 from app.market.indices import (
     TAIWAN_INDEX_RECONCILIATION_END_TIME,
     TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS,
-    get_cached_taiwan_intraday_stock_rows,
     get_market_index_summary,
     is_taiwan_index_live_refresh_window,
     market_index_summary_needs_reconciliation,
     refresh_market_index_summary,
 )
+from app.market.providers.twse_mis_current_breadth import (
+    get_cached_current_breadth_stock_rows,
+)
 from app.market.source_health import build_taiwan_source_health
 from app.market_data.eod_coverage import should_enqueue_eod_reconcile
 from app.market.tw_intraday_state import (
+    attach_current_market_lineage_to_stock_rows,
     persist_taiwan_intraday_stock_states,
 )
 from app.market.taiwan_rules import (
@@ -1326,7 +1329,10 @@ def collect_taiwan_market_index_summary() -> None:
         )
         stock_state_persistence = persist_taiwan_intraday_stock_states(
             db,
-            rows=get_cached_taiwan_intraday_stock_rows(),
+            rows=attach_current_market_lineage_to_stock_rows(
+                get_cached_current_breadth_stock_rows(),
+                summary=payload,
+            ),
             now=now,
         )
         logger.debug(

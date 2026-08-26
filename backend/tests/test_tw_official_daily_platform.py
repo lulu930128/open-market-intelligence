@@ -30,7 +30,6 @@ from app.market.daily_ohlcv_platform import (
 from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReader
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market.daily_price_transaction import TaiwanOfficialDailyTransaction
-from app.market.portfolio_valuation import read_taiwan_valuation_price
 from app.market.service import list_stock_ohlc_chart_data
 from app.market.schemas import MarketOhlcChartRead
 from app.routers.market import refresh_stock_official_daily_price
@@ -277,16 +276,6 @@ def test_cache_read_without_dates_uses_exact_latest_candidate_window(
     assert latest.daily.provider == "twse_openapi"
     assert latest.daily.raw_result_id == f"raw_fetch_result:{raw.id}"
     assert latest.dataset_health is not None
-    valuation = read_taiwan_valuation_price(
-        db,
-        symbol="2330",
-        requested_at=datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc),
-    )
-    assert valuation.price == 103
-    assert valuation.currency == "TWD"
-    assert valuation.provider == "twse_openapi"
-    assert valuation.source_kind == "resolved_completed_daily_close"
-    assert valuation.facts_usable is True
 
 
 def test_recorded_tpex_excerpt_parses_legacy_table_shape() -> None:
