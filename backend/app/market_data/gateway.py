@@ -14,8 +14,10 @@ from typing import Protocol
 
 from app.market_data.candidate_repository import CandidateRowRejection
 from app.market_data.contracts import (
+    AuctionObservation,
     BarObservation,
     DatasetHealth,
+    DepthObservation,
     MarketBreadthObservation,
     MarketIndexObservation,
     ProviderResourceHealth,
@@ -46,6 +48,8 @@ from app.market_data.resolution import (
     BarSeriesCandidate,
     ResolutionCandidate,
     resolve_bar_series,
+    resolve_auction,
+    resolve_depth,
     resolve_market_breadth,
     resolve_market_index,
     resolve_quote,
@@ -79,6 +83,38 @@ class QuoteCandidateReader(Protocol):
         self,
         requirement: DataRequirementV2,
     ) -> QuoteCandidateBatch: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DepthCandidateBatch:
+    candidates: tuple[ResolutionCandidate[DepthObservation], ...] = ()
+    provider_health: tuple[ProviderResourceHealth, ...] = ()
+    dataset_health: DatasetHealth | None = None
+    rejections: tuple[CandidateRowRejection, ...] = ()
+    limitations: tuple[str, ...] = ()
+
+
+class DepthCandidateReader(Protocol):
+    def read_depth_candidates(
+        self,
+        requirement: DataRequirementV2,
+    ) -> DepthCandidateBatch: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AuctionCandidateBatch:
+    candidates: tuple[ResolutionCandidate[AuctionObservation], ...] = ()
+    provider_health: tuple[ProviderResourceHealth, ...] = ()
+    dataset_health: DatasetHealth | None = None
+    rejections: tuple[CandidateRowRejection, ...] = ()
+    limitations: tuple[str, ...] = ()
+
+
+class AuctionCandidateReader(Protocol):
+    def read_auction_candidates(
+        self,
+        requirement: DataRequirementV2,
+    ) -> AuctionCandidateBatch: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,9 +166,33 @@ class QuoteAcquisitionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DepthAcquisitionResult:
+    summary: AcquisitionSummary
+    observations: tuple[DepthObservation, ...] = ()
+    receipts: tuple[RawFetchReceiptV1, ...] = ()
+    provider_health: tuple[ProviderResourceHealth, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AuctionAcquisitionResult:
+    summary: AcquisitionSummary
+    observations: tuple[AuctionObservation, ...] = ()
+    receipts: tuple[RawFetchReceiptV1, ...] = ()
+    provider_health: tuple[ProviderResourceHealth, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class MarketIndexAcquisitionResult:
     summary: AcquisitionSummary
     observations: tuple[MarketIndexObservation, ...] = ()
+    receipts: tuple[RawFetchReceiptV1, ...] = ()
+    provider_health: tuple[ProviderResourceHealth, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MarketBreadthAcquisitionResult:
+    summary: AcquisitionSummary
+    observations: tuple[MarketBreadthObservation, ...] = ()
     receipts: tuple[RawFetchReceiptV1, ...] = ()
     provider_health: tuple[ProviderResourceHealth, ...] = ()
 
@@ -153,6 +213,38 @@ class QuoteAcquisitionPort(Protocol):
     ) -> QuoteAcquisitionResult: ...
 
 
+class DepthAcquisitionPort(Protocol):
+    def acquire_depth_observations(
+        self,
+        requirement: DataRequirementV2,
+        plan: DataAcquisitionPlanV2,
+    ) -> DepthAcquisitionResult: ...
+
+
+class AuctionAcquisitionPort(Protocol):
+    def acquire_auction_observations(
+        self,
+        requirement: DataRequirementV2,
+        plan: DataAcquisitionPlanV2,
+    ) -> AuctionAcquisitionResult: ...
+
+
+class MarketIndexAcquisitionPort(Protocol):
+    def acquire_market_index_observations(
+        self,
+        requirement: DataRequirementV2,
+        plan: DataAcquisitionPlanV2,
+    ) -> MarketIndexAcquisitionResult: ...
+
+
+class MarketBreadthAcquisitionPort(Protocol):
+    def acquire_market_breadth_observations(
+        self,
+        requirement: DataRequirementV2,
+        plan: DataAcquisitionPlanV2,
+    ) -> MarketBreadthAcquisitionResult: ...
+
+
 class BarTransactionPort(Protocol):
     def persist_bar_acquisition(
         self,
@@ -166,6 +258,38 @@ class QuoteTransactionPort(Protocol):
         self,
         requirement: DataRequirementV2,
         acquisition: QuoteAcquisitionResult,
+    ) -> PersistenceSummary: ...
+
+
+class DepthTransactionPort(Protocol):
+    def persist_depth_acquisition(
+        self,
+        requirement: DataRequirementV2,
+        acquisition: DepthAcquisitionResult,
+    ) -> PersistenceSummary: ...
+
+
+class AuctionTransactionPort(Protocol):
+    def persist_auction_acquisition(
+        self,
+        requirement: DataRequirementV2,
+        acquisition: AuctionAcquisitionResult,
+    ) -> PersistenceSummary: ...
+
+
+class MarketIndexTransactionPort(Protocol):
+    def persist_market_index_acquisition(
+        self,
+        requirement: DataRequirementV2,
+        acquisition: MarketIndexAcquisitionResult,
+    ) -> PersistenceSummary: ...
+
+
+class MarketBreadthTransactionPort(Protocol):
+    def persist_market_breadth_acquisition(
+        self,
+        requirement: DataRequirementV2,
+        acquisition: MarketBreadthAcquisitionResult,
     ) -> PersistenceSummary: ...
 
 
@@ -236,13 +360,21 @@ class MarketDataGateway:
             policy=requirement.realtime_policy,
             now=requirement.requested_at,
             max_age=timedelta(seconds=requirement.freshness.max_age_seconds),
+            requirement=requirement,
         )
 
     @staticmethod
     def _validate_acquisition_budget(
         requirement: DataRequirementV2,
         plan: DataAcquisitionPlanV2,
-        result: BarAcquisitionResult | QuoteAcquisitionResult,
+        result: (
+            BarAcquisitionResult
+            | QuoteAcquisitionResult
+            | DepthAcquisitionResult
+            | AuctionAcquisitionResult
+            | MarketIndexAcquisitionResult
+            | MarketBreadthAcquisitionResult
+        ),
     ) -> None:
         summary = result.summary
         if summary.external_calls > requirement.bounds.max_external_calls:
@@ -258,8 +390,14 @@ class MarketDataGateway:
             raise AcquisitionBudgetExceeded("acquisition exceeded timeout_seconds")
         if len(result.observations) > requirement.bounds.max_rows:
             raise AcquisitionBudgetExceeded("acquisition exceeded bounds.max_rows")
-        if len(result.receipts) > requirement.bounds.max_external_calls:
-            raise AcquisitionBudgetExceeded("receipt count exceeded max_external_calls")
+        receipt_budget = (
+            requirement.bounds.max_external_calls
+            + requirement.bounds.max_subscriptions
+        )
+        if len(result.receipts) > receipt_budget:
+            raise AcquisitionBudgetExceeded(
+                "receipt count exceeded external-work bounds"
+            )
         planned_resources = {
             (route.provider_key, route.resource_id) for route in plan.routes
         }
@@ -278,7 +416,12 @@ class MarketDataGateway:
 
     @staticmethod
     def _validate_persistence_result(
-        acquisition: BarAcquisitionResult | QuoteAcquisitionResult,
+        acquisition: (
+            BarAcquisitionResult
+            | QuoteAcquisitionResult
+            | DepthAcquisitionResult
+            | AuctionAcquisitionResult
+        ),
         persistence: PersistenceSummary,
     ) -> None:
         if not persistence.attempted:
@@ -319,7 +462,10 @@ class MarketDataGateway:
             acquisition = _not_attempted("READ_POLICY_FORBIDS_ACQUISITION")
         elif (
             requirement.bounds.max_provider_attempts == 0
-            or requirement.bounds.max_external_calls == 0
+            or (
+                requirement.bounds.max_external_calls == 0
+                and requirement.bounds.max_subscriptions == 0
+            )
         ):
             acquisition = _not_attempted("ACQUISITION_BUDGET_ZERO")
         else:
@@ -395,6 +541,7 @@ class MarketDataGateway:
             policy=requirement.realtime_policy,
             now=requirement.requested_at,
             max_age=timedelta(seconds=requirement.freshness.max_age_seconds),
+            requirement=requirement,
         )
         final_batch = initial_batch
         acquisition_health: tuple[ProviderResourceHealth, ...] = ()
@@ -406,7 +553,10 @@ class MarketDataGateway:
             acquisition = _not_attempted("READ_POLICY_FORBIDS_ACQUISITION")
         elif (
             requirement.bounds.max_provider_attempts == 0
-            or requirement.bounds.max_external_calls == 0
+            or (
+                requirement.bounds.max_external_calls == 0
+                and requirement.bounds.max_subscriptions == 0
+            )
         ):
             acquisition = _not_attempted("ACQUISITION_BUDGET_ZERO")
         else:
@@ -450,6 +600,7 @@ class MarketDataGateway:
                         max_age=timedelta(
                             seconds=requirement.freshness.max_age_seconds
                         ),
+                        requirement=requirement,
                     )
                 elif acquisition.attempted:
                     persistence = _not_persisted(
@@ -478,37 +629,328 @@ class MarketDataGateway:
             ),
         )
 
+    def resolve_depth(
+        self,
+        requirement: DataRequirementV2,
+        *,
+        reader: DepthCandidateReader,
+        descriptors: Iterable[ProviderCapabilityDescriptorV2] = (),
+        acquisition_port: DepthAcquisitionPort | None = None,
+        transaction_port: DepthTransactionPort | None = None,
+    ) -> MarketDataResultV1:
+        if not isinstance(requirement.target, InstrumentTarget):
+            raise ValueError("depth resolution requires an instrument target")
+        if not isinstance(requirement.request, SnapshotCapabilityRequest):
+            raise ValueError("depth resolution requires a snapshot capability request")
+
+        initial_batch = reader.read_depth_candidates(requirement)
+        if len(initial_batch.candidates) > requirement.bounds.max_candidates:
+            raise ValueError("candidate reader exceeded bounds.max_candidates")
+        resolved = resolve_depth(
+            initial_batch.candidates,
+            policy=requirement.realtime_policy,
+            now=requirement.requested_at,
+            max_age=timedelta(seconds=requirement.freshness.max_age_seconds),
+            requirement=requirement,
+        )
+        final_batch = initial_batch
+        acquisition_health: tuple[ProviderResourceHealth, ...] = ()
+        persistence = _not_persisted("PERSISTENCE_NOT_REQUIRED")
+
+        if _is_satisfied(resolved.health.status):
+            acquisition = _not_attempted("PRE_RESOLUTION_SATISFIED")
+        elif not allows_external_acquisition(requirement.realtime_policy):
+            acquisition = _not_attempted("READ_POLICY_FORBIDS_ACQUISITION")
+        elif (
+            requirement.bounds.max_provider_attempts == 0
+            or (
+                requirement.bounds.max_external_calls == 0
+                and requirement.bounds.max_subscriptions == 0
+            )
+        ):
+            acquisition = _not_attempted("ACQUISITION_BUDGET_ZERO")
+        else:
+            plan = plan_data_acquisition_v2(
+                requirement,
+                descriptors,
+                initial_batch.provider_health,
+            )
+            if plan.unfillable:
+                acquisition = _plan_unavailable(plan)
+            elif acquisition_port is None:
+                acquisition = _not_attempted("ACQUISITION_PORT_UNAVAILABLE")
+            elif transaction_port is None:
+                acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
+                persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
+            else:
+                acquired = acquisition_port.acquire_depth_observations(
+                    requirement,
+                    plan,
+                )
+                self._validate_acquisition_budget(requirement, plan, acquired)
+                acquisition = acquired.summary
+                acquisition_health = acquired.provider_health
+                if acquisition.attempted and (
+                    acquired.receipts or acquired.observations
+                ):
+                    persistence = transaction_port.persist_depth_acquisition(
+                        requirement,
+                        acquired,
+                    )
+                    self._validate_persistence_result(acquired, persistence)
+                    final_batch = reader.read_depth_candidates(requirement)
+                    if len(final_batch.candidates) > requirement.bounds.max_candidates:
+                        raise ValueError(
+                            "candidate reader exceeded bounds.max_candidates"
+                        )
+                    resolved = resolve_depth(
+                        final_batch.candidates,
+                        policy=requirement.realtime_policy,
+                        now=requirement.requested_at,
+                        max_age=timedelta(
+                            seconds=requirement.freshness.max_age_seconds
+                        ),
+                        requirement=requirement,
+                    )
+                elif acquisition.attempted:
+                    persistence = _not_persisted(
+                        "NO_PERSISTABLE_ACQUISITION_EVIDENCE"
+                    )
+                else:
+                    persistence = _not_persisted("ACQUISITION_NOT_ATTEMPTED")
+
+        return MarketDataResultV1(
+            requirement=requirement,
+            result_kind="depth",
+            resolved=resolved,
+            provider_health=_merge_provider_health(
+                final_batch.provider_health,
+                acquisition_health,
+            ),
+            dataset_health=final_batch.dataset_health,
+            acquisition=acquisition,
+            persistence=persistence,
+            candidate_rejections=final_batch.rejections,
+            limitations=_unique(
+                (
+                    *final_batch.limitations,
+                    *acquisition.limitations,
+                )
+            ),
+        )
+
+    def resolve_auction(
+        self,
+        requirement: DataRequirementV2,
+        *,
+        reader: AuctionCandidateReader,
+        descriptors: Iterable[ProviderCapabilityDescriptorV2] = (),
+        acquisition_port: AuctionAcquisitionPort | None = None,
+        transaction_port: AuctionTransactionPort | None = None,
+    ) -> MarketDataResultV1:
+        if not isinstance(requirement.target, InstrumentTarget):
+            raise ValueError("auction resolution requires an instrument target")
+        if not isinstance(requirement.request, SnapshotCapabilityRequest):
+            raise ValueError("auction resolution requires a snapshot capability request")
+
+        initial_batch = reader.read_auction_candidates(requirement)
+        if len(initial_batch.candidates) > requirement.bounds.max_candidates:
+            raise ValueError("candidate reader exceeded bounds.max_candidates")
+        resolved = resolve_auction(
+            initial_batch.candidates,
+            policy=requirement.realtime_policy,
+            now=requirement.requested_at,
+            max_age=timedelta(seconds=requirement.freshness.max_age_seconds),
+            requirement=requirement,
+        )
+        final_batch = initial_batch
+        acquisition_health: tuple[ProviderResourceHealth, ...] = ()
+        persistence = _not_persisted("PERSISTENCE_NOT_REQUIRED")
+
+        if _is_satisfied(resolved.health.status):
+            acquisition = _not_attempted("PRE_RESOLUTION_SATISFIED")
+        elif not allows_external_acquisition(requirement.realtime_policy):
+            acquisition = _not_attempted("READ_POLICY_FORBIDS_ACQUISITION")
+        elif (
+            requirement.bounds.max_provider_attempts == 0
+            or (
+                requirement.bounds.max_external_calls == 0
+                and requirement.bounds.max_subscriptions == 0
+            )
+        ):
+            acquisition = _not_attempted("ACQUISITION_BUDGET_ZERO")
+        else:
+            plan = plan_data_acquisition_v2(
+                requirement,
+                descriptors,
+                initial_batch.provider_health,
+            )
+            if plan.unfillable:
+                acquisition = _plan_unavailable(plan)
+            elif acquisition_port is None:
+                acquisition = _not_attempted("ACQUISITION_PORT_UNAVAILABLE")
+            elif transaction_port is None:
+                acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
+                persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
+            else:
+                acquired = acquisition_port.acquire_auction_observations(
+                    requirement,
+                    plan,
+                )
+                self._validate_acquisition_budget(requirement, plan, acquired)
+                acquisition = acquired.summary
+                acquisition_health = acquired.provider_health
+                if acquisition.attempted and (
+                    acquired.receipts or acquired.observations
+                ):
+                    persistence = transaction_port.persist_auction_acquisition(
+                        requirement,
+                        acquired,
+                    )
+                    self._validate_persistence_result(acquired, persistence)
+                    final_batch = reader.read_auction_candidates(requirement)
+                    if len(final_batch.candidates) > requirement.bounds.max_candidates:
+                        raise ValueError(
+                            "candidate reader exceeded bounds.max_candidates"
+                        )
+                    resolved = resolve_auction(
+                        final_batch.candidates,
+                        policy=requirement.realtime_policy,
+                        now=requirement.requested_at,
+                        max_age=timedelta(
+                            seconds=requirement.freshness.max_age_seconds
+                        ),
+                        requirement=requirement,
+                    )
+                elif acquisition.attempted:
+                    persistence = _not_persisted(
+                        "NO_PERSISTABLE_ACQUISITION_EVIDENCE"
+                    )
+                else:
+                    persistence = _not_persisted("ACQUISITION_NOT_ATTEMPTED")
+
+        return MarketDataResultV1(
+            requirement=requirement,
+            result_kind="auction",
+            resolved=resolved,
+            provider_health=_merge_provider_health(
+                final_batch.provider_health,
+                acquisition_health,
+            ),
+            dataset_health=final_batch.dataset_health,
+            acquisition=acquisition,
+            persistence=persistence,
+            candidate_rejections=final_batch.rejections,
+            limitations=_unique(
+                (
+                    *final_batch.limitations,
+                    *acquisition.limitations,
+                )
+            ),
+        )
+
     def resolve_market_breadth(
         self,
         requirement: DataRequirementV2,
         *,
         reader: MarketBreadthCandidateReader,
+        descriptors: Iterable[ProviderCapabilityDescriptorV2] = (),
+        acquisition_port: MarketBreadthAcquisitionPort | None = None,
+        transaction_port: MarketBreadthTransactionPort | None = None,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, DatasetTarget):
             raise ValueError("market breadth resolution requires a dataset target")
         if not isinstance(requirement.request, DatasetCapabilityRequest):
             raise ValueError("market breadth resolution requires a dataset capability")
-        if requirement.request.capability_id != "market.breadth":
-            raise ValueError("market breadth resolver requires capability=market.breadth")
-        batch = reader.read_market_breadth_candidates(requirement)
-        if len(batch.candidates) > requirement.bounds.max_candidates:
+        if requirement.request.capability_id not in {
+            "market.breadth",
+            "market.breadth.current",
+        }:
+            raise ValueError("market breadth resolver requires a breadth capability")
+        initial_batch = reader.read_market_breadth_candidates(requirement)
+        if len(initial_batch.candidates) > requirement.bounds.max_candidates:
             raise ValueError("candidate reader exceeded bounds.max_candidates")
         resolved = resolve_market_breadth(
-            batch.candidates,
+            initial_batch.candidates,
             policy=requirement.realtime_policy,
             now=requirement.requested_at,
             max_age=timedelta(seconds=requirement.freshness.max_age_seconds),
+            requirement=requirement,
         )
+        final_batch = initial_batch
+        acquisition_health: tuple[ProviderResourceHealth, ...] = ()
+        persistence = _not_persisted("PERSISTENCE_NOT_REQUIRED")
+        if _is_satisfied(resolved.health.status):
+            acquisition = _not_attempted("PRE_RESOLUTION_SATISFIED")
+        elif not allows_external_acquisition(requirement.realtime_policy):
+            acquisition = _not_attempted("READ_POLICY_FORBIDS_ACQUISITION")
+        elif (
+            requirement.bounds.max_provider_attempts == 0
+            or requirement.bounds.max_external_calls == 0
+        ):
+            acquisition = _not_attempted("ACQUISITION_BUDGET_ZERO")
+        else:
+            plan = plan_data_acquisition_v2(
+                requirement,
+                descriptors,
+                initial_batch.provider_health,
+            )
+            if plan.unfillable:
+                acquisition = _plan_unavailable(plan)
+            elif acquisition_port is None:
+                acquisition = _not_attempted("ACQUISITION_PORT_UNAVAILABLE")
+            elif transaction_port is None:
+                acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
+                persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
+            else:
+                acquired = acquisition_port.acquire_market_breadth_observations(
+                    requirement,
+                    plan,
+                )
+                self._validate_acquisition_budget(requirement, plan, acquired)
+                acquisition = acquired.summary
+                acquisition_health = acquired.provider_health
+                if acquisition.attempted and (
+                    acquired.receipts or acquired.observations
+                ):
+                    persistence = transaction_port.persist_market_breadth_acquisition(
+                        requirement,
+                        acquired,
+                    )
+                    self._validate_persistence_result(acquired, persistence)
+                    final_batch = reader.read_market_breadth_candidates(requirement)
+                    if len(final_batch.candidates) > requirement.bounds.max_candidates:
+                        raise ValueError("candidate reader exceeded bounds.max_candidates")
+                    resolved = resolve_market_breadth(
+                        final_batch.candidates,
+                        policy=requirement.realtime_policy,
+                        now=requirement.requested_at,
+                        max_age=timedelta(
+                            seconds=requirement.freshness.max_age_seconds
+                        ),
+                        requirement=requirement,
+                    )
+                elif acquisition.attempted:
+                    persistence = _not_persisted(
+                        "NO_PERSISTABLE_ACQUISITION_EVIDENCE"
+                    )
+                else:
+                    persistence = _not_persisted("ACQUISITION_NOT_ATTEMPTED")
         return MarketDataResultV1(
             requirement=requirement,
             result_kind="market_breadth",
             resolved=resolved,
-            provider_health=batch.provider_health,
-            dataset_health=batch.dataset_health,
-            acquisition=_not_attempted("READ_POLICY_FORBIDS_ACQUISITION"),
-            persistence=_not_persisted("PERSISTENCE_NOT_REQUIRED"),
-            candidate_rejections=batch.rejections,
-            limitations=batch.limitations,
+            provider_health=_merge_provider_health(
+                final_batch.provider_health,
+                acquisition_health,
+            ),
+            dataset_health=final_batch.dataset_health,
+            acquisition=acquisition,
+            persistence=persistence,
+            candidate_rejections=final_batch.rejections,
+            limitations=_unique(
+                (*final_batch.limitations, *acquisition.limitations)
+            ),
         )
 
     def resolve_market_index(
@@ -516,50 +958,134 @@ class MarketDataGateway:
         requirement: DataRequirementV2,
         *,
         reader: MarketIndexCandidateReader,
+        descriptors: Iterable[ProviderCapabilityDescriptorV2] = (),
+        acquisition_port: MarketIndexAcquisitionPort | None = None,
+        transaction_port: MarketIndexTransactionPort | None = None,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, DatasetTarget):
             raise ValueError("market index resolution requires a dataset target")
         if not isinstance(requirement.request, DatasetCapabilityRequest):
             raise ValueError("market index resolution requires a dataset capability")
-        if requirement.request.capability_id != "market.index.daily":
-            raise ValueError(
-                "market index resolver requires capability=market.index.daily"
-            )
-        batch = reader.read_market_index_candidates(requirement)
-        if len(batch.candidates) > requirement.bounds.max_candidates:
+        if requirement.request.capability_id not in {
+            "market.index.daily",
+            "market.index.snapshot",
+        }:
+            raise ValueError("market index resolver requires an index capability")
+        initial_batch = reader.read_market_index_candidates(requirement)
+        if len(initial_batch.candidates) > requirement.bounds.max_candidates:
             raise ValueError("candidate reader exceeded bounds.max_candidates")
         resolved = resolve_market_index(
-            batch.candidates,
+            initial_batch.candidates,
             policy=requirement.realtime_policy,
             now=requirement.requested_at,
             max_age=timedelta(seconds=requirement.freshness.max_age_seconds),
+            requirement=requirement,
         )
+        final_batch = initial_batch
+        acquisition_health: tuple[ProviderResourceHealth, ...] = ()
+        persistence = _not_persisted("PERSISTENCE_NOT_REQUIRED")
+        if _is_satisfied(resolved.health.status):
+            acquisition = _not_attempted("PRE_RESOLUTION_SATISFIED")
+        elif not allows_external_acquisition(requirement.realtime_policy):
+            acquisition = _not_attempted("READ_POLICY_FORBIDS_ACQUISITION")
+        elif (
+            requirement.bounds.max_provider_attempts == 0
+            or requirement.bounds.max_external_calls == 0
+        ):
+            acquisition = _not_attempted("ACQUISITION_BUDGET_ZERO")
+        else:
+            plan = plan_data_acquisition_v2(
+                requirement,
+                descriptors,
+                initial_batch.provider_health,
+            )
+            if plan.unfillable:
+                acquisition = _plan_unavailable(plan)
+            elif acquisition_port is None:
+                acquisition = _not_attempted("ACQUISITION_PORT_UNAVAILABLE")
+            elif transaction_port is None:
+                acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
+                persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
+            else:
+                acquired = acquisition_port.acquire_market_index_observations(
+                    requirement,
+                    plan,
+                )
+                self._validate_acquisition_budget(requirement, plan, acquired)
+                acquisition = acquired.summary
+                acquisition_health = acquired.provider_health
+                if acquisition.attempted and (
+                    acquired.receipts or acquired.observations
+                ):
+                    persistence = transaction_port.persist_market_index_acquisition(
+                        requirement,
+                        acquired,
+                    )
+                    self._validate_persistence_result(acquired, persistence)
+                    final_batch = reader.read_market_index_candidates(requirement)
+                    if len(final_batch.candidates) > requirement.bounds.max_candidates:
+                        raise ValueError("candidate reader exceeded bounds.max_candidates")
+                    resolved = resolve_market_index(
+                        final_batch.candidates,
+                        policy=requirement.realtime_policy,
+                        now=requirement.requested_at,
+                        max_age=timedelta(
+                            seconds=requirement.freshness.max_age_seconds
+                        ),
+                        requirement=requirement,
+                    )
+                elif acquisition.attempted:
+                    persistence = _not_persisted(
+                        "NO_PERSISTABLE_ACQUISITION_EVIDENCE"
+                    )
+                else:
+                    persistence = _not_persisted("ACQUISITION_NOT_ATTEMPTED")
         return MarketDataResultV1(
             requirement=requirement,
             result_kind="market_index",
             resolved=resolved,
-            provider_health=batch.provider_health,
-            dataset_health=batch.dataset_health,
-            acquisition=_not_attempted("READ_POLICY_FORBIDS_ACQUISITION"),
-            persistence=_not_persisted("PERSISTENCE_NOT_REQUIRED"),
-            candidate_rejections=batch.rejections,
-            limitations=batch.limitations,
+            provider_health=_merge_provider_health(
+                final_batch.provider_health,
+                acquisition_health,
+            ),
+            dataset_health=final_batch.dataset_health,
+            acquisition=acquisition,
+            persistence=persistence,
+            candidate_rejections=final_batch.rejections,
+            limitations=_unique(
+                (*final_batch.limitations, *acquisition.limitations)
+            ),
         )
 
 
 __all__ = [
     "AcquisitionBudgetExceeded",
+    "AuctionAcquisitionPort",
+    "AuctionAcquisitionResult",
+    "AuctionCandidateBatch",
+    "AuctionCandidateReader",
+    "AuctionTransactionPort",
     "BarAcquisitionPort",
     "BarAcquisitionResult",
     "BarCandidateBatch",
     "BarCandidateReader",
     "BarTransactionPort",
+    "DepthAcquisitionPort",
+    "DepthAcquisitionResult",
+    "DepthCandidateBatch",
+    "DepthCandidateReader",
+    "DepthTransactionPort",
     "MarketDataGateway",
+    "MarketBreadthAcquisitionPort",
+    "MarketBreadthAcquisitionResult",
     "MarketBreadthCandidateBatch",
     "MarketBreadthCandidateReader",
+    "MarketBreadthTransactionPort",
+    "MarketIndexAcquisitionPort",
     "MarketIndexAcquisitionResult",
     "MarketIndexCandidateBatch",
     "MarketIndexCandidateReader",
+    "MarketIndexTransactionPort",
     "QuoteAcquisitionPort",
     "QuoteAcquisitionResult",
     "QuoteCandidateBatch",

@@ -7,6 +7,7 @@ separate so cache-only consumers cannot accidentally own provider work.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from enum import Enum
 from typing import Annotated, Literal
@@ -15,6 +16,7 @@ from pydantic import Field, field_validator, model_validator
 
 from app.market_data.candidate_repository import CandidateRowRejection
 from app.market_data.contracts import (
+    AuctionType,
     AuthorityClass,
     CanonicalModel,
     DatasetHealth,
@@ -37,6 +39,25 @@ from app.market_data.policies import (
 )
 
 
+_REQUIRED_FIELD_PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+def _normalize_required_fields(value: object) -> object:
+    if not isinstance(value, (list, tuple)):
+        return value
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("required_fields entries must be strings")
+        field_path = item.strip()
+        if len(field_path) > 128 or not _REQUIRED_FIELD_PATH.fullmatch(field_path):
+            raise ValueError("required_fields entries must be valid field paths")
+        normalized.append(field_path)
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("required_fields entries must be unique")
+    return tuple(normalized)
+
+
 class InstrumentTarget(CanonicalModel):
     kind: Literal["instrument"] = "instrument"
     instrument: InstrumentKey
@@ -57,6 +78,12 @@ class SnapshotCapabilityRequest(CanonicalModel):
     capability_id: str = Field(min_length=1, max_length=128)
     required_fields: tuple[str, ...] = Field(default=(), max_length=32)
     depth_levels: int | None = Field(default=None, ge=1, le=20)
+    auction_type: AuctionType | None = None
+
+    @field_validator("required_fields", mode="before")
+    @classmethod
+    def _validate_required_fields(cls, value: object) -> object:
+        return _normalize_required_fields(value)
 
 
 class BarCapabilityRequest(CanonicalModel):
@@ -111,6 +138,12 @@ class QualityRequirement(CanonicalModel):
     required_fields: tuple[str, ...] = Field(default=(), max_length=32)
     minimum_authority: AuthorityClass | None = None
     allow_partial: bool = False
+    require_canonical_lineage: bool = False
+
+    @field_validator("required_fields", mode="before")
+    @classmethod
+    def _validate_required_fields(cls, value: object) -> object:
+        return _normalize_required_fields(value)
 
 
 class RequestBounds(CanonicalModel):

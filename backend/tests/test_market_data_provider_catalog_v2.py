@@ -237,6 +237,32 @@ def test_require_live_fails_closed_when_resource_cannot_produce_live() -> None:
     assert plan.skipped_resources[0].reason_code == "LIVE_NOT_SUPPORTED_BY_RESOURCE"
 
 
+def test_require_live_can_plan_a_bounded_subscription_without_fetch_budget() -> None:
+    plan = plan_data_acquisition_v2(
+        _requirement(
+            RealtimePolicy.REQUIRE_LIVE,
+            max_attempts=1,
+            max_calls=0,
+            max_subscriptions=1,
+        ),
+        [
+            _descriptor(
+                "fake_stream",
+                "daily_stream",
+                modes=(AcquisitionMode.SUBSCRIPTION,),
+                live=True,
+            )
+        ],
+        [_health("fake_stream")],
+    )
+
+    assert len(plan.routes) == 1
+    assert plan.routes[0].fetch_allowed is False
+    assert plan.routes[0].subscription_allowed is True
+    assert plan.routes[0].max_external_calls == 0
+    assert plan.routes[0].max_subscriptions == 1
+
+
 def test_health_is_strict_but_unknown_can_be_explicitly_bounded() -> None:
     strict = plan_data_acquisition_v2(
         _requirement(),

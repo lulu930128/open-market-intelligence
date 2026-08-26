@@ -18,6 +18,9 @@ from app.market_data.contracts import (
     BarObservation,
     DatasetHealth,
     DatasetHealthStatus,
+    DepthCapability,
+    DepthLevel,
+    DepthObservation,
     EvidenceFreshness,
     InstrumentKey,
     InstrumentType,
@@ -31,8 +34,12 @@ from app.market_data.contracts import (
 )
 from app.market_data.gateway import (
     AcquisitionBudgetExceeded,
+    AuctionAcquisitionResult,
+    AuctionCandidateBatch,
     BarAcquisitionResult,
     BarCandidateBatch,
+    DepthAcquisitionResult,
+    DepthCandidateBatch,
     MarketDataGateway,
 )
 from app.market_data.integration_contracts import (
@@ -44,8 +51,10 @@ from app.market_data.integration_contracts import (
     FreshnessRequirement,
     InstrumentTarget,
     PersistenceSummary,
+    QualityRequirement,
     RawFetchReceiptV1,
     RequestBounds,
+    SnapshotCapabilityRequest,
 )
 from app.market_data.policies import DataPurpose, RealtimePolicy
 from app.market_data.provider_catalog import (
@@ -301,6 +310,28 @@ def test_cache_only_resolves_persisted_candidate_with_zero_acquisition() -> None
     assert result.acquisition.limitations == ("PRE_RESOLUTION_SATISFIED",)
 
 
+def test_gateway_centrally_rejects_missing_quality_field_before_cache_satisfaction() -> None:
+    requirement = _requirement(RealtimePolicy.CACHE_ONLY).model_copy(
+        update={"quality": QualityRequirement(required_fields=("trade_count",))}
+    )
+    reader = FakeReader([_batch(freshness=EvidenceFreshness.FRESH)])
+
+    result = MarketDataGateway().resolve_bars(requirement, reader=reader)
+
+    assert result.resolved.bars == ()
+    assert result.resolved.health.status is ResolvedEvidenceStatus.POLICY_UNSATISFIED
+    assert result.resolved.health.missing_fields == ("trade_count",)
+    assert result.resolved.candidates[0].eligible is False
+    assert (
+        result.resolved.candidates[0].reason_code
+        == "QUALITY_REQUIRED_FIELDS_MISSING"
+    )
+    assert result.acquisition.external_calls == 0
+    assert any(
+        "missing fields" in item for item in result.resolved.health.limitations
+    )
+
+
 def test_prefer_live_stale_cache_acquires_then_must_reread() -> None:
     events: list[str] = []
     reader = FakeReader(
@@ -536,7 +567,10 @@ def test_actual_tw_repository_can_flow_through_cache_gateway() -> None:
         db.flush()
         raw = RawFetchResult(
             source_id=source.id,
-            fetched_at=NOW,
+            # SQLite drops timezone offsets. RawFetchResult timestamps are stored
+            # as UTC, so persist the UTC wall-clock value the repository expects
+            # when it reattaches timezone information on read.
+            fetched_at=NOW.astimezone(timezone.utc),
             raw_text="[]",
             content_hash="fixture-hash",
         )
@@ -571,6 +605,512 @@ def test_actual_tw_repository_can_flow_through_cache_gateway() -> None:
     finally:
         db.close()
         engine.dispose()
+
+
+def _snapshot_requirement(
+    capability_id: str,
+    policy: RealtimePolicy,
+    *,
+    external_calls: int = 0,
+    subscriptions: int = 0,
+    session: MarketSession = MarketSession.CONTINUOUS,
+) -> DataRequirementV2:
+    return DataRequirementV2(
+        target=InstrumentTarget(instrument=_instrument()),
+        request=SnapshotCapabilityRequest(
+            capability_id=capability_id,
+            depth_levels=5 if capability_id == "quote.order_book" else None,
+        ),
+        purpose=DataPurpose.RESEARCH,
+        realtime_policy=policy,
+        session=session,
+        requested_at=NOW,
+        freshness=FreshnessRequirement(max_age_seconds=60),
+        bounds=RequestBounds(
+            max_provider_attempts=1 if external_calls or subscriptions else 0,
+            max_external_calls=external_calls,
+            max_subscriptions=subscriptions,
+            max_rows=10,
+        ),
+    )
+
+
+def _depth(*, cache_hit: bool = True) -> DepthObservation:
+    return DepthObservation(
+        instrument=_instrument(),
+        lineage=SourceLineage(
+            provider="fixture_provider",
+            source="fixture_provider.order_book",
+            authority=AuthorityClass.BROKER,
+            event_at=NOW,
+            cache_hit=cache_hit,
+        ),
+        capability=DepthCapability.LEVEL_5,
+        bids=(
+            DepthLevel(
+                level=1,
+                price=Decimal("104.5"),
+                quantity=Quantity(
+                    value=Decimal("10"),
+                    unit=QuantityUnit.BOARD_LOT,
+                ),
+            ),
+        ),
+        asks=(
+            DepthLevel(
+                level=1,
+                price=Decimal("105.0"),
+                quantity=Quantity(
+                    value=Decimal("8"),
+                    unit=QuantityUnit.BOARD_LOT,
+                ),
+            ),
+        ),
+    )
+
+
+def _auction(*, cache_hit: bool = True) -> AuctionObservation:
+    return AuctionObservation(
+        instrument=_instrument(),
+        lineage=SourceLineage(
+            provider="fixture_provider",
+            source="fixture_provider.auction",
+            authority=AuthorityClass.BROKER,
+            event_at=NOW,
+            cache_hit=cache_hit,
+        ),
+        auction_type=AuctionType.CLOSING,
+        state=ObservationState.INDICATIVE,
+        indicative_price=Decimal("105"),
+        provisional=True,
+    )
+
+
+def _snapshot_descriptor(
+    capability_id: str,
+    *,
+    subscription: bool = False,
+) -> ProviderCapabilityDescriptorV2:
+    return ProviderCapabilityDescriptorV2(
+        provider_key="fixture_provider",
+        market=Market.TW,
+        capability_id=capability_id,
+        resource_id=f"{capability_id}.fixture",
+        authority=AuthorityClass.BROKER,
+        target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+        venue_scope=("TWSE",),
+        instrument_types=(InstrumentType.STOCK,),
+        supported_sessions=(
+            MarketSession.CONTINUOUS,
+            MarketSession.CLOSING_AUCTION,
+        ),
+        acquisition_modes=(
+            (AcquisitionMode.SUBSCRIPTION,)
+            if subscription
+            else (AcquisitionMode.FETCH,)
+        ),
+        can_produce_live=True,
+        max_external_calls_per_attempt=0 if subscription else 1,
+        max_subscriptions_per_attempt=1 if subscription else 0,
+        allow_unknown_health=True,
+    )
+
+
+class FakeDepthReader:
+    def __init__(
+        self,
+        batches: list[DepthCandidateBatch],
+        events: list[str] | None = None,
+    ) -> None:
+        self._batches = batches
+        self._events = events
+        self.calls = 0
+
+    def read_depth_candidates(
+        self,
+        _requirement: DataRequirementV2,
+    ) -> DepthCandidateBatch:
+        if self._events is not None:
+            self._events.append("read")
+        index = min(self.calls, len(self._batches) - 1)
+        self.calls += 1
+        return self._batches[index]
+
+
+class FakeAuctionReader:
+    def __init__(self, batch: AuctionCandidateBatch) -> None:
+        self._batch = batch
+        self.calls = 0
+
+    def read_auction_candidates(
+        self,
+        _requirement: DataRequirementV2,
+    ) -> AuctionCandidateBatch:
+        self.calls += 1
+        return self._batch
+
+
+class RereadAuctionReader:
+    def __init__(
+        self,
+        batches: list[AuctionCandidateBatch],
+        events: list[str],
+    ) -> None:
+        self._batches = batches
+        self._events = events
+        self.calls = 0
+
+    def read_auction_candidates(
+        self,
+        _requirement: DataRequirementV2,
+    ) -> AuctionCandidateBatch:
+        self._events.append("read")
+        index = min(self.calls, len(self._batches) - 1)
+        self.calls += 1
+        return self._batches[index]
+
+
+class FakeDepthAcquisition:
+    def __init__(
+        self,
+        result: DepthAcquisitionResult,
+        events: list[str] | None = None,
+    ) -> None:
+        self._result = result
+        self._events = events
+        self.calls = 0
+
+    def acquire_depth_observations(
+        self,
+        _requirement: DataRequirementV2,
+        _plan: DataAcquisitionPlanV2,
+    ) -> DepthAcquisitionResult:
+        if self._events is not None:
+            self._events.append("acquire")
+        self.calls += 1
+        return self._result
+
+
+class FakeDepthTransaction:
+    def __init__(
+        self,
+        events: list[str] | None = None,
+        *,
+        fail: bool = False,
+    ) -> None:
+        self._events = events
+        self._fail = fail
+        self.calls = 0
+        self.rolled_back = False
+
+    def persist_depth_acquisition(
+        self,
+        _requirement: DataRequirementV2,
+        acquisition: DepthAcquisitionResult,
+    ) -> PersistenceSummary:
+        if self._events is not None:
+            self._events.append("persist")
+        self.calls += 1
+        if self._fail:
+            self.rolled_back = True
+            raise RuntimeError("depth transaction rolled back")
+        return PersistenceSummary(
+            attempted=True,
+            committed=True,
+            receipts_written=len(acquisition.receipts),
+            observations_written=len(acquisition.observations),
+            raw_result_ids=(1,) if acquisition.receipts else (),
+        )
+
+
+class FakeAuctionAcquisition:
+    def __init__(self, result: AuctionAcquisitionResult, events: list[str]) -> None:
+        self._result = result
+        self._events = events
+
+    def acquire_auction_observations(
+        self,
+        _requirement: DataRequirementV2,
+        _plan: DataAcquisitionPlanV2,
+    ) -> AuctionAcquisitionResult:
+        self._events.append("acquire")
+        return self._result
+
+
+class FakeAuctionTransaction:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def persist_auction_acquisition(
+        self,
+        _requirement: DataRequirementV2,
+        acquisition: AuctionAcquisitionResult,
+    ) -> PersistenceSummary:
+        self._events.append("persist")
+        return PersistenceSummary(
+            attempted=True,
+            committed=True,
+            receipts_written=len(acquisition.receipts),
+            observations_written=len(acquisition.observations),
+            raw_result_ids=(1,) if acquisition.receipts else (),
+        )
+
+
+def _depth_batch(
+    *,
+    freshness: EvidenceFreshness = EvidenceFreshness.LIVE,
+) -> DepthCandidateBatch:
+    return DepthCandidateBatch(
+        candidates=(
+            ResolutionCandidate(
+                observation=_depth(),
+                freshness=freshness,
+                provider_priority=10,
+                session=MarketSession.CONTINUOUS,
+            ),
+        )
+    )
+
+
+def test_depth_cache_hit_uses_typed_gateway_with_zero_external_work() -> None:
+    reader = FakeDepthReader([_depth_batch(freshness=EvidenceFreshness.FRESH)])
+    acquisition = FakeDepthAcquisition(
+        DepthAcquisitionResult(
+            summary=AcquisitionSummary(
+                attempted=True,
+                status=AcquisitionStatus.COMPLETED,
+                subscriptions_created=1,
+            )
+        )
+    )
+
+    result = MarketDataGateway().resolve_depth(
+        _snapshot_requirement("quote.order_book", RealtimePolicy.CACHE_ONLY),
+        reader=reader,
+        acquisition_port=acquisition,
+    )
+
+    assert result.result_kind == "depth"
+    assert result.resolved.depth is not None
+    assert result.resolved.depth.capability is DepthCapability.LEVEL_5
+    assert result.acquisition.attempted is False
+    assert acquisition.calls == 0
+    assert reader.calls == 1
+
+
+def test_depth_subscription_requires_live_and_reports_missing_port_truthfully() -> None:
+    requirement = _snapshot_requirement(
+        "quote.order_book",
+        RealtimePolicy.REQUIRE_LIVE,
+        subscriptions=1,
+    )
+
+    result = MarketDataGateway().resolve_depth(
+        requirement,
+        reader=FakeDepthReader([DepthCandidateBatch()]),
+        descriptors=(_snapshot_descriptor("quote.order_book", subscription=True),),
+    )
+
+    assert result.resolved.depth is None
+    assert result.resolved.health.status is ResolvedEvidenceStatus.POLICY_UNSATISFIED
+    assert result.acquisition.limitations == ("ACQUISITION_PORT_UNAVAILABLE",)
+
+
+def test_depth_acquisition_persists_then_mandatorily_rereads() -> None:
+    events: list[str] = []
+    requirement = _snapshot_requirement(
+        "quote.order_book",
+        RealtimePolicy.PREFER_LIVE,
+        external_calls=1,
+    )
+    reader = FakeDepthReader(
+        [DepthCandidateBatch(), _depth_batch()],
+        events,
+    )
+    receipt = _receipt().model_copy(
+        update={
+            "provider": "fixture_provider",
+            "source": "fixture_provider.order_book",
+            "resource_id": "quote.order_book.fixture",
+        }
+    )
+    acquisition = FakeDepthAcquisition(
+        DepthAcquisitionResult(
+            summary=AcquisitionSummary(
+                attempted=True,
+                status=AcquisitionStatus.COMPLETED,
+                providers_attempted=("fixture_provider",),
+                resource_attempts=(
+                    AcquisitionResourceAttempt(
+                        provider="fixture_provider",
+                        resource_id="quote.order_book.fixture",
+                    ),
+                ),
+                external_calls=1,
+            ),
+            observations=(_depth(cache_hit=False),),
+            receipts=(receipt,),
+        ),
+        events,
+    )
+    transaction = FakeDepthTransaction(events)
+
+    result = MarketDataGateway().resolve_depth(
+        requirement,
+        reader=reader,
+        descriptors=(_snapshot_descriptor("quote.order_book"),),
+        acquisition_port=acquisition,
+        transaction_port=transaction,
+    )
+
+    assert events == ["read", "acquire", "persist", "read"]
+    assert reader.calls == 2
+    assert result.persistence.committed is True
+    assert result.resolved.depth is not acquisition._result.observations[0]
+    assert result.resolved.health.status is ResolvedEvidenceStatus.SELECTED
+
+
+def test_depth_transaction_failure_propagates_without_reread() -> None:
+    events: list[str] = []
+    requirement = _snapshot_requirement(
+        "quote.order_book",
+        RealtimePolicy.PREFER_LIVE,
+        external_calls=1,
+    )
+    reader = FakeDepthReader([DepthCandidateBatch()], events)
+    receipt = _receipt().model_copy(
+        update={
+            "provider": "fixture_provider",
+            "source": "fixture_provider.order_book",
+            "resource_id": "quote.order_book.fixture",
+        }
+    )
+    acquisition = FakeDepthAcquisition(
+        DepthAcquisitionResult(
+            summary=AcquisitionSummary(
+                attempted=True,
+                status=AcquisitionStatus.COMPLETED,
+                providers_attempted=("fixture_provider",),
+                resource_attempts=(
+                    AcquisitionResourceAttempt(
+                        provider="fixture_provider",
+                        resource_id="quote.order_book.fixture",
+                    ),
+                ),
+                external_calls=1,
+            ),
+            observations=(_depth(cache_hit=False),),
+            receipts=(receipt,),
+        ),
+        events,
+    )
+    transaction = FakeDepthTransaction(events, fail=True)
+
+    with pytest.raises(RuntimeError, match="depth transaction rolled back"):
+        MarketDataGateway().resolve_depth(
+            requirement,
+            reader=reader,
+            descriptors=(_snapshot_descriptor("quote.order_book"),),
+            acquisition_port=acquisition,
+            transaction_port=transaction,
+        )
+
+    assert events == ["read", "acquire", "persist"]
+    assert reader.calls == 1
+    assert transaction.rolled_back is True
+
+
+def test_auction_cache_hit_remains_typed_and_indicative() -> None:
+    observation = _auction()
+    reader = FakeAuctionReader(
+        AuctionCandidateBatch(
+            candidates=(
+                ResolutionCandidate(
+                    observation=observation,
+                    freshness=EvidenceFreshness.FRESH,
+                    provider_priority=10,
+                    session=MarketSession.CLOSING_AUCTION,
+                ),
+            )
+        )
+    )
+
+    result = MarketDataGateway().resolve_auction(
+        _snapshot_requirement(
+            "auction",
+            RealtimePolicy.CACHE_ONLY,
+            session=MarketSession.CLOSING_AUCTION,
+        ),
+        reader=reader,
+    )
+
+    assert result.result_kind == "auction"
+    assert result.resolved.auction is observation
+    assert result.resolved.auction.state is ObservationState.INDICATIVE
+    assert result.resolved.auction.provisional is True
+    assert result.resolved.health.research_usable is False
+    assert result.acquisition.attempted is False
+
+
+def test_auction_acquisition_persists_then_mandatorily_rereads() -> None:
+    events: list[str] = []
+    observation = _auction()
+    final_batch = AuctionCandidateBatch(
+        candidates=(
+            ResolutionCandidate(
+                observation=observation,
+                freshness=EvidenceFreshness.LIVE,
+                provider_priority=10,
+                session=MarketSession.CLOSING_AUCTION,
+            ),
+        )
+    )
+    reader = RereadAuctionReader([AuctionCandidateBatch(), final_batch], events)
+    receipt = _receipt().model_copy(
+        update={
+            "provider": "fixture_provider",
+            "source": "fixture_provider.auction",
+            "resource_id": "auction.fixture",
+        }
+    )
+    acquisition = FakeAuctionAcquisition(
+        AuctionAcquisitionResult(
+            summary=AcquisitionSummary(
+                attempted=True,
+                status=AcquisitionStatus.COMPLETED,
+                providers_attempted=("fixture_provider",),
+                resource_attempts=(
+                    AcquisitionResourceAttempt(
+                        provider="fixture_provider",
+                        resource_id="auction.fixture",
+                    ),
+                ),
+                external_calls=1,
+            ),
+            observations=(_auction(cache_hit=False),),
+            receipts=(receipt,),
+        ),
+        events,
+    )
+
+    result = MarketDataGateway().resolve_auction(
+        _snapshot_requirement(
+            "auction",
+            RealtimePolicy.PREFER_LIVE,
+            external_calls=1,
+            session=MarketSession.CLOSING_AUCTION,
+        ),
+        reader=reader,
+        descriptors=(_snapshot_descriptor("auction"),),
+        acquisition_port=acquisition,
+        transaction_port=FakeAuctionTransaction(events),
+    )
+
+    assert events == ["read", "acquire", "persist", "read"]
+    assert reader.calls == 2
+    assert result.result_kind == "auction"
+    assert result.resolved.auction is observation
+    assert result.persistence.committed is True
 
 
 def test_auction_has_a_typed_resolved_contract() -> None:

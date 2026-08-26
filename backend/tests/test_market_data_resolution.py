@@ -17,12 +17,21 @@ from app.market_data.contracts import (
     InstrumentType,
     Market,
     MarketSession,
+    ObservationState,
     Quantity,
     QuantityUnit,
     QuoteObservation,
     ResolvedEvidenceStatus,
     SourceLineage,
     TradingStatusObservation,
+)
+from app.market_data.integration_contracts import (
+    DataRequirementV2,
+    FreshnessRequirement,
+    InstrumentTarget,
+    QualityRequirement,
+    RequestBounds,
+    SnapshotCapabilityRequest,
 )
 from app.market_data.policies import (
     AcquisitionResult,
@@ -93,6 +102,23 @@ def _quote(
     )
 
 
+def _quality_requirement(*, allow_partial: bool = False) -> DataRequirementV2:
+    return DataRequirementV2(
+        target=InstrumentTarget(instrument=_instrument()),
+        request=SnapshotCapabilityRequest(
+            capability_id="quote.snapshot",
+            required_fields=("last_trade_price",),
+        ),
+        purpose=DataPurpose.RESEARCH,
+        realtime_policy=RealtimePolicy.PREFER_LIVE,
+        session=MarketSession.CONTINUOUS,
+        requested_at=NOW,
+        freshness=FreshnessRequirement(max_age_seconds=300),
+        quality=QualityRequirement(allow_partial=allow_partial),
+        bounds=RequestBounds(max_provider_attempts=1, max_external_calls=1),
+    )
+
+
 def test_public_policy_vocabulary_remains_backward_compatible() -> None:
     assert PUBLIC_REALTIME_POLICIES == {
         "cache_only",
@@ -134,6 +160,52 @@ def test_cache_only_selects_cache_and_rejects_external_candidate() -> None:
     assert result.quote.lineage.provider == "sqlite"
     assert result.candidates[0].eligible is False
     assert result.candidates[0].reason_code == "NOT_CACHE_EVIDENCE"
+
+
+def test_quality_requirement_rejects_missing_field_before_ranking() -> None:
+    missing_price = _quote("kgi", "100").model_copy(
+        update={"last_trade_price": None}
+    )
+    result = resolve_quote(
+        [ResolutionCandidate(missing_price, EvidenceFreshness.LIVE)],
+        policy=RealtimePolicy.PREFER_LIVE,
+        now=NOW,
+        max_age=timedelta(minutes=5),
+        requirement=_quality_requirement(),
+    )
+
+    assert result.quote is None
+    assert result.health.status is ResolvedEvidenceStatus.MISSING
+    assert result.health.missing_fields == ("last_trade_price",)
+    assert result.candidates[0].reason_code == "QUALITY_REQUIRED_FIELDS_MISSING"
+
+
+def test_partial_quality_requires_allowance_and_remains_facts_only() -> None:
+    partial = _quote("kgi", "100").model_copy(
+        update={"state": ObservationState.PARTIAL}
+    )
+    rejected = resolve_quote(
+        [ResolutionCandidate(partial, EvidenceFreshness.LIVE)],
+        policy=RealtimePolicy.PREFER_LIVE,
+        now=NOW,
+        max_age=timedelta(minutes=5),
+        requirement=_quality_requirement(allow_partial=False),
+    )
+    assert rejected.quote is None
+    assert rejected.candidates[0].reason_code == "QUALITY_PARTIAL_NOT_ALLOWED"
+
+    allowed = resolve_quote(
+        [ResolutionCandidate(partial, EvidenceFreshness.LIVE)],
+        policy=RealtimePolicy.PREFER_LIVE,
+        now=NOW,
+        max_age=timedelta(minutes=5),
+        requirement=_quality_requirement(allow_partial=True),
+    )
+    assert allowed.quote is partial
+    assert allowed.health.status is ResolvedEvidenceStatus.PARTIAL
+    assert allowed.health.facts_usable is True
+    assert allowed.health.research_usable is False
+    assert allowed.candidates[0].reason_code == "QUALITY_PARTIAL_ALLOWED"
 
 
 def test_require_live_fails_closed_when_only_fresh_cache_exists() -> None:

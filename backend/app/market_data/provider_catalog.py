@@ -411,7 +411,10 @@ def plan_data_acquisition_v2(
         )
     if (
         requirement.bounds.max_provider_attempts == 0
-        or requirement.bounds.max_external_calls == 0
+        or (
+            requirement.bounds.max_external_calls == 0
+            and requirement.bounds.max_subscriptions == 0
+        )
     ):
         return DataAcquisitionPlanV2(
             requirement=requirement,

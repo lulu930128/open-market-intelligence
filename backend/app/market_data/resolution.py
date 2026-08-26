@@ -35,7 +35,14 @@ from app.market_data.contracts import (
     ResolvedTradingStatus,
     TradingStatusObservation,
 )
+from app.market_data.integration_contracts import DataRequirementV2
 from app.market_data.policies import RealtimePolicy, parse_realtime_policy
+from app.market_data.quality_policy import (
+    QualityEvaluation,
+    QualityReasonCode,
+    combine_quality_evaluations,
+    evaluate_candidate_quality,
+)
 
 
 ObservationT = TypeVar(
@@ -57,6 +64,7 @@ class ResolutionCandidate(Generic[ObservationT]):
     freshness: EvidenceFreshness
     provider_priority: int = 100
     session: MarketSession = MarketSession.UNKNOWN
+    quality: QualityEvaluation | None = None
 
     def __post_init__(self) -> None:
         if self.provider_priority < 0:
@@ -94,6 +102,7 @@ class _EvaluatedCandidate(Generic[ObservationT]):
     freshness: EvidenceFreshness
     eligible: bool
     reason_code: str
+    quality: QualityEvaluation | None = None
 
 
 def _require_aware(value: datetime, field_name: str) -> None:
@@ -132,8 +141,25 @@ def _evaluate(
     policy: RealtimePolicy,
     now: datetime,
     max_age: timedelta,
+    requirement: DataRequirementV2 | None = None,
 ) -> _EvaluatedCandidate[ObservationT]:
     observation = candidate.observation
+    quality = candidate.quality
+    if quality is None and requirement is not None:
+        quality = evaluate_candidate_quality(
+            observation,
+            requirement=requirement,
+            freshness=candidate.freshness,
+            now=now,
+        )
+    if quality is not None and not quality.eligible:
+        return _EvaluatedCandidate(
+            candidate,
+            candidate.freshness,
+            False,
+            quality.reason_code.value,
+            quality,
+        )
     observed_at = _observation_time(observation)
     freshness, temporal_rejection = _effective_freshness(
         candidate.freshness,
@@ -143,32 +169,48 @@ def _evaluate(
         completed_session=policy is RealtimePolicy.COMPLETED_SESSION,
     )
     if temporal_rejection:
-        return _EvaluatedCandidate(candidate, freshness, False, temporal_rejection)
+        return _EvaluatedCandidate(
+            candidate, freshness, False, temporal_rejection, quality
+        )
     state = getattr(observation, "state", ObservationState.AVAILABLE)
     if state is ObservationState.MISSING:
-        return _EvaluatedCandidate(candidate, freshness, False, "OBSERVATION_MISSING")
+        return _EvaluatedCandidate(
+            candidate, freshness, False, "OBSERVATION_MISSING", quality
+        )
     if policy is RealtimePolicy.CACHE_ONLY:
         is_cache = (
             observation.lineage.cache_hit
             or observation.lineage.authority is AuthorityClass.CACHE
         )
         if not is_cache:
-            return _EvaluatedCandidate(candidate, freshness, False, "NOT_CACHE_EVIDENCE")
+            return _EvaluatedCandidate(
+                candidate, freshness, False, "NOT_CACHE_EVIDENCE", quality
+            )
     elif policy is RealtimePolicy.REQUIRE_LIVE:
         if freshness is not EvidenceFreshness.LIVE:
-            return _EvaluatedCandidate(candidate, freshness, False, "LIVE_REQUIRED")
+            return _EvaluatedCandidate(
+                candidate, freshness, False, "LIVE_REQUIRED", quality
+            )
     elif policy is RealtimePolicy.COMPLETED_SESSION:
         if candidate.session not in {MarketSession.POST_CLOSE, MarketSession.CLOSED}:
             return _EvaluatedCandidate(
-                candidate, freshness, False, "SESSION_NOT_COMPLETED"
+                candidate, freshness, False, "SESSION_NOT_COMPLETED", quality
             )
     if freshness in {
         EvidenceFreshness.MISSING,
         EvidenceFreshness.NOT_APPLICABLE,
         EvidenceFreshness.UNKNOWN,
     }:
-        return _EvaluatedCandidate(candidate, freshness, False, "FRESHNESS_UNUSABLE")
-    return _EvaluatedCandidate(candidate, freshness, True, "ELIGIBLE")
+        return _EvaluatedCandidate(
+            candidate, freshness, False, "FRESHNESS_UNUSABLE", quality
+        )
+    reason_code = (
+        quality.reason_code.value
+        if quality is not None
+        and quality.reason_code is not QualityReasonCode.ELIGIBLE
+        else "ELIGIBLE"
+    )
+    return _EvaluatedCandidate(candidate, freshness, True, reason_code, quality)
 
 
 def _freshness_rank(value: EvidenceFreshness) -> int:
@@ -210,6 +252,7 @@ def _resolve(
     now: datetime,
     max_age: timedelta,
     official_first: bool = False,
+    requirement: DataRequirementV2 | None = None,
 ) -> tuple[
     ObservationT | None,
     ResolvedEvidenceHealth,
@@ -220,7 +263,13 @@ def _resolve(
         raise ValueError("max_age must be positive")
     parsed_policy = parse_realtime_policy(policy, allow_internal=True)
     evaluated = [
-        _evaluate(candidate, policy=parsed_policy, now=now, max_age=max_age)
+        _evaluate(
+            candidate,
+            policy=parsed_policy,
+            now=now,
+            max_age=max_age,
+            requirement=requirement,
+        )
         for candidate in candidates
     ]
     eligible = [item for item in evaluated if item.eligible]
@@ -252,6 +301,22 @@ def _resolve(
             RealtimePolicy.REQUIRE_LIVE,
             RealtimePolicy.COMPLETED_SESSION,
         }
+        quality_limitations = tuple(
+            dict.fromkeys(
+                limitation
+                for item in evaluated
+                if item.quality is not None
+                for limitation in item.quality.limitations
+            )
+        )
+        quality_missing_fields = tuple(
+            dict.fromkeys(
+                field
+                for item in evaluated
+                if item.quality is not None
+                for field in item.quality.missing_fields
+            )
+        )
         health = ResolvedEvidenceHealth(
             status=(
                 ResolvedEvidenceStatus.POLICY_UNSATISFIED
@@ -261,9 +326,17 @@ def _resolve(
             selection_reason=(
                 f"{parsed_policy.value.upper()}_NO_ELIGIBLE_CANDIDATE"
             ),
+            missing_fields=quality_missing_fields,
             facts_usable=False,
             research_usable=False,
-            limitations=("No candidate satisfied the requested data policy.",),
+            limitations=tuple(
+                dict.fromkeys(
+                    (
+                        "No candidate satisfied the requested data policy.",
+                        *quality_limitations,
+                    )
+                )
+            ),
         )
         return None, health, summaries
 
@@ -274,6 +347,7 @@ def _resolve(
         for item in evaluated
     )
     state = getattr(selected, "state", ObservationState.AVAILABLE)
+    selected_quality = selected_item.quality
     if selected_item.freshness is EvidenceFreshness.STALE:
         status = ResolvedEvidenceStatus.STALE
     elif state is ObservationState.PARTIAL:
@@ -292,17 +366,46 @@ def _resolve(
         selection_reason=(
             f"{parsed_policy.value.upper()}_{status.value.upper()}"
         ),
-        facts_usable=True,
-        research_usable=status in {
-            ResolvedEvidenceStatus.SELECTED,
-            ResolvedEvidenceStatus.FALLBACK,
-        },
-        limitations=(
-            ("Selected evidence is stale and must not be presented as current.",)
-            if status is ResolvedEvidenceStatus.STALE
-            else ("Selected evidence is partial.",)
-            if status is ResolvedEvidenceStatus.PARTIAL
-            else ()
+        missing_fields=(
+            selected_quality.missing_fields if selected_quality is not None else ()
+        ),
+        facts_usable=(
+            selected_quality.facts_usable if selected_quality is not None else True
+        ),
+        research_usable=(
+            status
+            in {
+                ResolvedEvidenceStatus.SELECTED,
+                ResolvedEvidenceStatus.FALLBACK,
+            }
+            and (
+                selected_quality.research_usable
+                if selected_quality is not None
+                else True
+            )
+        ),
+        limitations=tuple(
+            dict.fromkeys(
+                (
+                    *(
+                        (
+                            "Selected evidence is stale and must not be presented as current.",
+                        )
+                        if status is ResolvedEvidenceStatus.STALE
+                        else ()
+                    ),
+                    *(
+                        ("Selected evidence is partial.",)
+                        if status is ResolvedEvidenceStatus.PARTIAL
+                        else ()
+                    ),
+                    *(
+                        selected_quality.limitations
+                        if selected_quality is not None
+                        else ()
+                    ),
+                )
+            )
         ),
     )
     return selected, health, summaries
@@ -314,9 +417,14 @@ def resolve_quote(
     policy: str | RealtimePolicy,
     now: datetime,
     max_age: timedelta,
+    requirement: DataRequirementV2 | None = None,
 ) -> ResolvedQuote:
     selected, health, summaries = _resolve(
-        candidates, policy=policy, now=now, max_age=max_age
+        candidates,
+        policy=policy,
+        now=now,
+        max_age=max_age,
+        requirement=requirement,
     )
     return ResolvedQuote(quote=selected, health=health, candidates=summaries)
 
@@ -327,9 +435,14 @@ def resolve_depth(
     policy: str | RealtimePolicy,
     now: datetime,
     max_age: timedelta,
+    requirement: DataRequirementV2 | None = None,
 ) -> ResolvedDepth:
     selected, health, summaries = _resolve(
-        candidates, policy=policy, now=now, max_age=max_age
+        candidates,
+        policy=policy,
+        now=now,
+        max_age=max_age,
+        requirement=requirement,
     )
     return ResolvedDepth(depth=selected, health=health, candidates=summaries)
 
@@ -340,9 +453,14 @@ def resolve_auction(
     policy: str | RealtimePolicy,
     now: datetime,
     max_age: timedelta,
+    requirement: DataRequirementV2 | None = None,
 ) -> ResolvedAuction:
     selected, health, summaries = _resolve(
-        candidates, policy=policy, now=now, max_age=max_age
+        candidates,
+        policy=policy,
+        now=now,
+        max_age=max_age,
+        requirement=requirement,
     )
     return ResolvedAuction(auction=selected, health=health, candidates=summaries)
 
@@ -353,6 +471,7 @@ def resolve_market_breadth(
     policy: str | RealtimePolicy,
     now: datetime,
     max_age: timedelta,
+    requirement: DataRequirementV2 | None = None,
 ) -> ResolvedMarketBreadth:
     selected, health, summaries = _resolve(
         candidates,
@@ -360,6 +479,7 @@ def resolve_market_breadth(
         now=now,
         max_age=max_age,
         official_first=True,
+        requirement=requirement,
     )
     return ResolvedMarketBreadth(
         breadth=selected,
@@ -374,6 +494,7 @@ def resolve_market_index(
     policy: str | RealtimePolicy,
     now: datetime,
     max_age: timedelta,
+    requirement: DataRequirementV2 | None = None,
 ) -> ResolvedMarketIndex:
     selected, health, summaries = _resolve(
         candidates,
@@ -381,6 +502,7 @@ def resolve_market_index(
         now=now,
         max_age=max_age,
         official_first=True,
+        requirement=requirement,
     )
     return ResolvedMarketIndex(
         market_index=selected,
@@ -395,6 +517,7 @@ def resolve_trading_status(
     policy: str | RealtimePolicy,
     now: datetime,
     max_age: timedelta,
+    requirement: DataRequirementV2 | None = None,
 ) -> ResolvedTradingStatus:
     parsed_policy = parse_realtime_policy(policy, allow_internal=True)
     selected, health, summaries = _resolve(
@@ -403,6 +526,7 @@ def resolve_trading_status(
         now=now,
         max_age=max_age,
         official_first=True,
+        requirement=requirement,
     )
     if selected is not None:
         evaluated = [
@@ -411,6 +535,7 @@ def resolve_trading_status(
                 policy=parsed_policy,
                 now=now,
                 max_age=max_age,
+                requirement=requirement,
             )
             for candidate in candidates
         ]
@@ -461,6 +586,7 @@ def resolve_bar_series(
     policy: str | RealtimePolicy,
     now: datetime,
     max_age: timedelta,
+    requirement: DataRequirementV2 | None = None,
 ) -> ResolvedBarSeries:
     parsed_policy = parse_realtime_policy(policy, allow_internal=True)
     projected: list[ResolutionCandidate[BarObservation]] = []
@@ -472,11 +598,25 @@ def resolve_bar_series(
             for bar in candidate.bars
         ):
             continue
+        quality: QualityEvaluation | None = None
+        if requirement is not None:
+            quality = combine_quality_evaluations(
+                tuple(
+                    evaluate_candidate_quality(
+                        bar,
+                        requirement=requirement,
+                        freshness=(candidate.freshness if bar is latest else None),
+                        now=now,
+                    )
+                    for bar in candidate.bars
+                )
+            )
         projected_candidate = ResolutionCandidate(
             observation=latest,
             freshness=candidate.freshness,
             provider_priority=candidate.provider_priority,
             session=candidate.session,
+            quality=quality,
         )
         projected.append(projected_candidate)
         series_by_identity[id(latest)] = candidate.bars
@@ -485,6 +625,9 @@ def resolve_bar_series(
         policy=parsed_policy,
         now=now,
         max_age=max_age,
+        # Each bar was already evaluated above so the series can carry one
+        # combined quality result without evaluating the latest bar twice.
+        requirement=None,
     )
     bars = series_by_identity.get(id(selected), ()) if selected is not None else ()
     return ResolvedBarSeries(bars=bars, health=health, candidates=summaries)

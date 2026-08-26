@@ -9,14 +9,25 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
-from typing import Protocol
+from threading import RLock
+from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
 
 from app.market_data.contracts import CanonicalModel
+from app.market_data.contracts import ProviderResourceHealth
+from app.market_data.integration_contracts import DataRequirementV2, InstrumentTarget
 from app.market_data.policies import AcquisitionResult, DataRequirement
+from app.market_data.provider_catalog import (
+    AcquisitionMode,
+    DataAcquisitionPlanV2,
+    ProviderCapabilityDescriptorV2,
+    ProviderResourceRouteV2,
+    plan_data_acquisition_v2,
+)
 from app.market_data.provider_policy import ProviderRoute, ReasonCode
 
 
@@ -137,6 +148,289 @@ class ResearchAcquisitionHandle(Protocol):
 
 class ResearchAcquisitionPort(Protocol):
     def start(self, context: AcquisitionAttemptContext) -> ResearchAcquisitionHandle: ...
+
+
+ViewerLeaseOwnerKind = Literal["frontend_viewer", "acceptance_probe"]
+
+
+class ViewerLeaseState(CanonicalModel):
+    """Provider-neutral state for one persistent viewer-owned subscription."""
+
+    contract_version: str = "omi.market.viewer_lease_state.v1"
+    lease_id: str | None = Field(default=None, max_length=128)
+    stock_id: str = Field(min_length=1, max_length=64)
+    provider: str = Field(min_length=1, max_length=64)
+    owner_kind: ViewerLeaseOwnerKind
+    status: str = Field(min_length=1, max_length=64)
+    expires_in_seconds: int | None = Field(default=None, ge=1, le=86_400)
+    fallback_source: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=512)
+    error: str | None = Field(default=None, max_length=1_000)
+
+
+class ViewerLeasePortSummary(CanonicalModel):
+    contract_version: str = "omi.market.viewer_lease_port_summary.v1"
+    provider: str = Field(min_length=1, max_length=64)
+    total_active_leases: int = Field(ge=0, le=10_000)
+    active_symbol_count: int = Field(ge=0, le=10_000)
+    leases_by_owner_kind: dict[str, int] = Field(default_factory=dict)
+    leases_by_symbol: dict[str, int] = Field(default_factory=dict)
+    bridge_process_running: bool = False
+    idle_shutdown_pending: bool = False
+    subscription_worker_count: int = Field(default=0, ge=0, le=10_000)
+
+
+class ViewerLeaseSummary(CanonicalModel):
+    contract_version: str = "omi.market.viewer_lease_summary.v1"
+    provider: str = Field(min_length=1, max_length=64)
+    total_active_leases: int = Field(ge=0, le=10_000)
+    active_symbol_count: int = Field(ge=0, le=10_000)
+    leases_by_owner_kind: dict[str, int] = Field(default_factory=dict)
+    leases_by_symbol: dict[str, int] = Field(default_factory=dict)
+    bridge_process_running: bool = False
+    idle_shutdown_pending: bool = False
+    subscription_worker_count: int = Field(default=0, ge=0, le=10_000)
+    tracked_owner_tokens: int = Field(default=0, ge=0, le=10_000)
+
+
+class ViewerLeasePort(Protocol):
+    @property
+    def provider_key(self) -> str: ...
+
+    def health(self, requirement: DataRequirementV2) -> ProviderResourceHealth: ...
+
+    def acquire(
+        self,
+        requirement: DataRequirementV2,
+        route: ProviderResourceRouteV2,
+        *,
+        owner_kind: ViewerLeaseOwnerKind,
+    ) -> ViewerLeaseState: ...
+
+    def heartbeat(self, lease_id: str) -> ViewerLeaseState | None: ...
+
+    def release(self, lease_id: str) -> ViewerLeaseState | None: ...
+
+    def summary(self) -> ViewerLeasePortSummary: ...
+
+
+class ViewerLeaseAcquisition(CanonicalModel):
+    contract_version: str = "omi.market.viewer_lease_acquisition.v1"
+    lease: ViewerLeaseState | None = None
+    plan: DataAcquisitionPlanV2
+    selected_provider: str | None = Field(default=None, max_length=64)
+    detail_code: str = Field(min_length=1, max_length=64)
+
+
+class _ViewerLeaseBinding(CanonicalModel):
+    public_lease_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_.-]+$",
+    )
+    provider_key: str = Field(min_length=1, max_length=64)
+    provider_lease_id: str = Field(min_length=1, max_length=128)
+    stock_id: str = Field(min_length=1, max_length=64)
+    owner_kind: ViewerLeaseOwnerKind
+
+
+ViewerLeaseIdFactory = Callable[[], str]
+
+
+def _viewer_lease_id() -> str:
+    return uuid.uuid4().hex
+
+
+class ViewerLeaseCoordinator:
+    """Shared owner for long-lived viewer leases; provider handles stay private."""
+
+    def __init__(
+        self,
+        *,
+        descriptors: Iterable[ProviderCapabilityDescriptorV2],
+        ports: Mapping[str, ViewerLeasePort],
+        id_factory: ViewerLeaseIdFactory = _viewer_lease_id,
+        max_tracked_leases: int = 512,
+    ) -> None:
+        self._descriptors = tuple(descriptors)
+        self._ports = dict(ports)
+        if not 1 <= max_tracked_leases <= 10_000:
+            raise ValueError("max_tracked_leases must be between 1 and 10000")
+        if set(self._ports) != {port.provider_key for port in self._ports.values()}:
+            raise ValueError("viewer lease port registry keys must match provider keys")
+        descriptor_keys = {
+            descriptor.provider_key
+            for descriptor in self._descriptors
+            if AcquisitionMode.SUBSCRIPTION in descriptor.acquisition_modes
+        }
+        if not set(self._ports) <= descriptor_keys:
+            raise ValueError("viewer lease ports require subscription descriptors")
+        self._id_factory = id_factory
+        self._max_tracked_leases = max_tracked_leases
+        self._bindings: dict[str, _ViewerLeaseBinding] = {}
+        self._lock = RLock()
+
+    def acquire(
+        self,
+        requirement: DataRequirementV2,
+        *,
+        owner_kind: ViewerLeaseOwnerKind,
+    ) -> ViewerLeaseAcquisition:
+        if not isinstance(requirement.target, InstrumentTarget):
+            raise ValueError("viewer lease requires an instrument target")
+        with self._lock:
+            if len(self._bindings) >= self._max_tracked_leases:
+                plan = plan_data_acquisition_v2(requirement, (), ())
+                return ViewerLeaseAcquisition(
+                    plan=plan,
+                    detail_code="VIEWER_LEASE_BOUND_EXCEEDED",
+                )
+        descriptors = tuple(
+            descriptor
+            for descriptor in self._descriptors
+            if descriptor.provider_key in self._ports
+            and AcquisitionMode.SUBSCRIPTION in descriptor.acquisition_modes
+        )
+        health = tuple(
+            self._ports[provider_key].health(requirement)
+            for provider_key in sorted(self._ports)
+        )
+        plan = plan_data_acquisition_v2(requirement, descriptors, health)
+        route = next(
+            (item for item in plan.routes if item.subscription_allowed),
+            None,
+        )
+        if route is None:
+            return ViewerLeaseAcquisition(
+                plan=plan,
+                detail_code="VIEWER_LEASE_PLAN_UNFILLABLE",
+            )
+        port = self._ports.get(route.provider_key)
+        if port is None:
+            return ViewerLeaseAcquisition(
+                plan=plan,
+                selected_provider=route.provider_key,
+                detail_code="VIEWER_LEASE_PORT_UNAVAILABLE",
+            )
+        provider_state = port.acquire(
+            requirement,
+            route,
+            owner_kind=owner_kind,
+        )
+        provider_lease_id = provider_state.lease_id
+        if provider_state.provider != route.provider_key:
+            if provider_lease_id:
+                port.release(provider_lease_id)
+            raise ValueError("viewer lease port returned a different provider")
+        if provider_state.stock_id != requirement.target.instrument.symbol:
+            if provider_lease_id:
+                port.release(provider_lease_id)
+            raise ValueError("viewer lease port crossed requested instrument")
+        if provider_state.owner_kind != owner_kind:
+            if provider_lease_id:
+                port.release(provider_lease_id)
+            raise ValueError("viewer lease port changed owner_kind")
+        if provider_lease_id is None:
+            return ViewerLeaseAcquisition(
+                lease=provider_state,
+                plan=plan,
+                selected_provider=route.provider_key,
+                detail_code="VIEWER_LEASE_NOT_CREATED",
+            )
+        try:
+            public_lease_id = self._id_factory()
+            binding = _ViewerLeaseBinding(
+                public_lease_id=public_lease_id,
+                provider_key=route.provider_key,
+                provider_lease_id=provider_lease_id,
+                stock_id=provider_state.stock_id,
+                owner_kind=owner_kind,
+            )
+        except Exception:
+            port.release(provider_lease_id)
+            raise
+        with self._lock:
+            if public_lease_id in self._bindings:
+                port.release(provider_lease_id)
+                raise ValueError("viewer lease owner token collision")
+            self._bindings[public_lease_id] = binding
+        return ViewerLeaseAcquisition(
+            lease=provider_state.model_copy(update={"lease_id": public_lease_id}),
+            plan=plan,
+            selected_provider=route.provider_key,
+            detail_code="VIEWER_LEASE_CREATED",
+        )
+
+    def heartbeat(self, public_lease_id: str) -> ViewerLeaseState | None:
+        with self._lock:
+            binding = self._bindings.get(public_lease_id)
+        if binding is None:
+            return None
+        state = self._ports[binding.provider_key].heartbeat(binding.provider_lease_id)
+        if state is None:
+            with self._lock:
+                self._bindings.pop(public_lease_id, None)
+            return None
+        if (
+            state.provider != binding.provider_key
+            or state.stock_id != binding.stock_id
+            or state.owner_kind != binding.owner_kind
+        ):
+            self._ports[binding.provider_key].release(binding.provider_lease_id)
+            with self._lock:
+                self._bindings.pop(public_lease_id, None)
+            raise ValueError("viewer lease heartbeat identity mismatch")
+        return state.model_copy(update={"lease_id": public_lease_id})
+
+    def release(self, public_lease_id: str) -> ViewerLeaseState | None:
+        with self._lock:
+            binding = self._bindings.get(public_lease_id)
+        if binding is None:
+            return None
+        state = self._ports[binding.provider_key].release(binding.provider_lease_id)
+        with self._lock:
+            self._bindings.pop(public_lease_id, None)
+        if state is None:
+            return None
+        if (
+            state.provider != binding.provider_key
+            or state.stock_id != binding.stock_id
+            or state.owner_kind != binding.owner_kind
+        ):
+            raise ValueError("viewer lease release identity mismatch")
+        return state.model_copy(update={"lease_id": None})
+
+    def summary(self) -> ViewerLeaseSummary:
+        summaries = tuple(
+            self._ports[key].summary()
+            for key in sorted(self._ports)
+        )
+        owner_counts: dict[str, int] = {}
+        symbol_counts: dict[str, int] = {}
+        for summary in summaries:
+            for owner_kind, count in summary.leases_by_owner_kind.items():
+                owner_counts[owner_kind] = owner_counts.get(owner_kind, 0) + count
+            for symbol, count in summary.leases_by_symbol.items():
+                symbol_counts[symbol] = symbol_counts.get(symbol, 0) + count
+        with self._lock:
+            tracked = len(self._bindings)
+        return ViewerLeaseSummary(
+            provider=(summaries[0].provider if len(summaries) == 1 else "multiple"),
+            total_active_leases=sum(item.total_active_leases for item in summaries),
+            active_symbol_count=len(symbol_counts),
+            leases_by_owner_kind=owner_counts,
+            leases_by_symbol=symbol_counts,
+            bridge_process_running=any(
+                item.bridge_process_running for item in summaries
+            ),
+            idle_shutdown_pending=any(
+                item.idle_shutdown_pending for item in summaries
+            ),
+            subscription_worker_count=sum(
+                item.subscription_worker_count for item in summaries
+            ),
+            tracked_owner_tokens=tracked,
+        )
 
 
 class ResearchLeaseResult(CanonicalModel):
@@ -424,4 +718,11 @@ __all__ = [
     "ResearchAcquisitionPort",
     "ResearchLeaseResult",
     "ResearchLeaseRunner",
+    "ViewerLeaseAcquisition",
+    "ViewerLeaseCoordinator",
+    "ViewerLeaseOwnerKind",
+    "ViewerLeasePort",
+    "ViewerLeasePortSummary",
+    "ViewerLeaseState",
+    "ViewerLeaseSummary",
 ]
