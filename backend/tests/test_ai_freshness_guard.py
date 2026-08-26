@@ -34,6 +34,7 @@ from app.db.models import (
     StockMaster,
     USStockMaster,
 )
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
 SOURCE_COUNTER = count()
@@ -112,14 +113,32 @@ def add_raw_source(db: Session, category: str) -> tuple[int, int]:
 
 
 def add_daily_price(db: Session, stock_id: str, trade_date: date) -> None:
-    source_id, raw_result_id = add_raw_source(db, "market_daily_price")
+    source = (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.source_name == TWSE_DAILY_TRADING_SOURCE_NAME)
+        .first()
+    )
+    if source is None:
+        source = SourceRegistry(
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+            source_type="test_official",
+            category="market_daily_price",
+        )
+        db.add(source)
+        db.flush()
+    raw = RawFetchResult(source_id=source.id, method="GET")
+    db.add(raw)
+    db.flush()
     db.add(
         MarketDailyPrice(
-            source_id=source_id,
-            raw_result_id=raw_result_id,
+            source_id=source.id,
+            raw_result_id=raw.id,
             trade_date=trade_date,
             stock_id=stock_id,
             stock_name="TSMC",
+            open_price=100.0,
+            high_price=100.0,
+            low_price=100.0,
             close_price=100.0,
         )
     )

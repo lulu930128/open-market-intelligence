@@ -1743,7 +1743,7 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertIn("intraday", plan.requested_domains)
         self.assertIn("quote.snapshot", plan.selected_capabilities)
         self.assertIn("intraday.bars", plan.selected_capabilities)
-        self.assertIn("get_taiwan_stock_quote_depth", plan.required_readers)
+        self.assertIn("read_taiwan_quote_evidence", plan.required_readers)
         self.assertIn("get_market_intraday_history", plan.required_readers)
 
     def test_multi_intent_broker_question_uses_standard_stock_planner(self) -> None:

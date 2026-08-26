@@ -49,6 +49,21 @@ EXPECTED_INDEX_CONTRACTS = {
         "MarketOhlcChartRead",
         "200",
     ),
+    ("post", "/api/market/indices/list/refresh"): (
+        "refresh_indices_list_api_market_indices_list_refresh_post",
+        "MarketIndexListRead",
+        "200",
+    ),
+    ("post", "/api/market/indices/{index_id}/contributions/refresh"): (
+        "refresh_index_contributions_api_market_indices__index_id__contributions_refresh_post",
+        "MarketIndexContributionRead",
+        "200",
+    ),
+    ("post", "/api/market/indices/{index_id}/ohlc/refresh"): (
+        "refresh_index_ohlc_chart_data_api_market_indices__index_id__ohlc_refresh_post",
+        "MarketOhlcChartRead",
+        "200",
+    ),
 }
 
 EXPECTED_FUTURES_CONTRACTS = {
@@ -74,6 +89,10 @@ EXPECTED_FUTURES_CONTRACTS = {
     ),
     ("get", "/api/market/tw-futures/{symbol}/intraday"): (
         "list_taiwan_futures_intraday_bars_api_api_market_tw_futures__symbol__intraday_get",
+        "TaiwanFuturesIntradayBarRead",
+    ),
+    ("post", "/api/market/tw-futures/{symbol}/intraday/refresh"): (
+        "refresh_taiwan_futures_intraday_bars_api_api_market_tw_futures__symbol__intraday_refresh_post",
         "TaiwanFuturesIntradayBarRead",
     ),
 }
@@ -111,6 +130,10 @@ EXPECTED_FUTURES_PARAMETERS = {
             "trade_date",
         ),
         {"interval": "1m", "limit": 390, "refresh": False, "session": "auto"},
+    ),
+    ("post", "/api/market/tw-futures/{symbol}/intraday/refresh"): (
+        ("symbol", "interval", "limit", "session", "trade_date"),
+        {"interval": "1m", "limit": 390, "session": "auto"},
     ),
     ("post", "/api/market/tw-futures/{symbol}/daily/refresh"): (
         (
@@ -245,8 +268,8 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 406)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 405)
+        self.assertEqual(len(operations), 416)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 415)
         self.assertIn(("get", "/api/market-data/eod-coverage"), operations)
         self.assertIn(("post", "/api/market-data/eod-coverage/reconcile"), operations)
         self.assertIn(
@@ -264,9 +287,39 @@ class APIContractInventoryTests(unittest.TestCase):
             ),
             operations,
         )
+        self.assertIn(
+            ("post", "/api/market/quote-depth/{stock_id}/refresh"),
+            operations,
+        )
+        self.assertIn(
+            ("post", "/api/market/intraday/{stock_id}/history/refresh"),
+            operations,
+        )
+        self.assertIn(
+            ("post", "/api/market/overnight-impact/{stock_id}/refresh"),
+            operations,
+        )
+        self.assertIn(
+            ("post", "/api/market/broker-branches/{stock_id}/daily/refresh"),
+            operations,
+        )
+        self.assertIn(
+            (
+                "post",
+                "/api/market/institutional/{stock_id}/holding-ratios/refresh",
+            ),
+            operations,
+        )
         self.assertIn(("get", "/api/market/breadth/official"), operations)
         self.assertIn(("get", "/api/market/data-core/datasets"), operations)
         self.assertIn(("get", "/api/market/data-core/operations"), operations)
+        self.assertIn(
+            (
+                "get",
+                "/api/market/data-core/datasets/{dataset_id}/platform-evidence",
+            ),
+            operations,
+        )
         self.assertIn(
             ("get", "/api/market/data-core/datasets/{dataset_id}/health"),
             operations,

@@ -478,7 +478,7 @@ class TechnicalReportTests(unittest.TestCase):
 
     def test_stock_context_exposes_compact_evidence_without_intraday_fetch(self) -> None:
         with (
-            patch("app.ai.tools.read_taiwan_public_quote_projection") as quote_depth,
+            patch("app.ai.tools.read_taiwan_quote_evidence_projection") as quote_depth,
             patch("app.ai.tools.get_market_intraday_history") as intraday_history,
         ):
             context = ai_tools.read_stock_context(
@@ -629,7 +629,7 @@ class TechnicalReportTests(unittest.TestCase):
                 },
             ),
             patch(
-                "app.ai.tools.read_taiwan_public_quote_projection",
+                "app.ai.tools.read_taiwan_quote_evidence_projection",
                 return_value={
                     "provider": "test_provider",
                     "source": "twse_mis_public_quote",

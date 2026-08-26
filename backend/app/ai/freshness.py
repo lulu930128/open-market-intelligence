@@ -7,7 +7,12 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import BrokerBranchTradeDaily, MarketDailyPrice, StockMaster
+from app.db.models import BrokerBranchTradeDaily, StockMaster
+from app.market.tw_daily_freshness import (
+    TaiwanDailyFreshnessEvidence,
+    read_taiwan_daily_freshness,
+    read_taiwan_daily_freshness_batch,
+)
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_BROKER_BRANCH,
     TAIWAN_DATASET_DAILY_PRICE,
@@ -180,6 +185,46 @@ def _dataset_check(
     }
 
 
+def _daily_dataset_check(
+    *,
+    spec: DatasetSpec,
+    stock_id: str,
+    evidence: TaiwanDailyFreshnessEvidence,
+) -> dict[str, Any]:
+    """Project market-owned DatasetHealth into the legacy AI freshness shape."""
+
+    health_status = evidence.health.status.value
+    status = {
+        "healthy": "current",
+        "stale": "stale",
+        "missing": "missing",
+        "partial": "partial",
+        "not_applicable": "skipped",
+        "unavailable": "unavailable",
+        "unknown": "unknown",
+    }.get(health_status, "unknown")
+    is_current = health_status in {"healthy", "not_applicable"}
+    return {
+        "key": spec.key,
+        "label": spec.label,
+        "frequency": spec.frequency,
+        "required": True,
+        "status": status,
+        "latest": _json_value(evidence.latest_date),
+        "expected": _json_value(evidence.health.expected_date),
+        "is_current": is_current,
+        "stock_id": stock_id,
+        "release_status": None,
+        "release_at": None,
+        "next_release_at": None,
+        "refresh_eligible": evidence.health.refreshable and not is_current,
+        "next_eligible_refresh_at": None,
+        "canonical_dataset_id": evidence.health.dataset_id,
+        "dataset_health": evidence.health.model_dump(mode="json"),
+        "limitations": list(evidence.limitations),
+    }
+
+
 def _shareholding_refresh_cooldown(
     db: Session,
     *,
@@ -235,6 +280,16 @@ def _stock_freshness_rows(
 ) -> list[dict[str, Any]]:
     stock_ids = [candidate.stock_id for candidate in candidates]
     stock_master = _stock_master_by_id(db, stock_ids)
+    expected_dates = {
+        spec.key: _expected_date_for_dataset(spec.key)
+        for spec in DATASET_SPECS
+        if spec.has_expected_date
+    }
+    daily_by_stock = read_taiwan_daily_freshness_batch(
+        db,
+        stock_ids=stock_ids,
+        expected_date=expected_dates.get(TAIWAN_DATASET_DAILY_PRICE),
+    )
     latest_by_dataset = {
         spec.key: _latest_values_by_stock(
             db=db,
@@ -243,13 +298,9 @@ def _stock_freshness_rows(
             stock_ids=stock_ids,
         )
         for spec in DATASET_SPECS
+        if spec.key != TAIWAN_DATASET_DAILY_PRICE
     }
     shareholding_window = shareholding_distribution_release_window()
-    expected_dates = {
-        spec.key: _expected_date_for_dataset(spec.key)
-        for spec in DATASET_SPECS
-        if spec.has_expected_date
-    }
     rows: list[dict[str, Any]] = []
     cooldowns = (
         {
@@ -269,6 +320,15 @@ def _stock_freshness_rows(
         datasets = [_stock_master_check(candidate, stock)]
 
         for spec in DATASET_SPECS:
+            if spec.key == TAIWAN_DATASET_DAILY_PRICE:
+                datasets.append(
+                    _daily_dataset_check(
+                        spec=spec,
+                        stock_id=candidate.stock_id,
+                        evidence=daily_by_stock[candidate.stock_id],
+                    )
+                )
+                continue
             required = _is_equity_only_dataset_required(spec, stock)
             datasets.append(
                 _dataset_check(
@@ -551,12 +611,12 @@ def check_stock_daily_price_freshness(db: Session, stock_id: str) -> dict[str, A
         .filter(StockMaster.stock_id == normalized_stock_id)
         .first()
     )
-    latest = (
-        db.query(func.max(MarketDailyPrice.trade_date))
-        .filter(MarketDailyPrice.stock_id == normalized_stock_id)
-        .scalar()
-    )
     expected = expected_daily_price_date()
+    evidence = read_taiwan_daily_freshness(
+        db,
+        stock_id=normalized_stock_id,
+        expected_date=expected,
+    )
     daily_spec = next(
         spec for spec in DATASET_SPECS if spec.key == TAIWAN_DATASET_DAILY_PRICE
     )
@@ -566,12 +626,10 @@ def check_stock_daily_price_freshness(db: Session, stock_id: str) -> dict[str, A
     )
     datasets = [
         _stock_master_check(candidate, stock),
-        _dataset_check(
+        _daily_dataset_check(
             spec=daily_spec,
             stock_id=normalized_stock_id,
-            latest_value=latest,
-            expected_date=expected,
-            required=True,
+            evidence=evidence,
         ),
     ]
     issues = [dataset for dataset in datasets if not dataset["is_current"]]

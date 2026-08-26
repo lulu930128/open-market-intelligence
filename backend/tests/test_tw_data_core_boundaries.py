@@ -7,6 +7,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[2]
 BACKEND_APP = REPO_ROOT / "backend" / "app"
+AGENTS_ROOT = REPO_ROOT / "agents"
 TASK_ROOT = REPO_ROOT / "docs" / "agent-runs" / "tw-market-data-platform-convergence-20260825"
 DEBT_PATH = TASK_ROOT / "artifacts" / "cp0-boundary-debt.json"
 
@@ -90,7 +91,41 @@ def test_no_new_router_or_ai_provider_imports_beyond_recorded_debt() -> None:
         for path in root.rglob("*.py"):
             actual.update(_provider_imports(path))
 
-    assert actual <= allowed, f"new consumer/provider imports: {sorted(actual - allowed)}"
+    assert actual == allowed, (
+        f"consumer/provider debt drift: added={sorted(actual - allowed)}, "
+        f"stale_allowlist={sorted(allowed - actual)}"
+    )
+
+
+def test_ai_mcp_and_decision_code_cannot_consume_presentation_stream() -> None:
+    forbidden = {
+        "app.market.tw_realtime_stream_platform",
+        "app.market.providers.kgi_realtime_lease",
+        "app.market.providers.kgi_superpy",
+    }
+    violations: list[tuple[str, str]] = []
+    roots = (BACKEND_APP / "ai", AGENTS_ROOT)
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            for module in _imports(path):
+                if module in forbidden:
+                    violations.append((_relative(path), module))
+
+    assert violations == []
+
+
+def test_ai_freshness_does_not_query_platform_owned_taiwan_price_storage() -> None:
+    paths = (
+        BACKEND_APP / "ai" / "freshness.py",
+        BACKEND_APP / "ai" / "market_context" / "taiwan_freshness.py",
+    )
+    for path in paths:
+        source = path.read_text(encoding="utf-8-sig")
+        imports = _imports(path)
+        assert "MarketDailyPrice" not in source, _relative(path)
+        assert "app.market.tw_daily_freshness" in imports, _relative(path)
 
 
 def test_no_new_shared_market_data_transaction_owners_beyond_recorded_debt() -> None:
@@ -103,7 +138,10 @@ def test_no_new_shared_market_data_transaction_owners_beyond_recorded_debt() -> 
     for path in (BACKEND_APP / "market_data").rglob("*.py"):
         actual.update(_transaction_calls(path))
 
-    assert actual <= allowed, f"new shared transaction owners: {sorted(actual - allowed)}"
+    assert actual == allowed, (
+        f"shared transaction debt drift: added={sorted(actual - allowed)}, "
+        f"stale_allowlist={sorted(allowed - actual)}"
+    )
 
 
 def test_candidate_repository_contract_stays_pure() -> None:
@@ -407,16 +445,30 @@ def test_official_index_transaction_has_no_provider_io_or_resolution() -> None:
 def test_ai_taiwan_quote_context_depends_on_data_core_projection() -> None:
     tools_path = BACKEND_APP / "ai" / "tools.py"
     context_path = BACKEND_APP / "ai" / "market_context" / "taiwan_stock.py"
+    bundle_path = BACKEND_APP / "market" / "taiwan_quote_evidence.py"
+    projection_path = BACKEND_APP / "market" / "quote_depth.py"
     tools_source = tools_path.read_text(encoding="utf-8")
     context_source = context_path.read_text(encoding="utf-8")
+    bundle_source = bundle_path.read_text(encoding="utf-8")
+    projection_source = projection_path.read_text(encoding="utf-8")
 
-    assert "app.market.public_quote_platform" in tools_source
-    assert "app.market.quote_depth" not in tools_source
-    assert "read_taiwan_public_quote" in context_source
+    assert "app.market.public_quote_platform" not in tools_source
+    assert "app.market.quote_depth" in tools_source
+    assert "read_taiwan_quote_evidence" in context_source
+    assert "acquire_taiwan_quote_evidence" in context_source
+    assert "read_taiwan_latest_daily_evidence" in context_source
+    assert ".get_latest_stock_daily_price" not in context_source
     assert "get_taiwan_stock_quote_depth" not in context_source
     assert 'canonical_requested_provider = "auto"' in context_source
     assert '"provider_control_status": (' in context_source
     assert 'quote_depth.get("provider_attempts")' in context_source
+    assert '"quote.snapshot": self.quote' in bundle_source
+    assert '"quote.order_book": self.depth' in bundle_source
+    assert '"quote.auction": self.auction' in bundle_source
+    assert '"quote.official_close": self.official_close' in bundle_source
+    assert "read_taiwan_official_daily" in bundle_source
+    assert "MarketDailyPrice" not in projection_source
+    assert "SourceRegistry" not in projection_source
 
 
 def test_ai_intraday_compatibility_reader_cannot_trigger_provider_refresh() -> None:
@@ -463,6 +515,109 @@ def test_taiwan_ohlc_get_cannot_start_legacy_history_backfill() -> None:
     assert "backfill_twse_stock_day" not in source
     assert "backfill_tpex_trading_stock" not in source
     assert "Deprecated ensure_history was ignored" in source
+
+
+def test_taiwan_legacy_metric_get_handlers_only_read_cached_state() -> None:
+    path = BACKEND_APP / "routers" / "market.py"
+    source = path.read_text(encoding="utf-8-sig")
+    tree = _tree(path)
+    handler_names = {
+        "get_stock_overnight_impact",
+        "get_latest_market_chip_daily_api",
+        "get_latest_stock_institutional_trade_api",
+        "get_stock_institutional_trade_history",
+        "get_stock_broker_branch_daily",
+        "get_latest_stock_margin_trade_api",
+        "get_stock_margin_trade_history",
+        "get_latest_stock_shareholding_distribution_api",
+        "get_stock_shareholding_history_api",
+        "get_latest_stock_monthly_revenue_api",
+        "get_stock_monthly_revenue_history_api",
+        "get_latest_stock_financial_metric_api",
+        "get_stock_financial_metric_history_api",
+    }
+    forbidden_calls = {
+        "ensure_current_us_overnight_impact_report",
+        "ensure_market_chip_daily",
+        "ensure_latest_daily_metrics",
+        "ensure_stock_daily_metrics",
+        "ensure_stock_fundamental_metrics",
+        "ensure_stock_shareholding_history",
+        "ensure_stock_monthly_revenue_history",
+        "ensure_stock_financial_metrics_history",
+    }
+    found = {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in handler_names
+    }
+
+    assert set(found) == handler_names
+    for name, handler_source in found.items():
+        assert "_reject_get_side_effect_request(" in handler_source, name
+        for forbidden in forbidden_calls:
+            assert forbidden not in handler_source, f"{name} calls {forbidden}"
+
+    assert "ensure_current_us_overnight_impact_report(" in source
+    assert "ensure_daily=True" in source
+
+
+def test_taiwan_holding_ratio_get_uses_compatibility_cache_not_provider_io() -> None:
+    path = BACKEND_APP / "routers" / "market.py"
+    source = path.read_text(encoding="utf-8-sig")
+    tree = _tree(path)
+    handler = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "get_stock_institutional_holding_ratios"
+    )
+    handler_source = ast.get_source_segment(source, handler) or ""
+
+    assert "read_cached_institutional_holding_ratios(" in handler_source
+    assert "fetch_institutional_holding_ratios(" not in handler_source
+    assert "refresh_cached_institutional_holding_ratios(" not in handler_source
+    assert "RAW_RECEIPT_NOT_PERSISTED" in (
+        BACKEND_APP
+        / "market"
+        / "institutional_holding_ratio_cache.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_taiwan_futures_gets_cannot_refresh_or_select_provider() -> None:
+    path = BACKEND_APP / "routers" / "tw_market_futures.py"
+    source = path.read_text(encoding="utf-8-sig")
+    tree = _tree(path)
+    handler_names = {
+        "get_latest_taiwan_futures_quotes_api",
+        "list_taiwan_futures_intraday_bars_api",
+    }
+    handlers = {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in handler_names
+    }
+
+    assert set(handlers) == handler_names
+    for name, handler_source in handlers.items():
+        assert "HTTP_409_CONFLICT" in handler_source, name
+        assert "provider=None" in handler_source, name
+        assert "provider=provider" not in handler_source, name
+        assert "record_taiwan_futures_quote_refresh_issue(" not in handler_source, name
+        assert "refresh_taiwan_futures_" not in handler_source, name
+
+
+def test_frontend_does_not_use_refreshing_futures_get_requests() -> None:
+    sidebar = (
+        REPO_ROOT / "frontend" / "src" / "components" / "SidebarWatchlistExplorer.tsx"
+    ).read_text(encoding="utf-8")
+    detail = (
+        REPO_ROOT / "frontend" / "src" / "components" / "TaiwanFuturesDetailPanel.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "refresh: true" not in sidebar
+    assert "`${intradayPath}/refresh`" in detail
+    assert '{ method: "POST" }' in detail
 
 
 def test_taiwan_indicator_api_uses_versioned_backend_gateway() -> None:

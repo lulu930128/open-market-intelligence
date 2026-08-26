@@ -2,16 +2,7 @@
   "schema_version": "omi.tw_data_core.cp0_boundary_debt.v1",
   "captured_at": "2026-08-25",
   "purpose": "Allow existing debt to shrink while failing CI on new consumer/provider coupling or shared-foundation transaction ownership.",
-  "consumer_provider_imports": [
-    {
-      "file": "backend/app/routers/market.py",
-      "module": "app.market.kgi_market_data"
-    },
-    {
-      "file": "backend/app/routers/market.py",
-      "module": "app.market.providers.kgi_superpy"
-    }
-  ],
+  "consumer_provider_imports": [],
   "market_data_transaction_calls": [
     {
       "file": "backend/app/market_data/eod_coverage.py",

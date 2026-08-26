@@ -12,7 +12,10 @@ from app.market.indices import (
     get_market_index_list,
     get_market_index_ohlc_chart_data,
     get_market_index_summary,
+    refresh_market_index_contributions,
     refresh_market_index_daily_stats,
+    refresh_market_index_list,
+    refresh_market_index_ohlc_chart_data,
     refresh_market_index_summary,
 )
 from app.market.official_index_platform import (
@@ -41,10 +44,18 @@ router = APIRouter()
 
 @router.get("/indices/summary", response_model=MarketIndexSummaryRead)
 def get_indices_summary(
-    force_refresh: bool = False,
+    force_refresh: bool = Query(default=False, deprecated=True),
     db: Session = Depends(get_db),
 ):
-    return get_market_index_summary(db=db, force_refresh=force_refresh)
+    if force_refresh:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "GET /indices/summary is cache-only. "
+                "Use POST /indices/summary/refresh."
+            ),
+        )
+    return get_market_index_summary(db=db, force_refresh=False)
 
 
 @router.get("/market-state/volume", response_model=TaiwanMarketVolumeStateRead)
@@ -185,10 +196,24 @@ def get_indices_list(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.post("/indices/list/refresh", response_model=MarketIndexListRead)
+def refresh_indices_list(
+    market: str = Query(default="TWSE", pattern="^(TWSE|TPEX)$"),
+    limit: int = Query(default=80, ge=1, le=200),
+):
+    try:
+        return refresh_market_index_list(market=market, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index list source unavailable: {exc}",
+            detail=f"Index list refresh failed: {exc}",
         ) from exc
 
 
@@ -196,14 +221,16 @@ def get_indices_list(
 def get_index_intraday_trend(
     index_id: str,
     acquisition_policy: str = Query(
-        default="prefer_live",
+        default="cache_only",
         pattern="^(cache_only|prefer_live|require_live)$",
     ),
+    db: Session = Depends(get_db),
 ):
     try:
         return get_market_index_intraday(
             index_id=index_id,
             acquisition_policy=acquisition_policy,
+            db=db,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -230,10 +257,32 @@ def get_index_contributions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.post(
+    "/indices/{index_id}/contributions/refresh",
+    response_model=MarketIndexContributionRead,
+)
+def refresh_index_contributions(
+    index_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_market_index_contributions(
+            index_id=index_id,
+            limit=limit,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index contribution source unavailable: {exc}",
+            detail=f"Index contribution refresh failed: {exc}",
         ) from exc
 
 
@@ -256,10 +305,34 @@ def get_index_ohlc_chart_data(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.post(
+    "/indices/{index_id}/ohlc/refresh",
+    response_model=MarketOhlcChartRead,
+)
+def refresh_index_ohlc_chart_data(
+    index_id: str,
+    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    bars: int = Query(default=90, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_market_index_ohlc_chart_data(
+            index_id=index_id,
+            timeframe=timeframe,
+            bars=bars,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index chart source unavailable: {exc}",
+            detail=f"Index chart refresh failed: {exc}",
         ) from exc
 
 
@@ -273,6 +346,9 @@ __all__ = [
     "get_taiwan_market_volume_state",
     "queue_indices_summary_refresh",
     "refresh_indices_summary",
+    "refresh_indices_list",
+    "refresh_index_contributions",
+    "refresh_index_ohlc_chart_data",
     "refresh_index_daily_stats",
     "refresh_official_index_daily",
     "router",

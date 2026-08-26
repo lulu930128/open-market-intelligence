@@ -14,13 +14,21 @@ from app.market.tw_dataset_catalog import (
     TaiwanDatasetLineageStatus,
     TaiwanExpectedStatePolicy,
 )
+from app.market.tw_intraday_capabilities import (
+    TW_INTRADAY_BARS_CAPABILITY_ID,
+    TW_INTRADAY_DESCRIPTORS,
+)
 from app.market_data.contracts import Market
 from app.market_data.registry import DATASET_REGISTRY, RefreshBounds
 
 
 EXPECTED_TW_DATASETS = {
     "tw.quote.snapshot",
+    "tw.quote.order_book.snapshot",
+    "tw.quote.auction.snapshot",
     "tw.intraday.bars",
+    "tw.market_index.current",
+    "tw.market_breadth.current",
     "tw.daily.ohlcv",
     "tw.technical.daily",
     "tw.daily.ohlcv.full_market",
@@ -139,6 +147,11 @@ def test_platform_owned_datasets_have_canonical_lineage_and_repair_paths() -> No
     }
     assert set(platform_owned) == {
         "tw.quote.snapshot",
+        "tw.quote.order_book.snapshot",
+        "tw.quote.auction.snapshot",
+        "tw.intraday.bars",
+        "tw.market_index.current",
+        "tw.market_breadth.current",
         "tw.daily.ohlcv",
         "tw.daily.ohlcv.full_market",
         "tw.market_breadth.daily",
@@ -157,7 +170,15 @@ def test_platform_owned_datasets_have_canonical_lineage_and_repair_paths() -> No
     assert all(
         dataset.repairable
         for dataset_id, dataset in platform_owned.items()
-        if dataset_id not in {"tw.quote.snapshot", "tw.technical.daily"}
+        if dataset_id
+        not in {
+            "tw.quote.snapshot",
+            "tw.quote.order_book.snapshot",
+            "tw.quote.auction.snapshot",
+            "tw.market_index.current",
+            "tw.market_breadth.current",
+            "tw.technical.daily",
+        }
     )
 
 
@@ -169,7 +190,11 @@ def test_existing_shared_tw_registry_entries_do_not_drift_from_market_catalog() 
     }
     assert set(shared_tw) == {
         "tw.quote.snapshot",
+        "tw.quote.order_book.snapshot",
+        "tw.quote.auction.snapshot",
         "tw.intraday.bars",
+        "tw.market_index.current",
+        "tw.market_breadth.current",
         "tw.daily.ohlcv",
         "tw.daily.ohlcv.full_market",
         "tw.market_breadth.daily",
@@ -183,6 +208,27 @@ def test_existing_shared_tw_registry_entries_do_not_drift_from_market_catalog() 
         assert shared.repairable == market_owned.repairable
         assert shared.refresh_operation == market_owned.refresh_operation
         assert shared.refresh_bounds == market_owned.refresh_bounds
+
+
+def test_tw_intraday_capability_id_is_canonical_across_contract_owners() -> None:
+    shared = DATASET_REGISTRY.get("tw.intraday.bars")
+    market_owned = TW_DATASET_CATALOG.get("tw.intraday.bars")
+
+    assert TW_INTRADAY_BARS_CAPABILITY_ID == "intraday.bars"
+    assert shared.capability_ids == (TW_INTRADAY_BARS_CAPABILITY_ID,)
+    assert market_owned.capability_ids == (TW_INTRADAY_BARS_CAPABILITY_ID,)
+    assert {
+        descriptor.capability_id for descriptor in TW_INTRADAY_DESCRIPTORS
+    } == {TW_INTRADAY_BARS_CAPABILITY_ID}
+
+
+def test_current_breadth_scope_does_not_claim_official_full_market() -> None:
+    breadth = TW_DATASET_CATALOG.get("tw.market_breadth.current")
+
+    assert (
+        breadth.scope_kind
+        == "TWSE_or_TPEX_full_market_registered_stock_universe"
+    )
 
 
 def test_contract_rejects_lineage_gap_repairability() -> None:

@@ -13,11 +13,11 @@ from app.db.models import (
     FinancialMetricQuarterly,
     InstitutionalTradeDaily,
     MarginTradingDaily,
-    MarketDailyPrice,
     MonthlyRevenue,
     ShareholdingDistributionWeekly,
 )
 from app.market.taiwan_rules import expected_date_for_dataset
+from app.market.tw_daily_freshness import read_taiwan_daily_freshness
 
 
 def _json_value(value: Any) -> Any:
@@ -63,6 +63,33 @@ def _table_state(
     }
 
 
+def _canonical_daily_table_state(evidence) -> dict[str, Any]:
+    status = evidence.health.status.value
+    freshness = {
+        "healthy": "current",
+        "stale": "stale",
+        "missing": "missing",
+        "partial": "partial",
+        "not_applicable": "not_applicable",
+        "unavailable": "unavailable",
+        "unknown": "unknown",
+    }.get(status, "unknown")
+    return {
+        "latest": _json_value(evidence.latest_date),
+        "row_count": evidence.row_count,
+        "availability": (
+            "available"
+            if evidence.latest_date is not None and evidence.row_count > 0
+            else "missing"
+        ),
+        "freshness": freshness,
+        "expected": _json_value(evidence.health.expected_date),
+        "canonical_dataset_id": evidence.health.dataset_id,
+        "dataset_health": evidence.health.model_dump(mode="json"),
+        "limitations": list(evidence.limitations),
+    }
+
+
 def read_data_freshness(
     db: Session,
     stock_id: str | None = None,
@@ -99,12 +126,13 @@ def read_data_freshness(
         )
         .first()
     )
+    daily_freshness = read_taiwan_daily_freshness(
+        db,
+        stock_id=stock_id,
+        checked_at=checked_at,
+    )
 
     table_values = {
-        "market_daily_price": (
-            latest(MarketDailyPrice, MarketDailyPrice.trade_date),
-            count(MarketDailyPrice),
-        ),
         "institutional_trade_daily": (
             latest(InstitutionalTradeDaily, InstitutionalTradeDaily.trade_date),
             count(InstitutionalTradeDaily),
@@ -131,21 +159,31 @@ def read_data_freshness(
         ),
     }
     tables = {
+        "market_daily_price": _canonical_daily_table_state(daily_freshness),
+        **{
         name: _table_state(
             latest=latest_value,
             row_count=row_count,
             expected=expected_date_for_dataset(name, now=checked_at),
         )
         for name, (latest_value, row_count) in table_values.items()
+        },
     }
     missing = [name for name, info in tables.items() if info["availability"] == "missing"]
     stale = [name for name, info in tables.items() if info["freshness"] == "stale"]
+    partial = [
+        name
+        for name, info in tables.items()
+        if info["freshness"] in {"partial", "unavailable"}
+    ]
     unknown = [name for name, info in tables.items() if info["freshness"] == "unknown"]
     overall_freshness = (
         "missing"
         if missing
         else "stale"
         if stale
+        else "partial"
+        if partial
         else "unknown"
         if unknown
         else "current"
@@ -155,6 +193,8 @@ def read_data_freshness(
     ]
     if stale:
         warnings.append(f"Stale local datasets: {', '.join(stale)}.")
+    if partial:
+        warnings.append(f"Partial or unavailable datasets: {', '.join(partial)}.")
     if unknown:
         warnings.append(f"Freshness calendar is not defined for: {', '.join(unknown)}.")
     slot_status = {
@@ -162,6 +202,9 @@ def read_data_freshness(
         "stale": "stale",
         "unknown": "partial",
         "missing": "missing",
+        "partial": "partial",
+        "unavailable": "failed",
+        "not_applicable": "not_applicable",
     }
     slots = {
         name: slot_envelope(
@@ -180,7 +223,7 @@ def read_data_freshness(
         for name, info in tables.items()
     }
     slots["data_quality"] = slot_envelope(
-        status="partial" if missing or stale or unknown else "ready",
+        status="partial" if missing or stale or partial or unknown else "ready",
         capability="local_database_coverage",
         payload_ref="tables",
         payload_level="compact",
@@ -224,7 +267,13 @@ def read_data_freshness(
         warnings=warnings,
         freshness={
             "status": overall_freshness,
-            "is_current": False if stale else True if not missing and not unknown else None,
+            "is_current": (
+                False
+                if stale or partial
+                else True
+                if not missing and not unknown
+                else None
+            ),
             "missing": missing,
             "warnings": warnings,
         },

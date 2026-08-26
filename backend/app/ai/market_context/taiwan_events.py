@@ -3,6 +3,11 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Callable, Mapping
 
+from app.market.tw_instrument_trading_policy import (
+    TaiwanInstrumentTradingMode,
+    resolve_taiwan_instrument_trading_policy,
+)
+
 
 STOCK_EVENT_CAPABILITIES = frozenset(
     {
@@ -321,27 +326,18 @@ def _regulation_payloads(
         ),
         "warnings": [warning] if warning else [],
     }
-    trustworthy = cache_status not in _MISSING_CACHE_STATUSES
-    active = result.get("is_active") is True
+    trading_policy = resolve_taiwan_instrument_trading_policy(result)
+    trustworthy = trading_policy.market_semantics_usable
+    active = (
+        trading_policy.trading_mode
+        is TaiwanInstrumentTradingMode.DISPOSITION_BATCH_AUCTION
+    )
     restrictions = {
         "kind": "tw_stock_trading_restrictions",
         "status": status,
         "stock_id": disposition["stock_id"],
         "as_of": disposition["as_of"],
-        "trading_mode": (
-            "disposition_batch_auction"
-            if trustworthy and active
-            else "continuous"
-            if trustworthy
-            else "unknown"
-        ),
-        "analysis_basis": (
-            "effective_matches"
-            if trustworthy and active
-            else "time_bars"
-            if trustworthy
-            else "unknown"
-        ),
+        **trading_policy.projection(),
         "matching_interval_minutes": (
             result.get("matching_interval_minutes")
             if trustworthy and active

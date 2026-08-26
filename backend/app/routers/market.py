@@ -7,22 +7,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from app.market.daily_metrics_backfill import (
-    ensure_latest_daily_metrics,
-    ensure_stock_daily_metrics,
-)
 from app.market.daily_ohlcv_platform import (
     TaiwanDailyRefreshResult,
     refresh_taiwan_official_daily,
 )
 from app.market.official_breadth_platform import read_taiwan_official_breadth
-from app.market.fundamental_metrics_backfill import (
-    ensure_stock_fundamental_metrics,
-)
 from app.market.financial_contract import build_database_financial_contract
-from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
-from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
-from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_BROKER_BRANCH,
     TAIWAN_DATASET_DAILY_PRICE,
@@ -44,29 +34,32 @@ from app.settings.refresh_execution import (
     resolve_market_refresh_interval_seconds,
     resolve_subresource_refresh_interval_seconds,
 )
-from app.market.institutional_holding_ratios import (
-    InstitutionalHoldingRatioFetchError,
-    fetch_institutional_holding_ratios,
+from app.market.institutional_holding_ratio_cache import (
+    read_cached_institutional_holding_ratios,
+    refresh_cached_institutional_holding_ratios,
 )
+from app.market.institutional_holding_ratios import InstitutionalHoldingRatioFetchError
 from app.market.intraday import get_intraday_trend, get_market_intraday_history
+from app.market.tw_intraday_platform import refresh_taiwan_intraday_bars
 from app.market.index_contract_snapshot import (
     get_taiwan_index_contract_replay,
 )
-from app.market.quote_depth import (
-    get_taiwan_quote_contract_replay,
-    get_taiwan_stock_quote_depth,
+from app.market.quote_contract_capture import get_taiwan_quote_contract_replay
+from app.market.quote_depth import get_taiwan_stock_quote_depth
+from app.market.tw_kgi_data_operations import run_taiwan_kgi_data_backfill
+from app.market.tw_realtime_lease_platform import (
+    acquire_taiwan_realtime_quote_lease,
+    heartbeat_taiwan_realtime_quote_lease,
+    release_taiwan_realtime_quote_lease,
+    summarize_taiwan_realtime_quote_leases,
 )
-from app.market.kgi_market_data import backfill_taiwan_kgi_market_data
-from app.market.providers.kgi_superpy import (
-    acquire_kgi_superpy_quote_lease,
-    get_kgi_superpy_quote_lease_summary,
-    get_kgi_superpy_market_stream_snapshot,
-    heartbeat_kgi_superpy_quote_lease,
-    release_kgi_superpy_quote_lease,
+from app.market.taiwan_realtime_platform import refresh_taiwan_realtime_snapshot
+from app.market.tw_realtime_stream_platform import (
+    read_taiwan_realtime_market_stream,
 )
+from app.market_data.policies import RealtimePolicy
 from app.market.market_chips import (
     MarketChipFetchError,
-    ensure_market_chip_daily,
     get_latest_market_chip_daily,
     list_market_chip_daily,
     market_chip_daily_to_dict,
@@ -226,6 +219,22 @@ def _split_categories(value: str) -> list[str]:
 
 def _split_index_ids(value: str) -> list[str]:
     return [item.strip().upper() for item in value.split(",") if item.strip()]
+
+
+def _reject_get_side_effect_request(
+    requested: bool,
+    *,
+    read_path: str,
+    command_path: str,
+) -> None:
+    if requested:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"GET {read_path} is cache-only. "
+                f"Use {command_path} for an explicit refresh or backfill."
+            ),
+        )
 
 
 @router.get("/calendar-status", response_model=MarketCalendarStatusRead)
@@ -1078,19 +1087,24 @@ def get_stock_ohlc_chart_data(
     stock_id: str,
     timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     bars: int = Query(default=90, ge=1, le=5000),
-    ensure_history: bool = False,
+    ensure_history: bool = Query(default=False, deprecated=True),
     include_intraday: bool = False,
     to_date: date | None = None,
     sleep_seconds: float = Query(default=0.08, ge=0, le=2),
     db: Session = Depends(get_db),
 ):
     try:
+        _reject_get_side_effect_request(
+            ensure_history,
+            read_path="/ohlc/{stock_id}",
+            command_path="POST /daily/{stock_id}/refresh-official",
+        )
         return list_stock_ohlc_chart_data(
             db=db,
             stock_id=stock_id,
             timeframe=timeframe,
             bars=bars,
-            ensure_history=ensure_history,
+            ensure_history=False,
             include_intraday=include_intraday,
             to_date=to_date,
             sleep_seconds=sleep_seconds,
@@ -1115,16 +1129,60 @@ def get_stock_intraday_history(
     stock_id: str,
     interval: str = Query(default="1m", pattern="^(1m|5m|15m|30m|1h|4h)$"),
     range_value: str = Query(default="auto", alias="range", pattern="^(auto|1d|5d|1mo|3mo)$"),
-    refresh: bool = True,
+    refresh: bool = Query(default=False, deprecated=True),
     db: Session = Depends(get_db),
 ):
     try:
+        _reject_get_side_effect_request(
+            refresh,
+            read_path="/intraday/{stock_id}/history",
+            command_path="POST /intraday/{stock_id}/history/refresh",
+        )
         return get_market_intraday_history(
             db=db,
             stock_id=stock_id,
             interval=interval,
             range_value=range_value,
-            refresh=refresh,
+            refresh=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/intraday/{stock_id}/history/refresh",
+    response_model=MarketIntradayChartRead,
+)
+def refresh_stock_intraday_history(
+    stock_id: str,
+    interval: str = Query(default="1m", pattern="^(1m|5m|15m|30m|1h|4h)$"),
+    range_value: str = Query(
+        default="auto",
+        alias="range",
+        pattern="^(auto|1d|5d|1mo|3mo)$",
+    ),
+    policy: Literal["prefer_live", "require_live"] = Query(
+        default="prefer_live"
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        refresh_taiwan_intraday_bars(
+            db,
+            stock_id=stock_id,
+            interval=interval,
+            range_value=range_value,
+            policy=RealtimePolicy(policy),
+        )
+        return get_market_intraday_history(
+            db=db,
+            stock_id=stock_id,
+            interval=interval,
+            range_value=range_value,
+            refresh=False,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -1136,14 +1194,48 @@ def get_stock_intraday_history(
 @router.get("/quote-depth/{stock_id}", response_model=TaiwanStockQuoteDepthRead)
 def get_stock_quote_depth(
     stock_id: str,
-    refresh: bool = True,
+    refresh: bool = Query(default=False, deprecated=True),
     db: Session = Depends(get_db),
 ):
     try:
+        _reject_get_side_effect_request(
+            refresh,
+            read_path="/quote-depth/{stock_id}",
+            command_path="POST /quote-depth/{stock_id}/refresh",
+        )
         return get_taiwan_stock_quote_depth(
             db=db,
             stock_id=stock_id,
-            refresh=refresh,
+            refresh=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/quote-depth/{stock_id}/refresh",
+    response_model=TaiwanStockQuoteDepthRead,
+)
+def refresh_stock_quote_depth(
+    stock_id: str,
+    policy: Literal["prefer_live", "require_live"] = Query(
+        default="prefer_live"
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        refresh_taiwan_realtime_snapshot(
+            db,
+            stock_id=stock_id,
+            policy=RealtimePolicy(policy),
+        )
+        return get_taiwan_stock_quote_depth(
+            db=db,
+            stock_id=stock_id,
+            refresh=False,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -1157,7 +1249,7 @@ def get_stock_quote_depth(
     response_model=TaiwanRealtimeQuoteLeaseSummaryRead,
 )
 def get_realtime_quote_lease_summary():
-    return get_kgi_superpy_quote_lease_summary()
+    return summarize_taiwan_realtime_quote_leases()
 
 
 @router.post(
@@ -1186,8 +1278,9 @@ def create_realtime_quote_lease(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unknown Taiwan stock id: {stock_id}",
         )
-    return acquire_kgi_superpy_quote_lease(
-        stock_id,
+    return acquire_taiwan_realtime_quote_lease(
+        db,
+        stock_id=stock_id,
         owner_kind=request.owner_kind,
     )
 
@@ -1196,8 +1289,11 @@ def create_realtime_quote_lease(
     "/realtime-quote-leases/{lease_id}",
     response_model=TaiwanRealtimeQuoteLeaseRead,
 )
-def heartbeat_realtime_quote_lease(lease_id: str):
-    lease = heartbeat_kgi_superpy_quote_lease(lease_id)
+def heartbeat_realtime_quote_lease(
+    lease_id: str,
+    db: Session = Depends(get_db),
+):
+    lease = heartbeat_taiwan_realtime_quote_lease(db, lease_id)
     if lease is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1211,7 +1307,7 @@ def heartbeat_realtime_quote_lease(lease_id: str):
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def delete_realtime_quote_lease(lease_id: str):
-    release_kgi_superpy_quote_lease(lease_id)
+    release_taiwan_realtime_quote_lease(lease_id)
     return None
 
 
@@ -1237,7 +1333,7 @@ def backfill_kgi_market_data(
             detail=f"Unknown Taiwan stock id: {normalized}",
         )
     try:
-        return backfill_taiwan_kgi_market_data(
+        return run_taiwan_kgi_data_backfill(
             stock_id=normalized,
             request=request,
         )
@@ -1262,7 +1358,7 @@ async def _iter_taiwan_realtime_quote_sse(
     interval_seconds = interval_ms / 1000
     while not await request.is_disconnected():
         payload = TaiwanRealtimeMarketStreamRead.model_validate(
-            get_kgi_superpy_market_stream_snapshot(stock_id)
+            read_taiwan_realtime_market_stream(stock_id)
         ).model_dump(mode="json")
         yield _taiwan_realtime_sse_event("snapshot", payload)
         await asyncio.sleep(interval_seconds)
@@ -1280,7 +1376,7 @@ def get_realtime_quote_stream_snapshot(
     diagnostic_limit: int = Query(default=0, ge=0, le=240),
 ):
     try:
-        return get_kgi_superpy_market_stream_snapshot(
+        return read_taiwan_realtime_market_stream(
             stock_id,
             recent_trade_limit=recent_trade_limit,
             auction_limit=auction_limit,
@@ -1301,7 +1397,7 @@ async def stream_realtime_quote_snapshots(
     interval_ms: int = Query(default=500, ge=250, le=5000),
 ):
     try:
-        get_kgi_superpy_market_stream_snapshot(stock_id)
+        read_taiwan_realtime_market_stream(stock_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1410,18 +1506,39 @@ def get_stock_technical_report(
 @router.get("/overnight-impact/{stock_id}", response_model=OvernightImpactRead)
 def get_stock_overnight_impact(
     stock_id: str,
-    refresh: bool = True,
+    refresh: bool = Query(default=False, deprecated=True),
     max_refresh_symbols: int = Query(default=8, ge=1, le=8),
     db: Session = Depends(get_db),
 ):
     try:
-        if not refresh:
-            return build_us_overnight_impact_report(
-                db=db,
-                stock_id=stock_id,
-                suppress_stale_signal=True,
-            )
+        _reject_get_side_effect_request(
+            refresh,
+            read_path="/overnight-impact/{stock_id}",
+            command_path="POST /overnight-impact/{stock_id}/refresh",
+        )
+        del max_refresh_symbols
+        return build_us_overnight_impact_report(
+            db=db,
+            stock_id=stock_id,
+            suppress_stale_signal=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
+
+@router.post(
+    "/overnight-impact/{stock_id}/refresh",
+    response_model=OvernightImpactRead,
+)
+def refresh_stock_overnight_impact(
+    stock_id: str,
+    max_refresh_symbols: int = Query(default=8, ge=1, le=8),
+    db: Session = Depends(get_db),
+):
+    try:
         return ensure_current_us_overnight_impact_report(
             db=db,
             stock_id=stock_id,
@@ -1481,21 +1598,19 @@ def refresh_market_chip_daily_api(
 @router.get("/market-chips/latest", response_model=MarketChipDailyRead)
 def get_latest_market_chip_daily_api(
     index_id: str = Query(default="TAIEX", pattern="^(TAIEX|TPEX)$"),
-    ensure_latest: bool = False,
+    ensure_latest: bool = Query(default=False, deprecated=True),
     include_today: bool | None = None,
     force: bool = False,
     db: Session = Depends(get_db),
 ):
     try:
-        if ensure_latest:
-            row = ensure_market_chip_daily(
-                db=db,
-                index_id=index_id,
-                include_today=include_today,
-                force=force,
-            )
-        else:
-            row = get_latest_market_chip_daily(db=db, index_id=index_id)
+        _reject_get_side_effect_request(
+            ensure_latest,
+            read_path="/market-chips/latest",
+            command_path="POST /market-chips/refresh",
+        )
+        del include_today, force
+        row = get_latest_market_chip_daily(db=db, index_id=index_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1544,22 +1659,17 @@ def get_latest_institutional_trades(limit: int = Query(default=100, ge=1, le=100
 @router.get("/institutional/{stock_id}/latest", response_model=InstitutionalTradeDailyRead)
 def get_latest_stock_institutional_trade_api(
     stock_id: str,
-    ensure_daily: bool = False,
+    ensure_daily: bool = Query(default=False, deprecated=True),
     include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_daily:
-        resolved_include_today = _resolve_daily_metric_include_today(
-            categories=["institutional_trade"],
-            include_today=include_today,
-        )
-        ensure_latest_daily_metrics(
-            db=db,
-            categories=["institutional_trade"],
-            include_today=resolved_include_today,
-            sleep_seconds=sleep_seconds,
-        )
+    _reject_get_side_effect_request(
+        ensure_daily,
+        read_path="/institutional/{stock_id}/latest",
+        command_path="POST /backfill/daily-metrics",
+    )
+    del include_today, sleep_seconds
 
     result = get_latest_stock_institutional_trade(db=db, stock_id=stock_id)
     if result is None:
@@ -1573,31 +1683,18 @@ def get_stock_institutional_trade_history(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=250, ge=1, le=5000),
-    ensure_history: bool = False,
+    ensure_history: bool = Query(default=False, deprecated=True),
     lookback_days: int = Query(default=365, ge=1, le=5000),
     include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_history:
-        resolved_include_today = _resolve_daily_metric_include_today(
-            categories=["institutional_trade"],
-            include_today=include_today,
-        )
-        start_date, end_date = _daily_metric_history_range(
-            from_date=from_date,
-            to_date=to_date,
-            lookback_days=lookback_days,
-            include_today=resolved_include_today,
-        )
-        ensure_stock_daily_metrics(
-            db=db,
-            stock_id=stock_id,
-            start_date=start_date,
-            end_date=end_date,
-            categories=["institutional_trade"],
-            sleep_seconds=sleep_seconds,
-        )
+    _reject_get_side_effect_request(
+        ensure_history,
+        read_path="/institutional/{stock_id}/history",
+        command_path="POST /backfill/daily-metrics/{stock_id}/history",
+    )
+    del lookback_days, include_today, sleep_seconds
 
     return list_stock_institutional_trade_history(db=db, stock_id=stock_id, from_date=from_date, to_date=to_date, limit=limit, ascending=True)
 
@@ -1607,8 +1704,25 @@ def get_stock_institutional_trade_history(
     response_model=InstitutionalHoldingRatioRead,
 )
 def get_stock_institutional_holding_ratios(stock_id: str):
+    result = read_cached_institutional_holding_ratios(stock_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Cached institutional holding ratios for stock_id='{stock_id}' "
+                "were not found. Use the explicit refresh route."
+            ),
+        )
+    return result
+
+
+@router.post(
+    "/institutional/{stock_id}/holding-ratios/refresh",
+    response_model=InstitutionalHoldingRatioRead,
+)
+def refresh_stock_institutional_holding_ratios(stock_id: str):
     try:
-        return fetch_institutional_holding_ratios(stock_id=stock_id)
+        return refresh_cached_institutional_holding_ratios(stock_id)
     except InstitutionalHoldingRatioFetchError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -1629,7 +1743,39 @@ def get_stock_broker_branch_daily(
     stock_id: str,
     trade_date: date | None = None,
     days: int = Query(default=1, ge=1, le=120),
-    ensure_daily: bool = False,
+    ensure_daily: bool = Query(default=False, deprecated=True),
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        _reject_get_side_effect_request(
+            ensure_daily,
+            read_path="/broker-branches/{stock_id}/daily",
+            command_path="POST /broker-branches/{stock_id}/daily/refresh",
+        )
+        return get_broker_branch_trade_summary(
+            db=db,
+            stock_id=stock_id,
+            trade_date=trade_date,
+            days=days,
+            ensure_daily=False,
+            force=False,
+        )
+    except BrokerBranchFetchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/broker-branches/{stock_id}/daily/refresh",
+    response_model=BrokerBranchTradeDailySummaryRead,
+)
+def refresh_stock_broker_branch_daily(
+    stock_id: str,
+    trade_date: date | None = None,
+    days: int = Query(default=1, ge=1, le=120),
     force: bool = False,
     db: Session = Depends(get_db),
 ):
@@ -1639,7 +1785,7 @@ def get_stock_broker_branch_daily(
             stock_id=stock_id,
             trade_date=trade_date,
             days=days,
-            ensure_daily=ensure_daily,
+            ensure_daily=True,
             force=force,
         )
     except BrokerBranchFetchError as exc:
@@ -1661,22 +1807,17 @@ def get_latest_margin_trades(
 @router.get("/margin/{stock_id}/latest", response_model=MarginTradingDailyRead)
 def get_latest_stock_margin_trade_api(
     stock_id: str,
-    ensure_daily: bool = False,
+    ensure_daily: bool = Query(default=False, deprecated=True),
     include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_daily:
-        resolved_include_today = _resolve_daily_metric_include_today(
-            categories=["margin_trading"],
-            include_today=include_today,
-        )
-        ensure_latest_daily_metrics(
-            db=db,
-            categories=["margin_trading"],
-            include_today=resolved_include_today,
-            sleep_seconds=sleep_seconds,
-        )
+    _reject_get_side_effect_request(
+        ensure_daily,
+        read_path="/margin/{stock_id}/latest",
+        command_path="POST /backfill/daily-metrics",
+    )
+    del include_today, sleep_seconds
 
     result = get_latest_stock_margin_trade(db=db, stock_id=stock_id)
 
@@ -1695,31 +1836,18 @@ def get_stock_margin_trade_history(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=250, ge=1, le=5000),
-    ensure_history: bool = False,
+    ensure_history: bool = Query(default=False, deprecated=True),
     lookback_days: int = Query(default=365, ge=1, le=5000),
     include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_history:
-        resolved_include_today = _resolve_daily_metric_include_today(
-            categories=["margin_trading"],
-            include_today=include_today,
-        )
-        start_date, end_date = _daily_metric_history_range(
-            from_date=from_date,
-            to_date=to_date,
-            lookback_days=lookback_days,
-            include_today=resolved_include_today,
-        )
-        ensure_stock_daily_metrics(
-            db=db,
-            stock_id=stock_id,
-            start_date=start_date,
-            end_date=end_date,
-            categories=["margin_trading"],
-            sleep_seconds=sleep_seconds,
-        )
+    _reject_get_side_effect_request(
+        ensure_history,
+        read_path="/margin/{stock_id}/history",
+        command_path="POST /backfill/daily-metrics/{stock_id}/history",
+    )
+    del lookback_days, include_today, sleep_seconds
 
     return list_stock_margin_trade_history(
         db=db,
@@ -1762,17 +1890,16 @@ def get_stock_chip_coverage_api(stock_id: str, db: Session = Depends(get_db)):
 )
 def get_latest_stock_shareholding_distribution_api(
     stock_id: str,
-    ensure_latest: bool = False,
+    ensure_latest: bool = Query(default=False, deprecated=True),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_latest:
-        ensure_stock_fundamental_metrics(
-            db=db,
-            stock_id=stock_id,
-            categories=["shareholding_distribution"],
-            sleep_seconds=sleep_seconds,
-        )
+    _reject_get_side_effect_request(
+        ensure_latest,
+        read_path="/shareholding/{stock_id}/latest",
+        command_path="POST /backfill/fundamentals/{stock_id}",
+    )
+    del sleep_seconds
 
     return list_latest_stock_shareholding_distribution(db=db, stock_id=stock_id)
 
@@ -1786,20 +1913,17 @@ def get_stock_shareholding_history_api(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=5000, ge=1, le=20000),
-    ensure_history: bool = False,
+    ensure_history: bool = Query(default=False, deprecated=True),
     lookback_weeks: int = Query(default=52, ge=1, le=60),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_history:
-        ensure_stock_shareholding_history(
-            db=db,
-            stock_id=stock_id,
-            from_date=from_date,
-            to_date=to_date,
-            lookback_weeks=lookback_weeks,
-            sleep_seconds=sleep_seconds,
-        )
+    _reject_get_side_effect_request(
+        ensure_history,
+        read_path="/shareholding/{stock_id}/history",
+        command_path="POST /backfill/shareholding/{stock_id}/history",
+    )
+    del lookback_weeks, sleep_seconds
 
     return list_stock_shareholding_history(
         db=db,
@@ -1830,17 +1954,16 @@ def get_shareholding_distributions(
 @router.get("/revenue/{stock_id}/latest", response_model=MonthlyRevenueRead)
 def get_latest_stock_monthly_revenue_api(
     stock_id: str,
-    ensure_latest: bool = False,
+    ensure_latest: bool = Query(default=False, deprecated=True),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_latest:
-        ensure_stock_fundamental_metrics(
-            db=db,
-            stock_id=stock_id,
-            categories=["monthly_revenue"],
-            sleep_seconds=sleep_seconds,
-        )
+    _reject_get_side_effect_request(
+        ensure_latest,
+        read_path="/revenue/{stock_id}/latest",
+        command_path="POST /backfill/fundamentals/{stock_id}",
+    )
+    del sleep_seconds
 
     result = get_latest_stock_monthly_revenue(db=db, stock_id=stock_id)
 
@@ -1859,21 +1982,17 @@ def get_stock_monthly_revenue_history_api(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=120, ge=1, le=5000),
-    ensure_history: bool = False,
+    ensure_history: bool = Query(default=False, deprecated=True),
     backfill_months: int | None = Query(default=None, ge=1, le=120),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_history:
-        ensure_stock_monthly_revenue_history(
-            db=db,
-            stock_id=stock_id,
-            from_period=from_date,
-            to_period=to_date,
-            lookback_months=backfill_months or min(limit, 120),
-            sleep_seconds=sleep_seconds,
-            skip_existing=True,
-        )
+    _reject_get_side_effect_request(
+        ensure_history,
+        read_path="/revenue/{stock_id}/history",
+        command_path="POST /backfill/revenue/{stock_id}/history",
+    )
+    del backfill_months, sleep_seconds
 
     return list_stock_monthly_revenue_history(
         db=db,
@@ -1905,17 +2024,16 @@ def get_monthly_revenues(
 @router.get("/financials/{stock_id}/latest", response_model=FinancialMetricQuarterlyRead)
 def get_latest_stock_financial_metric_api(
     stock_id: str,
-    ensure_latest: bool = False,
+    ensure_latest: bool = Query(default=False, deprecated=True),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_latest:
-        ensure_stock_fundamental_metrics(
-            db=db,
-            stock_id=stock_id,
-            categories=["financial_metrics"],
-            sleep_seconds=sleep_seconds,
-        )
+    _reject_get_side_effect_request(
+        ensure_latest,
+        read_path="/financials/{stock_id}/latest",
+        command_path="POST /backfill/fundamentals/{stock_id}",
+    )
+    del sleep_seconds
 
     result = get_latest_stock_financial_metric(db=db, stock_id=stock_id)
 
@@ -1932,19 +2050,17 @@ def get_latest_stock_financial_metric_api(
 def get_stock_financial_metric_history_api(
     stock_id: str,
     limit: int = Query(default=40, ge=1, le=400),
-    ensure_history: bool = False,
+    ensure_history: bool = Query(default=False, deprecated=True),
     backfill_quarters: int | None = Query(default=None, ge=1, le=80),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    if ensure_history:
-        ensure_stock_financial_metrics_history(
-            db=db,
-            stock_id=stock_id,
-            lookback_quarters=backfill_quarters or min(limit, 80),
-            sleep_seconds=sleep_seconds,
-            skip_existing=True,
-        )
+    _reject_get_side_effect_request(
+        ensure_history,
+        read_path="/financials/{stock_id}/history",
+        command_path="POST /backfill/financials/{stock_id}/history",
+    )
+    del backfill_quarters, sleep_seconds
 
     return list_stock_financial_metric_history(
         db=db,

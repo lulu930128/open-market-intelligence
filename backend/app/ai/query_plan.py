@@ -46,7 +46,7 @@ QUOTE_ONLY_EXCLUDED_READERS = (
     "build_stock_technical_report",
     "build_us_overnight_impact_report",
     "get_market_intraday_history",
-    "get_taiwan_stock_quote_depth",
+    "read_taiwan_quote_evidence",
 )
 BROKER_BRANCH_REQUIRED_CAPABILITIES = (
     "target_identity",
@@ -87,7 +87,7 @@ EVENT_ONLY_EXCLUDED_CAPABILITIES = (
     "cross_market_context",
 )
 EVENT_ONLY_EXCLUDED_READERS = (
-    "get_latest_stock_daily_price",
+    "read_taiwan_latest_daily_evidence",
     *QUOTE_ONLY_EXCLUDED_READERS,
 )
 DOMAIN_HINTS = {
@@ -1120,11 +1120,11 @@ def build_query_plan(
     ):
         required_capabilities = list(QUOTE_ONLY_REQUIRED_CAPABILITIES)
         excluded_capabilities = list(QUOTE_ONLY_EXCLUDED_CAPABILITIES)
-        required_readers = ["get_stock", "get_latest_stock_daily_price"]
+        required_readers = ["get_stock", "read_taiwan_latest_daily_evidence"]
         excluded_readers = list(QUOTE_ONLY_EXCLUDED_READERS)
         freshness_scope = ["stock_master", "market_daily_price"]
         domain_reader_contract = {
-            "quote": ("quote_snapshot", "get_taiwan_stock_quote_depth"),
+            "quote": ("quote_snapshot", "read_taiwan_quote_evidence"),
             "intraday": ("live_intraday_bars", "get_market_intraday_history"),
         }
         for domain in requested_domains:

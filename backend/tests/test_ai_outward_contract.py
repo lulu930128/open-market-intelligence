@@ -545,7 +545,9 @@ class QueryPlanContractTests(unittest.TestCase):
             build_us_overnight_impact_report=excluded["build_us_overnight_impact_report"],
             get_broker_branch_trade_summary=excluded["get_broker_branch_trade_summary"],
             get_market_intraday_history=excluded["get_market_intraday_history"],
-            read_taiwan_public_quote=excluded["get_taiwan_stock_quote_depth"],
+            read_taiwan_quote_evidence=excluded["read_taiwan_quote_evidence"],
+            acquire_taiwan_quote_evidence=excluded["read_taiwan_quote_evidence"],
+            read_taiwan_latest_daily_evidence=market_service.get_latest_stock_daily_price,
             now=Mock(return_value="2026-07-19T00:00:00Z"),
         )
 
@@ -596,7 +598,13 @@ class QueryPlanContractTests(unittest.TestCase):
             build_us_overnight_impact_report=excluded["build_us_overnight_impact_report"],
             get_broker_branch_trade_summary=Mock(return_value=branch_summary),
             get_market_intraday_history=excluded["get_market_intraday_history"],
-            read_taiwan_public_quote=excluded["get_taiwan_stock_quote_depth"],
+            read_taiwan_quote_evidence=excluded["read_taiwan_quote_evidence"],
+            acquire_taiwan_quote_evidence=excluded["read_taiwan_quote_evidence"],
+            read_taiwan_latest_daily_evidence=Mock(
+                side_effect=AssertionError(
+                    "excluded reader called: read_taiwan_latest_daily_evidence"
+                )
+            ),
             now=Mock(return_value="2026-07-19T00:00:00Z"),
         )
 

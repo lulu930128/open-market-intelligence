@@ -58,7 +58,7 @@ from app.market_data.policies import DataPurpose, RealtimePolicy
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "tw_market_data"
 DAILY_DATE = date(2026, 8, 24)
-CACHE_REQUESTED_AT = datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc)
+CACHE_REQUESTED_AT = datetime(2026, 8, 25, 2, 31, tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -110,7 +110,7 @@ def _daily_refresh() -> RefreshRequirementV1:
         ),
         from_date=DAILY_DATE,
         to_date=DAILY_DATE,
-        requested_at=datetime(2026, 8, 25, 10, 30, tzinfo=timezone.utc),
+        requested_at=datetime(2026, 8, 25, 2, 30, tzinfo=timezone.utc),
         purpose=DataPurpose.REPAIR,
         max_provider_attempts=1,
         max_external_calls=1,
@@ -131,7 +131,7 @@ def _index_refresh() -> RefreshRequirementV1:
         ),
         from_date=DAILY_DATE,
         to_date=DAILY_DATE,
-        requested_at=datetime(2026, 8, 25, 10, 30, tzinfo=timezone.utc),
+        requested_at=datetime(2026, 8, 25, 2, 30, tzinfo=timezone.utc),
         purpose=DataPurpose.REPAIR,
         max_provider_attempts=1,
         max_external_calls=1,
@@ -175,7 +175,7 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
                         )
                     },
                     clock=lambda: datetime(
-                        2026, 8, 25, 10, 30, tzinfo=timezone.utc
+                    2026, 8, 25, 2, 30, tzinfo=timezone.utc
                     ),
                     monotonic=lambda: 10.0,
                 ),
@@ -196,7 +196,7 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
                         )
                     },
                     clock=lambda: datetime(
-                        2026, 8, 25, 10, 30, tzinfo=timezone.utc
+                    2026, 8, 25, 2, 30, tzinfo=timezone.utc
                     ),
                     monotonic=lambda: 10.0,
                 ),

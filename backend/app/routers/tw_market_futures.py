@@ -63,10 +63,17 @@ def list_taiwan_futures_products_api():
 def refresh_taiwan_futures_quotes_api(
     symbols: str = Query(default="TXF,MXF,TMF"),
     session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
-    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
+    provider: str | None = Query(
+        default=None,
+        pattern="^(auto|taifex_mis|kgi)$",
+        deprecated=True,
+    ),
     active_only: bool = True,
     db: Session = Depends(get_db),
 ):
+    # Provider selection is a market-platform concern. Keep the deprecated
+    # query parameter for compatibility, but never let it steer production.
+    del provider
     source_error: str | None = None
     try:
         rows = refresh_taiwan_futures_quotes(
@@ -74,7 +81,7 @@ def refresh_taiwan_futures_quotes_api(
             symbols=symbols,
             session=session,
             active_only=active_only,
-            provider=provider,
+            provider=None,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -88,13 +95,13 @@ def refresh_taiwan_futures_quotes_api(
             symbols=symbols,
             refresh=False,
             session=session,
-            provider=provider,
+            provider=None,
         )
         record_taiwan_futures_quote_refresh_issue(
             db=db,
             symbols=symbols,
             session=session,
-            provider=provider,
+            provider=None,
             exc=exc,
             cached_count=len(rows),
         )
@@ -115,48 +122,42 @@ def refresh_taiwan_futures_quotes_api(
 )
 def get_latest_taiwan_futures_quotes_api(
     symbols: str = Query(default="TXF,MXF,TMF"),
-    refresh: bool = False,
+    refresh: bool = Query(default=False, deprecated=True),
     session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
-    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
+    provider: str | None = Query(
+        default=None,
+        pattern="^(auto|taifex_mis|kgi)$",
+        deprecated=True,
+    ),
     db: Session = Depends(get_db),
 ):
-    source_error: str | None = None
+    if refresh:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "GET /tw-futures/latest is cache-only. "
+                "Use POST /tw-futures/refresh for an explicit refresh."
+            ),
+        )
+    del provider
     try:
         rows = get_latest_taiwan_futures_quotes(
             db=db,
             symbols=symbols,
-            refresh=refresh,
+            refresh=False,
             session=session,
-            provider=provider,
+            provider=None,
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except TaiwanFuturesFetchError as exc:
-        source_error = str(exc)
-        rows = get_latest_taiwan_futures_quotes(
-            db=db,
-            symbols=symbols,
-            refresh=False,
-            session=session,
-            provider=provider,
-        )
-        record_taiwan_futures_quote_refresh_issue(
-            db=db,
-            symbols=symbols,
-            session=session,
-            provider=provider,
-            exc=exc,
-            cached_count=len(rows),
-        )
-
     return [
         taiwan_futures_quote_to_dict(
             row,
             expected_session=session,
-            source_error=source_error,
+            source_error=None,
         )
         for row in rows
     ]
@@ -384,25 +385,26 @@ def list_taiwan_futures_intraday_bars_api(
     symbol: str,
     interval: str = Query(default="1m", pattern="^1m$"),
     limit: int = Query(default=390, ge=1, le=3000),
-    refresh: bool = False,
+    refresh: bool = Query(default=False, deprecated=True),
     session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
-    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
+    provider: str | None = Query(
+        default=None,
+        pattern="^(auto|taifex_mis|kgi)$",
+        deprecated=True,
+    ),
     trade_date: date | None = None,
     db: Session = Depends(get_db),
 ):
-    refresh_error: TaiwanFuturesFetchError | None = None
+    if refresh:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "GET /tw-futures/{symbol}/intraday is cache-only. "
+                "Use POST /tw-futures/{symbol}/intraday/refresh for an explicit refresh."
+            ),
+        )
+    del provider
     try:
-        if refresh:
-            try:
-                refresh_taiwan_futures_intraday_bars(
-                    db=db,
-                    symbol=symbol,
-                    session=session,
-                    provider=provider,
-                )
-            except TaiwanFuturesFetchError as exc:
-                refresh_error = exc
-
         rows = list_taiwan_futures_intraday_bars(
             db=db,
             symbol=symbol,
@@ -410,7 +412,7 @@ def list_taiwan_futures_intraday_bars_api(
             limit=limit,
             trade_date=trade_date,
             session=session,
-            provider=provider,
+            provider=None,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -418,11 +420,47 @@ def list_taiwan_futures_intraday_bars_api(
             detail=str(exc),
         ) from exc
 
-    if refresh_error is not None:
+    return [taiwan_futures_intraday_bar_to_dict(row) for row in rows]
+
+
+@router.post(
+    "/tw-futures/{symbol}/intraday/refresh",
+    response_model=list[TaiwanFuturesIntradayBarRead],
+)
+def refresh_taiwan_futures_intraday_bars_api(
+    symbol: str,
+    interval: str = Query(default="1m", pattern="^1m$"),
+    limit: int = Query(default=390, ge=1, le=3000),
+    session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
+    trade_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        refresh_taiwan_futures_intraday_bars(
+            db=db,
+            symbol=symbol,
+            session=session,
+            provider=None,
+        )
+        rows = list_taiwan_futures_intraday_bars(
+            db=db,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            trade_date=trade_date,
+            session=session,
+            provider=None,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except TaiwanFuturesFetchError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(refresh_error),
-        ) from refresh_error
+            detail=str(exc),
+        ) from exc
 
     return [taiwan_futures_intraday_bar_to_dict(row) for row in rows]
 
@@ -435,6 +473,7 @@ __all__ = [
     "list_taiwan_futures_daily_bars_api",
     "list_taiwan_futures_intraday_bars_api",
     "list_taiwan_futures_products_api",
+    "refresh_taiwan_futures_intraday_bars_api",
     "refresh_taiwan_derivatives_api",
     "refresh_taiwan_futures_quotes_api",
     "router",

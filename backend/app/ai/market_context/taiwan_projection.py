@@ -1069,6 +1069,26 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         "post_close",
         "market_closed",
     }
+    data_core_components = (
+        quote.get("data_core_components")
+        if isinstance(quote.get("data_core_components"), dict)
+        else {}
+    )
+    order_book_evidence = (
+        data_core_components.get("quote.order_book")
+        if isinstance(data_core_components.get("quote.order_book"), dict)
+        else {}
+    )
+    auction_evidence = (
+        data_core_components.get("quote.auction")
+        if isinstance(data_core_components.get("quote.auction"), dict)
+        else {}
+    )
+    official_close_evidence = (
+        data_core_components.get("quote.official_close")
+        if isinstance(data_core_components.get("quote.official_close"), dict)
+        else {}
+    )
     depth_available = bool(quote.get("depth_available"))
     depth_status = (
         "current"
@@ -1089,6 +1109,14 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         status=depth_status,
         available=depth_available,
         event_time=snapshot_time,
+    )
+    order_book_freshness.update(
+        {
+            "provider": order_book_evidence.get("provider") or quote.get("provider"),
+            "source": order_book_evidence.get("source") or quote.get("source"),
+            "resolved_health": order_book_evidence.get("resolved_health"),
+            "dataset_health": order_book_evidence.get("dataset_health"),
+        }
     )
     if post_close and not depth_available:
         order_book_freshness.update(
@@ -1147,8 +1175,12 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         ),
         "fetched_at": _json_value(quote.get("fetched_at")),
         "latency_ms": quote.get("latency_ms"),
-        "provider": quote.get("provider"),
-        "source": quote.get("source"),
+        "provider": order_book_evidence.get("provider") or quote.get("provider"),
+        "source": order_book_evidence.get("source") or quote.get("source"),
+        "lineage": order_book_evidence.get("lineage"),
+        "resolved_health": order_book_evidence.get("resolved_health"),
+        "dataset_health": order_book_evidence.get("dataset_health"),
+        "limitations": list(order_book_evidence.get("limitations") or []),
         "freshness": order_book_freshness,
     }
 
@@ -1189,6 +1221,14 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         status=auction_status,
         available=auction_available,
         event_time=auction_time,
+    )
+    auction_freshness.update(
+        {
+            "provider": auction_evidence.get("provider") or quote.get("provider"),
+            "source": auction_evidence.get("source") or quote.get("source"),
+            "resolved_health": auction_evidence.get("resolved_health"),
+            "dataset_health": auction_evidence.get("dataset_health"),
+        }
     )
     if auction_status == "not_applicable":
         auction_freshness["is_current"] = True
@@ -1260,14 +1300,24 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
             quote.get("provider_event_time")
         ),
         "latency_ms": quote.get("latency_ms"),
-        "provider": quote.get("provider"),
-        "source": quote.get("source"),
+        "provider": auction_evidence.get("provider") or quote.get("provider"),
+        "source": auction_evidence.get("source") or quote.get("source"),
+        "lineage": auction_evidence.get("lineage"),
+        "resolved_health": auction_evidence.get("resolved_health"),
+        "dataset_health": auction_evidence.get("dataset_health"),
+        "limitations": list(auction_evidence.get("limitations") or []),
         "freshness": auction_freshness,
     }
 
-    close_available = bool(quote.get("official_close_available"))
-    raw_close_status = str(
-        quote.get("official_close_status") or "unavailable"
+    projected_close_available = bool(quote.get("official_close_available"))
+    evidence_close_available = bool(official_close_evidence.get("available"))
+    close_available = projected_close_available or evidence_close_available
+    raw_close_status = (
+        str(quote.get("official_close_status") or "unavailable")
+        if projected_close_available
+        else "confirmed_latest_session"
+        if evidence_close_available
+        else str(quote.get("official_close_status") or "unavailable")
     )
     close_status = (
         "latest_completed_session"
@@ -1278,7 +1328,11 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         in {"pending", "closing_auction_pending", "not_available_yet"}
         else raw_close_status
     )
-    close_time = quote.get("official_close_trade_date")
+    close_time = (
+        quote.get("official_close_trade_date")
+        if projected_close_available
+        else official_close_evidence.get("trade_date")
+    )
     close_freshness = _component_freshness(
         quote,
         dataset="market_daily_price",
@@ -1286,18 +1340,53 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         available=close_available,
         event_time=close_time,
     )
+    close_freshness.update(
+        {
+            "provider": official_close_evidence.get("provider"),
+            "source": official_close_evidence.get("source"),
+            "resolved_health": official_close_evidence.get("resolved_health"),
+            "dataset_health": official_close_evidence.get("dataset_health"),
+        }
+    )
     official_close = {
         "kind": "quote_official_close",
         "status": close_status,
         "available": close_available,
-        "price": quote.get("official_close_price"),
-        "trade_date": _json_value(
-            quote.get("official_close_trade_date")
+        "price": (
+            quote.get("official_close_price")
+            if projected_close_available
+            else official_close_evidence.get("price")
         ),
-        "source": quote.get("official_close_source"),
-        "raw": quote.get("official_close_raw"),
-        "display": quote.get("official_close_display"),
-        "precision": quote.get("official_close_precision"),
+        "trade_date": _json_value(
+            close_time
+        ),
+        "provider": official_close_evidence.get("provider"),
+        "source": (
+            quote.get("official_close_source")
+            if projected_close_available
+            else official_close_evidence.get("source")
+        ),
+        "raw": (
+            quote.get("official_close_raw")
+            if projected_close_available
+            else official_close_evidence.get("raw")
+        ),
+        "display": (
+            quote.get("official_close_display")
+            if projected_close_available
+            else official_close_evidence.get("display")
+        ),
+        "precision": (
+            quote.get("official_close_precision")
+            if projected_close_available
+            else official_close_evidence.get("precision")
+        ),
+        "lineage": official_close_evidence.get("lineage"),
+        "resolved_health": official_close_evidence.get("resolved_health"),
+        "dataset_health": official_close_evidence.get("dataset_health"),
+        "limitations": list(
+            official_close_evidence.get("limitations") or []
+        ),
         "quote_semantics": quote.get("quote_semantics"),
         "delivery_status": quote.get("delivery_status"),
         "freshness": close_freshness,
@@ -1455,6 +1544,14 @@ def _compact_quote_snapshot(
         "kind": "quote_snapshot",
         "source": quote_depth.get("source"),
         "provider": quote_depth.get("provider"),
+        "data_core_result_kinds": list(
+            quote_depth.get("data_core_result_kinds") or []
+        ),
+        "data_core_components": (
+            dict(quote_depth.get("data_core_components"))
+            if isinstance(quote_depth.get("data_core_components"), dict)
+            else {}
+        ),
         "status": freshness.get("status") or quote_depth.get("session_phase") or "quote",
         "session_phase": quote_depth.get("session_phase"),
         "presentation_trade_date": _json_value(

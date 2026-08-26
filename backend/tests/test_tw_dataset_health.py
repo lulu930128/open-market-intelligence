@@ -77,6 +77,9 @@ def test_every_dataset_has_one_bounded_storage_probe() -> None:
 def test_empty_storage_is_truthful_missing_without_freshness_claim(db: Session) -> None:
     result = read_taiwan_dataset_health(db, "tw.chips.institutional.daily")
 
+    assert result.contract_scope == "storage_lineage_only"
+    assert result.lifecycle_health is None
+    assert "FRESHNESS_REQUIRES_DATASET_POLICY" in result.limitations
     assert result.storage_evidence.status is TaiwanDatasetStorageStatus.MISSING
     assert result.storage_evidence.has_observation is False
     assert result.storage_evidence.freshness_status == "not_evaluated"
@@ -115,7 +118,9 @@ def test_canonical_latest_row_requires_source_and_raw_receipt(db: Session) -> No
     assert evidence.latest_observed_value == "2026-08-25T05:30:00"
 
 
-def test_lineage_gap_row_is_not_upgraded_by_source_text(db: Session) -> None:
+def test_intraday_health_defers_component_lineage_to_dataset_projection(
+    db: Session,
+) -> None:
     observed_at = datetime(2026, 8, 25, 1, 5, tzinfo=timezone.utc)
     db.add(
         MarketIntradayBar(
@@ -138,9 +143,12 @@ def test_lineage_gap_row_is_not_upgraded_by_source_text(db: Session) -> None:
 
     evidence = result.storage_evidence
     assert evidence.has_observation is True
-    assert evidence.status is TaiwanDatasetStorageStatus.LINEAGE_INCOMPLETE
-    assert evidence.lineage_observed is False
-    assert "CATALOG_DECLARED_LINEAGE_GAP" in evidence.detail_codes
+    assert evidence.status is TaiwanDatasetStorageStatus.OBSERVED
+    assert evidence.lineage_observed is None
+    assert (
+        "DERIVED_COMPONENT_LINEAGE_REQUIRES_DATASET_PROJECTION"
+        in evidence.detail_codes
+    )
 
 
 def test_data_core_router_is_provider_neutral_and_unknown_dataset_is_404(
@@ -148,8 +156,8 @@ def test_data_core_router_is_provider_neutral_and_unknown_dataset_is_404(
 ) -> None:
     datasets = tw_data_core.list_taiwan_data_core_datasets()
     operations = tw_data_core.list_taiwan_data_core_operations()
-    assert len(datasets) == 28
-    assert len(operations) == 18
+    assert len(datasets) == 32
+    assert len(operations) == 22
     assert all("provider" not in item.dataset_id for item in datasets)
 
     with pytest.raises(HTTPException) as raised:
@@ -159,3 +167,17 @@ def test_data_core_router_is_provider_neutral_and_unknown_dataset_is_404(
             db=db,
         )
     assert raised.value.status_code == 404
+
+
+def test_platform_evidence_endpoint_is_the_non_deprecated_storage_contract(
+    db: Session,
+) -> None:
+    result = tw_data_core.get_taiwan_data_core_dataset_platform_evidence(
+        "tw.chips.institutional.daily",
+        target=None,
+        db=db,
+    )
+
+    assert result.contract_scope == "storage_lineage_only"
+    assert result.lifecycle_health is None
+    assert result.storage_evidence.freshness_status == "not_evaluated"

@@ -40,10 +40,35 @@ from app.ai.taiwan_intraday_contract import (
 )
 from app.market.live_snapshot import classify_market_snapshot, market_status_from_session
 from app.market.financial_contract import build_database_financial_contract
-from app.db.models import StockProfile
+from app.market.tw_company_profile import (
+    TaiwanCompanyProfileRead,
+    project_taiwan_company_profile,
+)
+from app.market.tw_instrument_trading_policy import (
+    TaiwanInstrumentTradingMode,
+    resolve_taiwan_instrument_trading_policy,
+)
+from app.market.taiwan_quote_evidence import TW_QUOTE_EVIDENCE_CAPABILITIES
 
 
 normalize_analysis_horizon = technical_analysis.normalize_analysis_horizon
+
+
+def _requested_quote_evidence_capabilities(
+    params: dict[str, Any],
+) -> tuple[str, ...] | None:
+    requested = {
+        str(value or "").strip()
+        for value in params.get("requested_capabilities") or []
+    }
+    if "quote.last_trade" in requested:
+        requested.add("quote.snapshot")
+    selected = tuple(
+        capability
+        for capability in TW_QUOTE_EVIDENCE_CAPABILITIES
+        if capability in requested
+    )
+    return selected or None
 _technical_analysis_summary = technical_analysis._technical_analysis_summary
 _technical_price_levels = technical_analysis._technical_price_levels
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -59,8 +84,13 @@ class TaiwanStockDependencies:
     build_us_overnight_impact_report: Callable[..., dict[str, Any]]
     get_broker_branch_trade_summary: Callable[..., dict[str, Any]]
     get_market_intraday_history: Callable[..., dict[str, Any]]
-    read_taiwan_public_quote: Callable[..., dict[str, Any]]
+    read_taiwan_quote_evidence: Callable[..., dict[str, Any]]
+    acquire_taiwan_quote_evidence: Callable[..., dict[str, Any]]
+    read_taiwan_latest_daily_evidence: Callable[..., Any]
     now: Callable[[], datetime]
+    read_taiwan_company_profile: Callable[..., TaiwanCompanyProfileRead | None] = (
+        lambda _db, _stock_id: None
+    )
     get_taiwan_disposition_status: Callable[..., dict[str, Any]] = (
         lambda stock_id, **_kwargs: {
             "stock_id": stock_id,
@@ -93,82 +123,15 @@ class TaiwanStockDependencies:
 
 def _company_profile_payload(
     stock: Any,
-    profile: StockProfile | None,
+    profile: TaiwanCompanyProfileRead | Any | None,
 ) -> dict[str, Any]:
-    stock_id = str(getattr(stock, "stock_id", "") or "").strip() or None
-    stock_name = getattr(stock, "stock_name", None)
-    company_name = getattr(profile, "company_name", None) or stock_name
-    market = (
-        getattr(profile, "market", None)
-        or getattr(stock, "market", None)
-        or "TW"
-    )
-    payload = {
-        "stock_id": stock_id,
-        "stock_name": stock_name,
-        "company_name": company_name,
-        "market": market,
-        "exchange": market,
-        "instrument_type": getattr(stock, "instrument_type", None),
-        "industry": (
-            getattr(profile, "industry", None)
-            or getattr(stock, "industry", None)
-        ),
-        "category": getattr(stock, "category", None),
-        "listed_date": _json_value(getattr(profile, "listed_date", None)),
-        "established_date": _json_value(
-            getattr(profile, "established_date", None)
-        ),
-        "paid_in_capital": getattr(profile, "paid_in_capital", None),
-        "issued_shares": getattr(profile, "issued_shares", None),
-        "is_active": getattr(stock, "is_active", None),
-        "currency": "TWD",
-        "source": (
-            "stock_master+stock_profile"
-            if profile is not None
-            else "stock_master"
-        ),
-        "as_of": _json_value(
-            getattr(profile, "updated_at", None)
-            or getattr(stock, "updated_at", None)
-            or getattr(stock, "last_seen_at", None)
-        ),
-    }
-    important_fields = (
-        "stock_id",
-        "stock_name",
-        "company_name",
-        "market",
-        "instrument_type",
-        "industry",
-        "listed_date",
-        "issued_shares",
-    )
-    missing_fields = [
-        field for field in important_fields if payload.get(field) is None
-    ]
-    payload["missing_fields"] = missing_fields
-    payload["status"] = (
-        "missing"
-        if stock is None
-        else "partial"
-        if missing_fields
-        else "ready"
-    )
-    return payload
+    return project_taiwan_company_profile(stock, profile)
 
 
-def _load_company_profile(
-    db: Session,
-    stock_id: str,
-) -> StockProfile | None:
-    if not callable(getattr(db, "query", None)):
-        return None
-    return (
-        db.query(StockProfile)
-        .filter(StockProfile.stock_id == stock_id)
-        .first()
-    )
+def _latest_daily_value(evidence: Any) -> Any:
+    """Unwrap the market-owned evidence result; accept test compatibility rows."""
+
+    return getattr(evidence, "daily", evidence)
 
 
 def _apply_disposition_quote_contract(
@@ -177,11 +140,12 @@ def _apply_disposition_quote_contract(
     *,
     now: datetime | None = None,
 ) -> None:
-    is_active = disposition.get("is_active") is True
-    quote["trading_mode"] = (
-        "disposition_batch_auction" if is_active else "continuous"
+    policy = resolve_taiwan_instrument_trading_policy(disposition)
+    is_active = (
+        policy.trading_mode
+        is TaiwanInstrumentTradingMode.DISPOSITION_BATCH_AUCTION
     )
-    quote["analysis_basis"] = "effective_matches" if is_active else "time_bars"
+    quote.update(policy.projection())
     quote["batch_interval_minutes"] = (
         disposition.get("matching_interval_minutes") if is_active else None
     )
@@ -992,16 +956,17 @@ def read_stock_quote_context(
         stock = None
         missing.append("stock_master")
     stock_profile = (
-        _load_company_profile(db, normalized_stock_id)
+        dependencies.read_taiwan_company_profile(db, normalized_stock_id)
         if stock is not None
         else None
     )
     company_profile = _company_profile_payload(stock, stock_profile)
 
-    latest_daily = dependencies.market_service.get_latest_stock_daily_price(
+    latest_daily_evidence = dependencies.read_taiwan_latest_daily_evidence(
         db,
         normalized_stock_id,
     )
+    latest_daily = _latest_daily_value(latest_daily_evidence)
     if latest_daily is None:
         missing.append("market_daily_price")
 
@@ -1060,16 +1025,28 @@ def read_stock_quote_context(
             "Taiwan provider/strict_provider controls are deprecated and ignored; "
             "the backend Data Core owns acquisition and resolution."
         )
-    live_quote_requested = external_fetch_allowed and "quote" in requested_domains
+    quote_requested = "quote" in requested_domains
+    live_quote_requested = external_fetch_allowed and quote_requested
     intraday_requested = "intraday" in requested_domains
     quote_depth: dict[str, Any] | None = None
     quote_error: str | None = None
-    if live_quote_requested:
+    if quote_requested and (external_fetch_allowed or cached_fallback_allowed):
         try:
-            quote_depth = dependencies.read_taiwan_public_quote(
-                db=db,
-                stock_id=normalized_stock_id,
-                refresh=True,
+            quote_reader = (
+                dependencies.acquire_taiwan_quote_evidence
+                if external_fetch_allowed
+                else dependencies.read_taiwan_quote_evidence
+            )
+            quote_kwargs: dict[str, Any] = {
+                "db": db,
+                "stock_id": normalized_stock_id,
+            }
+            if external_fetch_allowed:
+                quote_kwargs["requested_capabilities"] = (
+                    _requested_quote_evidence_capabilities(params)
+                )
+            quote_depth = quote_reader(
+                **quote_kwargs,
             )
         except Exception as exc:
             quote_error = str(exc) or type(exc).__name__
@@ -1811,13 +1788,17 @@ def read_stock_context(
         stock = None
         missing.append("stock_master")
     stock_profile = (
-        _load_company_profile(db, normalized_stock_id)
+        dependencies.read_taiwan_company_profile(db, normalized_stock_id)
         if stock is not None
         else None
     )
     company_profile = _company_profile_payload(stock, stock_profile)
 
-    latest_daily = dependencies.market_service.get_latest_stock_daily_price(db, normalized_stock_id)
+    latest_daily_evidence = dependencies.read_taiwan_latest_daily_evidence(
+        db,
+        normalized_stock_id,
+    )
+    latest_daily = _latest_daily_value(latest_daily_evidence)
     latest_institutional = dependencies.market_service.get_latest_stock_institutional_trade(db, normalized_stock_id)
     latest_margin = dependencies.market_service.get_latest_stock_margin_trade(db, normalized_stock_id)
     latest_revenue = dependencies.market_service.get_latest_stock_monthly_revenue(db, normalized_stock_id)
@@ -1962,11 +1943,20 @@ def read_stock_context(
                 if isinstance(market_data_params, dict)
                 else {}
             )
-            quote_depth = dependencies.read_taiwan_public_quote(
-                db=db,
-                stock_id=normalized_stock_id,
-                refresh=context_params.get("external_fetch_allowed") is True,
+            quote_reader = (
+                dependencies.acquire_taiwan_quote_evidence
+                if context_params.get("external_fetch_allowed") is True
+                else dependencies.read_taiwan_quote_evidence
             )
+            quote_kwargs: dict[str, Any] = {
+                "db": db,
+                "stock_id": normalized_stock_id,
+            }
+            if context_params.get("external_fetch_allowed") is True:
+                quote_kwargs["requested_capabilities"] = (
+                    _requested_quote_evidence_capabilities(context_params)
+                )
+            quote_depth = quote_reader(**quote_kwargs)
             _append_source_ref_once(
                 source_refs,
                 {"type": "resolved_market_data", "name": "tw.quote.snapshot"},

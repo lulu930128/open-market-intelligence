@@ -13,7 +13,7 @@ from app.market.tw_dataset_catalog import (
 )
 from app.market.tw_dataset_health import (
     TaiwanDatasetPlatformProjection,
-    read_taiwan_dataset_health,
+    read_taiwan_dataset_platform_projection,
 )
 
 
@@ -41,6 +41,11 @@ def list_taiwan_data_core_operations() -> list[TaiwanDatasetOperationSpec]:
 @router.get(
     "/data-core/datasets/{dataset_id}/health",
     response_model=TaiwanDatasetPlatformProjection,
+    deprecated=True,
+    description=(
+        "Compatibility alias for storage/lineage platform evidence. "
+        "It does not evaluate dataset lifecycle freshness."
+    ),
 )
 def get_taiwan_data_core_dataset_health(
     dataset_id: str,
@@ -51,7 +56,7 @@ def get_taiwan_data_core_dataset_health(
         normalized_target = (
             target.strip().upper() if isinstance(target, str) and target.strip() else None
         )
-        return read_taiwan_dataset_health(
+        return read_taiwan_dataset_platform_projection(
             db,
             dataset_id,
             scope_value=normalized_target,
@@ -61,6 +66,24 @@ def get_taiwan_data_core_dataset_health(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
+
+
+@router.get(
+    "/data-core/datasets/{dataset_id}/platform-evidence",
+    response_model=TaiwanDatasetPlatformProjection,
+)
+def get_taiwan_data_core_dataset_platform_evidence(
+    dataset_id: str,
+    target: str | None = Query(default=None, min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+) -> TaiwanDatasetPlatformProjection:
+    """Return cache-only storage/lineage evidence without freshness inference."""
+
+    return get_taiwan_data_core_dataset_health(
+        dataset_id=dataset_id,
+        target=target,
+        db=db,
+    )
 
 
 __all__ = ["router"]
