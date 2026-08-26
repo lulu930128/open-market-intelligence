@@ -1369,7 +1369,7 @@ export default function SidebarWatchlistExplorer({
           "/api/market/tw-futures/latest",
           {
             symbols: PINNED_TAIWAN_FUTURES_SYMBOLS.join(","),
-            refresh: true,
+            refresh: false,
             session: "auto",
           }
         );
@@ -1378,7 +1378,7 @@ export default function SidebarWatchlistExplorer({
 
         return fetchJson<TaiwanFuturesQuote[]>("/api/market/tw-futures/latest", {
           symbols: PINNED_TAIWAN_FUTURES_SYMBOLS.join(","),
-          refresh: true,
+          refresh: false,
           session: "regular",
         });
       };

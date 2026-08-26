@@ -328,7 +328,7 @@ export function useTaiwanStockChartData({
       try {
         const history = await fetchJson<IntradayHistoryResponse>(
           `/api/market/intraday/${effectStockId}/history`,
-          { interval: professionalTimeframe, range: "auto", refresh: true }
+          { interval: professionalTimeframe, range: "auto", refresh: false }
         );
 
         if (cancelled || activeStockIdRef.current !== effectStockId) return;

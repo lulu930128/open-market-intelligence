@@ -729,10 +729,19 @@ export default function TaiwanFuturesDetailPanel({
       }
 
       try {
-        const nextBars = await fetchJson<TaiwanFuturesIntradayBar[]>(
-          `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/intraday`,
-          { interval: "1m", limit: 900, refresh, session: "auto" }
-        );
+        const intradayPath = `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/intraday`;
+        const nextBars = refresh
+          ? await requestJson<TaiwanFuturesIntradayBar[]>(
+              `${intradayPath}/refresh`,
+              { method: "POST" },
+              { interval: "1m", limit: 900, session: "auto" }
+            )
+          : await fetchJson<TaiwanFuturesIntradayBar[]>(intradayPath, {
+              interval: "1m",
+              limit: 900,
+              refresh: false,
+              session: "auto",
+            });
         if (cancelled) return;
 
         setBars(nextBars);

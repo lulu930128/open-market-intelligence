@@ -1302,6 +1302,9 @@ export type IntradayTrendResponse = {
   previous_close_source?: string | null;
   previous_close_trade_date?: string | null;
   previous_close_provider?: string | null;
+  expected_previous_close_trade_date?: string | null;
+  previous_close_status?: "current" | "missing" | "unknown" | string;
+  rejected_previous_close_trade_date?: string | null;
   regular_session_close?: number | null;
   regular_session_close_time?: string | null;
   regular_session_close_source?: string | null;
@@ -1640,6 +1643,11 @@ export type TaiwanRealtimeDiagnosticCountersRead = {
 };
 
 export type TaiwanRealtimeMarketStreamRead = {
+  projection_scope: "presentation_only";
+  canonical_truth: false;
+  decision_usable: false;
+  research_usable: false;
+  provider_specific: true;
   kind: string;
   contract_version: string;
   stock_id: string;
@@ -1709,6 +1717,13 @@ export type IntradayHistoryResponse = {
   point_count: number;
   cached_count: number;
   refreshed_count: number;
+  read_policy?: "cache_only" | string;
+  acquisition_status?: string | null;
+  resolved_health?: Record<string, unknown> | null;
+  candidate_rejections?: Array<Record<string, unknown>>;
+  limitations?: string[];
+  component_raw_result_ids?: string[];
+  calculation_versions?: string[];
   points: ChartPoint[];
 };
 
@@ -3619,6 +3634,12 @@ export type InstitutionalHoldingRatioRead = InstitutionalHoldingRatioPointRead &
   source_url: string;
   fetched_at: string;
   history: InstitutionalHoldingRatioPointRead[];
+  classification: "compatibility_cache";
+  lineage_status: "raw_receipt_not_persisted";
+  canonical_truth: false;
+  decision_usable: false;
+  raw_receipt_id: null;
+  limitations: string[];
 };
 
 export type InstitutionalTradeDailyRead = {

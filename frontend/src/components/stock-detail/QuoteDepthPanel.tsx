@@ -324,6 +324,26 @@ function streamStatusLabel(
   }[quoteStream.status] ?? quoteStream.status;
 }
 
+function isPresentationTelemetry(
+  quoteStream: TaiwanRealtimeMarketStreamRead | null
+) {
+  return Boolean(
+    quoteStream &&
+      quoteStream.projection_scope === "presentation_only" &&
+      quoteStream.canonical_truth === false &&
+      quoteStream.decision_usable === false &&
+      quoteStream.research_usable === false &&
+      quoteStream.provider_specific === true
+  );
+}
+
+function streamProviderLabel(
+  quoteStream: TaiwanRealtimeMarketStreamRead | null
+) {
+  const provider = quoteStream?.provider?.trim();
+  return provider ? provider.replaceAll("_", " ").toUpperCase() : "REALTIME PROVIDER";
+}
+
 function tradeDirectionTone(direction: string) {
   if (direction === "up") return "text-omi-market-up";
   if (direction === "down") return "text-omi-market-down";
@@ -337,7 +357,8 @@ function RecentTradesPanel({
   quoteStream: TaiwanRealtimeMarketStreamRead | null;
   loadState: QuoteDepthLoadState;
 }) {
-  const trades = quoteStream?.recent_trades ?? [];
+  const presentationTelemetry = isPresentationTelemetry(quoteStream);
+  const trades = presentationTelemetry ? quoteStream?.recent_trades ?? [] : [];
   const warning = quoteStream?.warnings[0] ?? null;
   const isLive = quoteStream?.status === "live" && !quoteStream.is_stale;
 
@@ -353,7 +374,8 @@ function RecentTradesPanel({
             即時成交
           </div>
           <div className="mt-0.5 text-[11px] text-omi-text-muted">
-            KGI callback · 最近 {quoteStream?.limits.recent_trades ?? 60} 筆記憶體緩衝
+            {streamProviderLabel(quoteStream)} · 即時呈現串流／非研究證據 · 最近{" "}
+            {quoteStream?.limits.recent_trades ?? 60} 筆記憶體緩衝
           </div>
         </div>
         <span
@@ -401,7 +423,7 @@ function RecentTradesPanel({
           <div className="flex h-full min-h-[140px] items-center justify-center px-4 text-center">
             <div>
               <div className="text-xs font-semibold text-omi-text-strong">
-                {loadState === "loading" ? "等待凱基成交流" : "尚無正式成交事件"}
+                {loadState === "loading" ? "等待即時成交流" : "尚無正式成交事件"}
               </div>
               <div className="mt-1 text-[10px] leading-4 text-omi-text-muted">
                 {quoteStream?.status === "not_subscribed"
@@ -436,7 +458,10 @@ function AuctionDetailsPanel({
   replayLabel: string | null;
   replaySnapshots: TaiwanQuoteContractReplaySnapshotRead[];
 }) {
-  const observations = !isReplay && !isPreview ? quoteStream?.auction_observations ?? [] : [];
+  const observations =
+    !isReplay && !isPreview && isPresentationTelemetry(quoteStream)
+      ? quoteStream?.auction_observations ?? []
+      : [];
   const replayRows = isReplay
     ? [...replaySnapshots]
         .filter(isAuctionReplaySnapshot)
@@ -515,7 +540,9 @@ function AuctionDetailsPanel({
     ? "版型預覽資料"
     : isReplay
       ? `${replayLabel ?? "保存的試撮快照"} · 全部依時間合併`
-      : `KGI callback · 最近 ${quoteStream?.limits.auction_observations ?? 120} 筆記憶體緩衝`;
+      : `${streamProviderLabel(quoteStream)} · 即時呈現串流／非研究證據 · 最近 ${
+          quoteStream?.limits.auction_observations ?? 120
+        } 筆記憶體緩衝`;
 
   return (
     <section
@@ -582,7 +609,7 @@ function AuctionDetailsPanel({
                   <div className="mt-1 text-[10px] leading-4 text-omi-text-muted">
                     {isReplay
                       ? "目前標的沒有可用的保存快照。"
-                      : "試撮時段收到 KGI callback 後會列出試撮價量。"}
+                      : "試撮時段收到即時 provider event 後會列出試撮價量。"}
                   </div>
                 </div>
               </div>
@@ -833,6 +860,7 @@ export default function QuoteDepthPanel({
     !isPreview &&
     !isReplay &&
     quoteStream !== null &&
+    isPresentationTelemetry(quoteStream) &&
     (quoteDepth === null || quoteStream.stock_id === quoteDepth.stock_id) &&
     quoteStream.status === "live" &&
     !quoteStream.is_stale &&
@@ -876,7 +904,9 @@ export default function QuoteDepthPanel({
       ? (headlineChange! / displayQuoteDepth.previous_close) * 100
       : displayQuoteDepth?.change_pct;
   const message = streamDepth
-    ? `KGI 即時串流五檔 · ${formatEventClock(streamDepth.event_time)}`
+    ? `${streamProviderLabel(quoteStream)} 即時呈現五檔（非研究證據） · ${formatEventClock(
+        streamDepth.event_time
+      )}`
     : displayQuoteDepth?.freshness.message ??
     (loadState === "loading"
       ? "五檔資料載入中。"
@@ -917,7 +947,9 @@ export default function QuoteDepthPanel({
               </span>
             ) : null}
             <span className="text-[11px] text-omi-text-muted">
-              {streamDepth ? "KGI SUPER PY · STREAM" : sourceLabel(displayQuoteDepth)}
+              {streamDepth
+                ? `${streamProviderLabel(quoteStream)} · PRESENTATION STREAM`
+                : sourceLabel(displayQuoteDepth)}
             </span>
           </div>
         </div>

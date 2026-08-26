@@ -20,6 +20,16 @@ const quoteDepthLivePhases = new Set([
   "closing_auction",
 ]);
 
+function isPresentationTelemetry(
+  snapshot: TaiwanRealtimeMarketStreamRead
+) {
+  return snapshot.projection_scope === "presentation_only" &&
+    snapshot.canonical_truth === false &&
+    snapshot.decision_usable === false &&
+    snapshot.research_usable === false &&
+    snapshot.provider_specific === true;
+}
+
 export function quoteDepthRefreshDelayMs(
   quoteDepth: TaiwanStockQuoteDepthRead | null,
   now = new Date()
@@ -249,6 +259,10 @@ export function useTaiwanQuoteDepth({
     function applySnapshot(snapshot: TaiwanRealtimeMarketStreamRead) {
       if (cancelled || activeStockIdRef.current !== requestedStockId) return;
       if (snapshot.stock_id !== requestedStockId) return;
+      if (!isPresentationTelemetry(snapshot)) {
+        setQuoteStreamLoadState("error");
+        return;
+      }
       setQuoteStream(snapshot);
       setQuoteStreamLoadState("success");
     }
@@ -369,7 +383,7 @@ export function useTaiwanQuoteDepth({
       try {
         const depth = await fetchJson<TaiwanStockQuoteDepthRead>(
           `/api/market/quote-depth/${requestedStockId}`,
-          { refresh: true }
+          { refresh: false }
         );
 
         if (cancelled || activeStockIdRef.current !== requestedStockId) {

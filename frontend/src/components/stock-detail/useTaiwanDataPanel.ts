@@ -11,7 +11,7 @@ import {
   formatPanelJobProgress,
   type DataPanelTab,
 } from "@/components/stock-detail/StockDetailDataViews";
-import { fetchJson } from "@/lib/api";
+import { fetchJson, requestJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   getMarketCalendarStatusSnapshot,
@@ -827,8 +827,9 @@ export function useTaiwanDataPanel({
               ensure_history: false,
             }
           ),
-          fetchJson<InstitutionalHoldingRatioRead>(
-            `/api/market/institutional/${targetStockId}/holding-ratios`
+          requestJson<InstitutionalHoldingRatioRead>(
+            `/api/market/institutional/${targetStockId}/holding-ratios/refresh`,
+            { method: "POST" }
           ),
         ]);
         if (activeStockIdRef.current !== targetStockId) return;
