@@ -1,0 +1,32 @@
+{
+  "contract": "omi.test.twse_mis_public_quote_actual.v1",
+  "captured_from": "production SQLite read-only snapshot",
+  "captured_at": "2026-08-25T19:55:00+08:00",
+  "production_write_performed": false,
+  "records": [
+    {
+      "row_id": 3780,
+      "stock_id": "2330",
+      "venue": "TWSE",
+      "instrument_type": "stock",
+      "trade_date": "2026-08-25",
+      "event_time": "2026-08-25T13:30:00+08:00",
+      "received_at": "2026-08-25T05:34:00.038108+00:00",
+      "session": "post_close",
+      "sha256": "da6cc59dab56406815c4649a07464aa3b1ca36daab1092ade599c6c48622e07e",
+      "raw_text_base64": "eyJtc2dBcnJheSI6W3siQCI6IjIzMzAudHciLCJ0diI6IjI5OTciLCJwcyI6IjI5OTYiLCJwaWQiOiIyMC50c2UudHd8MjE3NzY4NSIsInB6IjoiMjQwMC4wMDAwIiwiYnAiOiIwIiwibSUiOiIwMDAwMDAiLCJeIjoiMjAyNjA4MjUiLCJrZXkiOiJ0c2VfMjMzMC50d18yMDI2MDgyNSIsImEiOiIyNDAwLjAwMDBfMjQwNS4wMDAwXzI0MTAuMDAwMF8yNDE1LjAwMDBfMjQyMC4wMDAwXyIsImIiOiIyMzk1LjAwMDBfMjM5MC4wMDAwXzIzODUuMDAwMF8yMzgwLjAwMDBfMjM3NS4wMDAwXyIsImMiOiIyMzMwIiwiIyI6IjIwLnRzZS50d3wyMTc5MDY0IiwiZCI6IjIwMjYwODI1IiwiJSI6IjEzOjMwOjAwIiwiY2giOiIyMzMwLnR3IiwidGxvbmciOiIxNzg3NjM1ODAwMDAwIiwiZiI6IjQwMF81NDlfODE0XzQ2MF80OTdfIiwiZyI6IjU0XzI1XzE5XzI1M181MTJfIiwiaXAiOiIwIiwibXQiOiIwMDAwMDAiLCJoIjoiMjQwMC4wMDAwIiwiaSI6IjI0IiwiaXQiOiIxMiIsImwiOiIyMzUwLjAwMDAiLCJuIjoi5Y+w56mN6Zu7IiwibyI6IjIzNTUuMDAwMCIsInAiOiIwIiwiZXgiOiJ0c2UiLCJzIjoiMjk5NyIsInQiOiIxMzozMDowMCIsInUiOiIyNjEwLjAwMDAiLCJ2IjoiMTI3ODkiLCJ3IjoiMjE0MC4wMDAwIiwibmYiOiLlj7DngaPnqY3pq5Tpm7vot6/oo73pgKDogqHku73mnInpmZDlhazlj7giLCJ5IjoiMjM3NS4wMDAwIiwieiI6IjI0MDAuMDAwMCIsInRzIjoiMCJ9XSwicmVmZXJlciI6IiIsInVzZXJEZWxheSI6NTAwMCwicnRjb2RlIjoiMDAwMCIsInF1ZXJ5VGltZSI6eyJzeXNEYXRlIjoiMjAyNjA4MjUiLCJzdG9ja0luZm9JdGVtIjo1NjAyLCJzdG9ja0luZm8iOjQ3NzEsInNlc3Npb25TdHIiOiJVc2VyU2Vzc2lvbiIsInN5c1RpbWUiOiIxMzozMzo1NyIsInNob3dDaGFydCI6ZmFsc2UsInNlc3Npb25Gcm9tVGltZSI6LTEsInNlc3Npb25MYXRlc3RUaW1lIjotMX0sInJ0bWVzc2FnZSI6Ik9LIiwiZXhLZXkiOiJpZl90c2VfMjMzMC50d196aC10dy5udWxsIiwiY2FjaGVkQWxpdmUiOjI0MjJ9"
+    },
+    {
+      "row_id": 1493,
+      "stock_id": "6173",
+      "venue": "TPEX",
+      "instrument_type": "stock",
+      "trade_date": "2026-08-21",
+      "event_time": "2026-08-21T08:59:20+08:00",
+      "received_at": "2026-08-21T00:59:34.716283+00:00",
+      "session": "pre_open",
+      "sha256": "fa45a9b09f13026c4a30362fb790f93b3ff280fd5cc0519c17fd3987dd7ae1e6",
+      "raw_text_base64": "eyJtc2dBcnJheSI6W3siQCI6IjYxNzMudHciLCJ0diI6Ii0iLCJwcyI6Ijg3IiwicGlkIjoiMjAub3RjLnR3fDE0NzQ3MSIsInB6IjoiMjIxLjAwMDAiLCJicCI6IjAiLCJtJSI6IjQzNzExMyIsIl4iOiIyMDI2MDgyMSIsImtleSI6Im90Y182MTczLnR3XzIwMjYwODIxIiwiYSI6IjIyMS4wMDAwXzIyMi4wMDAwXzIyMi41MDAwXzIyMy4wMDAwXzIyMy41MDAwXyIsImIiOiIyMjAuNTAwMF8yMjAuMDAwMF8yMTkuMDAwMF8yMTguMDAwMF8yMTcuNTAwMF8iLCJjIjoiNjE3MyIsIiMiOiIyMC5vdGMudHd8MTQ3NzYyIiwiZCI6IjIwMjYwODIxIiwiJSI6IjA4OjU5OjIwIiwiY2giOiI2MTczLnR3IiwidGxvbmciOiIxNzg3MjczOTYwMDAwIiwiZiI6IjcxXzM2XzI0XzJfMl8iLCJnIjoiOV81XzJfNV81XyIsImlwIjoiMCIsIm10IjoiNDM3MTEzIiwiaCI6Ii0iLCJpIjoiMjgiLCJpdCI6IjEyIiwibCI6Ii0iLCJuIjoi5L+h5piM6Zu7IiwibyI6Ii0iLCJwIjoiMCIsImV4Ijoib3RjIiwicyI6Ii0iLCJ0IjoiMDg6NTk6MjAiLCJ1IjoiMjQzLjAwMDAiLCJ2IjoiMCIsInciOiIxOTkuMDAwMCIsIm5mIjoi5L+h5piM6Zu75a2Q6Zm255O36IKh5Lu95pyJ6ZmQ5YWs5Y+4IiwieSI6IjIyMS4wMDAwIiwieiI6Ii0iLCJ0cyI6IjEifV0sInJlZmVyZXIiOiIiLCJ1c2VyRGVsYXkiOjUwMDAsInJ0Y29kZSI6IjAwMDAiLCJxdWVyeVRpbWUiOnsic3lzRGF0ZSI6IjIwMjYwODIxIiwic3RvY2tJbmZvSXRlbSI6NTM1MCwic3RvY2tJbmZvIjozMDI0LCJzZXNzaW9uU3RyIjoiVXNlclNlc3Npb24iLCJzeXNUaW1lIjoiMDg6NTk6MzAiLCJzaG93Q2hhcnQiOmZhbHNlLCJzZXNzaW9uRnJvbVRpbWUiOi0xLCJzZXNzaW9uTGF0ZXN0VGltZSI6LTF9LCJydG1lc3NhZ2UiOiJPSyIsImV4S2V5IjoiaWZfb3RjXzYxNzMudHdfemgtdHcubnVsbCIsImNhY2hlZEFsaXZlIjo1MzkwfQ=="
+    }
+  ]
+}

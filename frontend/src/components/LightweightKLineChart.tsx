@@ -78,6 +78,12 @@ import {
   movingAverage,
 } from "@/components/chart/LightweightKLineChartIndicators";
 import { StateSurface } from "@/components/LoadingPlaceholders";
+import {
+  backendIndicatorParametersMatch,
+  backendIndicatorValue,
+  backendIndicatorWindowExists,
+  indicatorProjectionScope,
+} from "@/components/stock-k-line/indicatorAuthority";
 import { useI18n } from "@/i18n";
 import { getOmiChartColors, type OmiTheme } from "@/lib/themeColors";
 export type {
@@ -263,6 +269,7 @@ export default function LightweightKLineChart({
     }),
     [indicatorParameters]
   );
+  const projectionScope = indicatorProjectionScope(indicatorData);
   const chartData = useMemo(
     () => normalizeChartPointsForTimeMode(sourceChartData, timeMode),
     [sourceChartData, timeMode]
@@ -893,25 +900,75 @@ export default function LightweightKLineChart({
       const volumes = chartData.map((point) =>
         volumeValueKey === "trade_value" ? point.trade_value : point.volume
       );
+      const indicatorByTime = new Map(
+        indicatorData.map((point) => [point.time.slice(0, 10), point])
+      );
 
       entries.forEach(({ point, index }) => {
         if (index < 1) return;
 
         const previous = chartData[index - 1];
+        const previousIndicator = indicatorByTime.get(previous.time.slice(0, 10));
+        const currentIndicator = indicatorByTime.get(point.time.slice(0, 10));
         const bullishPrice = point.low ?? point.close;
         const bearishPrice = point.high ?? point.close;
-        const previousDonchianUpper = donchian[index - 1]?.upper;
-        const previousDonchianLower = donchian[index - 1]?.lower;
-        const previousAdx = dmi[index - 1]?.adx;
-        const currentAdx = dmi[index]?.adx;
-        const previousEmaFast = emaFast[index - 1];
-        const previousEmaSlow = emaSlow[index - 1];
-        const currentEmaFast = emaFast[index];
-        const currentEmaSlow = emaSlow[index];
-        const previousMacd = macdValues.macd[index - 1];
-        const previousMacdSignal = macdValues.signal[index - 1];
-        const currentMacd = macdValues.macd[index];
-        const currentMacdSignal = macdValues.signal[index];
+        const backendDonchian = backendIndicatorParametersMatch(currentIndicator, {
+          donchian_period: params.donchianPeriod,
+        });
+        const backendAdx = backendIndicatorParametersMatch(currentIndicator, {
+          adx_period: params.adxPeriod,
+        });
+        const backendEma = backendIndicatorParametersMatch(currentIndicator, {
+          ema_fast: params.emaFast,
+          ema_slow: params.emaSlow,
+        });
+        const backendMacd = backendIndicatorParametersMatch(currentIndicator, {
+          macd_fast: params.macdFast,
+          macd_slow: params.macdSlow,
+          macd_signal: params.macdSignal,
+        });
+        const previousDonchianUpper = backendDonchian
+          ? backendIndicatorValue(
+              previousIndicator?.donchian,
+              `upper${params.donchianPeriod}`
+            )
+          : donchian[index - 1]?.upper;
+        const previousDonchianLower = backendDonchian
+          ? backendIndicatorValue(
+              previousIndicator?.donchian,
+              `lower${params.donchianPeriod}`
+            )
+          : donchian[index - 1]?.lower;
+        const previousAdx = backendAdx
+          ? backendIndicatorValue(previousIndicator?.adx, `adx${params.adxPeriod}`)
+          : dmi[index - 1]?.adx;
+        const currentAdx = backendAdx
+          ? backendIndicatorValue(currentIndicator?.adx, `adx${params.adxPeriod}`)
+          : dmi[index]?.adx;
+        const previousEmaFast = backendEma
+          ? backendIndicatorValue(previousIndicator?.ema, `ema${params.emaFast}`)
+          : emaFast[index - 1];
+        const previousEmaSlow = backendEma
+          ? backendIndicatorValue(previousIndicator?.ema, `ema${params.emaSlow}`)
+          : emaSlow[index - 1];
+        const currentEmaFast = backendEma
+          ? backendIndicatorValue(currentIndicator?.ema, `ema${params.emaFast}`)
+          : emaFast[index];
+        const currentEmaSlow = backendEma
+          ? backendIndicatorValue(currentIndicator?.ema, `ema${params.emaSlow}`)
+          : emaSlow[index];
+        const previousMacd = backendMacd
+          ? backendIndicatorValue(previousIndicator?.macd, "macd")
+          : macdValues.macd[index - 1];
+        const previousMacdSignal = backendMacd
+          ? backendIndicatorValue(previousIndicator?.macd, "signal")
+          : macdValues.signal[index - 1];
+        const currentMacd = backendMacd
+          ? backendIndicatorValue(currentIndicator?.macd, "macd")
+          : macdValues.macd[index];
+        const currentMacdSignal = backendMacd
+          ? backendIndicatorValue(currentIndicator?.macd, "signal")
+          : macdValues.signal[index];
 
         if (
           finiteNumber(previousEmaFast) &&
@@ -1015,7 +1072,16 @@ export default function LightweightKLineChart({
           );
         }
 
-        const volumeMa = movingAverage(volumes, index, params.volumeMa);
+        const volumeMa = backendIndicatorWindowExists(
+          currentIndicator,
+          "volume_ma_windows",
+          params.volumeMa
+        )
+          ? backendIndicatorValue(
+              currentIndicator?.volume_ma,
+              `volume_ma${params.volumeMa}`
+            )
+          : movingAverage(volumes, index, params.volumeMa);
         const volume = volumes[index];
         const previousClose = previous?.close;
         const changePct =
@@ -1084,6 +1150,29 @@ export default function LightweightKLineChart({
         params.macdSlow,
         params.macdSignal
       );
+      const indicatorByTime = new Map(
+        indicatorData.map((point) => [point.time.slice(0, 10), point])
+      );
+      const indicatorAt = (index: number) =>
+        indicatorByTime.get(chartData[index]?.time.slice(0, 10));
+      const rsiAt = (index: number) => {
+        const indicator = indicatorAt(index);
+        return backendIndicatorParametersMatch(indicator, {
+          rsi_period: params.rsiPeriod,
+        })
+          ? backendIndicatorValue(indicator?.rsi, `rsi${params.rsiPeriod}`)
+          : rsiValues[index];
+      };
+      const macdHistogramAt = (index: number) => {
+        const indicator = indicatorAt(index);
+        return backendIndicatorParametersMatch(indicator, {
+          macd_fast: params.macdFast,
+          macd_slow: params.macdSlow,
+          macd_signal: params.macdSignal,
+        })
+          ? backendIndicatorValue(indicator?.macd, "histogram")
+          : macdValues.histogram[index];
+      };
       const pivotRadius = 3;
       const firstIndex = entries[0]?.index ?? 0;
       const lastIndex = entries[entries.length - 1]?.index ?? chartData.length - 1;
@@ -1149,14 +1238,18 @@ export default function LightweightKLineChart({
             return;
           }
 
+          const currentRsi = rsiAt(index);
+          const previousRsi = rsiAt(previousIndex);
+          const currentMacdHistogram = macdHistogramAt(index);
+          const previousMacdHistogram = macdHistogramAt(previousIndex);
           const rsiBullish =
-            finiteNumber(rsiValues[index]) &&
-            finiteNumber(rsiValues[previousIndex]) &&
-            rsiValues[index] - rsiValues[previousIndex] >= 3;
+            finiteNumber(currentRsi) &&
+            finiteNumber(previousRsi) &&
+            currentRsi - previousRsi >= 3;
           const macdBullish =
-            finiteNumber(macdValues.histogram[index]) &&
-            finiteNumber(macdValues.histogram[previousIndex]) &&
-            macdValues.histogram[index] > macdValues.histogram[previousIndex];
+            finiteNumber(currentMacdHistogram) &&
+            finiteNumber(previousMacdHistogram) &&
+            currentMacdHistogram > previousMacdHistogram;
 
           if (!rsiBullish && !macdBullish) return;
 
@@ -1194,14 +1287,18 @@ export default function LightweightKLineChart({
             return;
           }
 
+          const currentRsi = rsiAt(index);
+          const previousRsi = rsiAt(previousIndex);
+          const currentMacdHistogram = macdHistogramAt(index);
+          const previousMacdHistogram = macdHistogramAt(previousIndex);
           const rsiBearish =
-            finiteNumber(rsiValues[index]) &&
-            finiteNumber(rsiValues[previousIndex]) &&
-            rsiValues[previousIndex] - rsiValues[index] >= 3;
+            finiteNumber(currentRsi) &&
+            finiteNumber(previousRsi) &&
+            previousRsi - currentRsi >= 3;
           const macdBearish =
-            finiteNumber(macdValues.histogram[index]) &&
-            finiteNumber(macdValues.histogram[previousIndex]) &&
-            macdValues.histogram[index] < macdValues.histogram[previousIndex];
+            finiteNumber(currentMacdHistogram) &&
+            finiteNumber(previousMacdHistogram) &&
+            currentMacdHistogram < previousMacdHistogram;
 
           if (!rsiBearish && !macdBearish) return;
 
@@ -1231,6 +1328,7 @@ export default function LightweightKLineChart({
     activeIndicators.divergence,
     activeIndicators.signals,
     chartData,
+    indicatorData,
     chartRef,
     drawingI18n,
     mainSeriesRef,
@@ -1903,6 +2001,7 @@ export default function LightweightKLineChart({
 
       <div
         data-testid="lightweight-kline-chart"
+        data-indicator-projection-scope={projectionScope}
         data-active-indicators={activeIndicatorKeys}
         data-chart-point-count={chartData.length}
         data-event-marker-count={projectedEventMarkers.length}

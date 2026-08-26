@@ -259,7 +259,7 @@ class TaiwanEventSurfaceTests(unittest.TestCase):
             build_us_overnight_impact_report=excluded,
             get_broker_branch_trade_summary=excluded,
             get_market_intraday_history=excluded,
-            get_taiwan_stock_quote_depth=excluded,
+            read_taiwan_public_quote=excluded,
             get_taiwan_disposition_status=Mock(),
             get_taiwan_stock_event_summary=summary,
             get_taiwan_stock_event_history=Mock(),

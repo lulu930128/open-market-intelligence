@@ -1,6 +1,11 @@
 import type { IndicatorParameters, IndicatorSettings } from "@/components/StockKLineChart";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 import {
+  backendIndicatorParametersMatch,
+  backendIndicatorValue,
+  backendIndicatorWindowExists,
+} from "@/components/stock-k-line/indicatorAuthority";
+import {
   type CandlestickData,
   type HistogramData,
   type LineData,
@@ -268,17 +273,61 @@ export function buildSeriesData(
     const time = chartTime(point.time, timeMode);
     const color = point.close >= point.open ? upColor : downColor;
     const indicator = indicatorByTime.get(timeKey);
-    const maShort =
-      indicator?.ma?.[`ma${params.maShort}`] ?? movingAverage(closes, index, params.maShort);
-    const maMiddle =
-      indicator?.ma?.[`ma${params.maMiddle}`] ?? movingAverage(closes, index, params.maMiddle);
-    const maLong =
-      indicator?.ma?.[`ma${params.maLong}`] ?? movingAverage(closes, index, params.maLong);
-    const bbMiddle = movingAverage(closes, index, params.bollingerPeriod);
+    const backendEma = backendIndicatorParametersMatch(indicator, {
+      ema_fast: params.emaFast,
+      ema_slow: params.emaSlow,
+    });
+    const backendMacd = backendIndicatorParametersMatch(indicator, {
+      macd_fast: params.macdFast,
+      macd_slow: params.macdSlow,
+      macd_signal: params.macdSignal,
+    });
+    const backendRsi = backendIndicatorParametersMatch(indicator, {
+      rsi_period: params.rsiPeriod,
+    });
+    const backendKd = backendIndicatorParametersMatch(indicator, {
+      kd_period: params.kdPeriod,
+    });
+    const backendAtr = backendIndicatorParametersMatch(indicator, {
+      atr_period: params.atrPeriod,
+    });
+    const backendAdx = backendIndicatorParametersMatch(indicator, {
+      adx_period: params.adxPeriod,
+    });
+    const backendMfi = backendIndicatorParametersMatch(indicator, {
+      mfi_period: params.mfiPeriod,
+    });
+    const backendRoc = backendIndicatorParametersMatch(indicator, {
+      roc_period: params.rocPeriod,
+    });
+    const backendDonchian = backendIndicatorParametersMatch(indicator, {
+      donchian_period: params.donchianPeriod,
+    });
+    const backendBollinger = backendIndicatorParametersMatch(indicator, {
+      bollinger_period: params.bollingerPeriod,
+      bollinger_std_dev: params.bollingerStdDev,
+    });
+    const backendSupportResistance = backendIndicatorParametersMatch(indicator, {
+      support_resistance_period: params.supportResistanceLookback,
+    });
+    const maShort = backendIndicatorWindowExists(indicator, "ma_windows", params.maShort)
+      ? backendIndicatorValue(indicator?.ma, `ma${params.maShort}`)
+      : movingAverage(closes, index, params.maShort);
+    const maMiddle = backendIndicatorWindowExists(indicator, "ma_windows", params.maMiddle)
+      ? backendIndicatorValue(indicator?.ma, `ma${params.maMiddle}`)
+      : movingAverage(closes, index, params.maMiddle);
+    const maLong = backendIndicatorWindowExists(indicator, "ma_windows", params.maLong)
+      ? backendIndicatorValue(indicator?.ma, `ma${params.maLong}`)
+      : movingAverage(closes, index, params.maLong);
+    const bbMiddle = backendBollinger
+      ? backendIndicatorValue(indicator?.bollinger, `middle${params.bollingerPeriod}`)
+      : movingAverage(closes, index, params.bollingerPeriod);
     const bbStd = standardDeviation(closes, index, params.bollingerPeriod);
     const bbWidthMiddle = movingAverage(closes, index, params.bbWidthPeriod);
     const bbWidthStd = standardDeviation(closes, index, params.bbWidthPeriod);
-    const macdHistogramValue = macd.histogram[index];
+    const macdHistogramValue = backendMacd
+      ? backendIndicatorValue(indicator?.macd, "histogram")
+      : macd.histogram[index];
 
     candles.push({
       time,
@@ -316,15 +365,39 @@ export function buildSeriesData(
     pushLine(lines.maShort, time, maShort);
     pushLine(lines.maMiddle, time, maMiddle);
     pushLine(lines.maLong, time, maLong);
-    pushLine(lines.emaFast, time, emaFast[index]);
-    pushLine(lines.emaSlow, time, emaSlow[index]);
+    pushLine(
+      lines.emaFast,
+      time,
+      backendEma
+        ? backendIndicatorValue(indicator?.ema, `ema${params.emaFast}`)
+        : emaFast[index]
+    );
+    pushLine(
+      lines.emaSlow,
+      time,
+      backendEma
+        ? backendIndicatorValue(indicator?.ema, `ema${params.emaSlow}`)
+        : emaSlow[index]
+    );
     pushLine(lines.wma, time, wma[index]);
     pushLine(lines.hma, time, hma[index]);
     pushLine(lines.vwma, time, vwma[index]);
     pushLine(lines.vwap, time, vwap[index]);
     pushLine(lines.psar, time, psar[index]);
-    pushLine(lines.donchianUpper, time, donchian[index].upper);
-    pushLine(lines.donchianLower, time, donchian[index].lower);
+    pushLine(
+      lines.donchianUpper,
+      time,
+      backendDonchian
+        ? backendIndicatorValue(indicator?.donchian, `upper${params.donchianPeriod}`)
+        : donchian[index].upper
+    );
+    pushLine(
+      lines.donchianLower,
+      time,
+      backendDonchian
+        ? backendIndicatorValue(indicator?.donchian, `lower${params.donchianPeriod}`)
+        : donchian[index].lower
+    );
     pushLine(lines.ichimokuConversion, time, ichimoku.conversion[index]);
     pushLine(lines.ichimokuBase, time, ichimoku.base[index]);
     pushLine(lines.ichimokuSpanA, time, ichimoku.spanA[index]);
@@ -340,29 +413,103 @@ export function buildSeriesData(
     pushLine(lines.keltnerUpper, time, keltner[index].upper);
     pushLine(lines.keltnerMiddle, time, keltner[index].middle);
     pushLine(lines.keltnerLower, time, keltner[index].lower);
-    pushLine(lines.rsi, time, indicator?.rsi?.rsi14 ?? rsi[index]);
-    pushLine(lines.macd, time, macd.macd[index]);
-    pushLine(lines.macdSignal, time, macd.signal[index]);
-    pushLine(lines.kdK, time, kd[index].k);
-    pushLine(lines.kdD, time, kd[index].d);
-    pushLine(lines.atr, time, indicator?.atr?.atr14 ?? atr[index]);
-    pushLine(lines.adx, time, indicator?.adx?.adx14 ?? dmi[index].adx);
-    pushLine(lines.plusDi, time, indicator?.adx?.plus_di14 ?? dmi[index].plusDi);
-    pushLine(lines.minusDi, time, indicator?.adx?.minus_di14 ?? dmi[index].minusDi);
+    pushLine(
+      lines.rsi,
+      time,
+      backendRsi
+        ? backendIndicatorValue(indicator?.rsi, `rsi${params.rsiPeriod}`)
+        : rsi[index]
+    );
+    pushLine(
+      lines.macd,
+      time,
+      backendMacd ? backendIndicatorValue(indicator?.macd, "macd") : macd.macd[index]
+    );
+    pushLine(
+      lines.macdSignal,
+      time,
+      backendMacd ? backendIndicatorValue(indicator?.macd, "signal") : macd.signal[index]
+    );
+    pushLine(
+      lines.kdK,
+      time,
+      backendKd
+        ? backendIndicatorValue(indicator?.kd, `k${params.kdPeriod}`)
+        : kd[index].k
+    );
+    pushLine(
+      lines.kdD,
+      time,
+      backendKd
+        ? backendIndicatorValue(indicator?.kd, `d${params.kdPeriod}`)
+        : kd[index].d
+    );
+    pushLine(
+      lines.atr,
+      time,
+      backendAtr
+        ? backendIndicatorValue(indicator?.atr, `atr${params.atrPeriod}`)
+        : atr[index]
+    );
+    pushLine(
+      lines.adx,
+      time,
+      backendAdx
+        ? backendIndicatorValue(indicator?.adx, `adx${params.adxPeriod}`)
+        : dmi[index].adx
+    );
+    pushLine(
+      lines.plusDi,
+      time,
+      backendAdx
+        ? backendIndicatorValue(indicator?.adx, `plus_di${params.adxPeriod}`)
+        : dmi[index].plusDi
+    );
+    pushLine(
+      lines.minusDi,
+      time,
+      backendAdx
+        ? backendIndicatorValue(indicator?.adx, `minus_di${params.adxPeriod}`)
+        : dmi[index].minusDi
+    );
     pushLine(lines.aroonUp, time, aroon[index].up);
     pushLine(lines.aroonDown, time, aroon[index].down);
     pushLine(lines.obv, time, obv[index]);
     pushLine(lines.obvMa, time, obvMa[index]);
-    pushLine(lines.mfi, time, indicator?.mfi?.mfi14 ?? mfi[index]);
+    pushLine(
+      lines.mfi,
+      time,
+      backendMfi
+        ? backendIndicatorValue(indicator?.mfi, `mfi${params.mfiPeriod}`)
+        : mfi[index]
+    );
     pushLine(lines.cci, time, cci[index]);
     pushLine(lines.williamsR, time, williamsR[index]);
-    pushLine(lines.roc, time, indicator?.roc?.roc12 ?? roc[index]);
+    pushLine(
+      lines.roc,
+      time,
+      backendRoc
+        ? backendIndicatorValue(indicator?.roc, `roc${params.rocPeriod}`)
+        : roc[index]
+    );
     pushLine(lines.stochRsiK, time, stochRsi.k[index]);
     pushLine(lines.stochRsiD, time, stochRsi.d[index]);
     pushLine(lines.trix, time, trix.trix[index]);
     pushLine(lines.trixSignal, time, trix.signal[index]);
 
-    if (bbMiddle !== null && bbStd !== null) {
+    if (backendBollinger) {
+      pushLine(
+        lines.bollingerUpper,
+        time,
+        backendIndicatorValue(indicator?.bollinger, `upper${params.bollingerPeriod}`)
+      );
+      pushLine(lines.bollingerMiddle, time, bbMiddle);
+      pushLine(
+        lines.bollingerLower,
+        time,
+        backendIndicatorValue(indicator?.bollinger, `lower${params.bollingerPeriod}`)
+      );
+    } else if (bbMiddle !== null && bbStd !== null) {
       pushLine(lines.bollingerUpper, time, bbMiddle + bbStd * params.bollingerStdDev);
       pushLine(lines.bollingerMiddle, time, bbMiddle);
       pushLine(lines.bollingerLower, time, bbMiddle - bbStd * params.bollingerStdDev);
@@ -392,8 +539,26 @@ export function buildSeriesData(
     pushLine(lines.pivot, time, pivots[index].pivot);
     pushLine(lines.pivotR1, time, pivots[index].r1);
     pushLine(lines.pivotS1, time, pivots[index].s1);
-    pushLine(lines.support, time, supportResistance[index].support);
-    pushLine(lines.resistance, time, supportResistance[index].resistance);
+    pushLine(
+      lines.support,
+      time,
+      backendSupportResistance
+        ? backendIndicatorValue(
+            indicator?.support_resistance,
+            `support${params.supportResistanceLookback}`
+          )
+        : supportResistance[index].support
+    );
+    pushLine(
+      lines.resistance,
+      time,
+      backendSupportResistance
+        ? backendIndicatorValue(
+            indicator?.support_resistance,
+            `resistance${params.supportResistanceLookback}`
+          )
+        : supportResistance[index].resistance
+    );
     pushLine(lines.gapUp, time, gaps[index].up);
     pushLine(lines.gapDown, time, gaps[index].down);
   });

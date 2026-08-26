@@ -24,7 +24,7 @@ from app.market.broker_branch import get_broker_branch_trade_summary
 from app.market.calendar_status import build_market_calendar_status, build_taiwan_calendar_status
 from app.market.live_snapshot import market_status_from_session
 from app.market.intraday import get_market_intraday_history
-from app.market.quote_depth import get_taiwan_stock_quote_depth
+from app.market.public_quote_platform import read_taiwan_public_quote_projection
 from app.market.tw_disposition import get_taiwan_disposition_status
 from app.market.tw_corporate_events import (
     get_taiwan_stock_event_history,
@@ -435,7 +435,7 @@ def read_stock_context(
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
             get_market_intraday_history=get_market_intraday_history,
-            get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
+            read_taiwan_public_quote=read_taiwan_public_quote_projection,
             get_taiwan_disposition_status=get_taiwan_disposition_status,
             get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
             get_taiwan_stock_event_history=get_taiwan_stock_event_history,
@@ -464,7 +464,7 @@ def read_stock_quote_context(
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
             get_market_intraday_history=get_market_intraday_history,
-            get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
+            read_taiwan_public_quote=read_taiwan_public_quote_projection,
             get_taiwan_disposition_status=get_taiwan_disposition_status,
             get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
             get_taiwan_stock_event_history=get_taiwan_stock_event_history,
@@ -492,7 +492,7 @@ def read_stock_event_context(
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
             get_market_intraday_history=get_market_intraday_history,
-            get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
+            read_taiwan_public_quote=read_taiwan_public_quote_projection,
             get_taiwan_disposition_status=get_taiwan_disposition_status,
             get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
             get_taiwan_stock_event_history=get_taiwan_stock_event_history,
@@ -522,7 +522,7 @@ def read_stock_broker_branch_context(
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
             get_market_intraday_history=get_market_intraday_history,
-            get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
+            read_taiwan_public_quote=read_taiwan_public_quote_projection,
             get_taiwan_disposition_status=get_taiwan_disposition_status,
             get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
             get_taiwan_stock_event_history=get_taiwan_stock_event_history,

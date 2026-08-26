@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.market.indicator_service import (
-    calculate_daily_indicators,
-    calculate_latest_daily_indicator,
+from app.market.technical_indicator_gateway import (
+    active_engine_contract,
+    calculate_active_daily_indicators,
+    calculate_active_latest_daily_indicator,
 )
 from app.market.schemas import DailyIndicatorPointRead
+from app.market.technical_parameters import get_technical_analysis_parameters
 
 router = APIRouter()
 
@@ -24,14 +26,17 @@ def get_stock_daily_indicators(
     db: Session = Depends(get_db),
 ):
     try:
-        return calculate_daily_indicators(
+        parameters = get_technical_analysis_parameters(
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+        )
+        return calculate_active_daily_indicators(
             db=db,
             stock_id=stock_id,
             from_date=from_date,
             to_date=to_date,
             limit=limit,
-            ma_windows=ma_windows,
-            volume_ma_windows=volume_ma_windows,
+            parameters=parameters,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -48,11 +53,14 @@ def get_latest_stock_daily_indicator(
     db: Session = Depends(get_db),
 ):
     try:
-        result = calculate_latest_daily_indicator(
-            db=db,
-            stock_id=stock_id,
+        parameters = get_technical_analysis_parameters(
             ma_windows=ma_windows,
             volume_ma_windows=volume_ma_windows,
+        )
+        result = calculate_active_latest_daily_indicator(
+            db=db,
+            stock_id=stock_id,
+            parameters=parameters,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -67,3 +75,10 @@ def get_latest_stock_daily_indicator(
         )
 
     return result
+
+
+@router.get("/contract/active")
+def get_active_indicator_engine_contract():
+    """Expose the backend-owned algorithm/version switch without market data I/O."""
+
+    return active_engine_contract()

@@ -15,6 +15,12 @@ from app.market.indices import (
     refresh_market_index_daily_stats,
     refresh_market_index_summary,
 )
+from app.market.official_index_platform import (
+    TaiwanIndexRefreshResult,
+    read_taiwan_official_index,
+    refresh_taiwan_official_index,
+)
+from app.market_data.integration_contracts import MarketDataResultV1
 from app.market.schemas import (
     IntradayTrendRead,
     MarketIndexContributionRead,
@@ -123,6 +129,50 @@ def refresh_index_daily_stats(
         ) from exc
 
 
+@router.get(
+    "/indices/{index_id}/official-daily",
+    response_model=MarketDataResultV1,
+)
+def get_official_index_daily(
+    index_id: str,
+    trade_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return read_taiwan_official_index(
+            db,
+            index_id=index_id,
+            trade_date=trade_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/indices/{index_id}/official-daily/refresh",
+    response_model=TaiwanIndexRefreshResult,
+)
+def refresh_official_index_daily(
+    index_id: str,
+    trade_date: date,
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_taiwan_official_index(
+            db,
+            index_id=index_id,
+            trade_date=trade_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
 @router.get("/indices/list", response_model=MarketIndexListRead)
 def get_indices_list(
     market: str = Query(default="TWSE", pattern="^(TWSE|TPEX)$"),
@@ -217,11 +267,13 @@ __all__ = [
     "get_index_contributions",
     "get_index_intraday_trend",
     "get_index_ohlc_chart_data",
+    "get_official_index_daily",
     "get_indices_list",
     "get_indices_summary",
     "get_taiwan_market_volume_state",
     "queue_indices_summary_refresh",
     "refresh_indices_summary",
     "refresh_index_daily_stats",
+    "refresh_official_index_daily",
     "router",
 ]

@@ -51,7 +51,6 @@ class IntradayTrendTests(unittest.TestCase):
                 "_fetch_nstock_intraday",
                 side_effect=fetch_provider,
             ) as fetch_nstock,
-            patch.object(intraday, "_fetch_mis_message", return_value=None),
             patch.object(intraday, "_upsert_market_intraday_bars", return_value=1),
         ):
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -61,119 +60,10 @@ class IntradayTrendTests(unittest.TestCase):
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[0]["point_count"], 1)
 
-    def test_mis_actual_trade_can_advance_history_without_tv(self):
-        result = {
-            "stock_id": "2330",
-            "source": "nstock_minute_stock_data",
-            "point_count": 1,
-            "points": [
-                {
-                    "time": "2026-08-05T09:04:00+08:00",
-                    "price": 2395.0,
-                    "volume": 1000,
-                }
-            ],
-        }
-
-        adjusted = intraday._apply_mis_volume_adjustment(
-            result,
-            {
-                "d": "20260805",
-                "t": "09:05:00",
-                "ts": "0",
-                "z": "2400",
-                "tv": "-",
-                "v": "3141",
-            },
-        )
-
-        self.assertTrue(adjusted["current_trade_available"])
-        self.assertTrue(adjusted["current_price_applied_to_history"])
-        self.assertEqual(adjusted["latest_history_price"], 2395.0)
-        self.assertEqual(adjusted["latest_actual_trade_price"], 2400.0)
-        self.assertEqual(adjusted["lag_seconds"], 60.0)
-        self.assertEqual(adjusted["points"][-1]["price"], 2400.0)
-        self.assertIsNone(adjusted["points"][-1]["volume"])
-        self.assertEqual(adjusted["current_observation"]["value"], 2400.0)
-        self.assertEqual(
-            adjusted["current_observation"]["price_semantics"],
-            "actual_trade",
-        )
-        self.assertTrue(adjusted["capabilities"]["supports_volume"])
-
-    def test_mis_volume_without_z_does_not_create_null_price_point(self):
-        result = {
-            "stock_id": "2330",
-            "source": "nstock_minute_stock_data",
-            "point_count": 1,
-            "points": [
-                {
-                    "time": "2026-08-05T09:04:00+08:00",
-                    "price": 2395.0,
-                    "volume": 1000,
-                }
-            ],
-        }
-
-        adjusted = intraday._apply_mis_volume_adjustment(
-            result,
-            {
-                "d": "20260805",
-                "t": "09:05:00",
-                "ts": "0",
-                "z": "-",
-                "tv": "5",
-                "v": "3141",
-                "pz": "2400",
-            },
-        )
-
-        self.assertFalse(adjusted["current_trade_available"])
-        self.assertEqual(
-            adjusted["current_trade_unavailable_reason"],
-            "ACTUAL_TRADE_PRICE_MISSING",
-        )
-        self.assertEqual(adjusted["point_count"], 1)
-        self.assertEqual(adjusted["points"][-1]["price"], 2395.0)
-        self.assertEqual(adjusted["current_observation"]["value"], 2395.0)
-        self.assertEqual(
-            adjusted["current_observation"]["price_semantics"],
-            "intraday_bar_close",
-        )
-
-    def test_mis_trial_price_does_not_replace_history(self):
-        result = {
-            "stock_id": "2330",
-            "source": "nstock_minute_stock_data",
-            "point_count": 1,
-            "points": [
-                {
-                    "time": "2026-08-05T08:59:00+08:00",
-                    "price": 2390.0,
-                    "volume": 0,
-                }
-            ],
-        }
-
-        adjusted = intraday._apply_mis_volume_adjustment(
-            result,
-            {
-                "d": "20260805",
-                "t": "08:59:55",
-                "ts": "1",
-                "z": "2395",
-                "pz": "2400",
-                "tv": "5",
-                "v": "3141",
-            },
-        )
-
-        self.assertFalse(adjusted["current_trade_available"])
-        self.assertEqual(
-            adjusted["current_trade_unavailable_reason"],
-            "AUCTION_INDICATIVE_ONLY",
-        )
-        self.assertEqual(adjusted["points"][-1]["price"], 2390.0)
+    def test_legacy_mis_snapshot_bar_masquerading_helpers_are_removed(self):
+        self.assertFalse(hasattr(intraday, "_fetch_mis_message"))
+        self.assertFalse(hasattr(intraday, "_fetch_mis_snapshot"))
+        self.assertFalse(hasattr(intraday, "_apply_mis_volume_adjustment"))
 
 
 if __name__ == "__main__":

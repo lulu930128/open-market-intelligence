@@ -171,20 +171,32 @@ def test_foundation_reference_matches_current_validated_checkpoint() -> None:
     baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     checkpoint_path = REPO_ROOT / baseline["foundation_reference"]["artifact"]
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-    extension_path = (
+    extension_paths = (
         REPO_ROOT
         / "docs"
         / "agent-runs"
         / "tw-realtime-market-state-remediation-20260824"
         / "artifacts"
-        / "acceptance-extension-checkpoint.json"
+        / "acceptance-extension-checkpoint.json",
+        REPO_ROOT
+        / "docs"
+        / "agent-runs"
+        / "tw-market-data-platform-convergence-20260825"
+        / "artifacts"
+        / "foundation-extension-checkpoint.json",
     )
-    extension = json.loads(extension_path.read_text(encoding="utf-8"))
+    extensions = [
+        json.loads(path.read_text(encoding="utf-8")) for path in extension_paths
+    ]
     assert checkpoint["validation"]["result"] == "passed"
-    assert extension["validation"]["result"] == "passed"
+    assert all(extension["validation"]["result"] == "passed" for extension in extensions)
     assert checkpoint["coverage"]["target_count"] == 30
     assert len(checkpoint["files"]) == 30
-    extension_files = {item["path"]: item for item in extension["files"]}
+    extension_files = {
+        item["path"]: item
+        for extension in extensions
+        for item in extension["files"]
+    }
     mismatches = []
     for item in checkpoint["files"]:
         item = extension_files.get(item["path"], item)

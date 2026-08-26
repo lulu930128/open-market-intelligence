@@ -125,6 +125,13 @@ class DatabaseMigrationTests(unittest.TestCase):
                 }.issubset(behavior_feature_columns)
             )
             self.assertIn("market_index_daily_stat", table_names)
+            market_index_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("market_index_daily_stat")
+            }
+            self.assertTrue(
+                {"source_id", "raw_result_id"}.issubset(market_index_columns)
+            )
             self.assertIn("taiwan_market_minute_state", table_names)
             self.assertIn("market_chip_daily", table_names)
             market_chip_columns = {
@@ -154,9 +161,17 @@ class DatabaseMigrationTests(unittest.TestCase):
                     "taiwan_stock_quote_snapshot"
                 )
             }
-            self.assertIn(
-                "last_trade_volume_lots",
-                quote_snapshot_columns,
+            self.assertTrue(
+                {
+                    "last_trade_volume_lots",
+                    "source_id",
+                    "raw_result_id",
+                    "received_at",
+                    "observation_state",
+                    "market_session",
+                    "trade_state",
+                    "raw_contract_version",
+                }.issubset(quote_snapshot_columns)
             )
             self.assertIn("taiwan_quote_contract_snapshot", table_names)
             self.assertIn("chart_drawing_snapshot", table_names)
@@ -262,6 +277,140 @@ class DatabaseMigrationTests(unittest.TestCase):
 
             self.assertEqual(stock_name, "台積電")
             self.assertEqual(get_database_revision(database_url), get_head_revision())
+
+    def test_market_index_lineage_upgrade_and_rollback_preserve_legacy_rows(
+        self,
+    ) -> None:
+        with migration_test_directory() as directory:
+            database_url = sqlite_url(directory / "market_index_lineage.db")
+            config = create_alembic_config(database_url)
+            command.upgrade(config, "head")
+            command.downgrade(config, "20260822_0066")
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO market_index_daily_stat "
+                            "(id,index_id,market,trade_date,close_value,price_change,"
+                            "source,created_at,updated_at) "
+                            "VALUES (1,'TAIEX','TWSE','2026-08-24',44762.32,"
+                            "-461.97,'legacy','2026-08-25 00:00:00',"
+                            "'2026-08-25 00:00:00')"
+                        )
+                    )
+                command.upgrade(config, "head")
+                columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns(
+                        "market_index_daily_stat"
+                    )
+                }
+                with engine.connect() as connection:
+                    upgraded = connection.execute(
+                        text(
+                            "SELECT index_id, source_id, raw_result_id "
+                            "FROM market_index_daily_stat WHERE id = 1"
+                        )
+                    ).one()
+                self.assertTrue({"source_id", "raw_result_id"}.issubset(columns))
+                self.assertEqual(upgraded.index_id, "TAIEX")
+                self.assertIsNone(upgraded.source_id)
+                self.assertIsNone(upgraded.raw_result_id)
+
+                command.downgrade(config, "20260822_0066")
+                rolled_back_columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns(
+                        "market_index_daily_stat"
+                    )
+                }
+                with engine.connect() as connection:
+                    preserved_index_id = connection.execute(
+                        text(
+                            "SELECT index_id FROM market_index_daily_stat WHERE id = 1"
+                        )
+                    ).scalar_one()
+            finally:
+                engine.dispose()
+
+            self.assertNotIn("source_id", rolled_back_columns)
+            self.assertNotIn("raw_result_id", rolled_back_columns)
+            self.assertEqual(preserved_index_id, "TAIEX")
+
+    def test_public_quote_lineage_upgrade_and_rollback_preserve_legacy_rows(
+        self,
+    ) -> None:
+        with migration_test_directory() as directory:
+            database_url = sqlite_url(directory / "public_quote_lineage.db")
+            config = create_alembic_config(database_url)
+            command.upgrade(config, "head")
+            command.downgrade(config, "20260825_0067")
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO taiwan_stock_quote_snapshot "
+                            "(id,provider,market,stock_id,session_phase,trade_date,"
+                            "quote_time,last_price,source,fetched_at,created_at,updated_at) "
+                            "VALUES (1,'twse_mis','TWSE','2330','regular_live',"
+                            "'2026-08-25','2026-08-25 13:30:00',2400.0,"
+                            "'twse_mis_quote_depth','2026-08-25 05:30:01',"
+                            "'2026-08-25 05:30:01','2026-08-25 05:30:01')"
+                        )
+                    )
+                command.upgrade(config, "head")
+                columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns(
+                        "taiwan_stock_quote_snapshot"
+                    )
+                }
+                with engine.connect() as connection:
+                    upgraded = connection.execute(
+                        text(
+                            "SELECT stock_id, source_id, raw_result_id, "
+                            "observation_state FROM taiwan_stock_quote_snapshot "
+                            "WHERE id = 1"
+                        )
+                    ).one()
+                self.assertTrue(
+                    {
+                        "source_id",
+                        "raw_result_id",
+                        "received_at",
+                        "observation_state",
+                        "market_session",
+                        "trade_state",
+                        "raw_contract_version",
+                    }.issubset(columns)
+                )
+                self.assertEqual(upgraded.stock_id, "2330")
+                self.assertIsNone(upgraded.source_id)
+                self.assertIsNone(upgraded.raw_result_id)
+                self.assertIsNone(upgraded.observation_state)
+
+                command.downgrade(config, "20260825_0067")
+                rolled_back_columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns(
+                        "taiwan_stock_quote_snapshot"
+                    )
+                }
+                with engine.connect() as connection:
+                    preserved_stock_id = connection.execute(
+                        text(
+                            "SELECT stock_id FROM taiwan_stock_quote_snapshot "
+                            "WHERE id = 1"
+                        )
+                    ).scalar_one()
+            finally:
+                engine.dispose()
+
+            self.assertNotIn("source_id", rolled_back_columns)
+            self.assertNotIn("raw_result_id", rolled_back_columns)
+            self.assertEqual(preserved_stock_id, "2330")
 
     def test_financial_date_migration_clears_known_fetch_date_pollution(self) -> None:
         with migration_test_directory() as directory:

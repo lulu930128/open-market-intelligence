@@ -1,0 +1,31 @@
+{
+  "fixture_contract": "omi.test.actual_public_payload.v1",
+  "source_receipt": {
+    "provider": "twse_openapi",
+    "source_name": "TWSE Official Market Index Daily",
+    "resource_id": "twse_fmtqik",
+    "url": "https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK",
+    "captured_at": "2026-08-25T19:20:00+08:00",
+    "status_code": 200,
+    "original_content_length": 2199,
+    "original_content_hash": "76e193b9a34c1004d422cc70959d421c7f2926a3f44eb7b718250e01af2c2d72"
+  },
+  "payload": [
+    {"Date":"1150803","TradeVolume":"11427047935","TradeValue":"885506043091","Transaction":"4191882","TAIEX":"43386.41","Change":"266.66"},
+    {"Date":"1150804","TradeVolume":"11340636777","TradeValue":"1087045875836","Transaction":"4751347","TAIEX":"43360.66","Change":"-25.75"},
+    {"Date":"1150805","TradeVolume":"13207451811","TradeValue":"1200212510521","Transaction":"5256070","TAIEX":"44611.60","Change":"1250.94"},
+    {"Date":"1150806","TradeVolume":"10650583944","TradeValue":"974054973424","Transaction":"4630303","TAIEX":"44396.70","Change":"-214.90"},
+    {"Date":"1150807","TradeVolume":"9376069669","TradeValue":"850815189087","Transaction":"4398054","TAIEX":"44225.91","Change":"-170.79"},
+    {"Date":"1150810","TradeVolume":"10238975923","TradeValue":"880440723750","Transaction":"4441614","TAIEX":"44928.76","Change":"702.85"},
+    {"Date":"1150811","TradeVolume":"9740372114","TradeValue":"902052207533","Transaction":"4473307","TAIEX":"45120.72","Change":"191.96"},
+    {"Date":"1150812","TradeVolume":"9972596202","TradeValue":"892659784922","Transaction":"4570191","TAIEX":"45518.07","Change":"397.35"},
+    {"Date":"1150813","TradeVolume":"11492166298","TradeValue":"1104024642159","Transaction":"5240402","TAIEX":"46021.48","Change":"503.41"},
+    {"Date":"1150814","TradeVolume":"11975502093","TradeValue":"1109746702006","Transaction":"5369692","TAIEX":"45811.01","Change":"-210.47"},
+    {"Date":"1150817","TradeVolume":"10616088292","TradeValue":"981055134845","Transaction":"4740651","TAIEX":"45857.27","Change":"46.26"},
+    {"Date":"1150818","TradeVolume":"10333808272","TradeValue":"1007881760816","Transaction":"5224454","TAIEX":"45308.68","Change":"-548.59"},
+    {"Date":"1150819","TradeVolume":"10230116335","TradeValue":"890269743542","Transaction":"4880908","TAIEX":"44719.35","Change":"-589.33"},
+    {"Date":"1150820","TradeVolume":"9068926422","TradeValue":"834412514041","Transaction":"4140846","TAIEX":"44933.74","Change":"214.39"},
+    {"Date":"1150821","TradeVolume":"8208832354","TradeValue":"754905335886","Transaction":"3751488","TAIEX":"45224.29","Change":"290.55"},
+    {"Date":"1150824","TradeVolume":"8082548083","TradeValue":"656280679689","Transaction":"3876321","TAIEX":"44762.32","Change":"-461.97"}
+  ]
+}

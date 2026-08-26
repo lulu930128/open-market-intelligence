@@ -228,6 +228,8 @@ class SourceLineage(CanonicalModel):
     fetched_at: datetime | None = None
     cache_hit: bool = False
     observation_id: str | None = Field(default=None, max_length=128)
+    raw_receipt_id: str | None = Field(default=None, max_length=128)
+    content_hash: str | None = Field(default=None, max_length=128)
 
     @field_validator("event_at", "received_at", "fetched_at")
     @classmethod
@@ -377,6 +379,11 @@ class BarObservation(CanonicalModel):
     low_price: Decimal
     close_price: Decimal
     volume: Quantity | None = None
+    instrument_name: str | None = Field(default=None, max_length=120)
+    turnover_value: Decimal | None = Field(default=None, ge=0)
+    turnover_currency: str | None = Field(default=None, min_length=3, max_length=3)
+    trade_count: int | None = Field(default=None, ge=0)
+    price_change: Decimal | None = None
     finalization: BarFinalization
 
     @field_validator("start_at", "end_at")
@@ -402,6 +409,106 @@ class BarObservation(CanonicalModel):
             raise ValueError("bar high_price is inconsistent")
         if self.low_price > min(self.open_price, self.high_price, self.close_price):
             raise ValueError("bar low_price is inconsistent")
+        if (self.turnover_value is None) != (self.turnover_currency is None):
+            raise ValueError(
+                "turnover_value and turnover_currency must be provided together"
+            )
+        return self
+
+
+class MarketBreadthObservation(CanonicalModel):
+    contract_version: str = "omi.market.breadth.v1"
+    market: Market
+    venue: str = Field(min_length=1, max_length=32)
+    lineage: SourceLineage
+    session: MarketSession
+    trade_date: date
+    scope: str = Field(min_length=1, max_length=64)
+    universe_source: str = Field(min_length=1, max_length=192)
+    universe_count: int = Field(ge=0)
+    advance_count: int = Field(ge=0)
+    decline_count: int = Field(ge=0)
+    unchanged_count: int = Field(ge=0)
+    unknown_count: int = Field(ge=0)
+    missing_count: int = Field(ge=0)
+    trade_value: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    state: ObservationState = ObservationState.AVAILABLE
+    price_semantics: str = Field(min_length=1, max_length=64)
+    official: bool = False
+    provisional: bool = False
+
+    @property
+    def classified_count(self) -> int:
+        return self.advance_count + self.decline_count + self.unchanged_count
+
+    @model_validator(mode="after")
+    def _validate_partition(self) -> MarketBreadthObservation:
+        partition = self.classified_count + self.unknown_count + self.missing_count
+        if partition != self.universe_count:
+            raise ValueError(
+                "breadth classified/unknown/missing counts must equal universe_count"
+            )
+        incomplete = (
+            self.unknown_count > 0
+            or self.missing_count > 0
+            or self.trade_value is None
+        )
+        if incomplete and self.state is ObservationState.AVAILABLE:
+            raise ValueError("incomplete breadth must be partial or stale")
+        if not incomplete and self.state is ObservationState.PARTIAL:
+            raise ValueError("complete breadth cannot be partial")
+        if (self.trade_value is None) != (self.currency is None):
+            raise ValueError("breadth trade_value and currency must be paired")
+        if self.session in {MarketSession.POST_CLOSE, MarketSession.CLOSED}:
+            if self.provisional:
+                raise ValueError("completed-session breadth cannot be provisional")
+        return self
+
+
+class MarketIndexObservation(CanonicalModel):
+    contract_version: str = "omi.market.index_observation.v1"
+    market: Market
+    index_id: str = Field(min_length=1, max_length=32)
+    venue: str = Field(min_length=1, max_length=32)
+    lineage: SourceLineage
+    session: MarketSession
+    trade_date: date
+    close_value: Decimal = Field(gt=0)
+    price_change: Decimal
+    trade_volume: Quantity | None = None
+    trade_value: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    transaction_count: int | None = Field(default=None, ge=0)
+    state: ObservationState = ObservationState.AVAILABLE
+    value_semantics: str = Field(min_length=1, max_length=64)
+    finalization: BarFinalization
+    official: bool = False
+    provisional: bool = False
+
+    @model_validator(mode="after")
+    def _validate_market_index(self) -> MarketIndexObservation:
+        incomplete = any(
+            value is None
+            for value in (
+                self.trade_volume,
+                self.trade_value,
+                self.transaction_count,
+            )
+        )
+        if incomplete and self.state is ObservationState.AVAILABLE:
+            raise ValueError(
+                "incomplete market index observation must be partial or stale"
+            )
+        if not incomplete and self.state is ObservationState.PARTIAL:
+            raise ValueError("complete market index observation cannot be partial")
+        if (self.trade_value is None) != (self.currency is None):
+            raise ValueError("market index trade_value and currency must be paired")
+        if self.session in {MarketSession.POST_CLOSE, MarketSession.CLOSED}:
+            if self.provisional:
+                raise ValueError("completed-session market index cannot be provisional")
+            if self.finalization is BarFinalization.PROVISIONAL:
+                raise ValueError("completed-session market index must be final")
         return self
 
 
@@ -542,6 +649,13 @@ class ResolvedDepth(CanonicalModel):
     candidates: tuple[CandidateSummary, ...] = ()
 
 
+class ResolvedAuction(CanonicalModel):
+    contract_version: str = "omi.market.resolved_auction.v1"
+    auction: AuctionObservation | None = None
+    health: ResolvedEvidenceHealth
+    candidates: tuple[CandidateSummary, ...] = ()
+
+
 class ResolvedBarSeries(CanonicalModel):
     contract_version: str = "omi.market.resolved_bar_series.v1"
     bars: tuple[BarObservation, ...] = ()
@@ -563,6 +677,20 @@ class ResolvedBarSeries(CanonicalModel):
             ):
                 raise ValueError("resolved bars must be strictly ordered")
         return self
+
+
+class ResolvedMarketBreadth(CanonicalModel):
+    contract_version: str = "omi.market.resolved_breadth.v1"
+    breadth: MarketBreadthObservation | None = None
+    health: ResolvedEvidenceHealth
+    candidates: tuple[CandidateSummary, ...] = ()
+
+
+class ResolvedMarketIndex(CanonicalModel):
+    contract_version: str = "omi.market.resolved_index.v1"
+    market_index: MarketIndexObservation | None = None
+    health: ResolvedEvidenceHealth
+    candidates: tuple[CandidateSummary, ...] = ()
 
 
 class ResolvedTradingStatus(CanonicalModel):

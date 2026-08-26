@@ -545,7 +545,7 @@ class QueryPlanContractTests(unittest.TestCase):
             build_us_overnight_impact_report=excluded["build_us_overnight_impact_report"],
             get_broker_branch_trade_summary=excluded["get_broker_branch_trade_summary"],
             get_market_intraday_history=excluded["get_market_intraday_history"],
-            get_taiwan_stock_quote_depth=excluded["get_taiwan_stock_quote_depth"],
+            read_taiwan_public_quote=excluded["get_taiwan_stock_quote_depth"],
             now=Mock(return_value="2026-07-19T00:00:00Z"),
         )
 
@@ -596,7 +596,7 @@ class QueryPlanContractTests(unittest.TestCase):
             build_us_overnight_impact_report=excluded["build_us_overnight_impact_report"],
             get_broker_branch_trade_summary=Mock(return_value=branch_summary),
             get_market_intraday_history=excluded["get_market_intraday_history"],
-            get_taiwan_stock_quote_depth=excluded["get_taiwan_stock_quote_depth"],
+            read_taiwan_public_quote=excluded["get_taiwan_stock_quote_depth"],
             now=Mock(return_value="2026-07-19T00:00:00Z"),
         )
 

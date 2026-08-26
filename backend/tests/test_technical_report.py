@@ -21,7 +21,10 @@ from app.db.models import (
 from app.market.indicator_service import calculate_indicator_points_from_ohlc_points
 from app.market.signal_service import calculate_latest_stock_signals
 from app.market.schemas import TechnicalReportRead
+from app.market.technical_evidence import build_tw_stock_technical_evidence
+from app.market.technical_indicator_gateway import calculate_active_daily_indicators
 from app.market.technical_report import TAIPEI_TZ, _fmt_price, build_stock_technical_report
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
 def make_session() -> Session:
@@ -31,8 +34,13 @@ def make_session() -> Session:
 
 
 def add_raw_source(db: Session, category: str) -> tuple[int, int]:
+    source_name = (
+        TWSE_DAILY_TRADING_SOURCE_NAME
+        if category == "market_daily_price"
+        else f"test-{category}"
+    )
     source = SourceRegistry(
-        source_name=f"test-{category}",
+        source_name=source_name,
         source_type="test",
         category=category,
     )
@@ -175,6 +183,55 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertIsNotNone(latest["kd"]["k9"])
         self.assertEqual(latest["support_resistance"]["support20"], 107.0)
         self.assertEqual(latest["support_resistance"]["resistance20"], 130.0)
+
+    def test_api_ai_and_frontend_series_share_resolved_backend_indicator_truth(self) -> None:
+        vendor_source_id, vendor_raw_id = add_raw_source(self.db, "vendor_duplicate")
+        self.db.add(
+            MarketDailyPrice(
+                source_id=vendor_source_id,
+                raw_result_id=vendor_raw_id,
+                trade_date=date(2026, 3, 21),
+                stock_id="2330",
+                stock_name="TSMC vendor duplicate",
+                trade_volume=9_999_999,
+                open_price=9_998.0,
+                high_price=10_001.0,
+                low_price=9_997.0,
+                close_price=10_000.0,
+                price_change=9_821.0,
+            )
+        )
+        self.db.commit()
+
+        api_series = calculate_active_daily_indicators(
+            db=self.db,
+            stock_id="2330",
+            limit=250,
+        )
+        evidence = build_tw_stock_technical_evidence(
+            db=self.db,
+            stock_id="2330",
+            corporate_event_history={
+                "cache_status": "current",
+                "coverage_start": "2020-01-01",
+                "coverage_end": "2026-12-31",
+                "results": [],
+            },
+        )
+        api_latest = api_series[-1]
+        ai_latest = evidence["indicators"]["timeframes"]["daily"]["completed"]
+
+        self.assertEqual(api_latest["close"], 179.0)
+        self.assertEqual(api_latest["algorithm_version"], "tw.technical.indicators.v3")
+        self.assertEqual(api_latest["calculation_role"], "backend_authoritative")
+        self.assertEqual(api_latest["rsi"], ai_latest["rsi"])
+        self.assertEqual(api_latest["macd"], ai_latest["macd"])
+        self.assertEqual(api_latest["kd"], ai_latest["kd"])
+        self.assertEqual(
+            evidence["indicators"]["lineage"]["resolved_health"]["selected_provider"],
+            "twse_openapi",
+        )
+        self.assertNotEqual(api_latest["close"], 10_000.0)
 
     def test_daily_report_returns_prompt_ready_rows(self) -> None:
         report = build_stock_technical_report(
@@ -421,7 +478,7 @@ class TechnicalReportTests(unittest.TestCase):
 
     def test_stock_context_exposes_compact_evidence_without_intraday_fetch(self) -> None:
         with (
-            patch("app.ai.tools.get_taiwan_stock_quote_depth") as quote_depth,
+            patch("app.ai.tools.read_taiwan_public_quote_projection") as quote_depth,
             patch("app.ai.tools.get_market_intraday_history") as intraday_history,
         ):
             context = ai_tools.read_stock_context(
@@ -572,10 +629,10 @@ class TechnicalReportTests(unittest.TestCase):
                 },
             ),
             patch(
-                "app.ai.tools.get_taiwan_stock_quote_depth",
+                "app.ai.tools.read_taiwan_public_quote_projection",
                 return_value={
                     "provider": "test_provider",
-                    "source": "twse_mis_quote_depth",
+                    "source": "twse_mis_public_quote",
                     "session_phase": "regular",
                     "phase_label": "regular",
                     "trade_date": date(2026, 3, 21),
@@ -595,7 +652,18 @@ class TechnicalReportTests(unittest.TestCase):
                     "best_ask_size_lots": 15,
                     "spread": 0.5,
                     "spread_pct": 0.28,
-                    "depth_available": True,
+                    "depth_available": False,
+                    "depth_status": "unavailable",
+                    "provider_attempts": [
+                        {
+                            "provider": "test_provider",
+                            "resource_id": "twse_mis_public_quote",
+                        }
+                    ],
+                    "resolved_health": {
+                        "fallback_used": False,
+                        "selection_reason": "selected_ranked_candidate",
+                    },
                     "freshness": {
                         "status": "live",
                         "is_live": True,
@@ -619,7 +687,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(intraday_history.call_count, 2)
 
         compact = context["data"]["compact"]
-        self.assertEqual(compact["quote"]["source"], "twse_mis_quote_depth")
+        self.assertEqual(compact["quote"]["source"], "twse_mis_public_quote")
         self.assertEqual(compact["quote"]["latest_price"], 181.5)
         self.assertEqual(compact["quote"]["price"], 181.5)
         self.assertEqual(compact["quote"]["last_price"], 181.5)
@@ -642,6 +710,8 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertTrue(
             any(ref["name"] == "market_intraday_bar" for ref in compact["source_refs"])
         )
+        for call in intraday_history.call_args_list:
+            self.assertFalse(call.kwargs["refresh"])
 
     def test_tw_index_context_compact_intraday_respects_payload_level(self) -> None:
         daily_points = [

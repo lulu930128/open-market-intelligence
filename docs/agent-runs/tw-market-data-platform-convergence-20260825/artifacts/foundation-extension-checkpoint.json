@@ -1,0 +1,35 @@
+{
+  "schema_version": "omi.market_data_foundation.acceptance_extension_checkpoint.v1",
+  "captured_at": "2026-08-26T10:00:44+08:00",
+  "task": "tw-market-data-platform-convergence-20260825",
+  "base_checkpoint_artifact": "docs/agent-runs/market-data-foundation-closure-runtime-acceptance-v1-20260819/artifacts/source-checkpoint.json",
+  "prior_extension_artifact": "docs/agent-runs/tw-realtime-market-state-remediation-20260824/artifacts/acceptance-extension-checkpoint.json",
+  "validation": {
+    "backend_compileall": "passed in isolated staged tree 9520795edc9439e84e794f88792224f3d90dad30",
+    "targeted_contract_suites": "338 passed and 71 subtests passed in isolated staged tree",
+    "full_backend_pre_checkpoint": "2278 passed in the then-current mixed worktree; the US integration allowlist and this successor checkpoint remained outside that result",
+    "full_safe_validation": "passed in .tmp/validation/20260825-222211: compileall; 2280 backend tests; frontend lint, TypeScript, production build; git diff check",
+    "frontend_lint_typecheck_build": "ESLint and TypeScript passed in isolated staged tree; production build retained from the historical full safe validation",
+    "result": "passed"
+  },
+  "coverage": {
+    "target_count": 13,
+    "supersedes_matching_prior_entries": true,
+    "reason": "Records the isolated shared Data Core and Taiwan consumer convergence staged tree. Coexisting US integration hunks are deliberately excluded without rewriting the dated Foundation or M5 checkpoints."
+  },
+  "files": [
+    {"path": "backend/app/market/schemas.py", "sha256": "27e17dc8cd030389e7b35d88dbac19a4c7b7b401dc14b08857f13ee8a886aa6e", "owner": "tw_data_core_convergence"},
+    {"path": "backend/app/routers/market.py", "sha256": "2a82e2835e54d1ab787cad5f95a7e239bcc426c031943d38c781c292e32692a9", "owner": "tw_data_core_convergence"},
+    {"path": "backend/app/market_data/contracts.py", "sha256": "ee9f0e51599da8335d4d024662def2f6f0ed20126cb8ef5f29aa2a9e513e9011", "owner": "shared_data_core"},
+    {"path": "backend/app/market_data/resolution.py", "sha256": "ba1ef0fe6b739731bfb0acf4dc97f95333663338f9290e1004bf91386de60938", "owner": "shared_data_core"},
+    {"path": "backend/app/market_data/registry.py", "sha256": "9b32726163124aaa61b8cce438ab797958486ebccabbbb168c4984cba58d86e3", "owner": "shared_data_core"},
+    {"path": "backend/app/ai/capability_projection_registry.py", "sha256": "a5e1fd076c4643d68c7a685ec30970c71e585c106155f2913951a320ee03ca97", "owner": "tw_consumer_convergence"},
+    {"path": "backend/tests/test_market_data_registry.py", "sha256": "b5e6f9f7a084a79f2cf4b59f99102c923008502beceb326554bb008f65721f05", "owner": "shared_data_core"},
+    {"path": "backend/app/ai/market_context/taiwan_stock.py", "sha256": "dee173a3b64ad38d67945abe31370282bd6992ba43988d41e274594ea2911185", "owner": "tw_consumer_convergence"},
+    {"path": "backend/app/market/index_resolution.py", "sha256": "2e979814409df4468fa97125f9efd60a06983dc1b00647c3d41b38fab77be253", "owner": "tw_data_core_convergence"},
+    {"path": "backend/tests/test_taiwan_index_resolution.py", "sha256": "7fce3c1b531a1824cc384407dc4ab05d2fe41dd169b6b4e39a19c73be185d925", "owner": "tw_data_core_convergence"},
+    {"path": "backend/tests/test_tw_market_dashboard.py", "sha256": "87235844a792101d0d7740b811d47120c404db11b6772703080d048bcbfd5e3b", "owner": "tw_data_core_convergence"},
+    {"path": "backend/tests/test_market_data_v2_dark_boundary.py", "sha256": "c8ca46aeff0a690fb9ac362a7bf388df539481d844095871f7adb9ab7de43a1b", "owner": "foundation_checkpoint_guard"},
+    {"path": "frontend/src/types/market.ts", "sha256": "cbdfa9ded54330c38b6dc97ef5fc0b40c3fb02713fbf6116af4a11c132e06c9b", "owner": "tw_consumer_convergence"}
+  ]
+}

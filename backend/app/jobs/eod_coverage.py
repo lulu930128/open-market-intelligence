@@ -7,7 +7,11 @@ from sqlalchemy.orm import Session
 from app.db.models import JobRun
 from app.jobs import service as job_service
 from app.jobs.job_types import MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE
-from app.market_data.eod_coverage import normalize_coverage_market, reconcile_eod_coverage
+from app.market_data.eod_coverage import (
+    eod_reconcile_bounds,
+    normalize_coverage_market,
+    reconcile_eod_coverage,
+)
 
 
 def run_eod_coverage_reconcile_job(
@@ -59,6 +63,16 @@ def enqueue_eod_coverage_reconcile(
     message: str = "Queued full-market EOD coverage reconciliation.",
 ) -> tuple[JobRun, bool]:
     normalized = normalize_coverage_market(market)
+    bounds = eod_reconcile_bounds(normalized)
+    effective_max_symbols = min(
+        max(int(max_symbols), 1),
+        bounds.max_symbols,
+        bounds.max_calls,
+    )
+    effective_max_runtime_seconds = min(
+        max(int(max_runtime_seconds), 1),
+        bounds.timeout_seconds,
+    )
     target = f"{normalized}:full_market_stock_universe"
     active = job_service.find_active_job_by_target(
         db,
@@ -71,8 +85,8 @@ def enqueue_eod_coverage_reconcile(
         "market": normalized,
         "repair": repair,
         "expected_trade_date": expected_trade_date,
-        "max_symbols": max_symbols,
-        "max_runtime_seconds": max_runtime_seconds,
+        "max_symbols": effective_max_symbols,
+        "max_runtime_seconds": effective_max_runtime_seconds,
         "sleep_seconds": sleep_seconds,
         "max_consecutive_errors": max_consecutive_errors,
         "error_backoff_seconds": error_backoff_seconds,
@@ -82,15 +96,15 @@ def enqueue_eod_coverage_reconcile(
         job_type=MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE,
         target=target,
         request=request,
-        progress_total=2 if normalized == "TW" else max(max_symbols, 1),
+        progress_total=effective_max_symbols,
         message=message,
         task=run_eod_coverage_reconcile_job,
         task_args=(
             normalized,
             repair,
             expected_trade_date,
-            max_symbols,
-            max_runtime_seconds,
+            effective_max_symbols,
+            effective_max_runtime_seconds,
             sleep_seconds,
             max_consecutive_errors,
             error_backoff_seconds,

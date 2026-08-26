@@ -2,7 +2,7 @@ import asyncio
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -11,6 +11,11 @@ from app.market.daily_metrics_backfill import (
     ensure_latest_daily_metrics,
     ensure_stock_daily_metrics,
 )
+from app.market.daily_ohlcv_platform import (
+    TaiwanDailyRefreshResult,
+    refresh_taiwan_official_daily,
+)
+from app.market.official_breadth_platform import read_taiwan_official_breadth
 from app.market.fundamental_metrics_backfill import (
     ensure_stock_fundamental_metrics,
 )
@@ -96,6 +101,8 @@ from app.market.tw_corporate_events import (
     refresh_taiwan_corporate_events,
 )
 from app.routers.tw_market_etfs import router as market_etfs_router
+from app.routers.tw_data_core import router as data_core_router
+from app.routers.tw_public_quotes import router as public_quotes_router
 from app.market.source_health import build_taiwan_source_health
 from app.market.chart_drawings import (
     ChartDrawingSnapshotNotFoundError,
@@ -109,6 +116,7 @@ from app.market.trading_calendar import (
     TAIWAN_TZ,
     previous_taiwan_trading_day,
 )
+from app.market_data.integration_contracts import MarketDataResultV1
 from app.market.schemas import (
     BrokerBranchTradeDailySummaryRead,
     ChartDrawingSnapshotRead,
@@ -177,8 +185,10 @@ from app.routers.tw_market_indices import (
     get_index_contributions,
     get_index_intraday_trend,
     get_index_ohlc_chart_data,
+    get_official_index_daily,
     get_indices_list,
     get_indices_summary,
+    refresh_official_index_daily,
     router as market_indices_router,
 )
 from app.routers.tw_market_futures import (
@@ -196,9 +206,11 @@ from app.routers.tw_market_futures import (
 )
 
 router = APIRouter()
+router.include_router(data_core_router)
 router.include_router(market_indices_router)
 router.include_router(market_futures_router)
 router.include_router(market_etfs_router)
+router.include_router(public_quotes_router)
 
 TAIWAN_DAILY_METRIC_CATEGORY_DATASET_KEYS = {
     TAIWAN_REFRESH_DAILY_PRICE: TAIWAN_DATASET_DAILY_PRICE,
@@ -370,6 +382,27 @@ def get_taiwan_source_health(
         index_id=index_id,
         now=now,
     )
+
+
+@router.get("/breadth/official", response_model=MarketDataResultV1)
+def get_taiwan_official_market_breadth(
+    venue: Literal["TWSE", "TPEX"],
+    trade_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    """Read one provider-neutral, completed-session official breadth snapshot."""
+
+    try:
+        return read_taiwan_official_breadth(
+            db,
+            venue=venue,
+            trade_date=trade_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post("/source-health/snapshot", response_model=TaiwanSourceHealthRead)
@@ -607,6 +640,30 @@ def refresh_selected_stock_data_api(
         task_args=(stock_id, include_today, resolved_sleep_seconds, refresh_profile),
         reuse_success_within_seconds=120,
     )
+
+
+@router.post(
+    "/daily/{stock_id}/refresh-official",
+    response_model=TaiwanDailyRefreshResult,
+)
+def refresh_stock_official_daily_price(
+    stock_id: str,
+    trade_date: date,
+    db: Session = Depends(get_db),
+):
+    """Run one provider-neutral, bounded completed-session repair."""
+
+    try:
+        return refresh_taiwan_official_daily(
+            db,
+            stock_id=stock_id,
+            trade_date=trade_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post(

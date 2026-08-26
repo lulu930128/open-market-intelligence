@@ -1,4 +1,6 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -12,11 +14,16 @@ from app.db.models import (
     ShareholdingDistributionWeekly,
     StockMaster,
 )
-from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
 from app.market.intraday import get_intraday_trend
 from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
+from app.market.daily_ohlcv_platform import read_taiwan_official_daily
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import previous_taiwan_trading_day
+from app.market_data.contracts import (
+    DatasetHealthStatus,
+    ResolvedEvidenceStatus,
+)
+from app.market_data.integration_contracts import MarketDataResultV1
 
 
 CHART_LOOKBACK_MULTIPLIER = {
@@ -25,6 +32,7 @@ CHART_LOOKBACK_MULTIPLIER = {
     "monthly": 31,
 }
 MAX_CHART_BARS = 5000
+TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 
 
 def list_market_daily_prices(
@@ -169,6 +177,93 @@ def _chart_row(row: MarketDailyPrice, time_value: date | None = None) -> dict:
     }
 
 
+def _whole_number(value: Decimal | None) -> int | None:
+    if value is None:
+        return None
+    if value != value.to_integral_value():
+        return None
+    return int(value)
+
+
+def _platform_chart_row(bar) -> dict:
+    return {
+        "time": bar.end_at.astimezone(TAIWAN_TZ).date(),
+        "open": float(bar.open_price),
+        "high": float(bar.high_price),
+        "low": float(bar.low_price),
+        "close": float(bar.close_price),
+        "volume": _whole_number(bar.volume.value) if bar.volume else None,
+        "trade_value": _whole_number(bar.turnover_value),
+        "transaction_count": bar.trade_count,
+    }
+
+
+def _platform_daily_read(
+    db: Session,
+    *,
+    stock: StockMaster,
+    start_date: date,
+    end_date: date,
+) -> tuple[list[dict], MarketDataResultV1]:
+    result = read_taiwan_official_daily(
+        db,
+        stock_id=stock.stock_id,
+        from_date=start_date,
+        to_date=end_date,
+        limit=MAX_CHART_BARS,
+    )
+    return [_platform_chart_row(bar) for bar in result.resolved.bars], result
+
+
+def _daily_points_with_platform(
+    db: Session,
+    *,
+    stock_id: str,
+    start_date: date,
+    end_date: date,
+) -> tuple[list[dict], date | None, MarketDataResultV1 | None]:
+    stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
+    if stock is not None and str(stock.market or "").strip().upper() in {"TWSE", "TPEX"}:
+        points, result = _platform_daily_read(
+            db,
+            stock=stock,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        latest_date = points[-1]["time"] if points else None
+        return points, latest_date, result
+    rows = list_stock_daily_history(
+        db=db,
+        stock_id=stock_id,
+        from_date=start_date,
+        to_date=end_date,
+        limit=MAX_CHART_BARS,
+        ascending=True,
+    )
+    return [_chart_row(row) for row in rows], (rows[-1].trade_date if rows else None), None
+
+
+def _platform_quality(result: MarketDataResultV1 | None) -> tuple[str, list[str]]:
+    if result is None:
+        return "legacy", ["TW_DATA_CORE_INSTRUMENT_METADATA_UNAVAILABLE"]
+    warnings = list(result.limitations)
+    warnings.extend(result.resolved.health.limitations)
+    warnings.extend(item.reason_code for item in result.candidate_rejections)
+    dataset_status = result.dataset_health.status if result.dataset_health else None
+    if dataset_status is DatasetHealthStatus.PARTIAL:
+        quality = "partial"
+    elif result.resolved.health.status in {
+        ResolvedEvidenceStatus.SELECTED,
+        ResolvedEvidenceStatus.FALLBACK,
+    }:
+        quality = "ok"
+    elif result.resolved.health.status is ResolvedEvidenceStatus.STALE:
+        quality = "stale"
+    else:
+        quality = "missing"
+    return quality, list(dict.fromkeys(warnings))
+
+
 def _aggregate_market_rows(
     rows: list[MarketDailyPrice],
     timeframe: str,
@@ -178,62 +273,6 @@ def _aggregate_market_rows(
         timeframe=timeframe,
         sum_fields=("volume", "trade_value", "transaction_count"),
     )
-
-
-def _get_stock_market(db: Session, stock_id: str) -> str | None:
-    stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
-
-    if stock is None:
-        return None
-
-    return stock.market.upper()
-
-
-def _ensure_stock_history(
-    db: Session,
-    stock_id: str,
-    start_date: date,
-    end_date: date,
-    sleep_seconds: float,
-) -> dict | None:
-    market = _get_stock_market(db=db, stock_id=stock_id)
-
-    if market == "TWSE":
-        return backfill_twse_stock_day(
-            db=db,
-            stock_id=stock_id,
-            start_date=start_date,
-            end_date=end_date,
-            sleep_seconds=sleep_seconds,
-            skip_existing_months=True,
-        )
-
-    if market == "TPEX":
-        return backfill_tpex_trading_stock(
-            db=db,
-            stock_id=stock_id,
-            start_date=start_date,
-            end_date=end_date,
-            sleep_seconds=sleep_seconds,
-            skip_existing_months=True,
-        )
-
-    return {
-        "stock_id": stock_id,
-        "stock_name": None,
-        "source_id": 0,
-        "start_date": start_date,
-        "end_date": end_date,
-        "requested_month_count": 0,
-        "fetched_month_count": 0,
-        "skipped_existing_month_count": 0,
-        "parsed_count": 0,
-        "inserted_count": 0,
-        "skipped_count": 0,
-        "status": "skipped",
-        "message": f"History backfill is not configured for market='{market}'.",
-        "months": [],
-    }
 
 
 def list_stock_ohlc_chart_data(
@@ -246,6 +285,7 @@ def list_stock_ohlc_chart_data(
     to_date: date | None = None,
     sleep_seconds: float = 0.1,
 ) -> dict:
+    del sleep_seconds  # retained only for outward compatibility; GET is cache-only
     if timeframe not in CHART_LOOKBACK_MULTIPLIER:
         raise ValueError("timeframe must be one of: daily, weekly, monthly.")
 
@@ -265,62 +305,33 @@ def list_stock_ohlc_chart_data(
     start_date = end_date - timedelta(days=lookback_days)
 
     backfill_result = None
-    rows = list_stock_daily_history(
-        db=db,
+    daily_points, latest_data_date, platform_result = _daily_points_with_platform(
+        db,
         stock_id=stock_id,
-        from_date=start_date,
-        to_date=end_date,
-        limit=5000,
-        ascending=True,
+        start_date=start_date,
+        end_date=end_date,
     )
-    daily_points = [_chart_row(row) for row in rows]
     base_points = aggregate_ohlc_points(
         points=daily_points,
         timeframe=timeframe,
         sum_fields=("volume", "trade_value", "transaction_count"),
     )[-bars:]
-    latest_data_date = rows[-1].trade_date if rows else None
     refresh_reasons: list[str] = []
     if len(base_points) < bars:
         refresh_reasons.append("insufficient_history")
     if latest_data_date is None or latest_data_date < resolved_expected_data_date:
         refresh_reasons.append("stale_latest_date")
 
-    if ensure_history and refresh_reasons:
-        try:
-            refresh_result = _ensure_stock_history(
-                db=db,
-                stock_id=stock_id,
-                start_date=start_date,
-                end_date=resolved_expected_data_date,
-                sleep_seconds=sleep_seconds,
-            )
-            backfill_result = (
-                {**refresh_result, "refresh_reasons": refresh_reasons}
-                if refresh_result is not None
-                else None
-            )
-        except Exception as exc:
-            db.rollback()
-            if not rows:
-                raise
-            backfill_result = {
-                "status": "error",
-                "stock_id": stock_id,
-                "refresh_reasons": refresh_reasons,
-                "message": f"Taiwan daily refresh failed; using cached rows: {exc}",
-            }
-
-        rows = list_stock_daily_history(
-            db=db,
-            stock_id=stock_id,
-            from_date=start_date,
-            to_date=end_date,
-            limit=5000,
-            ascending=True,
-        )
-        daily_points = [_chart_row(row) for row in rows]
-        latest_data_date = rows[-1].trade_date if rows else None
+    if ensure_history:
+        backfill_result = {
+            "status": "not_attempted",
+            "stock_id": stock_id,
+            "refresh_reasons": refresh_reasons,
+            "message": (
+                "Deprecated ensure_history was ignored because Taiwan OHLC GET "
+                "is cache-only; use an explicit bounded refresh operation."
+            ),
+        }
 
     intraday_overlay = None
     if include_intraday:
@@ -344,6 +355,7 @@ def list_stock_ohlc_chart_data(
         if latest_data_date > resolved_expected_data_date
         else "current"
     )
+    data_quality, warnings = _platform_quality(platform_result)
 
     return {
         "stock_id": stock_id,
@@ -356,6 +368,8 @@ def list_stock_ohlc_chart_data(
         "points": points,
         "backfill": backfill_result,
         "intraday_overlay": intraday_overlay,
+        "data_quality": data_quality,
+        "warnings": warnings,
         "latest_data_date": latest_data_date,
         "expected_data_date": resolved_expected_data_date,
         "freshness_status": freshness_status,

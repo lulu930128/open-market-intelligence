@@ -245,10 +245,41 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 396)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 395)
+        self.assertEqual(len(operations), 406)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 405)
         self.assertIn(("get", "/api/market-data/eod-coverage"), operations)
         self.assertIn(("post", "/api/market-data/eod-coverage/reconcile"), operations)
+        self.assertIn(
+            ("post", "/api/market/daily/{stock_id}/refresh-official"),
+            operations,
+        )
+        self.assertIn(
+            ("get", "/api/market/quotes/{stock_id}/public-last-trade"),
+            operations,
+        )
+        self.assertIn(
+            (
+                "post",
+                "/api/market/quotes/{stock_id}/public-last-trade/refresh",
+            ),
+            operations,
+        )
+        self.assertIn(("get", "/api/market/breadth/official"), operations)
+        self.assertIn(("get", "/api/market/data-core/datasets"), operations)
+        self.assertIn(("get", "/api/market/data-core/operations"), operations)
+        self.assertIn(
+            ("get", "/api/market/data-core/datasets/{dataset_id}/health"),
+            operations,
+        )
+        self.assertIn(("get", "/api/market/indicators/contract/active"), operations)
+        self.assertIn(
+            ("get", "/api/market/indices/{index_id}/official-daily"),
+            operations,
+        )
+        self.assertIn(
+            ("post", "/api/market/indices/{index_id}/official-daily/refresh"),
+            operations,
+        )
         self.assertIn(
             ("post", "/api/portfolio/holdings/kgi-sync"),
             operations,

@@ -1,0 +1,61 @@
+{
+  "artifact_contract": "omi.tw_data_core.cp3_readonly_coverage.v1",
+  "recorded_at": "2026-08-25T19:06:00+08:00",
+  "database": "data/open_market_intelligence.db",
+  "database_mode": "read_only",
+  "dataset_id": "tw.daily.ohlcv.full_market",
+  "scope_key": "twse_tpex_active_ordinary_stocks",
+  "expected_trade_date": "2026-08-25",
+  "computed_from_persisted_rows": {
+    "universe_count": 1973,
+    "current_count": 854,
+    "partial_count": 26,
+    "stale_count": 1091,
+    "missing_count": 2,
+    "latest_data_date": "2026-08-25",
+    "partition_sum": 1973,
+    "status": "partial"
+  },
+  "by_venue": [
+    {
+      "venue": "TPEX",
+      "universe_count": 887,
+      "current_count": 854,
+      "partial_count": 26,
+      "stale_count": 6,
+      "missing_count": 1
+    },
+    {
+      "venue": "TWSE",
+      "universe_count": 1086,
+      "current_count": 0,
+      "partial_count": 0,
+      "stale_count": 1085,
+      "missing_count": 1
+    }
+  ],
+  "latest_persisted_checkpoint": {
+    "id": 4,
+    "expected_trade_date": "2026-08-25",
+    "latest_data_date": "2026-08-25",
+    "universe_count": 1973,
+    "current_count": 854,
+    "partial_count": 26,
+    "stale_count": 1091,
+    "missing_count": 2,
+    "status": "partial",
+    "repair_status": "partial",
+    "checked_at": "2026-08-25T10:48:39.631823+00:00"
+  },
+  "interpretation": [
+    "The persisted checkpoint exactly matches a fresh read-only recomputation over the current active TWSE/TPEX ordinary-stock universe.",
+    "The dataset is truthfully partial, not healthy: TPEx is mostly current while TWSE is almost entirely stale for the expected date.",
+    "Unknown and partial observations remain separate from zero and from current coverage.",
+    "Both venues are unresolved for repair targeting because each venue has at least one non-current member."
+  ],
+  "limits": [
+    "No provider call was made and no production row or checkpoint was changed while producing this artifact.",
+    "This proves persisted coverage truth and checkpoint agreement, not successful production repair or runtime adoption.",
+    "The current TWSE gap must remain visible until an explicit bounded reconcile succeeds and reread proves the postcondition."
+  ]
+}

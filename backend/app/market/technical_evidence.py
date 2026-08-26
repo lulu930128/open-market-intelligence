@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import MarketIndexDailyStat
 from app.market import indicator_service
+from app.market.daily_ohlcv_platform import read_taiwan_official_daily
 from app.market.ohlc_overlay import aggregate_ohlc_points, point_date
-from app.market.service import list_stock_daily_history
 from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     get_technical_analysis_parameters,
@@ -271,6 +271,31 @@ def indicator_method_catalog(
     }
 
 
+def _indicator_parameter_contract(
+    parameters: TechnicalAnalysisParameters,
+) -> dict[str, Any]:
+    return {
+        "ma_windows": list(parameters.ma_windows),
+        "volume_ma_windows": list(parameters.volume_ma_windows),
+        "ema_fast": parameters.macd_fast_period,
+        "ema_slow": parameters.macd_slow_period,
+        "macd_fast": parameters.macd_fast_period,
+        "macd_slow": parameters.macd_slow_period,
+        "macd_signal": parameters.macd_signal_period,
+        "rsi_period": parameters.rsi_period,
+        "atr_period": parameters.atr_period,
+        "adx_period": parameters.adx_period,
+        "roc_period": parameters.roc_period,
+        "mfi_period": parameters.mfi_period,
+        "donchian_period": parameters.donchian_period,
+        "bollinger_period": parameters.bollinger_period,
+        "bollinger_std_dev": parameters.bollinger_std_dev,
+        "kd_period": parameters.kd_period,
+        "kd_smooth_period": parameters.kd_smooth_period,
+        "support_resistance_period": parameters.support_resistance_period,
+    }
+
+
 def calculate_canonical_indicator_points(
     points: list[dict[str, Any]],
     *,
@@ -307,12 +332,15 @@ def calculate_canonical_indicator_points(
         signal_period=resolved.pvo_signal_period,
     )
     output: list[dict[str, Any]] = []
+    parameter_contract = _indicator_parameter_contract(resolved)
     for index, legacy_point in enumerate(legacy):
         output.append(
             {
                 **legacy_point,
                 "algorithm_version": INDICATOR_ALGORITHM_VERSION,
                 "price_basis": PRICE_BASIS,
+                "calculation_role": "backend_authoritative",
+                "parameter_contract": parameter_contract,
                 "ema": {
                     f"ema{resolved.macd_fast_period}": fast[index],
                     f"ema{resolved.macd_slow_period}": slow[index],
@@ -1457,25 +1485,54 @@ def build_technical_structure_v2(
     }
 
 
-def _daily_points(db: Session, stock_id: str) -> list[dict[str, Any]]:
-    rows = list_stock_daily_history(
-        db=db,
+def _daily_points(
+    db: Session,
+    stock_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    result = read_taiwan_official_daily(
+        db,
         stock_id=stock_id,
         limit=MAX_DAILY_BARS,
-        ascending=True,
     )
-    return [
+    bars = result.resolved.bars
+    points = [
         {
-            "time": row.trade_date,
-            "open": row.open_price,
-            "high": row.high_price,
-            "low": row.low_price,
-            "close": row.close_price,
-            "volume": row.trade_volume,
-            "price_change": row.price_change,
+            "time": bar.end_at.date(),
+            "open": float(bar.open_price),
+            "high": float(bar.high_price),
+            "low": float(bar.low_price),
+            "close": float(bar.close_price),
+            "volume": int(bar.volume.value) if bar.volume is not None else None,
+            "price_change": None,
         }
-        for row in rows
+        for bar in bars
     ]
+    latest = bars[-1] if bars else None
+    lineage = {
+        "dataset_id": "tw.daily.ohlcv",
+        "component_count": len(bars),
+        "resolved_health": result.resolved.health.model_dump(mode="json"),
+        "dataset_health": (
+            result.dataset_health.model_dump(mode="json")
+            if result.dataset_health is not None
+            else None
+        ),
+        "latest_component": (
+            {
+                "provider": latest.lineage.provider,
+                "source": latest.lineage.source,
+                "event_at": latest.lineage.event_at,
+                "fetched_at": latest.lineage.fetched_at,
+                "observation_id": latest.lineage.observation_id,
+                "raw_receipt_id": latest.lineage.raw_receipt_id,
+                "content_hash": latest.lineage.content_hash,
+            }
+            if latest is not None
+            else None
+        ),
+        "limitations": list(result.limitations),
+    }
+    return points, lineage
 
 
 def _benchmark_points(db: Session) -> list[dict[str, Any]]:
@@ -1504,7 +1561,7 @@ def build_tw_stock_technical_evidence(
     market_calendar_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     parameters = get_technical_analysis_parameters()
-    daily = _daily_points(db, stock_id)
+    daily, daily_lineage = _daily_points(db, stock_id)
     if not daily:
         return {
             "kind": "tw_stock_technical_evidence",
@@ -1640,7 +1697,7 @@ def build_tw_stock_technical_evidence(
         analysis_end=end_date,
     )
     indicator_source_refs = [
-        {"type": "table", "name": "market_daily_price"},
+        {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
         {"type": "derived", "name": "app.market.technical_evidence"},
         {"type": "external_or_cache", "name": "taiwan_corporate_event_history"},
     ]
@@ -1703,6 +1760,9 @@ def build_tw_stock_technical_evidence(
     indicators = {
         "kind": "tw_technical_indicator_snapshot",
         "schema_version": INDICATOR_ALGORITHM_VERSION,
+        "algorithm_version": INDICATOR_ALGORITHM_VERSION,
+        "calculation_role": "backend_authoritative",
+        "parameter_contract": _indicator_parameter_contract(parameters),
         "status": "partial" if daily_corporate_actions["coverage_status"] != "complete" else "ready",
         "stock_id": stock_id,
         "as_of": _json_date(end_date),
@@ -1719,6 +1779,7 @@ def build_tw_stock_technical_evidence(
         "missing": [],
         "warnings": indicator_warnings,
         "source_refs": indicator_source_refs,
+        "lineage": daily_lineage,
         "freshness": {
             "status": "current",
             "latest_data_date": _json_date(

@@ -2184,6 +2184,10 @@ export type OvernightImpactRead = {
 
 export type StockIndicatorPoint = {
   time: string;
+  algorithm_version?: string | null;
+  price_basis?: string | null;
+  calculation_role?: string | null;
+  parameter_contract?: Record<string, number | number[] | string | null>;
   close: number | null;
   volume: number | null;
   change: number | null;
@@ -2200,6 +2204,7 @@ export type StockIndicatorPoint = {
   donchian?: Record<string, number | null>;
   bollinger?: Record<string, number | null>;
   kd?: Record<string, number | null>;
+  pvo?: Record<string, number | null>;
   support_resistance?: Record<string, number | null>;
 };
 

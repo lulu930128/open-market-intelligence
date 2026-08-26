@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import unittest
 from unittest.mock import patch
 
@@ -8,8 +8,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.models import Base, MarketDailyPrice, StockMaster, USDailyPrice
+from app.db.models import RawFetchResult, SourceRegistry
 from app.market.ohlc_overlay import aggregate_ohlc_points
 from app.market.service import list_stock_ohlc_chart_data
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 from app.us_market.service import list_us_ohlc_chart_data
 
 
@@ -107,6 +109,29 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.assertTrue(chart["intraday_overlay"]["provisional"])
 
     def test_taiwan_daily_ohlc_refreshes_when_full_window_is_stale(self) -> None:
+        source = SourceRegistry(
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+            source_type="api",
+            category="market_data",
+            priority=10,
+            parser_type="twse_stock_day_all.v2",
+            reliability_level="official",
+        )
+        self.db.add(source)
+        self.db.flush()
+        trade_dates = [date(2026, 7, 13), date(2026, 7, 14)]
+        raw_results = []
+        for index, trade_date in enumerate(trade_dates, start=1):
+            raw = RawFetchResult(
+                source_id=source.id,
+                fetched_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+                raw_text="[]",
+                content_hash=f"fixture-{index}",
+                parser_version="twse_stock_day_all.v2",
+            )
+            self.db.add(raw)
+            self.db.flush()
+            raw_results.append(raw)
         self.db.add(
             StockMaster(
                 stock_id="2330",
@@ -118,8 +143,8 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.db.add_all(
             [
                 MarketDailyPrice(
-                    source_id=1,
-                    raw_result_id=index,
+                    source_id=source.id,
+                    raw_result_id=raw.id,
                     trade_date=trade_date,
                     stock_id="2330",
                     stock_name="TSMC",
@@ -129,31 +154,27 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
                     close_price=101.0 + index,
                     trade_volume=1000 + index,
                 )
-                for index, trade_date in enumerate(
-                    [date(2026, 7, 13), date(2026, 7, 14)],
+                for index, (trade_date, raw) in enumerate(
+                    zip(trade_dates, raw_results, strict=True),
                     start=1,
                 )
             ]
         )
         self.db.commit()
 
-        with patch(
-            "app.market.service._ensure_stock_history",
-            return_value={"status": "success", "message": "mocked"},
-        ) as refresh_mock:
-            chart = list_stock_ohlc_chart_data(
-                self.db,
-                stock_id="2330",
-                timeframe="daily",
-                bars=2,
-                ensure_history=True,
-                to_date=date(2026, 7, 16),
-            )
+        chart = list_stock_ohlc_chart_data(
+            self.db,
+            stock_id="2330",
+            timeframe="daily",
+            bars=2,
+            ensure_history=True,
+            to_date=date(2026, 7, 16),
+        )
 
-        refresh_mock.assert_called_once()
-        self.assertEqual(refresh_mock.call_args.kwargs["end_date"], date(2026, 7, 16))
         self.assertEqual(chart["freshness_status"], "stale")
         self.assertIn("stale_latest_date", chart["backfill"]["refresh_reasons"])
+        self.assertEqual(chart["backfill"]["status"], "not_attempted")
+        self.assertIn("cache-only", chart["backfill"]["message"])
 
     def test_us_weekly_ohlc_merges_provisional_intraday_candle(self) -> None:
         self.db.add_all(

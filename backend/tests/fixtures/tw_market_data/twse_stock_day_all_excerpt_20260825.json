@@ -1,0 +1,43 @@
+{
+  "fixture_contract": "omi.test.actual_public_payload_excerpt.v1",
+  "source_receipt": {
+    "provider": "twse_openapi",
+    "source_name": "TWSE OpenAPI Daily Trading",
+    "resource_id": "STOCK_DAY_ALL",
+    "raw_result_id": 95909,
+    "fetched_at": "2026-08-25T10:24:23.552747+00:00",
+    "status_code": 200,
+    "original_content_hash": "9b77b0849dc4794677ef27fc60933b4c9266a4272a669c625393109d49671f52",
+    "original_row_count": 1378,
+    "extracted_symbols": ["2317", "2330"],
+    "note": "Exact public rows extracted read-only from the recorded full response; names preserve the stored response encoding."
+  },
+  "payload": [
+    {
+      "Date": "1150824",
+      "Code": "2317",
+      "Name": "�E��",
+      "TradeVolume": "23690554",
+      "TradeValue": "5791846854",
+      "OpeningPrice": "246.00",
+      "HighestPrice": "246.50",
+      "LowestPrice": "243.50",
+      "ClosingPrice": "243.50",
+      "Change": "-2.0000",
+      "Transaction": "24915"
+    },
+    {
+      "Date": "1150824",
+      "Code": "2330",
+      "Name": "�x�n�q",
+      "TradeVolume": "13073210",
+      "TradeValue": "31234578255",
+      "OpeningPrice": "2410.00",
+      "HighestPrice": "2410.00",
+      "LowestPrice": "2375.00",
+      "ClosingPrice": "2375.00",
+      "Change": "-35.0000",
+      "Transaction": "84694"
+    }
+  ]
+}

@@ -175,6 +175,53 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
     ),
     CapabilityProjectionSpec(
         capability_id="technical.indicators",
+        scope_type="stock",
+        market="TW",
+        dataset_ids=("tw.technical.daily",),
+        projector_name="data.technical_indicators",
+        projector=_path_projector(
+            ("data", "technical_indicators"),
+            ("data", "technical_evidence", "indicators"),
+        ),
+        fixture_context={
+            "data": {
+                "technical_indicators": {
+                    "schema_version": "tw.technical.indicators.v3",
+                    "algorithm_version": "tw.technical.indicators.v3",
+                    "price_basis": "raw_unadjusted",
+                    "status": "partial",
+                }
+            }
+        },
+        canonical_schema_version="omi.research.technical.indicators.v1",
+        compatibility_schema_versions=("tw.technical.indicators.v3",),
+    ),
+    CapabilityProjectionSpec(
+        capability_id="technical.structure",
+        scope_type="stock",
+        market="TW",
+        dataset_ids=("tw.technical.daily",),
+        projector_name="data.technical_advanced.structure_v2",
+        projector=_path_projector(
+            ("data", "technical_advanced", "structure_v2"),
+            ("data", "technical_evidence", "structure_v2"),
+            ("data", "compact", "technical"),
+        ),
+        fixture_context={
+            "data": {
+                "technical_advanced": {
+                    "structure_v2": {
+                        "schema_version": "omi.research.technical.structure.v1",
+                        "status": "partial",
+                        "trend_state": "neutral",
+                    }
+                }
+            }
+        },
+        canonical_schema_version="omi.research.technical.structure.v1",
+    ),
+    CapabilityProjectionSpec(
+        capability_id="technical.indicators",
         scope_type="us_stock",
         market="US",
         dataset_ids=("us.daily.ohlcv",),

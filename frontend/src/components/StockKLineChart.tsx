@@ -27,6 +27,7 @@ import {
 } from "@/components/stock-k-line/indicatorProjection";
 import { useT } from "@/i18n";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
+import { indicatorProjectionScope } from "@/components/stock-k-line/indicatorAuthority";
 
 export * from "@/components/stock-k-line/indicatorCatalog";
 
@@ -303,6 +304,7 @@ export default function StockKLineChart({
   );
   const getVolumeMetric = (point: ChartPoint | MergedPoint) =>
     volumeValueKey === "trade_value" ? point.trade_value : point.volume;
+  const projectionScope = indicatorProjectionScope(indicatorData);
 
   const data = useMemo(
     () =>
@@ -893,7 +895,10 @@ export default function StockKLineChart({
   const shouldShowRevealCover = activeRevealKey === stableRevealKey;
 
   return (
-    <div className="border border-omi-border-subtle bg-omi-surface">
+    <div
+      className="border border-omi-border-subtle bg-omi-surface"
+      data-indicator-projection-scope={projectionScope}
+    >
       <div className="flex min-h-16 items-start justify-between gap-4 border-b border-omi-border-subtle px-4 py-3">
         <div>
           <div className="text-sm font-semibold text-omi-text">{t("chart.kline.title")}</div>

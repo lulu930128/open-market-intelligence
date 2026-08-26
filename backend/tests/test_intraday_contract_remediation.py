@@ -1687,7 +1687,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
             build_us_overnight_impact_report=lambda **_kwargs: {},
             get_broker_branch_trade_summary=lambda **_kwargs: {},
             get_market_intraday_history=intraday_history,
-            get_taiwan_stock_quote_depth=quote_depth,
+            read_taiwan_public_quote=quote_depth,
             get_taiwan_disposition_status=lambda *_args, **_kwargs: {"is_active": False},
             now=lambda: datetime.fromisoformat("2026-07-20T13:17:20+08:00"),
         )
@@ -1714,15 +1714,19 @@ class IntradayContractRemediationTests(unittest.TestCase):
         )
 
         contract = result["data"]["provider_contract"]
-        self.assertTrue(contract["strict_provider"])
+        self.assertFalse(contract["strict_provider"])
+        self.assertTrue(contract["legacy_strict_provider"])
+        self.assertEqual(contract["legacy_requested_provider"], "twse_mis")
+        self.assertEqual(contract["provider_control_status"], "deprecated_ignored")
         self.assertFalse(contract["provider_fallback_used"])
-        self.assertEqual(contract["provider_fallback_reason"], "strict_provider_unavailable")
-        self.assertEqual(result["data"]["quote"]["status"], "unavailable")
+        self.assertIsNone(contract["provider_fallback_reason"])
         self.assertEqual(
             result["data"]["compact"]["freshness_by_domain"]["intraday"],
-            "unavailable",
+            "missing",
         )
-        intraday_history.assert_not_called()
+        self.assertGreaterEqual(intraday_history.call_count, 1)
+        for call in intraday_history.call_args_list:
+            self.assertFalse(call.kwargs["refresh"])
 
     def test_prefer_live_without_external_fetch_reads_only_persisted_intraday(
         self,
@@ -1833,11 +1837,13 @@ class IntradayContractRemediationTests(unittest.TestCase):
 
         contract = result["data"]["provider_contract"]
         refresh = result["data"]["refresh_summary"]
-        self.assertEqual(contract["requested_provider"], "twse_mis")
-        self.assertTrue(contract["provider_fallback_used"])
-        self.assertEqual(contract["provider_fallback_reason"], "requested_provider_unavailable")
-        self.assertEqual(refresh["attempted_domains"], ["quote", "intraday"])
-        self.assertEqual(refresh["attempted_dataset_count"], 2)
+        self.assertEqual(contract["requested_provider"], "auto")
+        self.assertEqual(contract["legacy_requested_provider"], "twse_mis")
+        self.assertEqual(contract["provider_control_status"], "deprecated_ignored")
+        self.assertFalse(contract["provider_fallback_used"])
+        self.assertIsNone(contract["provider_fallback_reason"])
+        self.assertEqual(refresh["attempted_domains"], ["quote"])
+        self.assertEqual(refresh["attempted_dataset_count"], 1)
         self.assertNotIn("fundamentals", refresh["attempted_domains"])
         self.assertNotIn("broker_branch", refresh["attempted_domains"])
 

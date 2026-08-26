@@ -23,6 +23,14 @@ from app.market.taiwan_rules import (
 )
 from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day
 from app.market.tw_universe import list_taiwan_stock_universe
+from app.market_data.dataset_lifecycle import (
+    DatasetLifecycleContract,
+    DatasetLifecycleEvaluation,
+    dataset_lifecycle_contract,
+    evaluate_lifecycle,
+    require_refresh_contract,
+)
+from app.market_data.registry import ExpectedStatePolicy, RefreshBounds
 from app.observability.provider_http import provider_http_failure
 from app.pipelines.fetch_pipeline import refresh_source
 from app.sources.defaults import (
@@ -40,6 +48,8 @@ TW_SCOPE_KEY = "twse_tpex_active_ordinary_stocks"
 US_SCOPE_KEY = "nasdaq_trader_active_non_etf_non_test_stocks"
 TW_DATASET_ID = "tw.daily.ohlcv.full_market"
 US_DATASET_ID = "us.daily.ohlcv.full_market"
+TW_REFRESH_OPERATION = "tw.reconcile_full_market_eod"
+US_REFRESH_OPERATION = "us.reconcile_full_market_eod"
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 
 
@@ -123,6 +133,30 @@ class CoverageComputation:
         }
 
 
+def eod_lifecycle_contract(market: str) -> DatasetLifecycleContract:
+    normalized = normalize_coverage_market(market)
+    dataset_id = TW_DATASET_ID if normalized == "TW" else US_DATASET_ID
+    lifecycle = dataset_lifecycle_contract(dataset_id)
+    if lifecycle.expected_state_policy is not ExpectedStatePolicy.LATEST_COMPLETED_SESSION:
+        raise RuntimeError(
+            f"full-market EOD dataset '{dataset_id}' must use latest-completed policy"
+        )
+    if lifecycle.scope_kind != FULL_MARKET_SCOPE_KIND:
+        raise RuntimeError(
+            f"full-market EOD dataset '{dataset_id}' has incompatible scope"
+        )
+    return lifecycle
+
+
+def eod_reconcile_bounds(market: str) -> RefreshBounds:
+    normalized = normalize_coverage_market(market)
+    lifecycle = eod_lifecycle_contract(normalized)
+    operation = (
+        TW_REFRESH_OPERATION if normalized == "TW" else US_REFRESH_OPERATION
+    )
+    return require_refresh_contract(lifecycle, operation=operation)
+
+
 def normalize_coverage_market(value: str) -> str:
     normalized = str(value or "").strip().upper()
     if normalized not in {"TW", "US"}:
@@ -132,6 +166,7 @@ def normalize_coverage_market(value: str) -> str:
 
 def expected_eod_trade_date(market: str, *, now: datetime | None = None) -> date:
     normalized = normalize_coverage_market(market)
+    eod_lifecycle_contract(normalized)
     if normalized == "TW":
         return expected_daily_price_date(now=now)
     return expected_us_daily_price_date(now=now)
@@ -317,6 +352,40 @@ def compute_eod_coverage(
     )
 
 
+def evaluate_eod_lifecycle(
+    computation: CoverageComputation,
+    *,
+    checked_at: datetime | None = None,
+) -> DatasetLifecycleEvaluation:
+    lifecycle = eod_lifecycle_contract(computation.market)
+    if lifecycle.dataset_id != computation.dataset_id:
+        raise ValueError("coverage computation does not match lifecycle dataset")
+    return evaluate_lifecycle(
+        lifecycle,
+        expected_date=computation.expected_trade_date,
+        latest_date=computation.latest_data_date,
+        checked_at=checked_at or utc_now(),
+        eligible=(True if computation.universe_count else False),
+        partial=computation.status == "partial",
+    )
+
+
+def _lifecycle_detail(
+    evaluation: DatasetLifecycleEvaluation,
+) -> dict[str, Any]:
+    return evaluation.model_dump(mode="json")
+
+
+def _lifecycle_result(
+    computation: CoverageComputation,
+) -> dict[str, Any]:
+    evaluation = evaluate_eod_lifecycle(computation)
+    return {
+        "dataset_lifecycle": evaluation.lifecycle.model_dump(mode="json"),
+        "dataset_health": evaluation.health.model_dump(mode="json"),
+    }
+
+
 def _decode_detail(value: str | None) -> dict[str, Any]:
     if not value:
         return {}
@@ -363,6 +432,9 @@ def persist_eod_coverage(
         db.add(row)
 
     detail = computation.detail()
+    detail["dataset_lifecycle"] = _lifecycle_detail(
+        evaluate_eod_lifecycle(computation)
+    )
     previous_detail = _decode_detail(row.detail_json)
     for key in ("repair", "last_error", "last_provider_failure"):
         if key in previous_detail:
@@ -487,15 +559,22 @@ def _as_aware_utc(value: datetime | None) -> datetime | None:
 def should_enqueue_eod_reconcile(db: Session, *, market: str) -> bool:
     normalized = normalize_coverage_market(market)
     expected = expected_eod_trade_date(normalized)
-    members = build_eod_universe(db, normalized)
-    dataset_id = TW_DATASET_ID if normalized == "TW" else US_DATASET_ID
+    computation = compute_eod_coverage(
+        db,
+        market=normalized,
+        expected_trade_date=expected,
+    )
+    dataset_id = eod_lifecycle_contract(normalized).dataset_id
     scope_key = TW_SCOPE_KEY if normalized == "TW" else US_SCOPE_KEY
     row = (
         db.query(MarketDatasetCoverageCheckpoint)
         .filter(MarketDatasetCoverageCheckpoint.dataset_id == dataset_id)
         .filter(MarketDatasetCoverageCheckpoint.scope_key == scope_key)
         .filter(MarketDatasetCoverageCheckpoint.expected_trade_date == expected)
-        .filter(MarketDatasetCoverageCheckpoint.universe_hash == _universe_hash(members))
+        .filter(
+            MarketDatasetCoverageCheckpoint.universe_hash
+            == computation.universe_hash
+        )
         .order_by(MarketDatasetCoverageCheckpoint.checked_at.desc())
         .first()
     )
@@ -504,7 +583,7 @@ def should_enqueue_eod_reconcile(db: Session, *, market: str) -> bool:
     next_retry_at = _as_aware_utc(row.next_retry_at)
     if next_retry_at is not None and next_retry_at > utc_now():
         return False
-    return row.status != "healthy"
+    return row.status != "healthy" or computation.status != "healthy"
 
 
 def _update_repair_state(
@@ -563,13 +642,16 @@ def _repair_tw_eod(
     job_id: int | None,
     progress_callback: ProgressCallback | None,
     error_backoff_seconds: int,
+    max_calls: int,
 ) -> dict[str, Any]:
     source_by_venue = (
         ("TWSE", TWSE_DAILY_TRADING_SOURCE_NAME),
         ("TPEX", TPEX_DAILY_QUOTES_SOURCE_NAME),
     )
     unresolved_venues = _tw_unresolved_venues(computation)
-    targets = [item for item in source_by_venue if item[0] in unresolved_venues]
+    targets = [
+        item for item in source_by_venue if item[0] in unresolved_venues
+    ][:max_calls]
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     _update_repair_state(
@@ -668,6 +750,7 @@ def _repair_tw_eod(
     return {
         "status": "completed" if refreshed.status == "healthy" else "partial",
         "market": "TW",
+        **_lifecycle_result(refreshed),
         **_result_coverage_counts(refreshed_row),
         "attempted_count": len(targets),
         "success_count": sum(1 for item in results if item.get("parse_status") == "success"),
@@ -832,6 +915,7 @@ def _repair_us_eod(
     return {
         "status": "completed" if refreshed.status == "healthy" else "partial",
         "market": "US",
+        **_lifecycle_result(refreshed),
         **_result_coverage_counts(refreshed_row),
         "attempted_count": attempted,
         "success_count": succeeded,
@@ -857,6 +941,16 @@ def reconcile_eod_coverage(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_coverage_market(market)
+    bounds = eod_reconcile_bounds(normalized)
+    bounded_max_symbols = min(
+        max(int(max_symbols), 1),
+        bounds.max_symbols,
+        bounds.max_calls,
+    )
+    bounded_runtime_seconds = min(
+        max(int(max_runtime_seconds), 1),
+        bounds.timeout_seconds,
+    )
     computation = compute_eod_coverage(
         db,
         market=normalized,
@@ -877,6 +971,7 @@ def reconcile_eod_coverage(
         return {
             "status": "completed",
             "market": normalized,
+            **_lifecycle_result(computation),
             **_result_coverage_counts(row),
             "attempted_count": 0,
             "success_count": 0,
@@ -888,6 +983,7 @@ def reconcile_eod_coverage(
         return {
             "status": "partial",
             "market": normalized,
+            **_lifecycle_result(computation),
             **_result_coverage_counts(row),
             "attempted_count": 0,
             "success_count": 0,
@@ -900,6 +996,7 @@ def reconcile_eod_coverage(
         return {
             "status": "partial",
             "market": normalized,
+            **_lifecycle_result(computation),
             **_result_coverage_counts(row),
             "attempted_count": 0,
             "success_count": 0,
@@ -929,6 +1026,7 @@ def reconcile_eod_coverage(
             return {
                 "status": "partial",
                 "market": normalized,
+                **_lifecycle_result(computation),
                 **_result_coverage_counts(row),
                 "attempted_count": 0,
                 "success_count": 0,
@@ -943,14 +1041,15 @@ def reconcile_eod_coverage(
             job_id=job_id,
             progress_callback=progress_callback,
             error_backoff_seconds=error_backoff_seconds,
+            max_calls=min(bounds.max_calls, bounds.max_symbols),
         )
     return _repair_us_eod(
         db,
         row=row,
         computation=computation,
         job_id=job_id,
-        max_symbols=min(max(int(max_symbols), 1), 500),
-        max_runtime_seconds=min(max(int(max_runtime_seconds), 30), 1800),
+        max_symbols=bounded_max_symbols,
+        max_runtime_seconds=bounded_runtime_seconds,
         sleep_seconds=min(max(float(sleep_seconds), 0), 30),
         max_consecutive_errors=min(max(int(max_consecutive_errors), 1), 20),
         error_backoff_seconds=max(int(error_backoff_seconds), 60),
@@ -966,6 +1065,9 @@ __all__ = [
     "build_eod_universe",
     "cached_eod_coverage_projection",
     "compute_eod_coverage",
+    "eod_lifecycle_contract",
+    "eod_reconcile_bounds",
+    "evaluate_eod_lifecycle",
     "expected_eod_trade_date",
     "list_cached_eod_checkpoints",
     "normalize_coverage_market",

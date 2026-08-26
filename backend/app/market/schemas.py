@@ -591,6 +591,10 @@ class MarketIndexSnapshotRead(BaseModel):
     acquisition_policy: str | None = None
     current_observation: dict[str, Any] | None = None
     official_close: dict[str, Any] | None = None
+    completed_official_index: dict[str, Any] | None = None
+    completed_official_breadth: dict[str, Any] | None = None
+    data_core: dict[str, Any] | None = None
+    data_core_projection_scope: dict[str, str] | None = None
     decision_usable: bool = False
     resolution: dict[str, Any] | None = None
 
@@ -604,6 +608,7 @@ class MarketIndexSummaryRead(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     resolution_version: str | None = None
     acquisition_policy: str | None = None
+    data_core_contract_version: str | None = None
 
 
 class TaiwanMarketVolumeBaselineRead(BaseModel):
@@ -2025,6 +2030,11 @@ class OvernightImpactRead(BaseModel):
 class DailyIndicatorPointRead(BaseModel):
     time: date
 
+    algorithm_version: str | None = None
+    price_basis: str | None = None
+    calculation_role: str | None = None
+    parameter_contract: dict[str, Any] = Field(default_factory=dict)
+
     close: float | None = None
     volume: int | None = None
 
@@ -2043,6 +2053,7 @@ class DailyIndicatorPointRead(BaseModel):
     donchian: dict[str, float | None] = Field(default_factory=dict)
     bollinger: dict[str, float | None] = Field(default_factory=dict)
     kd: dict[str, float | None] = Field(default_factory=dict)
+    pvo: dict[str, float | None] = Field(default_factory=dict)
     support_resistance: dict[str, float | None] = Field(default_factory=dict)
 
 

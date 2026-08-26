@@ -444,17 +444,12 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
     def test_stock_detail_is_cache_only_and_does_not_backfill(self) -> None:
         self._seed_preopen_state()
 
-        with patch(
-            "app.market.service._ensure_stock_history"
-        ) as ensure_history:
-            payload = build_tw_dashboard_stock_detail(
-                self.db,
-                stock_id="2330",
-                timeframe="daily",
-                bars=90,
-            )
-
-        ensure_history.assert_not_called()
+        payload = build_tw_dashboard_stock_detail(
+            self.db,
+            stock_id="2330",
+            timeframe="daily",
+            bars=90,
+        )
         TaiwanDashboardStockDetailRead.model_validate(payload)
         self.assertTrue(payload["cache_only"])
         self.assertEqual(payload["stock_id"], "2330")

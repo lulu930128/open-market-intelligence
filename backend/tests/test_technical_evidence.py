@@ -85,6 +85,13 @@ class TechnicalEvidenceTests(unittest.TestCase):
         self.assertIsNone(calculated[10]["ema"]["ema12"])
         self.assertIsNotNone(calculated[11]["ema"]["ema12"])
         self.assertEqual(calculated[-1]["algorithm_version"], INDICATOR_ALGORITHM_VERSION)
+        self.assertEqual(calculated[-1]["price_basis"], "raw_unadjusted")
+        self.assertEqual(calculated[-1]["calculation_role"], "backend_authoritative")
+        self.assertEqual(calculated[-1]["parameter_contract"]["rsi_period"], 14)
+        self.assertEqual(
+            calculated[-1]["parameter_contract"]["ma_windows"],
+            [5, 20, 60],
+        )
 
     def test_indicator_catalog_discloses_method_parameters_and_warmup(self) -> None:
         methods = indicator_method_catalog(self.parameters)

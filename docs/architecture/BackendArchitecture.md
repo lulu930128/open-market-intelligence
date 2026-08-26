@@ -154,7 +154,7 @@ KGI Account = unavailable/503
 
 ## 6. Canonical Observation Layer
 
-Shared boundary：`backend/app/market_data/`。Foundation v1 已建立 typed contracts、pure resolution、Dataset Registry 與 bounded comparison primitives；production consumer cutover 尚未發生。
+Shared boundary：`backend/app/market_data/`。Foundation v1 已建立typed contracts、pure resolution與Dataset Registry；Taiwan Data Core v2另以additive Gateway、typed requirement/result、candidate repository、bounded acquisition port與transaction owner完成第一批production source cutover。2026-08-25 production DB/runtime已由migration、launcher PID/port lineage、API/data、visible UI、MCP與cold restart evidence證明採用；active-session public quote acceptance仍是獨立gate。
 
 核心 contracts：
 
@@ -547,6 +547,20 @@ CI 保護 truthful capability。
 - Dataset Registry v1：保留 TW quote/intraday/daily 與 US intraday/daily 五個 per-target 核心 dataset，另註冊 TW/US 兩個 full-market EOD coverage lifecycle dataset。
 - Capability projection validation：TW/US core fixture registrations 已建立；`technical.indicators` 與 `technical.structure` 已有 US resolved daily research projection，US full-market aggregates仍受 coverage gate 阻擋。
 - Runtime adoption、KGI live smoke、canary/on、consumer cutover、DB persistence：尚未驗收，也不屬於本次 source-complete。
+
+### Taiwan Data Core v2 source status（2026-08-25）
+
+- `DataRequirementV2`／`RefreshRequirementV1`、`MarketDataGateway`、provider capability-resource descriptor、candidate repository ports、typed acquisition/persistence summary與`MarketDataResultV1`已建立；Gateway只做pre-read／plan／acquire／persist／mandatory reread／Resolver，不擁有provider或DB transaction。
+- TWSE／TPEx official daily OHLCV已完成actual payload -> canonical -> source/raw + typed row transaction -> cold reread -> Resolver -> chart/API projection；cache-only daily read不接受`ensure_history`隱性backfill。
+- Full-market EOD expected date、eligibility、venue-bounded repair、postcondition/checkpoint、startup catch-up與retry由Dataset Lifecycle contract約束；powered-off後可修completed-session EOD，不宣稱修復未保存intraday/depth。
+- Official index與official breadth是不同canonical payload；breadth只由同venue/date/raw receipt official daily rows與registered universe導出，unknown與missing保持分離。
+- Public request-time第一個capability是single-symbol TWSE MIS `quote.last_trade`，定位為personal-research best effort/no-SLA；quote不製造minute bar，未取得授權前不推定raw/value-added資料可向外轉播。
+- Taiwan market-owned catalog現有28個production dataset contracts與18個bounded operations；Data Core health surface讀actual storage/lineage，lineage gap不冒充canonical或fresh。
+- Taiwan AI quote context只讀Data Core projection；daily technical API與AI evidence共用Resolver-selected official OHLCV及`tw.technical.indicators.v3` algorithm/price-basis/parameter contract。Frontend只在authority metadata匹配時使用backend authoritative values，local math僅是presentation compatibility。
+- `/indices/summary`分離current-session observation與completed official index/breadth；completed components只接受Data Core evidence，missing時fail closed，不回復legacy completed row。
+- 已移除direct MIS snapshot-to-bar、台股OHLC GET隱性backfill與completed dashboard legacy fallback。Current-session index/intraday、depth/auction與KGI是尚未onboard的獨立capabilities，不得誤稱已完成。
+- Production DB已由0066採用0067 index lineage與0068 public quote lineage；offline backup與clone downgrade/upgrade rehearsal通過。Named launcher runtime、Data Core API、TPEX actual official index persistence/cold read、visible browser與MCP `omi.decision.v4`均已驗收。
+- TAIEX 2026-08-25 official source response缺target date、current public quote legacy row lineage incomplete、official breadth不完整與active-session F-07都保持truthful outward。F-07完成前label維持`TW_DATA_CORE_PRODUCTION_ADOPTED_F07_PENDING`，不得標記common platform operational。
 
 ### US first-class Foundation source status（2026-08-23）
 

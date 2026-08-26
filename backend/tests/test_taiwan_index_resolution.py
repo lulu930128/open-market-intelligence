@@ -111,6 +111,44 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
         self.assertIsNone(result["selected_candidate"])
         self.assertFalse(result["decision_usable"])
 
+    def test_completed_official_component_keeps_its_own_trade_date(self) -> None:
+        checked_at = datetime(2026, 8, 14, 10, 0, tzinfo=TAIWAN_TZ)
+        result = resolve_taiwan_index_quote_state(
+            intraday={
+                "source": "twse_index_5s_intraday",
+                "provider": "twse",
+                "trade_date": "2026-08-14",
+                "points": [
+                    {
+                        "time": "2026-08-14T09:59:00+08:00",
+                        "price": 24_321.5,
+                    }
+                ],
+            },
+            index_snapshot={
+                "index_id": "TAIEX",
+                "time": "2026-08-14",
+                "as_of": "2026-08-14T09:59:00+08:00",
+                "close": 24_321.5,
+                "source": "twse_index_5s_intraday",
+                "official_close_status": "confirmed",
+                "official_close_price": 24_000.0,
+                "official_close_trade_date": "2026-08-13",
+                "official_close_source": "twse_openapi_fmtqik",
+            },
+            calendar_status=_calendar(
+                phase="regular",
+                checked_at=checked_at,
+            ),
+            index_id="TAIEX",
+            acquisition_policy="cache_only",
+        )
+
+        self.assertEqual(result["selected_candidate"], "intraday_last_trade")
+        self.assertEqual(result["selected_trade_date"], "2026-08-14")
+        self.assertFalse(result["official_close_available"])
+        self.assertIsNone(result["official_close_trade_date"])
+
     def test_post_close_uses_confirmed_official_close(self) -> None:
         checked_at = datetime(2026, 8, 14, 13, 34, tzinfo=TAIWAN_TZ)
         result = resolve_taiwan_index_quote_state(

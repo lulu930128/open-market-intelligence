@@ -1,0 +1,137 @@
+{
+  "artifact_contract": "omi.agent_run.tw_data_core.cp5_public_quote.v1",
+  "captured_at": "2026-08-25T20:45:00+08:00",
+  "capability": {
+    "capability_id": "quote.last_trade",
+    "dataset_id": "tw.quote.snapshot",
+    "market": "TW",
+    "provider": "twse_mis",
+    "source": "twse_mis_quote_depth",
+    "resource_id": "twse_mis.stock_info",
+    "usage_class": "public_best_effort_no_sla",
+    "max_provider_attempts": 1,
+    "max_external_calls": 1,
+    "max_subscriptions": 0,
+    "timeout_seconds": 10,
+    "max_symbols": 1
+  },
+  "actual_source_records": [
+    {
+      "production_row_id": 3780,
+      "symbol": "2330",
+      "venue": "TWSE",
+      "event_at": "2026-08-25T13:30:00+08:00",
+      "received_at": "2026-08-25T05:34:00.038108+00:00",
+      "content_sha256": "da6cc59dab56406815c4649a07464aa3b1ca36daab1092ade599c6c48622e07e",
+      "observation_state": "available",
+      "trade_state": "trade_observed",
+      "last_trade_price": "2400.0000",
+      "last_trade_quantity_lots": "2997",
+      "cumulative_quantity_shares": "12789000"
+    },
+    {
+      "production_row_id": 1493,
+      "symbol": "6173",
+      "venue": "TPEX",
+      "event_at": "2026-08-21T08:59:20+08:00",
+      "received_at": "2026-08-21T00:59:34.716283+00:00",
+      "content_sha256": "fa45a9b09f13026c4a30362fb790f93b3ff280fd5cc0519c17fd3987dd7ae1e6",
+      "observation_state": "indicative",
+      "trade_state": "indicative_observed",
+      "last_trade_price": null,
+      "previous_close": "221.0000",
+      "cumulative_quantity_shares": "0",
+      "semantic_proof": "zero cumulative quantity and trial state do not become an actual last trade"
+    }
+  ],
+  "isolated_sqlite_replay": {
+    "actual_payload_fixture": "backend/tests/fixtures/tw_market_data/twse_mis_public_quote_actual_20260825.json",
+    "twse_flow": "raw receipt -> canonical quote -> atomic persist -> DB reread -> shared Resolver selected",
+    "tpex_flow": "raw receipt -> indicative canonical quote -> atomic persist -> required last_trade rejection -> policy_unsatisfied",
+    "twse_counts_after_first_run": {
+      "source_registry": 1,
+      "raw_fetch_result": 1,
+      "taiwan_stock_quote_snapshot": 1,
+      "data_quality_check": 1
+    },
+    "second_prefer_live_external_calls": 0,
+    "cache_only_external_calls": 0,
+    "post_close_require_live_external_calls": 0,
+    "transport_failure_receipt_persisted": true,
+    "transport_failure_quote_rows_created": 0,
+    "commit_failure_rolled_back_source_raw_quote_quality": true
+  },
+  "consumer_convergence": {
+    "legacy_surface": "GET /api/market/intraday/{stock_id}",
+    "current_trade_owner": "app.market.public_quote_platform.read_taiwan_public_last_trade_quote",
+    "current_trade_policy": "cache_only",
+    "direct_mis_fetch_in_production_intraday_path": false,
+    "mis_snapshot_as_bar_fallback": false,
+    "mis_quote_volume_merged_into_nstock_or_yahoo_bars": false,
+    "component_domains": [
+      "price_bars",
+      "bar_volume",
+      "current_trade"
+    ],
+    "current_trade_applied_to_history": false,
+    "legacy_dead_helpers_retained_for_cp8_removal": true
+  },
+  "stable_api": {
+    "read": "GET /api/market/quotes/{stock_id}/public-last-trade",
+    "refresh": "POST /api/market/quotes/{stock_id}/public-last-trade/refresh",
+    "response_contract": "omi.market.data_result.v1",
+    "provider_input_accepted": false,
+    "refresh_policies": [
+      "prefer_live",
+      "require_live"
+    ]
+  },
+  "migration": {
+    "revision": "20260825_0068",
+    "down_revision": "20260825_0067",
+    "kind": "nullable_additive_lineage",
+    "legacy_row_preserved_on_upgrade_and_downgrade": true,
+    "platform_accepts_legacy_row_without_lineage": false
+  },
+  "production_database_read_only_baseline": {
+    "alembic_revision": "20260822_0066",
+    "twse_mis_quote_snapshot_rows": 1317,
+    "lineage_columns_present": false,
+    "mode": "sqlite_uri_mode_ro_and_query_only",
+    "migration_applied": false,
+    "write_performed": false,
+    "runtime_adopted": false
+  },
+  "validation": {
+    "command_scope": [
+      "tests/test_tw_public_quote_platform.py",
+      "tests/test_intraday_trend.py",
+      "tests/test_intraday_history.py",
+      "tests/test_tw_market_dashboard.py",
+      "tests/test_market_data_gateway.py",
+      "tests/test_market_data_registry.py",
+      "tests/test_tw_data_core_boundaries.py",
+      "tests/test_database_model_contract.py",
+      "tests/test_database_migrations.py",
+      "tests/test_api_contract_inventory.py"
+    ],
+    "tests_passed": 89,
+    "subtests_passed": 162,
+    "tests_failed": 0,
+    "warnings": 552,
+    "warning_class": "Python 3.12 sqlite date and datetime adapter deprecation",
+    "import_validation": "passed_with_PYTHONDONTWRITEBYTECODE",
+    "git_diff_check": "passed"
+  },
+  "acceptance_limits": {
+    "active_market_session_live_smoke_run": false,
+    "reason": "CP5 implementation and validation completed outside the active Taiwan market session",
+    "live_semantics_claimed": false,
+    "kgi_or_m5_used": false,
+    "raw_payload_redistribution_authorized": false
+  },
+  "official_usage_references": [
+    "https://www.twse.com.tw/zh/about/company/service.html",
+    "https://www.twse.com.tw/zh/products/information/qa.html"
+  ]
+}

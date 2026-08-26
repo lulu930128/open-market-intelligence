@@ -322,9 +322,17 @@ def resolve_taiwan_index_quote_state(
         if snapshot.get("official_close_price") is not None
         else summary_candidate["value"]
     )
+    official_trade_date = (
+        index_candidate_date(
+            snapshot.get("official_close_trade_date"),
+            timezone_name=timezone_name,
+        )
+        or summary_date
+    )
     summary_official_confirmed = bool(
         official_price is not None
-        and summary_candidate["eligible"]
+        and expected_trade_date is not None
+        and official_trade_date == expected_trade_date
         and (
             explicit_official_status in {"confirmed", "official", "final"}
             or source_is_official and after_confirmation_deadline
@@ -343,7 +351,9 @@ def resolve_taiwan_index_quote_state(
             "event_time": _json_value(
                 snapshot.get("official_close_time") or summary_time
             ),
-            "trade_date": summary_candidate["trade_date"],
+            "trade_date": (
+                official_trade_date.isoformat() if official_trade_date else None
+            ),
             "source": official_source or None,
             "provider": snapshot.get("provider"),
             "eligible": summary_official_confirmed,

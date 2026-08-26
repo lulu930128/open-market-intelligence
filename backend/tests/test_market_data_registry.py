@@ -33,9 +33,12 @@ def test_registry_contains_per_symbol_and_full_market_eod_datasets() -> None:
         "tw.quote.snapshot",
         "tw.intraday.bars",
         "tw.daily.ohlcv",
+        "tw.technical.daily",
         "us.intraday.bars",
         "us.daily.ohlcv",
         "tw.daily.ohlcv.full_market",
+        "tw.market_breadth.daily",
+        "tw.market_index.daily",
         "us.daily.ohlcv.full_market",
     }
     for spec in specs:
@@ -60,6 +63,20 @@ def test_refreshable_datasets_have_executable_operation_bounds_and_postcondition
         assert spec.refresh_bounds.max_calls >= 1
         assert spec.refresh_bounds.timeout_seconds >= 1
         assert spec.postcondition
+
+
+def test_public_quote_dataset_declares_bounded_shared_platform_contract() -> None:
+    spec = DATASET_REGISTRY.get("tw.quote.snapshot")
+    assert spec.owner == "app.market.public_quote_platform"
+    assert spec.read_operation == "read_taiwan_public_last_trade_quote"
+    assert spec.capability_ids == ("quote.snapshot", "quote.last_trade")
+    assert spec.refreshable is True
+    assert spec.refresh_operation == "tw.acquire_public_last_trade_quote"
+    assert spec.refresh_bounds is not None
+    assert spec.refresh_bounds.max_calls == 1
+    assert spec.refresh_bounds.timeout_seconds == 10
+    assert spec.refresh_bounds.max_symbols == 1
+    assert spec.refresh_bounds.max_range_days == 1
 
 
 def test_non_refreshable_dataset_cannot_advertise_operation_or_repairability() -> None:
@@ -102,6 +119,14 @@ def test_health_evaluation_separates_not_applicable_unavailable_missing_and_stal
             DatasetHealthStatus.STALE,
         ),
         (
+            {
+                "eligible": True,
+                "latest_date": expected,
+                "stale": True,
+            },
+            DatasetHealthStatus.STALE,
+        ),
+        (
             {"eligible": True, "latest_date": expected},
             DatasetHealthStatus.HEALTHY,
         ),
@@ -126,6 +151,8 @@ def test_advertised_foundation_scopes_have_real_projectors_and_fixture_payloads(
         ("intraday.bars", "us_stock", "US"),
         ("daily.ohlcv", "stock", "TW"),
         ("daily.ohlcv", "us_stock", "US"),
+        ("technical.indicators", "stock", "TW"),
+        ("technical.structure", "stock", "TW"),
         ("technical.indicators", "us_stock", "US"),
         ("technical.structure", "us_stock", "US"),
     }

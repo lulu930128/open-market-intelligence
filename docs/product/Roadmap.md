@@ -50,6 +50,8 @@ AI decision 必須建立在可信 evidence 之上，而不是靠 provider-specif
 - preopen / opening handoff / regular / close acceptance。
 - depth / auction / quote semantics。
 
+2026-08-25 Data Core production adoption checkpoint：official daily OHLCV、full-market EOD lifecycle、official index/breadth與single-symbol public last-trade已接入共同Gateway/Resolver/result contract；28個production dataset與18個bounded operations已由running production runtime公開。Production DB採用0067/0068，named launcher、TPEX actual official index persistence/cold read、API、visible UI、frontend proxy與MCP `omi.decision.v4`已驗收。Active-session public quote F-07、TAIEX expected-date source gap、current public quote lineage gap與official breadth completeness仍如實pending/partial；完成F-07前不得標記common platform operational。KGI、depth/auction及既有M5依使用者決策留待共同平台完成後另案onboard。
+
 ### United States
 
 - KGI US quote integration。

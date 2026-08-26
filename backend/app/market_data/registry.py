@@ -28,6 +28,7 @@ class ExpectedStatePolicy(str, Enum):
 
 
 class EligibilityPolicy(str, Enum):
+    MARKET_TRADING_DAY = "market_trading_day"
     LISTED_INSTRUMENT_AND_TRADING_DAY = "listed_instrument_and_trading_day"
     LISTED_INSTRUMENT_MARKET_DAY_AND_INSTRUMENT_ELIGIBLE = (
         "listed_instrument_market_day_and_instrument_eligible"
@@ -99,6 +100,8 @@ class DatasetRegistry:
 INTERNAL_DATASET_REFRESH_OPERATIONS = frozenset(
     {
         "tw.reconcile_full_market_eod",
+        "tw.refresh_official_market_index",
+        "tw.acquire_public_last_trade_quote",
         "us.reconcile_full_market_eod",
     }
 )
@@ -112,6 +115,7 @@ def evaluate_dataset_health(
     checked_at: datetime,
     eligible: bool | None,
     partial: bool = False,
+    stale: bool = False,
     provider_available: bool = True,
 ) -> DatasetHealth:
     """Evaluate health from caller-supplied calendar/storage facts without I/O."""
@@ -131,6 +135,9 @@ def evaluate_dataset_health(
     elif partial:
         status = DatasetHealthStatus.PARTIAL
         detail_code = "DATASET_PARTIAL"
+    elif stale:
+        status = DatasetHealthStatus.STALE
+        detail_code = "DATASET_STALE"
     elif expected_date is None:
         status = DatasetHealthStatus.UNKNOWN
         detail_code = "EXPECTED_DATE_UNKNOWN"
@@ -160,14 +167,22 @@ DATASET_REGISTRY = DatasetRegistry(
             schema_version="omi.market.quote.v1",
             market=Market.TW,
             scope_kind="stock",
-            owner="app.market.quote_depth",
-            read_operation="get_taiwan_stock_quote_depth",
+            owner="app.market.public_quote_platform",
+            read_operation="read_taiwan_public_last_trade_quote",
             projection_id="quote.snapshot.stock.TW",
-            capability_ids=("quote.snapshot",),
+            capability_ids=("quote.snapshot", "quote.last_trade"),
             frequency=DatasetFrequency.EVENT,
             expected_state_policy=ExpectedStatePolicy.CURRENT_SESSION,
             eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT_AND_TRADING_DAY,
             storage_reference="taiwan_stock_quote_snapshot",
+            refreshable=True,
+            refresh_operation="tw.acquire_public_last_trade_quote",
+            refresh_bounds=RefreshBounds(
+                max_calls=1,
+                timeout_seconds=10,
+                max_symbols=1,
+                max_range_days=1,
+            ),
             postcondition="Return a quote snapshot or a truthful unavailable/partial state.",
         ),
         DatasetSpec(
@@ -190,8 +205,8 @@ DATASET_REGISTRY = DatasetRegistry(
             schema_version="omi.market.bar.v1",
             market=Market.TW,
             scope_kind="stock",
-            owner="app.market.daily_prices",
-            read_operation="get_stock_daily_prices",
+            owner="app.market.daily_ohlcv_platform",
+            read_operation="MarketDataGateway.resolve_bars",
             projection_id="daily.ohlcv.stock.TW",
             capability_ids=("daily.ohlcv", "technical.structure"),
             frequency=DatasetFrequency.DAILY,
@@ -199,7 +214,7 @@ DATASET_REGISTRY = DatasetRegistry(
             eligibility_policy=(
                 EligibilityPolicy.LISTED_INSTRUMENT_MARKET_DAY_AND_INSTRUMENT_ELIGIBLE
             ),
-            storage_reference="market_daily_price",
+            storage_reference="source_registry+raw_fetch_result+market_daily_price",
             refreshable=True,
             refresh_operation="tw.refresh_daily_price",
             refresh_bounds=RefreshBounds(
@@ -208,8 +223,23 @@ DATASET_REGISTRY = DatasetRegistry(
                 max_symbols=1,
                 max_range_days=3650,
             ),
-            postcondition="Latest stored trade date reaches the bounded requested/expected date.",
+            postcondition="Official raw receipt and canonical row commit, repository reread, and latest selected trade date reaches the bounded expected date.",
             repairable=True,
+        ),
+        DatasetSpec(
+            dataset_id="tw.technical.daily",
+            schema_version="tw.technical.indicator_series.v3",
+            market=Market.TW,
+            scope_kind="stock",
+            owner="app.market.technical_indicator_gateway",
+            read_operation="calculate_active_daily_indicators",
+            projection_id="technical.indicators.daily.TW",
+            capability_ids=("technical.indicators", "technical.structure"),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.REQUESTED_OR_LATEST_COMPLETED,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT,
+            storage_reference="source_registry+raw_fetch_result+market_daily_price",
+            postcondition="Versioned backend series derives from resolved persisted daily OHLCV with algorithm, price basis, and parameter contract.",
         ),
         DatasetSpec(
             dataset_id="us.intraday.bars",
@@ -304,6 +334,65 @@ DATASET_REGISTRY = DatasetRegistry(
                 max_range_days=5,
             ),
             postcondition="The official active US stock universe has a durable bounded progress checkpoint for the expected completed session.",
+            repairable=True,
+        ),
+        DatasetSpec(
+            dataset_id="tw.market_index.daily",
+            schema_version="omi.market.index_observation.v1",
+            market=Market.TW,
+            scope_kind="official_market_index",
+            owner="app.market.official_index_platform",
+            read_operation="MarketDataGateway.resolve_market_index",
+            projection_id="market.index.daily.TW",
+            capability_ids=("market.index.daily",),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.LATEST_COMPLETED_SESSION,
+            eligibility_policy=EligibilityPolicy.MARKET_TRADING_DAY,
+            storage_reference=(
+                "source_registry+raw_fetch_result+market_index_daily_stat"
+            ),
+            refreshable=True,
+            refresh_operation="tw.refresh_official_market_index",
+            refresh_bounds=RefreshBounds(
+                max_calls=1,
+                timeout_seconds=30,
+                max_symbols=1,
+                max_range_days=1,
+            ),
+            postcondition=(
+                "The requested official TAIEX/TPEX completed-session row rereads "
+                "with raw receipt lineage and selected resolved evidence."
+            ),
+            repairable=True,
+        ),
+        DatasetSpec(
+            dataset_id="tw.market_breadth.daily",
+            schema_version="omi.market.breadth.v1",
+            market=Market.TW,
+            scope_kind="venue_active_ordinary_stock_universe",
+            owner="app.market.official_breadth_platform",
+            read_operation="MarketDataGateway.resolve_market_breadth",
+            projection_id="market.breadth.venue.TW",
+            capability_ids=("market.breadth",),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.LATEST_COMPLETED_SESSION,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT,
+            storage_reference=(
+                "stock_master+source_registry+raw_fetch_result+market_daily_price"
+            ),
+            refreshable=True,
+            refresh_operation="tw.reconcile_full_market_eod",
+            refresh_bounds=RefreshBounds(
+                max_calls=2,
+                timeout_seconds=120,
+                max_symbols=2,
+                max_range_days=1,
+            ),
+            postcondition=(
+                "Each TWSE/TPEX active ordinary-stock member is classified as "
+                "advance, decline, unchanged, unknown, or missing from one "
+                "coherent official raw receipt."
+            ),
             repairable=True,
         ),
     )

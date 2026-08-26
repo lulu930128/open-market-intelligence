@@ -779,6 +779,67 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(row.trade_value, 1_115_744_351_199)
         self.assertEqual(row.close_value, 45396.99)
 
+    def test_legacy_refresh_does_not_overwrite_platform_owned_index_row(self) -> None:
+        source = SourceRegistry(
+            source_name="TPEx Official Market Index Daily",
+            source_type="api",
+            category="market_data",
+            parser_type="tpex.daily_trading_index.v1",
+        )
+        self.db.add(source)
+        self.db.flush()
+        raw = RawFetchResult(
+            source_id=source.id,
+            fetched_at=datetime(2026, 8, 25, 6, 0, tzinfo=timezone.utc),
+            status_code=200,
+            content_hash="canonical-tpex-index",
+            parser_version="tpex.daily_trading_index.v1",
+        )
+        self.db.add(raw)
+        self.db.flush()
+        self.db.add(
+            MarketIndexDailyStat(
+                index_id="TPEX",
+                market="TPEX",
+                trade_date=date(2026, 8, 25),
+                trade_volume=701_017_083,
+                trade_value=168_782_272_071,
+                transaction_count=809_034,
+                close_value=389.41,
+                price_change=3.31,
+                source="tpex_openapi",
+                source_url="https://example.test/canonical",
+                source_id=source.id,
+                raw_result_id=raw.id,
+            )
+        )
+        self.db.commit()
+
+        result = indices._persist_market_index_daily_stats(
+            self.db,
+            index_id="TPEX",
+            market="TPEX",
+            rows=[
+                {
+                    "trade_date": date(2026, 8, 25),
+                    "trade_volume": 701_017_083,
+                    "trade_value": 168_782_272_071,
+                    "transaction_count": None,
+                    "close_value": 389.41,
+                    "price_change": 3.31,
+                }
+            ],
+            source="tpex_openapi_daily_trading_index",
+            source_url="https://example.test/legacy",
+        )
+
+        row = self.db.query(MarketIndexDailyStat).one()
+        self.assertEqual(result["updated_count"], 0)
+        self.assertEqual(result["skipped_platform_owned_count"], 1)
+        self.assertEqual(row.transaction_count, 809_034)
+        self.assertEqual(row.source, "tpex_openapi")
+        self.assertEqual(row.raw_result_id, raw.id)
+
     def test_twse_rwd_market_breadth_parses_current_stock_counts_and_total_value(self) -> None:
         payload = {
             "stat": "OK",
@@ -914,7 +975,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(taiex["trade_value"], 1_045_439_448_015)
         self.assertEqual(taiex["close"], 44999.90)
 
-    def test_current_breadth_is_not_rejected_by_stale_index_quote_date(self) -> None:
+    def test_legacy_completed_breadth_is_not_used_when_data_core_is_missing(self) -> None:
         target_date = date(2026, 7, 22)
         stale_index_date = date(2026, 7, 17)
         resolved_targets: list[tuple[str, date | None]] = []
@@ -966,8 +1027,12 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         )
         tpex = next(item for item in payload["indices"] if item["index_id"] == "TPEX")
         self.assertEqual(tpex["time"], stale_index_date)
-        self.assertEqual(tpex["breadth"]["trade_date"], target_date)
-        self.assertEqual(tpex["breadth_status"]["status"], "ready")
+        self.assertIsNone(tpex["breadth"])
+        self.assertEqual(tpex["breadth_status"]["status"], "failed")
+        self.assertEqual(
+            tpex["data_core_projection_scope"]["official_breadth"],
+            "data_core_missing",
+        )
 
     def test_get_index_summary_never_refreshes_provider_even_with_legacy_flag(self) -> None:
         original_cache = dict(indices._CACHE)

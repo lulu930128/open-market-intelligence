@@ -1,0 +1,32 @@
+{
+  "fixture_contract": "omi.test.actual_public_payload.v1",
+  "source_receipt": {
+    "provider": "tpex_openapi",
+    "source_name": "TPEx Official Market Index Daily",
+    "resource_id": "tpex_daily_trading_index",
+    "url": "https://www.tpex.org.tw/openapi/v1/tpex_daily_trading_index",
+    "captured_at": "2026-08-25T19:20:00+08:00",
+    "status_code": 200,
+    "original_content_length": 2466,
+    "original_content_hash": "93ff27302b023fabd00c8cba4a46539f4c00d91c5e74357762fe9d6068aeffd8"
+  },
+  "payload": [
+    {"Date":"1150803","TradeVolume":"682447106","TradeAmount":"132226012483","NumberOfTransactions":"654724","TPExIndex":"362.89","Change":"15.04"},
+    {"Date":"1150804","TradeVolume":"783768410","TradeAmount":"159489264264","NumberOfTransactions":"752912","TPExIndex":"375.03","Change":"12.14"},
+    {"Date":"1150805","TradeVolume":"882981883","TradeAmount":"182591030981","NumberOfTransactions":"889250","TPExIndex":"383.75","Change":"8.72"},
+    {"Date":"1150806","TradeVolume":"842892004","TradeAmount":"224818070539","NumberOfTransactions":"875358","TPExIndex":"391.37","Change":"7.62"},
+    {"Date":"1150807","TradeVolume":"818224403","TradeAmount":"206043637049","NumberOfTransactions":"924146","TPExIndex":"384.19","Change":"-7.18"},
+    {"Date":"1150810","TradeVolume":"871511726","TradeAmount":"188766082227","NumberOfTransactions":"920975","TPExIndex":"391.61","Change":"7.42"},
+    {"Date":"1150811","TradeVolume":"853989399","TradeAmount":"183880347003","NumberOfTransactions":"915282","TPExIndex":"391.68","Change":"0.07"},
+    {"Date":"1150812","TradeVolume":"940558517","TradeAmount":"200917879950","NumberOfTransactions":"1025870","TPExIndex":"402.02","Change":"10.34"},
+    {"Date":"1150813","TradeVolume":"1042906522","TradeAmount":"248782296042","NumberOfTransactions":"1134959","TPExIndex":"406.12","Change":"4.10"},
+    {"Date":"1150814","TradeVolume":"992500788","TradeAmount":"237372937110","NumberOfTransactions":"1234054","TPExIndex":"400.95","Change":"-5.17"},
+    {"Date":"1150817","TradeVolume":"745810912","TradeAmount":"173191189442","NumberOfTransactions":"910429","TPExIndex":"398.32","Change":"-2.63"},
+    {"Date":"1150818","TradeVolume":"1026031222","TradeAmount":"237768204016","NumberOfTransactions":"1176424","TPExIndex":"390.83","Change":"-7.49"},
+    {"Date":"1150819","TradeVolume":"790217029","TradeAmount":"179226416352","NumberOfTransactions":"962148","TPExIndex":"384.79","Change":"-6.04"},
+    {"Date":"1150820","TradeVolume":"863156355","TradeAmount":"183188158784","NumberOfTransactions":"908031","TPExIndex":"389.96","Change":"5.17"},
+    {"Date":"1150821","TradeVolume":"856939838","TradeAmount":"197673237762","NumberOfTransactions":"943833","TPExIndex":"387.27","Change":"-2.69"},
+    {"Date":"1150824","TradeVolume":"802938719","TradeAmount":"186358091327","NumberOfTransactions":"918273","TPExIndex":"386.10","Change":"-1.17"},
+    {"Date":"1150825","TradeVolume":"701017083","TradeAmount":"168782272071","NumberOfTransactions":"809034","TPExIndex":"389.41","Change":"3.31"}
+  ]
+}

@@ -59,7 +59,7 @@ class TaiwanStockDependencies:
     build_us_overnight_impact_report: Callable[..., dict[str, Any]]
     get_broker_branch_trade_summary: Callable[..., dict[str, Any]]
     get_market_intraday_history: Callable[..., dict[str, Any]]
-    get_taiwan_stock_quote_depth: Callable[..., dict[str, Any]]
+    read_taiwan_public_quote: Callable[..., dict[str, Any]]
     now: Callable[[], datetime]
     get_taiwan_disposition_status: Callable[..., dict[str, Any]] = (
         lambda stock_id, **_kwargs: {
@@ -243,12 +243,11 @@ def _compact_intraday_bars(
         if isinstance(market_data_params, dict)
         else {}
     )
-    realtime_policy = str(params.get("realtime_policy") or "prefer_live")
     cached_fallback_allowed = params.get("fallback_to_cached") is not False
-    refresh_allowed = (
-        realtime_policy != "cache_only"
-        and params.get("external_fetch_allowed") is not False
-    )
+    # Intraday bars have not passed the common-platform lineage gate. AI reads
+    # their persisted compatibility cache only; it never triggers Yahoo/NStock
+    # acquisition or chooses a provider.
+    refresh_allowed = False
     intervals = (
         (requested_interval,)
         if requested_interval is not None
@@ -278,7 +277,7 @@ def _compact_intraday_bars(
                 stock_id=stock_id,
                 interval=interval,
                 range_value="1d",
-                refresh=refresh_allowed,
+                refresh=False,
             )
             compact_history = _compact_intraday_history(history, point_limit=point_limit)
             series[interval] = compact_history
@@ -333,7 +332,7 @@ def _compact_intraday_bars(
         "enabled": True,
         "provider_refresh_allowed": refresh_allowed,
         "cached_fallback_allowed": cached_fallback_allowed,
-        "read_mode": "provider_refresh" if refresh_allowed else "persisted_cache",
+        "read_mode": "persisted_cache",
         "intervals": list(intervals),
         "requested_interval": requested_interval,
         "range": "1d",
@@ -1051,26 +1050,31 @@ def read_stock_quote_context(
     requested_provider_values = (
         params.get("providers") if isinstance(params.get("providers"), list) else []
     )
-    requested_provider = str(
+    legacy_requested_provider = str(
         params.get("provider")
         or (requested_provider_values[0] if requested_provider_values else "auto")
     ).strip().lower() or "auto"
-    strict_provider = params.get("strict_provider") is True
+    legacy_strict_provider = params.get("strict_provider") is True
+    if legacy_requested_provider != "auto" or legacy_strict_provider:
+        warnings.append(
+            "Taiwan provider/strict_provider controls are deprecated and ignored; "
+            "the backend Data Core owns acquisition and resolution."
+        )
     live_quote_requested = external_fetch_allowed and "quote" in requested_domains
     intraday_requested = "intraday" in requested_domains
     quote_depth: dict[str, Any] | None = None
     quote_error: str | None = None
     if live_quote_requested:
         try:
-            quote_depth = dependencies.get_taiwan_stock_quote_depth(
+            quote_depth = dependencies.read_taiwan_public_quote(
                 db=db,
                 stock_id=normalized_stock_id,
                 refresh=True,
             )
         except Exception as exc:
             quote_error = str(exc) or type(exc).__name__
-            warnings.append(f"Taiwan quote depth unavailable: {quote_error}")
-            missing.append("quote_depth")
+            warnings.append(f"Taiwan public last-trade quote unavailable: {quote_error}")
+            missing.append("quote")
 
     quote = _compact_quote_snapshot(
         latest_daily=latest_daily,
@@ -1082,24 +1086,10 @@ def read_stock_quote_context(
         live_quote_requested=live_quote_requested,
     )
     quote_freshness = quote.get("freshness") if isinstance(quote.get("freshness"), dict) else {}
-    if strict_provider and quote_freshness.get("source_error"):
-        quote_freshness.update(
-            {
-                "status": "unavailable",
-                "is_live": False,
-                "is_stale": True,
-            }
-        )
-        for key in ("latest_price", "price", "last_price"):
-            quote[key] = None
-        quote["depth_available"] = False
-        quote["status"] = "unavailable"
     if quote_depth is None:
         quote_freshness.update(
             {
-                "status": "unavailable"
-                if live_quote_requested and strict_provider
-                else "missing"
+                "status": "missing"
                 if latest_daily is None
                 else "stale"
                 if quote_is_stale
@@ -1110,11 +1100,6 @@ def read_stock_quote_context(
                 "source_error": quote_error,
             }
         )
-        if live_quote_requested and strict_provider:
-            for key in ("latest_price", "price", "last_price"):
-                quote[key] = None
-            quote["status"] = "unavailable"
-            quote["depth_available"] = False
     quote["freshness"] = quote_freshness
     quote["market_status"] = market_status_from_session(calendar_status)
     quote["timezone"] = calendar_status.get("timezone") or "Asia/Taipei"
@@ -1147,16 +1132,10 @@ def read_stock_quote_context(
         if isinstance(source_ref, dict):
             _append_source_ref_once(source_refs, source_ref)
 
-    allow_intraday_fallback = not strict_provider or requested_provider in {
-        "auto",
-        "yahoo",
-        "yahoo_chart",
-        "yahoo_finance_chart",
-    }
     intraday_read_allowed = bool(
-        external_fetch_allowed
-        or str(params.get("realtime_policy") or "") == "cache_only"
+        str(params.get("realtime_policy") or "") == "cache_only"
         or cached_fallback_allowed
+        or external_fetch_allowed
     )
     intraday_bars = _compact_intraday_bars(
         dependencies=dependencies,
@@ -1164,16 +1143,11 @@ def read_stock_quote_context(
         stock_id=normalized_stock_id,
         include_intraday=(
             intraday_requested
-            and allow_intraday_fallback
             and intraday_read_allowed
         ),
         market_data_params=market_data_params,
         calendar_status=calendar_status,
     )
-    if intraday_requested and not allow_intraday_fallback:
-        intraday_bars["warnings"] = [
-            f"strict_provider={requested_provider} does not permit Yahoo intraday fallback."
-        ]
     _apply_taiwan_intraday_volume_reconciliation(
         quote=quote,
         intraday_bars=intraday_bars,
@@ -1229,43 +1203,48 @@ def read_stock_quote_context(
             and str(value.get("provider") or value.get("source") or "").strip()
         )
     )
-    if quote.get("provider") and not (
-        strict_provider and quote.get("status") == "unavailable"
-    ):
+    if quote.get("provider"):
         effective_providers.insert(0, canonical_provider(quote["provider"]))
         effective_providers = list(dict.fromkeys(effective_providers))
-    canonical_requested_provider = canonical_provider(requested_provider)
-    provider_fallback_used = bool(
-        canonical_requested_provider not in {"", "auto"}
-        and any(provider != canonical_requested_provider for provider in effective_providers)
+    canonical_requested_provider = "auto"
+    resolved_quote_health = (
+        quote_depth.get("resolved_health")
+        if isinstance(quote_depth, dict)
+        and isinstance(quote_depth.get("resolved_health"), dict)
+        else {}
+    )
+    provider_fallback_used = bool(resolved_quote_health.get("fallback_used"))
+    platform_provider_attempts = (
+        quote_depth.get("provider_attempts")
+        if isinstance(quote_depth, dict)
+        and isinstance(quote_depth.get("provider_attempts"), list)
+        else []
     )
     provider_contract = {
         "requested_provider": canonical_requested_provider,
+        "legacy_requested_provider": canonical_provider(legacy_requested_provider),
         "effective_provider": effective_providers[0] if effective_providers else None,
         "effective_providers": effective_providers,
-        "strict_provider": strict_provider,
+        "strict_provider": False,
+        "legacy_strict_provider": legacy_strict_provider,
+        "provider_control_status": (
+            "deprecated_ignored"
+            if legacy_requested_provider != "auto" or legacy_strict_provider
+            else "backend_owned"
+        ),
         "provider_fallback_used": provider_fallback_used,
         "provider_fallback_reason": (
-            "requested_provider_unavailable"
+            resolved_quote_health.get("selection_reason")
             if provider_fallback_used
-            else "strict_provider_unavailable"
-            if strict_provider and live_quote_requested and quote_depth is None
             else None
         ),
-        "provider_attempts": [
-            {
-                "provider": canonical_requested_provider,
-                "domain": "quote",
-                "status": quote_freshness.get("status"),
-                "error": quote_freshness.get("source_error") or quote_error,
-            }
-        ]
-        if live_quote_requested
-        else [],
+        # Data Core owns the attempt list. The AI consumer projects it without
+        # inventing an "auto" provider attempt or reconstructing fallback.
+        "provider_attempts": list(platform_provider_attempts),
     }
     attempted_domains = [
         domain
-        for domain in ("quote", "intraday")
+        for domain in ("quote",)
         if domain in requested_domains and external_fetch_allowed
     ]
     updated_domains: list[str] = []
@@ -1289,23 +1268,6 @@ def read_stock_quote_context(
             updated_domains.append("quote")
         else:
             unchanged_domains.append("quote")
-    if "intraday" in attempted_domains:
-        intraday_refresh_count = sum(
-            int(item.get("refreshed_count") or 0)
-            for item in intraday_series.values()
-            if isinstance(item, dict)
-        )
-        intraday_has_points = any(
-            int(item.get("returned_point_count") or 0) > 0
-            for item in intraday_series.values()
-            if isinstance(item, dict)
-        )
-        if intraday_refresh_count > 0:
-            updated_domains.append("intraday")
-        elif intraday_has_points:
-            unchanged_domains.append("intraday")
-        else:
-            failed_domains.append("intraday")
     refresh_summary = {
         "requested_domains": list(requested_domain_values),
         "excluded_domains": list(excluded_domain_values),
@@ -1318,30 +1280,6 @@ def read_stock_quote_context(
         "unchanged_dataset_count": len(unchanged_domains),
         "failed_dataset_count": len(failed_domains),
     }
-    if intraday_requested and "intraday" in attempted_domains:
-        provider_contract["provider_attempts"].append(
-            {
-                "provider": (
-                    "yahoo_finance_chart"
-                    if allow_intraday_fallback
-                    else canonical_requested_provider
-                ),
-                "domain": "intraday",
-                "status": (
-                    "updated"
-                    if "intraday" in updated_domains
-                    else "unchanged"
-                    if "intraday" in unchanged_domains
-                    else "unavailable"
-                ),
-                "error": (
-                    None
-                    if "intraday" not in failed_domains
-                    else "; ".join(str(item) for item in intraday_bars.get("warnings") or [])
-                    or "intraday provider unavailable"
-                ),
-            }
-        )
     provider_contract["cache_reads"] = (
         [
             {
@@ -1442,7 +1380,7 @@ def read_stock_quote_context(
     if quote_depth is not None:
         _append_source_ref_once(
             source_refs,
-            {"type": "external_or_cache", "name": "taiwan_quote_depth"},
+            {"type": "resolved_market_data", "name": "tw.quote.snapshot"},
         )
     if intraday_bars.get("enabled"):
         _append_source_ref_once(
@@ -2019,16 +1957,24 @@ def read_stock_context(
     quote_error: str | None = None
     if include_intraday:
         try:
-            quote_depth = dependencies.get_taiwan_stock_quote_depth(
+            context_params = (
+                market_data_params
+                if isinstance(market_data_params, dict)
+                else {}
+            )
+            quote_depth = dependencies.read_taiwan_public_quote(
                 db=db,
                 stock_id=normalized_stock_id,
-                refresh=True,
+                refresh=context_params.get("external_fetch_allowed") is True,
             )
-            _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "taiwan_quote_depth"})
+            _append_source_ref_once(
+                source_refs,
+                {"type": "resolved_market_data", "name": "tw.quote.snapshot"},
+            )
         except Exception as exc:
             quote_error = str(exc) or exc.__class__.__name__
-            warnings.append(f"Taiwan quote depth unavailable: {quote_error}")
-            missing.append("quote_depth")
+            warnings.append(f"Taiwan public last-trade quote unavailable: {quote_error}")
+            missing.append("quote")
     source_health = _with_effective_quote_source_health(
         source_health,
         quote_depth=quote_depth,

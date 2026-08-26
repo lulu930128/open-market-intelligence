@@ -21,8 +21,10 @@ from app.market_data.eod_coverage import (
     compute_eod_coverage,
     persist_eod_coverage,
     reconcile_eod_coverage,
+    should_enqueue_eod_reconcile,
     taiwan_bulk_eod_refresh_window,
 )
+from app.sources.defaults import TPEX_DAILY_QUOTES_SOURCE_NAME
 from app.observability.provider_http import (
     ProviderHttpError,
     ProviderHttpFailure,
@@ -326,3 +328,161 @@ def test_twse_parser_uses_expected_trade_date_for_dateless_weekend_payload(db: S
 
     assert skipped == 0
     assert rows[0]["trade_date"] == date(2026, 8, 21)
+
+
+def test_tw_healthy_lifecycle_performs_zero_provider_calls(db: Session) -> None:
+    source, raw = _source_and_raw(db)
+    db.add_all(
+        [
+            StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"),
+            StockMaster(stock_id="6488", market="TPEX", instrument_type="stock"),
+            MarketDailyPrice(
+                source_id=source.id,
+                raw_result_id=raw.id,
+                stock_id="2330",
+                trade_date=EXPECTED,
+                close_price=100,
+            ),
+            MarketDailyPrice(
+                source_id=source.id,
+                raw_result_id=raw.id,
+                stock_id="6488",
+                trade_date=EXPECTED,
+                close_price=200,
+            ),
+        ]
+    )
+    db.commit()
+
+    with patch("app.market_data.eod_coverage.refresh_source") as refresh:
+        result = reconcile_eod_coverage(
+            db,
+            market="TW",
+            expected_trade_date=EXPECTED,
+            repair=True,
+        )
+
+    refresh.assert_not_called()
+    assert result["status"] == "completed"
+    assert result["attempted_count"] == 0
+    assert result["dataset_health"]["status"] == "healthy"
+    assert (
+        result["dataset_lifecycle"]["refresh_operation"]
+        == "tw.reconcile_full_market_eod"
+    )
+    assert (
+        result["checkpoint"]["detail"]["dataset_lifecycle"]["health"]["status"]
+        == "healthy"
+    )
+
+
+def test_tw_lifecycle_repairs_only_unresolved_venue_then_rereads_coverage(
+    db: Session,
+) -> None:
+    source, raw = _source_and_raw(db)
+    tpex_source = SourceRegistry(
+        source_name=TPEX_DAILY_QUOTES_SOURCE_NAME,
+        source_type="api",
+        category="market_data",
+        endpoint_url="https://example.test/tpex",
+        enabled=True,
+    )
+    db.add(tpex_source)
+    db.flush()
+    db.add_all(
+        [
+            StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"),
+            StockMaster(stock_id="6488", market="TPEX", instrument_type="stock"),
+            MarketDailyPrice(
+                source_id=source.id,
+                raw_result_id=raw.id,
+                stock_id="2330",
+                trade_date=EXPECTED,
+                close_price=100,
+            ),
+        ]
+    )
+    db.commit()
+    calls: list[int] = []
+
+    def fake_refresh(*, db: Session, source_id: int, trade_date: date):
+        calls.append(source_id)
+        receipt = RawFetchResult(
+            source_id=source_id,
+            fetched_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+            raw_text="[]",
+            content_hash="tpex-lifecycle-fixture",
+        )
+        db.add(receipt)
+        db.flush()
+        db.add(
+            MarketDailyPrice(
+                source_id=source_id,
+                raw_result_id=receipt.id,
+                stock_id="6488",
+                trade_date=trade_date,
+                close_price=200,
+            )
+        )
+        db.commit()
+        return {
+            "fetch_status": "success",
+            "parse_status": "success",
+            "parsed_count": 1,
+            "data_quality_status": "valid",
+            "error_message": None,
+        }
+
+    with (
+        patch(
+            "app.market_data.eod_coverage.taiwan_bulk_eod_refresh_window",
+            return_value=(True, None, "test_completed_session"),
+        ),
+        patch(
+            "app.market_data.eod_coverage.refresh_source",
+            side_effect=fake_refresh,
+        ),
+    ):
+        result = reconcile_eod_coverage(
+            db,
+            market="TW",
+            expected_trade_date=EXPECTED,
+            repair=True,
+            max_symbols=500,
+            max_runtime_seconds=1800,
+        )
+
+    assert calls == [tpex_source.id]
+    assert result["status"] == "completed"
+    assert result["attempted_count"] == 1
+    assert result["checkpoint"]["current_count"] == 2
+    assert result["dataset_health"]["status"] == "healthy"
+    assert result["dataset_lifecycle"]["refresh_bounds"]["max_calls"] == 2
+
+
+def test_scheduler_decision_recomputes_persisted_coverage_instead_of_trusting_checkpoint(
+    db: Session,
+) -> None:
+    source, raw = _source_and_raw(db)
+    db.add(StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"))
+    row = MarketDailyPrice(
+        source_id=source.id,
+        raw_result_id=raw.id,
+        stock_id="2330",
+        trade_date=EXPECTED,
+        close_price=100,
+    )
+    db.add(row)
+    db.commit()
+    persist_eod_coverage(
+        db,
+        compute_eod_coverage(db, market="TW", expected_trade_date=EXPECTED),
+    )
+    row.trade_date = STALE
+    db.commit()
+
+    with patch(
+        "app.market_data.eod_coverage.expected_eod_trade_date",
+        return_value=EXPECTED,
+    ):
+        assert should_enqueue_eod_reconcile(db, market="TW") is True

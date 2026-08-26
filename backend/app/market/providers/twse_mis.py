@@ -73,6 +73,35 @@ def fetch_stock_messages(
     return [message for message in messages if isinstance(message, dict)]
 
 
+def get_stock_response(
+    codes: list[str],
+    *,
+    exchange: str = "tse",
+    timeout_seconds: int = 10,
+):
+    normalized_exchange = str(exchange or "").strip().lower()
+    if normalized_exchange not in {"tse", "otc"}:
+        raise ValueError("TWSE MIS exchange must be tse or otc.")
+    normalized_codes = tuple(
+        dict.fromkeys(str(code or "").strip() for code in codes if str(code or "").strip())
+    )
+    if not normalized_codes:
+        raise ValueError("TWSE MIS stock response requires at least one code.")
+    if len(normalized_codes) > 20:
+        raise ValueError("TWSE MIS stock response is bounded to 20 codes.")
+    channel = "|".join(
+        f"{normalized_exchange}_{code}.tw" for code in normalized_codes
+    )
+    return get_response(
+        STOCK_INFO_URL,
+        timeout_seconds=timeout_seconds,
+        params={"ex_ch": channel, "json": "1", "delay": "0"},
+        headers=_headers(),
+        omi_resource="stock_quote_batch",
+        omi_target=f"count:{len(normalized_codes)}",
+    )
+
+
 def fetch_index_message(
     channel: str,
     *,

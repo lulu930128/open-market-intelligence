@@ -1,0 +1,29 @@
+{
+  "fixture_contract": "omi.test.actual_public_payload_excerpt.v1",
+  "source_receipt": {
+    "provider": "tpex_openapi",
+    "source_name": "TPEx Mainboard Daily Quotes",
+    "resource_id": "tpex_mainboard_quotes",
+    "raw_result_id": 95820,
+    "fetched_at": "2026-08-25T09:23:57.270275+00:00",
+    "status_code": 200,
+    "original_content_hash": "7e25259c1e4de61c7f44e4ca813f0aa3d93969081f54ee448ce8ddf266e97635",
+    "original_row_count": 10495,
+    "extracted_symbols": ["6488", "8069"],
+    "note": "Exact public rows extracted read-only from the recorded full response; names preserve the stored response encoding."
+  },
+  "payload": {
+    "date": "20260825",
+    "tables": [
+      {
+        "fields": [],
+        "data": [
+          ["6488", "���y��", "980.00", "-30.00 ", "989.00", "998.00", "940.00", "970.70", "9,687,718", "9,403,896,234", "26,254", "979.00", "20", "980.00", "41", "478,113,725", "980.00", "1075.00", "882.00"],
+          ["8069", "����", "158.50", "0.00 ", "157.50", "159.00", "155.00", "157.44", "3,457,759", "544,400,547", "3,457", "158.00", "88", "158.50", "50", "1,154,678,380", "158.50", "174.00", "143.00"]
+        ]
+      }
+    ],
+    "flagField": "",
+    "stat": "ok"
+  }
+}

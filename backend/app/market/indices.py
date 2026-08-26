@@ -1688,6 +1688,7 @@ def _persist_market_index_daily_stats(
 ) -> dict:
     inserted_count = 0
     updated_count = 0
+    skipped_platform_owned_count = 0
 
     for row in rows:
         trade_date = row.get("trade_date")
@@ -1722,6 +1723,13 @@ def _persist_market_index_daily_stats(
             inserted_count += 1
             continue
 
+        if existing.source_id is not None or existing.raw_result_id is not None:
+            # Canonical Data Core owns rows carrying raw-receipt lineage.  A
+            # legacy fetch has no receipt for its incoming fields, so merging
+            # it into the same row would make the retained lineage untruthful.
+            skipped_platform_owned_count += 1
+            continue
+
         changed = False
         for key, value in values.items():
             if getattr(existing, key) != value:
@@ -1740,6 +1748,7 @@ def _persist_market_index_daily_stats(
     return {
         "inserted_count": inserted_count,
         "updated_count": updated_count,
+        "skipped_platform_owned_count": skipped_platform_owned_count,
     }
 
 
@@ -1821,6 +1830,7 @@ def _fetch_and_persist_tpex_market_daily_history(
     successful_months: set[date] = set()
     inserted_count = 0
     updated_count = 0
+    skipped_platform_owned_count = 0
     completed_count = 0
 
     with ThreadPoolExecutor(max_workers=MAX_INDEX_STAT_FETCH_WORKERS) as executor:
@@ -1846,6 +1856,9 @@ def _fetch_and_persist_tpex_market_daily_history(
                         )
                         inserted_count += counts["inserted_count"]
                         updated_count += counts["updated_count"]
+                        skipped_platform_owned_count += counts[
+                            "skipped_platform_owned_count"
+                        ]
                         pending_rows = []
             except Exception as exc:
                 errors.append(
@@ -1881,6 +1894,7 @@ def _fetch_and_persist_tpex_market_daily_history(
         )
         inserted_count += counts["inserted_count"]
         updated_count += counts["updated_count"]
+        skipped_platform_owned_count += counts["skipped_platform_owned_count"]
 
     requested_months = set(
         _month_starts_between(from_date=from_date, to_date=to_date)
@@ -1892,6 +1906,7 @@ def _fetch_and_persist_tpex_market_daily_history(
         "skipped_existing_month_count": len(requested_months - fetch_months),
         "inserted_count": inserted_count,
         "updated_count": updated_count,
+        "skipped_platform_owned_count": skipped_platform_owned_count,
         "errors": errors,
     }
 
@@ -1933,6 +1948,7 @@ def _ensure_market_index_daily_stat_coverage(
         "skipped_existing_month_count": len(months) - len(fetch_months),
         "inserted_count": 0,
         "updated_count": 0,
+        "skipped_platform_owned_count": 0,
         "errors": [],
     }
 
@@ -1951,6 +1967,9 @@ def _ensure_market_index_daily_stat_coverage(
         ]
         result["inserted_count"] += history["inserted_count"]
         result["updated_count"] += history["updated_count"]
+        result["skipped_platform_owned_count"] += history[
+            "skipped_platform_owned_count"
+        ]
         result["errors"].extend(history["errors"])
 
     if index_id == "TAIEX" and fetch_months:
@@ -1976,6 +1995,9 @@ def _ensure_market_index_daily_stat_coverage(
                     result["fetched_month_count"] += 1
                     result["inserted_count"] += counts["inserted_count"]
                     result["updated_count"] += counts["updated_count"]
+                    result["skipped_platform_owned_count"] += counts[
+                        "skipped_platform_owned_count"
+                    ]
                 except Exception as exc:
                     db.rollback()
                     result["errors"].append(
@@ -2004,6 +2026,9 @@ def _ensure_market_index_daily_stat_coverage(
             result["source"] = result["source"] or recent_source
             result["inserted_count"] += counts["inserted_count"]
             result["updated_count"] += counts["updated_count"]
+            result["skipped_platform_owned_count"] += counts[
+                "skipped_platform_owned_count"
+            ]
     except Exception as exc:
         db.rollback()
         result["errors"].append(
@@ -5248,6 +5273,14 @@ def _attach_summary_index_resolutions(
     }
 
 
+def _attach_completed_data_core_evidence(db: Session, payload: dict) -> dict:
+    from app.market.tw_dashboard_data_core import attach_taiwan_dashboard_data_core
+
+    return _with_breadth_status_contract(
+        attach_taiwan_dashboard_data_core(db, payload)
+    )
+
+
 def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
     if force_refresh:
         logger.warning(
@@ -5255,7 +5288,10 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
         )
     return _attach_summary_index_resolutions(
         db,
-        _market_index_summary(db=db, force_refresh=False),
+        _attach_completed_data_core_evidence(
+            db,
+            _market_index_summary(db=db, force_refresh=False),
+        ),
         acquisition_policy="cache_only",
     )
 
@@ -5268,10 +5304,13 @@ def refresh_market_index_summary(
     with _SUMMARY_REFRESH_LOCK:
         return _attach_summary_index_resolutions(
             db,
-            _market_index_summary(
-                db=db,
-                force_refresh=True,
-                refresh_daily_stats=refresh_daily_stats,
+            _attach_completed_data_core_evidence(
+                db,
+                _market_index_summary(
+                    db=db,
+                    force_refresh=True,
+                    refresh_daily_stats=refresh_daily_stats,
+                ),
             ),
             acquisition_policy="prefer_live",
         )
@@ -5314,6 +5353,7 @@ def refresh_market_index_daily_stats(
         ),
         "inserted_count": 0,
         "updated_count": 0,
+        "skipped_platform_owned_count": 0,
         "errors": [],
         "message": "Index daily stats are already current for the requested range.",
     }

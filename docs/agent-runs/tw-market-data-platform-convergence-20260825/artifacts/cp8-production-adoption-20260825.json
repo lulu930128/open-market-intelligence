@@ -1,0 +1,214 @@
+{
+  "schema_version": "omi.tw_data_core.production_adoption.v1",
+  "captured_at": "2026-08-25T23:20:00+08:00",
+  "status": "production_adopted_active_session_acceptance_pending",
+  "production_database": {
+    "path": "data/open_market_intelligence.db",
+    "revision_before_user_restart": "20260822_0066",
+    "revision_after_user_restart": "20260825_0068",
+    "migration_event": "The user restarted OMI at 2026-08-25 22:35 +08:00 and the launcher startup migration advanced 0066 -> 0067 -> 0068 before the agent performed a manual migration.",
+    "manual_production_migration_performed_by_agent": false,
+    "production_database_deleted_rebuilt_or_restored": false
+  },
+  "backup": {
+    "path": "data/backups/open_market_intelligence-after-tw-data-core-auto-migration-20260825-223925.db",
+    "created_offline": true,
+    "size_bytes": 26334392320,
+    "sha256": "1b03b478c2c5b3969826a6a8321bc7e6119ff46d746d01f9fdde6bd51c3319d4",
+    "alembic_revision": "20260825_0068",
+    "sqlite_quick_check": "ok",
+    "foreign_key_violation_count": 0,
+    "row_counts": {
+      "market_index_daily_stat": 5170,
+      "taiwan_stock_quote_snapshot": 3781
+    },
+    "lineage_note": "This is a post-auto-migration, pre-bounded-acquisition rollback point. Existing legacy rows remain truthful unknown lineage; they were not fabricated into canonical rows."
+  },
+  "rollback_rehearsal": {
+    "target": "verified backup clone",
+    "sequence": [
+      "20260825_0068",
+      "20260822_0066",
+      "20260825_0068"
+    ],
+    "result": "passed",
+    "preserved_row_counts": {
+      "market_index_daily_stat": 5170,
+      "taiwan_stock_quote_snapshot": 3781
+    },
+    "foreign_key_violation_count": 0,
+    "sqlite_quick_check": "ok",
+    "temporary_clone_removed": true,
+    "production_rollback_policy": "Keep additive 0067/0068 schema and roll back the application first. Schema downgrade is emergency compatibility only after evaluating lineage loss."
+  },
+  "runtime": {
+    "launcher_pid": 58996,
+    "launcher_command": "scripts/omi-launcher.ps1 -LauncherAction Run",
+    "backend": {
+      "selected_endpoint": "http://127.0.0.1:8916",
+      "listener_pid": 3000,
+      "service_wrapper_pid": 56144,
+      "python_command": "C:/project/Open Market Intelligence/.venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8916",
+      "health_status": "ok",
+      "ready_status": "ready",
+      "database_check": "ok"
+    },
+    "frontend": {
+      "selected_endpoint": "http://127.0.0.1:3000",
+      "listener_pid": 14732,
+      "service_wrapper_pid": 53972,
+      "proxy_target": "http://127.0.0.1:8916",
+      "ui_health_status": "ok"
+    },
+    "lineage_verified_to_named_launcher": true,
+    "restart_scope": "formal OMI launcher actions only; no broad process kill"
+  },
+  "platform_inventory": {
+    "dataset_contract_count": 28,
+    "bounded_operation_count": 18,
+    "data_core_catalog_status": 200,
+    "frontend_proxy_catalog_status": 200,
+    "tw_market_index_daily_health": {
+      "status": "observed",
+      "latest_observed_value": "2026-08-25",
+      "lineage_observed": true
+    },
+    "tw_quote_snapshot_health": {
+      "status": "lineage_incomplete",
+      "lineage_observed": false,
+      "detail_codes": [
+        "LATEST_ROW_MISSING_SOURCE_OR_RAW_RECEIPT"
+      ]
+    }
+  },
+  "bounded_real_acquisition": {
+    "taiex_2026_08_25": {
+      "external_calls": 1,
+      "raw_result_id": 96134,
+      "observation_written": false,
+      "result": "truthful_missing",
+      "limitations": [
+        "TARGET_TRADE_DATE_NOT_FOUND"
+      ],
+      "note": "The official source response only contained data through 2026-08-24. A request for 2026-08-24 was then rejected by the latest-completed expected-date contract rather than backdated silently."
+    },
+    "tpex_2026_08_25": {
+      "external_calls_per_attempt": 1,
+      "final_raw_result_id": 96206,
+      "content_hash": "93ff27302b023fabd00c8cba4a46539f4c00d91c5e74357762fe9d6068aeffd8",
+      "provider": "tpex_openapi",
+      "authority": "exchange",
+      "trade_date": "2026-08-25",
+      "close": 389.41,
+      "change": 3.31,
+      "volume_shares": 701017083,
+      "trade_value_twd": 168782272071,
+      "transaction_count": 809034,
+      "postcondition": true,
+      "resolver_status": "selected",
+      "fallback_used": false
+    },
+    "twse_public_quote_2330_post_close": {
+      "external_calls": 0,
+      "acquisition_attempted": false,
+      "result": "policy_unsatisfied",
+      "limitations": [
+        "SESSION_NOT_SUPPORTED_BY_RESOURCE"
+      ],
+      "note": "The active-session-only public quote capability was not made to look live after market close."
+    },
+    "unbounded_refresh_performed": false,
+    "kgi_or_m5_used": false
+  },
+  "cold_read_and_restart": {
+    "result": "passed",
+    "tpex_raw_receipt_id": 96206,
+    "tpex_transaction_count": 809034,
+    "tpex_source": "tpex_openapi",
+    "acquisition_external_calls": 0,
+    "persistence_attempted": false,
+    "row_lineage_unchanged_after_restart": true,
+    "latest_indicator_status": 200,
+    "latest_indicator_trade_date": "2026-08-24",
+    "latest_indicator_algorithm": "tw.technical.indicators.v3",
+    "technical_status": 200
+  },
+  "production_regressions_fixed": [
+    {
+      "code": "LATEST_DAILY_RANGE_MAX_ROWS",
+      "symptom": "latest indicator and technical endpoints returned 400 because a calendar-day estimate could contain more persisted trading rows than max_rows",
+      "fix": "derive the exact persisted lower bound for the latest N rows while retaining strict failure for explicit over-wide ranges",
+      "regression_coverage": "backend/tests/test_tw_official_daily_platform.py"
+    },
+    {
+      "code": "LEGACY_INDEX_WRITER_OVERWROTE_CANONICAL_LINEAGE",
+      "symptom": "restart-time legacy index persistence overwrote a canonical platform-owned row and preserved mismatched raw lineage",
+      "fix": "legacy persistence now skips rows with source_id or raw_result_id and reports skipped_platform_owned_count",
+      "regression_coverage": "backend/tests/test_market_index_daily_stats.py"
+    }
+  ],
+  "outward_surfaces": {
+    "api": {
+      "status": "passed",
+      "evidence": [
+        "Data Core catalog and health routes return 200",
+        "TPEX official-daily cold read returns Resolver selected evidence with zero external calls",
+        "2330 latest indicator and technical endpoints return 200"
+      ]
+    },
+    "frontend": {
+      "status": "passed_with_truthful_limits",
+      "visible_evidence": [
+        "Open Market Intelligence dashboard rendered at http://127.0.0.1:3000",
+        "TPEX 389.41, +3.31, +0.86%, trade date 2026-08-25",
+        "breadth failure and missing data remained visible",
+        "browser console had no warnings or errors"
+      ]
+    },
+    "mcp": {
+      "status": "passed",
+      "contract": "omi.decision.v4",
+      "target": "TW:TPEX",
+      "required_capability": "quote.official_close",
+      "realtime_policy": "cache_only",
+      "external_fetch_allowed": false,
+      "price": 389.41,
+      "trade_date": "2026-08-25",
+      "quality_status": "ready",
+      "trust_level": "high",
+      "unsupported_scope_fail_closed_verified": true
+    }
+  },
+  "validation": {
+    "targeted_after_production_fixes": "118 passed and 8 subtests passed",
+    "full_run_id": "20260825-231250",
+    "full_run_context": "host context after sandbox basetemp teardown permission failure",
+    "backend_compileall": "passed",
+    "backend_pytest": "2282 passed, 939 warnings in 295.17s",
+    "frontend_lint": "passed",
+    "frontend_typescript": "passed",
+    "frontend_production_build": "passed",
+    "git_diff_check": "passed",
+    "browser_visible_acceptance": "passed separately in the in-app browser",
+    "e2e_suite": "not_run"
+  },
+  "remaining_gates": [
+    {
+      "acceptance_id": "F-07",
+      "status": "pending",
+      "reason": "The public last-trade capability is active-session-only. Post-close policy rejection cannot substitute for a live Taiwan market-session sample."
+    }
+  ],
+  "known_limitations": [
+    "TAIEX official Data Core acquisition could not obtain the expected 2026-08-25 row from the source response.",
+    "The latest production public quote row lacks canonical source/raw receipt lineage; active-session F-07 remains pending.",
+    "Current official breadth remains incomplete and the UI/MCP expose the gap instead of substituting sample movers.",
+    "KGI, depth, auction, realtime lease, and M5 remain explicitly deferred.",
+    "This artifact does not mark TW_DATA_CORE_COMMON_PLATFORM_OPERATIONAL while F-07 is pending."
+  ],
+  "git": {
+    "commit_performed": false,
+    "push_performed": false,
+    "unrelated_dirty_worktree_preserved": true
+  }
+}

@@ -13,18 +13,24 @@ from typing import Generic, Sequence, TypeVar
 
 from app.market_data.contracts import (
     AuthorityClass,
+    AuctionObservation,
     BarFinalization,
     BarObservation,
     CandidateSummary,
     DepthObservation,
     EvidenceFreshness,
+    MarketBreadthObservation,
+    MarketIndexObservation,
     MarketSession,
     ObservationState,
     QuoteObservation,
     ResolvedBarSeries,
+    ResolvedAuction,
     ResolvedDepth,
     ResolvedEvidenceHealth,
     ResolvedEvidenceStatus,
+    ResolvedMarketBreadth,
+    ResolvedMarketIndex,
     ResolvedQuote,
     ResolvedTradingStatus,
     TradingStatusObservation,
@@ -33,7 +39,13 @@ from app.market_data.policies import RealtimePolicy, parse_realtime_policy
 
 
 ObservationT = TypeVar(
-    "ObservationT", QuoteObservation, DepthObservation, TradingStatusObservation
+    "ObservationT",
+    QuoteObservation,
+    DepthObservation,
+    AuctionObservation,
+    MarketBreadthObservation,
+    MarketIndexObservation,
+    TradingStatusObservation,
 )
 MAX_CANDIDATE_SUMMARIES = 8
 FUTURE_TOLERANCE = timedelta(minutes=5)
@@ -322,6 +334,61 @@ def resolve_depth(
     return ResolvedDepth(depth=selected, health=health, candidates=summaries)
 
 
+def resolve_auction(
+    candidates: Sequence[ResolutionCandidate[AuctionObservation]],
+    *,
+    policy: str | RealtimePolicy,
+    now: datetime,
+    max_age: timedelta,
+) -> ResolvedAuction:
+    selected, health, summaries = _resolve(
+        candidates, policy=policy, now=now, max_age=max_age
+    )
+    return ResolvedAuction(auction=selected, health=health, candidates=summaries)
+
+
+def resolve_market_breadth(
+    candidates: Sequence[ResolutionCandidate[MarketBreadthObservation]],
+    *,
+    policy: str | RealtimePolicy,
+    now: datetime,
+    max_age: timedelta,
+) -> ResolvedMarketBreadth:
+    selected, health, summaries = _resolve(
+        candidates,
+        policy=policy,
+        now=now,
+        max_age=max_age,
+        official_first=True,
+    )
+    return ResolvedMarketBreadth(
+        breadth=selected,
+        health=health,
+        candidates=summaries,
+    )
+
+
+def resolve_market_index(
+    candidates: Sequence[ResolutionCandidate[MarketIndexObservation]],
+    *,
+    policy: str | RealtimePolicy,
+    now: datetime,
+    max_age: timedelta,
+) -> ResolvedMarketIndex:
+    selected, health, summaries = _resolve(
+        candidates,
+        policy=policy,
+        now=now,
+        max_age=max_age,
+        official_first=True,
+    )
+    return ResolvedMarketIndex(
+        market_index=selected,
+        health=health,
+        candidates=summaries,
+    )
+
+
 def resolve_trading_status(
     candidates: Sequence[ResolutionCandidate[TradingStatusObservation]],
     *,
@@ -427,8 +494,11 @@ __all__ = [
     "BarSeriesCandidate",
     "MAX_CANDIDATE_SUMMARIES",
     "ResolutionCandidate",
+    "resolve_auction",
     "resolve_bar_series",
     "resolve_depth",
+    "resolve_market_breadth",
+    "resolve_market_index",
     "resolve_quote",
     "resolve_trading_status",
 ]

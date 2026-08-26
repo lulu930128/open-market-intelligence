@@ -1,0 +1,68 @@
+{
+  "contract": "omi.tw.official_breadth.platform_readonly.v1",
+  "captured_at": "2026-08-25T19:18:58.8154985+08:00",
+  "database": "data/open_market_intelligence.db",
+  "database_mode": "sqlite_uri_mode_ro_and_pragma_query_only",
+  "database_snapshot_note": "The local database was active and changed during the surrounding inspection. Counts and receipt IDs below are a bounded read-only snapshot, not a frozen database hash.",
+  "external_provider_calls": 0,
+  "database_writes_by_this_evidence_run": 0,
+  "results": [
+    {
+      "venue": "TWSE",
+      "trade_date": "2026-08-24",
+      "result_kind": "market_breadth",
+      "resolved_status": "partial",
+      "dataset_status": "partial",
+      "acquisition_external_calls": 0,
+      "persistence_attempted": false,
+      "limitations": [
+        "BREADTH_UNIVERSE_ROWS_MISSING"
+      ],
+      "breadth": {
+        "universe_count": 1086,
+        "advance_count": 315,
+        "decline_count": 638,
+        "unchanged_count": 129,
+        "unknown_count": 0,
+        "missing_count": 4,
+        "official": true,
+        "provisional": false,
+        "raw_receipt_id": "raw_fetch_result:95999",
+        "content_hash": "9b77b0849dc4794677ef27fc60933b4c9266a4272a669c625393109d49671f52"
+      }
+    },
+    {
+      "venue": "TPEX",
+      "trade_date": "2026-08-25",
+      "result_kind": "market_breadth",
+      "resolved_status": "partial",
+      "dataset_status": "partial",
+      "acquisition_external_calls": 0,
+      "persistence_attempted": false,
+      "limitations": [
+        "BREADTH_PRICE_CHANGE_UNKNOWN",
+        "BREADTH_UNIVERSE_ROWS_MISSING"
+      ],
+      "breadth": {
+        "universe_count": 887,
+        "advance_count": 367,
+        "decline_count": 381,
+        "unchanged_count": 90,
+        "unknown_count": 42,
+        "missing_count": 7,
+        "official": true,
+        "provisional": false,
+        "raw_receipt_id": "raw_fetch_result:96000",
+        "content_hash": "1c971643b7879fa5b1f383a81b1b244ee5897cbba1ed264e1fda7c526712d4b8"
+      }
+    }
+  ],
+  "acceptance": {
+    "partition_identity": "advance + decline + unchanged + unknown + missing = universe",
+    "unknown_not_zero": true,
+    "missing_not_unknown": true,
+    "single_receipt_lineage_required": true,
+    "truthful_partial_outward": true,
+    "cache_read_only": true
+  }
+}

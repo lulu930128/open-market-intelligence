@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.market import indicator_service
+from app.market.daily_ohlcv_platform import read_taiwan_official_daily
+from app.market.daily_ohlcv_platform import TAIWAN_TZ
 from app.market.technical_evidence import (
     INDICATOR_ALGORITHM_VERSION,
     calculate_canonical_indicator_points,
 )
-from app.market.service import list_stock_daily_history
 from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     get_technical_analysis_parameters,
@@ -54,6 +56,8 @@ def calculate_active_daily_indicators(
     *,
     db: Session,
     stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
     limit: int = 100,
     parameters: TechnicalAnalysisParameters | None = None,
 ) -> list[Any]:
@@ -62,28 +66,31 @@ def calculate_active_daily_indicators(
         return indicator_service.calculate_daily_indicators(
             db=db,
             stock_id=stock_id,
+            from_date=from_date,
+            to_date=to_date,
             limit=limit,
             ma_windows=resolved.ma_windows_text,
             volume_ma_windows=resolved.volume_ma_windows_text,
             parameters=resolved,
         )
-    rows = list_stock_daily_history(
-        db=db,
+    resolved_daily = read_taiwan_official_daily(
+        db,
         stock_id=stock_id,
+        from_date=from_date,
+        to_date=to_date,
         limit=limit,
-        ascending=True,
     )
     points = [
         {
-            "time": row.trade_date,
-            "open": row.open_price,
-            "high": row.high_price,
-            "low": row.low_price,
-            "close": row.close_price,
-            "volume": row.trade_volume,
-            "price_change": row.price_change,
+            "time": bar.end_at.astimezone(TAIWAN_TZ).date(),
+            "open": float(bar.open_price),
+            "high": float(bar.high_price),
+            "low": float(bar.low_price),
+            "close": float(bar.close_price),
+            "volume": int(bar.volume.value) if bar.volume is not None else None,
+            "price_change": None,
         }
-        for row in rows
+        for bar in resolved_daily.resolved.bars
     ]
     return calculate_canonical_indicator_points(points, parameters=resolved)
 

@@ -7,14 +7,18 @@ from sqlalchemy.orm import Session
 
 from app.db.models import MarketIntradayBar, StockMaster, utc_now
 from app.market.providers import http_get
+from app.market.public_quote_platform import read_taiwan_public_last_trade_quote
 from app.market.tw_disposition import get_taiwan_disposition_status
-from app.market.twse_mis_observation import resolve_twse_mis_actual_trade
+from app.market_data.contracts import (
+    ResolvedEvidenceStatus,
+    TradeObservationState,
+)
+from app.market_data.integration_contracts import MarketDataResultV1
 from app.observability.provider_fallback import observe_provider_fallback
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 NSTOCK_MINUTE_URL = "https://shop.nstock.tw/api/v2/minute-stock-data/data"
-TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TAIPEI_TZ = timezone(timedelta(hours=8))
 INTRADAY_CACHE_TTL_SECONDS = 4.75
 _INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
@@ -302,27 +306,6 @@ def _fetch_nstock_intraday(stock_id: str) -> dict:
         "point_count": len(points),
         "points": points,
     }
-
-
-def _fetch_mis_message(stock_id: str, market: str | None) -> dict | None:
-    exchange = _mis_exchange(market)
-    response = http_get(
-        TWSE_MIS_STOCK_INFO_URL,
-        params={
-            "ex_ch": f"{exchange}_{stock_id}.tw",
-            "json": "1",
-            "delay": "0",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
-
-    payload = response.json()
-    return (payload.get("msgArray") or [None])[0]
 
 
 def _parse_snapshot_datetime(message: dict) -> datetime | None:
@@ -1125,21 +1108,25 @@ def _apply_disposition_intraday_contract(
     }
 
 
-def _apply_mis_volume_adjustment(result: dict, message: dict | None) -> dict:
+def _apply_platform_quote_contract(
+    result: dict,
+    quote_result: MarketDataResultV1 | None,
+    *,
+    unavailable_reason: str | None = None,
+) -> dict:
+    """Project a resolved quote beside bars without manufacturing a new bar."""
+
     original_source = str(result.get("source") or "unknown")
     price_provider = (
-        "nstock" if original_source.startswith("nstock") else "yahoo_finance_chart"
+        "nstock"
+        if original_source.startswith("nstock")
+        else "yahoo_finance_chart"
         if original_source.startswith("yahoo")
         else original_source
     )
-    result["price_provider"] = price_provider
-    result["volume_provider"] = price_provider
-    result["provider"] = price_provider
-    result["source_components"] = [
-        {"domain": "price", "provider": price_provider, "source": original_source}
+    points = [
+        point for point in result.get("points") or [] if isinstance(point, dict)
     ]
-    points = [point for point in result.get("points") or [] if isinstance(point, dict)]
-    result["points"] = points
     latest_history_point = max(
         points,
         key=lambda point: (
@@ -1164,20 +1151,123 @@ def _apply_mis_volume_adjustment(result: dict, message: dict | None) -> dict:
         if latest_history_point is not None
         else None
     )
-    expected_trade_date = latest_history_time.date() if latest_history_time else None
+    quote = quote_result.resolved.quote if quote_result is not None else None
+    health = quote_result.resolved.health if quote_result is not None else None
+    event_at = quote.lineage.event_at if quote is not None else None
+    actual_trade_observed = bool(
+        quote is not None
+        and quote.trade_state is TradeObservationState.TRADE_OBSERVED
+        and quote.last_trade_price is not None
+        and event_at is not None
+    )
+    current_trade_available = bool(
+        actual_trade_observed
+        and health is not None
+        and health.status
+        in {
+            ResolvedEvidenceStatus.SELECTED,
+            ResolvedEvidenceStatus.FALLBACK,
+        }
+        and health.research_usable
+    )
+    actual_trade_price = (
+        float(quote.last_trade_price)
+        if actual_trade_observed and quote is not None
+        else None
+    )
+    lag_seconds = (
+        (event_at - latest_history_time).total_seconds()
+        if event_at is not None and latest_history_time is not None
+        else None
+    )
+    history_observation = (
+        {
+            "value": latest_history_price,
+            "observed_at": latest_history_time.isoformat(),
+            "confirmed_at": None,
+            "price_semantics": "intraday_bar_close",
+            "provider": price_provider,
+            "freshness_status": "history_latest",
+            "decision_usable": False,
+        }
+        if latest_history_price is not None and latest_history_time is not None
+        else None
+    )
+    current_observation = (
+        {
+            "value": actual_trade_price,
+            "observed_at": event_at.isoformat(),
+            "confirmed_at": event_at.isoformat(),
+            "price_semantics": "actual_trade",
+            "provider": quote.lineage.provider,
+            "freshness_status": health.status.value,
+            "decision_usable": True,
+        }
+        if current_trade_available
+        and quote is not None
+        and health is not None
+        and event_at is not None
+        else history_observation
+    )
+    source_components = []
+    if points:
+        source_components.extend(
+            (
+                {
+                    "domain": "price_bars",
+                    "provider": price_provider,
+                    "source": original_source,
+                },
+                {
+                    "domain": "bar_volume",
+                    "provider": price_provider,
+                    "source": original_source,
+                },
+            )
+        )
+    if actual_trade_observed and quote is not None and health is not None:
+        source_components.append(
+            {
+                "domain": "current_trade",
+                "provider": quote.lineage.provider,
+                "source": quote.lineage.source,
+                "event_at": event_at.isoformat() if event_at else None,
+                "resolved_status": health.status.value,
+            }
+        )
+    if unavailable_reason is None and not current_trade_available:
+        unavailable_reason = (
+            health.selection_reason
+            if health is not None
+            else "PUBLIC_QUOTE_PLATFORM_UNAVAILABLE"
+        )
     result.update(
         {
+            "provider": price_provider,
+            "price_provider": price_provider,
+            "volume_provider": price_provider,
+            "source_components": source_components,
+            "points": points,
+            "point_count": len(points),
             "history_price_source": price_provider,
             "latest_history_time": (
                 latest_history_time.isoformat() if latest_history_time else None
             ),
             "latest_history_price": latest_history_price,
-            "latest_actual_trade_time": None,
-            "latest_actual_trade_price": None,
-            "current_price_source": None,
-            "lag_seconds": None,
-            "current_trade_available": False,
-            "current_trade_unavailable_reason": "MIS_SNAPSHOT_UNAVAILABLE",
+            "latest_actual_trade_time": (
+                event_at.isoformat() if actual_trade_observed and event_at else None
+            ),
+            "latest_actual_trade_price": actual_trade_price,
+            "current_price_source": (
+                quote.lineage.source
+                if current_trade_available and quote is not None
+                else None
+            ),
+            "lag_seconds": lag_seconds,
+            "current_trade_available": current_trade_available,
+            "current_trade_unavailable_reason": (
+                None if current_trade_available else unavailable_reason
+            ),
             "current_price_applied_to_history": False,
             "capabilities": {
                 "supports_volume": True,
@@ -1185,235 +1275,88 @@ def _apply_mis_volume_adjustment(result: dict, message: dict | None) -> dict:
                 "supports_price_limit": True,
                 "supports_quote_depth": True,
             },
-            "current_observation": (
+            "current_observation": current_observation,
+            "observations": (
+                [current_observation] if current_observation is not None else []
+            ),
+            "resolution_version": (
+                quote_result.contract_version if quote_result is not None else None
+            ),
+            "resolution_id": (
+                quote.lineage.observation_id if quote is not None else None
+            ),
+            "acquisition_policy": (
+                quote_result.requirement.realtime_policy.value
+                if quote_result is not None
+                else "cache_only"
+            ),
+            "acquisition_status": (
+                quote_result.acquisition.status.value
+                if quote_result is not None
+                else "not_attempted"
+            ),
+            "canonical_observation": (
+                quote.model_dump(mode="json") if quote is not None else None
+            ),
+            "decision_usable": bool(
+                current_trade_available and health and health.research_usable
+            ),
+            "resolution": (
                 {
-                    "value": latest_history_price,
-                    "observed_at": latest_history_time.isoformat(),
-                    "confirmed_at": None,
-                    "price_semantics": "intraday_bar_close",
-                    "provider": price_provider,
-                    "freshness_status": "history_latest",
-                    "decision_usable": False,
+                    "health": health.model_dump(mode="json"),
+                    "dataset_health": (
+                        quote_result.dataset_health.model_dump(mode="json")
+                        if quote_result.dataset_health is not None
+                        else None
+                    ),
+                    "provider_health": [
+                        item.model_dump(mode="json")
+                        for item in quote_result.provider_health
+                    ],
+                    "limitations": list(quote_result.limitations),
                 }
-                if latest_history_price is not None and latest_history_time is not None
+                if quote_result is not None and health is not None
+                else None
+            ),
+            "source_provenance": (
+                quote.lineage.model_dump(mode="json")
+                if quote is not None
                 else None
             ),
         }
     )
-    if not message or not result.get("points"):
-        return result
-
-    snapshot_time = _parse_snapshot_datetime(message)
-    trade_date = message.get("d")
-
-    if snapshot_time is None or not trade_date:
-        return result
-
-    if not any((key := _point_time_key(point)) is not None and key[0] == trade_date for point in points):
-        result["current_trade_unavailable_reason"] = "OBSERVATION_TRADE_DATE_MISMATCH"
-        return result
-
-    price = _as_float(message.get("z"))
-    close_volume = _volume_lots_to_shares(message.get("tv") or message.get("s"))
-    total_volume = _volume_lots_to_shares(message.get("v"))
-    actual_trade = resolve_twse_mis_actual_trade(
-        expected_trade_date=expected_trade_date,
-        observation_trade_date=trade_date,
-        provider_event_time=snapshot_time,
-        trial_status=message.get("ts"),
-        last_trade_price=price,
-        last_trade_volume_lots=_as_int(message.get("tv") or message.get("s")),
-        cumulative_volume_lots=_as_int(message.get("v")),
-    )
-    actual_trade_time = actual_trade.get("actual_trade_price_as_of")
-    actual_trade_price = _as_float(actual_trade.get("actual_trade_price"))
-    current_trade_available = bool(
-        actual_trade.get("actual_trade_price_available")
-        and actual_trade_time is not None
-        and actual_trade_price is not None
-    )
-    lag_seconds = (
-        (actual_trade_time - latest_history_time).total_seconds()
-        if current_trade_available
-        and latest_history_time is not None
-        and actual_trade_time is not None
-        else None
-    )
-    result.update(
-        {
-            "latest_actual_trade_time": (
-                actual_trade_time.isoformat() if actual_trade_time is not None else None
-            ),
-            "latest_actual_trade_price": actual_trade_price,
-            "current_price_source": actual_trade.get("actual_trade_price_source"),
-            "lag_seconds": lag_seconds,
-            "current_trade_available": current_trade_available,
-            "current_trade_unavailable_reason": (
-                None if current_trade_available else actual_trade.get("reason_code")
-            ),
-            "current_observation": (
-                {
-                    "value": actual_trade_price,
-                    "observed_at": actual_trade_time.isoformat(),
-                    "confirmed_at": actual_trade_time.isoformat(),
-                    "price_semantics": "actual_trade",
-                    "provider": "twse_mis",
-                    "freshness_status": "current",
-                    "decision_usable": True,
-                }
-                if current_trade_available
-                and actual_trade_time is not None
-                and actual_trade_price is not None
-                else result.get("current_observation")
-            ),
-        }
-    )
-    adjusted = False
-    price_adjusted = False
-    volume_adjusted = False
-
-    if (
-        current_trade_available
-        and actual_trade_time is not None
-        and (latest_history_time is None or actual_trade_time >= latest_history_time)
-    ):
-        _upsert_intraday_point(
-            points,
-            point_time=actual_trade_time,
-            price=actual_trade_price,
-            volume=close_volume if close_volume is not None and close_volume > 0 else None,
-            open_price=actual_trade_price,
-            high_price=actual_trade_price,
-            low_price=actual_trade_price,
-        )
-        adjusted = True
-        price_adjusted = True
-        volume_adjusted = bool(close_volume is not None and close_volume > 0)
-        result["current_price_applied_to_history"] = True
-    elif close_volume is not None and close_volume > 0:
-        matching_point = next(
-            (
-                point
-                for point in points
-                if _point_time_key(point)
-                == (snapshot_time.strftime("%Y%m%d"), snapshot_time.strftime("%H:%M:%S"))
-            ),
-            None,
-        )
-        if matching_point is not None:
-            _upsert_intraday_point(
-                points,
-                point_time=snapshot_time,
-                price=None,
-                volume=close_volume,
-                open_price=None,
-                high_price=None,
-                low_price=None,
-            )
-            adjusted = True
-            volume_adjusted = True
-
-    if (
-        total_volume is not None
-        and total_volume > 0
-        and snapshot_time.hour == 13
-        and snapshot_time.minute >= 30
-    ):
-        current_total = sum(
-            volume
-            for volume in (_as_int(point.get("volume")) for point in points)
-            if volume is not None and volume > 0
-        )
-        missing_volume = total_volume - current_total
-
-        if missing_volume > 0:
-            open_time = datetime.combine(
-                snapshot_time.date(),
-                time(9, 0, 0),
-                tzinfo=snapshot_time.tzinfo or TAIPEI_TZ,
-            )
-            _upsert_intraday_point(
-                points,
-                point_time=open_time,
-                price=_as_float(message.get("o")),
-                volume=missing_volume,
-                volume_mode="add",
-                open_price=_as_float(message.get("o")),
-                high_price=_as_float(message.get("o")),
-                low_price=_as_float(message.get("o")),
-            )
-            adjusted = True
-            volume_adjusted = True
-
-    result["point_count"] = len(points)
-    if volume_adjusted:
-        if result.get("source") == "nstock_minute_stock_data":
-            result["source"] = "nstock_minute_stock_data_twse_mis_volume"
-        else:
-            result["source"] = "yahoo_finance_chart_twse_mis_volume"
-        result["provider"] = "composite"
-        result["volume_provider"] = "twse_mis"
-        result["source_components"] = [
-            {"domain": "price", "provider": price_provider, "source": original_source},
-            {"domain": "volume", "provider": "twse_mis", "source": "twse_mis_snapshot"},
-        ]
-    elif adjusted:
-        result["provider"] = "composite"
-    if price_adjusted:
-        result["source_components"].append(
-            {
-                "domain": "current_price",
-                "provider": "twse_mis",
-                "source": "twse_mis_snapshot_z",
-            }
-        )
+    if unavailable_reason and quote_result is None:
+        warnings = list(result.get("warnings") or [])
+        if unavailable_reason not in warnings:
+            warnings.append(unavailable_reason)
+        result["warnings"] = warnings
     return result
 
 
-def _fetch_mis_snapshot(stock_id: str, market: str | None) -> dict:
-    exchange = _mis_exchange(market)
-    message = _fetch_mis_message(stock_id=stock_id, market=market)
-
-    if not message:
-        return {
-            "stock_id": stock_id,
-            "symbol": f"{exchange}_{stock_id}.tw",
-            "source": "twse_mis_snapshot",
-            "previous_close": None,
-            "point_count": 0,
-            "points": [],
-        }
-
-    trade_date = message.get("d")
-    previous_close = _as_float(message.get("y"))
-    latest_time = message.get("t") or message.get("%") or "13:30:00"
-    candidates = [
-        ("09:00:00", _as_float(message.get("o"))),
-        ("10:30:00", _as_float(message.get("h"))),
-        ("12:00:00", _as_float(message.get("l"))),
-        (latest_time, _as_float(message.get("z"))),
-    ]
-    points = [
-        {
-            "time": _build_snapshot_time(trade_date, point_time),
-            "price": price,
-            "volume": _as_int(message.get("v")),
-            "open": _as_float(message.get("o")),
-            "high": _as_float(message.get("h")),
-            "low": _as_float(message.get("l")),
-        }
-        for point_time, price in candidates
-        if price is not None
-    ]
-
-    return {
-        "stock_id": stock_id,
-        "symbol": f"{exchange}_{stock_id}.tw",
-        "source": "twse_mis_snapshot",
-        "previous_close": previous_close,
-        "point_count": len(points),
-        "points": points,
-    }
+def _attach_cached_public_quote(
+    db: Session,
+    *,
+    stock_id: str,
+    result: dict,
+) -> dict:
+    try:
+        quote_result = read_taiwan_public_last_trade_quote(
+            db,
+            stock_id=stock_id,
+        )
+    except Exception as exc:
+        observe_provider_fallback(
+            exc,
+            operation="intraday.public_quote_cache_read",
+        )
+        return _apply_platform_quote_contract(
+            result,
+            None,
+            unavailable_reason=(
+                f"PUBLIC_QUOTE_PLATFORM_{type(exc).__name__.upper()}"
+            ),
+        )
+    return _apply_platform_quote_contract(result, quote_result)
 
 
 def _load_intraday_trend_uncached(
@@ -1431,16 +1374,12 @@ def _load_intraday_trend_uncached(
         nstock_result = _fetch_nstock_intraday(stock_id=stock_id)
 
         if nstock_result["points"]:
-            try:
-                message = _fetch_mis_message(stock_id=stock_id, market=market)
-            except Exception as exc:
-                observe_provider_fallback(
-                    exc,
-                    operation="intraday.nstock_volume_adjustment",
-                )
-                message = None
             result = _apply_disposition_intraday_contract(
-                _apply_mis_volume_adjustment(nstock_result, message),
+                _attach_cached_public_quote(
+                    db,
+                    stock_id=stock_id,
+                    result=nstock_result,
+                ),
                 disposition,
             )
             _upsert_market_intraday_bars(
@@ -1461,16 +1400,12 @@ def _load_intraday_trend_uncached(
         yahoo_result = _fetch_yahoo_intraday(stock_id=stock_id, market=market)
 
         if yahoo_result["points"]:
-            try:
-                message = _fetch_mis_message(stock_id=stock_id, market=market)
-            except Exception as exc:
-                observe_provider_fallback(
-                    exc,
-                    operation="intraday.yahoo_volume_adjustment",
-                )
-                message = None
             result = _apply_disposition_intraday_contract(
-                _apply_mis_volume_adjustment(yahoo_result, message),
+                _attach_cached_public_quote(
+                    db,
+                    stock_id=stock_id,
+                    result=yahoo_result,
+                ),
                 disposition,
             )
             _upsert_market_intraday_bars(
@@ -1487,24 +1422,24 @@ def _load_intraday_trend_uncached(
     except Exception as exc:
         observe_provider_fallback(exc, operation="intraday.yahoo_secondary")
 
-    try:
-        return _cache_set(
-            cache_key,
-            _apply_disposition_intraday_contract(
-                _fetch_mis_snapshot(stock_id=stock_id, market=market),
-                disposition,
+    return _cache_set(
+        cache_key,
+        _apply_disposition_intraday_contract(
+            _attach_cached_public_quote(
+                db,
+                stock_id=stock_id,
+                result={
+                    "stock_id": stock_id,
+                    "symbol": _yahoo_symbol(stock_id=stock_id, market=market),
+                    "source": "unavailable",
+                    "previous_close": None,
+                    "point_count": 0,
+                    "points": [],
+                },
             ),
-        )
-    except Exception as exc:
-        observe_provider_fallback(exc, operation="intraday.mis_snapshot_final")
-        return _cache_set(cache_key, {
-            "stock_id": stock_id,
-            "symbol": _yahoo_symbol(stock_id=stock_id, market=market),
-            "source": "unavailable",
-            "previous_close": None,
-            "point_count": 0,
-            "points": [],
-        })
+            disposition,
+        ),
+    )
 
 
 def get_intraday_trend(db: Session, stock_id: str) -> dict:

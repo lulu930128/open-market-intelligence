@@ -83,7 +83,7 @@ class DatabaseModelContractTests(unittest.TestCase):
             for foreign_key in table.foreign_keys
         ]
 
-        self.assertEqual(len(foreign_keys), 98)
+        self.assertEqual(len(foreign_keys), 102)
         for foreign_key in foreign_keys:
             with self.subTest(foreign_key=str(foreign_key)):
                 self.assertIn(foreign_key.column.table.name, Base.metadata.tables)

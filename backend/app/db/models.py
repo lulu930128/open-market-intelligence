@@ -872,6 +872,17 @@ class TaiwanStockQuoteSnapshot(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
+    source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=True,
+        index=True,
+    )
+    raw_result_id: Mapped[int | None] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=True,
+        index=True,
+    )
+
     provider: Mapped[str] = mapped_column(String(60), index=True)
     market: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     stock_id: Mapped[str] = mapped_column(String(20), index=True)
@@ -908,6 +919,27 @@ class TaiwanStockQuoteSnapshot(Base):
     source: Mapped[str] = mapped_column(String(120), index=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    observation_state: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+    market_session: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+    trade_state: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+    raw_contract_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -2182,6 +2214,17 @@ class MarketIndexDailyStat(Base):
     index_id: Mapped[str] = mapped_column(String(20), index=True)
     market: Mapped[str] = mapped_column(String(20), index=True)
     trade_date: Mapped[date] = mapped_column(Date, index=True)
+
+    source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=True,
+        index=True,
+    )
+    raw_result_id: Mapped[int | None] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=True,
+        index=True,
+    )
 
     trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import Mock, patch
 
 from app.jobs import scheduler
+from app.jobs import eod_coverage
 
 
 def test_eod_coverage_scheduler_has_immediate_startup_catchup() -> None:
@@ -58,3 +59,33 @@ def test_scheduler_enqueues_bounded_tw_and_us_repairs() -> None:
     assert enqueue.call_args_list[0].kwargs["max_symbols"] == 2
     assert enqueue.call_args_list[1].kwargs["market"] == "US"
     assert enqueue.call_args_list[1].kwargs["max_symbols"] == 250
+
+
+def test_eod_enqueue_clamps_effective_work_to_registry_bounds() -> None:
+    fake_db = Mock()
+    fake_job = Mock(id=31)
+
+    with (
+        patch(
+            "app.jobs.eod_coverage.job_service.find_active_job_by_target",
+            return_value=None,
+        ),
+        patch(
+            "app.jobs.eod_coverage.job_service.enqueue_job",
+            return_value=(fake_job, True),
+        ) as enqueue,
+    ):
+        job, created = eod_coverage.enqueue_eod_coverage_reconcile(
+            fake_db,
+            market="TW",
+            max_symbols=500,
+            max_runtime_seconds=1800,
+        )
+
+    assert job is fake_job
+    assert created is True
+    kwargs = enqueue.call_args.kwargs
+    assert kwargs["request"]["max_symbols"] == 2
+    assert kwargs["request"]["max_runtime_seconds"] == 120
+    assert kwargs["progress_total"] == 2
+    assert kwargs["task_args"][3:5] == (2, 120)
