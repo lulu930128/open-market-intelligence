@@ -31,6 +31,7 @@ OPEN_MARKET_STATUSES = {
     "pre_market",
     "after_hours",
     "closing_auction",
+    "close_resolution",
 }
 ACTIVE_SESSION_STATUSES = {
     "open",
@@ -41,6 +42,7 @@ ACTIVE_SESSION_STATUSES = {
     "pre_market",
     "after_hours",
     "closing_auction",
+    "close_resolution",
 }
 INTERVAL_SECONDS = {
     "1m": 60,
@@ -64,6 +66,8 @@ COMPLETED_SESSION_SEMANTICS = {
     "latest_session_close",
     "daily_close",
     "final_snapshot",
+    "session_final",
+    "completed_session_close",
 }
 OBSERVATION_TIME_KEYS = {
     "end_at",
@@ -773,7 +777,11 @@ def annotate_selected_data(
     assessments: dict[str, dict[str, Any]] = {}
     market = str(target.get("market") or target.get("type") or "unknown")
     realtime_policy = str(selection.get("realtime_policy") or "prefer_live")
-    for capability_id in ("quote.snapshot", "intraday.bars"):
+    for capability_id in (
+        "quote.snapshot",
+        "quote.session_close",
+        "intraday.bars",
+    ):
         value = projected_data.get(capability_id)
         if value in (None, {}, []):
             continue

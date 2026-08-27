@@ -371,7 +371,7 @@ export function useTaiwanQuoteDepth({
       }
     }
 
-    async function load(showLoading: boolean) {
+    async function load(showLoading: boolean, acquire: boolean) {
       if (requestInFlight) return latestQuoteDepth;
       requestInFlight = true;
 
@@ -381,10 +381,26 @@ export function useTaiwanQuoteDepth({
       }
 
       try {
-        const depth = await fetchJson<TaiwanStockQuoteDepthRead>(
-          `/api/market/quote-depth/${requestedStockId}`,
-          { refresh: false }
-        );
+        let depth: TaiwanStockQuoteDepthRead;
+        if (acquire) {
+          try {
+            depth = await requestJson<TaiwanStockQuoteDepthRead>(
+              `/api/market/quote-depth/${requestedStockId}/refresh`,
+              { method: "POST" },
+              { policy: "prefer_live" }
+            );
+          } catch {
+            depth = await fetchJson<TaiwanStockQuoteDepthRead>(
+              `/api/market/quote-depth/${requestedStockId}`,
+              { refresh: false }
+            );
+          }
+        } else {
+          depth = await fetchJson<TaiwanStockQuoteDepthRead>(
+            `/api/market/quote-depth/${requestedStockId}`,
+            { refresh: false }
+          );
+        }
 
         if (cancelled || activeStockIdRef.current !== requestedStockId) {
           return latestQuoteDepth;
@@ -410,11 +426,13 @@ export function useTaiwanQuoteDepth({
     function scheduleRefresh(depth: TaiwanStockQuoteDepthRead | null) {
       if (cancelled) return;
       refreshTimer = window.setTimeout(() => {
-        void load(false).then(scheduleRefresh);
+        void load(false, depth?.session_phase === "close_resolution").then(
+          scheduleRefresh
+        );
       }, quoteDepthRefreshDelayMs(depth));
     }
 
-    void load(true).then(scheduleRefresh);
+    void load(true, true).then(scheduleRefresh);
     void loadReplay();
 
     return () => {

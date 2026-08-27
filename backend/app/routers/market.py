@@ -45,7 +45,10 @@ from app.market.index_contract_snapshot import (
     get_taiwan_index_contract_replay,
 )
 from app.market.quote_contract_capture import get_taiwan_quote_contract_replay
-from app.market.quote_depth import get_taiwan_stock_quote_depth
+from app.market.quote_depth import (
+    acquire_taiwan_quote_evidence_projection,
+    get_taiwan_stock_quote_depth,
+)
 from app.market.tw_kgi_data_operations import run_taiwan_kgi_data_backfill
 from app.market.tw_realtime_lease_platform import (
     acquire_taiwan_realtime_quote_lease,
@@ -53,7 +56,6 @@ from app.market.tw_realtime_lease_platform import (
     release_taiwan_realtime_quote_lease,
     summarize_taiwan_realtime_quote_leases,
 )
-from app.market.taiwan_realtime_platform import refresh_taiwan_realtime_snapshot
 from app.market.tw_realtime_stream_platform import (
     read_taiwan_realtime_market_stream,
 )
@@ -1227,15 +1229,10 @@ def refresh_stock_quote_depth(
     db: Session = Depends(get_db),
 ):
     try:
-        refresh_taiwan_realtime_snapshot(
-            db,
-            stock_id=stock_id,
-            policy=RealtimePolicy(policy),
-        )
-        return get_taiwan_stock_quote_depth(
+        return acquire_taiwan_quote_evidence_projection(
             db=db,
             stock_id=stock_id,
-            refresh=False,
+            policy=RealtimePolicy(policy),
         )
     except ValueError as exc:
         raise HTTPException(

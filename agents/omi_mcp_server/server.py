@@ -158,6 +158,7 @@ PAYLOAD_LEVEL_SCHEMA: dict[str, Any] = {
 CAPABILITY_IDS = [
     "target.identity",
     "quote.snapshot",
+    "quote.session_close",
     "quote.order_book",
     "quote.auction",
     "quote.official_close",

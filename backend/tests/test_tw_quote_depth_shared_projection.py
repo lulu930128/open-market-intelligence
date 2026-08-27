@@ -24,7 +24,10 @@ from app.market.providers.kgi_realtime_acquisition import (
     KgiRealtimeProviderSnapshot,
 )
 from app.market.public_quote_platform import acquire_taiwan_public_last_trade_quote
-from app.market.quote_depth import get_taiwan_stock_quote_depth
+from app.market.quote_depth import (
+    _finalize_shared_projection_semantics,
+    get_taiwan_stock_quote_depth,
+)
 from app.market.schemas import TaiwanStockQuoteDepthRead
 from app.market.taiwan_realtime_platform import (
     acquire_taiwan_auction,
@@ -262,6 +265,82 @@ def test_official_close_component_uses_canonical_daily_owner() -> None:
         engine.dispose()
 
 
+def test_previous_session_official_close_is_promoted_before_next_preopen() -> None:
+    db, engine = _db()
+    try:
+        _persist_quote_and_depth(db)
+        _persist_official_daily_close(
+            db,
+            trade_date=date(2026, 8, 26),
+            close_price=1182,
+        )
+        next_day_before_preopen = datetime(2026, 8, 27, 0, 15, tzinfo=TAIPEI)
+
+        result = get_taiwan_stock_quote_depth(
+            db=db,
+            stock_id="2330",
+            now=next_day_before_preopen,
+        )
+
+        assert result["session_phase"] == "post_close_snapshot"
+        assert result["official_close_available"] is True
+        assert result["official_close_status"] == "confirmed_latest_session"
+        assert result["official_close_trade_date"] == date(2026, 8, 26)
+        assert result["official_close_price"] == 1182
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_session_close_distinguishes_pending_from_released_but_missing_eod() -> None:
+    session_close = {
+        "available": True,
+        "status": "session_final",
+        "price": 605,
+        "trade_date": date(2026, 8, 27),
+        "event_time": datetime(2026, 8, 27, 13, 30, tzinfo=TAIPEI),
+    }
+    before_release = {"freshness": {}}
+    _finalize_shared_projection_semantics(
+        before_release,
+        phase="post_close_snapshot",
+        session_close=session_close,
+        requested_at=datetime(2026, 8, 27, 14, 0, tzinfo=TAIPEI),
+    )
+    assert before_release["official_close_status"] == "pending"
+    assert "remains pending" in before_release["freshness"]["message"]
+
+    after_release = {"freshness": {}}
+    _finalize_shared_projection_semantics(
+        after_release,
+        phase="post_close_snapshot",
+        session_close=session_close,
+        requested_at=datetime(2026, 8, 27, 16, 0, tzinfo=TAIPEI),
+    )
+    assert after_release["last_price"] == 605
+    assert after_release["quote_semantics"] == "completed_session_close"
+    assert after_release["official_close_status"] == "unavailable_after_release"
+    assert "released official daily EOD evidence is unavailable" in (
+        after_release["freshness"]["message"]
+    )
+
+    ai_quote = _compact_quote_snapshot(
+        latest_daily=None,
+        quote_depth=after_release,
+        quote_error=None,
+        session_phase="post_close",
+        current_session_date="2026-08-27",
+        is_trading_day=True,
+    )
+    assert ai_quote["latest_price"] == 605
+    assert ai_quote["components"]["official_close"]["status"] == (
+        "unavailable_after_release"
+    )
+    assert ai_quote["components"]["official_close"]["freshness"][
+        "refresh_recommended"
+    ] is True
+
+
 def test_trial_auction_projection_never_overwrites_actual_trade() -> None:
     db, engine = _db()
     try:
@@ -321,6 +400,19 @@ def test_quote_depth_public_owner_is_cache_only_projection() -> None:
     assert "get_kgi_superpy_quote_snapshot" not in function_source
     assert ".commit(" not in function_source
     assert ".rollback(" not in function_source
+
+
+def test_quote_depth_refresh_route_uses_shared_quote_evidence_acquisition() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "app" / "routers" / "market.py"
+    ).read_text(encoding="utf-8")
+    start = source.index("def refresh_stock_quote_depth(")
+    end = source.index("@router.get(\n    \"/realtime-quote-leases/summary\"", start)
+    function_source = source[start:end]
+
+    assert "acquire_taiwan_quote_evidence_projection" in function_source
+    assert "refresh_taiwan_realtime_snapshot" not in function_source
+    assert "get_taiwan_stock_quote_depth" not in function_source
 
 
 def test_quote_depth_module_has_no_provider_io_or_transaction_owner() -> None:

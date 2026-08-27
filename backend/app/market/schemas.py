@@ -474,9 +474,13 @@ class MarketOhlcChartRead(BaseModel):
     points: list[MarketDailyChartRead]
     backfill: dict | None = None
     intraday_overlay: dict[str, Any] | None = None
+    volume_unit: str | None = None
+    volume_semantics: str = "not_provided"
+    volume_status: str = "not_provided"
     data_quality: str = "ok"
     warnings: list[str] = Field(default_factory=list)
     latest_data_date: date | None = None
+    latest_finalized_data_date: date | None = None
     expected_data_date: date | None = None
     freshness_status: str = "missing"
     is_current: bool = False
@@ -782,7 +786,7 @@ class MarketIndexContributionRead(BaseModel):
 
 
 class IntradayTrendPointRead(BaseModel):
-    time: str
+    time: datetime
     price: float
     volume: int | None = None
     open: float | None = None
@@ -1345,6 +1349,12 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     official_close_display: str | None = None
     official_close_precision: int | None = None
     official_close_precision_semantics: str
+    session_close_available: bool = False
+    session_close_status: str = "unavailable"
+    session_close_price: float | None = None
+    session_close_trade_date: date | None = None
+    session_close_event_time: datetime | None = None
+    session_close_confirmed_at: datetime | None = None
     refresh_outcome: str = "not_attempted"
     freshness: TaiwanStockQuoteDepthFreshnessRead
 

@@ -755,6 +755,7 @@ type ProjectStockKLineDataInput = {
   benchmarkData: ChartPoint[];
   params: IndicatorParameters;
   latestPreviousClose: number | null;
+  allowCanonicalFallback?: boolean;
 };
 
 export function projectStockKLineData({
@@ -763,6 +764,7 @@ export function projectStockKLineData({
   benchmarkData,
   params,
   latestPreviousClose,
+  allowCanonicalFallback = true,
 }: ProjectStockKLineDataInput): MergedPoint[] {
   const indicatorByTime = new Map<string, StockIndicatorPoint>();
 
@@ -802,6 +804,8 @@ export function projectStockKLineData({
   const relativeMetrics = calculateRelativeMetrics(chartData, benchmarkData, params);
 
   return chartData.map((point, index) => {
+    const presentationFallback = (value: number | null) =>
+      allowCanonicalFallback ? value : null;
     const indicator = indicatorByTime.get(point.time.slice(0, 10));
     const backendAuthoritative = isBackendAuthoritativeIndicator(indicator);
     const backendEma = backendIndicatorParametersMatch(indicator, {
@@ -844,16 +848,16 @@ export function projectStockKLineData({
         : chartData[index - 1]?.close;
     const maShort = backendIndicatorWindowExists(indicator, "ma_windows", params.maShort)
       ? backendIndicatorValue(indicator?.ma, `ma${params.maShort}`)
-      : movingAverage(closes, index, params.maShort);
+      : presentationFallback(movingAverage(closes, index, params.maShort));
     const maMiddle = backendIndicatorWindowExists(indicator, "ma_windows", params.maMiddle)
       ? backendIndicatorValue(indicator?.ma, `ma${params.maMiddle}`)
-      : movingAverage(closes, index, params.maMiddle);
+      : presentationFallback(movingAverage(closes, index, params.maMiddle));
     const maLong = backendIndicatorWindowExists(indicator, "ma_windows", params.maLong)
       ? backendIndicatorValue(indicator?.ma, `ma${params.maLong}`)
-      : movingAverage(closes, index, params.maLong);
+      : presentationFallback(movingAverage(closes, index, params.maLong));
     const bbMiddle = backendBollinger
       ? backendIndicatorValue(indicator?.bollinger, `middle${params.bollingerPeriod}`)
-      : movingAverage(closes, index, params.bollingerPeriod);
+      : presentationFallback(movingAverage(closes, index, params.bollingerPeriod));
     const standardDev20 = standardDeviation(closes, index, params.bollingerPeriod);
 
     return {
@@ -863,22 +867,22 @@ export function projectStockKLineData({
       ma60: maLong,
       ema12: backendEma
         ? backendIndicatorValue(indicator?.ema, `ema${params.emaFast}`)
-        : ema12[index],
+        : presentationFallback(ema12[index]),
       ema26: backendEma
         ? backendIndicatorValue(indicator?.ema, `ema${params.emaSlow}`)
-        : ema26[index],
+        : presentationFallback(ema26[index]),
       vwap: vwap[index],
       psar: psar[index],
       donchianUpper: backendDonchian
         ? backendIndicatorValue(indicator?.donchian, `upper${params.donchianPeriod}`)
-        : donchian[index].upper,
+        : presentationFallback(donchian[index].upper),
       donchianLower: backendDonchian
         ? backendIndicatorValue(indicator?.donchian, `lower${params.donchianPeriod}`)
-        : donchian[index].lower,
+        : presentationFallback(donchian[index].lower),
       volumeMa20:
         backendIndicatorWindowExists(indicator, "volume_ma_windows", params.volumeMa)
           ? backendIndicatorValue(indicator?.volume_ma, `volume_ma${params.volumeMa}`)
-          : movingAverage(volumes, index, params.volumeMa),
+          : presentationFallback(movingAverage(volumes, index, params.volumeMa)),
       changePct:
         backendAuthoritative
           ? indicator?.change_pct ?? null
@@ -887,53 +891,53 @@ export function projectStockKLineData({
       bbUpper: backendBollinger
         ? backendIndicatorValue(indicator?.bollinger, `upper${params.bollingerPeriod}`)
         : bbMiddle !== null && standardDev20 !== null
-          ? bbMiddle + standardDev20 * params.bollingerStdDev
+          ? presentationFallback(bbMiddle + standardDev20 * params.bollingerStdDev)
           : null,
       bbLower: backendBollinger
         ? backendIndicatorValue(indicator?.bollinger, `lower${params.bollingerPeriod}`)
         : bbMiddle !== null && standardDev20 !== null
-          ? bbMiddle - standardDev20 * params.bollingerStdDev
+          ? presentationFallback(bbMiddle - standardDev20 * params.bollingerStdDev)
           : null,
       rsi14: backendRsi
         ? backendIndicatorValue(indicator?.rsi, `rsi${params.rsiPeriod}`)
-        : rsi[index],
+        : presentationFallback(rsi[index]),
       macd: backendMacd
         ? backendIndicatorValue(indicator?.macd, "macd")
-        : macd.macd[index],
+        : presentationFallback(macd.macd[index]),
       macdSignal: backendMacd
         ? backendIndicatorValue(indicator?.macd, "signal")
-        : macd.signal[index],
+        : presentationFallback(macd.signal[index]),
       macdHistogram: backendMacd
         ? backendIndicatorValue(indicator?.macd, "histogram")
-        : macd.histogram[index],
+        : presentationFallback(macd.histogram[index]),
       k: backendKd
         ? backendIndicatorValue(indicator?.kd, `k${params.kdPeriod}`)
-        : kd[index].k,
+        : presentationFallback(kd[index].k),
       d: backendKd
         ? backendIndicatorValue(indicator?.kd, `d${params.kdPeriod}`)
-        : kd[index].d,
+        : presentationFallback(kd[index].d),
       atr14: backendAtr
         ? backendIndicatorValue(indicator?.atr, `atr${params.atrPeriod}`)
-        : atr[index],
+        : presentationFallback(atr[index]),
       plusDi14: backendAdx
         ? backendIndicatorValue(indicator?.adx, `plus_di${params.adxPeriod}`)
-        : dmi[index].plusDi,
+        : presentationFallback(dmi[index].plusDi),
       minusDi14: backendAdx
         ? backendIndicatorValue(indicator?.adx, `minus_di${params.adxPeriod}`)
-        : dmi[index].minusDi,
+        : presentationFallback(dmi[index].minusDi),
       adx14: backendAdx
         ? backendIndicatorValue(indicator?.adx, `adx${params.adxPeriod}`)
-        : dmi[index].adx,
+        : presentationFallback(dmi[index].adx),
       obv: obv[index],
       obvMa10: obvMa10[index],
       mfi14: backendMfi
         ? backendIndicatorValue(indicator?.mfi, `mfi${params.mfiPeriod}`)
-        : mfi[index],
+        : presentationFallback(mfi[index]),
       cci20: cci[index],
       williamsR14: williamsR[index],
       roc12: backendRoc
         ? backendIndicatorValue(indicator?.roc, `roc${params.rocPeriod}`)
-        : roc[index],
+        : presentationFallback(roc[index]),
       stochRsiK: stochRsi.k[index],
       stochRsiD: stochRsi.d[index],
       relativeStrength: relativeMetrics.relativeStrength[index],

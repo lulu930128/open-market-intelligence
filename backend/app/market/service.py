@@ -368,9 +368,17 @@ def list_stock_ohlc_chart_data(
         "points": points,
         "backfill": backfill_result,
         "intraday_overlay": intraday_overlay,
+        "volume_unit": "shares",
+        "volume_semantics": (
+            "provisional_cumulative_traded_shares_overlay"
+            if intraday_overlay is not None
+            else "finalized_traded_shares"
+        ),
+        "volume_status": "available",
         "data_quality": data_quality,
         "warnings": warnings,
         "latest_data_date": latest_data_date,
+        "latest_finalized_data_date": latest_data_date,
         "expected_data_date": resolved_expected_data_date,
         "freshness_status": freshness_status,
         "is_current": freshness_status in {"current", "future"},

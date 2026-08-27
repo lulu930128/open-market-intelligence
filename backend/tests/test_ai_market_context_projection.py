@@ -1138,6 +1138,59 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         )
         self.assertEqual(daily["weight_in_composite"], 0.45)
 
+    def test_taiwan_technical_projection_keeps_finalized_and_current_observation_separate(
+        self,
+    ) -> None:
+        compact = taiwan_projection._compact_technical_report(
+            {
+                "timeframe": "daily",
+                "phase": "daily_intraday",
+                "title": "短線整理",
+                "summary": "finalized",
+                "score": 1,
+                "confidence": "medium",
+                "value": 2.0,
+                "value_label": "vs MA20",
+                "data": {
+                    "daily_indicator": {"close": 592},
+                    "decision_state_time": "2026-08-26",
+                    "decision_state_status": "official_daily_finalized",
+                    "decision_state": {
+                        "headline": {"label": "短線整理"},
+                        "qualifier": {"label": "量縮"},
+                        "position": {"price": 592},
+                    },
+                    "current_observation": {
+                        "status": "provisional_close",
+                        "time": "2026-08-27",
+                        "decision_usable": False,
+                        "official_daily_confirmed": False,
+                        "indicator": {
+                            "close": 605,
+                            "volume": 11_106_000,
+                            "bar_status": "provisional_close",
+                        },
+                        "current_state": {
+                            "headline": {"label": "今日暫估"},
+                            "qualifier": {"label": "暫定"},
+                            "position": {"price": 605},
+                        },
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+            },
+            timeframe="daily",
+            analysis={"components": []},
+        )
+
+        self.assertEqual(compact["latest_finalized_close"], 592)
+        self.assertEqual(compact["decision_state_time"], "2026-08-26")
+        self.assertEqual(compact["decision_state"]["position"]["price"], 592)
+        self.assertEqual(compact["current_observation"]["close"], 605)
+        self.assertEqual(compact["current_observation"]["volume"], 11_106_000)
+        self.assertFalse(compact["current_observation"]["decision_usable"])
+
 
 if __name__ == "__main__":
     unittest.main()

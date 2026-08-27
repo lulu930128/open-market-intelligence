@@ -1236,8 +1236,10 @@ export const enUS = {
       change: "Change",
       tradeValue: "Trade value",
       tradeValueYi: "Trade value (100M)",
+      volume: "Volume",
       volumeLots: "Volume (lots)",
       volumeShares: "Volume (shares)",
+      obv: "OBV",
       obvLots: "OBV (lots)",
       highGuide: "High {value}",
       lowGuide: "Low {value}",
@@ -2128,6 +2130,19 @@ export const enUS = {
       },
       technical: {
         eyebrow: "Technical",
+        finalizedTitle: "Finalized daily analysis",
+        finalizedDetailTitle: "Finalized daily evidence",
+        finalizedAsOf: "Finalized through {date}",
+        finalizedValueLabel: "Finalized daily",
+        provisionalTitle: "Today's provisional observation",
+        provisionalDetailTitle: "Provisional technical evidence",
+        provisionalPrice: "Provisional close",
+        provisionalPosition: "Provisional position",
+        provisionalMomentum: "Provisional momentum",
+        provisionalAsOf: "Provisional date {date} · {status}",
+        decisionUnavailable: "Not usable as a finalized decision",
+        unavailableTitle: "Finalized technical data unavailable",
+        unavailableSummary: "The backend has not provided a verifiable finalized daily technical report; browser calculations are not substituted.",
         valueLabels: {
           vsPreviousClose: "vs prev close",
           last13Weeks: "last 13W",
@@ -2137,6 +2152,7 @@ export const enUS = {
         basis: {
           intraday: "Intraday price {priceTime} · daily indicators {dailyTime}",
           daily: "Daily indicators through {dailyTime}",
+          provisional: "Provisional indicators {currentTime} (not decision-usable) · finalized daily {dailyTime}",
           warningCount: "{count} data limitations",
         },
         units: {
@@ -2775,6 +2791,26 @@ export const enUS = {
       monitoringEndedTitle: "US live monitoring window ended",
       monitoringEndedMessage:
         "This is no longer a live update window; the last usable data remains visible.",
+    },
+    ohlcCoverage: {
+      incompleteTitle: "US K-line history is incomplete",
+      incompleteMessage:
+        "Expected session {expected}, latest finalized row {latest}; {count} trading sessions are missing ({dates}). The stale previous close is disabled to prevent an incorrect change.",
+      historyIncompleteTitle: "US K-line history is too short",
+      historyIncompleteMessage:
+        "Only {available}/{requested} bars are cached. A full-history repair is queued, and the short series is not marked complete.",
+      bestAvailableTitle: "Full provider history is available",
+      bestAvailableMessage:
+        "The provider returned its full range. {available}/{requested} bars are available, possibly because the instrument listed later.",
+      repairingTitle: "Repairing US K-line history",
+      repairingMessage:
+        "A bounded repair job is running and will verify session continuity and history depth afterward.",
+      repairedTitle: "US K-line history repaired",
+      repairedMessage:
+        "The latest session, internal continuity, and history depth were verified again.",
+      repairFailedTitle: "US K-line repair incomplete",
+      repairFailedMessage:
+        "The repair job did not satisfy the K-line continuity contract. Check the job details.",
     },
     statusSource: "US stock detail",
     corporateEvents: {

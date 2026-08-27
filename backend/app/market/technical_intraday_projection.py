@@ -176,7 +176,29 @@ def build_current_partial_daily_bar(
         default=None,
     )
     phase = str(session_phase or quote.get("session_phase") or "unknown").strip().lower()
-    bar_status = "provisional_close" if phase in _POST_CLOSE_PHASES else "intraday_partial"
+    components = (
+        quote.get("components")
+        if isinstance(quote.get("components"), Mapping)
+        else {}
+    )
+    session_close = (
+        components.get("session_close")
+        if isinstance(components.get("session_close"), Mapping)
+        else {}
+    )
+    session_close_final = bool(
+        quote.get("session_close_available") is True
+        or (
+            session_close.get("available") is True
+            and session_close.get("finalization")
+            in {"session_final", "official_daily_confirmed"}
+        )
+    )
+    bar_status = (
+        "provisional_close"
+        if phase in _POST_CLOSE_PHASES and session_close_final
+        else "intraday_partial"
+    )
     previous_close = (
         _number(completed_daily_points[-1].get("close"))
         if completed_daily_points
@@ -196,6 +218,16 @@ def build_current_partial_daily_bar(
         "volume": cumulative_volume,
         "price_change": price_change,
         "bar_status": bar_status,
+        "session_close_finalization": (
+            (
+                session_close.get("finalization")
+                or quote.get("session_close_status")
+            )
+            if session_close_final
+            else None
+        ),
+        "official_daily_confirmed": False,
+        "decision_usable": False,
         "event_time": event_at.isoformat() if event_at is not None else None,
         "source": "+".join(
             value

@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.market.exchange_calendar_cache import cached_market_holiday
+from app.market_data.contracts import MarketSession
 
 
 TAIWAN_TZ = ZoneInfo(settings.timezone)
@@ -101,8 +102,10 @@ def taiwan_market_session_phase(now: datetime) -> str:
         return "preopen"
     if current_time < TAIWAN_CLOSING_AUCTION_TIME:
         return "regular"
-    if current_time < TAIWAN_SESSION_CLOSE_TIME:
+    if current_time <= TAIWAN_SESSION_CLOSE_TIME:
         return "closing_auction"
+    if current_time < TAIWAN_CLOSE_RESOLUTION_TIME:
+        return "close_resolution"
     return "post_close"
 
 
@@ -176,6 +179,27 @@ def normalize_taiwan_session_phase(value: object) -> str:
     return TAIWAN_SESSION_PHASE_ALIASES.get(normalized, normalized)
 
 
+def taiwan_market_session_from_phase(value: object) -> MarketSession:
+    """Map the market-owned Taiwan phase taxonomy to the shared session enum."""
+
+    normalized = normalize_taiwan_session_phase(value)
+    return {
+        "preopen_pending": MarketSession.PRE_OPEN,
+        "preopen": MarketSession.OPENING_AUCTION,
+        "regular": MarketSession.CONTINUOUS,
+        "closing_auction": MarketSession.CLOSING_AUCTION,
+        "close_resolution": MarketSession.CLOSE_RESOLUTION,
+        "post_close": MarketSession.POST_CLOSE,
+        "market_closed": MarketSession.CLOSED,
+    }.get(normalized, MarketSession.UNKNOWN)
+
+
+def taiwan_market_session(now: datetime) -> MarketSession:
+    """Resolve the shared session enum through the authoritative Taiwan clock."""
+
+    return taiwan_market_session_from_phase(taiwan_market_session_phase(now))
+
+
 def taiwan_session_is_auction(value: object) -> bool:
     normalized = normalize_taiwan_session_phase(value)
     return normalized in {
@@ -233,6 +257,8 @@ __all__ = [
     "next_taiwan_trading_day",
     "normalize_taiwan_session_phase",
     "previous_taiwan_trading_day",
+    "taiwan_market_session",
+    "taiwan_market_session_from_phase",
     "taiwan_market_session_phase",
     "taiwan_market_holiday_name",
     "taiwan_now",

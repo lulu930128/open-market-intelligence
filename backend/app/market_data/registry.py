@@ -174,7 +174,11 @@ DATASET_REGISTRY = DatasetRegistry(
             owner="app.market.public_quote_platform",
             read_operation="read_taiwan_public_last_trade_quote",
             projection_id="quote.snapshot.stock.TW",
-            capability_ids=("quote.snapshot", "quote.last_trade"),
+            capability_ids=(
+                "quote.snapshot",
+                "quote.last_trade",
+                "quote.session_close",
+            ),
             frequency=DatasetFrequency.EVENT,
             expected_state_policy=ExpectedStatePolicy.CURRENT_SESSION,
             eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT_AND_TRADING_DAY,

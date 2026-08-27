@@ -29,11 +29,17 @@ from app.market.taiwan_rules import (
     shareholding_distribution_release_window,
 )
 from app.market.trading_calendar import (
+    TAIWAN_CLOSE_RESOLUTION_TIME,
+    TAIWAN_CLOSING_AUCTION_TIME,
     TAIWAN_MARKET_HOLIDAYS,
+    TAIWAN_PREOPEN_TIME,
+    TAIWAN_SESSION_CLOSE_TIME,
+    TAIWAN_SESSION_OPEN_TIME,
     TAIWAN_TZ,
     is_taiwan_trading_day,
     next_taiwan_trading_day,
     previous_taiwan_trading_day,
+    taiwan_market_session_phase,
     taiwan_presentation_session,
     taiwan_market_holiday_name,
 )
@@ -84,10 +90,6 @@ from app.jp_market.trading_calendar import (
 
 MarketCode = Literal["tw", "us", "jp", "kr"]
 
-TAIWAN_PREOPEN_TIME = time(hour=8, minute=30)
-TAIWAN_SESSION_OPEN_TIME = time(hour=9, minute=0)
-TAIWAN_CLOSING_AUCTION_TIME = time(hour=13, minute=25)
-TAIWAN_SESSION_CLOSE_TIME = time(hour=13, minute=30)
 KR_SESSION_OPEN_TIME = time(hour=9, minute=0)
 KR_SESSION_CLOSE_TIME = time(hour=15, minute=30)
 TAIWAN_RELEASE_DATASETS = (
@@ -316,14 +318,7 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         include_value=is_trading_day,
     )
     next_trading_day = next_taiwan_trading_day(current_date, include_value=False)
-    phase = _session_phase(
-        local_now=local_now,
-        is_trading_day=is_trading_day,
-        preopen_time=TAIWAN_PREOPEN_TIME,
-        open_time=TAIWAN_SESSION_OPEN_TIME,
-        close_time=TAIWAN_SESSION_CLOSE_TIME,
-        closing_auction_time=TAIWAN_CLOSING_AUCTION_TIME,
-    )
+    phase = taiwan_market_session_phase(local_now)
     presentation_session = taiwan_presentation_session(local_now)
 
     release_windows = {
@@ -403,12 +398,19 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         "session": {
             "preopen_time": TAIWAN_PREOPEN_TIME.strftime("%H:%M"),
             "open_time": TAIWAN_SESSION_OPEN_TIME.strftime("%H:%M"),
+            "closing_auction_time": TAIWAN_CLOSING_AUCTION_TIME.strftime(
+                "%H:%M"
+            ),
             "close_time": TAIWAN_SESSION_CLOSE_TIME.strftime("%H:%M"),
+            "close_resolution_time": TAIWAN_CLOSE_RESOLUTION_TIME.strftime(
+                "%H:%M"
+            ),
             "next_session_start_at": next_session_start_at.isoformat(),
             "is_polling_window": phase in {
                 "preopen",
                 "regular",
                 "closing_auction",
+                "close_resolution",
             },
             "is_after_close": phase == "post_close",
         },

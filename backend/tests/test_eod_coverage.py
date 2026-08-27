@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from unittest.mock import patch
+from datetime import date, datetime, timedelta, timezone
+import json
+from unittest.mock import Mock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -24,6 +25,8 @@ from app.market_data.eod_coverage import (
     should_enqueue_eod_reconcile,
     taiwan_bulk_eod_refresh_window,
 )
+from app.jobs import eod_coverage as eod_coverage_jobs
+from app.jobs import service as job_service
 from app.sources.defaults import TPEX_DAILY_QUOTES_SOURCE_NAME
 from app.observability.provider_http import (
     ProviderHttpError,
@@ -112,6 +115,19 @@ def test_tw_coverage_partitions_current_partial_stale_and_missing(db: Session) -
     assert coverage.stale_symbols == {"5501"}
     assert coverage.missing_symbols == {"5502"}
     assert coverage.status == "partial"
+    venue_breakdown = coverage.detail()["venue_breakdown"]
+    assert venue_breakdown["TWSE"] == {
+        "universe_count": 2,
+        "current_count": 1,
+        "partial_count": 1,
+        "stale_count": 0,
+        "missing_count": 0,
+        "coverage_ratio": 0.5,
+        "status": "partial",
+    }
+    assert venue_breakdown["TPEX"]["current_count"] == 0
+    assert venue_breakdown["TPEX"]["stale_count"] == 1
+    assert venue_breakdown["TPEX"]["missing_count"] == 1
 
 
 def test_us_coverage_uses_official_active_non_etf_non_test_stock_universe(db: Session) -> None:
@@ -214,9 +230,63 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
         )
 
     assert calls == ["C", "B"]
+    assert first["postcondition_met"] is False
     assert first["checkpoint"]["current_count"] == 2
     assert second["status"] == "completed"
+    assert second["postcondition_met"] is True
     assert second["checkpoint"]["current_count"] == 3
+
+
+def test_partial_coverage_job_fails_terminal_status_but_preserves_partial_result() -> None:
+    partial_result = {
+        "status": "partial",
+        "postcondition_met": False,
+        "market": "TW",
+        "universe_count": 1973,
+        "current_count": 861,
+        "partial_count": 19,
+        "stale_count": 1091,
+        "missing_count": 2,
+    }
+    captured: list[job_service.JobExecutionError] = []
+
+    def execute(_job_id, worker):
+        try:
+            worker(object(), Mock())
+        except job_service.JobExecutionError as exc:
+            captured.append(exc)
+
+    with (
+        patch.object(
+            eod_coverage_jobs,
+            "reconcile_eod_coverage",
+            return_value=partial_result,
+        ) as reconcile_mock,
+        patch.object(
+            eod_coverage_jobs.job_service,
+            "run_tracked_job",
+            side_effect=execute,
+        ),
+    ):
+        eod_coverage_jobs.run_eod_coverage_reconcile_job(
+            1,
+            "TW",
+            True,
+            EXPECTED,
+            250,
+            600,
+            0,
+            5,
+            1800,
+        )
+
+    assert len(captured) == 1
+    assert (
+        reconcile_mock.call_args.kwargs["taiwan_venue_refresher"]
+        is eod_coverage_jobs.refresh_taiwan_official_daily_venue
+    )
+    assert captured[0].result == partial_result
+    assert "current=861/1973" in str(captured[0])
 
 
 def test_daily_parser_guard_refuses_large_same_date_regression_before_delete(db: Session) -> None:
@@ -293,14 +363,51 @@ def test_us_rate_limit_stops_shard_and_persists_retry_boundary(db: Session) -> N
     assert result["checkpoint"]["failed_count"] == 1
 
 
-def test_taiwan_bulk_window_blocks_live_session_and_allows_closed_day_catchup() -> None:
+def test_taiwan_bulk_window_allows_released_previous_session_catchup() -> None:
     eligible, retry_at, reason = taiwan_bulk_eod_refresh_window(
         expected_trade_date=date(2026, 8, 20),
         now=datetime(2026, 8, 21, 2, 0, tzinfo=timezone.utc),
     )
+    assert eligible is True
+    assert retry_at is None
+    assert reason == "released_historical_session"
+
+    eligible, retry_at, reason = taiwan_bulk_eod_refresh_window(
+        expected_trade_date=date(2026, 8, 27),
+        now=datetime(2026, 8, 27, 16, 13, tzinfo=timezone.utc),
+    )
+    assert eligible is True
+    assert retry_at is None
+    assert reason == "released_historical_session"
+
+    eligible, retry_at, reason = taiwan_bulk_eod_refresh_window(
+        expected_trade_date=date(2026, 8, 27),
+        now=datetime(2026, 8, 28, 7, 15, tzinfo=timezone.utc),
+    )
+    assert eligible is True
+    assert retry_at is None
+    assert reason == "released_historical_session"
+
+
+def test_taiwan_bulk_window_keeps_same_day_release_guard_and_rejects_future_date() -> None:
+    eligible, retry_at, reason = taiwan_bulk_eod_refresh_window(
+        expected_trade_date=date(2026, 8, 21),
+        now=datetime(2026, 8, 21, 2, 0, tzinfo=timezone.utc),
+    )
     assert eligible is False
-    assert retry_at is not None
+    assert retry_at == datetime(2026, 8, 21, 7, 15, tzinfo=timezone.utc)
     assert reason == "current_trading_session_not_finalized"
+
+    eligible, retry_at, reason = taiwan_bulk_eod_refresh_window(
+        expected_trade_date=date(2026, 8, 24),
+        now=datetime(2026, 8, 21, 2, 0, tzinfo=timezone.utc),
+    )
+    assert eligible is False
+    assert retry_at is None
+    assert reason == "requested_date_is_not_released"
+
+
+def test_taiwan_bulk_window_allows_closed_day_latest_session() -> None:
 
     eligible, retry_at, reason = taiwan_bulk_eod_refresh_window(
         expected_trade_date=date(2026, 8, 21),
@@ -309,6 +416,109 @@ def test_taiwan_bulk_window_blocks_live_session_and_allows_closed_day_catchup() 
     assert eligible is True
     assert retry_at is None
     assert reason == "closed_day_latest_bulk_snapshot"
+
+
+def test_release_guard_retry_is_rechecked_without_bypassing_provider_backoff(
+    db: Session,
+) -> None:
+    source, raw = _source_and_raw(db)
+    db.add(StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"))
+    db.add(
+        MarketDailyPrice(
+            source_id=source.id,
+            raw_result_id=raw.id,
+            stock_id="2330",
+            trade_date=date(2026, 8, 26),
+            close_price=100,
+        )
+    )
+    db.commit()
+    expected = date(2026, 8, 27)
+    now = datetime(2026, 8, 27, 16, 13, tzinfo=timezone.utc)
+    row = persist_eod_coverage(
+        db,
+        compute_eod_coverage(db, market="TW", expected_trade_date=expected),
+    )
+    row.repair_status = "deferred"
+    row.next_retry_at = now + timedelta(hours=15)
+    row.detail_json = json.dumps(
+        {
+            "repair": {
+                "phase": "release_guard",
+                "reason": "current_trading_session_not_finalized",
+            }
+        }
+    )
+    db.commit()
+
+    assert should_enqueue_eod_reconcile(
+        db,
+        market="TW",
+        expected_trade_date=expected,
+        now=now,
+    ) is True
+
+    row.repair_status = "rate_limited"
+    row.detail_json = json.dumps({"repair": {"phase": "provider_refresh"}})
+    db.commit()
+
+    assert should_enqueue_eod_reconcile(
+        db,
+        market="TW",
+        expected_trade_date=expected,
+        now=now,
+    ) is False
+
+
+def test_reconcile_bypasses_expired_release_semantics_but_keeps_pinned_date(
+    db: Session,
+) -> None:
+    source, raw = _source_and_raw(db)
+    db.add(StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"))
+    db.add(
+        MarketDailyPrice(
+            source_id=source.id,
+            raw_result_id=raw.id,
+            stock_id="2330",
+            trade_date=date(2026, 8, 26),
+            close_price=100,
+        )
+    )
+    db.commit()
+    expected = date(2026, 8, 27)
+    now = datetime(2026, 8, 27, 16, 13, tzinfo=timezone.utc)
+    row = persist_eod_coverage(
+        db,
+        compute_eod_coverage(db, market="TW", expected_trade_date=expected),
+    )
+    row.repair_status = "deferred"
+    row.next_retry_at = now + timedelta(hours=15)
+    row.detail_json = json.dumps(
+        {"repair": {"phase": "release_guard"}}
+    )
+    db.commit()
+
+    repair_result = {
+        "status": "partial",
+        "postcondition_met": False,
+        "market": "TW",
+        "expected_trade_date": expected,
+    }
+    with (
+        patch("app.market_data.eod_coverage.utc_now", return_value=now),
+        patch(
+            "app.market_data.eod_coverage._repair_tw_eod",
+            return_value=repair_result,
+        ) as repair,
+    ):
+        result = reconcile_eod_coverage(
+            db,
+            market="TW",
+            expected_trade_date=expected,
+        )
+
+    assert result == repair_result
+    assert repair.call_args.kwargs["computation"].expected_trade_date == expected
 
 
 def test_twse_parser_uses_expected_trade_date_for_dateless_weekend_payload(db: Session) -> None:
@@ -458,6 +668,76 @@ def test_tw_lifecycle_repairs_only_unresolved_venue_then_rereads_coverage(
     assert result["checkpoint"]["current_count"] == 2
     assert result["dataset_health"]["status"] == "healthy"
     assert result["dataset_lifecycle"]["refresh_bounds"]["max_calls"] == 2
+
+
+def test_tw_transport_success_with_previous_date_payload_is_not_repair_success(
+    db: Session,
+) -> None:
+    source, raw = _source_and_raw(db)
+    tpex_source = SourceRegistry(
+        source_name=TPEX_DAILY_QUOTES_SOURCE_NAME,
+        source_type="api",
+        category="market_data",
+        endpoint_url="https://example.test/tpex",
+        enabled=True,
+    )
+    db.add(tpex_source)
+    db.flush()
+    db.add_all(
+        [
+            StockMaster(stock_id="6488", market="TPEX", instrument_type="stock"),
+            MarketDailyPrice(
+                source_id=source.id,
+                raw_result_id=raw.id,
+                stock_id="6488",
+                trade_date=STALE,
+                close_price=200,
+            ),
+        ]
+    )
+    db.commit()
+
+    with (
+        patch(
+            "app.market_data.eod_coverage.taiwan_bulk_eod_refresh_window",
+            return_value=(True, None, "test_completed_session"),
+        ),
+        patch(
+            "app.market_data.eod_coverage.refresh_source",
+            return_value={
+                "fetch_status": "success",
+                "parse_status": "success",
+                "parsed_count": 1,
+                "data_quality_status": "valid",
+                "raw_result_id": 99,
+                "fetched_at": datetime(2026, 8, 21, 8, 0, tzinfo=timezone.utc),
+                "is_duplicate": True,
+                "replaced_trade_dates": [STALE],
+                "error_message": None,
+            },
+        ),
+    ):
+        result = reconcile_eod_coverage(
+            db,
+            market="TW",
+            expected_trade_date=EXPECTED,
+            repair=True,
+        )
+
+    assert result["status"] == "partial"
+    assert result["postcondition_met"] is False
+    assert result["success_count"] == 0
+    assert result["transport_success_count"] == 1
+    assert result["unchanged_count"] == 1
+    assert result["checkpoint"]["succeeded_count"] == 0
+    assert result["checkpoint"]["last_success_at"] is None
+    provider_result = result["checkpoint"]["detail"]["repair"][
+        "provider_results"
+    ][0]
+    assert provider_result["dataset_status"] == "stale_payload"
+    assert provider_result["expected_trade_date_observed"] is False
+    assert provider_result["dataset_advanced"] is False
+    assert provider_result["coverage_before"] == provider_result["coverage_after"]
 
 
 def test_scheduler_decision_recomputes_persisted_coverage_instead_of_trusting_checkpoint(

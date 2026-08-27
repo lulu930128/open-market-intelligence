@@ -426,7 +426,11 @@ TW_DATASET_CONTRACTS = (
         family="quote",
         payload="omi.market.quote.v1",
         scope="listed_stock_or_etf",
-        capabilities=("quote.snapshot", "quote.last_trade"),
+        capabilities=(
+            "quote.snapshot",
+            "quote.last_trade",
+            "quote.session_close",
+        ),
         tables=("source_registry", "raw_fetch_result", "taiwan_stock_quote_snapshot"),
         read="app.market.public_quote_platform.read_taiwan_public_last_trade_quote",
         projection="app.routers.tw_public_quotes.get_public_last_trade_quote",

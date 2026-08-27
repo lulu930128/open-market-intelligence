@@ -55,6 +55,34 @@ class CapabilityProjectionSpec:
 
 CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
     CapabilityProjectionSpec(
+        capability_id="quote.session_close",
+        scope_type="stock",
+        market="TW",
+        dataset_ids=("tw.quote.snapshot",),
+        projector_name="compact.quote.components.session_close",
+        projector=_path_projector(
+            ("data", "compact", "quote", "components", "session_close"),
+            ("compact", "quote", "components", "session_close"),
+        ),
+        fixture_context={
+            "data": {
+                "compact": {
+                    "quote": {
+                        "components": {
+                            "session_close": {
+                                "status": "session_final",
+                                "available": True,
+                                "price": 605,
+                                "official_daily": False,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        canonical_schema_version="omi.market.tw_session_close.v1",
+    ),
+    CapabilityProjectionSpec(
         capability_id="quote.snapshot",
         scope_type="stock",
         market="TW",

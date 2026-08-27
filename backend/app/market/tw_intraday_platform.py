@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import json
 from typing import Iterable
 
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db.models import StockMaster
 from app.market.intraday_repository import TaiwanIntradayBarRepository
 from app.market.intraday_transaction import TaiwanIntradayBarTransaction
+from app.market.trading_calendar import taiwan_presentation_session
 from app.market.tw_intraday_acquisition import TaiwanIntradayAcquisitionExecutor
 from app.market.tw_intraday_capabilities import (
     TW_INTRADAY_BARS_CAPABILITY_ID,
@@ -107,11 +108,19 @@ def build_taiwan_intraday_requirement(
     config = intraday_history_config(interval, range_value)
     days = int(config["days"])
     local_requested_at = requested_at.astimezone(TAIPEI_TZ)
-    start_at = (
-        datetime.combine(local_requested_at.date(), time.min, tzinfo=TAIPEI_TZ)
-        if days == 1
-        else local_requested_at - timedelta(days=days)
-    )
+    if days == 1:
+        presentation_trade_date = taiwan_presentation_session(
+            local_requested_at
+        )["trade_date"]
+        if not isinstance(presentation_trade_date, date):
+            raise RuntimeError("Taiwan presentation session returned an invalid trade date")
+        start_at = datetime.combine(
+            presentation_trade_date,
+            time.min,
+            tzinfo=TAIPEI_TZ,
+        )
+    else:
+        start_at = local_requested_at - timedelta(days=days)
     if start_at >= local_requested_at:
         start_at = local_requested_at - timedelta(days=1)
     bounds = RequestBounds(

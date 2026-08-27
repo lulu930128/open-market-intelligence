@@ -93,6 +93,7 @@ ANSWER_GAP_DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
 
 CAPABILITY_ANSWER_DOMAINS: dict[str, str] = {
     "quote.snapshot": "quote",
+    "quote.session_close": "quote",
     "daily.ohlcv": "chart",
     "intraday.bars": "chart",
     "technical.structure": "technical",

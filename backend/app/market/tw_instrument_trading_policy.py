@@ -147,6 +147,13 @@ def resolve_taiwan_auction_applicability(
             trading_policy=trading_policy,
             reason_codes=("CONTINUOUS_INSTRUMENT_NOT_AUCTION",),
         )
+    if session is MarketSession.CLOSE_RESOLUTION:
+        return TaiwanAuctionApplicability(
+            applicable=False,
+            auction_type=None,
+            trading_policy=trading_policy,
+            reason_codes=("MARKET_CLOSE_RESOLUTION_NOT_AUCTION",),
+        )
     if session in {MarketSession.POST_CLOSE, MarketSession.CLOSED}:
         return TaiwanAuctionApplicability(
             applicable=False,

@@ -11,6 +11,110 @@ from app.ai.market_context.taiwan_projection import (
 
 
 class TaiwanQuoteComponentTests(unittest.TestCase):
+    def test_post_close_session_close_owns_headline_while_official_daily_is_pending(
+        self,
+    ) -> None:
+        quote = _compact_quote_snapshot(
+            latest_daily=SimpleNamespace(
+                trade_date="2026-08-26",
+                close_price=592.0,
+                trade_volume=10_000_000,
+            ),
+            quote_depth={
+                "source": "twse_mis_quote_depth",
+                "provider": "twse_mis",
+                "session_phase": "post_close_snapshot",
+                "market_calendar_phase": "post_close",
+                "trade_date": "2026-08-27",
+                "quote_time": "2026-08-27T13:30:00+08:00",
+                "provider_event_time": "2026-08-27T13:30:00+08:00",
+                "last_trade_available": True,
+                "last_trade_price": 605.0,
+                "last_trade_is_current_session": True,
+                "price_available": True,
+                "session_close_available": True,
+                "session_close_status": "session_final",
+                "session_close_price": 605.0,
+                "session_close_trade_date": "2026-08-27",
+                "official_close_available": False,
+                "official_close_status": "pending",
+                "quote_semantics": "completed_session_close",
+                "delivery_status": "session_final",
+                "data_core_components": {
+                    "quote.session_close": {
+                        "kind": "quote_session_close",
+                        "status": "session_final",
+                        "available": True,
+                        "price": 605.0,
+                        "trade_date": "2026-08-27",
+                        "event_time": "2026-08-27T13:30:00+08:00",
+                        "confirmed_at": "2026-08-27T13:34:00+08:00",
+                        "provider": "twse_mis",
+                        "source": "twse_mis_quote_depth",
+                        "finalization": "session_final",
+                        "official_daily": False,
+                        "decision_usable": True,
+                        "reconciliation_status": "pending",
+                        "freshness": {
+                            "status": "current",
+                            "is_current": True,
+                            "expected_trade_date": "2026-08-27",
+                            "latest_trade_date": "2026-08-27",
+                        },
+                    }
+                },
+                "freshness": {
+                    "status": "session_final",
+                    "is_live": False,
+                    "is_stale": False,
+                    "expected_trade_date": "2026-08-27",
+                },
+            },
+            quote_error=None,
+        )
+
+        self.assertEqual(quote["latest_price"], 605.0)
+        self.assertEqual(quote["quote_semantics"], "completed_session_close")
+        self.assertTrue(quote["price_decision_usable"])
+        session_close = quote["components"]["session_close"]
+        self.assertEqual(session_close["status"], "session_final")
+        self.assertEqual(session_close["price"], 605.0)
+        self.assertFalse(session_close["official_daily"])
+        self.assertEqual(
+            session_close["reconciliation_status"],
+            "pending",
+        )
+        self.assertEqual(
+            quote["components"]["official_close"]["status"],
+            "pending",
+        )
+
+        selection = capability_contract.normalize_selection(
+            selection={"required": ["quote.session_close"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            target_market="TW",
+            question_intent="quote",
+        )
+        projected, unavailable = capability_contract.project_selected_data(
+            response={
+                "target": {"type": "tw_stock", "id": "3711", "market": "TW"},
+                "result": {"data": {"compact": {"quote": quote}}},
+                "freshness": {
+                    "status": "current",
+                    "is_current": True,
+                    "datasets": ["tw.quote.snapshot"],
+                    "missing": [],
+                    "warnings": [],
+                },
+            },
+            selection=selection,
+        )
+        self.assertEqual(unavailable, [])
+        self.assertEqual(projected["quote.session_close"]["price"], 605.0)
+
     def test_quote_projection_preserves_backend_volume_contract(self) -> None:
         backend_reconciliation = {
             "reference_dataset": "market_daily_price",

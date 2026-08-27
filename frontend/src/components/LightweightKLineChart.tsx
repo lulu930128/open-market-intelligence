@@ -79,6 +79,7 @@ import {
 } from "@/components/chart/LightweightKLineChartIndicators";
 import { StateSurface } from "@/components/LoadingPlaceholders";
 import {
+  allowsCanonicalIndicatorFallback,
   backendIndicatorParametersMatch,
   backendIndicatorValue,
   backendIndicatorWindowExists,
@@ -184,6 +185,7 @@ export default function LightweightKLineChart({
   volumePanelLabel,
   volumeValueKey = "volume",
   pricePrecision,
+  canonicalIndicatorAuthority = "presentation",
   drawingTool = "cursor",
   drawings = emptyDrawings,
   selectedDrawingId = null,
@@ -194,7 +196,7 @@ export default function LightweightKLineChart({
 }: LightweightKLineChartProps) {
   const { locale, t } = useI18n();
   const drawingI18n = useMemo(() => ({ locale, t }), [locale, t]);
-  const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volumeLots");
+  const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volume");
   const overlaySvgRef = useRef<SVGSVGElement | null>(null);
   const shortcutActiveRef = useRef(false);
   const [projectedCloudPolygons, setProjectedCloudPolygons] = useState<ProjectedCloudPolygon[]>([]);
@@ -269,11 +271,16 @@ export default function LightweightKLineChart({
     }),
     [indicatorParameters]
   );
-  const projectionScope = indicatorProjectionScope(indicatorData);
   const chartData = useMemo(
     () => normalizeChartPointsForTimeMode(sourceChartData, timeMode),
     [sourceChartData, timeMode]
   );
+  const projectionScope = indicatorProjectionScope(indicatorData, chartData, {
+    indicators: activeIndicators,
+    parameters: params,
+    canonicalAuthority: canonicalIndicatorAuthority,
+  });
+  const allowCanonicalFallback = allowsCanonicalIndicatorFallback(projectionScope);
   const benchmarkData = useMemo(
     () =>
       sourceBenchmarkData
@@ -282,8 +289,25 @@ export default function LightweightKLineChart({
     [sourceBenchmarkData, timeMode]
   );
   const seriesData = useMemo(
-    () => buildSeriesData(chartData, indicatorData, volumeValueKey, timeMode, params, benchmarkData),
-    [benchmarkData, chartData, indicatorData, params, timeMode, volumeValueKey]
+    () =>
+      buildSeriesData(
+        chartData,
+        indicatorData,
+        volumeValueKey,
+        timeMode,
+        params,
+        benchmarkData,
+        allowCanonicalFallback
+      ),
+    [
+      allowCanonicalFallback,
+      benchmarkData,
+      chartData,
+      indicatorData,
+      params,
+      timeMode,
+      volumeValueKey,
+    ]
   );
   const chartSeriesKey = useMemo(() => {
     return [
@@ -746,6 +770,8 @@ export default function LightweightKLineChart({
   }, [chartData, mainSeriesRef, overlaySize.height, overlaySize.width, params.gapMinPct, visibleChartPointEntries]);
 
   const buildSupportResistanceProjection = useCallback((): ProjectedSupportResistanceLevel[] => {
+    if (!allowCanonicalFallback) return [];
+
     const series = mainSeriesRef.current;
     const entries = visibleChartPointEntries();
 
@@ -837,6 +863,7 @@ export default function LightweightKLineChart({
         ];
       });
   }, [
+    allowCanonicalFallback,
     chartData,
     mainSeriesRef,
     overlaySize.height,
@@ -855,6 +882,8 @@ export default function LightweightKLineChart({
     const activeSeries = series;
     const entries = visibleChartPointEntries();
     const signals: ProjectedTechnicalSignal[] = [];
+    const canonicalFallback = (value: number | null | undefined) =>
+      allowCanonicalFallback && finiteNumber(value) ? value : null;
 
     function projectSignal(
       id: string,
@@ -932,43 +961,43 @@ export default function LightweightKLineChart({
               previousIndicator?.donchian,
               `upper${params.donchianPeriod}`
             )
-          : donchian[index - 1]?.upper;
+          : canonicalFallback(donchian[index - 1]?.upper);
         const previousDonchianLower = backendDonchian
           ? backendIndicatorValue(
               previousIndicator?.donchian,
               `lower${params.donchianPeriod}`
             )
-          : donchian[index - 1]?.lower;
+          : canonicalFallback(donchian[index - 1]?.lower);
         const previousAdx = backendAdx
           ? backendIndicatorValue(previousIndicator?.adx, `adx${params.adxPeriod}`)
-          : dmi[index - 1]?.adx;
+          : canonicalFallback(dmi[index - 1]?.adx);
         const currentAdx = backendAdx
           ? backendIndicatorValue(currentIndicator?.adx, `adx${params.adxPeriod}`)
-          : dmi[index]?.adx;
+          : canonicalFallback(dmi[index]?.adx);
         const previousEmaFast = backendEma
           ? backendIndicatorValue(previousIndicator?.ema, `ema${params.emaFast}`)
-          : emaFast[index - 1];
+          : canonicalFallback(emaFast[index - 1]);
         const previousEmaSlow = backendEma
           ? backendIndicatorValue(previousIndicator?.ema, `ema${params.emaSlow}`)
-          : emaSlow[index - 1];
+          : canonicalFallback(emaSlow[index - 1]);
         const currentEmaFast = backendEma
           ? backendIndicatorValue(currentIndicator?.ema, `ema${params.emaFast}`)
-          : emaFast[index];
+          : canonicalFallback(emaFast[index]);
         const currentEmaSlow = backendEma
           ? backendIndicatorValue(currentIndicator?.ema, `ema${params.emaSlow}`)
-          : emaSlow[index];
+          : canonicalFallback(emaSlow[index]);
         const previousMacd = backendMacd
           ? backendIndicatorValue(previousIndicator?.macd, "macd")
-          : macdValues.macd[index - 1];
+          : canonicalFallback(macdValues.macd[index - 1]);
         const previousMacdSignal = backendMacd
           ? backendIndicatorValue(previousIndicator?.macd, "signal")
-          : macdValues.signal[index - 1];
+          : canonicalFallback(macdValues.signal[index - 1]);
         const currentMacd = backendMacd
           ? backendIndicatorValue(currentIndicator?.macd, "macd")
-          : macdValues.macd[index];
+          : canonicalFallback(macdValues.macd[index]);
         const currentMacdSignal = backendMacd
           ? backendIndicatorValue(currentIndicator?.macd, "signal")
-          : macdValues.signal[index];
+          : canonicalFallback(macdValues.signal[index]);
 
         if (
           finiteNumber(previousEmaFast) &&
@@ -1081,7 +1110,7 @@ export default function LightweightKLineChart({
               currentIndicator?.volume_ma,
               `volume_ma${params.volumeMa}`
             )
-          : movingAverage(volumes, index, params.volumeMa);
+          : canonicalFallback(movingAverage(volumes, index, params.volumeMa));
         const volume = volumes[index];
         const previousClose = previous?.close;
         const changePct =
@@ -1161,7 +1190,7 @@ export default function LightweightKLineChart({
           rsi_period: params.rsiPeriod,
         })
           ? backendIndicatorValue(indicator?.rsi, `rsi${params.rsiPeriod}`)
-          : rsiValues[index];
+          : canonicalFallback(rsiValues[index]);
       };
       const macdHistogramAt = (index: number) => {
         const indicator = indicatorAt(index);
@@ -1171,7 +1200,7 @@ export default function LightweightKLineChart({
           macd_signal: params.macdSignal,
         })
           ? backendIndicatorValue(indicator?.macd, "histogram")
-          : macdValues.histogram[index];
+          : canonicalFallback(macdValues.histogram[index]);
       };
       const pivotRadius = 3;
       const firstIndex = entries[0]?.index ?? 0;
@@ -1327,6 +1356,7 @@ export default function LightweightKLineChart({
     activeIndicators.candlestickPatterns,
     activeIndicators.divergence,
     activeIndicators.signals,
+    allowCanonicalFallback,
     chartData,
     indicatorData,
     chartRef,

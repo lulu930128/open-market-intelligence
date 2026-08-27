@@ -42,6 +42,7 @@ _LEGACY_SESSION_PHASE = {
     MarketSession.OPENING_AUCTION: "preopen_auction",
     MarketSession.CONTINUOUS: "regular_live",
     MarketSession.CLOSING_AUCTION: "closing_auction",
+    MarketSession.CLOSE_RESOLUTION: "close_resolution",
     MarketSession.POST_CLOSE: "post_close_snapshot",
     MarketSession.CLOSED: "market_closed",
     MarketSession.UNKNOWN: "unknown",
@@ -51,6 +52,12 @@ _LEGACY_SESSION_PHASE = {
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("quote transaction timestamps must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _stored_as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
 
@@ -160,7 +167,7 @@ class TaiwanPublicQuoteTransaction:
         source: SourceRegistry,
         raw: RawFetchResult,
         receipt: RawFetchReceiptV1,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         if observation.instrument.market is not Market.TW:
             raise ValueError("Taiwan public quote transaction requires market=TW")
         if observation.lineage.event_at is None or observation.trade_date is None:
@@ -269,11 +276,24 @@ class TaiwanPublicQuoteTransaction:
                 **incoming,
             )
             self._db.add(row)
-            return False
+            return False, None
+        if (
+            row.fetched_at is not None
+            and _stored_as_utc(row.fetched_at) > incoming["fetched_at"]
+        ):
+            return True, "PUBLIC_QUOTE_RECEIPT_TIME_REGRESSION_REJECTED"
+        existing_volume = row.total_volume_lots
+        incoming_volume = incoming["total_volume_lots"]
+        if (
+            existing_volume is not None
+            and incoming_volume is not None
+            and incoming_volume < existing_volume
+        ):
+            return True, "PUBLIC_QUOTE_CUMULATIVE_VOLUME_REGRESSION_REJECTED"
         unchanged = all(getattr(row, key) == value for key, value in comparable.items())
         for key, value in incoming.items():
             setattr(row, key, value)
-        return unchanged
+        return unchanged, None
 
     def _quality_check(
         self,
@@ -343,6 +363,7 @@ class TaiwanPublicQuoteTransaction:
         raw_ids: list[int] = []
         observation_counts: dict[tuple[str, str], int] = {}
         actual_trade_counts: dict[tuple[str, str], int] = {}
+        transaction_limitations: dict[tuple[str, str], list[str]] = {}
         written = unchanged = 0
         try:
             for receipt in acquisition.receipts:
@@ -364,7 +385,7 @@ class TaiwanPublicQuoteTransaction:
                 if matched is None:
                     raise ValueError("quote observation has no matching raw receipt")
                 source, raw, receipt = matched
-                was_unchanged = self._upsert(
+                was_unchanged, upsert_limitation = self._upsert(
                     observation,
                     session=requirement.session,
                     source=source,
@@ -374,6 +395,10 @@ class TaiwanPublicQuoteTransaction:
                 observation_counts[key] = observation_counts.get(key, 0) + 1
                 if observation.last_trade_price is not None:
                     actual_trade_counts[key] = actual_trade_counts.get(key, 0) + 1
+                if upsert_limitation is not None:
+                    transaction_limitations.setdefault(key, []).append(
+                        upsert_limitation
+                    )
                 if was_unchanged:
                     unchanged += 1
                 else:
@@ -385,7 +410,14 @@ class TaiwanPublicQuoteTransaction:
                     receipt=receipt,
                     observation_count=observation_counts.get(key, 0),
                     actual_trade_count=actual_trade_counts.get(key, 0),
-                    limitations=acquisition.summary.limitations,
+                    limitations=tuple(
+                        dict.fromkeys(
+                            (
+                                *acquisition.summary.limitations,
+                                *transaction_limitations.get(key, ()),
+                            )
+                        )
+                    ),
                 )
             self._db.commit()
         except Exception:
@@ -398,7 +430,18 @@ class TaiwanPublicQuoteTransaction:
             observations_written=written,
             observations_unchanged=unchanged,
             raw_result_ids=tuple(raw_ids),
-            limitations=acquisition.summary.limitations,
+            limitations=tuple(
+                dict.fromkeys(
+                    (
+                        *acquisition.summary.limitations,
+                        *(
+                            limitation
+                            for values in transaction_limitations.values()
+                            for limitation in values
+                        ),
+                    )
+                )
+            ),
         )
 
 

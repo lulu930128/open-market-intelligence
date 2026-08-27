@@ -73,7 +73,11 @@ def test_public_quote_dataset_declares_bounded_shared_platform_contract() -> Non
     spec = DATASET_REGISTRY.get("tw.quote.snapshot")
     assert spec.owner == "app.market.public_quote_platform"
     assert spec.read_operation == "read_taiwan_public_last_trade_quote"
-    assert spec.capability_ids == ("quote.snapshot", "quote.last_trade")
+    assert spec.capability_ids == (
+        "quote.snapshot",
+        "quote.last_trade",
+        "quote.session_close",
+    )
     assert spec.refreshable is True
     assert spec.refresh_operation == "tw.acquire_public_last_trade_quote"
     assert spec.refresh_bounds is not None
@@ -150,6 +154,7 @@ def test_advertised_foundation_scopes_have_real_projectors_and_fixture_payloads(
     advertised = {spec.key for spec in CAPABILITY_PROJECTION_SPECS if spec.advertised}
     assert advertised == {
         ("quote.snapshot", "stock", "TW"),
+        ("quote.session_close", "stock", "TW"),
         ("quote.snapshot", "us_stock", "US"),
         ("intraday.bars", "stock", "TW"),
         ("intraday.bars", "us_stock", "US"),

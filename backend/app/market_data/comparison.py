@@ -149,6 +149,7 @@ def _legacy_session(value: Any) -> MarketSession:
         "preopen_auction": MarketSession.OPENING_AUCTION,
         "regular_live": MarketSession.CONTINUOUS,
         "closing_auction": MarketSession.CLOSING_AUCTION,
+        "close_resolution": MarketSession.CLOSE_RESOLUTION,
         "post_close_snapshot": MarketSession.POST_CLOSE,
         "market_closed": MarketSession.CLOSED,
     }.get(normalized, MarketSession.UNKNOWN)

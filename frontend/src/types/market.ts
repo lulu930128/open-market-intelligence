@@ -833,9 +833,13 @@ export type OhlcChartResponse = {
   points: ChartPoint[];
   backfill: Record<string, unknown> | null;
   intraday_overlay: OhlcIntradayOverlay | null;
+  volume_unit: "shares" | string | null;
+  volume_semantics: string;
+  volume_status: "available" | "not_provided" | string;
   data_quality?: "ok" | "partial" | "unavailable" | string;
   warnings?: string[];
   latest_data_date: string | null;
+  latest_finalized_data_date: string | null;
   expected_data_date: string | null;
   freshness_status: "current" | "stale" | "missing" | "future" | string;
   is_current: boolean;
@@ -1472,6 +1476,19 @@ export type TaiwanStockQuoteDepthRead = {
   actual_trade_price_cached?: boolean;
   actual_trade_price_source?: string | null;
   actual_trade_price_as_of?: string | null;
+  quote_semantics?: string;
+  delivery_status?: string;
+  price_available?: boolean;
+  session_close_available?: boolean;
+  session_close_status?: string;
+  session_close_price?: number | null;
+  session_close_trade_date?: string | null;
+  session_close_event_time?: string | null;
+  session_close_confirmed_at?: string | null;
+  official_close_available?: boolean;
+  official_close_status?: string;
+  official_close_price?: number | null;
+  official_close_trade_date?: string | null;
   freshness: TaiwanStockQuoteDepthFreshness;
 };
 
@@ -2203,6 +2220,16 @@ export type StockIndicatorPoint = {
   price_basis?: string | null;
   calculation_role?: string | null;
   parameter_contract?: Record<string, number | number[] | string | null>;
+  bar_status?: string | null;
+  session_close_finalization?: string | null;
+  official_daily_confirmed?: boolean;
+  event_time?: string | null;
+  source?: string | null;
+  volume_semantics?: string | null;
+  indicator_semantics?: Record<string, string | null>;
+  decision_usable?: boolean;
+  volume_based_decision_usable?: boolean;
+  warnings?: string[];
   close: number | null;
   volume: number | null;
   change: number | null;
@@ -3174,8 +3201,33 @@ export type USOhlcChartRead = {
   backfill: Record<string, unknown> | null;
   intraday_overlay: Record<string, unknown> | null;
   latest_data_date: string | null;
+  latest_finalized_data_date: string | null;
   expected_data_date: string | null;
   freshness_status: "current" | "stale" | "missing" | "future" | string;
+  coverage_status: "complete" | "best_available" | "partial" | "missing" | string;
+  continuity_status: "complete" | "partial" | "missing" | string;
+  history_status:
+    | "complete"
+    | "best_available"
+    | "insufficient_history"
+    | "missing"
+    | string;
+  history_fetch_scope: "full" | "compact" | "unknown" | string;
+  first_data_date: string | null;
+  continuity_start_date: string | null;
+  contiguous_through_date: string | null;
+  latest_expected_date_present: boolean;
+  missing_trade_date_count: number;
+  missing_trade_dates: string[];
+  missing_trade_dates_truncated: boolean;
+  requested_bar_count: number;
+  available_bar_count: number;
+  expected_previous_close_trade_date: string | null;
+  previous_close: number | null;
+  previous_close_trade_date: string | null;
+  previous_close_provider: string | null;
+  previous_close_fetched_at: string | null;
+  previous_close_status: "current" | "partial" | "missing" | string;
   is_current: boolean;
   refresh_recommended: boolean;
 };

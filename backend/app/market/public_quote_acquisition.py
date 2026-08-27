@@ -279,6 +279,11 @@ class TaiwanPublicQuoteAcquisitionExecutor:
             )
 
         has_actual_trade = observation.last_trade_price is not None
+        completed_session_observation = session in {
+            MarketSession.CLOSE_RESOLUTION,
+            MarketSession.POST_CLOSE,
+            MarketSession.CLOSED,
+        }
         return _QuoteRouteOutcome(
             receipt=receipt,
             observation=observation,
@@ -292,7 +297,9 @@ class TaiwanPublicQuoteAcquisitionExecutor:
                     else OperationalStatus.DEGRADED
                 ),
                 freshness=(
-                    EvidenceFreshness.LIVE
+                    EvidenceFreshness.FRESH
+                    if has_actual_trade and completed_session_observation
+                    else EvidenceFreshness.LIVE
                     if has_actual_trade
                     else EvidenceFreshness.FRESH
                 ),

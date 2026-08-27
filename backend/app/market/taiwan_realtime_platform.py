@@ -32,7 +32,7 @@ from app.market.tw_instrument_trading_policy import (
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
-    taiwan_market_session_phase,
+    taiwan_market_session,
 )
 from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_health
 from app.market.tw_realtime_capabilities import (
@@ -92,14 +92,7 @@ class TaiwanRealtimeRefreshResult:
 
 
 def _market_session(now: datetime) -> MarketSession:
-    return {
-        "preopen": MarketSession.PRE_OPEN,
-        "regular": MarketSession.CONTINUOUS,
-        "closing_auction": MarketSession.CLOSING_AUCTION,
-        "post_close": MarketSession.POST_CLOSE,
-        "preopen_pending": MarketSession.CLOSED,
-        "market_closed": MarketSession.CLOSED,
-    }.get(taiwan_market_session_phase(now), MarketSession.UNKNOWN)
+    return taiwan_market_session(now)
 
 
 def _load_instrument(db: Session, stock_id: str) -> InstrumentKey:

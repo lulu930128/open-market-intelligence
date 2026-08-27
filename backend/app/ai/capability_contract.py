@@ -44,8 +44,16 @@ READY_STATUSES = {
     "ok",
     "ready",
     "ready_empty",
+    "session_final",
 }
-LIMITED_STATUSES = {"cached", "delayed", "partial", "pending", "waiting"}
+LIMITED_STATUSES = {
+    "cached",
+    "delayed",
+    "partial",
+    "pending",
+    "resolving",
+    "waiting",
+}
 NEUTRAL_STATUSES = {"not_applicable", "not_requested"}
 EXECUTABLE_FILL_OPERATIONS = {
     "tw.refresh_daily_price",
@@ -752,6 +760,76 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         markets=("TW",),
         frequency="intraday",
         unit_semantics="prices_lots_and_minutes",
+        event_time_basis="provider_event_time",
+    ),
+    CapabilitySpec(
+        capability_id="quote.session_close",
+        schema_version="omi.market.tw_session_close.v1",
+        domain="quote",
+        slot="quote_session_close",
+        scopes=("stock",),
+        paths=(
+            "compact.quote.components.session_close",
+            "data.quote.components.session_close",
+        ),
+        fields=(
+            "kind",
+            "status",
+            "available",
+            "price",
+            "candidate_price",
+            "trade_date",
+            "event_time",
+            "event_time_basis",
+            "confirmed_at",
+            "confirmation_time_basis",
+            "provider",
+            "source",
+            "authority",
+            "authority_class",
+            "finalization",
+            "official_daily",
+            "session",
+            "freshness",
+            "facts_usable",
+            "research_usable",
+            "decision_usable",
+            "reconciliation_status",
+            "official_close_price",
+            "official_close_trade_date",
+            "lineage",
+            "resolved_health",
+            "dataset_health",
+            "limitations",
+        ),
+        default_fields=(
+            "status",
+            "available",
+            "price",
+            "trade_date",
+            "event_time",
+            "confirmed_at",
+            "provider",
+            "source",
+            "authority",
+            "finalization",
+            "official_daily",
+            "freshness",
+            "decision_usable",
+            "reconciliation_status",
+            "limitations",
+        ),
+        default_limit=1,
+        refresh_strategies=(("stock", "reader_fetch"),),
+        title="Taiwan completed session close",
+        description=(
+            "Completed Taiwan cash-equity session close confirmed from "
+            "current-session exchange evidence before official daily EOD "
+            "publication. It never implies official-daily finalization."
+        ),
+        markets=("TW",),
+        frequency="session_boundary",
+        unit_semantics="security_price",
         event_time_basis="provider_event_time",
     ),
     CapabilitySpec(
@@ -4569,6 +4647,7 @@ SCOPE_DOMAIN_CAPABILITIES = {
         "cross_market": ("market.cross_market",),
     },
     "stock": {
+        "quote": ("quote.snapshot", "quote.session_close"),
         "events": ("events.upcoming", "events.history"),
         "regulation": (
             "regulation.disposition",
@@ -4660,6 +4739,13 @@ def _default_capabilities(scope_type: str, question_intent: str) -> tuple[str, .
     if scope_type == "data_freshness":
         return ("target.identity", "diagnostics.data_freshness")
     if question_intent == "quote":
+        if scope_type == "stock":
+            return (
+                "target.identity",
+                "quote.snapshot",
+                "quote.session_close",
+                "data.freshness",
+            )
         return ("target.identity", "quote.snapshot", "data.freshness")
     if question_intent == "regulation":
         return (

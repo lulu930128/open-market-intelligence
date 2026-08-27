@@ -108,6 +108,8 @@ def _session(value: str | MarketSession) -> MarketSession:
         return MarketSession.CONTINUOUS
     if normalized in {"closing_auction", "closing_auction_delayed"}:
         return MarketSession.CLOSING_AUCTION
+    if normalized == "close_resolution":
+        return MarketSession.CLOSE_RESOLUTION
     if normalized in {"post_close", "post_close_snapshot"}:
         return MarketSession.POST_CLOSE
     if normalized in {"closed", "market_closed"}:

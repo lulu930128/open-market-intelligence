@@ -1,0 +1,60 @@
+{
+  "fixture_contract": "omi.test.actual_public_payload_excerpt.v1",
+  "source_receipt": {
+    "provider": "twse_rwd",
+    "source_name": "TWSE RWD Daily Trading",
+    "resource_id": "MI_INDEX_ALLBUT0999",
+    "fetched_at": "2026-08-27T15:35:00+00:00",
+    "status_code": 200,
+    "original_row_count": 1377,
+    "extracted_symbols": ["3711"],
+    "note": "Exact 3711 row and table schema read from the official TWSE RWD MI_INDEX ALLBUT0999 response on 2026-08-27."
+  },
+  "payload": {
+    "stat": "OK",
+    "date": "20260827",
+    "tables": [
+      {
+        "title": "115年08月27日 每日收盤行情(全部(不含權證、牛熊證、可展延牛熊證))",
+        "fields": [
+          "證券代號",
+          "證券名稱",
+          "成交股數",
+          "成交筆數",
+          "成交金額",
+          "開盤價",
+          "最高價",
+          "最低價",
+          "收盤價",
+          "漲跌(+/-)",
+          "漲跌價差",
+          "最後揭示買價",
+          "最後揭示買量",
+          "最後揭示賣價",
+          "最後揭示賣量",
+          "本益比"
+        ],
+        "data": [
+          [
+            "3711",
+            "日月光投控",
+            "11,658,860",
+            "18,048",
+            "7,011,817,192",
+            "608.00",
+            "608.00",
+            "593.00",
+            "605.00",
+            "<p style= color:red>+</p>",
+            "13.00",
+            "604.00",
+            "163",
+            "605.00",
+            "265",
+            "43.78"
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
@@ -17,7 +18,10 @@ from app.market.public_quote_acquisition import (
 from app.market.public_quote_repository import TaiwanPublicQuoteRepository
 from app.market.public_quote_transaction import TaiwanPublicQuoteTransaction
 from app.market.trading_calendar import (
+    TAIWAN_CLOSE_RESOLUTION_TIME,
+    TAIWAN_SESSION_CLOSE_TIME,
     TAIWAN_TZ,
+    taiwan_market_session,
     taiwan_market_session_phase,
     taiwan_presentation_session,
 )
@@ -63,23 +67,34 @@ from app.market_data.resolution import ResolutionCandidate
 
 
 PUBLIC_QUOTE_MAX_AGE_SECONDS = 15
+SESSION_CLOSE_MAX_AGE_SECONDS = 86_400
 _ACTIVE_SESSIONS = {
     MarketSession.PRE_OPEN,
     MarketSession.OPENING_AUCTION,
     MarketSession.CONTINUOUS,
     MarketSession.CLOSING_AUCTION,
 }
+_SESSION_CLOSE_ROUTE_DESCRIPTOR = TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR.model_copy(
+    update={
+        "supported_sessions": (
+            MarketSession.CLOSE_RESOLUTION,
+            MarketSession.POST_CLOSE,
+        ),
+        "can_produce_live": False,
+        "limitations": tuple(
+            dict.fromkeys(
+                (
+                    *TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR.limitations,
+                    "SESSION_CLOSE_CONFIRMATION_ROUTE",
+                )
+            )
+        ),
+    }
+)
 
 
 def _market_session(now: datetime) -> MarketSession:
-    return {
-        "preopen": MarketSession.PRE_OPEN,
-        "regular": MarketSession.CONTINUOUS,
-        "closing_auction": MarketSession.CLOSING_AUCTION,
-        "post_close": MarketSession.POST_CLOSE,
-        "preopen_pending": MarketSession.CLOSED,
-        "market_closed": MarketSession.CLOSED,
-    }.get(taiwan_market_session_phase(now), MarketSession.UNKNOWN)
+    return taiwan_market_session(now)
 
 
 def _instrument_type(value: str | None) -> InstrumentType:
@@ -162,9 +177,48 @@ def build_taiwan_public_quote_requirement(
     )
 
 
+def build_taiwan_session_close_requirement(
+    *,
+    instrument: InstrumentKey,
+    policy: RealtimePolicy,
+    requested_at: datetime,
+    bounds: RequestBounds | None = None,
+) -> DataRequirementV2:
+    """Build a completed-session read on the existing public quote dataset."""
+
+    requirement = build_taiwan_public_quote_requirement(
+        instrument=instrument,
+        policy=policy,
+        requested_at=requested_at,
+        bounds=bounds,
+        require_actual_trade=True,
+    )
+    presentation = taiwan_presentation_session(requested_at)
+    target_session = (
+        MarketSession.POST_CLOSE
+        if presentation["state"] == "previous_session"
+        else requirement.session
+    )
+    return requirement.model_copy(
+        update={
+            "purpose": DataPurpose.RESEARCH,
+            "session": target_session,
+            "freshness": FreshnessRequirement(
+                max_age_seconds=SESSION_CLOSE_MAX_AGE_SECONDS
+            ),
+        }
+    )
+
+
 class TaiwanPublicQuoteCandidateReader:
-    def __init__(self, repository: TaiwanPublicQuoteRepository) -> None:
+    def __init__(
+        self,
+        repository: TaiwanPublicQuoteRepository,
+        *,
+        session_close: bool = False,
+    ) -> None:
         self._repository = repository
+        self._session_close = session_close
 
     def read_quote_candidates(
         self,
@@ -200,6 +254,11 @@ class TaiwanPublicQuoteCandidateReader:
             and stored.observation.trade_date is not None
         ]
         latest_date = max(latest_dates) if latest_dates else None
+        confirmation_boundary = datetime.combine(
+            expected_trade_date,
+            TAIWAN_CLOSE_RESOLUTION_TIME,
+            tzinfo=TAIWAN_TZ,
+        )
         for stored in stored_reads:
             observation = stored.observation
             if observation is None:
@@ -239,11 +298,51 @@ class TaiwanPublicQuoteCandidateReader:
                 freshness = EvidenceFreshness.MISSING
             else:
                 assert event_at is not None
+                local_event_at = event_at.astimezone(TAIWAN_TZ)
                 age_seconds = (
                     requirement.requested_at - event_at
                 ).total_seconds()
                 same_trade_date = observation.trade_date == expected_trade_date
-                if (
+                confirmed_at = (
+                    stored.confirmed_at.astimezone(TAIWAN_TZ)
+                    if stored.confirmed_at is not None
+                    else None
+                )
+                actual_trade = bool(
+                    observation.trade_state
+                    is TradeObservationState.TRADE_OBSERVED
+                    and observation.last_trade_price is not None
+                )
+                legal_session_event = bool(
+                    local_event_at.date() == expected_trade_date
+                    and TAIWAN_SESSION_CLOSE_TIME
+                    <= local_event_at.time()
+                    <= TAIWAN_CLOSE_RESOLUTION_TIME
+                    and event_at <= requirement.requested_at
+                )
+                session_close_confirmed = bool(
+                    self._session_close
+                    and same_trade_date
+                    and actual_trade
+                    and legal_session_event
+                    and confirmed_at is not None
+                    and confirmed_at >= confirmation_boundary
+                )
+                if session_close_confirmed:
+                    freshness = EvidenceFreshness.FRESH
+                elif self._session_close:
+                    freshness = EvidenceFreshness.STALE
+                    limitations.append(
+                        "SESSION_CLOSE_EVENT_TIME_INVALID"
+                        if not legal_session_event
+                        else (
+                            "SESSION_CLOSE_RESOLVING"
+                            if stored.market_session
+                            is MarketSession.CLOSE_RESOLUTION
+                            else "SESSION_CLOSE_CONFIRMATION_MISSING"
+                        )
+                    )
+                elif (
                     requirement.session in _ACTIVE_SESSIONS
                     and same_trade_date
                     and -300 <= age_seconds <= PUBLIC_QUOTE_MAX_AGE_SECONDS
@@ -261,7 +360,7 @@ class TaiwanPublicQuoteCandidateReader:
                         observation=observation,
                         freshness=freshness,
                         provider_priority=stored.provider_priority,
-                        session=requirement.session,
+                        session=stored.market_session or requirement.session,
                     )
                 )
             freshness_values.append(freshness)
@@ -276,7 +375,11 @@ class TaiwanPublicQuoteCandidateReader:
                     operational=OperationalStatus.UNKNOWN,
                     freshness=freshness,
                     checked_at=requirement.requested_at,
-                    detail_code="PERSISTED_PUBLIC_QUOTE_CANDIDATE",
+                    detail_code=(
+                        "PERSISTED_SESSION_CLOSE_CANDIDATE"
+                        if self._session_close
+                        else "PERSISTED_PUBLIC_QUOTE_CANDIDATE"
+                    ),
                 )
             )
         spec = DATASET_REGISTRY.get(TW_PUBLIC_QUOTE_DATASET_ID)
@@ -357,6 +460,29 @@ def read_taiwan_quote_snapshot(
     )
 
 
+def read_taiwan_session_close(
+    db: Session,
+    *,
+    stock_id: str,
+    requested_at: datetime | None = None,
+) -> MarketDataResultV1:
+    """Read completed-session close evidence from the existing quote store."""
+
+    effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
+    requirement = build_taiwan_session_close_requirement(
+        instrument=_load_instrument(db, stock_id),
+        policy=RealtimePolicy.CACHE_ONLY,
+        requested_at=effective_requested_at,
+    )
+    return MarketDataGateway().resolve_quote(
+        requirement,
+        reader=TaiwanPublicQuoteCandidateReader(
+            TaiwanPublicQuoteRepository(db),
+            session_close=True,
+        ),
+    )
+
+
 def _acquisition_bounds(
     descriptors: tuple[ProviderCapabilityDescriptorV2, ...],
 ) -> RequestBounds:
@@ -419,6 +545,35 @@ def acquire_taiwan_public_last_trade_quote(
         requirement,
         reader=TaiwanPublicQuoteCandidateReader(
             TaiwanPublicQuoteRepository(db)
+        ),
+        descriptors=descriptor_catalog,
+        acquisition_port=acquisition or TaiwanPublicQuoteAcquisitionExecutor(),
+        transaction_port=TaiwanPublicQuoteTransaction(db),
+    )
+
+
+def acquire_taiwan_session_close(
+    db: Session,
+    *,
+    stock_id: str,
+    requested_at: datetime | None = None,
+    acquisition: QuoteAcquisitionPort | None = None,
+) -> MarketDataResultV1:
+    """Confirm a session close through the bounded existing quote transaction."""
+
+    effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
+    descriptor_catalog = (_SESSION_CLOSE_ROUTE_DESCRIPTOR,)
+    requirement = build_taiwan_session_close_requirement(
+        instrument=_load_instrument(db, stock_id),
+        policy=RealtimePolicy.PREFER_LIVE,
+        requested_at=effective_requested_at,
+        bounds=_acquisition_bounds(descriptor_catalog),
+    )
+    return MarketDataGateway().resolve_quote(
+        requirement,
+        reader=TaiwanPublicQuoteCandidateReader(
+            TaiwanPublicQuoteRepository(db),
+            session_close=True,
         ),
         descriptors=descriptor_catalog,
         acquisition_port=acquisition or TaiwanPublicQuoteAcquisitionExecutor(),
@@ -586,6 +741,180 @@ def project_taiwan_public_last_trade_quote(
     }
 
 
+def project_taiwan_session_close(
+    result: MarketDataResultV1,
+) -> dict[str, object]:
+    """Project a completed Taiwan session close without official-EOD semantics."""
+
+    if result.result_kind != "quote":
+        raise ValueError("session close projection requires quote result")
+    quote = result.resolved.quote
+    health = result.resolved.health
+    presentation = taiwan_presentation_session(result.requirement.requested_at)
+    event_at = quote.lineage.event_at if quote is not None else None
+    confirmed_at = (
+        max(
+            value
+            for value in (
+                quote.lineage.received_at,
+                quote.lineage.fetched_at,
+            )
+            if value is not None
+        )
+        if quote is not None
+        and any(
+            value is not None
+            for value in (
+                quote.lineage.received_at,
+                quote.lineage.fetched_at,
+            )
+        )
+        else None
+    )
+    candidate_freshness = (
+        result.resolved.candidates[0].freshness
+        if result.resolved.candidates
+        else EvidenceFreshness.MISSING
+    )
+    actual_trade = bool(
+        quote is not None
+        and quote.trade_state is TradeObservationState.TRADE_OBSERVED
+        and quote.last_trade_price is not None
+    )
+    same_session = bool(
+        quote is not None
+        and quote.trade_date == presentation["trade_date"]
+    )
+    session_final = bool(
+        actual_trade
+        and same_session
+        and candidate_freshness is EvidenceFreshness.FRESH
+    )
+    phase = taiwan_market_session_phase(result.requirement.requested_at)
+    resolving = bool(
+        not session_final
+        and actual_trade
+        and same_session
+        and phase == "close_resolution"
+    )
+    status = (
+        "session_final"
+        if session_final
+        else "resolving"
+        if resolving
+        else "unavailable"
+    )
+    price = quote.last_trade_price if quote is not None else None
+    authority_class = (
+        quote.lineage.authority.value if quote is not None else None
+    )
+    authority = {
+        "exchange": "official_exchange_realtime",
+        "broker": "broker_realtime",
+    }.get(str(authority_class or ""), "fallback" if quote is not None else None)
+    limitations = list(
+        dict.fromkeys((*result.limitations, *health.limitations))
+    )
+    if session_final:
+        limitations.append("OFFICIAL_DAILY_RECONCILIATION_PENDING")
+    return {
+        "contract_version": "omi.market.tw_session_close.v1",
+        "kind": "quote_session_close",
+        "status": status,
+        "available": session_final,
+        "price": _decimal_value(price) if session_final else None,
+        "candidate_price": _decimal_value(price) if resolving else None,
+        "trade_date": quote.trade_date if quote is not None else None,
+        "event_time": event_at,
+        "event_time_basis": "provider_event_time",
+        "confirmed_at": confirmed_at,
+        "confirmation_time_basis": "persisted_provider_receipt_time",
+        "provider": quote.lineage.provider if quote is not None else None,
+        "source": quote.lineage.source if quote is not None else None,
+        "authority": authority,
+        "authority_class": authority_class,
+        "finalization": status,
+        "official_daily": False,
+        "session": (
+            health.selected_session.value
+            if health.selected_session is not None
+            else phase
+        ),
+        "freshness": {
+            "status": "current" if session_final else status,
+            "is_current": session_final,
+            "expected_trade_date": presentation["trade_date"],
+            "latest_trade_date": quote.trade_date if quote is not None else None,
+            "provider_event_time": event_at,
+            "confirmed_at": confirmed_at,
+        },
+        "facts_usable": session_final,
+        "research_usable": session_final,
+        "decision_usable": session_final,
+        "reconciliation_status": "pending" if session_final else "unavailable",
+        "resolved_health": health.model_dump(mode="json"),
+        "dataset_health": (
+            result.dataset_health.model_dump(mode="json")
+            if result.dataset_health is not None
+            else None
+        ),
+        "lineage": (
+            quote.lineage.model_dump(mode="json")
+            if quote is not None
+            else None
+        ),
+        "limitations": list(dict.fromkeys(limitations)),
+    }
+
+
+def reconcile_taiwan_session_close(
+    projection: dict[str, object],
+    official_close_result: MarketDataResultV1,
+) -> dict[str, object]:
+    """Reconcile the market-owned session close with canonical official daily."""
+
+    reconciled = dict(projection)
+    bar = (
+        official_close_result.resolved.bars[-1]
+        if official_close_result.resolved.bars
+        else None
+    )
+    if not reconciled.get("available") or bar is None:
+        return reconciled
+    official_trade_date = bar.end_at.astimezone(TAIWAN_TZ).date()
+    if official_trade_date != reconciled.get("trade_date"):
+        return reconciled
+    try:
+        session_price = Decimal(str(reconciled.get("price")))
+    except (InvalidOperation, TypeError, ValueError):
+        session_price = None
+    reconciliation_status = (
+        "matched"
+        if session_price is not None and session_price == bar.close_price
+        else "mismatched"
+    )
+    reconciled.update(
+        {
+            "official_daily": True,
+            "finalization": "official_daily_confirmed",
+            "reconciliation_status": reconciliation_status,
+            "official_close_price": float(bar.close_price),
+            "official_close_trade_date": official_trade_date,
+        }
+    )
+    limitations = [
+        value
+        for value in list(reconciled.get("limitations") or [])
+        if value != "OFFICIAL_DAILY_RECONCILIATION_PENDING"
+    ]
+    if reconciliation_status == "mismatched":
+        limitations.append("SESSION_CLOSE_OFFICIAL_DAILY_MISMATCH")
+        reconciled["research_usable"] = False
+        reconciled["decision_usable"] = False
+    reconciled["limitations"] = list(dict.fromkeys(limitations))
+    return reconciled
+
+
 def read_taiwan_public_quote_projection(
     db: Session,
     *,
@@ -614,11 +943,17 @@ def read_taiwan_public_quote_projection(
 
 __all__ = [
     "PUBLIC_QUOTE_MAX_AGE_SECONDS",
+    "SESSION_CLOSE_MAX_AGE_SECONDS",
     "TaiwanPublicQuoteCandidateReader",
+    "acquire_taiwan_session_close",
     "acquire_taiwan_public_last_trade_quote",
     "build_taiwan_public_quote_requirement",
+    "build_taiwan_session_close_requirement",
     "project_taiwan_public_last_trade_quote",
+    "project_taiwan_session_close",
+    "reconcile_taiwan_session_close",
     "read_taiwan_public_quote_projection",
     "read_taiwan_public_last_trade_quote",
     "read_taiwan_quote_snapshot",
+    "read_taiwan_session_close",
 ]

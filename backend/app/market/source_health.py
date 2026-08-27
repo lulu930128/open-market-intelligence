@@ -18,6 +18,10 @@ from app.db.models import (
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.indices import get_market_index_summary
 from app.market.quote_depth import TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS
+from app.market.public_quote_platform import (
+    project_taiwan_session_close,
+    read_taiwan_session_close,
+)
 from app.market.quote_contract_health import (
     build_taiwan_quote_provider_availability,
     build_taiwan_quote_scheduler_contract,
@@ -284,7 +288,8 @@ def _realtime_observation_status(
             f"{expected_data_date.isoformat()}.",
             age_seconds,
         )
-    if phase == "regular" and age_seconds > stale_after_seconds:
+    live_observation_phases = {"regular", "closing_auction", "close_resolution"}
+    if phase in live_observation_phases and age_seconds > stale_after_seconds:
         return (
             "stale",
             False,
@@ -293,7 +298,7 @@ def _realtime_observation_status(
             f"threshold is {stale_after_seconds}s.",
             age_seconds,
         )
-    if phase == "regular":
+    if phase in live_observation_phases:
         return (
             "current",
             True,
@@ -382,6 +387,73 @@ def _stock_quote_entry(
         db,
         stock_id=stock_id,
     )
+    session_close_health: dict[str, Any] = {
+        "version": "tw.quote.session_close.health.v1",
+        "status": "not_requested" if stock_id is None else "unavailable",
+        "available": False,
+        "expected_trade_date": (
+            expected_data_date.isoformat() if expected_data_date else None
+        ),
+    }
+    if stock_id is not None:
+        try:
+            session_close_projection = project_taiwan_session_close(
+                read_taiwan_session_close(
+                    db,
+                    stock_id=stock_id,
+                    requested_at=current_time,
+                )
+            )
+            session_close_health = {
+                "version": "tw.quote.session_close.health.v1",
+                "status": session_close_projection.get("status"),
+                "available": session_close_projection.get("available") is True,
+                "trade_date": (
+                    session_close_projection["trade_date"].isoformat()
+                    if isinstance(session_close_projection.get("trade_date"), date)
+                    else session_close_projection.get("trade_date")
+                ),
+                "expected_trade_date": (
+                    expected_data_date.isoformat() if expected_data_date else None
+                ),
+                "event_time": (
+                    session_close_projection["event_time"].isoformat()
+                    if isinstance(session_close_projection.get("event_time"), datetime)
+                    else session_close_projection.get("event_time")
+                ),
+                "provider": session_close_projection.get("provider"),
+                "source": session_close_projection.get("source"),
+                "finalization": session_close_projection.get("finalization"),
+                "official_daily": session_close_projection.get("official_daily"),
+                "reconciliation_status": session_close_projection.get(
+                    "reconciliation_status"
+                ),
+                "limitations": session_close_projection.get("limitations") or [],
+            }
+        except ValueError as exc:
+            session_close_health["limitations"] = [
+                f"SESSION_CLOSE_HEALTH_UNAVAILABLE:{type(exc).__name__}"
+            ]
+    phase = str(calendar_status.get("phase") or "unknown")
+    if stock_id is not None and phase == "post_close":
+        if session_close_health.get("available") is True:
+            status_value = "current"
+            ok = True
+            data_quality = "ok"
+            reason = (
+                "Current-session close is confirmed from the centralized quote "
+                "resolver; official daily EOD may still be pending."
+            )
+        else:
+            status_value = "partial" if row_count > 0 else "empty"
+            ok = False
+            data_quality = "partial" if row_count > 0 else "empty"
+            reason = (
+                "A quote row exists, but the centralized resolver has not confirmed "
+                "a current-session close."
+                if row_count > 0
+                else "No current-session close evidence is available."
+            )
     if stock_id is None:
         scheduler_status = str(scheduler_contract.get("status") or "missing")
         status_value = (
@@ -436,6 +508,7 @@ def _stock_quote_entry(
             "request_live": request_live,
             "scheduler_contract": scheduler_contract,
             "provider_availability": provider_availability,
+            "session_close": session_close_health,
         },
     )
 

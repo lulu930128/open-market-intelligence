@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from app.market import intraday
+from app.market.schemas import IntradayTrendRead
 
 
 class IntradayTrendTests(unittest.TestCase):
@@ -66,6 +67,23 @@ class IntradayTrendTests(unittest.TestCase):
         self.assertFalse(hasattr(intraday, "_fetch_nstock_intraday"))
         self.assertFalse(hasattr(intraday, "_fetch_yahoo_intraday"))
         self.assertFalse(hasattr(intraday, "_upsert_market_intraday_bars"))
+
+    def test_public_schema_serializes_timezone_aware_intraday_points(self):
+        payload = {
+            "stock_id": "3711",
+            "source": "nstock_minute_stock_data",
+            "point_count": 1,
+            "points": [
+                {
+                    "time": "2026-08-27T13:30:00+08:00",
+                    "price": 605.0,
+                }
+            ],
+        }
+
+        public = IntradayTrendRead.model_validate(payload).model_dump(mode="json")
+
+        self.assertEqual(public["points"][0]["time"], "2026-08-27T13:30:00+08:00")
 
 
 if __name__ == "__main__":

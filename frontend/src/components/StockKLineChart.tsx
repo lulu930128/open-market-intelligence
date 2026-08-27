@@ -27,7 +27,11 @@ import {
 } from "@/components/stock-k-line/indicatorProjection";
 import { useT } from "@/i18n";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
-import { indicatorProjectionScope } from "@/components/stock-k-line/indicatorAuthority";
+import {
+  allowsCanonicalIndicatorFallback,
+  indicatorProjectionScope,
+  type CanonicalIndicatorAuthority,
+} from "@/components/stock-k-line/indicatorAuthority";
 
 export * from "@/components/stock-k-line/indicatorCatalog";
 
@@ -48,6 +52,7 @@ type Props = {
   priceMaximumFractionDigits?: number;
   latestPreviousClose?: number | null;
   timeLabelFormatter?: (value: string) => string;
+  canonicalIndicatorAuthority?: CanonicalIndicatorAuthority;
 };
 
 type Panel = {
@@ -105,9 +110,13 @@ function formatPrice(value: number | null | undefined, maximumFractionDigits = 2
   });
 }
 
-function formatLots(value: number | null | undefined) {
+export function formatStockKLineVolumeRaw(
+  value: number | null | undefined
+) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return new Intl.NumberFormat("zh-TW").format(Math.round(value / 1000));
+  return new Intl.NumberFormat("zh-TW", {
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 function formatTradeValue(value: number | null | undefined) {
@@ -273,16 +282,19 @@ export default function StockKLineChart({
   volumePanelLabel,
   volumeTooltipLabel,
   volumeValueKey = "volume",
-  volumeValueFormatter = formatLots,
+  volumeValueFormatter,
   priceMaximumFractionDigits = 2,
   latestPreviousClose = null,
   timeLabelFormatter = (value) => value,
+  canonicalIndicatorAuthority = "presentation",
 }: Props) {
   const t = useT();
   const formatChartPrice = (value: number | null | undefined) =>
     formatPrice(value, priceMaximumFractionDigits);
-  const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volumeLots");
+  const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volume");
   const resolvedVolumeTooltipLabel = volumeTooltipLabel ?? resolvedVolumePanelLabel;
+  const resolvedVolumeValueFormatter =
+    volumeValueFormatter ?? formatStockKLineVolumeRaw;
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [hoverPriceGuide, setHoverPriceGuide] = useState<HoverPriceGuideState | null>(null);
   const [visibleRange, setVisibleRange] = useState<VisibleRangeState>({
@@ -304,19 +316,32 @@ export default function StockKLineChart({
   );
   const getVolumeMetric = (point: ChartPoint | MergedPoint) =>
     volumeValueKey === "trade_value" ? point.trade_value : point.volume;
-  const projectionScope = indicatorProjectionScope(indicatorData);
-
-  const data = useMemo(
-    () =>
-      projectStockKLineData({
+  const { data, projectionScope } = useMemo(() => {
+    const scope = indicatorProjectionScope(indicatorData, chartData, {
+      indicators,
+      parameters: params,
+      canonicalAuthority: canonicalIndicatorAuthority,
+    });
+    return {
+      projectionScope: scope,
+      data: projectStockKLineData({
         chartData,
         indicatorData,
         benchmarkData,
         params,
         latestPreviousClose,
+        allowCanonicalFallback: allowsCanonicalIndicatorFallback(scope),
       }),
-    [benchmarkData, chartData, indicatorData, latestPreviousClose, params]
-  );
+    };
+  }, [
+    benchmarkData,
+    canonicalIndicatorAuthority,
+    chartData,
+    indicatorData,
+    indicators,
+    latestPreviousClose,
+    params,
+  ]);
 
   const dataKey = `${label}:${data.length}:${data[0]?.time ?? ""}:${data[data.length - 1]?.time ?? ""}`;
   const activeVisibleRange =
@@ -931,7 +956,7 @@ export default function StockKLineChart({
               <div>
                 <span className="text-omi-text-subtle">{resolvedVolumeTooltipLabel}</span>
                 <div className="font-semibold text-omi-text">
-                  {volumeValueFormatter(getVolumeMetric(hoveredPoint))}
+                  {resolvedVolumeValueFormatter(getVolumeMetric(hoveredPoint))}
                 </div>
               </div>
               {volumeValueKey !== "trade_value" ? (
@@ -1014,9 +1039,9 @@ export default function StockKLineChart({
               ) : null}
               {indicators.obv ? (
                 <div>
-                  <span className="text-omi-text-subtle">{t("chart.kline.obvLots")}</span>
+                  <span className="text-omi-text-subtle">{t("chart.kline.obv")}</span>
                   <div className={`font-semibold ${valueTone(hoveredPoint.obv)}`}>
-                    {formatLots(hoveredPoint.obv)}
+                    {formatStockKLineVolumeRaw(hoveredPoint.obv)}
                   </div>
                 </div>
               ) : null}

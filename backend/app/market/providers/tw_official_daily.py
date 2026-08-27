@@ -37,6 +37,7 @@ from app.market_data.provider_catalog import (
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
+    TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
 )
 
 from . import tpex, twse
@@ -44,10 +45,13 @@ from . import tpex, twse
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 TW_DAILY_DATASET_ID = "tw.daily.ohlcv"
+TW_FULL_MARKET_DAILY_DATASET_ID = "tw.daily.ohlcv.full_market"
 TW_BREADTH_DATASET_ID = "tw.market_breadth.daily"
 TWSE_DAILY_RESOURCE_ID = "STOCK_DAY_ALL"
+TWSE_RWD_DAILY_RESOURCE_ID = "MI_INDEX_ALLBUT0999"
 TPEX_DAILY_RESOURCE_ID = "tpex_mainboard_quotes"
 TWSE_DAILY_PARSER_VERSION = "twse_stock_day_all.v2"
+TWSE_RWD_DAILY_PARSER_VERSION = "twse_mi_index_allbut0999.v1"
 TPEX_DAILY_PARSER_VERSION = "tpex_mainboard_quotes.v2"
 _EMPTY_VALUES = {"", "-", "--", "nan", "null", "none"}
 
@@ -103,17 +107,40 @@ TWSE_OFFICIAL_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     resource_id=TWSE_DAILY_RESOURCE_ID,
     authority=AuthorityClass.EXCHANGE,
     target_kinds=(DescriptorTargetKind.INSTRUMENT, DescriptorTargetKind.DATASET),
-    dataset_ids=(TW_DAILY_DATASET_ID,),
+    dataset_ids=(TW_DAILY_DATASET_ID, TW_FULL_MARKET_DAILY_DATASET_ID),
     dataset_scope_keys=("TWSE",),
     venue_scope=("TWSE",),
     instrument_types=(InstrumentType.STOCK, InstrumentType.ETF),
     intervals=("1d",),
     acquisition_modes=(AcquisitionMode.FETCH,),
-    priority=10,
+    priority=20,
     can_produce_final=True,
     max_timeout_seconds=30,
     max_external_calls_per_attempt=1,
-    max_symbols_per_call=500,
+    max_symbols_per_call=5_000,
+    max_range_days=1,
+    allow_unknown_health=True,
+    limitations=("OFFICIAL_COMPLETED_SESSION_ONLY",),
+)
+
+TWSE_RWD_OFFICIAL_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key=twse.RWD_PROVIDER,
+    market=Market.TW,
+    capability_id="daily.ohlcv",
+    resource_id=TWSE_RWD_DAILY_RESOURCE_ID,
+    authority=AuthorityClass.EXCHANGE,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT, DescriptorTargetKind.DATASET),
+    dataset_ids=(TW_DAILY_DATASET_ID, TW_FULL_MARKET_DAILY_DATASET_ID),
+    dataset_scope_keys=("TWSE",),
+    venue_scope=("TWSE",),
+    instrument_types=(InstrumentType.STOCK, InstrumentType.ETF),
+    intervals=("1d",),
+    acquisition_modes=(AcquisitionMode.FETCH,),
+    priority=5,
+    can_produce_final=True,
+    max_timeout_seconds=30,
+    max_external_calls_per_attempt=1,
+    max_symbols_per_call=5_000,
     max_range_days=1,
     allow_unknown_health=True,
     limitations=("OFFICIAL_COMPLETED_SESSION_ONLY",),
@@ -126,7 +153,7 @@ TPEX_OFFICIAL_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     resource_id=TPEX_DAILY_RESOURCE_ID,
     authority=AuthorityClass.EXCHANGE,
     target_kinds=(DescriptorTargetKind.INSTRUMENT, DescriptorTargetKind.DATASET),
-    dataset_ids=(TW_DAILY_DATASET_ID,),
+    dataset_ids=(TW_DAILY_DATASET_ID, TW_FULL_MARKET_DAILY_DATASET_ID),
     dataset_scope_keys=("TPEX",),
     venue_scope=("TPEX",),
     instrument_types=(InstrumentType.STOCK, InstrumentType.ETF),
@@ -136,13 +163,14 @@ TPEX_OFFICIAL_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     can_produce_final=True,
     max_timeout_seconds=30,
     max_external_calls_per_attempt=1,
-    max_symbols_per_call=500,
+    max_symbols_per_call=5_000,
     max_range_days=1,
     allow_unknown_health=True,
     limitations=("OFFICIAL_COMPLETED_SESSION_ONLY",),
 )
 
 TW_OFFICIAL_DAILY_DESCRIPTORS = (
+    TWSE_RWD_OFFICIAL_DAILY_DESCRIPTOR,
     TWSE_OFFICIAL_DAILY_DESCRIPTOR,
     TPEX_OFFICIAL_DAILY_DESCRIPTOR,
 )
@@ -366,6 +394,120 @@ def parse_twse_official_daily_payload(
     )
 
 
+_TWSE_RWD_DAILY_REQUIRED_FIELDS = {
+    "證券代號",
+    "證券名稱",
+    "成交股數",
+    "成交筆數",
+    "成交金額",
+    "開盤價",
+    "最高價",
+    "最低價",
+    "收盤價",
+    "漲跌(+/-)",
+    "漲跌價差",
+}
+
+
+def _twse_rwd_daily_table(payload: dict[str, Any]) -> tuple[list[str], list[Any]]:
+    tables = payload.get("tables")
+    if not isinstance(tables, list):
+        raise ValueError("TWSE RWD official daily payload has no tables")
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        fields = table.get("fields")
+        rows = table.get("data")
+        if not isinstance(fields, list) or not isinstance(rows, list):
+            continue
+        normalized_fields = [str(value or "").strip() for value in fields]
+        if _TWSE_RWD_DAILY_REQUIRED_FIELDS <= set(normalized_fields):
+            return normalized_fields, rows
+    raise ValueError("TWSE RWD official daily table was not found")
+
+
+def _twse_rwd_signed_change(sign: Any, change: Any) -> Decimal | None:
+    value = _decimal(change)
+    if value is None:
+        return None
+    sign_text = str(sign or "")
+    if re.search(r"(?:>|^)\s*-\s*(?:<|$)", sign_text):
+        return -abs(value)
+    if re.search(r"(?:>|^)\s*\+\s*(?:<|$)", sign_text):
+        return abs(value)
+    return value
+
+
+def parse_twse_rwd_official_daily_payload(
+    raw_text: str,
+    *,
+    target_symbols: frozenset[str] | None = None,
+) -> OfficialDailyParseResult:
+    payload = json.loads(_repair_text(raw_text).lstrip("\ufeff").strip())
+    if not isinstance(payload, dict):
+        raise ValueError("TWSE RWD official daily payload must be a JSON object")
+    if str(payload.get("stat") or "").strip().upper() != "OK":
+        raise ValueError("TWSE RWD official daily payload status is not OK")
+    payload_date = _date(payload.get("date"))
+    fields, rows = _twse_rwd_daily_table(payload)
+    field_index = {name: index for index, name in enumerate(fields)}
+    issues: Counter[str] = Counter()
+    records: list[OfficialDailyRecord] = []
+    matched = 0
+    seen: set[tuple[str, date]] = set()
+
+    def value(row: list[Any], field: str) -> Any:
+        index = field_index[field]
+        return row[index] if index < len(row) else None
+
+    for row in rows:
+        if not isinstance(row, list):
+            issues["ROW_INVALID_SHAPE"] += 1
+            continue
+        symbol = _text(value(row, "證券代號"))
+        if target_symbols is not None and symbol not in target_symbols:
+            continue
+        matched += 1
+        record, issue = _record(
+            venue="TWSE",
+            trade_date=payload_date,
+            symbol=symbol,
+            instrument_name=_text(value(row, "證券名稱")),
+            open_price=_decimal(value(row, "開盤價")),
+            high_price=_decimal(value(row, "最高價")),
+            low_price=_decimal(value(row, "最低價")),
+            close_price=_decimal(value(row, "收盤價")),
+            trade_volume=_integer(value(row, "成交股數")),
+            trade_value=_integer(value(row, "成交金額")),
+            transaction_count=_integer(value(row, "成交筆數")),
+            price_change=_twse_rwd_signed_change(
+                value(row, "漲跌(+/-)"),
+                value(row, "漲跌價差"),
+            ),
+        )
+        if issue is not None:
+            issues[issue] += 1
+            continue
+        assert record is not None
+        key = (record.symbol, record.trade_date)
+        if key in seen:
+            issues["DUPLICATE_SYMBOL_DATE"] += 1
+            continue
+        seen.add(key)
+        records.append(record)
+    if target_symbols is not None:
+        missing_targets = target_symbols - {record.symbol for record in records}
+        if missing_targets:
+            issues["TARGET_SYMBOL_NOT_FOUND"] += len(missing_targets)
+    return OfficialDailyParseResult(
+        venue="TWSE",
+        input_row_count=len(rows),
+        matched_row_count=matched,
+        records=tuple(records),
+        issues=_issues(issues),
+    )
+
+
 def _first_tpex_table(payload: dict[str, Any]) -> list[Any]:
     tables = payload.get("tables") or payload.get("Tables") or []
     if isinstance(tables, list):
@@ -508,6 +650,8 @@ def official_daily_record_to_bar(
 def source_name_for_resource(resource_id: str) -> str:
     if resource_id == TWSE_DAILY_RESOURCE_ID:
         return TWSE_DAILY_TRADING_SOURCE_NAME
+    if resource_id == TWSE_RWD_DAILY_RESOURCE_ID:
+        return TWSE_RWD_DAILY_TRADING_SOURCE_NAME
     if resource_id == TPEX_DAILY_RESOURCE_ID:
         return TPEX_DAILY_QUOTES_SOURCE_NAME
     raise ValueError(f"unsupported Taiwan official daily resource: {resource_id}")
@@ -516,6 +660,8 @@ def source_name_for_resource(resource_id: str) -> str:
 def parser_version_for_resource(resource_id: str) -> str:
     if resource_id == TWSE_DAILY_RESOURCE_ID:
         return TWSE_DAILY_PARSER_VERSION
+    if resource_id == TWSE_RWD_DAILY_RESOURCE_ID:
+        return TWSE_RWD_DAILY_PARSER_VERSION
     if resource_id == TPEX_DAILY_RESOURCE_ID:
         return TPEX_DAILY_PARSER_VERSION
     raise ValueError(f"unsupported Taiwan official daily resource: {resource_id}")
@@ -524,6 +670,8 @@ def parser_version_for_resource(resource_id: str) -> str:
 def endpoint_for_resource(resource_id: str) -> str:
     if resource_id == TWSE_DAILY_RESOURCE_ID:
         return twse.DAILY_QUOTES_URL
+    if resource_id == TWSE_RWD_DAILY_RESOURCE_ID:
+        return twse.RWD_MI_INDEX_URL
     if resource_id == TPEX_DAILY_RESOURCE_ID:
         return tpex.DAILY_QUOTES_URL
     raise ValueError(f"unsupported Taiwan official daily resource: {resource_id}")
@@ -538,16 +686,21 @@ __all__ = [
     "TPEX_OFFICIAL_DAILY_DESCRIPTOR",
     "TPEX_OFFICIAL_BREADTH_DESCRIPTOR",
     "TW_BREADTH_DATASET_ID",
+    "TW_FULL_MARKET_DAILY_DATASET_ID",
     "TWSE_DAILY_PARSER_VERSION",
     "TWSE_DAILY_RESOURCE_ID",
     "TWSE_OFFICIAL_DAILY_DESCRIPTOR",
     "TWSE_OFFICIAL_BREADTH_DESCRIPTOR",
+    "TWSE_RWD_DAILY_PARSER_VERSION",
+    "TWSE_RWD_DAILY_RESOURCE_ID",
+    "TWSE_RWD_OFFICIAL_DAILY_DESCRIPTOR",
     "TW_OFFICIAL_BREADTH_DESCRIPTORS",
     "TW_DAILY_DATASET_ID",
     "TW_OFFICIAL_DAILY_DESCRIPTORS",
     "endpoint_for_resource",
     "official_daily_record_to_bar",
     "parse_tpex_official_daily_payload",
+    "parse_twse_rwd_official_daily_payload",
     "parse_twse_official_daily_payload",
     "parser_version_for_resource",
     "source_name_for_resource",

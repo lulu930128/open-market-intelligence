@@ -635,6 +635,62 @@ class TaiwanSourceHealthTests(unittest.TestCase):
             "pending",
         )
 
+    def test_post_close_quote_row_is_not_healthy_without_session_close_confirmation(
+        self,
+    ) -> None:
+        self.db.add(
+            StockMaster(
+                stock_id="3711",
+                stock_name="ASE Technology Holding",
+                market="TWSE",
+                instrument_type="stock",
+            )
+        )
+        self.db.add(
+            TaiwanStockQuoteSnapshot(
+                provider="twse_mis",
+                market="TWSE",
+                stock_id="3711",
+                session_phase="regular_live",
+                trade_date=date(2026, 8, 27),
+                quote_time=datetime(
+                    2026,
+                    8,
+                    27,
+                    11,
+                    49,
+                    55,
+                    tzinfo=ZoneInfo("Asia/Taipei"),
+                ),
+                last_price=601.0,
+                source="twse_mis_stock_info",
+                fetched_at=datetime(2026, 8, 27, 3, 50, tzinfo=timezone.utc),
+            )
+        )
+        self.db.commit()
+
+        with patch(
+            "app.market.source_health.get_market_index_summary",
+            return_value={"as_of": "2026-08-27T13:30:00+08:00", "indices": []},
+        ):
+            health = build_taiwan_source_health(
+                self.db,
+                stock_id="3711",
+                dataset="taiwan_stock_quote_snapshot",
+                now=datetime(2026, 8, 27, 14, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+            )
+
+        entry = health["entries"][0]
+        self.assertEqual(entry["status"], "partial")
+        self.assertFalse(entry["ok"])
+        self.assertEqual(
+            entry["health_dimensions"]["session_close"]["status"],
+            "unavailable",
+        )
+        self.assertFalse(
+            entry["health_dimensions"]["session_close"]["available"]
+        )
+
     def test_minute_state_health_is_partial_when_latest_minute_misses_tpex(self) -> None:
         minute_at = datetime(2026, 7, 22, 13, 30, tzinfo=ZoneInfo("Asia/Taipei"))
         self.db.add(

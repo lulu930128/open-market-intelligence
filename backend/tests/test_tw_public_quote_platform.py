@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     Base,
     DataQualityCheck,
+    MarketDailyPrice,
     RawFetchResult,
     SourceRegistry,
     StockMaster,
@@ -30,12 +31,18 @@ from app.market.public_quote_acquisition import (
     TaiwanPublicQuoteAcquisitionExecutor,
 )
 from app.market.public_quote_platform import (
+    acquire_taiwan_session_close,
     acquire_taiwan_public_last_trade_quote,
     project_taiwan_public_last_trade_quote,
+    project_taiwan_session_close,
     read_taiwan_public_last_trade_quote,
+    read_taiwan_session_close,
 )
 from app.market.public_quote_repository import TaiwanPublicQuoteRepository
+from app.market.quote_depth import read_taiwan_quote_evidence_projection
+from app.market.schemas import TaiwanStockQuoteDepthRead
 from app.market.trading_calendar import TAIWAN_TZ
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 from app.market_data.contracts import (
     DatasetHealthStatus,
     EvidenceFreshness,
@@ -86,6 +93,12 @@ def db() -> Session:
                 market="TPEX",
                 instrument_type="stock",
             ),
+            StockMaster(
+                stock_id="3711",
+                stock_name="日月光投控",
+                market="TWSE",
+                instrument_type="stock",
+            ),
         ]
     )
     session.commit()
@@ -105,6 +118,12 @@ def _raw(record: dict) -> str:
     raw = base64.b64decode(record["raw_text_base64"]).decode("utf-8")
     assert hashlib.sha256(raw.encode("utf-8")).hexdigest() == record["sha256"]
     return raw
+
+
+def _raw_with_message_updates(record: dict, **updates: str) -> str:
+    payload = json.loads(_raw(record))
+    payload["msgArray"][0].update(updates)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _instrument(record: dict) -> InstrumentKey:
@@ -302,6 +321,7 @@ def test_intraday_production_path_no_longer_uses_mis_quote_as_bar_fallback() -> 
     assert "_fetch_mis_message" not in source
     assert "_fetch_mis_snapshot" not in source
     assert "_apply_mis_volume_adjustment" not in source
+    assert "read_taiwan_session_close" in attach_source
     assert "read_taiwan_public_last_trade_quote" in attach_source
     assert "acquire_taiwan_public_last_trade_quote" not in attach_source
 
@@ -361,6 +381,470 @@ def test_require_live_post_close_is_zero_io_and_policy_unsatisfied(
     assert not result.acquisition.attempted
     assert "SESSION_NOT_SUPPORTED_BY_RESOURCE" in result.acquisition.limitations
     assert db.query(RawFetchResult).count() == 0
+
+
+def test_session_close_reuses_receipt_and_quote_upsert_then_survives_cold_read(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    raw_text = _raw(record)
+
+    resolving = acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 13, 31, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            raw_text,
+            datetime(2026, 8, 25, 5, 31, tzinfo=timezone.utc),
+        ),
+    )
+    resolving_projection = project_taiwan_session_close(resolving)
+    assert resolving_projection["status"] == "resolving"
+    assert resolving_projection["available"] is False
+    assert resolving_projection["candidate_price"] == 2400.0
+    assert db.query(RawFetchResult).count() == 1
+    assert db.query(TaiwanStockQuoteSnapshot).count() == 1
+    assert db.query(TaiwanStockQuoteSnapshot).one().market_session == "close_resolution"
+
+    finalized = acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            raw_text,
+            datetime(2026, 8, 25, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    projection = project_taiwan_session_close(finalized)
+    assert finalized.resolved.health.status is ResolvedEvidenceStatus.SELECTED
+    assert projection["status"] == "session_final"
+    assert projection["available"] is True
+    assert projection["price"] == 2400.0
+    assert projection["trade_date"] == datetime(2026, 8, 25).date()
+    assert projection["event_time"] == datetime(
+        2026, 8, 25, 13, 30, tzinfo=TAIWAN_TZ
+    )
+    assert projection["confirmed_at"] == datetime(
+        2026, 8, 25, 5, 34, tzinfo=timezone.utc
+    )
+    assert projection["official_daily"] is False
+    assert projection["reconciliation_status"] == "pending"
+    assert db.query(RawFetchResult).count() == 2
+    assert db.query(TaiwanStockQuoteSnapshot).count() == 1
+    row = db.query(TaiwanStockQuoteSnapshot).one()
+    assert row.market_session == "post_close"
+    assert row.raw_result_id == 2
+
+    intraday_projection = intraday._apply_platform_quote_contract(
+        {
+            "stock_id": "2330",
+            "symbol": "2330.TW",
+            "source": "unavailable",
+            "point_count": 0,
+            "points": [],
+        },
+        finalized,
+    )
+    assert intraday_projection["trade_date"] == datetime(2026, 8, 25).date()
+    assert intraday_projection["current_trade_available"] is True
+    assert intraday_projection["current_observation"]["value"] == 2400.0
+    assert intraday_projection["current_observation"]["price_semantics"] == (
+        "completed_session_close"
+    )
+    assert intraday_projection["current_observation"]["freshness_status"] == (
+        "session_final"
+    )
+    assert intraday_projection["source_components"][-1]["domain"] == (
+        "session_close"
+    )
+
+    db.expire_all()
+    cold = read_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 14, 0, tzinfo=TAIWAN_TZ),
+    )
+    cold_projection = project_taiwan_session_close(cold)
+    assert cold.requirement.realtime_policy is RealtimePolicy.CACHE_ONLY
+    assert cold.acquisition.external_calls == 0
+    assert cold_projection["status"] == "session_final"
+    assert cold_projection["price"] == 2400.0
+
+    outward = read_taiwan_quote_evidence_projection(
+        db=db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 14, 0, tzinfo=TAIWAN_TZ),
+    )
+    assert outward["price_available"] is True
+    assert outward["last_price"] == 2400.0
+    assert outward["quote_semantics"] == "completed_session_close"
+    assert outward["official_close_status"] == "pending"
+    assert outward["official_close_available"] is False
+    public_outward = TaiwanStockQuoteDepthRead.model_validate(outward)
+    assert public_outward.session_close_available is True
+    assert public_outward.session_close_status == "session_final"
+    assert public_outward.session_close_price == 2400.0
+    assert public_outward.session_close_trade_date == datetime(2026, 8, 25).date()
+    assert outward["data_core_components"]["quote.session_close"]["status"] == (
+        "session_final"
+    )
+
+
+def test_session_close_remains_final_before_next_presentation_rollover(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    requested_at = datetime(2026, 8, 26, 0, 51, tzinfo=TAIWAN_TZ)
+
+    result = acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=requested_at,
+        acquisition=_executor(
+            _raw(record),
+            datetime(2026, 8, 25, 16, 51, tzinfo=timezone.utc),
+        ),
+    )
+    projection = project_taiwan_session_close(result)
+
+    assert result.requirement.session is MarketSession.POST_CLOSE
+    assert projection["status"] == "session_final"
+    assert projection["available"] is True
+    assert projection["trade_date"] == datetime(2026, 8, 25).date()
+    assert projection["price"] == 2400.0
+
+
+def test_post_close_receipt_cannot_promote_an_earlier_last_trade(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    result = acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw_with_message_updates(record, t="13:20:00", **{"%": "13:20:00"}),
+            datetime(2026, 8, 25, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    projection = project_taiwan_session_close(result)
+    assert projection["status"] == "unavailable"
+    assert projection["available"] is False
+    assert projection["price"] is None
+    assert projection["event_time"] == datetime(
+        2026, 8, 25, 13, 20, tzinfo=TAIWAN_TZ
+    )
+    assert "SESSION_CLOSE_EVENT_TIME_INVALID" in projection["limitations"]
+
+
+def test_post_close_trial_cannot_be_promoted_to_session_close(
+    db: Session,
+) -> None:
+    record = _records()["6173"]
+    result = acquire_taiwan_session_close(
+        db,
+        stock_id="6173",
+        requested_at=datetime(2026, 8, 21, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw_with_message_updates(
+                record,
+                t="13:30:00",
+                ts="1",
+                **{"%": "13:30:00"},
+            ),
+            datetime(2026, 8, 21, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    projection = project_taiwan_session_close(result)
+    assert projection["status"] == "unavailable"
+    assert projection["available"] is False
+    assert projection["price"] is None
+    assert result.candidate_rejections[0].missing_fields == ("last_trade_price",)
+
+
+def test_future_event_time_cannot_be_promoted_to_session_close(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    result = acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw_with_message_updates(
+                record,
+                t="13:35:00",
+                **{"%": "13:35:00"},
+            ),
+            datetime(2026, 8, 25, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    projection = project_taiwan_session_close(result)
+    assert projection["status"] == "unavailable"
+    assert projection["available"] is False
+    assert {
+        "SESSION_CLOSE_EVENT_TIME_INVALID",
+        "PUBLIC_LAST_TRADE_REQUIRED_FIELD_MISSING",
+    }.intersection(projection["limitations"])
+
+
+def test_cumulative_volume_regression_cannot_finalize_same_trade_event(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    resolving = acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 13, 31, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw_with_message_updates(record, v="13000"),
+            datetime(2026, 8, 25, 5, 31, tzinfo=timezone.utc),
+        ),
+    )
+    assert project_taiwan_session_close(resolving)["status"] == "resolving"
+    first_row = db.query(TaiwanStockQuoteSnapshot).one()
+    first_raw_result_id = first_row.raw_result_id
+    first_volume = first_row.total_volume_lots
+
+    regressed = acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw_with_message_updates(record, v="12000"),
+            datetime(2026, 8, 25, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    projection = project_taiwan_session_close(regressed)
+    row = db.query(TaiwanStockQuoteSnapshot).one()
+    assert projection["status"] == "unavailable"
+    assert row.market_session == "close_resolution"
+    assert row.raw_result_id == first_raw_result_id
+    assert row.total_volume_lots == first_volume
+    assert db.query(RawFetchResult).count() == 2
+    assert (
+        "PUBLIC_QUOTE_CUMULATIVE_VOLUME_REGRESSION_REJECTED"
+        in regressed.persistence.limitations
+    )
+
+
+def test_non_trading_day_reads_previous_session_without_false_today_promotion(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    acquired = acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 28, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw_with_message_updates(
+                record,
+                d="20260828",
+                **{"^": "20260828"},
+            ),
+            datetime(2026, 8, 28, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    assert project_taiwan_session_close(acquired)["status"] == "session_final"
+
+    weekend = project_taiwan_session_close(
+        read_taiwan_session_close(
+            db,
+            stock_id="2330",
+            requested_at=datetime(2026, 8, 29, 10, 0, tzinfo=TAIWAN_TZ),
+        )
+    )
+    assert weekend["status"] == "session_final"
+    assert weekend["trade_date"] == datetime(2026, 8, 28).date()
+    assert weekend["freshness"]["expected_trade_date"] == datetime(
+        2026, 8, 28
+    ).date()
+
+
+def test_official_daily_reconciles_session_close_and_wins_on_mismatch(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw(record),
+            datetime(2026, 8, 25, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    source = SourceRegistry(
+        source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+        source_type="api",
+        category="market_data",
+        priority=10,
+        parser_type="twse_daily_trading",
+        reliability_level="official",
+    )
+    db.add(source)
+    db.flush()
+    raw = RawFetchResult(
+        source_id=source.id,
+        fetched_at=datetime(2026, 8, 25, 7, 16, tzinfo=timezone.utc),
+        content_hash="official-20260825",
+        parser_version="twse.stock_day_all.v1",
+        raw_text="[]",
+    )
+    db.add(raw)
+    db.flush()
+    daily = MarketDailyPrice(
+        source_id=source.id,
+        raw_result_id=raw.id,
+        stock_id="2330",
+        trade_date=datetime(2026, 8, 25).date(),
+        open_price=2355.0,
+        high_price=2400.0,
+        low_price=2350.0,
+        close_price=2400.0,
+        trade_volume=12_789_000,
+    )
+    db.add(daily)
+    db.commit()
+
+    matched = read_taiwan_quote_evidence_projection(
+        db=db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 15, 20, tzinfo=TAIWAN_TZ),
+    )
+    matched_session = matched["data_core_components"]["quote.session_close"]
+    assert matched_session["reconciliation_status"] == "matched"
+    assert matched_session["official_daily"] is True
+    assert matched_session["finalization"] == "official_daily_confirmed"
+    assert matched["official_close_available"] is True
+    assert float(matched["last_price"]) == 2400.0
+
+    daily.close_price = 2399.0
+    db.commit()
+    mismatched = read_taiwan_quote_evidence_projection(
+        db=db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 15, 21, tzinfo=TAIWAN_TZ),
+    )
+    mismatched_session = mismatched["data_core_components"][
+        "quote.session_close"
+    ]
+    assert mismatched_session["reconciliation_status"] == "mismatched"
+    assert mismatched_session["decision_usable"] is False
+    assert "SESSION_CLOSE_OFFICIAL_DAILY_MISMATCH" in mismatched_session[
+        "limitations"
+    ]
+    assert float(mismatched["last_price"]) == 2399.0
+    assert mismatched["quote_semantics"] == "official_close"
+
+
+def test_3711_acceptance_is_independent_of_fixed_capture_universe(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    raw_text = _raw_with_message_updates(
+        record,
+        c="3711",
+        ch="3711.tw",
+        d="20260827",
+        t="13:30:00",
+        z="605.0000",
+        y="592.0000",
+        o="600.0000",
+        h="608.0000",
+        l="590.0000",
+        tv="100",
+        s="100",
+        v="1000",
+        n="日月光投控",
+        nf="日月光投資控股股份有限公司",
+        **{"@": "3711.tw", "%": "13:30:00", "^": "20260827"},
+    )
+    source = SourceRegistry(
+        source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+        source_type="api",
+        category="market_data",
+        priority=10,
+        parser_type="twse_daily_trading",
+        reliability_level="official",
+    )
+    db.add(source)
+    db.flush()
+    official_raw = RawFetchResult(
+        source_id=source.id,
+        fetched_at=datetime(2026, 8, 27, 1, 0, tzinfo=timezone.utc),
+        content_hash="3711-previous-official",
+        parser_version="twse.stock_day_all.v1",
+        raw_text="[]",
+    )
+    db.add(official_raw)
+    db.flush()
+    db.add(
+        MarketDailyPrice(
+            source_id=source.id,
+            raw_result_id=official_raw.id,
+            stock_id="3711",
+            trade_date=datetime(2026, 8, 26).date(),
+            open_price=588.0,
+            high_price=595.0,
+            low_price=585.0,
+            close_price=592.0,
+            trade_volume=9_000_000,
+        )
+    )
+    db.commit()
+
+    acquired = acquire_taiwan_session_close(
+        db,
+        stock_id="3711",
+        requested_at=datetime(2026, 8, 27, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            raw_text,
+            datetime(2026, 8, 27, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    assert project_taiwan_session_close(acquired)["price"] == 605.0
+
+    outward = read_taiwan_quote_evidence_projection(
+        db=db,
+        stock_id="3711",
+        requested_at=datetime(2026, 8, 27, 14, 0, tzinfo=TAIWAN_TZ),
+    )
+    session_close = outward["data_core_components"]["quote.session_close"]
+    official_close = outward["data_core_components"]["quote.official_close"]
+    assert outward["last_price"] == 605.0
+    assert outward["quote_semantics"] == "completed_session_close"
+    assert session_close["trade_date"] == datetime(2026, 8, 27).date()
+    assert session_close["finalization"] == "session_final"
+    assert official_close["trade_date"] == datetime(2026, 8, 26).date()
+    assert float(official_close["price"]) == 592.0
+    assert outward["official_close_status"] == "pending"
+
+
+def test_tpex_actual_trade_can_be_confirmed_as_session_close(db: Session) -> None:
+    record = _records()["6173"]
+    result = acquire_taiwan_session_close(
+        db,
+        stock_id="6173",
+        requested_at=datetime(2026, 8, 21, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw_with_message_updates(
+                record,
+                t="13:30:00",
+                ts="0",
+                z="221.0000",
+                tv="10",
+                s="10",
+                v="100",
+                **{"%": "13:30:00"},
+            ),
+            datetime(2026, 8, 21, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    projection = project_taiwan_session_close(result)
+    assert projection["status"] == "session_final"
+    assert projection["price"] == 221.0
+    assert projection["authority"] == "official_exchange_realtime"
 
 
 def test_preopen_trial_is_persisted_but_cannot_satisfy_last_trade(

@@ -8,14 +8,22 @@ from datetime import date, datetime
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketDailyPrice, RawFetchResult, SourceRegistry, StockMaster
+from app.db.models import (
+    MarketDailyPrice,
+    MarketDatasetCoverageCheckpoint,
+    RawFetchResult,
+    SourceRegistry,
+    StockMaster,
+)
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market_data.contracts import DatasetHealth
 from app.market_data.registry import DATASET_REGISTRY, evaluate_dataset_health
+from app.market_data.eod_coverage import TW_DATASET_ID, TW_SCOPE_KEY
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
+    TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
 )
 
 
@@ -36,7 +44,12 @@ def _canonical_daily_filter():
     return or_(
         and_(
             func.upper(StockMaster.market) == "TWSE",
-            SourceRegistry.source_name == TWSE_DAILY_TRADING_SOURCE_NAME,
+            SourceRegistry.source_name.in_(
+                (
+                    TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+                    TWSE_DAILY_TRADING_SOURCE_NAME,
+                )
+            ),
         ),
         and_(
             func.upper(StockMaster.market) == "TPEX",
@@ -64,6 +77,7 @@ def _health(
     latest_date: date | None,
     expected_date: date | None,
     checked_at: datetime,
+    partial: bool = False,
 ) -> DatasetHealth:
     return evaluate_dataset_health(
         DATASET_REGISTRY.get(TW_DAILY_DATASET_ID),
@@ -71,6 +85,25 @@ def _health(
         latest_date=latest_date,
         checked_at=checked_at,
         eligible=True,
+        partial=partial,
+    )
+
+
+def _full_market_checkpoint(
+    db: Session,
+    *,
+    expected_date: date,
+) -> MarketDatasetCoverageCheckpoint | None:
+    return (
+        db.query(MarketDatasetCoverageCheckpoint)
+        .filter(MarketDatasetCoverageCheckpoint.dataset_id == TW_DATASET_ID)
+        .filter(MarketDatasetCoverageCheckpoint.scope_key == TW_SCOPE_KEY)
+        .filter(MarketDatasetCoverageCheckpoint.expected_trade_date == expected_date)
+        .order_by(
+            MarketDatasetCoverageCheckpoint.checked_at.desc(),
+            MarketDatasetCoverageCheckpoint.id.desc(),
+        )
+        .first()
     )
 
 
@@ -94,6 +127,23 @@ def read_taiwan_daily_freshness(
         func.max(MarketDailyPrice.updated_at),
     ).one()
     resolved_expected = expected_date or expected_daily_price_date(now=now)
+    limitations: tuple[str, ...] = ()
+    partial = False
+    if normalized_stock_id is None and resolved_expected is not None:
+        checkpoint = _full_market_checkpoint(
+            db,
+            expected_date=resolved_expected,
+        )
+        if checkpoint is not None:
+            latest_date = checkpoint.latest_data_date
+            partial = checkpoint.status == "partial"
+            limitations = (
+                "FULL_MARKET_COVERAGE_CHECKPOINT_APPLIED",
+                f"FULL_MARKET_CURRENT_{int(checkpoint.current_count or 0)}_OF_{int(checkpoint.universe_count or 0)}",
+                f"FULL_MARKET_PARTIAL_{int(checkpoint.partial_count or 0)}",
+                f"FULL_MARKET_STALE_{int(checkpoint.stale_count or 0)}",
+                f"FULL_MARKET_MISSING_{int(checkpoint.missing_count or 0)}",
+            )
     return TaiwanDailyFreshnessEvidence(
         stock_id=normalized_stock_id,
         latest_date=latest_date,
@@ -103,8 +153,9 @@ def read_taiwan_daily_freshness(
             latest_date=latest_date,
             expected_date=resolved_expected,
             checked_at=now,
+            partial=partial,
         ),
-        limitations=(),
+        limitations=limitations,
     )
 
 

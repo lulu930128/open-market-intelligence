@@ -136,7 +136,7 @@ def _health(
     )
 
 
-def _refresh() -> RefreshRequirementV1:
+def _refresh(*, max_symbols: int = 500) -> RefreshRequirementV1:
     return RefreshRequirementV1(
         dataset_id="tw.daily.ohlcv.official",
         target=DatasetTarget(
@@ -151,7 +151,7 @@ def _refresh() -> RefreshRequirementV1:
         max_provider_attempts=2,
         max_external_calls=2,
         timeout_seconds=60,
-        max_symbols=500,
+        max_symbols=max_symbols,
         max_range_days=1,
         postcondition="Persisted official daily rows are reread and resolved.",
     )
@@ -334,6 +334,38 @@ def test_refresh_planning_uses_dataset_resource_and_never_subscribes() -> None:
     assert plan.routes[0].subscription_allowed is False
     assert plan.routes[0].max_range_days == 1
     assert plan.skipped_resources[0].reason_code == "DATASET_NOT_SUPPORTED_BY_RESOURCE"
+
+
+@pytest.mark.parametrize("universe_size", [887, 1086])
+def test_refresh_route_preserves_full_market_bulk_symbol_bound(
+    universe_size: int,
+) -> None:
+    descriptor = ProviderCapabilityDescriptorV2(
+        provider_key="fake_official",
+        market=Market.TW,
+        capability_id="daily.ohlcv",
+        resource_id="official_bulk",
+        authority=AuthorityClass.EXCHANGE,
+        target_kinds=(DescriptorTargetKind.DATASET,),
+        dataset_ids=("tw.daily.ohlcv.official",),
+        dataset_scope_keys=("TWSE",),
+        venue_scope=("TWSE",),
+        acquisition_modes=(AcquisitionMode.FETCH,),
+        can_produce_final=True,
+        max_external_calls_per_attempt=1,
+        max_symbols_per_call=5_000,
+        max_range_days=1,
+    )
+
+    plan = plan_refresh_acquisition_v1(
+        _refresh(max_symbols=universe_size),
+        [descriptor],
+        [_health("fake_official")],
+    )
+
+    assert len(plan.routes) == 1
+    assert plan.routes[0].max_symbols == universe_size
+    assert plan.routes[0].max_external_calls == 1
 
 
 def test_duplicate_provider_resource_descriptor_is_rejected() -> None:

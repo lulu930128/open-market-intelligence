@@ -91,6 +91,7 @@ import {
   priceLimitBoxClass,
   priceLimitTone,
   professionalIntradayMinutes,
+  resolveTodayHeadlineValues,
   safeRatio,
   summarizeIntradayPoints,
   valueTone,
@@ -103,6 +104,7 @@ import type {
   LoadState,
   ProfessionalTimeframe,
   RevenueView,
+  TechnicalReport,
   Timeframe,
 } from "@/components/stock-detail/StockDetailDataViews";
 import { emitDataStatusEvent, type DataStatusLevel } from "@/lib/dataStatusEvents";
@@ -136,6 +138,7 @@ type Props = {
   instrumentType?: string | null;
   initialChartData?: ChartPoint[];
   initialChartIntradayOverlay?: OhlcIntradayOverlay | null;
+  initialChartVolumeUnit?: string | null;
   initialIndicatorData?: StockIndicatorPoint[];
   watchlistRankingPanel?: ReactNode;
   marketIndexSummary?: MarketIndexSummary | null;
@@ -146,6 +149,19 @@ type Props = {
 
 function normalizeIsoDate(value: string | null | undefined) {
   return value ? value.slice(0, 10) : null;
+}
+
+function backendCurrentPartialIndicator(value: unknown): StockIndicatorPoint | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.time !== "string" ||
+    typeof candidate.close !== "number" ||
+    candidate.calculation_role !== "backend_authoritative"
+  ) {
+    return null;
+  }
+  return candidate as unknown as StockIndicatorPoint;
 }
 
 function corporateEventTone(eventType: string) {
@@ -291,6 +307,7 @@ export default function StockDetailPanel({
   instrumentType = null,
   initialChartData = [],
   initialChartIntradayOverlay = null,
+  initialChartVolumeUnit = "shares",
   initialIndicatorData = [],
   watchlistRankingPanel,
   marketIndexSummary,
@@ -610,6 +627,7 @@ export default function StockDetailPanel({
       benchmarkIndexId,
       chartData,
       chartIntradayOverlay,
+      chartVolumeUnit,
       chartStockId,
       chartTimeframe,
       indicatorData,
@@ -634,6 +652,7 @@ export default function StockDetailPanel({
     effectiveTimeframe,
     initialChartData,
     initialChartIntradayOverlay,
+    initialChartVolumeUnit,
     initialIndicatorData,
     isIndexProduct,
     onDailyPricesChanged,
@@ -731,9 +750,22 @@ export default function StockDetailPanel({
   }
 
   const indicatorForTimeframe = useMemo(() => {
-    if (effectiveTimeframe === "daily") return indicatorData.slice(-180);
+    if (effectiveTimeframe === "daily") {
+      const pointsByDate = new Map(
+        indicatorData.map((point) => [normalizeIsoDate(point.time), point])
+      );
+      const currentPartial = backendCurrentPartialIndicator(
+        backendTechnicalReport?.data.current_partial_indicator
+      );
+      if (currentPartial) {
+        pointsByDate.set(normalizeIsoDate(currentPartial.time), currentPartial);
+      }
+      return [...pointsByDate.values()]
+        .sort((left, right) => left.time.localeCompare(right.time))
+        .slice(-180);
+    }
     return [];
-  }, [effectiveTimeframe, indicatorData]);
+  }, [backendTechnicalReport, effectiveTimeframe, indicatorData]);
 
   const latestIndicator = indicatorData[indicatorData.length - 1] ?? null;
   const latestChart = chartData[chartData.length - 1] ?? null;
@@ -761,6 +793,17 @@ export default function StockDetailPanel({
   const latestTodayDisplayPrice = finiteNumber(todayCurrentObservation?.value)
     ? todayCurrentObservation.value
     : latestToday?.price ?? null;
+  const officialCompletedClose =
+    quoteDepth?.official_close_available === true &&
+    finiteNumber(quoteDepth.official_close_price)
+      ? quoteDepth.official_close_price
+      : null;
+  const confirmedSessionClose =
+    quoteDepth?.session_close_available === true &&
+    finiteNumber(quoteDepth.session_close_price)
+      ? quoteDepth.session_close_price
+      : null;
+  const completedSessionHeadline = officialCompletedClose ?? confirmedSessionClose;
   const todayStats = useMemo(
     () =>
       summarizeIntradayPoints(todayTrend, {
@@ -872,10 +915,6 @@ export default function StockDetailPanel({
     (professionalIsIntraday || currentChartReady);
   const professionalTimeframeLabel = t(`timeframes.${professionalTimeframe}`);
   const latestProfessionalChart = professionalChartData[professionalChartData.length - 1] ?? null;
-  const latestClose =
-    effectiveTimeframe === "today"
-      ? latestTodayDisplayPrice
-      : latestCurrentIndicator?.close ?? latestChart?.close ?? null;
   const dailyPreviousClose =
     latestCurrentIndicator?.close !== null &&
     latestCurrentIndicator?.close !== undefined &&
@@ -899,13 +938,32 @@ export default function StockDetailPanel({
     chartPreviousClose !== undefined
       ? latestChart.close - chartPreviousClose
       : null;
-  const latestChange =
-    effectiveTimeframe === "today" && latestTodayDisplayPrice !== null && todayReferenceClose
-      ? latestTodayDisplayPrice - todayReferenceClose
+  const todayHeadlineValues = resolveTodayHeadlineValues({
+    currentPrice: latestTodayDisplayPrice,
+    currentReferenceClose: todayReferenceClose,
+    completedSessionPrice: completedSessionHeadline,
+    completedSessionReferenceClose: quoteDepth?.previous_close,
+  });
+  const todayHeadlinePrice: number | null = todayHeadlineValues[0];
+  const todayHeadlineChange: number | null = todayHeadlineValues[1];
+  const todayHeadlineChangePct: number | null = todayHeadlineValues[2];
+  const latestClose: number | null =
+    effectiveTimeframe === "today"
+      ? todayHeadlinePrice
+      : completedSessionHeadline ?? latestCurrentIndicator?.close ?? latestChart?.close ?? null;
+  const latestChange: number | null =
+    effectiveTimeframe === "today"
+      ? todayHeadlineChange
+      : completedSessionHeadline !== null && finiteNumber(quoteDepth?.previous_close)
+        ? completedSessionHeadline - quoteDepth.previous_close
       : latestCurrentIndicator?.change ?? chartChange;
-  const latestChangePct =
-    effectiveTimeframe === "today" && latestTodayDisplayPrice !== null && todayReferenceClose
-      ? ((latestTodayDisplayPrice - todayReferenceClose) / todayReferenceClose) * 100
+  const latestChangePct: number | null =
+    effectiveTimeframe === "today"
+      ? todayHeadlineChangePct
+      : completedSessionHeadline !== null &&
+          finiteNumber(quoteDepth?.previous_close) &&
+          quoteDepth.previous_close !== 0
+        ? ((completedSessionHeadline - quoteDepth.previous_close) / quoteDepth.previous_close) * 100
       : latestCurrentIndicator?.change_pct ?? chartChangePct;
   const professionalLatestClose =
     chartFocusMode && professionalIsIntraday
@@ -977,78 +1035,42 @@ export default function StockDetailPanel({
       ? latestChangePct - primaryMarketIndex.change_pct
       : null;
 
-  const fallbackTechnicalReport = useMemo(
-    () =>
-      buildFallbackTechnicalReport({
-        chartData,
-        currentChartReady,
-        effectiveTimeframe,
-        financialMetric,
-        institutional,
-        institutionalHistory,
-        isIndexProduct,
-        largeHolderLots,
-        latestChangePct,
-        latestChartVolume: latestChart?.volume ?? null,
-        latestClose,
-        latestCurrentIndicator,
-        latestToday,
-        loadState,
-        ma5,
-        ma20,
-        ma60,
-        margin,
-        monthlyRevenue,
-        primaryMarketIndex,
-        priceVsMa20,
-        relativeToPrimaryIndex,
-        shareholding,
-        t,
-        todayStats,
-        todayReferenceClose,
-        todayTrendLength: todayTrend.length,
-        totalInstitutionalNet,
-        volumeMa20,
-        volumeRatio,
-        volumeRatioPct,
-      }),
-    [
-      chartData,
-      currentChartReady,
-      effectiveTimeframe,
-      financialMetric,
-      institutional,
-      institutionalHistory,
-      isIndexProduct,
-      largeHolderLots,
-      latestChangePct,
-      latestChart?.volume,
-      latestClose,
-      latestCurrentIndicator,
-      latestToday,
-      loadState,
-      ma5,
-      ma20,
-      ma60,
-      margin,
-      monthlyRevenue,
-      primaryMarketIndex,
-      priceVsMa20,
-      relativeToPrimaryIndex,
-      shareholding,
-      t,
-      todayStats,
-      todayReferenceClose,
-      todayTrend.length,
-      totalInstitutionalNet,
-      volumeMa20,
-      volumeRatio,
-      volumeRatioPct,
-    ]
-  );
-  const localizedFallbackTechnicalReport = useMemo(
-    () => localizeTechnicalReport(fallbackTechnicalReport, t),
-    [fallbackTechnicalReport, t]
+  const fallbackTechnicalReport = buildFallbackTechnicalReport({
+    chartData,
+    currentChartReady,
+    effectiveTimeframe,
+    financialMetric,
+    institutional,
+    institutionalHistory,
+    isIndexProduct,
+    largeHolderLots,
+    latestChangePct,
+    latestChartVolume: latestChart?.volume ?? null,
+    latestClose,
+    latestCurrentIndicator,
+    latestToday,
+    loadState,
+    ma5,
+    ma20,
+    ma60,
+    margin,
+    monthlyRevenue,
+    primaryMarketIndex,
+    priceVsMa20,
+    relativeToPrimaryIndex,
+    shareholding,
+    t,
+    todayStats,
+    todayReferenceClose,
+    todayTrendLength: todayTrend.length,
+    totalInstitutionalNet,
+    volumeMa20,
+    volumeRatio,
+    volumeRatioPct,
+  });
+  const localizedFallbackTechnicalReport = localizeTechnicalReport(
+    fallbackTechnicalReport,
+    t
   );
   const backendTechnicalReportView = useMemo(() => {
     if (
@@ -1061,10 +1083,43 @@ export default function StockDetailPanel({
 
     return mapBackendTechnicalReport(backendTechnicalReport, t);
   }, [backendTechnicalReport, effectiveTimeframe, stockId, t]);
-  const technicalReport = backendTechnicalReportView ?? localizedFallbackTechnicalReport;
-  const technicalCurrentState =
-    effectiveTimeframe === "daily" ? technicalReport.currentState ?? null : null;
-  const technicalStatus = technicalCurrentState?.headline.label ?? technicalReport.title;
+  const unavailableDailyTechnicalReport = useMemo<TechnicalReport>(
+    () => ({
+      title: t("stockDetail.dataViews.technical.unavailableTitle"),
+      summary: t("stockDetail.dataViews.technical.unavailableSummary"),
+      value: null,
+      valueLabel: t("stockDetail.dataViews.technical.finalizedValueLabel"),
+      score: 0,
+      rows: [],
+      badges: [],
+      currentState: null,
+      decisionState: null,
+      decisionStateStatus: "unavailable",
+      currentStateStatus: "unavailable",
+      currentStateDecisionUsable: false,
+      warningCount: 1,
+    }),
+    [t]
+  );
+  const technicalReport =
+    backendTechnicalReportView ??
+    (effectiveTimeframe === "daily"
+      ? unavailableDailyTechnicalReport
+      : localizedFallbackTechnicalReport);
+  const technicalDecisionState =
+    effectiveTimeframe === "daily"
+      ? technicalReport.decisionState ??
+        (technicalReport.currentStateDecisionUsable
+          ? technicalReport.currentState ?? null
+          : null)
+      : null;
+  const technicalProvisionalState =
+    effectiveTimeframe === "daily" &&
+    technicalReport.currentObservation?.decisionUsable === false
+      ? technicalReport.currentObservation.currentState
+      : null;
+  const technicalCurrentState = technicalDecisionState;
+  const technicalStatus = technicalDecisionState?.headline.label ?? technicalReport.title;
   const technicalSummaryText = technicalReport.summary;
   const technicalPositionUsesBelow =
     (technicalCurrentState?.position.belowCount ?? 0) > 0;
@@ -1112,29 +1167,16 @@ export default function StockDetailPanel({
   const displayOvernightImpact = !stockId || isIndexProduct ? null : overnightImpact;
   const displayOvernightImpactLoadState: LoadState =
     !stockId || isIndexProduct ? "idle" : overnightImpactLoadState;
-  const stockSignalChips = useMemo(
-    () =>
-      buildStockSignalChips({
-        technicalReport,
-        institutional,
-        margin,
-        monthlyRevenue,
-        overnightImpact: displayOvernightImpact,
-        relativeToPrimaryIndex,
-        primaryMarketLabel: primaryMarketIndex?.short_label ?? stockTechnicalTerm(t, "market"),
-        t,
-      }),
-    [
-      displayOvernightImpact,
-      institutional,
-      margin,
-      monthlyRevenue,
-      primaryMarketIndex?.short_label,
-      relativeToPrimaryIndex,
-      t,
-      technicalReport,
-    ]
-  );
+  const stockSignalChips = buildStockSignalChips({
+    technicalReport,
+    institutional,
+    margin,
+    monthlyRevenue,
+    overnightImpact: displayOvernightImpact,
+    relativeToPrimaryIndex,
+    primaryMarketLabel: primaryMarketIndex?.short_label ?? stockTechnicalTerm(t, "market"),
+    t,
+  });
   const stockSignalChipGroups = [
     {
       key: "technical",
@@ -1625,9 +1667,16 @@ export default function StockDetailPanel({
               volumePanelLabel={
                 isIndexProduct
                   ? t("chart.kline.tradeValueYi")
-                  : t("chart.kline.volumeShares")
+                  : chartVolumeUnit === "shares"
+                    ? t("chart.kline.volumeShares")
+                    : t("chart.kline.volume")
               }
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
+              canonicalIndicatorAuthority={
+                !isIndexProduct && professionalTimeframe === "daily"
+                  ? "backend"
+                  : "presentation"
+              }
               drawingTool={chartDrawingTool}
               drawings={chartDrawings}
               selectedDrawingId={activeSelectedChartDrawingId}
@@ -1680,12 +1729,31 @@ export default function StockDetailPanel({
               volumePanelLabel={
                 isIndexProduct
                   ? t("chart.kline.tradeValueYi")
-                  : t("chart.kline.volumeShares")
+                  : chartVolumeUnit === "shares"
+                    ? t("chart.kline.volumeShares")
+                    : t("chart.kline.volume")
               }
-              volumeTooltipLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
+              volumeTooltipLabel={
+                isIndexProduct
+                  ? t("chart.kline.tradeValueYi")
+                  : chartVolumeUnit === "shares"
+                    ? t("chart.kline.volumeShares")
+                    : t("chart.kline.volume")
+              }
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
-              volumeValueFormatter={isIndexProduct ? formatTradeValueYi : undefined}
+              volumeValueFormatter={
+                isIndexProduct
+                  ? formatTradeValueYi
+                  : chartVolumeUnit === "shares"
+                    ? formatNumber
+                    : undefined
+              }
               latestPreviousClose={chartOverlayPreviousClose}
+              canonicalIndicatorAuthority={
+                !isIndexProduct && effectiveTimeframe === "daily"
+                  ? "backend"
+                  : "presentation"
+              }
             />
           ) : (
             <EmptyDataState
@@ -1757,6 +1825,11 @@ export default function StockDetailPanel({
       <aside
         id="tw-stock-technical-panel"
         data-testid="stock-detail-secondary-panel"
+        data-current-state-status={technicalReport.currentStateStatus ?? "unknown"}
+        data-decision-state-status={technicalReport.decisionStateStatus ?? "unknown"}
+        data-current-state-decision-usable={
+          technicalReport.currentStateDecisionUsable === false ? "false" : "true"
+        }
         className="flex min-w-0 scroll-mt-4 flex-col border border-omi-border-subtle bg-omi-surface"
       >
         {isIndexProduct ? (
@@ -1775,7 +1848,9 @@ export default function StockDetailPanel({
           <>
             <div className="omi-technical-summary border-b border-omi-border-subtle px-5 py-3">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                {stockTechnicalText(t, "eyebrow")}
+                {effectiveTimeframe === "daily"
+                  ? t("stockDetail.dataViews.technical.finalizedTitle")
+                  : stockTechnicalText(t, "eyebrow")}
               </div>
               <div className="mt-1.5 flex items-start justify-between gap-4">
                 <div className="min-w-0">
@@ -1795,6 +1870,13 @@ export default function StockDetailPanel({
                           })}
                         </span>
                       ) : null}
+                    </div>
+                  ) : null}
+                  {effectiveTimeframe === "daily" && technicalReport.decisionStateTime ? (
+                    <div className="mt-1 text-[11px] leading-4 text-omi-text-subtle">
+                      {t("stockDetail.dataViews.technical.finalizedAsOf", {
+                        date: technicalReport.decisionStateTime.slice(0, 10),
+                      })}
                     </div>
                   ) : null}
                 </div>
@@ -1896,6 +1978,64 @@ export default function StockDetailPanel({
               ) : null}
             </div>
 
+            {technicalProvisionalState ? (
+              <section
+                className="border-b border-omi-warning/40 bg-omi-warning/5"
+                data-testid="tw-technical-provisional-section"
+              >
+                <div className="flex items-start justify-between gap-4 px-5 py-3">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-warning">
+                      {t("stockDetail.dataViews.technical.provisionalTitle")}
+                    </div>
+                    <div className="mt-1 text-sm font-semibold text-omi-text-strong">
+                      {technicalProvisionalState.headline.label}
+                    </div>
+                    <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">
+                      {technicalProvisionalState.summary}
+                    </div>
+                    <div className="mt-1 text-[11px] leading-4 text-omi-text-subtle">
+                      {t("stockDetail.dataViews.technical.provisionalAsOf", {
+                        date:
+                          technicalReport.currentObservation?.time?.slice(0, 10) ?? "-",
+                        status:
+                          technicalReport.currentObservation?.status ?? "-",
+                      })}
+                    </div>
+                  </div>
+                  <span className="shrink-0 border border-omi-warning/50 bg-omi-surface px-2 py-1 text-[11px] font-semibold text-omi-warning">
+                    {t("stockDetail.dataViews.technical.decisionUnavailable")}
+                  </span>
+                </div>
+                <div className="grid gap-px border-t border-omi-warning/30 bg-omi-border-subtle sm:grid-cols-3">
+                  <div className="bg-omi-surface px-5 py-3">
+                    <div className="text-[11px] font-semibold text-omi-text-muted">
+                      {t("stockDetail.dataViews.technical.provisionalPrice")}
+                    </div>
+                    <div className="mt-0.5 text-sm font-semibold tabular-nums text-omi-text-strong">
+                      {formatPrice(technicalProvisionalState.position.price)}
+                    </div>
+                  </div>
+                  <div className="bg-omi-surface px-5 py-3">
+                    <div className="text-[11px] font-semibold text-omi-text-muted">
+                      {t("stockDetail.dataViews.technical.provisionalPosition")}
+                    </div>
+                    <div className="mt-0.5 text-sm font-semibold text-omi-text-strong">
+                      {technicalProvisionalState.position.label}
+                    </div>
+                  </div>
+                  <div className="bg-omi-surface px-5 py-3">
+                    <div className="text-[11px] font-semibold text-omi-text-muted">
+                      {t("stockDetail.dataViews.technical.provisionalMomentum")}
+                    </div>
+                    <div className="mt-0.5 text-sm font-semibold text-omi-text-strong">
+                      {technicalProvisionalState.qualifier.label}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
             {technicalCurrentState ? (
               <TechnicalCurrentStateOverview state={technicalCurrentState} />
             ) : (
@@ -1934,6 +2074,9 @@ export default function StockDetailPanel({
             <div className="px-5 py-3">
               {technicalCurrentState ? (
                 <>
+                  <div className="mb-2 text-xs font-semibold text-omi-text-muted">
+                    {t("stockDetail.dataViews.technical.finalizedDetailTitle")}
+                  </div>
                   <TechnicalCurrentStateEvidence state={technicalCurrentState}>
                     <details
                       id="tw-technical-context"

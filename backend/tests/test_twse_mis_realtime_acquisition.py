@@ -20,6 +20,7 @@ from app.market.providers.twse_mis_realtime_acquisition import (
     TwseMisRealtimeAcquisitionAdapter,
 )
 from app.market.quote_depth import get_taiwan_stock_quote_depth
+from app.market.public_quote_platform import project_taiwan_session_close
 from app.market.taiwan_quote_evidence import (
     acquire_taiwan_quote_evidence_bundle,
 )
@@ -46,7 +47,7 @@ def _db() -> tuple[Session, object]:
     return db, engine
 
 
-def _payload(*, trial: bool = False) -> str:
+def _payload(*, trial: bool = False, event_time: str | None = None) -> str:
     return json.dumps(
         {
             "rtcode": "0000",
@@ -56,7 +57,7 @@ def _payload(*, trial: bool = False) -> str:
                     "n": "台積電",
                     "ch": "tse_2330.tw",
                     "d": "20260826",
-                    "t": "08:45:00" if trial else "10:00:00",
+                    "t": event_time or ("08:45:00" if trial else "10:00:00"),
                     "z": "-" if trial else "1180",
                     "y": "1170",
                     "o": "-" if trial else "1170",
@@ -187,6 +188,38 @@ def test_quote_bundle_acquisition_reports_requested_resource_and_materialization
             "quote.snapshot",
         )
         assert bundle.acquisition_scope.limitations == ()
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_quote_bundle_uses_same_adapter_for_bounded_post_close_confirmation() -> None:
+    now = datetime(2026, 8, 26, 13, 34, tzinfo=TAIPEI)
+    calls: list[tuple] = []
+    db, engine = _db()
+    try:
+        bundle = acquire_taiwan_quote_evidence_bundle(
+            db,
+            stock_id="2330",
+            requested_at=now,
+            requested_capabilities=("quote.session_close",),
+            acquisition=_adapter(_payload(event_time="13:30:00"), now, calls),
+        )
+
+        assert len(calls) == 1
+        assert db.query(TaiwanStockQuoteSnapshot).count() == 1
+        assert db.query(TaiwanStockDepthSnapshot).count() == 0
+        projection = project_taiwan_session_close(bundle.session_close)
+        assert projection["status"] == "session_final"
+        assert projection["price"] == 1180.0
+        assert bundle.acquisition_scope is not None
+        assert bundle.acquisition_scope.materialized_capabilities == (
+            "quote.snapshot",
+            "quote.session_close",
+        )
+        assert bundle.acquisition_scope.acquired_resources == (
+            TWSE_MIS_QUOTE_RESOURCE_ID,
+        )
     finally:
         db.close()
         engine.dispose()

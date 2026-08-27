@@ -1052,7 +1052,12 @@ def _component_freshness(
         "provider": quote.get("provider"),
         "source": quote.get("source"),
         "refresh_recommended": normalized_status
-        in {"missing", "stale", "unavailable"},
+        in {
+            "missing",
+            "stale",
+            "unavailable",
+            "unavailable_after_release",
+        },
         "reason": quote_freshness.get("message"),
     }
 
@@ -1087,6 +1092,11 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
     official_close_evidence = (
         data_core_components.get("quote.official_close")
         if isinstance(data_core_components.get("quote.official_close"), dict)
+        else {}
+    )
+    session_close_evidence = (
+        data_core_components.get("quote.session_close")
+        if isinstance(data_core_components.get("quote.session_close"), dict)
         else {}
     )
     depth_available = bool(quote.get("depth_available"))
@@ -1391,9 +1401,23 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         "delivery_status": quote.get("delivery_status"),
         "freshness": close_freshness,
     }
+    session_close = {
+        **session_close_evidence,
+        "kind": session_close_evidence.get("kind") or "quote_session_close",
+        "status": session_close_evidence.get("status") or "unavailable",
+        "available": bool(session_close_evidence.get("available")),
+        "price": session_close_evidence.get("price"),
+        "trade_date": _json_value(session_close_evidence.get("trade_date")),
+        "event_time": _json_value(session_close_evidence.get("event_time")),
+        "confirmed_at": _json_value(session_close_evidence.get("confirmed_at")),
+        "official_close_trade_date": _json_value(
+            session_close_evidence.get("official_close_trade_date")
+        ),
+    }
     return {
         "order_book": order_book,
         "auction": auction,
+        "session_close": session_close,
         "official_close": official_close,
     }
 
@@ -1410,6 +1434,7 @@ def _quote_component_freshness_rows(
     for capability_id, key in (
         ("quote.order_book", "order_book"),
         ("quote.auction", "auction"),
+        ("quote.session_close", "session_close"),
         ("quote.official_close", "official_close"),
     ):
         component = (
@@ -1441,6 +1466,11 @@ def _quote_component_slots(
     for slot_name, capability_id, key in (
         ("quote_order_book", "quote.order_book", "order_book"),
         ("quote_auction", "quote.auction", "auction"),
+        (
+            "quote_session_close",
+            "quote.session_close",
+            "session_close",
+        ),
         (
             "quote_official_close",
             "quote.official_close",
@@ -1623,6 +1653,20 @@ def _compact_quote_snapshot(
         ),
         "actual_trade_price_as_of": _json_value(
             quote_depth.get("actual_trade_price_as_of")
+        ),
+        "session_close_available": bool(
+            quote_depth.get("session_close_available")
+        ),
+        "session_close_status": quote_depth.get("session_close_status"),
+        "session_close_price": quote_depth.get("session_close_price"),
+        "session_close_trade_date": _json_value(
+            quote_depth.get("session_close_trade_date")
+        ),
+        "session_close_event_time": _json_value(
+            quote_depth.get("session_close_event_time")
+        ),
+        "session_close_confirmed_at": _json_value(
+            quote_depth.get("session_close_confirmed_at")
         ),
         "facts_usable_for_current_session": bool(
             last_trade_available
@@ -2204,6 +2248,26 @@ def _compact_technical_report(
     data = report.get("data") if isinstance(report.get("data"), dict) else {}
     daily_indicator = data.get("daily_indicator") if isinstance(data.get("daily_indicator"), dict) else {}
     intraday = data.get("intraday") if isinstance(data.get("intraday"), dict) else {}
+    current_observation = (
+        data.get("current_observation")
+        if isinstance(data.get("current_observation"), dict)
+        else {}
+    )
+    current_indicator = (
+        current_observation.get("indicator")
+        if isinstance(current_observation.get("indicator"), dict)
+        else {}
+    )
+    decision_state = (
+        data.get("decision_state")
+        if isinstance(data.get("decision_state"), dict)
+        else {}
+    )
+    current_state = (
+        current_observation.get("current_state")
+        if isinstance(current_observation.get("current_state"), dict)
+        else {}
+    )
     return {
         "timeframe": report.get("timeframe"),
         "phase": report.get("phase"),
@@ -2214,6 +2278,32 @@ def _compact_technical_report(
         "value": report.get("value"),
         "value_label": report.get("value_label"),
         "latest_close": daily_indicator.get("close") or (intraday.get("latest_point") or {}).get("close"),
+        "latest_finalized_close": daily_indicator.get("close"),
+        "decision_state_time": data.get("decision_state_time"),
+        "decision_state_status": data.get("decision_state_status"),
+        "decision_state": {
+            "headline": decision_state.get("headline"),
+            "qualifier": decision_state.get("qualifier"),
+            "position": decision_state.get("position"),
+        },
+        "current_observation": (
+            {
+                "status": current_observation.get("status"),
+                "time": current_observation.get("time"),
+                "decision_usable": current_observation.get("decision_usable"),
+                "official_daily_confirmed": current_observation.get(
+                    "official_daily_confirmed"
+                ),
+                "close": current_indicator.get("close"),
+                "volume": current_indicator.get("volume"),
+                "bar_status": current_indicator.get("bar_status"),
+                "headline": current_state.get("headline"),
+                "qualifier": current_state.get("qualifier"),
+                "position": current_state.get("position"),
+            }
+            if current_observation
+            else None
+        ),
         "score_contract": _technical_report_score_contract(
             report=report,
             timeframe=timeframe,

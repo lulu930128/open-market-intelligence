@@ -433,6 +433,7 @@ def refresh_source(db: Session, source_id: int, trade_date: date | None = None) 
         "parsed_count": parse_result["parsed_count"],
         "skipped_count": parse_result["skipped_count"],
         "inserted_count": parse_result["inserted_count"],
+        "replaced_trade_dates": parse_result.get("replaced_trade_dates") or [],
         "message": "Source refreshed and parsed successfully.",
         "error_message": None,
         "fetched_at": fetch_result["fetched_at"],

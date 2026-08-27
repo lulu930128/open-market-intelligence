@@ -10,7 +10,7 @@ import {
   type ProfessionalTimeframe,
   type Timeframe,
 } from "@/components/stock-detail/StockDetailDataViews";
-import { fetchJson } from "@/lib/api";
+import { fetchJson, requestJson } from "@/lib/api";
 import type { DataStatusLevel } from "@/lib/dataStatusEvents";
 import { requestBackfillJob } from "@/lib/jobs";
 import {
@@ -66,6 +66,7 @@ type UseTaiwanStockChartDataOptions = {
   effectiveTimeframe: Timeframe;
   initialChartData: ChartPoint[];
   initialChartIntradayOverlay: OhlcIntradayOverlay | null;
+  initialChartVolumeUnit: string | null;
   initialIndicatorData: StockIndicatorPoint[];
   isIndexProduct: boolean;
   onDailyPricesChanged?: () => void;
@@ -123,6 +124,7 @@ export function useTaiwanStockChartData({
   effectiveTimeframe,
   initialChartData,
   initialChartIntradayOverlay,
+  initialChartVolumeUnit,
   initialIndicatorData,
   isIndexProduct,
   onDailyPricesChanged,
@@ -139,6 +141,9 @@ export function useTaiwanStockChartData({
   );
   const [chartIntradayOverlay, setChartIntradayOverlay] =
     useState<OhlcIntradayOverlay | null>(initialChartIntradayOverlay);
+  const [chartVolumeUnit, setChartVolumeUnit] = useState<string | null>(
+    initialChartVolumeUnit
+  );
   const [chartStockId, setChartStockId] = useState<string | null>(stockId);
   const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>("daily");
   const [benchmarkChartData, setBenchmarkChartData] = useState<ChartPoint[]>([]);
@@ -204,6 +209,7 @@ export function useTaiwanStockChartData({
     const timer = window.setTimeout(() => {
       setChartData([]);
       setChartIntradayOverlay(null);
+      setChartVolumeUnit(null);
       setChartStockId(null);
       setChartTimeframe("daily");
       setTodayTrend([]);
@@ -240,6 +246,15 @@ export function useTaiwanStockChartData({
       }
     }
 
+    async function refreshTodayIntradayCache() {
+      if (isIndexProduct) return;
+      await requestJson<IntradayHistoryResponse>(
+        `/api/market/intraday/${effectStockId}/history/refresh`,
+        { method: "POST" },
+        { interval: "1m", range: "1d", policy: "prefer_live" }
+      );
+    }
+
     async function loadTodayTrend(showLoading: boolean) {
       if (intradayRequestInFlight) return;
       intradayRequestInFlight = true;
@@ -252,6 +267,25 @@ export function useTaiwanStockChartData({
       }
 
       try {
+        if (!isIndexProduct) {
+          try {
+            await refreshTodayIntradayCache();
+          } catch (error) {
+            if (!cancelled) {
+              publishDataStatus({
+                level: "warning",
+                title: timeframeLabel(tRef.current, "today"),
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : tRef.current("stockDetail.errors.dataLoad"),
+                source: "今日走勢",
+                statusKey: "today-intraday-refresh",
+              });
+            }
+          }
+        }
+
         const today = await fetchJson<IntradayTrendResponse>(
           isIndexProduct
             ? `/api/market/indices/${effectStockId}/intraday`
@@ -530,6 +564,7 @@ export function useTaiwanStockChartData({
 
         setChartData(normalizeChartPoints(refreshedOhlc.points));
         setChartIntradayOverlay(refreshedOhlc.intraday_overlay);
+        setChartVolumeUnit(refreshedOhlc.volume_unit ?? null);
         setIndicatorData(refreshedIndicators);
         setChartStockId(targetStockId);
         setChartTimeframe(requestedTimeframe);
@@ -607,6 +642,20 @@ export function useTaiwanStockChartData({
           !isIndexProduct &&
           shouldRetryTaiwanDailyOhlcWithIntraday(ohlc)
         ) {
+          try {
+            await refreshTodayIntradayCache();
+          } catch (error) {
+            publishDataStatus({
+              level: "warning",
+              title: timeframeLabel(tRef.current, "today"),
+              message:
+                error instanceof Error
+                  ? error.message
+                  : tRef.current("stockDetail.errors.dataLoad"),
+              source: "今日走勢",
+              statusKey: "today-intraday-refresh",
+            });
+          }
           ohlc = await fetchJson<OhlcChartResponse>(
             `/api/market/ohlc/${effectStockId}`,
             {
@@ -632,6 +681,7 @@ export function useTaiwanStockChartData({
 
         setChartData(normalizeChartPoints(ohlc.points));
         setChartIntradayOverlay(ohlc.intraday_overlay);
+        setChartVolumeUnit(ohlc.volume_unit ?? null);
         setIndicatorData(indicators);
         setChartStockId(effectStockId);
         setChartTimeframe(requestedTimeframe);
@@ -721,6 +771,7 @@ export function useTaiwanStockChartData({
       benchmarkIndexId,
       chartData,
       chartIntradayOverlay,
+      chartVolumeUnit,
       chartStockId,
       chartTimeframe,
       indicatorData,

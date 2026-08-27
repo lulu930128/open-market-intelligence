@@ -933,8 +933,10 @@ export const jaJP = {
       change: "騰落",
       tradeValue: "売買代金",
       tradeValueYi: "売買代金(億)",
+      volume: "出来高",
       volumeLots: "出来高(ロット)",
       volumeShares: "出来高(株)",
+      obv: "OBV",
       highGuide: "高値 {value}",
       lowGuide: "安値 {value}",
       highMarker: "高値 {value}",
@@ -1514,6 +1516,19 @@ export const jaJP = {
       technical: {
         ...zhTW.stockDetail.dataViews.technical,
         eyebrow: "テクニカル",
+        finalizedTitle: "確定日足分析",
+        finalizedDetailTitle: "確定日足の根拠",
+        finalizedAsOf: "確定データ日 {date}",
+        finalizedValueLabel: "確定日足",
+        provisionalTitle: "本日の暫定観測",
+        provisionalDetailTitle: "暫定テクニカル根拠",
+        provisionalPrice: "暫定終値",
+        provisionalPosition: "暫定位置",
+        provisionalMomentum: "暫定モメンタム",
+        provisionalAsOf: "暫定データ日 {date} · {status}",
+        decisionUnavailable: "確定判断には使用不可",
+        unavailableTitle: "確定テクニカルデータ不足",
+        unavailableSummary: "検証可能な確定日足レポートがバックエンドから提供されていないため、ブラウザー計算で代替しません。",
         valueLabels: {
           vsPreviousClose: "前日終値比",
           last13Weeks: "直近13週",
@@ -1523,6 +1538,7 @@ export const jaJP = {
         basis: {
           intraday: "ザラ場価格 {priceTime} · 日足指標 {dailyTime}",
           daily: "日足指標 {dailyTime} 時点",
+          provisional: "暫定指標 {currentTime}（判断利用不可）· 確定日足 {dailyTime}",
           warningCount: "データ制約 {count} 件",
         },
         chips: {
@@ -2074,6 +2090,25 @@ export const jaJP = {
       monitoringEndedTitle: "米国株の日中監視時間が終了しました",
       monitoringEndedMessage:
         "現在はリアルタイム更新時間外です。最後に利用できたデータを表示しています。",
+    },
+    ohlcCoverage: {
+      incompleteTitle: "米国株の足データが不完全です",
+      incompleteMessage:
+        "想定取引日 {expected} に対し最新確定日は {latest} です。{count} 取引日が欠落しています（{dates}）。誤った騰落を防ぐため古い前日終値は使用しません。",
+      historyIncompleteTitle: "米国株の履歴本数が不足しています",
+      historyIncompleteMessage:
+        "現在は {available}/{requested} 本です。全履歴の修復を予約し、短い系列を完全とは表示しません。",
+      bestAvailableTitle: "提供元の全履歴を取得済みです",
+      bestAvailableMessage:
+        "提供元の全期間を取得しました。利用可能なのは {available}/{requested} 本で、上場時期による可能性があります。",
+      repairingTitle: "米国株の足データを修復中",
+      repairingMessage:
+        "範囲を限定した修復ジョブを開始し、完了後に取引日の連続性と履歴本数を再検証します。",
+      repairedTitle: "米国株の足データを修復しました",
+      repairedMessage: "最新取引日、内部連続性、履歴本数を再検証しました。",
+      repairFailedTitle: "米国株の足データ修復が未完了です",
+      repairFailedMessage:
+        "修復ジョブは足データ連続性の条件を満たしませんでした。ジョブ詳細を確認してください。",
     },
     statusSource: "米国株詳細",
     usDailyWeeklyMonthly: "米国株 日/週/月",

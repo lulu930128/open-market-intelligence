@@ -170,11 +170,11 @@ class TwseMisObservationTests(unittest.TestCase):
         self.assertFalse(result["actual_trade_price_available"])
         self.assertEqual(result["reason_code"], "ACTUAL_TRADE_PRICE_MISSING")
 
-    def test_trial_observation_can_remain_delayed_closing_auction(self) -> None:
+    def test_trial_observation_is_rejected_during_close_resolution(self) -> None:
         result = resolve_twse_mis_observation(
             request_now=datetime(2026, 8, 5, 13, 31, 0, tzinfo=TAIWAN_TZ),
-            market_calendar_phase="post_close",
-            legacy_clock_phase="post_close_snapshot",
+            market_calendar_phase="close_resolution",
+            legacy_clock_phase="close_resolution",
             provider_event_time=datetime(2026, 8, 5, 13, 31, 0, tzinfo=TAIWAN_TZ),
             trial_status="1",
             indicative_price=2410.0,
@@ -183,9 +183,31 @@ class TwseMisObservationTests(unittest.TestCase):
             cumulative_volume_lots=27545,
         )
 
-        self.assertEqual(result["instrument_phase"], "closing_auction_delayed")
-        self.assertEqual(result["legacy_session_phase"], "closing_auction")
-        self.assertTrue(result["auction_applicable"])
+        self.assertEqual(result["instrument_phase"], "close_resolution")
+        self.assertEqual(result["legacy_session_phase"], "close_resolution")
+        self.assertFalse(result["auction_applicable"])
+        self.assertFalse(result["session_final_candidate"])
+        self.assertEqual(result["session_final_reason_code"], "TRIAL_OBSERVATION")
+
+    def test_actual_trade_is_explicit_session_final_candidate(self) -> None:
+        result = resolve_twse_mis_observation(
+            request_now=datetime(2026, 8, 5, 13, 31, 0, tzinfo=TAIWAN_TZ),
+            market_calendar_phase="close_resolution",
+            legacy_clock_phase="close_resolution",
+            provider_event_time=datetime(2026, 8, 5, 13, 30, 0, tzinfo=TAIWAN_TZ),
+            trial_status="0",
+            indicative_price=None,
+            indicative_volume_lots=None,
+            last_trade_price=2410.0,
+            cumulative_volume_lots=27545,
+        )
+
+        self.assertEqual(result["instrument_phase"], "close_resolution")
+        self.assertTrue(result["session_final_candidate"])
+        self.assertEqual(
+            result["session_final_reason_code"],
+            "VALID_CURRENT_SESSION_ACTUAL_TRADE",
+        )
 
 
 if __name__ == "__main__":

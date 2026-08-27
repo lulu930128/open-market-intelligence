@@ -1244,8 +1244,10 @@ export const zhTW = {
       change: "漲跌",
       tradeValue: "成交金額",
       tradeValueYi: "成交金額(億)",
+      volume: "成交量",
       volumeLots: "成交量(張)",
       volumeShares: "成交量(股)",
+      obv: "OBV",
       obvLots: "OBV(張)",
       highGuide: "高 {value}",
       lowGuide: "低 {value}",
@@ -2134,6 +2136,19 @@ export const zhTW = {
       },
       technical: {
         eyebrow: "Technical",
+        finalizedTitle: "正式完成日線",
+        finalizedDetailTitle: "正式日線技術證據",
+        finalizedAsOf: "正式完成資料日 {date}",
+        finalizedValueLabel: "正式日線",
+        provisionalTitle: "今日暫估觀察",
+        provisionalDetailTitle: "今日暫估技術證據",
+        provisionalPrice: "暫估收盤",
+        provisionalPosition: "暫估位階",
+        provisionalMomentum: "暫估動能",
+        provisionalAsOf: "暫估資料日 {date} · {status}",
+        decisionUnavailable: "不可作正式決策",
+        unavailableTitle: "正式技術資料不足",
+        unavailableSummary: "後端尚未提供可驗證的正式日線技術報告，不以瀏覽器補算結果替代。",
         valueLabels: {
           vsPreviousClose: "vs 昨收",
           last13Weeks: "近13週",
@@ -2143,6 +2158,7 @@ export const zhTW = {
         basis: {
           intraday: "盤中價 {priceTime} · 日線指標 {dailyTime}",
           daily: "日線指標截至 {dailyTime}",
+          provisional: "今日暫估指標 {currentTime}（不可作 finalized decision）· 正式日線 {dailyTime}",
           warningCount: "{count} 項資料限制",
         },
         units: {
@@ -3040,6 +3056,23 @@ export const zhTW = {
       recoveredMessage: "Yahoo 盤中資料已恢復更新。",
       monitoringEndedTitle: "美股盤中監控時段已結束",
       monitoringEndedMessage: "目前不是即時更新時段；畫面保留最後可用資料。",
+    },
+    ohlcCoverage: {
+      incompleteTitle: "美股 K 線資料不完整",
+      incompleteMessage:
+        "預期交易日 {expected}，目前只到 {latest}；缺少 {count} 個交易日（{dates}）。舊前收已停用，避免顯示錯誤漲跌。",
+      historyIncompleteTitle: "美股 K 線歷史根數不足",
+      historyIncompleteMessage:
+        "目前只有 {available}/{requested} 根；已排入完整歷史修復，不會把短資料誤標成完整。",
+      bestAvailableTitle: "已取得來源可提供的完整歷史",
+      bestAvailableMessage:
+        "來源已回傳完整範圍；目前可用 {available}/{requested} 根，可能受上市時間限制。",
+      repairingTitle: "正在修復美股 K 線",
+      repairingMessage: "已建立 bounded repair job，完成後會重新驗證交易日連續性與歷史根數。",
+      repairedTitle: "美股 K 線已修復",
+      repairedMessage: "最新交易日、內部連續性與歷史根數已重新驗證。",
+      repairFailedTitle: "美股 K 線修復未完成",
+      repairFailedMessage: "修復工作未滿足 K 線連續性條件，請查看工作詳情。",
     },
     statusSource: "美股詳情",
     corporateEvents: {

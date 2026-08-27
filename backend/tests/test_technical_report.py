@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -300,7 +301,7 @@ class TechnicalReportTests(unittest.TestCase):
             "tw.technical.indicators.v1-legacy",
         )
 
-    def test_daily_report_can_overlay_current_price_without_relabeling_daily_indicators(self) -> None:
+    def test_daily_report_separates_finalized_decision_from_provisional_current_state(self) -> None:
         with (
             patch(
                 "app.market.technical_report._now",
@@ -335,7 +336,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertTrue(price_context["is_provisional"])
         self.assertEqual(
             price_context["technical_price_basis"],
-            "intraday_series_latest_price",
+            "intraday_partial_daily_bar",
         )
         self.assertFalse(price_context["bid_ask_price_used"])
         self.assertEqual(price_context["daily_indicator_time"], "2026-03-21")
@@ -343,17 +344,26 @@ class TechnicalReportTests(unittest.TestCase):
             price_context["moving_average_structure"]["price_state"],
             "below_all",
         )
-        self.assertTrue(any(row["key"] == "price_position" for row in report["rows"]))
-        self.assertTrue(any(badge["label"] == "失守 MA60" for badge in report["badges"]))
+        price_row = next(
+            row for row in report["rows"] if row["key"] == "price_position"
+        )
+        self.assertIn("179", price_row["description"])
+        self.assertNotIn("130", price_row["description"])
+        self.assertTrue(any(badge["label"] == "站上 MA60" for badge in report["badges"]))
         self.assertTrue(report["data"]["price_context"]["range_signals"])
         self.assertTrue(
-            any(badge["label"] == "盤中價 × 已收盤指標" for badge in report["badges"])
+            any(badge["label"] == "今日暫估指標另列" for badge in report["badges"])
         )
         self.assertEqual(
             report["evidence_passport"]["as_of"],
             "2026-03-23T10:00:00+08:00",
         )
         self.assertEqual(report["data"]["decision_snapshot"], "completed")
+        self.assertEqual(report["data"]["decision_state"]["position"]["price"], 179.0)
+        self.assertEqual(report["data"]["current_state"]["position"]["price"], 130.0)
+        self.assertEqual(report["data"]["decision_state_time"], "2026-03-21")
+        self.assertEqual(report["data"]["current_state_time"], "2026-03-23")
+        self.assertFalse(report["data"]["current_state_decision_usable"])
         partial = report["data"]["current_partial_indicator"]
         self.assertEqual(partial["time"], date(2026, 3, 23))
         self.assertEqual(partial["bar_status"], "intraday_partial")
@@ -362,7 +372,81 @@ class TechnicalReportTests(unittest.TestCase):
             "partial_cumulative_volume",
         )
         self.assertFalse(partial["decision_usable"])
+        current_observation = report["data"]["current_observation"]
+        self.assertEqual(current_observation["status"], "intraday_partial")
+        self.assertEqual(current_observation["time"], "2026-03-23")
+        self.assertFalse(current_observation["decision_usable"])
+        self.assertEqual(
+            current_observation["current_state"],
+            report["data"]["current_state"],
+        )
         self.assertEqual(report["data"]["daily_indicator"]["time"], date(2026, 3, 21))
+
+    def test_post_close_session_close_replaces_stale_intraday_headline_price(self) -> None:
+        event_at = datetime(2026, 8, 27, 13, 30, tzinfo=TAIPEI_TZ)
+        quote = SimpleNamespace(
+            trade_date=date(2026, 8, 27),
+            lineage=SimpleNamespace(
+                event_at=event_at,
+                provider="twse_mis",
+                source="twse_mis",
+            ),
+            last_trade_price=605.0,
+            open_price=608.0,
+            high_price=608.0,
+            low_price=593.0,
+            cumulative_quantity=SimpleNamespace(value=11_106_000),
+        )
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 8, 27, 14, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "source": "persisted_intraday",
+                    "previous_close": 592.0,
+                    "points": [
+                        {
+                            "time": "2026-08-27T11:49:55+08:00",
+                            "price": 601.0,
+                            "volume": 8_000_000,
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "app.market.technical_report.read_taiwan_session_close",
+                return_value=SimpleNamespace(
+                    resolved=SimpleNamespace(quote=quote),
+                ),
+            ),
+            patch(
+                "app.market.technical_report.project_taiwan_session_close",
+                return_value={
+                    "available": True,
+                    "finalization": "session_final",
+                },
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="daily",
+                include_intraday=True,
+            )
+
+        self.assertEqual(report["data"]["price_context"]["price"], 605.0)
+        self.assertEqual(
+            report["data"]["price_context"]["technical_price_basis"],
+            "session_close_provisional_daily_bar",
+        )
+        self.assertEqual(report["data"]["current_partial_indicator"]["close"], 605.0)
+        self.assertEqual(report["data"]["current_partial_indicator"]["volume"], 11_106_000)
+        self.assertEqual(report["data"]["current_state"]["position"]["price"], 605.0)
+        self.assertEqual(report["data"]["decision_state"]["position"]["price"], 179.0)
+        self.assertFalse(report["data"]["current_observation"]["decision_usable"])
 
     def test_daily_report_uses_finalized_daily_state_after_close(self) -> None:
         self.db.query(MarketDailyPrice).filter(
@@ -390,6 +474,8 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["phase"], "daily")
         self.assertEqual(report["confidence"], "high")
         self.assertFalse(report["data"]["price_context"]["is_provisional"])
+        self.assertTrue(report["data"]["current_state_decision_usable"])
+        self.assertIsNone(report["data"]["current_observation"])
         self.assertEqual(
             report["data"]["price_context"]["technical_price_basis"],
             "official_completed_daily_close",
@@ -397,7 +483,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["data"]["price_context"]["price_time"], "2026-03-20")
         self.assertFalse(
             any(
-                badge["label"] == "盤中價 × 已收盤指標"
+                badge["label"] == "今日暫估指標另列"
                 for badge in report["badges"]
             )
         )

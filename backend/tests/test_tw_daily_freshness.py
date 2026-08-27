@@ -18,7 +18,11 @@ from app.market.tw_daily_freshness import (
     read_taiwan_daily_freshness_batch,
 )
 from app.market_data.contracts import DatasetHealthStatus
-from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
+from app.market_data.eod_coverage import compute_eod_coverage, persist_eod_coverage
+from app.sources.defaults import (
+    TPEX_DAILY_QUOTES_SOURCE_NAME,
+    TWSE_DAILY_TRADING_SOURCE_NAME,
+)
 
 
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
@@ -150,5 +154,63 @@ def test_daily_freshness_batch_returns_truthful_missing_and_stale_health() -> No
         assert evidence["2317"].health.status is DatasetHealthStatus.MISSING
         assert evidence["2317"].latest_date is None
         assert evidence["2317"].row_count == 0
+    finally:
+        db.close()
+
+
+def test_all_market_freshness_uses_full_market_checkpoint_not_cross_venue_max() -> None:
+    db = _session()
+    try:
+        db.add_all(
+            [
+                StockMaster(
+                    stock_id="2330",
+                    stock_name="TSMC",
+                    market="TWSE",
+                    instrument_type="stock",
+                ),
+                StockMaster(
+                    stock_id="6488",
+                    stock_name="GlobalWafers",
+                    market="TPEX",
+                    instrument_type="stock",
+                ),
+            ]
+        )
+        twse = _source(db, TWSE_DAILY_TRADING_SOURCE_NAME)
+        tpex = _source(db, TPEX_DAILY_QUOTES_SOURCE_NAME)
+        _price(
+            db,
+            source=twse,
+            stock_id="2330",
+            trade_date=date(2026, 8, 26),
+        )
+        _price(
+            db,
+            source=tpex,
+            stock_id="6488",
+            trade_date=date(2026, 8, 27),
+        )
+        db.commit()
+        persist_eod_coverage(
+            db,
+            compute_eod_coverage(
+                db,
+                market="TW",
+                expected_trade_date=date(2026, 8, 27),
+            ),
+        )
+
+        evidence = read_taiwan_daily_freshness(
+            db,
+            checked_at=datetime(2026, 8, 27, 16, 0, tzinfo=TAIPEI_TZ),
+            expected_date=date(2026, 8, 27),
+        )
+
+        assert evidence.latest_date == date(2026, 8, 27)
+        assert evidence.health.status is DatasetHealthStatus.PARTIAL
+        assert "FULL_MARKET_COVERAGE_CHECKPOINT_APPLIED" in evidence.limitations
+        assert "FULL_MARKET_CURRENT_1_OF_2" in evidence.limitations
+        assert "FULL_MARKET_STALE_1" in evidence.limitations
     finally:
         db.close()

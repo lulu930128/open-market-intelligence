@@ -6,16 +6,18 @@ import hashlib
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Protocol
 
 from app.market.providers import tpex, twse
 from app.market.providers.tw_official_daily import (
     TPEX_DAILY_RESOURCE_ID,
     TWSE_DAILY_RESOURCE_ID,
+    TWSE_RWD_DAILY_RESOURCE_ID,
     endpoint_for_resource,
     official_daily_record_to_bar,
     parse_tpex_official_daily_payload,
+    parse_twse_rwd_official_daily_payload,
     parse_twse_official_daily_payload,
     parser_version_for_resource,
     source_name_for_resource,
@@ -68,11 +70,27 @@ def _unique(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
 
 
-def _default_fetch(route: ProviderResourceRouteV2) -> HttpResponseLike:
+def _default_fetch(
+    route: ProviderResourceRouteV2,
+    *,
+    trade_date: date | None,
+) -> HttpResponseLike:
     if route.resource_id == TWSE_DAILY_RESOURCE_ID:
         return twse.get_response(
             twse.DAILY_QUOTES_URL,
             timeout_seconds=route.timeout_seconds,
+        )
+    if route.resource_id == TWSE_RWD_DAILY_RESOURCE_ID:
+        if trade_date is None:
+            raise ValueError("TWSE RWD official daily acquisition requires trade_date")
+        return twse.get_response(
+            twse.RWD_MI_INDEX_URL,
+            timeout_seconds=route.timeout_seconds,
+            params={
+                "date": trade_date.strftime("%Y%m%d"),
+                "type": "ALLBUT0999",
+                "response": "json",
+            },
         )
     if route.resource_id == TPEX_DAILY_RESOURCE_ID:
         return tpex.get_response(
@@ -126,19 +144,27 @@ class TaiwanOfficialDailyAcquisitionExecutor:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
 
-    def _fetch(self, route: ProviderResourceRouteV2) -> HttpResponseLike:
-        fetcher = self._fetchers.get(route.resource_id, _default_fetch)
-        return fetcher(route)
+    def _fetch(
+        self,
+        route: ProviderResourceRouteV2,
+        *,
+        trade_date: date | None,
+    ) -> HttpResponseLike:
+        fetcher = self._fetchers.get(route.resource_id)
+        if fetcher is not None:
+            return fetcher(route)
+        return _default_fetch(route, trade_date=trade_date)
 
     def _run_route(
         self,
         route: ProviderResourceRouteV2,
         *,
-        instrument: InstrumentKey,
+        instruments: Mapping[str, InstrumentKey],
+        trade_date: date | None,
     ) -> _RouteOutcome:
         checked_at = self._clock()
         try:
-            response = self._fetch(route)
+            response = self._fetch(route, trade_date=trade_date)
         except Exception as exc:
             return _RouteOutcome(
                 receipt=None,
@@ -199,9 +225,14 @@ class TaiwanOfficialDailyAcquisitionExecutor:
             )
 
         try:
-            target_symbols = frozenset({instrument.symbol})
+            target_symbols = frozenset(instruments)
             if route.resource_id == TWSE_DAILY_RESOURCE_ID:
                 parsed = parse_twse_official_daily_payload(
+                    raw_text,
+                    target_symbols=target_symbols,
+                )
+            elif route.resource_id == TWSE_RWD_DAILY_RESOURCE_ID:
+                parsed = parse_twse_rwd_official_daily_payload(
                     raw_text,
                     target_symbols=target_symbols,
                 )
@@ -214,20 +245,32 @@ class TaiwanOfficialDailyAcquisitionExecutor:
                 raise ValueError(
                     f"unsupported Taiwan official daily resource: {route.resource_id}"
                 )
+            date_records = tuple(
+                record
+                for record in parsed.records
+                if trade_date is None or record.trade_date == trade_date
+            )
             bars = tuple(
                 official_daily_record_to_bar(
                     record,
-                    instrument=instrument,
+                    instrument=instruments[record.symbol],
                     provider=route.provider_key,
                     source=receipt.source,
                     parser_version=receipt.parser_version,
                     fetched_at=receipt.fetched_at,
                     content_hash=receipt.content_hash,
                 )
-                for record in parsed.records
+                for record in date_records
             )
             limitations = _unique(
-                tuple(issue.reason_code for issue in parsed.issues)
+                (
+                    *tuple(issue.reason_code for issue in parsed.issues),
+                    *(
+                        ("EXPECTED_TRADE_DATE_NOT_OBSERVED",)
+                        if trade_date is not None and not date_records
+                        else ()
+                    ),
+                )
             )
         except Exception as exc:
             return _RouteOutcome(
@@ -278,7 +321,24 @@ class TaiwanOfficialDailyAcquisitionExecutor:
         self,
         instrument: InstrumentKey,
         routes: Sequence[ProviderResourceRouteV2],
+        *,
+        trade_date: date | None = None,
     ) -> BarAcquisitionResult:
+        return self.acquire_dataset_routes(
+            {instrument.symbol: instrument},
+            routes,
+            trade_date=trade_date,
+        )
+
+    def acquire_dataset_routes(
+        self,
+        instruments: Mapping[str, InstrumentKey],
+        routes: Sequence[ProviderResourceRouteV2],
+        *,
+        trade_date: date | None,
+    ) -> BarAcquisitionResult:
+        if not instruments:
+            raise ValueError("official daily dataset acquisition requires instruments")
         started_at = self._monotonic()
         attempts: list[AcquisitionResourceAttempt] = []
         receipts: list[RawFetchReceiptV1] = []
@@ -294,7 +354,11 @@ class TaiwanOfficialDailyAcquisitionExecutor:
                     resource_id=route.resource_id,
                 )
             )
-            outcome = self._run_route(route, instrument=instrument)
+            outcome = self._run_route(
+                route,
+                instruments=instruments,
+                trade_date=trade_date,
+            )
             if outcome.receipt is not None:
                 receipts.append(outcome.receipt)
             bars.extend(outcome.bars)
@@ -342,7 +406,11 @@ class TaiwanOfficialDailyAcquisitionExecutor:
             raise ValueError("shared acquisition plan does not match requirement")
         if not isinstance(requirement.target, InstrumentTarget):
             raise ValueError("official daily acquisition requires an instrument target")
-        return self.acquire_routes(requirement.target.instrument, plan.routes)
+        return self.acquire_routes(
+            requirement.target.instrument,
+            plan.routes,
+            trade_date=requirement.request.end_at.date(),
+        )
 
 
 __all__ = [

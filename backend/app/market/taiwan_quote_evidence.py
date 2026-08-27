@@ -12,7 +12,12 @@ from app.market.daily_ohlcv_platform import read_taiwan_official_daily
 from app.market.providers.twse_mis_realtime_acquisition import (
     TwseMisRealtimeAcquisitionAdapter,
 )
-from app.market.public_quote_platform import read_taiwan_quote_snapshot
+from app.market.public_quote_platform import (
+    acquire_taiwan_session_close,
+    project_taiwan_session_close,
+    read_taiwan_quote_snapshot,
+    read_taiwan_session_close,
+)
 from app.market.taiwan_realtime_platform import (
     read_taiwan_auction,
     read_taiwan_depth,
@@ -31,6 +36,7 @@ from app.market_data.policies import RealtimePolicy
 
 TW_QUOTE_EVIDENCE_CAPABILITIES = (
     "quote.snapshot",
+    "quote.session_close",
     TW_ORDER_BOOK_CAPABILITY_ID,
     TW_AUCTION_CAPABILITY_ID,
     "quote.official_close",
@@ -63,6 +69,7 @@ class TaiwanQuoteEvidenceBundle:
 
     requested_at: datetime
     quote: MarketDataResultV1
+    session_close: MarketDataResultV1
     depth: MarketDataResultV1
     auction: MarketDataResultV1
     official_close: MarketDataResultV1
@@ -72,6 +79,7 @@ class TaiwanQuoteEvidenceBundle:
     def component_results(self) -> dict[str, MarketDataResultV1]:
         return {
             "quote.snapshot": self.quote,
+            "quote.session_close": self.session_close,
             "quote.order_book": self.depth,
             "quote.auction": self.auction,
             "quote.official_close": self.official_close,
@@ -126,12 +134,15 @@ def _acquisition_scope(
     )
     resolved_fields = {
         "quote.snapshot": "quote",
+        "quote.session_close": "quote",
         "quote.order_book": "depth",
         "quote.auction": "auction",
         "quote.official_close": "bars",
     }
 
     def is_materialized(capability: str, result: MarketDataResultV1) -> bool:
+        if capability == "quote.session_close":
+            return bool(project_taiwan_session_close(result)["available"])
         field = resolved_fields[capability]
         value = getattr(result.resolved, field, None)
         return bool(value) if field == "bars" else value is not None
@@ -168,6 +179,11 @@ def read_taiwan_quote_evidence_bundle(
         stock_id=stock_id,
         requested_at=now,
     )
+    session_close = read_taiwan_session_close(
+        db,
+        stock_id=stock_id,
+        requested_at=now,
+    )
     depth = read_taiwan_depth(
         db,
         stock_id=stock_id,
@@ -189,6 +205,7 @@ def read_taiwan_quote_evidence_bundle(
     return TaiwanQuoteEvidenceBundle(
         requested_at=now,
         quote=quote,
+        session_close=session_close,
         depth=depth,
         auction=auction,
         official_close=official_close,
@@ -222,9 +239,29 @@ def acquire_taiwan_quote_evidence_bundle(
                 else capability
             )
             for capability in requested
-            if capability != "quote.official_close"
+            if capability
+            not in {"quote.official_close", "quote.session_close"}
         ),
         acquisition=acquisition,
+    )
+    session_close = (
+        acquire_taiwan_session_close(
+            db,
+            stock_id=stock_id,
+            requested_at=now,
+            acquisition=acquisition,
+        )
+        if "quote.session_close" in requested
+        else read_taiwan_session_close(
+            db,
+            stock_id=stock_id,
+            requested_at=now,
+        )
+    )
+    quote = (
+        read_taiwan_quote_snapshot(db, stock_id=stock_id, requested_at=now)
+        if "quote.session_close" in requested
+        else refreshed.quote
     )
     auction = refreshed.auction or read_taiwan_auction(
         db,
@@ -239,14 +276,16 @@ def acquire_taiwan_quote_evidence_bundle(
         requested_at=now,
     )
     realtime_results = {
-        "quote.snapshot": refreshed.quote,
+        "quote.snapshot": quote,
+        "quote.session_close": session_close,
         "quote.order_book": refreshed.depth,
         "quote.auction": auction,
         "quote.official_close": official_close,
     }
     return TaiwanQuoteEvidenceBundle(
         requested_at=now,
-        quote=refreshed.quote,
+        quote=quote,
+        session_close=session_close,
         depth=refreshed.depth,
         auction=auction,
         official_close=official_close,

@@ -36,12 +36,30 @@ from app.market.tw_current_market_platform import (
     refresh_taiwan_current_breadth,
     refresh_taiwan_current_index,
 )
-from app.market_data.contracts import DatasetHealthStatus, ResolvedEvidenceStatus
+from app.market_data.contracts import (
+    DatasetHealthStatus,
+    MarketSession,
+    ResolvedEvidenceStatus,
+)
 from app.market_data.policies import RealtimePolicy
 
 
 TAIPEI = timezone(timedelta(hours=8))
 NOW = datetime(2026, 8, 26, 10, 15, tzinfo=TAIPEI)
+
+
+def test_current_market_session_uses_authoritative_close_lifecycle() -> None:
+    from app.market.tw_current_market_platform import current_taiwan_market_session
+
+    assert current_taiwan_market_session(
+        datetime(2026, 8, 26, 13, 30, tzinfo=TAIPEI)
+    ) is MarketSession.CLOSING_AUCTION
+    assert current_taiwan_market_session(
+        datetime(2026, 8, 26, 13, 31, tzinfo=TAIPEI)
+    ) is MarketSession.CLOSE_RESOLUTION
+    assert current_taiwan_market_session(
+        datetime(2026, 8, 26, 13, 33, tzinfo=TAIPEI)
+    ) is MarketSession.POST_CLOSE
 
 
 def _db() -> tuple[Session, object]:

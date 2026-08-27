@@ -70,7 +70,9 @@ def test_session_phase_boundaries_follow_taiwan_stock_depth_rules() -> None:
         "2026-06-30T13:24:00+08:00": "regular_live",
         "2026-06-30T13:25:00+08:00": "closing_auction",
         "2026-06-30T13:30:00+08:00": "closing_auction",
-        "2026-06-30T13:31:00+08:00": "post_close_snapshot",
+        "2026-06-30T13:31:00+08:00": "close_resolution",
+        "2026-06-30T13:32:59+08:00": "close_resolution",
+        "2026-06-30T13:33:00+08:00": "post_close_snapshot",
         "2026-06-28T09:00:00+08:00": "market_closed",
     }
     for value, expected in cases.items():

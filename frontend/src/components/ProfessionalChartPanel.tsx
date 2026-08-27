@@ -13,6 +13,7 @@ import type {
   ChartTimeMode,
 } from "@/components/LightweightKLineChart";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
+import type { CanonicalIndicatorAuthority } from "@/components/stock-k-line/indicatorAuthority";
 import type { ChartEventMarker } from "@/components/chart/chartEventMarkers";
 import { useT } from "@/i18n";
 import dynamic from "next/dynamic";
@@ -73,6 +74,7 @@ type Props<TTimeframe extends string> = {
   volumePanelLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
   pricePrecision?: number;
+  canonicalIndicatorAuthority?: CanonicalIndicatorAuthority;
   drawingTool: ChartDrawingTool;
   drawings: ChartDrawing[];
   selectedDrawingId: string | null;
@@ -129,6 +131,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   onToggleIndicatorMenu,
   onUndoDrawing,
   pricePrecision,
+  canonicalIndicatorAuthority,
   priceSummary,
   selectedDrawingId,
   showMovingAverages,
@@ -359,6 +362,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
           volumePanelLabel={volumePanelLabel}
           volumeValueKey={volumeValueKey}
           pricePrecision={pricePrecision}
+          canonicalIndicatorAuthority={canonicalIndicatorAuthority}
           drawingTool={drawingTool}
           drawings={drawings}
           selectedDrawingId={selectedDrawingId}

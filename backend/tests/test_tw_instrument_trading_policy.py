@@ -69,3 +69,14 @@ def test_continuous_unknown_disposition_fails_closed_but_market_auctions_do_not(
     assert unknown.auction_type is None
     assert opening.applicable is True
     assert opening.auction_type is AuctionType.OPENING
+
+
+def test_close_resolution_is_explicitly_non_auction() -> None:
+    applicability = resolve_taiwan_auction_applicability(
+        session=MarketSession.CLOSE_RESOLUTION,
+        disposition={"cache_status": "current", "is_active": False},
+    )
+
+    assert applicability.applicable is False
+    assert applicability.auction_type is None
+    assert applicability.reason_codes == ("MARKET_CLOSE_RESOLUTION_NOT_AUCTION",)

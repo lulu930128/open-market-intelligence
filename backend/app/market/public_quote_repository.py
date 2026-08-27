@@ -36,6 +36,8 @@ class PersistedPublicQuoteRead:
     provider_priority: int = 100
     storage_row_id: int | None = None
     raw_result_id: int | None = None
+    market_session: MarketSession | None = None
+    confirmed_at: datetime | None = None
     rows_examined: int = 0
     limitations: tuple[str, ...] = ()
 
@@ -241,6 +243,11 @@ class TaiwanPublicQuoteRepository:
             provider_priority=binding.descriptor.priority,
             storage_row_id=row.id,
             raw_result_id=raw.id,
+            market_session=session,
+            confirmed_at=max(
+                _as_utc(row.received_at),
+                _as_utc(raw.fetched_at),
+            ),
             rows_examined=1,
         )
 

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db.models import JobRun
 from app.jobs import service as job_service
 from app.jobs.job_types import MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE
+from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue
 from app.market_data.eod_coverage import (
     eod_reconcile_bounds,
     normalize_coverage_market,
@@ -38,10 +39,23 @@ def run_eod_coverage_reconcile_job(
             max_consecutive_errors=max_consecutive_errors,
             error_backoff_seconds=error_backoff_seconds,
             progress_callback=progress,
+            taiwan_venue_refresher=(
+                refresh_taiwan_official_daily_venue
+                if market.strip().upper() == "TW"
+                else None
+            ),
         )
-        if result.get("status") == "failed":
+        if result.get("postcondition_met") is not True:
             raise job_service.JobExecutionError(
-                str(result.get("message") or "EOD coverage reconciliation failed."),
+                (
+                    "EOD coverage postcondition not met: "
+                    f"market={result.get('market')} "
+                    f"current={result.get('current_count', 0)}/"
+                    f"{result.get('universe_count', 0)} "
+                    f"partial={result.get('partial_count', 0)} "
+                    f"stale={result.get('stale_count', 0)} "
+                    f"missing={result.get('missing_count', 0)}."
+                ),
                 result=result,
             )
         return result

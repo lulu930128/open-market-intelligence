@@ -2,6 +2,7 @@ import type { IndicatorParameters, IndicatorSettings } from "@/components/StockK
 import type { ChartEventMarker } from "@/components/chart/chartEventMarkers";
 import { omiChartColors } from "@/lib/themeColors";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
+import type { CanonicalIndicatorAuthority } from "@/components/stock-k-line/indicatorAuthority";
 import type { TranslationFunction, TranslationValues } from "@/i18n";
 import {
   type CandlestickData,
@@ -85,6 +86,7 @@ export type LightweightKLineChartProps = {
   volumePanelLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
   pricePrecision?: number;
+  canonicalIndicatorAuthority?: CanonicalIndicatorAuthority;
   drawingTool?: ChartDrawingTool;
   drawings?: ChartDrawing[];
   selectedDrawingId?: string | null;

@@ -26,15 +26,66 @@ from app.market.tw_intraday_capabilities import (
     YAHOO_INTRADAY_DESCRIPTOR,
 )
 from app.market.tw_intraday_platform import (
+    build_taiwan_intraday_requirement,
     project_taiwan_intraday_bars,
     read_taiwan_intraday_bars,
     refresh_taiwan_intraday_bars,
 )
 from app.market_data.policies import RealtimePolicy
-from app.market_data.contracts import DatasetHealthStatus
+from app.market_data.contracts import (
+    DatasetHealthStatus,
+    InstrumentKey,
+    InstrumentType,
+    Market,
+)
 
 
 TAIPEI = timezone(timedelta(hours=8))
+
+
+def _instrument() -> InstrumentKey:
+    return InstrumentKey(
+        market=Market.TW,
+        symbol="3711",
+        instrument_type=InstrumentType.STOCK,
+        venue="TWSE",
+    )
+
+
+def test_one_day_window_uses_canonical_presentation_session_before_rollover() -> None:
+    requested_at = datetime(2026, 8, 28, 0, 53, tzinfo=TAIPEI)
+
+    requirement = build_taiwan_intraday_requirement(
+        instrument=_instrument(),
+        interval="1m",
+        range_value="1d",
+        policy=RealtimePolicy.CACHE_ONLY,
+        requested_at=requested_at,
+        acquiring=False,
+    )
+
+    assert requirement.request.start_at == datetime(
+        2026, 8, 27, 0, 0, tzinfo=TAIPEI
+    )
+    assert requirement.request.end_at == requested_at
+
+
+def test_one_day_window_rolls_to_current_trade_date_at_presentation_boundary() -> None:
+    requested_at = datetime(2026, 8, 28, 8, 0, tzinfo=TAIPEI)
+
+    requirement = build_taiwan_intraday_requirement(
+        instrument=_instrument(),
+        interval="1m",
+        range_value="1d",
+        policy=RealtimePolicy.CACHE_ONLY,
+        requested_at=requested_at,
+        acquiring=False,
+    )
+
+    assert requirement.request.start_at == datetime(
+        2026, 8, 28, 0, 0, tzinfo=TAIPEI
+    )
+    assert requirement.request.end_at == requested_at
 
 
 def _db() -> tuple[Session, object]:
@@ -266,6 +317,7 @@ def test_cache_only_history_and_trend_do_not_call_provider_or_commit(monkeypatch
             interval="1m",
             range_value="1d",
             refresh=True,
+            requested_at=now,
         )
 
         assert shared.acquisition.attempted is False

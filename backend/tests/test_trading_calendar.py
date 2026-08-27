@@ -131,13 +131,22 @@ class MarketCalendarStatusTests(unittest.TestCase):
         auction = build_taiwan_calendar_status(
             now=datetime(2026, 6, 15, 13, 25, 0, tzinfo=timezone),
         )
-        closed = build_taiwan_calendar_status(
+        close_match = build_taiwan_calendar_status(
             now=datetime(2026, 6, 15, 13, 30, 0, tzinfo=timezone),
+        )
+        resolving = build_taiwan_calendar_status(
+            now=datetime(2026, 6, 15, 13, 31, 0, tzinfo=timezone),
+        )
+        closed = build_taiwan_calendar_status(
+            now=datetime(2026, 6, 15, 13, 33, 0, tzinfo=timezone),
         )
 
         self.assertEqual(regular["phase"], "regular")
         self.assertEqual(auction["phase"], "closing_auction")
         self.assertTrue(auction["session"]["is_polling_window"])
+        self.assertEqual(close_match["phase"], "closing_auction")
+        self.assertEqual(resolving["phase"], "close_resolution")
+        self.assertTrue(resolving["session"]["is_polling_window"])
         self.assertEqual(closed["phase"], "post_close")
 
     def test_taiwan_status_exposes_0800_presentation_rollover(self) -> None:

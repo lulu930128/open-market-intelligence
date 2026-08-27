@@ -40,6 +40,7 @@ class MarketSession(str, Enum):
     OPENING_AUCTION = "opening_auction"
     CONTINUOUS = "continuous"
     CLOSING_AUCTION = "closing_auction"
+    CLOSE_RESOLUTION = "close_resolution"
     POST_CLOSE = "post_close"
     CLOSED = "closed"
     UNKNOWN = "unknown"

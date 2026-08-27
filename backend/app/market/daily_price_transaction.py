@@ -26,6 +26,7 @@ from app.market_data.integration_contracts import (
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
+    TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
 )
 
 
@@ -35,6 +36,7 @@ TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
     if receipt.source not in {
         TWSE_DAILY_TRADING_SOURCE_NAME,
+        TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
         TPEX_DAILY_QUOTES_SOURCE_NAME,
     }:
         raise ValueError(f"unsupported Taiwan official daily source: {receipt.source}")
@@ -44,7 +46,13 @@ def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
         "category": "market_data",
         "endpoint_url": receipt.url,
         "enabled": True,
-        "priority": 10,
+        "priority": (
+            5
+            if receipt.source == TWSE_RWD_DAILY_TRADING_SOURCE_NAME
+            else 20
+            if receipt.source == TWSE_DAILY_TRADING_SOURCE_NAME
+            else 10
+        ),
         "parser_type": receipt.parser_version,
         "auth_type": "none",
         "reliability_level": "official",

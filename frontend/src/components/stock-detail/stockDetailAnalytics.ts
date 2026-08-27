@@ -165,6 +165,65 @@ export function averageRecentChartValue(
   return values.reduce((total, value) => total + value, 0) / values.length;
 }
 
+export function resolveTodayHeadlineValues({
+  currentPrice,
+  currentReferenceClose,
+  completedSessionPrice,
+  completedSessionReferenceClose,
+}: {
+  currentPrice: number | null | undefined;
+  currentReferenceClose: number | null | undefined;
+  completedSessionPrice: number | null | undefined;
+  completedSessionReferenceClose: number | null | undefined;
+}): readonly [
+  price: number | null,
+  change: number | null,
+  changePct: number | null,
+  source: "current_session" | "completed_session" | "unavailable",
+] {
+  const normalizedCurrentPrice = finiteNumber(currentPrice) ? currentPrice : null;
+  const normalizedCurrentReference = finiteNumber(currentReferenceClose)
+    ? currentReferenceClose
+    : null;
+  if (normalizedCurrentPrice !== null) {
+    return [
+      normalizedCurrentPrice,
+      normalizedCurrentReference !== null
+        ? normalizedCurrentPrice - normalizedCurrentReference
+        : null,
+      normalizedCurrentReference !== null && normalizedCurrentReference !== 0
+        ? ((normalizedCurrentPrice - normalizedCurrentReference) /
+            normalizedCurrentReference) *
+          100
+        : null,
+      "current_session",
+    ] as const;
+  }
+
+  const normalizedCompletedPrice = finiteNumber(completedSessionPrice)
+    ? completedSessionPrice
+    : null;
+  const normalizedCompletedReference = finiteNumber(completedSessionReferenceClose)
+    ? completedSessionReferenceClose
+    : null;
+  if (normalizedCompletedPrice !== null) {
+    return [
+      normalizedCompletedPrice,
+      normalizedCompletedReference !== null
+        ? normalizedCompletedPrice - normalizedCompletedReference
+        : null,
+      normalizedCompletedReference !== null && normalizedCompletedReference !== 0
+        ? ((normalizedCompletedPrice - normalizedCompletedReference) /
+            normalizedCompletedReference) *
+          100
+        : null,
+      "completed_session",
+    ] as const;
+  }
+
+  return [null, null, null, "unavailable"] as const;
+}
+
 export function chartWindowStats(points: ChartPoint[], windowSize: number) {
   const rows = points.slice(-windowSize);
   const firstClose = rows.find((point) => finiteNumber(point.close))?.close ?? null;

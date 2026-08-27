@@ -279,6 +279,7 @@ export default async function Page({
   const initialChartData: ChartPoint[] = initialOhlc?.points ?? [];
   const initialChartIntradayOverlay: OhlcIntradayOverlay | null =
     initialOhlc?.intraday_overlay ?? null;
+  const initialChartVolumeUnit = initialOhlc?.volume_unit ?? null;
 
   return (
     <MarketDashboardClient
@@ -295,6 +296,7 @@ export default async function Page({
       initialSelectedKrSymbol={initialSelectedKrSymbol}
       initialChartData={initialChartData}
       initialChartIntradayOverlay={initialChartIntradayOverlay}
+      initialChartVolumeUnit={initialChartVolumeUnit}
       initialIndicatorData={initialIndicatorData}
       initialRankingData={null}
       initialRadarMode={initialRadarMode}

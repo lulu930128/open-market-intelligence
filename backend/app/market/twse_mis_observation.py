@@ -225,30 +225,44 @@ def resolve_twse_mis_observation(
             if trial or indicative_available
             else "CLOSING_AUCTION_ACTIVE"
         )
-    elif (
-        market_phase == "post_close"
-        and trial
-        and local_now.time() <= TAIWAN_CLOSE_RESOLUTION_TIME
-    ):
-        instrument_phase = "closing_auction_delayed"
-        projected_legacy_phase = "closing_auction"
-        reason_code = "CLOSING_AUCTION_DELAYED"
-    elif market_phase == "post_close":
-        instrument_phase = (
-            "closing_pending"
-            if local_now.time() <= TAIWAN_CLOSE_RESOLUTION_TIME
-            else "closed"
-        )
-        projected_legacy_phase = "post_close_snapshot"
+    elif market_phase == "close_resolution":
+        instrument_phase = "close_resolution"
+        projected_legacy_phase = "close_resolution"
         reason_code = (
-            "OFFICIAL_CLOSE_PENDING"
-            if instrument_phase == "closing_pending"
-            else "SESSION_COMPLETED"
+            "CLOSE_RESOLUTION_TRIAL_REJECTED"
+            if trial
+            else "SESSION_CLOSE_CANDIDATE"
+            if actual_trade_price_available
+            else "CLOSE_RESOLUTION_AWAITING_VALID_TRADE"
         )
+    elif market_phase == "post_close":
+        instrument_phase = "closed"
+        projected_legacy_phase = "post_close_snapshot"
+        reason_code = "SESSION_COMPLETED"
     else:
         instrument_phase = "unknown"
         projected_legacy_phase = legacy_phase
         reason_code = "UNKNOWN_SESSION_STATE"
+
+    session_final_candidate = bool(
+        market_phase in {"close_resolution", "post_close"}
+        and not trial
+        and actual_trade_price_available
+        and event_time is not None
+        and event_time.date() == local_now.date()
+        and event_time.time() <= TAIWAN_CLOSE_RESOLUTION_TIME
+    )
+    session_final_reason_code = (
+        "VALID_CURRENT_SESSION_ACTUAL_TRADE"
+        if session_final_candidate
+        else "TRIAL_OBSERVATION"
+        if trial
+        else "CURRENT_SESSION_EVENT_MISSING"
+        if event_time is None or event_time.date() != local_now.date()
+        else "ACTUAL_TRADE_PRICE_MISSING"
+        if not actual_trade_price_available
+        else "SESSION_PHASE_NOT_ELIGIBLE"
+    )
 
     return {
         "market_calendar_phase": market_phase,
@@ -260,6 +274,8 @@ def resolve_twse_mis_observation(
         "indicative_available": indicative_available,
         "actual_trade_occurred": actual_trade_occurred,
         "actual_trade_price_available": actual_trade_price_available,
+        "session_final_candidate": session_final_candidate,
+        "session_final_reason_code": session_final_reason_code,
         "reason_code": reason_code,
     }
 

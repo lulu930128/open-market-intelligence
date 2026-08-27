@@ -70,6 +70,7 @@ _LIVE_SESSIONS = (
     MarketSession.OPENING_AUCTION,
     MarketSession.CONTINUOUS,
     MarketSession.CLOSING_AUCTION,
+    MarketSession.CLOSE_RESOLUTION,
     MarketSession.POST_CLOSE,
     MarketSession.UNKNOWN,
 )

@@ -37,6 +37,7 @@ from app.market_data.contracts import (
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
+    TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
 )
 
 
@@ -50,32 +51,41 @@ class _OfficialDailySourceBinding:
     source_name: str
 
 
-_SOURCE_BY_VENUE = {
-    "TWSE": _OfficialDailySourceBinding(
-        venue="TWSE",
-        provider="twse_openapi",
-        source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+_SOURCES_BY_VENUE = {
+    "TWSE": (
+        _OfficialDailySourceBinding(
+            venue="TWSE",
+            provider="twse_rwd",
+            source_name=TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+        ),
+        _OfficialDailySourceBinding(
+            venue="TWSE",
+            provider="twse_openapi",
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+        ),
     ),
-    "TPEX": _OfficialDailySourceBinding(
-        venue="TPEX",
-        provider="tpex_openapi",
-        source_name=TPEX_DAILY_QUOTES_SOURCE_NAME,
+    "TPEX": (
+        _OfficialDailySourceBinding(
+            venue="TPEX",
+            provider="tpex_openapi",
+            source_name=TPEX_DAILY_QUOTES_SOURCE_NAME,
+        ),
     ),
 }
 
 
-def _binding_for_instrument(
+def _bindings_for_instrument(
     instrument: InstrumentKey,
-) -> _OfficialDailySourceBinding:
+) -> tuple[_OfficialDailySourceBinding, ...]:
     if instrument.market is not Market.TW:
         raise ValueError("Taiwan daily repository requires market=TW")
     if instrument.instrument_type not in {InstrumentType.STOCK, InstrumentType.ETF}:
         raise ValueError("Taiwan daily repository supports stock and ETF instruments")
     venue = str(instrument.venue or "").strip().upper()
-    binding = _SOURCE_BY_VENUE.get(venue)
-    if binding is None:
+    bindings = _SOURCES_BY_VENUE.get(venue)
+    if bindings is None:
         raise ValueError("Taiwan daily repository requires venue=TWSE or TPEX")
-    return binding
+    return bindings
 
 
 def _as_aware_utc(value: datetime) -> datetime:
@@ -119,14 +129,16 @@ class TaiwanOfficialDailyBarRepository:
 
         if max_rows < 1 or max_rows > 5000:
             raise ValueError("Taiwan daily read max_rows must be between 1 and 5000")
-        binding = _binding_for_instrument(instrument)
+        bindings = _bindings_for_instrument(instrument)
+        source_names = tuple(item.source_name for item in bindings)
         rows = (
             self._db.query(MarketDailyPrice.trade_date)
             .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
             .filter(MarketDailyPrice.stock_id == instrument.symbol)
             .filter(MarketDailyPrice.trade_date <= end_date)
-            .filter(SourceRegistry.source_name == binding.source_name)
+            .filter(SourceRegistry.source_name.in_(source_names))
+            .distinct()
             .order_by(MarketDailyPrice.trade_date.desc(), MarketDailyPrice.id.desc())
             .limit(max_rows)
             .all()
@@ -135,7 +147,8 @@ class TaiwanOfficialDailyBarRepository:
 
     def load_daily_bars(self, query: DailyBarCandidateQuery) -> DailyBarCandidateRead:
         instrument = query.instrument
-        binding = _binding_for_instrument(instrument)
+        bindings = _bindings_for_instrument(instrument)
+        binding_by_source = {item.source_name: item for item in bindings}
 
         rows = (
             self._db.query(MarketDailyPrice, RawFetchResult, SourceRegistry)
@@ -144,23 +157,35 @@ class TaiwanOfficialDailyBarRepository:
             .filter(MarketDailyPrice.stock_id == instrument.symbol)
             .filter(MarketDailyPrice.trade_date >= query.start_date)
             .filter(MarketDailyPrice.trade_date <= query.end_date)
-            .filter(SourceRegistry.source_name == binding.source_name)
+            .filter(SourceRegistry.source_name.in_(tuple(binding_by_source)))
             .order_by(MarketDailyPrice.trade_date.asc(), MarketDailyPrice.id.asc())
-            .limit(query.max_rows + 1)
+            .limit(query.max_rows * len(bindings) + 1)
             .all()
         )
-        if len(rows) > query.max_rows:
+        if len(rows) > query.max_rows * len(bindings):
+            raise CandidateReadLimitExceeded(
+                "daily candidate read exceeded max_rows; narrow the requested range"
+            )
+        source_row_counts: dict[str, int] = {}
+        for _, _, source in rows:
+            source_row_counts[source.source_name] = (
+                source_row_counts.get(source.source_name, 0) + 1
+            )
+        if any(count > query.max_rows for count in source_row_counts.values()):
             raise CandidateReadLimitExceeded(
                 "daily candidate read exceeded max_rows; narrow the requested range"
             )
 
-        bars: list[BarObservation] = []
-        storage_row_ids: list[int] = []
-        raw_result_ids: list[int] = []
+        bars_by_source: dict[str, list[BarObservation]] = {}
+        storage_ids_by_source: dict[str, list[int]] = {}
+        raw_ids_by_source: dict[str, list[int]] = {}
+        priority_by_source: dict[str, int] = {}
         rejections: list[CandidateRowRejection] = []
-        provider_priority = 100
         for row, raw_result, source in rows:
-            provider_priority = max(int(source.priority), 0)
+            binding = binding_by_source.get(source.source_name)
+            if binding is None:
+                continue
+            priority_by_source[source.source_name] = max(int(source.priority), 0)
             missing_fields = _missing_ohlc(row)
             if missing_fields:
                 rejections.append(
@@ -239,27 +264,29 @@ class TaiwanOfficialDailyBarRepository:
                 )
                 continue
 
-            bars.append(bar)
-            storage_row_ids.append(row.id)
-            raw_result_ids.append(raw_result.id)
+            bars_by_source.setdefault(source.source_name, []).append(bar)
+            storage_ids_by_source.setdefault(source.source_name, []).append(row.id)
+            raw_ids_by_source.setdefault(source.source_name, []).append(raw_result.id)
 
-        series = (
+        series = tuple(
             PersistedBarSeries(
-                provider=binding.provider,
-                source=binding.source_name,
+                provider=binding_by_source[source_name].provider,
+                source=source_name,
                 authority=AuthorityClass.EXCHANGE,
-                provider_priority=provider_priority,
+                provider_priority=priority_by_source.get(source_name, 100),
                 bars=tuple(bars),
-                storage_row_ids=tuple(storage_row_ids),
-                raw_result_ids=tuple(raw_result_ids),
-            ),
-        ) if bars else ()
+                storage_row_ids=tuple(storage_ids_by_source[source_name]),
+                raw_result_ids=tuple(raw_ids_by_source[source_name]),
+            )
+            for source_name, bars in bars_by_source.items()
+            if bars
+        )
         return DailyBarCandidateRead(
             query=query,
             series=series,
             rejections=tuple(rejections),
             rows_examined=len(rows),
-            rows_accepted=len(bars),
+            rows_accepted=sum(len(values) for values in bars_by_source.values()),
         )
 
 

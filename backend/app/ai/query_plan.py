@@ -250,6 +250,13 @@ CAPABILITY_HINTS = {
         "official close",
         "official closing price",
     ),
+    "quote.session_close": (
+        "今日收盤",
+        "當日收盤",
+        "盤後收盤",
+        "session close",
+        "completed session close",
+    ),
     "chips.institutional": (
         "三大法人",
         "法人",
@@ -1110,6 +1117,7 @@ def build_query_plan(
                     allowed_capabilities={
                         "target.identity",
                         "quote.snapshot",
+                        "quote.session_close",
                         "quote.official_close",
                         "intraday.bars",
                         "data.freshness",

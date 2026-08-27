@@ -429,6 +429,7 @@ def _market_live_summary(
             "preopen_auction": "preopen",
             "lunch_break": "lunch_break",
             "closing_auction": "closing_auction",
+            "close_resolution": "close_resolution",
             "post_close": "latest_session_close",
             "post_close_snapshot": "latest_session_close",
             "market_closed": "closed_holiday"

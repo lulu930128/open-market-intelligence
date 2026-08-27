@@ -26,6 +26,7 @@ from app.market.daily_ohlcv_platform import (
     read_taiwan_latest_daily_evidence,
     read_taiwan_official_daily,
     refresh_taiwan_official_daily,
+    refresh_taiwan_official_daily_venue,
 )
 from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReader
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
@@ -37,7 +38,10 @@ from app.routers.market import refresh_stock_official_daily_price
 from app.market.providers.tw_official_daily import (
     TPEX_DAILY_RESOURCE_ID,
     TWSE_DAILY_RESOURCE_ID,
+    TWSE_RWD_DAILY_RESOURCE_ID,
+    TW_OFFICIAL_DAILY_DESCRIPTORS,
     parse_tpex_official_daily_payload,
+    parse_twse_rwd_official_daily_payload,
     parse_twse_official_daily_payload,
 )
 from app.market_data.contracts import (
@@ -53,7 +57,10 @@ from app.market_data.integration_contracts import (
 )
 from app.market_data.policies import DataPurpose
 from app.market_data.registry import DATASET_REGISTRY
-from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
+from app.sources.defaults import (
+    TWSE_DAILY_TRADING_SOURCE_NAME,
+    TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+)
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "tw_market_data"
@@ -129,6 +136,11 @@ def _platform(
         ),
         transaction=TaiwanOfficialDailyTransaction(db),
         acquisition=executor,
+        descriptors=tuple(
+            descriptor
+            for descriptor in TW_OFFICIAL_DAILY_DESCRIPTORS
+            if descriptor.resource_id == resource_id
+        ),
     )
 
 
@@ -163,6 +175,147 @@ def test_recorded_twse_excerpt_parses_without_losing_market_fields() -> None:
     assert record.trade_value == 31_234_578_255
     assert record.transaction_count == 84_694
     assert str(record.price_change) == "-35.0000"
+
+
+def test_recorded_twse_rwd_same_day_excerpt_parses_official_3711_ohlcv() -> None:
+    fixture_name = "twse_mi_index_allbut0999_excerpt_20260827.json"
+    fixture = _fixture(fixture_name)
+    parsed = parse_twse_rwd_official_daily_payload(
+        _raw_payload(fixture_name),
+        target_symbols=frozenset({"3711"}),
+    )
+
+    assert fixture["source_receipt"]["original_row_count"] == 1377
+    assert parsed.input_row_count == 1
+    assert parsed.matched_row_count == 1
+    assert parsed.issues == ()
+    record = parsed.records[0]
+    assert record.trade_date == date(2026, 8, 27)
+    assert record.symbol == "3711"
+    assert record.instrument_name == "日月光投控"
+    assert record.open_price == 608
+    assert record.high_price == 608
+    assert record.low_price == 593
+    assert record.close_price == 605
+    assert record.trade_volume == 11_658_860
+    assert record.trade_value == 7_011_817_192
+    assert record.transaction_count == 18_048
+    assert record.price_change == 13
+
+
+def test_twse_rwd_venue_refresh_uses_existing_transaction_and_resolver(
+    db: Session,
+) -> None:
+    db.add(
+        StockMaster(
+            stock_id="3711",
+            stock_name="日月光投控",
+            market="TWSE",
+            instrument_type="stock",
+            is_active=True,
+        )
+    )
+    db.commit()
+    executor = TaiwanOfficialDailyAcquisitionExecutor(
+        fetchers={
+            TWSE_RWD_DAILY_RESOURCE_ID: lambda _route: FakeResponse(
+                text=_raw_payload(
+                    "twse_mi_index_allbut0999_excerpt_20260827.json"
+                )
+            )
+        },
+        clock=lambda: datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
+        monotonic=lambda: 10.0,
+    )
+
+    result = refresh_taiwan_official_daily_venue(
+        db,
+        venue="TWSE",
+        trade_date=date(2026, 8, 27),
+        requested_at=datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
+        acquisition=executor,
+    )
+
+    assert result["fetch_status"] == "success"
+    assert result["parse_status"] == "success"
+    assert result["source_name"] == TWSE_RWD_DAILY_TRADING_SOURCE_NAME
+    assert result["parsed_count"] == 1
+    assert result["replaced_trade_dates"] == [date(2026, 8, 27)]
+    assert result["resource_attempts"] == [
+        {"provider": "twse_rwd", "resource_id": TWSE_RWD_DAILY_RESOURCE_ID}
+    ]
+    row = db.query(MarketDailyPrice).one()
+    assert row.stock_id == "3711"
+    assert row.trade_date == date(2026, 8, 27)
+    assert row.close_price == 605
+    assert row.trade_volume == 11_658_860
+    assert row.trade_value == 7_011_817_192
+    assert row.transaction_count == 18_048
+    outward = read_taiwan_official_daily(
+        db,
+        stock_id="3711",
+        from_date=date(2026, 8, 27),
+        to_date=date(2026, 8, 27),
+        requested_at=datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
+    )
+    assert outward.resolved.health.status is ResolvedEvidenceStatus.SELECTED
+    assert outward.resolved.bars[-1].lineage.provider == "twse_rwd"
+    assert outward.resolved.bars[-1].close_price == 605
+    assert outward.resolved.bars[-1].volume is not None
+    assert outward.resolved.bars[-1].volume.value == 11_658_860
+
+
+def test_twse_rwd_venue_refresh_accepts_runtime_scale_universe(
+    db: Session,
+) -> None:
+    db.add_all(
+        [
+            StockMaster(
+                stock_id="3711",
+                stock_name="日月光投控",
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            ),
+            *(
+                StockMaster(
+                    stock_id=f"X{index:04d}",
+                    stock_name=f"測試股票 {index}",
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                )
+                for index in range(1_085)
+            ),
+        ]
+    )
+    db.commit()
+    route_symbol_bounds: list[int] = []
+
+    def fetch(route):
+        route_symbol_bounds.append(route.max_symbols)
+        return FakeResponse(
+            text=_raw_payload("twse_mi_index_allbut0999_excerpt_20260827.json")
+        )
+
+    executor = TaiwanOfficialDailyAcquisitionExecutor(
+        fetchers={TWSE_RWD_DAILY_RESOURCE_ID: fetch},
+        clock=lambda: datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
+        monotonic=lambda: 10.0,
+    )
+
+    result = refresh_taiwan_official_daily_venue(
+        db,
+        venue="TWSE",
+        trade_date=date(2026, 8, 27),
+        requested_at=datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
+        acquisition=executor,
+    )
+
+    assert route_symbol_bounds == [1_086]
+    assert result["fetch_status"] == "success"
+    assert result["parsed_count"] == 1
+    assert db.query(MarketDailyPrice).one().stock_id == "3711"
 
 
 def test_cache_requirement_rejects_unbounded_calendar_range() -> None:
@@ -403,10 +556,15 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
     assert chart["points"][0]["close"] == close
     assert chart["points"][0]["trade_value"] == row.trade_value
     assert chart["points"][0]["transaction_count"] == row.transaction_count
+    assert chart["volume_unit"] == "shares"
+    assert chart["volume_semantics"] == "finalized_traded_shares"
+    assert chart["latest_finalized_data_date"] == trade_date
     assert chart["data_quality"] == "ok"
     outward = MarketOhlcChartRead.model_validate(chart).model_dump(mode="json")
     assert outward["stock_id"] == symbol
     assert outward["points"][0]["close"] == close
+    assert outward["volume_unit"] == "shares"
+    assert outward["latest_finalized_data_date"] == trade_date.isoformat()
     assert outward["data_quality"] == "ok"
 
 
@@ -576,7 +734,7 @@ def test_refresh_dataset_scope_cannot_cross_venue() -> None:
     plan = plan_refresh_acquisition_v1(requirement, TW_OFFICIAL_DAILY_DESCRIPTORS)
 
     assert len(plan.routes) == 1
-    assert plan.routes[0].resource_id == TWSE_DAILY_RESOURCE_ID
+    assert plan.routes[0].resource_id == TWSE_RWD_DAILY_RESOURCE_ID
     assert any(
         item.reason_code == "DATASET_SCOPE_NOT_SUPPORTED_BY_RESOURCE"
         for item in plan.skipped_resources
@@ -587,22 +745,22 @@ def test_production_refresh_entrypoint_is_provider_neutral_and_registry_owned(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture_name = "twse_stock_day_all_excerpt_20260825.json"
+    fixture_name = "twse_mi_index_allbut0999_excerpt_20260827.json"
     calls: list[str] = []
 
-    def fetch(_route) -> FakeResponse:
-        calls.append(TWSE_DAILY_RESOURCE_ID)
+    def fetch(route) -> FakeResponse:
+        calls.append(route.resource_id)
         return FakeResponse(text=_raw_payload(fixture_name))
 
     executor = TaiwanOfficialDailyAcquisitionExecutor(
-        fetchers={TWSE_DAILY_RESOURCE_ID: fetch},
-        clock=lambda: datetime(2026, 8, 25, 10, 30, tzinfo=timezone.utc),
+        fetchers={TWSE_RWD_DAILY_RESOURCE_ID: fetch},
+        clock=lambda: datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
         monotonic=lambda: 10.0,
     )
     db.add(
         StockMaster(
-            stock_id="2330",
-            stock_name="TSMC",
+            stock_id="3711",
+            stock_name="日月光投控",
             market="TWSE",
             instrument_type="stock",
             is_active=True,
@@ -611,20 +769,20 @@ def test_production_refresh_entrypoint_is_provider_neutral_and_registry_owned(
     db.commit()
     monkeypatch.setattr(
         "app.market.daily_ohlcv_platform.expected_daily_price_date",
-        lambda **_kwargs: date(2026, 8, 24),
+        lambda **_kwargs: date(2026, 8, 27),
     )
 
     result = refresh_taiwan_official_daily(
         db,
-        stock_id="2330",
-        trade_date=date(2026, 8, 24),
-        requested_at=datetime(2026, 8, 25, 18, 30, tzinfo=timezone.utc),
+        stock_id="3711",
+        trade_date=date(2026, 8, 27),
+        requested_at=datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
         acquisition=executor,
     )
 
-    assert calls == [TWSE_DAILY_RESOURCE_ID]
+    assert calls == [TWSE_RWD_DAILY_RESOURCE_ID]
     assert result.postcondition_satisfied is True
-    assert result.plan.routes[0].provider_key == "twse_openapi"
+    assert result.plan.routes[0].provider_key == "twse_rwd"
     spec = DATASET_REGISTRY.get("tw.daily.ohlcv")
     assert spec.owner == "app.market.daily_ohlcv_platform"
     assert spec.read_operation == "MarketDataGateway.resolve_bars"

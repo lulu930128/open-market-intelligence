@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime
 from typing import Iterable
 
 from sqlalchemy.orm import Session
 
-from app.market.trading_calendar import (
-    TAIWAN_TZ,
-    is_taiwan_trading_day,
-    taiwan_presentation_session,
-)
+from app.market.trading_calendar import taiwan_market_session, taiwan_presentation_session
 from app.market.tw_current_market_acquisition import (
     TaiwanCurrentBreadthAcquisitionExecutor,
     TaiwanCurrentIndexAcquisitionExecutor,
@@ -44,19 +40,7 @@ from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2
 def current_taiwan_market_session(requested_at: datetime) -> MarketSession:
     if requested_at.tzinfo is None or requested_at.utcoffset() is None:
         raise ValueError("requested_at must be timezone-aware")
-    local = requested_at.astimezone(TAIWAN_TZ)
-    if not is_taiwan_trading_day(local.date()):
-        return MarketSession.CLOSED
-    clock = local.time().replace(tzinfo=None)
-    if clock < time(8, 30):
-        return MarketSession.PRE_OPEN
-    if clock < time(9, 0):
-        return MarketSession.OPENING_AUCTION
-    if clock < time(13, 25):
-        return MarketSession.CONTINUOUS
-    if clock < time(13, 30):
-        return MarketSession.CLOSING_AUCTION
-    return MarketSession.POST_CLOSE
+    return taiwan_market_session(requested_at)
 
 
 def build_taiwan_current_requirement(

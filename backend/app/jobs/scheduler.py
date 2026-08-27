@@ -68,7 +68,10 @@ from app.market.providers.twse_mis_current_breadth import (
     get_cached_current_breadth_stock_rows,
 )
 from app.market.source_health import build_taiwan_source_health
-from app.market_data.eod_coverage import should_enqueue_eod_reconcile
+from app.market_data.eod_coverage import (
+    expected_eod_trade_date,
+    should_enqueue_eod_reconcile,
+)
 from app.market.tw_intraday_state import (
     attach_current_market_lineage_to_stock_rows,
     persist_taiwan_intraday_stock_states,
@@ -2084,12 +2087,18 @@ def enqueue_market_eod_coverage_reconcile() -> None:
             continue
         db = SessionLocal()
         try:
-            if not should_enqueue_eod_reconcile(db, market=market):
+            expected_trade_date = expected_eod_trade_date(market)
+            if not should_enqueue_eod_reconcile(
+                db,
+                market=market,
+                expected_trade_date=expected_trade_date,
+            ):
                 continue
             job, created = enqueue_eod_coverage_reconcile(
                 db,
                 market=market,
                 repair=True,
+                expected_trade_date=expected_trade_date,
                 max_symbols=(
                     settings.scheduler_eod_coverage_us_max_symbols_per_run
                     if market == "US"

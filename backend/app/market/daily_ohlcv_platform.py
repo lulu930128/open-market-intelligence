@@ -17,8 +17,10 @@ from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market.daily_price_transaction import TaiwanOfficialDailyTransaction
 from app.market.providers.tw_official_daily import (
     TW_DAILY_DATASET_ID,
+    TW_FULL_MARKET_DAILY_DATASET_ID,
     TW_OFFICIAL_DAILY_DESCRIPTORS,
 )
+from app.market.tw_universe import list_taiwan_stock_universe
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market_data.contracts import (
     CanonicalModel,
@@ -37,6 +39,7 @@ from app.market_data.integration_contracts import (
     AcquisitionSummary,
     BarCapabilityRequest,
     DataRequirementV2,
+    DatasetTarget,
     FreshnessRequirement,
     InstrumentTarget,
     MarketDataResultV1,
@@ -367,6 +370,7 @@ class TaiwanOfficialDailyPlatform:
             acquisition = self._acquisition.acquire_routes(
                 requirement.target.instrument,
                 plan.routes,
+                trade_date=requirement.to_date,
             )
             if acquisition.receipts or acquisition.observations:
                 persistence = self._transaction.persist_bar_acquisition(
@@ -476,8 +480,8 @@ def refresh_taiwan_official_daily(
         to_date=trade_date,
         requested_at=effective_requested_at,
         purpose=DataPurpose.REPAIR,
-        max_provider_attempts=1,
-        max_external_calls=1,
+        max_provider_attempts=2 if venue == "TWSE" else 1,
+        max_external_calls=2 if venue == "TWSE" else 1,
         timeout_seconds=30,
         max_symbols=1,
         max_range_days=1,
@@ -495,6 +499,153 @@ def refresh_taiwan_official_daily(
     ).refresh_instrument(requirement)
 
 
+def refresh_taiwan_official_daily_venue(
+    db: Session,
+    *,
+    venue: str,
+    trade_date: date,
+    requested_at: datetime | None = None,
+    acquisition: TaiwanOfficialDailyAcquisitionExecutor | None = None,
+) -> dict[str, object]:
+    """Refresh one official venue receipt through the existing daily owner.
+
+    This is the dataset-scoped command used by the full-market EOD job.  It
+    reuses the same descriptors, canonical bars, transaction owner and source
+    lineage as per-instrument refresh; it does not create another EOD store.
+    """
+
+    normalized_venue = str(venue or "").strip().upper()
+    if normalized_venue not in {"TWSE", "TPEX"}:
+        raise ValueError("official Taiwan daily venue must be TWSE or TPEX")
+    effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
+    if effective_requested_at.tzinfo is None or effective_requested_at.utcoffset() is None:
+        raise ValueError("requested_at must be timezone-aware")
+    instruments: dict[str, InstrumentKey] = {}
+    for stock in list_taiwan_stock_universe(db):
+        stock_venue = str(stock.market or "").strip().upper()
+        if stock_venue != normalized_venue:
+            continue
+        instruments[stock.stock_id] = InstrumentKey(
+            market=Market.TW,
+            symbol=stock.stock_id,
+            instrument_type=InstrumentType.STOCK,
+            venue=normalized_venue,
+        )
+    if not instruments:
+        raise ValueError(
+            f"active Taiwan ordinary-stock universe is empty for venue={normalized_venue}"
+        )
+
+    attempt_bound = 2 if normalized_venue == "TWSE" else 1
+    requirement = RefreshRequirementV1(
+        dataset_id=TW_FULL_MARKET_DAILY_DATASET_ID,
+        target=DatasetTarget(
+            market=Market.TW,
+            dataset_id=TW_FULL_MARKET_DAILY_DATASET_ID,
+            scope_key=normalized_venue,
+        ),
+        from_date=trade_date,
+        to_date=trade_date,
+        requested_at=effective_requested_at,
+        purpose=DataPurpose.REPAIR,
+        max_provider_attempts=attempt_bound,
+        max_external_calls=attempt_bound,
+        timeout_seconds=30,
+        max_symbols=len(instruments),
+        max_range_days=1,
+        postcondition=(
+            f"Official {normalized_venue} daily observations reach "
+            f"{trade_date.isoformat()} and commit atomically."
+        ),
+    )
+    plan = plan_refresh_acquisition_v1(
+        requirement,
+        TW_OFFICIAL_DAILY_DESCRIPTORS,
+    )
+    if plan.unfillable:
+        return {
+            "fetch_status": "skipped",
+            "parse_status": "skipped",
+            "parsed_count": 0,
+            "data_quality_status": "unavailable",
+            "raw_result_id": None,
+            "fetched_at": effective_requested_at,
+            "replaced_trade_dates": [],
+            "error_message": "Official daily acquisition plan is unfillable.",
+            "limitations": list(plan.limitations),
+            "resource_attempts": [],
+        }
+
+    executor = acquisition or TaiwanOfficialDailyAcquisitionExecutor()
+    acquired = executor.acquire_dataset_routes(
+        instruments,
+        plan.routes,
+        trade_date=trade_date,
+    )
+    persistence = (
+        TaiwanOfficialDailyTransaction(db).persist_bar_acquisition(
+            requirement,
+            acquired,
+        )
+        if acquired.receipts or acquired.observations
+        else PersistenceSummary(
+            attempted=False,
+            limitations=("NO_PERSISTABLE_ACQUISITION_EVIDENCE",),
+        )
+    )
+    observed_dates = sorted(
+        {
+            bar.end_at.astimezone(TAIWAN_TZ).date()
+            for bar in acquired.observations
+        }
+    )
+    observed_sources = list(
+        dict.fromkeys(bar.lineage.source for bar in acquired.observations)
+    )
+    parse_success = bool(acquired.observations)
+    fetch_success = parse_success and any(
+        receipt.error_message is None
+        and receipt.status_code is not None
+        and 200 <= receipt.status_code < 300
+        for receipt in acquired.receipts
+    )
+    return {
+        "fetch_status": "success" if fetch_success else "error",
+        "parse_status": "success" if parse_success else "error",
+        "source_name": observed_sources[0] if len(observed_sources) == 1 else None,
+        "parsed_count": len(acquired.observations),
+        "inserted_count": persistence.observations_written,
+        "unchanged_observation_count": persistence.observations_unchanged,
+        "data_quality_status": (
+            "valid"
+            if parse_success and not acquired.summary.limitations
+            else "warning"
+            if parse_success
+            else "error"
+        ),
+        "raw_result_id": (
+            persistence.raw_result_ids[-1] if persistence.raw_result_ids else None
+        ),
+        "raw_result_ids": list(persistence.raw_result_ids),
+        "fetched_at": (
+            acquired.receipts[-1].fetched_at
+            if acquired.receipts
+            else effective_requested_at
+        ),
+        "replaced_trade_dates": observed_dates,
+        "error_message": None if parse_success else "Expected official daily observations were not acquired.",
+        "limitations": list(
+            dict.fromkeys(
+                (*acquired.summary.limitations, *persistence.limitations)
+            )
+        ),
+        "resource_attempts": [
+            item.model_dump(mode="json")
+            for item in acquired.summary.resource_attempts
+        ],
+    }
+
+
 __all__ = [
     "TaiwanDailyPriceEvidence",
     "TaiwanDailyRefreshResult",
@@ -505,4 +656,5 @@ __all__ = [
     "read_taiwan_official_daily",
     "read_taiwan_latest_daily_evidence",
     "refresh_taiwan_official_daily",
+    "refresh_taiwan_official_daily_venue",
 ]

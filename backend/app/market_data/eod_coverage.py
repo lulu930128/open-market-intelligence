@@ -51,6 +51,7 @@ US_DATASET_ID = "us.daily.ohlcv.full_market"
 TW_REFRESH_OPERATION = "tw.reconcile_full_market_eod"
 US_REFRESH_OPERATION = "us.reconcile_full_market_eod"
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
+TaiwanVenueRefresher = Callable[..., dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -113,9 +114,39 @@ class CoverageComputation:
 
     def detail(self) -> dict[str, Any]:
         denominator = max(self.universe_count, 1)
+        venue_breakdown: dict[str, dict[str, Any]] = {}
+        for venue in sorted({member.venue for member in self.members}):
+            venue_symbols = {
+                member.symbol for member in self.members if member.venue == venue
+            }
+            venue_count = len(venue_symbols)
+            current_count = len(venue_symbols & self.current_symbols)
+            partial_count = len(venue_symbols & self.partial_symbols)
+            stale_count = len(venue_symbols & self.stale_symbols)
+            missing_count = len(venue_symbols & self.missing_symbols)
+            venue_breakdown[venue] = {
+                "universe_count": venue_count,
+                "current_count": current_count,
+                "partial_count": partial_count,
+                "stale_count": stale_count,
+                "missing_count": missing_count,
+                "coverage_ratio": current_count / max(venue_count, 1),
+                "status": (
+                    "healthy"
+                    if venue_count > 0 and current_count == venue_count
+                    else "unavailable"
+                    if venue_count == 0
+                    else "partial"
+                    if current_count or partial_count
+                    else "stale"
+                    if stale_count
+                    else "missing"
+                ),
+            }
         return {
             "coverage_ratio": self.current_count / denominator,
             "observed_ratio": (self.current_count + self.partial_count) / denominator,
+            "venue_breakdown": venue_breakdown,
             "current_sample": sorted(self.current_symbols)[:10],
             "partial_sample": sorted(self.partial_symbols)[:10],
             "stale_sample": sorted(self.stale_symbols)[:10],
@@ -183,15 +214,28 @@ def taiwan_bulk_eod_refresh_window(
     else:
         local_now = local_now.astimezone(TAIWAN_TZ)
     latest_expected = expected_daily_price_date(now=local_now)
-    if expected_trade_date != latest_expected:
-        return False, None, "requested_date_is_not_latest_completed_session"
-    if not is_taiwan_trading_day(local_now.date()):
-        return True, None, "closed_day_latest_bulk_snapshot"
+    if not is_taiwan_trading_day(expected_trade_date):
+        return False, None, "requested_date_is_not_trading_session"
     release_at = datetime.combine(
         local_now.date(),
         TAIWAN_DAILY_PRICE_RELEASE_TIME,
         tzinfo=TAIWAN_TZ,
     )
+    if expected_trade_date > latest_expected:
+        if (
+            expected_trade_date == local_now.date()
+            and is_taiwan_trading_day(local_now.date())
+        ):
+            return (
+                False,
+                release_at.astimezone(timezone.utc),
+                "current_trading_session_not_finalized",
+            )
+        return False, None, "requested_date_is_not_released"
+    if not is_taiwan_trading_day(local_now.date()):
+        return True, None, "closed_day_latest_bulk_snapshot"
+    if expected_trade_date < local_now.date():
+        return True, None, "released_historical_session"
     if local_now >= release_at and expected_trade_date == local_now.date():
         return True, None, "post_release_latest_bulk_snapshot"
     return (
@@ -556,9 +600,38 @@ def _as_aware_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def should_enqueue_eod_reconcile(db: Session, *, market: str) -> bool:
+def _release_guard_retry_is_now_eligible(
+    row: MarketDatasetCoverageCheckpoint,
+    *,
+    market: str,
+    expected_trade_date: date,
+    now: datetime,
+) -> bool:
+    if market != "TW" or row.repair_status != "deferred":
+        return False
+    repair = _decode_detail(row.detail_json).get("repair")
+    if not isinstance(repair, dict) or repair.get("phase") != "release_guard":
+        return False
+    eligible, _retry_at, _reason = taiwan_bulk_eod_refresh_window(
+        expected_trade_date=expected_trade_date,
+        now=now,
+    )
+    return eligible
+
+
+def should_enqueue_eod_reconcile(
+    db: Session,
+    *,
+    market: str,
+    expected_trade_date: date | None = None,
+    now: datetime | None = None,
+) -> bool:
     normalized = normalize_coverage_market(market)
-    expected = expected_eod_trade_date(normalized)
+    decision_now = now or utc_now()
+    expected = expected_trade_date or expected_eod_trade_date(
+        normalized,
+        now=decision_now,
+    )
     computation = compute_eod_coverage(
         db,
         market=normalized,
@@ -581,7 +654,17 @@ def should_enqueue_eod_reconcile(db: Session, *, market: str) -> bool:
     if row is None:
         return True
     next_retry_at = _as_aware_utc(row.next_retry_at)
-    if next_retry_at is not None and next_retry_at > utc_now():
+    decision_now_utc = _as_aware_utc(decision_now) or utc_now()
+    if (
+        next_retry_at is not None
+        and next_retry_at > decision_now_utc
+        and not _release_guard_retry_is_now_eligible(
+            row,
+            market=normalized,
+            expected_trade_date=expected,
+            now=decision_now,
+        )
+    ):
         return False
     return row.status != "healthy" or computation.status != "healthy"
 
@@ -634,6 +717,50 @@ def _tw_unresolved_venues(computation: CoverageComputation) -> set[str]:
     }
 
 
+def _tw_venue_coverage(
+    computation: CoverageComputation,
+    venue: str,
+) -> dict[str, Any]:
+    return dict(
+        computation.detail().get("venue_breakdown", {}).get(
+            venue,
+            {
+                "universe_count": 0,
+                "current_count": 0,
+                "partial_count": 0,
+                "stale_count": 0,
+                "missing_count": 0,
+                "coverage_ratio": 0.0,
+                "status": "unavailable",
+            },
+        )
+    )
+
+
+def _iso_trade_dates(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    normalized = []
+    for value in values:
+        if isinstance(value, (date, datetime)):
+            normalized.append(
+                value.date().isoformat()
+                if isinstance(value, datetime)
+                else value.isoformat()
+            )
+        elif isinstance(value, str) and value.strip():
+            normalized.append(value.strip()[:10])
+    return list(dict.fromkeys(normalized))
+
+
+def _iso_temporal(value: Any) -> str | None:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def _repair_tw_eod(
     db: Session,
     *,
@@ -643,6 +770,7 @@ def _repair_tw_eod(
     progress_callback: ProgressCallback | None,
     error_backoff_seconds: int,
     max_calls: int,
+    venue_refresher: TaiwanVenueRefresher | None,
 ) -> dict[str, Any]:
     source_by_venue = (
         ("TWSE", TWSE_DAILY_TRADING_SOURCE_NAME),
@@ -666,37 +794,101 @@ def _repair_tw_eod(
         if progress_callback:
             progress_callback(index - 1, max(len(targets), 1), f"Refreshing {venue} full-market EOD.")
         try:
-            source = get_source_by_name(db, source_name)
-            result = refresh_source(
-                db=db,
-                source_id=source.id,
-                trade_date=computation.expected_trade_date,
+            before_coverage = _tw_venue_coverage(computation, venue)
+            if venue_refresher is None:
+                source = get_source_by_name(db, source_name)
+                result = refresh_source(
+                    db=db,
+                    source_id=source.id,
+                    trade_date=computation.expected_trade_date,
+                )
+            else:
+                result = venue_refresher(
+                    db=db,
+                    venue=venue,
+                    trade_date=computation.expected_trade_date,
+                )
+            refreshed_attempt = compute_eod_coverage(
+                db,
+                market="TW",
+                expected_trade_date=computation.expected_trade_date,
             )
+            after_coverage = _tw_venue_coverage(refreshed_attempt, venue)
+            observed_trade_dates = _iso_trade_dates(
+                result.get("replaced_trade_dates")
+            )
+            expected_trade_date = computation.expected_trade_date.isoformat()
+            transport_ok = (
+                result.get("fetch_status") == "success"
+                and result.get("parse_status") == "success"
+            )
+            venue_advanced = int(after_coverage["current_count"]) > int(
+                before_coverage["current_count"]
+            )
+            venue_postcondition_met = (
+                int(after_coverage["universe_count"]) > 0
+                and int(after_coverage["current_count"])
+                == int(after_coverage["universe_count"])
+            )
+            dataset_success = transport_ok and (
+                venue_advanced or venue_postcondition_met
+            )
+            if not transport_ok:
+                dataset_status = "transport_error"
+            elif venue_postcondition_met:
+                dataset_status = "current"
+            elif venue_advanced:
+                dataset_status = "advanced_partial"
+            elif observed_trade_dates and expected_trade_date not in observed_trade_dates:
+                dataset_status = "stale_payload"
+            elif result.get("is_duplicate") is True:
+                dataset_status = "unchanged_duplicate"
+            elif observed_trade_dates:
+                dataset_status = "expected_payload_without_coverage_advance"
+            else:
+                dataset_status = "unchanged"
             compact = {
                 "venue": venue,
-                "source_name": source_name,
+                "source_name": result.get("source_name") or source_name,
+                "resource_attempts": result.get("resource_attempts") or [],
+                "limitations": result.get("limitations") or [],
                 "fetch_status": result.get("fetch_status"),
                 "parse_status": result.get("parse_status"),
                 "parsed_count": result.get("parsed_count"),
                 "data_quality_status": result.get("data_quality_status"),
+                "raw_result_id": result.get("raw_result_id"),
+                "fetched_at": _iso_temporal(result.get("fetched_at")),
+                "is_duplicate": result.get("is_duplicate"),
+                "observed_trade_dates": observed_trade_dates,
+                "expected_trade_date_observed": (
+                    expected_trade_date in observed_trade_dates
+                    if observed_trade_dates
+                    else None
+                ),
+                "dataset_status": dataset_status,
+                "dataset_advanced": venue_advanced,
+                "venue_postcondition_met": venue_postcondition_met,
+                "coverage_before": before_coverage,
+                "coverage_after": after_coverage,
                 "error_message": result.get("error_message"),
             }
             results.append(compact)
-            ok = result.get("fetch_status") == "success" and result.get("parse_status") == "success"
             _update_repair_state(
                 db,
                 row,
-                repair_status="running" if ok else "partial",
+                repair_status="running" if transport_ok else "partial",
                 repair_provider="twse+tpex",
                 job_id=job_id,
                 cursor_symbol=venue,
                 attempted_delta=1,
-                succeeded_delta=1 if ok else 0,
-                failed_delta=0 if ok else 1,
-                consecutive_error_count=0 if ok else row.consecutive_error_count + 1,
-                mark_success=ok,
+                succeeded_delta=1 if dataset_success else 0,
+                failed_delta=0 if transport_ok else 1,
+                consecutive_error_count=(
+                    0 if transport_ok else row.consecutive_error_count + 1
+                ),
+                mark_success=dataset_success,
             )
-            if not ok:
+            if not transport_ok:
                 errors.append({"venue": venue, "message": result.get("error_message") or result.get("message")})
         except Exception as exc:
             db.rollback()
@@ -749,11 +941,34 @@ def _repair_tw_eod(
     )
     return {
         "status": "completed" if refreshed.status == "healthy" else "partial",
+        "postcondition_met": refreshed.status == "healthy",
         "market": "TW",
         **_lifecycle_result(refreshed),
         **_result_coverage_counts(refreshed_row),
         "attempted_count": len(targets),
-        "success_count": sum(1 for item in results if item.get("parse_status") == "success"),
+        "success_count": sum(
+            1
+            for item in results
+            if item.get("dataset_advanced") is True
+            or item.get("venue_postcondition_met") is True
+        ),
+        "transport_success_count": sum(
+            1
+            for item in results
+            if item.get("fetch_status") == "success"
+            and item.get("parse_status") == "success"
+        ),
+        "unchanged_count": sum(
+            1
+            for item in results
+            if item.get("dataset_status")
+            in {
+                "stale_payload",
+                "unchanged_duplicate",
+                "expected_payload_without_coverage_advance",
+                "unchanged",
+            }
+        ),
         "error_count": len(errors),
         "errors": errors[:10],
         "checkpoint": serialize_eod_checkpoint(refreshed_row),
@@ -914,6 +1129,7 @@ def _repair_us_eod(
     )
     return {
         "status": "completed" if refreshed.status == "healthy" else "partial",
+        "postcondition_met": refreshed.status == "healthy",
         "market": "US",
         **_lifecycle_result(refreshed),
         **_result_coverage_counts(refreshed_row),
@@ -939,6 +1155,7 @@ def reconcile_eod_coverage(
     max_consecutive_errors: int = 5,
     error_backoff_seconds: int = 1800,
     progress_callback: ProgressCallback | None = None,
+    taiwan_venue_refresher: TaiwanVenueRefresher | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_coverage_market(market)
     bounds = eod_reconcile_bounds(normalized)
@@ -970,6 +1187,7 @@ def reconcile_eod_coverage(
         )
         return {
             "status": "completed",
+            "postcondition_met": True,
             "market": normalized,
             **_lifecycle_result(computation),
             **_result_coverage_counts(row),
@@ -982,6 +1200,7 @@ def reconcile_eod_coverage(
     if not repair:
         return {
             "status": "partial",
+            "postcondition_met": False,
             "market": normalized,
             **_lifecycle_result(computation),
             **_result_coverage_counts(row),
@@ -991,10 +1210,21 @@ def reconcile_eod_coverage(
             "checkpoint": serialize_eod_checkpoint(row),
             "message": "Coverage checkpoint recomputed without provider repair.",
         }
+    decision_now = utc_now()
     next_retry_at = _as_aware_utc(row.next_retry_at)
-    if next_retry_at is not None and next_retry_at > utc_now():
+    if (
+        next_retry_at is not None
+        and next_retry_at > decision_now
+        and not _release_guard_retry_is_now_eligible(
+            row,
+            market=normalized,
+            expected_trade_date=computation.expected_trade_date,
+            now=decision_now,
+        )
+    ):
         return {
             "status": "partial",
+            "postcondition_met": False,
             "market": normalized,
             **_lifecycle_result(computation),
             **_result_coverage_counts(row),
@@ -1007,6 +1237,7 @@ def reconcile_eod_coverage(
     if normalized == "TW":
         eligible, release_retry_at, reason = taiwan_bulk_eod_refresh_window(
             expected_trade_date=computation.expected_trade_date,
+            now=decision_now,
         )
         if not eligible:
             _update_repair_state(
@@ -1025,6 +1256,7 @@ def reconcile_eod_coverage(
             )
             return {
                 "status": "partial",
+                "postcondition_met": False,
                 "market": normalized,
                 **_lifecycle_result(computation),
                 **_result_coverage_counts(row),
@@ -1042,6 +1274,7 @@ def reconcile_eod_coverage(
             progress_callback=progress_callback,
             error_backoff_seconds=error_backoff_seconds,
             max_calls=min(bounds.max_calls, bounds.max_symbols),
+            venue_refresher=taiwan_venue_refresher,
         )
     return _repair_us_eod(
         db,

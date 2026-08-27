@@ -31,6 +31,7 @@ from app.market_data.contracts import (
     EnablementStatus,
     EntitlementStatus,
     EvidenceFreshness,
+    MarketSession,
     OperationalStatus,
     ProviderResourceHealth,
 )
@@ -135,7 +136,13 @@ class TwseMisRealtimeAcquisitionAdapter:
                 else OperationalStatus.FAILED
             ),
             freshness=(
-                EvidenceFreshness.LIVE if healthy else EvidenceFreshness.MISSING
+                EvidenceFreshness.FRESH
+                if healthy
+                and requirement.session
+                in {MarketSession.CLOSE_RESOLUTION, MarketSession.POST_CLOSE}
+                else EvidenceFreshness.LIVE
+                if healthy
+                else EvidenceFreshness.MISSING
             ),
             checked_at=checked_at,
             detail_code=detail_code,

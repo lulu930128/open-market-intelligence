@@ -14,6 +14,10 @@ from app.db.models import (
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.live_snapshot import market_status_from_session
 from app.market.quote_volume import build_taiwan_quote_volume_contract
+from app.market.public_quote_platform import (
+    project_taiwan_session_close,
+    reconcile_taiwan_session_close,
+)
 from app.market.taiwan_quote_evidence import (
     TaiwanQuoteEvidenceBundle,
     acquire_taiwan_quote_evidence_bundle,
@@ -46,9 +50,6 @@ KGI_SUPERPY_SOURCE = "kgi_superpy_quote_all"
 TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS = 180
 TAIWAN_QUOTE_DEPTH_WAIT_START = time(5, 0)
 TAIWAN_QUOTE_DEPTH_PREOPEN = time(8, 30)
-TAIWAN_QUOTE_DEPTH_OPEN = time(9, 0)
-TAIWAN_QUOTE_DEPTH_CLOSING_AUCTION = time(13, 25)
-TAIWAN_QUOTE_DEPTH_CLOSE = time(13, 30)
 LIVE_DEPTH_PHASES = {"preopen_auction", "regular_live", "closing_auction"}
 POST_CLOSE_PHASES = {"post_close_snapshot", "market_closed"}
 PHASE_LABELS = {
@@ -56,6 +57,7 @@ PHASE_LABELS = {
     "preopen_auction": "試撮",
     "regular_live": "即時",
     "closing_auction": "收盤撮合",
+    "close_resolution": "收盤確認",
     "post_close_snapshot": "收盤快照",
     "market_closed": "休市",
 }
@@ -121,13 +123,15 @@ def resolve_taiwan_stock_quote_phase(now: datetime | None = None) -> str:
         return "post_close_snapshot"
     if TAIWAN_QUOTE_DEPTH_WAIT_START <= current_time < TAIWAN_QUOTE_DEPTH_PREOPEN:
         return "closed_waiting_preopen"
-    if current_time < TAIWAN_QUOTE_DEPTH_OPEN:
-        return "preopen_auction"
-    if current_time < TAIWAN_QUOTE_DEPTH_CLOSING_AUCTION:
-        return "regular_live"
-    if current_time <= TAIWAN_QUOTE_DEPTH_CLOSE:
-        return "closing_auction"
-    return "post_close_snapshot"
+    return {
+        "preopen_pending": "closed_waiting_preopen",
+        "preopen": "preopen_auction",
+        "regular": "regular_live",
+        "closing_auction": "closing_auction",
+        "close_resolution": "close_resolution",
+        "post_close": "post_close_snapshot",
+        "market_closed": "market_closed",
+    }.get(taiwan_market_session_phase(local_now), "market_closed")
 
 
 def _expected_trade_date_for_phase(phase: str, now: datetime | None = None) -> date | None:
@@ -135,7 +139,13 @@ def _expected_trade_date_for_phase(phase: str, now: datetime | None = None) -> d
     current_date = local_now.date()
     if phase == "post_close_snapshot" and local_now.time() < TAIWAN_QUOTE_DEPTH_WAIT_START:
         return previous_taiwan_trading_day(current_date, include_value=False)
-    if phase in {"preopen_auction", "regular_live", "closing_auction", "post_close_snapshot"}:
+    if phase in {
+        "preopen_auction",
+        "regular_live",
+        "closing_auction",
+        "close_resolution",
+        "post_close_snapshot",
+    }:
         if is_taiwan_trading_day(current_date):
             return current_date
     if phase == "closed_waiting_preopen":
@@ -706,6 +716,8 @@ def _price_semantics_contract(
         official_close_status = "confirmed"
     elif phase == "closing_auction":
         official_close_status = "closing_auction_pending"
+    elif phase == "close_resolution":
+        official_close_status = "pending"
     elif phase == "post_close_snapshot":
         official_close_status = "pending"
     elif phase == "market_closed":
@@ -767,6 +779,13 @@ def _price_semantics_contract(
             else "closing_auction_pending"
         )
         price_available = last_trade_available
+    elif phase == "close_resolution":
+        quote_semantics = (
+            "close_resolution_candidate"
+            if last_trade_available
+            else "close_resolution_pending"
+        )
+        price_available = last_trade_available
     elif phase in POST_CLOSE_PHASES:
         quote_semantics = (
             "official_close"
@@ -786,6 +805,8 @@ def _price_semantics_contract(
         if phase == "post_close_snapshot"
         else "closing_auction"
         if phase == "closing_auction"
+        else "close_resolution"
+        if phase == "close_resolution"
         else "live_depth_only"
         if phase == "preopen_auction" and depth_available
         else str(freshness.get("status") or "unavailable")
@@ -1356,6 +1377,8 @@ def _finalize_shared_projection_semantics(
     payload: dict[str, Any],
     *,
     phase: str,
+    session_close: dict[str, object] | None = None,
+    requested_at: datetime | None = None,
 ) -> None:
     """Recompute compatibility semantics after typed depth/auction projection.
 
@@ -1453,25 +1476,109 @@ def _finalize_shared_projection_semantics(
         )
         delivery_status = "closing_auction"
         payload["price_available"] = last_trade_available
-    elif phase in POST_CLOSE_PHASES:
-        # Current-session MIS/KGI evidence is never promoted to the separately
-        # owned completed-session official close contract.
+    elif phase == "close_resolution":
         semantics = (
-            "official_close_pending"
-            if phase == "post_close_snapshot"
-            else "latest_session_close_unverified"
+            "close_resolution_candidate"
+            if last_trade_available
+            else "close_resolution_pending"
         )
-        delivery_status = semantics
+        delivery_status = "close_resolution"
+        payload["price_available"] = last_trade_available
+    elif phase in POST_CLOSE_PHASES:
+        # The session close is a separate resolved projection. It can own the
+        # post-close headline while official daily remains pending.
+        session_close_available = bool(
+            isinstance(session_close, dict)
+            and session_close.get("available") is True
+        )
+        if session_close_available:
+            session_trade_date = session_close.get("trade_date")
+            if isinstance(session_trade_date, datetime):
+                session_trade_date = session_trade_date.date()
+            elif isinstance(session_trade_date, str):
+                try:
+                    session_trade_date = date.fromisoformat(session_trade_date)
+                except ValueError:
+                    session_trade_date = None
+            official_daily_released = bool(
+                isinstance(session_trade_date, date)
+                and session_trade_date
+                <= expected_daily_price_date(now=_local_now(requested_at))
+            )
+            official_close_status = (
+                "unavailable_after_release"
+                if official_daily_released
+                else "pending"
+                if phase == "post_close_snapshot"
+                else "unverified_latest_session"
+            )
+            semantics = "completed_session_close"
+            delivery_status = "session_final"
+            session_price = session_close.get("price")
+            payload.update(
+                {
+                    "session_close_available": True,
+                    "session_close_status": session_close.get("status"),
+                    "session_close_price": session_price,
+                    "session_close_trade_date": session_close.get("trade_date"),
+                    "session_close_event_time": session_close.get("event_time"),
+                    "session_close_confirmed_at": session_close.get("confirmed_at"),
+                    "last_price": session_price,
+                    "last_trade_price": session_price,
+                    "last_trade_available": True,
+                    "last_trade_is_current_session": True,
+                    "price_available": True,
+                    "trade_date": session_close.get("trade_date"),
+                    "quote_time": session_close.get("event_time"),
+                    "provider_event_time": session_close.get("event_time"),
+                }
+            )
+            freshness = payload.get("freshness")
+            if isinstance(freshness, dict):
+                freshness.update(
+                    {
+                        "status": "session_final",
+                        "is_live": False,
+                        "is_stale": False,
+                        "expected_trade_date": session_close.get("trade_date"),
+                        "message": (
+                            "The Taiwan session close is confirmed, but the "
+                            "released official daily EOD evidence is unavailable."
+                            if official_daily_released
+                            else "The current Taiwan session close is confirmed; "
+                            "official daily EOD publication remains pending."
+                        ),
+                    }
+                )
+        else:
+            official_close_status = (
+                "pending"
+                if phase == "post_close_snapshot"
+                else "unverified_latest_session"
+            )
+            semantics = (
+                "session_close_unavailable"
+                if phase == "post_close_snapshot"
+                else "latest_session_close_unverified"
+            )
+            delivery_status = semantics
+            payload.update(
+                {
+                    "session_close_available": False,
+                    "session_close_status": (
+                        session_close.get("status")
+                        if isinstance(session_close, dict)
+                        else "unavailable"
+                    ),
+                    "session_close_price": None,
+                    "price_available": False,
+                }
+            )
         payload.update(
             {
                 "official_close_available": False,
-                "official_close_status": (
-                    "pending"
-                    if phase == "post_close_snapshot"
-                    else "unverified_latest_session"
-                ),
+                "official_close_status": official_close_status,
                 "official_close_price": None,
-                "price_available": False,
             }
         )
     else:
@@ -1566,14 +1673,14 @@ def _apply_resolved_official_close(
     phase = str(response.get("session_phase") or "")
     if phase not in POST_CLOSE_PHASES:
         return
-    if is_taiwan_trading_day(local_now.date()):
-        if trade_date != local_now.date():
-            return
-        status = "confirmed"
-    else:
-        if trade_date != expected_date:
-            return
-        status = "confirmed_latest_session"
+    expected_session_date = _expected_trade_date_for_phase(phase, local_now)
+    if trade_date != expected_session_date or trade_date > expected_date:
+        return
+    status = (
+        "confirmed"
+        if expected_session_date == local_now.date()
+        else "confirmed_latest_session"
+    )
 
     raw_close = format(bar.close_price, "f")
     response.update(
@@ -1583,6 +1690,13 @@ def _apply_resolved_official_close(
             "official_close_price": bar.close_price,
             "official_close_trade_date": trade_date,
             "official_close_source": bar.lineage.source,
+            "last_price": bar.close_price,
+            "last_trade_price": bar.close_price,
+            "last_trade_available": True,
+            "last_trade_is_current_session": status == "confirmed",
+            "trade_date": trade_date,
+            "quote_time": bar.lineage.event_at,
+            "provider_event_time": bar.lineage.event_at,
             "official_close_raw": raw_close,
             "official_close_display": raw_close,
             "official_close_precision": max(
@@ -1650,7 +1764,12 @@ def project_taiwan_quote_evidence_bundle(
     quote_result = bundle.quote
     depth_result = bundle.depth
     auction_result = bundle.auction
+    session_close_result = bundle.session_close
     official_close_result = bundle.official_close
+    session_close = reconcile_taiwan_session_close(
+        project_taiwan_session_close(session_close_result),
+        official_close_result,
+    )
     official_daily_bar = (
         official_close_result.resolved.bars[-1]
         if official_close_result.resolved.bars
@@ -1677,7 +1796,12 @@ def project_taiwan_quote_evidence_bundle(
     )
     _apply_resolved_depth(response, depth_result, phase=phase)
     _apply_resolved_auction(response, auction_result)
-    _finalize_shared_projection_semantics(response, phase=phase)
+    _finalize_shared_projection_semantics(
+        response,
+        phase=phase,
+        session_close=session_close,
+        requested_at=requested_at,
+    )
     _apply_resolved_official_close(
         response,
         official_close_result,
@@ -1687,6 +1811,7 @@ def project_taiwan_quote_evidence_bundle(
         observation.lineage.source
         for observation in (
             getattr(quote_result.resolved, "quote", None),
+            getattr(session_close_result.resolved, "quote", None),
             getattr(depth_result.resolved, "depth", None),
             getattr(auction_result.resolved, "auction", None),
         )
@@ -1719,6 +1844,7 @@ def project_taiwan_quote_evidence_bundle(
                     quote_result,
                     getattr(quote_result.resolved, "quote", None),
                 ),
+                "quote.session_close": session_close,
                 "quote.order_book": _component_evidence(
                     depth_result,
                     getattr(depth_result.resolved, "depth", None),

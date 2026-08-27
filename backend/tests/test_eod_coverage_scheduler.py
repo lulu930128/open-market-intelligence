@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
 from unittest.mock import Mock, patch
 
-from app.jobs import scheduler
 from app.jobs import eod_coverage
+from app.jobs import scheduler
 
 
 def test_eod_coverage_scheduler_has_immediate_startup_catchup() -> None:
@@ -41,12 +42,21 @@ def test_scheduler_enqueues_bounded_tw_and_us_repairs() -> None:
     fake_db_us = Mock()
     fake_job_tw = Mock(id=11)
     fake_job_us = Mock(id=12)
+    expected_tw = date(2026, 8, 27)
+    expected_us = date(2026, 8, 26)
 
     with (
         patch.object(scheduler.settings, "scheduler_eod_coverage_markets", "TW,US"),
         patch.object(scheduler.settings, "scheduler_eod_coverage_us_max_symbols_per_run", 250),
         patch("app.jobs.scheduler.SessionLocal", side_effect=[fake_db_tw, fake_db_us]),
-        patch("app.jobs.scheduler.should_enqueue_eod_reconcile", side_effect=[True, True]),
+        patch(
+            "app.jobs.scheduler.expected_eod_trade_date",
+            side_effect=[expected_tw, expected_us],
+        ),
+        patch(
+            "app.jobs.scheduler.should_enqueue_eod_reconcile",
+            side_effect=[True, True],
+        ) as should_enqueue,
         patch(
             "app.jobs.scheduler.enqueue_eod_coverage_reconcile",
             side_effect=[(fake_job_tw, True), (fake_job_us, True)],
@@ -57,6 +67,7 @@ def test_scheduler_enqueues_bounded_tw_and_us_repairs() -> None:
     assert enqueue.call_count == 2
     assert enqueue.call_args_list[0].kwargs["market"] == "TW"
     assert enqueue.call_args_list[0].kwargs["max_symbols"] == 2
+    assert enqueue.call_args_list[0].kwargs["expected_trade_date"] == expected_tw
     assert enqueue.call_args_list[1].kwargs["market"] == "US"
     assert enqueue.call_args_list[1].kwargs["max_symbols"] == 250
 

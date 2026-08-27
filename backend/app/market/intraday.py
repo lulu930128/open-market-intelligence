@@ -6,7 +6,11 @@ import time as monotonic_time
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketIntradayBar, StockMaster
-from app.market.public_quote_platform import read_taiwan_public_last_trade_quote
+from app.market.public_quote_platform import (
+    project_taiwan_session_close,
+    read_taiwan_public_last_trade_quote,
+    read_taiwan_session_close,
+)
 from app.market.tw_disposition import get_taiwan_disposition_status
 from app.market.tw_instrument_trading_policy import (
     TaiwanInstrumentTradingMode,
@@ -18,6 +22,7 @@ from app.market.tw_intraday_platform import (
     read_taiwan_intraday_bars,
 )
 from app.market_data.contracts import (
+    MarketSession,
     ResolvedEvidenceStatus,
     TradeObservationState,
 )
@@ -681,6 +686,31 @@ def _apply_platform_quote_contract(
         }
         and health.research_usable
     )
+    completed_session_close = bool(
+        current_trade_available
+        and health is not None
+        and health.selected_session is MarketSession.POST_CLOSE
+    )
+    confirmed_at = (
+        max(
+            value
+            for value in (
+                quote.lineage.received_at,
+                quote.lineage.fetched_at,
+            )
+            if value is not None
+        )
+        if completed_session_close
+        and quote is not None
+        and any(
+            value is not None
+            for value in (
+                quote.lineage.received_at,
+                quote.lineage.fetched_at,
+            )
+        )
+        else event_at
+    )
     actual_trade_price = (
         float(quote.last_trade_price)
         if actual_trade_observed and quote is not None
@@ -708,10 +738,18 @@ def _apply_platform_quote_contract(
         {
             "value": actual_trade_price,
             "observed_at": event_at.isoformat(),
-            "confirmed_at": event_at.isoformat(),
-            "price_semantics": "actual_trade",
+            "confirmed_at": confirmed_at.isoformat() if confirmed_at else None,
+            "price_semantics": (
+                "completed_session_close"
+                if completed_session_close
+                else "actual_trade"
+            ),
             "provider": quote.lineage.provider,
-            "freshness_status": health.status.value,
+            "freshness_status": (
+                "session_final"
+                if completed_session_close
+                else health.status.value
+            ),
             "decision_usable": True,
         }
         if current_trade_available
@@ -739,7 +777,11 @@ def _apply_platform_quote_contract(
     if actual_trade_observed and quote is not None and health is not None:
         source_components.append(
             {
-                "domain": "current_trade",
+                "domain": (
+                    "session_close"
+                    if completed_session_close
+                    else "current_trade"
+                ),
                 "provider": quote.lineage.provider,
                 "source": quote.lineage.source,
                 "event_at": event_at.isoformat() if event_at else None,
@@ -760,6 +802,18 @@ def _apply_platform_quote_contract(
             "source_components": source_components,
             "points": points,
             "point_count": len(points),
+            "trade_date": (
+                quote.trade_date
+                if current_trade_available and quote is not None
+                else result.get("trade_date")
+            ),
+            "previous_close": (
+                float(quote.previous_close)
+                if current_trade_available
+                and quote is not None
+                and quote.previous_close is not None
+                else result.get("previous_close")
+            ),
             "history_price_source": price_provider,
             "latest_history_time": (
                 latest_history_time.isoformat() if latest_history_time else None
@@ -850,6 +904,19 @@ def _attach_cached_public_quote(
     stock_id: str,
     result: dict,
 ) -> dict:
+    try:
+        session_close_result = read_taiwan_session_close(
+            db,
+            stock_id=stock_id,
+        )
+        if project_taiwan_session_close(session_close_result)["available"]:
+            return _apply_platform_quote_contract(result, session_close_result)
+    except Exception as exc:
+        observe_provider_fallback(
+            exc,
+            operation="intraday.session_close_cache_read",
+        )
+
     try:
         quote_result = read_taiwan_public_last_trade_quote(
             db,
@@ -963,6 +1030,7 @@ def get_market_intraday_history(
     interval: str = "1m",
     range_value: str = "auto",
     refresh: bool = False,
+    requested_at: datetime | None = None,
 ) -> dict:
     del refresh  # legacy GET input is intentionally non-operative.
     stock = _get_stock(db=db, stock_id=stock_id)
@@ -977,6 +1045,7 @@ def get_market_intraday_history(
         stock_id=stock_id,
         interval=interval,
         range_value=range_value,
+        requested_at=requested_at,
     )
     points, resolution_metadata = project_taiwan_intraday_bars(db, resolved)
     source = str(resolution_metadata.get("source") or "unavailable")

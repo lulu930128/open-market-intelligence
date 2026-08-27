@@ -7,7 +7,9 @@ from zoneinfo import ZoneInfo
 
 LIVE_MAX_AGE_SECONDS = 180
 DELAYED_MAX_AGE_SECONDS = 600
-DEFAULT_LIVE_PHASES = frozenset({"regular", "regular_live", "closing_auction"})
+DEFAULT_LIVE_PHASES = frozenset(
+    {"regular", "regular_live", "closing_auction", "close_resolution"}
+)
 
 
 def _parse_datetime(value: Any, *, timezone_name: str) -> datetime | None:
@@ -53,6 +55,7 @@ def market_status_from_session(calendar_status: dict[str, Any]) -> str:
         "regular_live": "open",
         "lunch_break": "lunch_break",
         "closing_auction": "closing_auction",
+        "close_resolution": "close_resolution",
         "after_hours": "after_hours",
         "post_close": "closed",
         "post_close_snapshot": "closed",

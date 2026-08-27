@@ -424,6 +424,13 @@ def _snapshot_for_timeframe(
                 "high": current_partial_point.get("high"),
                 "low": current_partial_point.get("low"),
                 "bar_status": current_partial_point.get("bar_status") or "intraday_partial",
+                "session_close_finalization": current_partial_point.get(
+                    "session_close_finalization"
+                ),
+                "official_daily_confirmed": current_partial_point.get(
+                    "official_daily_confirmed",
+                    False,
+                ),
                 "event_time": current_partial_point.get("event_time"),
                 "source": current_partial_point.get("source"),
                 "volume_semantics": current_partial_point.get("volume_semantics"),

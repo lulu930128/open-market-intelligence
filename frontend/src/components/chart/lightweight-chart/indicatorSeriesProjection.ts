@@ -185,7 +185,8 @@ export function buildSeriesData(
   volumeValueKey: LightweightKLineChartProps["volumeValueKey"],
   timeMode: ChartTimeMode,
   params: IndicatorParameters,
-  benchmarkData?: ChartPoint[]
+  benchmarkData?: ChartPoint[],
+  allowCanonicalFallback = true
 ): BuiltSeriesData {
   const indicatorByTime = new Map(indicatorData.map((point) => [point.time.slice(0, 10), point]));
   const closes = chartData.map((point) => point.close);
@@ -270,6 +271,8 @@ export function buildSeriesData(
     }
 
     const timeKey = point.time.slice(0, 10);
+    const presentationFallback = (value: number | null) =>
+      allowCanonicalFallback ? value : null;
     const time = chartTime(point.time, timeMode);
     const color = point.close >= point.open ? upColor : downColor;
     const indicator = indicatorByTime.get(timeKey);
@@ -312,22 +315,22 @@ export function buildSeriesData(
     });
     const maShort = backendIndicatorWindowExists(indicator, "ma_windows", params.maShort)
       ? backendIndicatorValue(indicator?.ma, `ma${params.maShort}`)
-      : movingAverage(closes, index, params.maShort);
+      : presentationFallback(movingAverage(closes, index, params.maShort));
     const maMiddle = backendIndicatorWindowExists(indicator, "ma_windows", params.maMiddle)
       ? backendIndicatorValue(indicator?.ma, `ma${params.maMiddle}`)
-      : movingAverage(closes, index, params.maMiddle);
+      : presentationFallback(movingAverage(closes, index, params.maMiddle));
     const maLong = backendIndicatorWindowExists(indicator, "ma_windows", params.maLong)
       ? backendIndicatorValue(indicator?.ma, `ma${params.maLong}`)
-      : movingAverage(closes, index, params.maLong);
+      : presentationFallback(movingAverage(closes, index, params.maLong));
     const bbMiddle = backendBollinger
       ? backendIndicatorValue(indicator?.bollinger, `middle${params.bollingerPeriod}`)
-      : movingAverage(closes, index, params.bollingerPeriod);
+      : presentationFallback(movingAverage(closes, index, params.bollingerPeriod));
     const bbStd = standardDeviation(closes, index, params.bollingerPeriod);
     const bbWidthMiddle = movingAverage(closes, index, params.bbWidthPeriod);
     const bbWidthStd = standardDeviation(closes, index, params.bbWidthPeriod);
     const macdHistogramValue = backendMacd
       ? backendIndicatorValue(indicator?.macd, "histogram")
-      : macd.histogram[index];
+      : presentationFallback(macd.histogram[index]);
 
     candles.push({
       time,
@@ -370,14 +373,14 @@ export function buildSeriesData(
       time,
       backendEma
         ? backendIndicatorValue(indicator?.ema, `ema${params.emaFast}`)
-        : emaFast[index]
+        : presentationFallback(emaFast[index])
     );
     pushLine(
       lines.emaSlow,
       time,
       backendEma
         ? backendIndicatorValue(indicator?.ema, `ema${params.emaSlow}`)
-        : emaSlow[index]
+        : presentationFallback(emaSlow[index])
     );
     pushLine(lines.wma, time, wma[index]);
     pushLine(lines.hma, time, hma[index]);
@@ -389,14 +392,14 @@ export function buildSeriesData(
       time,
       backendDonchian
         ? backendIndicatorValue(indicator?.donchian, `upper${params.donchianPeriod}`)
-        : donchian[index].upper
+        : presentationFallback(donchian[index].upper)
     );
     pushLine(
       lines.donchianLower,
       time,
       backendDonchian
         ? backendIndicatorValue(indicator?.donchian, `lower${params.donchianPeriod}`)
-        : donchian[index].lower
+        : presentationFallback(donchian[index].lower)
     );
     pushLine(lines.ichimokuConversion, time, ichimoku.conversion[index]);
     pushLine(lines.ichimokuBase, time, ichimoku.base[index]);
@@ -418,59 +421,63 @@ export function buildSeriesData(
       time,
       backendRsi
         ? backendIndicatorValue(indicator?.rsi, `rsi${params.rsiPeriod}`)
-        : rsi[index]
+        : presentationFallback(rsi[index])
     );
     pushLine(
       lines.macd,
       time,
-      backendMacd ? backendIndicatorValue(indicator?.macd, "macd") : macd.macd[index]
+      backendMacd
+        ? backendIndicatorValue(indicator?.macd, "macd")
+        : presentationFallback(macd.macd[index])
     );
     pushLine(
       lines.macdSignal,
       time,
-      backendMacd ? backendIndicatorValue(indicator?.macd, "signal") : macd.signal[index]
+      backendMacd
+        ? backendIndicatorValue(indicator?.macd, "signal")
+        : presentationFallback(macd.signal[index])
     );
     pushLine(
       lines.kdK,
       time,
       backendKd
         ? backendIndicatorValue(indicator?.kd, `k${params.kdPeriod}`)
-        : kd[index].k
+        : presentationFallback(kd[index].k)
     );
     pushLine(
       lines.kdD,
       time,
       backendKd
         ? backendIndicatorValue(indicator?.kd, `d${params.kdPeriod}`)
-        : kd[index].d
+        : presentationFallback(kd[index].d)
     );
     pushLine(
       lines.atr,
       time,
       backendAtr
         ? backendIndicatorValue(indicator?.atr, `atr${params.atrPeriod}`)
-        : atr[index]
+        : presentationFallback(atr[index])
     );
     pushLine(
       lines.adx,
       time,
       backendAdx
         ? backendIndicatorValue(indicator?.adx, `adx${params.adxPeriod}`)
-        : dmi[index].adx
+        : presentationFallback(dmi[index].adx)
     );
     pushLine(
       lines.plusDi,
       time,
       backendAdx
         ? backendIndicatorValue(indicator?.adx, `plus_di${params.adxPeriod}`)
-        : dmi[index].plusDi
+        : presentationFallback(dmi[index].plusDi)
     );
     pushLine(
       lines.minusDi,
       time,
       backendAdx
         ? backendIndicatorValue(indicator?.adx, `minus_di${params.adxPeriod}`)
-        : dmi[index].minusDi
+        : presentationFallback(dmi[index].minusDi)
     );
     pushLine(lines.aroonUp, time, aroon[index].up);
     pushLine(lines.aroonDown, time, aroon[index].down);
@@ -481,7 +488,7 @@ export function buildSeriesData(
       time,
       backendMfi
         ? backendIndicatorValue(indicator?.mfi, `mfi${params.mfiPeriod}`)
-        : mfi[index]
+        : presentationFallback(mfi[index])
     );
     pushLine(lines.cci, time, cci[index]);
     pushLine(lines.williamsR, time, williamsR[index]);
@@ -490,7 +497,7 @@ export function buildSeriesData(
       time,
       backendRoc
         ? backendIndicatorValue(indicator?.roc, `roc${params.rocPeriod}`)
-        : roc[index]
+        : presentationFallback(roc[index])
     );
     pushLine(lines.stochRsiK, time, stochRsi.k[index]);
     pushLine(lines.stochRsiD, time, stochRsi.d[index]);
@@ -509,7 +516,7 @@ export function buildSeriesData(
         time,
         backendIndicatorValue(indicator?.bollinger, `lower${params.bollingerPeriod}`)
       );
-    } else if (bbMiddle !== null && bbStd !== null) {
+    } else if (allowCanonicalFallback && bbMiddle !== null && bbStd !== null) {
       pushLine(lines.bollingerUpper, time, bbMiddle + bbStd * params.bollingerStdDev);
       pushLine(lines.bollingerMiddle, time, bbMiddle);
       pushLine(lines.bollingerLower, time, bbMiddle - bbStd * params.bollingerStdDev);
@@ -547,7 +554,7 @@ export function buildSeriesData(
             indicator?.support_resistance,
             `support${params.supportResistanceLookback}`
           )
-        : supportResistance[index].support
+        : presentationFallback(supportResistance[index].support)
     );
     pushLine(
       lines.resistance,
@@ -557,7 +564,7 @@ export function buildSeriesData(
             indicator?.support_resistance,
             `resistance${params.supportResistanceLookback}`
           )
-        : supportResistance[index].resistance
+        : presentationFallback(supportResistance[index].resistance)
     );
     pushLine(lines.gapUp, time, gaps[index].up);
     pushLine(lines.gapDown, time, gaps[index].down);

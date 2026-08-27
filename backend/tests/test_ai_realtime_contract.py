@@ -31,6 +31,31 @@ class AiRealtimeContractTests(unittest.TestCase):
         self.assertFalse(result["refresh_recommended"])
         self.assertEqual(result["status_class"], "blocked")
 
+    def test_taiwan_session_close_is_completed_evidence_not_live(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "kind": "quote_session_close",
+                "status": "session_final",
+                "available": True,
+                "price": 605.0,
+                "trade_date": "2026-08-27",
+                "event_time": "2026-08-27T13:30:00+08:00",
+                "confirmed_at": "2026-08-27T13:34:00+08:00",
+                "session": "post_close",
+                "finalization": "session_final",
+                "official_daily": False,
+            },
+            market="TW",
+            realtime_policy="prefer_live",
+            now=datetime(2026, 8, 27, 6, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["state"], "latest_completed_session")
+        self.assertEqual(result["observation_mode"], "session_close")
+        self.assertTrue(result["facts_usable"])
+        self.assertTrue(result["decision_usable"])
+        self.assertFalse(result["execution_grade_usable"])
+
     def test_local_daily_close_is_latest_session_during_preopen_pending(self) -> None:
         result = realtime_contract.classify_observation(
             {

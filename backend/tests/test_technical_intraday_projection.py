@@ -30,8 +30,8 @@ def _daily_points(count: int, *, end: date = date(2026, 8, 12)) -> list[dict]:
     ]
 
 
-def _quote(*, phase: str = "regular") -> dict:
-    return {
+def _quote(*, phase: str = "regular", session_final: bool = False) -> dict:
+    payload = {
         "trade_date": "2026-08-13",
         "event_time": "2026-08-13T10:31:00+08:00",
         "provider": "twse_mis",
@@ -45,6 +45,14 @@ def _quote(*, phase: str = "regular") -> dict:
         "cumulative_volume_shares": 12_000_000,
         "volume_source": "twse_mis",
     }
+    if session_final:
+        payload.update(
+            {
+                "session_close_available": True,
+                "session_close_status": "session_final",
+            }
+        )
+    return payload
 
 
 class TechnicalIntradayProjectionTests(unittest.TestCase):
@@ -99,7 +107,7 @@ class TechnicalIntradayProjectionTests(unittest.TestCase):
 
         self.assertIsNone(partial)
 
-    def test_post_close_before_official_row_is_provisional_close(self) -> None:
+    def test_post_close_stale_intraday_is_not_promoted_to_provisional_close(self) -> None:
         partial = build_current_partial_daily_bar(
             completed_daily_points=self.completed,
             intraday_points=self.intraday,
@@ -108,7 +116,28 @@ class TechnicalIntradayProjectionTests(unittest.TestCase):
             session_phase="post_close",
         )
 
+        self.assertEqual(partial["bar_status"], "intraday_partial")
+        self.assertIsNone(partial["session_close_finalization"])
+
+    def test_session_final_close_builds_provisional_close_before_official_daily(
+        self,
+    ) -> None:
+        partial = build_current_partial_daily_bar(
+            completed_daily_points=self.completed,
+            intraday_points=self.intraday,
+            quote=_quote(phase="post_close", session_final=True),
+            session_date=date(2026, 8, 13),
+            session_phase="post_close",
+        )
+
         self.assertEqual(partial["bar_status"], "provisional_close")
+        self.assertEqual(partial["close"], 156.0)
+        self.assertEqual(
+            partial["session_close_finalization"],
+            "session_final",
+        )
+        self.assertFalse(partial["official_daily_confirmed"])
+        self.assertFalse(partial["decision_usable"])
 
     def test_official_daily_row_suppresses_partial(self) -> None:
         completed = _daily_points(50, end=date(2026, 8, 13))

@@ -95,6 +95,18 @@ export type TechnicalReport = {
   rows: TechnicalReportRow[];
   badges: TechnicalReportBadge[];
   currentState?: TechnicalCurrentState | null;
+  decisionState?: TechnicalCurrentState | null;
+  decisionStateTime?: string | null;
+  decisionStateStatus?: string | null;
+  currentObservation?: {
+    status: string | null;
+    time: string | null;
+    decisionUsable: boolean;
+    officialDailyConfirmed: boolean;
+    currentState: TechnicalCurrentState | null;
+  } | null;
+  currentStateStatus?: string | null;
+  currentStateDecisionUsable?: boolean;
   basisLabel?: string | null;
   warningCount?: number;
 };
@@ -511,7 +523,60 @@ export function mapBackendTechnicalReport(
       ? priceContext.daily_indicator_time
       : null;
   const isIntraday = priceContext?.is_intraday === true;
-  const basisLabel = isIntraday
+  const currentStateStatus =
+    typeof report.data.current_state_status === "string"
+      ? report.data.current_state_status
+      : null;
+  const currentStateDecisionUsable =
+    report.data.current_state_decision_usable !== false;
+  const currentStateTime =
+    typeof report.data.current_state_time === "string"
+      ? report.data.current_state_time
+      : null;
+  const decisionStateTime =
+    typeof report.data.decision_state_time === "string"
+      ? report.data.decision_state_time
+      : null;
+  const decisionStateStatus =
+    typeof report.data.decision_state_status === "string"
+      ? report.data.decision_state_status
+      : null;
+  const currentObservationData =
+    report.data.current_observation &&
+    typeof report.data.current_observation === "object" &&
+    !Array.isArray(report.data.current_observation)
+      ? (report.data.current_observation as Record<string, unknown>)
+      : null;
+  const currentObservation = currentObservationData
+    ? {
+        status:
+          typeof currentObservationData.status === "string"
+            ? currentObservationData.status
+            : null,
+        time:
+          typeof currentObservationData.time === "string"
+            ? currentObservationData.time
+            : null,
+        decisionUsable: currentObservationData.decision_usable === true,
+        officialDailyConfirmed:
+          currentObservationData.official_daily_confirmed === true,
+        currentState: mapTechnicalCurrentState(
+          currentObservationData.current_state,
+          t
+        ),
+      }
+    : null;
+  const basisLabel = !currentStateDecisionUsable
+    ? translatedValue(
+        t,
+        "stockDetail.dataViews.technical.basis.provisional",
+        `今日暫估指標 ${currentStateTime?.slice(0, 10) ?? "-"}（不可作 finalized decision）· 正式日線 ${dailyIndicatorTime?.slice(0, 10) ?? "-"}`,
+        {
+          currentTime: currentStateTime?.slice(0, 10) ?? "-",
+          dailyTime: dailyIndicatorTime?.slice(0, 10) ?? "-",
+        }
+      )
+    : isIntraday
     ? translatedValue(
         t,
         "stockDetail.dataViews.technical.basis.intraday",
@@ -550,6 +615,12 @@ export function mapBackendTechnicalReport(
       tone: semanticBadgeToneClass(badge.tone),
     })),
     currentState: mapTechnicalCurrentState(report.data.current_state, t),
+    decisionState: mapTechnicalCurrentState(report.data.decision_state, t),
+    decisionStateTime,
+    decisionStateStatus,
+    currentObservation,
+    currentStateStatus,
+    currentStateDecisionUsable,
     basisLabel,
     warningCount: report.warnings.length,
   };

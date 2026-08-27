@@ -416,6 +416,7 @@ def classify_taiwan_session_date_relation(
             "regular",
             "regular_live",
             "closing_auction",
+            "close_resolution",
             "post_close_snapshot",
         }
     ):

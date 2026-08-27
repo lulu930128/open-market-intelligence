@@ -378,6 +378,7 @@
                 "quote.auction",
                 "quote.official_close",
                 "quote.order_book",
+                "quote.session_close",
                 "quote.snapshot",
                 "regulation.disposition",
                 "regulation.trading_restrictions",
@@ -465,6 +466,7 @@
                 "quote.auction",
                 "quote.official_close",
                 "quote.order_book",
+                "quote.session_close",
                 "quote.snapshot",
                 "regulation.disposition",
                 "regulation.trading_restrictions",
@@ -555,6 +557,7 @@
                 "quote.auction",
                 "quote.official_close",
                 "quote.order_book",
+                "quote.session_close",
                 "quote.snapshot",
                 "regulation.disposition",
                 "regulation.trading_restrictions",
@@ -1003,6 +1006,7 @@
                 "quote.auction",
                 "quote.official_close",
                 "quote.order_book",
+                "quote.session_close",
                 "quote.snapshot",
                 "regulation.disposition",
                 "regulation.trading_restrictions",
@@ -1775,6 +1779,89 @@
         "slot": "quote_auction",
         "title": "Taiwan quote auction state",
         "unit_semantics": "prices_lots_and_minutes",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "quote.session_close",
+        "default_fields": [
+          "status",
+          "available",
+          "price",
+          "trade_date",
+          "event_time",
+          "confirmed_at",
+          "provider",
+          "source",
+          "authority",
+          "finalization",
+          "official_daily",
+          "freshness",
+          "decision_usable",
+          "reconciliation_status",
+          "limitations"
+        ],
+        "default_limit": 1,
+        "deprecated": false,
+        "description": "Completed Taiwan cash-equity session close confirmed from current-session exchange evidence before official daily EOD publication. It never implies official-daily finalization.",
+        "domain": "quote",
+        "event_time_basis": "provider_event_time",
+        "fields": [
+          "kind",
+          "status",
+          "available",
+          "price",
+          "candidate_price",
+          "trade_date",
+          "event_time",
+          "event_time_basis",
+          "confirmed_at",
+          "confirmation_time_basis",
+          "provider",
+          "source",
+          "authority",
+          "authority_class",
+          "finalization",
+          "official_daily",
+          "session",
+          "freshness",
+          "facts_usable",
+          "research_usable",
+          "decision_usable",
+          "reconciliation_status",
+          "official_close_price",
+          "official_close_trade_date",
+          "lineage",
+          "resolved_health",
+          "dataset_health",
+          "limitations"
+        ],
+        "fill_operations": {},
+        "frequency": "session_boundary",
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "paths": [
+          "compact.quote.components.session_close",
+          "data.quote.components.session_close"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {
+          "stock": "reader_fetch"
+        },
+        "replacement_capabilities": [],
+        "schema_version": "omi.market.tw_session_close.v1",
+        "scopes": [
+          "stock"
+        ],
+        "side_effect_policy": "read_only",
+        "slot": "quote_session_close",
+        "title": "Taiwan completed session close",
+        "unit_semantics": "security_price",
         "writes_cache": false
       },
       {
@@ -6964,10 +7051,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "63f5197dc03e258d4f6f113000fe6baffc4055da82fa06dba8ca994869bdf717",
+    "x-omi-capability-registry-digest": "113fd33b2899497d1147969bd6fdd3e6435343faf9c05cb4c8188b004d8664d7",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "63f5197dc03e258d4f6f113000fe6baffc4055da82fa06dba8ca994869bdf717",
+    "x-omi-public-contract-digest": "113fd33b2899497d1147969bd6fdd3e6435343faf9c05cb4c8188b004d8664d7",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -7240,6 +7327,7 @@
     "quote.snapshot",
     "quote.order_book",
     "quote.auction",
+    "quote.session_close",
     "quote.official_close",
     "intraday.bars",
     "daily.ohlcv",
@@ -7306,7 +7394,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "63f5197dc03e258d4f6f113000fe6baffc4055da82fa06dba8ca994869bdf717",
+  "digest": "113fd33b2899497d1147969bd6fdd3e6435343faf9c05cb4c8188b004d8664d7",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [
