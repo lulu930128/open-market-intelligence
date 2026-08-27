@@ -1,4 +1,4 @@
-# Open Market Intelligence 4.0
+# Open Market Intelligence 4.3
 
 > Local-first · Taiwan-first · Evidence-first
 
@@ -7,11 +7,19 @@
 [![Release](https://img.shields.io/github/v/release/lulu930128/open-market-intelligence?display_name=tag)](https://github.com/lulu930128/open-market-intelligence/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**目前正式版：OMI 4.0。**
+**目前程式版本：OMI 4.3.0（台股中間封版）。**
 
 Open Market Intelligence（OMI）是一套以台股為核心的市場情報與交易決策研究工作台。它把行情、技術結構、籌碼、基本面、跨市場背景與資料品質整合在同一個研究流程中，讓結論不只回答「偏多或偏空」，還能交代回測區、確認條件、失效條件、主要風險與反證。
 
 OMI 不是自動交易系統，也不代替使用者下單。它的工作是把資料、情境與風險整理成可檢查、可反駁、可持續追蹤的決策依據。
+
+## 4.3.0 台股中間封版
+
+這個 checkpoint 凍結 2026-08-27 的台股 Shared Data Core source、跨市場估值 ownership 邊界、current Market-State 投影，以及 M5 live acceptance 證據。
+
+- 已通過：SourceOnly、runtime compare preflight、Opening、Regular／Level 5／symbol switch、Market-State、Closing Auction／formal match、compare→off rollback、off stable checks 與 final validation。
+- 待重驗：final-source Preopen。真實盤前時窗已過，不能用後續 session 補證，因此目前仍是 `runtime_accepted=false`、`release_ready=false`。
+- Runtime 已透過正式 launcher 回到 `off`，並完成兩次穩定檢查。美股共用市場資料架構遷移不包含在這個 checkpoint，會另行驗收。
 
 ![OMI 4.0 台股 Dashboard 與 Radar v2](docs/assets/readme/omi-v4-dashboard-radar-2k.png)
 
