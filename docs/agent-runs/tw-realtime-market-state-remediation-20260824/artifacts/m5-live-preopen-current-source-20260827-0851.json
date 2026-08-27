@@ -1,0 +1,219 @@
+{
+  "schema_version": "omi.mdf.m5.live_session.v1",
+  "status": "passed",
+  "mode": "Live",
+  "started_at": "2026-08-27T00:50:51.9372333Z",
+  "completed_at": "2026-08-27T00:51:53.0101724Z",
+  "expected_mode": "compare",
+  "effective_mode": "compare",
+  "symbols": [
+    "2330",
+    "2303",
+    "2330"
+  ],
+  "lease_baseline_count": 0,
+  "lease_cleanup_count": 0,
+  "request_error_count": 0,
+  "assertions": {
+    "depth_ready_for_every_switch": true,
+    "no_trial_trade_leak": true,
+    "no_negative_latency": true,
+    "callbacks_categorized": true,
+    "owned_lease_cleanup_restored_baseline": true
+  },
+  "diagnostic_counters": {
+    "callback_count": 24,
+    "baseline_only_count": 0,
+    "cumulative_advanced_count": 0,
+    "same_cumulative_count": 21,
+    "decreasing_cumulative_count": 0,
+    "missing_cumulative_count": 0,
+    "invalid_cumulative_count": 0,
+    "trade_addition_count": 0,
+    "auction_addition_count": 24,
+    "trade_signature_suppression_count": 0,
+    "auction_signature_suppression_count": 0,
+    "non_trade_suppression_count": 0,
+    "trial_leak_count": 0,
+    "cross_date_rejected_count": 0
+  },
+  "steps": [
+    {
+      "switch_index": 0,
+      "symbol": "2330",
+      "sample_count": 39,
+      "request_error_count": 0,
+      "first_useful_depth_ms": 7234,
+      "diagnostic_counters": {
+        "callback_count": 6,
+        "baseline_only_count": 0,
+        "cumulative_advanced_count": 0,
+        "same_cumulative_count": 5,
+        "decreasing_cumulative_count": 0,
+        "missing_cumulative_count": 0,
+        "invalid_cumulative_count": 0,
+        "trade_addition_count": 0,
+        "auction_addition_count": 6,
+        "trade_signature_suppression_count": 0,
+        "auction_signature_suppression_count": 0,
+        "non_trade_suppression_count": 0,
+        "trial_leak_count": 0,
+        "cross_date_rejected_count": 0
+      },
+      "latency": {
+        "event_to_bridge_ms": {
+          "sample_count": 25,
+          "missing_count": 14,
+          "negative_count": 0,
+          "p50_ms": 960.304,
+          "p95_ms": 3199.902,
+          "max_ms": 3199.902
+        },
+        "bridge_to_manager_ms": {
+          "sample_count": 25,
+          "missing_count": 14,
+          "negative_count": 0,
+          "p50_ms": 0.829,
+          "p95_ms": 1.146,
+          "max_ms": 1.146
+        },
+        "manager_to_stream_ms": {
+          "sample_count": 25,
+          "missing_count": 14,
+          "negative_count": 0,
+          "p50_ms": 1649.43,
+          "p95_ms": 4024.174,
+          "max_ms": 4535.71
+        },
+        "event_to_stream_ms": {
+          "sample_count": 25,
+          "missing_count": 14,
+          "negative_count": 0,
+          "p50_ms": 3449.758,
+          "p95_ms": 5360.825,
+          "max_ms": 5497.16
+        }
+      }
+    },
+    {
+      "switch_index": 1,
+      "symbol": "2303",
+      "sample_count": 39,
+      "request_error_count": 0,
+      "first_useful_depth_ms": 2571,
+      "diagnostic_counters": {
+        "callback_count": 9,
+        "baseline_only_count": 0,
+        "cumulative_advanced_count": 0,
+        "same_cumulative_count": 8,
+        "decreasing_cumulative_count": 0,
+        "missing_cumulative_count": 0,
+        "invalid_cumulative_count": 0,
+        "trade_addition_count": 0,
+        "auction_addition_count": 9,
+        "trade_signature_suppression_count": 0,
+        "auction_signature_suppression_count": 0,
+        "non_trade_suppression_count": 0,
+        "trial_leak_count": 0,
+        "cross_date_rejected_count": 0
+      },
+      "latency": {
+        "event_to_bridge_ms": {
+          "sample_count": 34,
+          "missing_count": 5,
+          "negative_count": 0,
+          "p50_ms": 540.588,
+          "p95_ms": 3710.836,
+          "max_ms": 3710.836
+        },
+        "bridge_to_manager_ms": {
+          "sample_count": 34,
+          "missing_count": 5,
+          "negative_count": 0,
+          "p50_ms": 1.186,
+          "p95_ms": 1.978,
+          "max_ms": 8.116
+        },
+        "manager_to_stream_ms": {
+          "sample_count": 34,
+          "missing_count": 5,
+          "negative_count": 0,
+          "p50_ms": 1885.168,
+          "p95_ms": 4669.469,
+          "max_ms": 4957.847
+        },
+        "event_to_stream_ms": {
+          "sample_count": 34,
+          "missing_count": 5,
+          "negative_count": 0,
+          "p50_ms": 2993.596,
+          "p95_ms": 5210.226,
+          "max_ms": 5330.402
+        }
+      }
+    },
+    {
+      "switch_index": 2,
+      "symbol": "2330",
+      "sample_count": 39,
+      "request_error_count": 0,
+      "first_useful_depth_ms": 2557,
+      "diagnostic_counters": {
+        "callback_count": 9,
+        "baseline_only_count": 0,
+        "cumulative_advanced_count": 0,
+        "same_cumulative_count": 8,
+        "decreasing_cumulative_count": 0,
+        "missing_cumulative_count": 0,
+        "invalid_cumulative_count": 0,
+        "trade_addition_count": 0,
+        "auction_addition_count": 9,
+        "trade_signature_suppression_count": 0,
+        "auction_signature_suppression_count": 0,
+        "non_trade_suppression_count": 0,
+        "trial_leak_count": 0,
+        "cross_date_rejected_count": 0
+      },
+      "latency": {
+        "event_to_bridge_ms": {
+          "sample_count": 34,
+          "missing_count": 5,
+          "negative_count": 0,
+          "p50_ms": 1398.692,
+          "p95_ms": 3891.904,
+          "max_ms": 3891.904
+        },
+        "bridge_to_manager_ms": {
+          "sample_count": 34,
+          "missing_count": 5,
+          "negative_count": 0,
+          "p50_ms": 0.657,
+          "p95_ms": 47.792,
+          "max_ms": 47.792
+        },
+        "manager_to_stream_ms": {
+          "sample_count": 34,
+          "missing_count": 5,
+          "negative_count": 0,
+          "p50_ms": 1653.754,
+          "p95_ms": 4214.946,
+          "max_ms": 4291.795
+        },
+        "event_to_stream_ms": {
+          "sample_count": 34,
+          "missing_count": 5,
+          "negative_count": 0,
+          "p50_ms": 3526.729,
+          "p95_ms": 5690.664,
+          "max_ms": 5713.39
+        }
+      }
+    }
+  ],
+  "artifact_policy": {
+    "raw_provider_payload_included": false,
+    "diagnostic_events_included": false,
+    "lease_ids_included": false,
+    "credentials_included": false
+  }
+}

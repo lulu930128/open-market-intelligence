@@ -1,0 +1,38 @@
+{
+  "artifact_version": "omi.tw.freeze_gate.life.v1",
+  "captured_at": "2026-08-26T18:42:00+08:00",
+  "packages": {
+    "LIFE-01": {
+      "status": "SOURCE_PASS",
+      "canonical_auction_capability": "quote.auction",
+      "result_kind": "auction",
+      "targeted_tests": "33 passed in 2.16s"
+    },
+    "LIFE-02": {
+      "status": "SOURCE_PASS",
+      "datasets_added": [
+        "tw.quote.order_book.snapshot",
+        "tw.quote.auction.snapshot"
+      ],
+      "shared_registry": true,
+      "taiwan_catalog": true,
+      "storage_probes": true,
+      "targeted_tests": "31 passed in 3.09s"
+    },
+    "LIFE-03": {
+      "status": "SOURCE_PASS",
+      "dataset_health_readers": [
+        "tw.intraday.bars",
+        "tw.quote.order_book.snapshot",
+        "tw.quote.auction.snapshot",
+        "tw.market_index.current",
+        "tw.market_breadth.current"
+      ],
+      "shared_gateway_market_inference": false,
+      "targeted_tests": "38 passed in 5.98s"
+    }
+  },
+  "runtime_adoption": "not_run",
+  "provider_io": "not_run",
+  "live_acceptance": "pending"
+}

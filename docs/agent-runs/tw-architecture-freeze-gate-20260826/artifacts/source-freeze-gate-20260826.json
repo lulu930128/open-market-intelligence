@@ -1,0 +1,91 @@
+{
+  "artifact": "tw-architecture-freeze-source-gate",
+  "captured_at": "2026-08-26T19:39:00+08:00",
+  "status": "SOURCE_FROZEN",
+  "source_freeze": "SOURCE_FROZEN",
+  "runtime_acceptance": "RUNTIME_ACCEPTANCE_PENDING",
+  "live_acceptance": "LIVE_ACCEPTANCE_PENDING",
+  "branch": "codex/tw-etf-provider-normalization",
+  "gates": {
+    "FG0_baseline": "passed",
+    "FG1_lifecycle": "passed_source",
+    "FG2_consumer_evidence": "passed_source",
+    "FG3_read_command_boundary": "passed_source",
+    "FG4_freshness_authority": "passed_source",
+    "FG5_sidecar_classification": "passed_source",
+    "FG6_cross_surface_source": "passed_source",
+    "FG7_runtime_adoption": "not_started",
+    "FG8_live_acceptance": "pending",
+    "FG9_freeze_closeout": "passed_source"
+  },
+  "validation": [
+    {
+      "name": "cross_surface_backend",
+      "result": "500 passed, 99 subtests passed",
+      "duration_seconds": 69.82
+    },
+    {
+      "name": "quote_four_component_bundle_increment",
+      "result": "163 passed, 33 subtests passed",
+      "duration_seconds": 14.06
+    },
+    {
+      "name": "final_cross_surface_backend",
+      "result": "360 passed, 97 subtests passed",
+      "duration_seconds": 44.31
+    },
+    {
+      "name": "disposable_migrations_0069_0072_and_general",
+      "result": "13 passed",
+      "duration_seconds": 56.43
+    },
+    {
+      "name": "final_holding_boundary_increment",
+      "result": "44 passed, 64 subtests passed"
+    },
+    {
+      "name": "frontend_eslint",
+      "result": "passed"
+    },
+    {
+      "name": "frontend_typescript",
+      "result": "passed"
+    },
+    {
+      "name": "frontend_production_build",
+      "result": "passed"
+    },
+    {
+      "name": "safe_quick",
+      "result": "compileall, tsc, diff-check passed",
+      "log": ".tmp/validation/20260826-193858"
+    },
+    {
+      "name": "task_docs",
+      "result": "strict UTF-8, JSON parse, trailing whitespace passed"
+    }
+  ],
+  "safety": {
+    "external_provider_io": false,
+    "user_database_mutation": false,
+    "runtime_restart": false,
+    "live_lease": false,
+    "git_commit": false,
+    "git_push": false,
+    "staged_file_count": 0
+  },
+  "warnings": [
+    "Python 3.12 emitted SQLite date/datetime adapter deprecation warnings",
+    "existing inaccessible pytest temp directories still produce status/search warnings",
+    "legacy explicit index acquisition physical code remains in indices.py",
+    "US/JP/KR valuation readers remain market-owned compatibility seams"
+  ],
+  "unverified": [
+    "launcher-selected runtime source identity and interpreter",
+    "running direct API and frontend proxy adoption",
+    "MCP and visible UI runtime parity",
+    "KGI entitlement and actual live provider payloads",
+    "Preopen, Opening, Regular, Closing Auction official-session gates",
+    "symbol switch, L5, duplicate/trial/cumulative and zero-residual live counters"
+  ]
+}

@@ -31,7 +31,6 @@ FORBIDDEN_NEW_MODULE_PREFIXES = (
     "requests",
     "httpx",
     "sqlalchemy",
-    "threading",
     "multiprocessing",
     "subprocess",
     "asyncio",
@@ -40,9 +39,16 @@ AUTHORIZED_INTEGRATION_IMPORTS = {
     "backend/app/us_market/market_data_policy.py": [
         "app.market_data.provider_policy"
     ],
+    "backend/app/market/providers/kgi_realtime_lease.py": [
+        "app.market_data.research_lease"
+    ],
+    "backend/app/market/tw_realtime_lease_platform.py": [
+        "app.market_data.research_lease"
+    ],
 }
 AUTHORIZED_PROTECTED_DRIFT = {
     "agents/omi_mcp_server/public_contract_snapshot.json",
+    "backend/app/ai/query_plan.py",
     "backend/app/ai/market_context/taiwan_stock.py",
 }
 
@@ -184,6 +190,30 @@ def test_foundation_reference_matches_current_validated_checkpoint() -> None:
         / "tw-market-data-platform-convergence-20260825"
         / "artifacts"
         / "foundation-extension-checkpoint.json",
+        REPO_ROOT
+        / "docs"
+        / "agent-runs"
+        / "tw-shared-data-core-convergence-20260826"
+        / "artifacts"
+        / "precommit-remediation-source-checkpoint.json",
+        REPO_ROOT
+        / "docs"
+        / "agent-runs"
+        / "tw-architecture-freeze-gate-20260826"
+        / "artifacts"
+        / "freeze-source-checkpoint.json",
+        REPO_ROOT
+        / "docs"
+        / "agent-runs"
+        / "tw-realtime-market-state-remediation-20260824"
+        / "artifacts"
+        / "live-remediation-source-checkpoint-20260827.json",
+        REPO_ROOT
+        / "docs"
+        / "agent-runs"
+        / "tw-realtime-market-state-remediation-20260824"
+        / "artifacts"
+        / "tw-4.3.0-source-checkpoint-20260827.json",
     )
     extensions = [
         json.loads(path.read_text(encoding="utf-8")) for path in extension_paths

@@ -1,0 +1,26 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_preflight.v2",
+  "captured_at": "2026-08-27T08:22:06.2734668+08:00",
+  "timezone": "Asia/Taipei",
+  "expected_date": "2026-08-27",
+  "runtime_action": "SourceOnly",
+  "expected_mode": "compare",
+  "target": {
+    "market": "TW",
+    "symbol": "2330"
+  },
+  "source": null,
+  "acceptance_harness": null,
+  "runtime": null,
+  "calendar": null,
+  "public_contract": null,
+  "frontend": null,
+  "mcp": null,
+  "viewer_baseline": null,
+  "viewer_readiness": null,
+  "result": "failed",
+  "failure_code": "EXTENSION_TARGET_CHANGED",
+  "failure_reason": "[EXTENSION_TARGET_CHANGED] 10 acceptance extension target file(s) changed.",
+  "limitations": [],
+  "completed_at": "2026-08-27T08:22:16.7668725+08:00"
+}

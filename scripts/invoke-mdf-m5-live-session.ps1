@@ -7,6 +7,7 @@ param(
     [string[]]$Symbols = @("2330", "2303", "2330"),
     [ValidateRange(3, 120)][int]$StepDurationSeconds = 20,
     [ValidateRange(250, 5000)][int]$SampleIntervalMs = 500,
+    [ValidateRange(30, 240)][int]$CleanupTimeoutSeconds = 240,
     [ValidateSet("off", "shadow", "compare")][string]$ExpectedMode = "compare",
     [bool]$RequireZeroLeaseBaseline = $true,
     [string]$ArtifactPath
@@ -271,6 +272,9 @@ function Get-OfflineSteps {
         effective_mode = [string](Get-PropertyValue $fixture "effective_mode")
         lease_baseline_count = $baselineCount
         lease_cleanup_count = Convert-ToNonNegativeInt (Get-PropertyValue (Get-PropertyValue $fixture "lease_cleanup") "total_active_leases")
+        cleanup_bridge_process_running = [bool](Get-PropertyValue (Get-PropertyValue $fixture "lease_cleanup") "bridge_process_running")
+        cleanup_waited_seconds = 0
+        external_overlap_observed = $false
         steps = @(Get-PropertyValue $fixture "steps")
     }
 }
@@ -348,11 +352,31 @@ function Get-LiveSteps {
             }
         }
     }
-    $cleanupSummary = Invoke-JsonRequest -Method GET -Url "$normalizedUrl/api/market/realtime-quote-leases/summary" -TimeoutSeconds 5
+    $cleanupClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $externalOverlapObserved = $false
+    do {
+        $cleanupSummary = Invoke-JsonRequest -Method GET -Url "$normalizedUrl/api/market/realtime-quote-leases/summary" -TimeoutSeconds 5
+        $cleanupCount = Convert-ToNonNegativeInt (Get-PropertyValue $cleanupSummary "total_active_leases")
+        $cleanupBridgeRunning = [bool](Get-PropertyValue $cleanupSummary "bridge_process_running")
+        if ($cleanupCount -gt $baselineCount) {
+            $externalOverlapObserved = $true
+        }
+        if ($cleanupCount -eq $baselineCount -and -not $cleanupBridgeRunning) {
+            break
+        }
+        if ($cleanupClock.Elapsed.TotalSeconds -ge $CleanupTimeoutSeconds) {
+            break
+        }
+        Start-Sleep -Seconds 5
+    } while ($true)
+    $cleanupClock.Stop()
     return [ordered]@{
         effective_mode = $effectiveMode
         lease_baseline_count = $baselineCount
-        lease_cleanup_count = Convert-ToNonNegativeInt (Get-PropertyValue $cleanupSummary "total_active_leases")
+        lease_cleanup_count = $cleanupCount
+        cleanup_bridge_process_running = $cleanupBridgeRunning
+        cleanup_waited_seconds = [math]::Round($cleanupClock.Elapsed.TotalSeconds, 3)
+        external_overlap_observed = $externalOverlapObserved
         step_results = $stepResults.ToArray()
     }
 }
@@ -410,7 +434,9 @@ $categorizedCallbacks =
     $aggregateCounters.non_trade_suppression_count +
     $aggregateCounters.cross_date_rejected_count
 $callbacksCategorized = $categorizedCallbacks -eq $aggregateCounters.callback_count
-$cleanupRestored = $source.lease_cleanup_count -eq $source.lease_baseline_count
+$cleanupRestored =
+    $source.lease_cleanup_count -eq $source.lease_baseline_count -and
+    -not $source.cleanup_bridge_process_running
 $passed =
     $depthReadyForEverySwitch -and
     $aggregateCounters.trial_leak_count -eq 0 -and
@@ -429,6 +455,9 @@ $artifact = [ordered]@{
     symbols = @($stepResults.ToArray() | ForEach-Object { $_.symbol })
     lease_baseline_count = $source.lease_baseline_count
     lease_cleanup_count = $source.lease_cleanup_count
+    cleanup_bridge_process_running = $source.cleanup_bridge_process_running
+    cleanup_waited_seconds = $source.cleanup_waited_seconds
+    external_overlap_observed = $source.external_overlap_observed
     request_error_count = $totalRequestErrors
     assertions = [ordered]@{
         depth_ready_for_every_switch = $depthReadyForEverySwitch

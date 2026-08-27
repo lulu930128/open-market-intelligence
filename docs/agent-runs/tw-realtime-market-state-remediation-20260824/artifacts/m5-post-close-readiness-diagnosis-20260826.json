@@ -1,0 +1,50 @@
+{
+  "schema_version": "omi.tw.m5.readiness_diagnosis.v1",
+  "captured_at": "2026-08-26T16:40:55.3349246+08:00",
+  "timezone": "Asia/Taipei",
+  "expected_date": "2026-08-26",
+  "session": "post_close",
+  "source": {
+    "base_checkpoint_sha256": "8acbaea6fa4566416c67dc1e1745e4a080e2b6ee8e341fd1c0edc501f56badf2",
+    "m5_extension_checkpoint_sha256": "2ec7456200c310a778621df31747974cc468839c560d025680d870bc7d478619",
+    "data_core_convergence_checkpoint_sha256": "460903c9692e09e3e81315b12a6c39fac3f36fcfa3eb5c4176516b4190e453ba",
+    "shared_data_core_checkpoint_sha256": "5eec32a6e49a5e3e7d58c3b63d4a02dfdbda12d653430229d1339314188edf8d",
+    "preflight_sha256": "9fbe8cec064cb68372750194d3df4ad30e8210407f9ff6c7cb204be8744cc214",
+    "effective_target_count": 35,
+    "target_mismatch_count": 0
+  },
+  "runtime": {
+    "backend_url": "http://127.0.0.1:8400",
+    "listener_pid": 54792,
+    "launcher_pid": 51752,
+    "effective_mode": "compare",
+    "health": "ok",
+    "ready": "ready",
+    "alembic_revision": "20260826_0072",
+    "data_core_dataset_count": 30,
+    "data_core_operation_count": 21
+  },
+  "probe": {
+    "market": "TW",
+    "symbol": "2330",
+    "owner_kind": "acceptance_probe",
+    "provider": "kgi_superpy",
+    "status": "unavailable",
+    "lease_acquired": false,
+    "fallback_source": "twse_mis_quote_depth",
+    "detail_code": "VIEWER_LEASE_PLAN_UNFILLABLE",
+    "interpretation": "The common planner correctly rejected a subscription route during post_close. This is not credential or entitlement evidence."
+  },
+  "cleanup": {
+    "total_active_leases": 0,
+    "bridge_process_running": false,
+    "idle_shutdown_pending": false,
+    "subscription_worker_count": 0
+  },
+  "result": "failed",
+  "failure_code": "VIEWER_LEASE_PLAN_UNFILLABLE",
+  "limitations": [
+    "Post-close readiness cannot substitute for Preopen, Opening, Regular, or Closing session evidence.",
+    "The next valid readiness and live-session gates remain pending for 2026-08-27."
+  ]
+}

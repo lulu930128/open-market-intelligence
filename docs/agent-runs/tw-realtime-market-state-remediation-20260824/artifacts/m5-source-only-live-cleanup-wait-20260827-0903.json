@@ -1,0 +1,26 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_preflight.v2",
+  "captured_at": "2026-08-27T09:03:26.1787467+08:00",
+  "timezone": "Asia/Taipei",
+  "expected_date": "2026-08-27",
+  "runtime_action": "SourceOnly",
+  "expected_mode": "compare",
+  "target": {
+    "market": "TW",
+    "symbol": "2330"
+  },
+  "source": null,
+  "acceptance_harness": null,
+  "runtime": null,
+  "calendar": null,
+  "public_contract": null,
+  "frontend": null,
+  "mcp": null,
+  "viewer_baseline": null,
+  "viewer_readiness": null,
+  "result": "failed",
+  "failure_code": "EXTENSION_TARGET_CHANGED",
+  "failure_reason": "[EXTENSION_TARGET_CHANGED] 1 acceptance extension target file(s) changed: scripts/invoke-mdf-m5-live-session.ps1|expected=9644bbc6c4e71124d8ee7ed7da862cb0aac878f89e12f1100e263337307da775|actual=73335801d153ad0c42ebc0d1cea48e72fac1852e5d13e15d6f5c05675443bb04",
+  "limitations": [],
+  "completed_at": "2026-08-27T09:03:39.7385001+08:00"
+}

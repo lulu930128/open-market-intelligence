@@ -3,14 +3,14 @@
 ## 目前進度
 
 - Milestone 0～5 的 source implementation 與 validation 已完成。
-- Source-ready 已達成：base checkpoint + 20-target extension checkpoint + SourceOnly preflight 均通過。
-- Runtime-adopted／Runtime-accepted 尚未執行；未取得 restart authority，也尚未進入下一個正式台股 session live gate。
+- Source-ready 已達成：30-target base、28-target M5 extension、13-target Data Core convergence與19-target Shared Data Core pre-commit overlay均由SourceOnly fail-closed驗證通過。
+- Runtime-adopted 已於2026-08-26 16:29透過正式launcher component-scoped `RestartServices`完成；Runtime-accepted仍為`PENDING`，須由新source identity的正式session artifacts完成。
 
 ## 執行原則
 
 - 依 milestone 順序實作；每一段先跑最接近的 targeted validation，失敗先修正再前進。
 - Source test 通過只代表 implementation ready，不代表 live gate closure。
-- 使用者已明示授權 2026-08-25 08:20 起的正式時段驗收，以及正式 launcher 的 component-scoped runtime adoption／repair；其餘外部 refresh、未知 lease、Account／Order、DB write、commit／push仍不在授權內。
+- 使用者已明示授權 2026-08-26 08:20 起的正式時段驗收，以及正式 launcher 的 component-scoped runtime adoption／repair；其餘外部 refresh、未知 lease、Account／Order、DB write、commit／push仍不在授權內。
 - Automation 不因第一次 failure 停止。可安全修復項目必須保存 evidence、修復、重驗並續跑；只有明確 terminal blocker 才暫停。
 
 ## Milestone 0：規格與 baseline
@@ -74,8 +74,8 @@
 
 ## Milestone 6：08:20 主動待機與 live closure
 
-- 08:20 先驗 base＋extension source identity、launcher lineage、effective `compare`、health／ready、frontend／MCP、global lease baseline與單一 probe readiness。
-- 08:30 起取得 Preopen；08:58 起取得 Opening；09:05 取得 Regular；13:25 前重新建立乾淨 bounded probe，覆蓋 Closing Auction 與 formal close。
+- 08:20 先驗 base＋extension source identity、launcher lineage、effective `compare`、health／ready、frontend／MCP與global lease baseline；啟動／frontend／cleanup timeout分別放寬至180／120／240秒，讓正式程式完成初始化而不因短暫慢啟動失敗。
+- Runtime 一旦乾淨就立即完成單一 probe readiness並取得當下有效 evidence；Preopen 與 08:58 Opening仍維持真實時窗，09:05後取得Regular，13:25前後取得Closing Auction與formal close。沒有固定停止時間；只要仍能安全修復、取得新證據或推進有效gate就持續。
 - Runtime／frontend／MCP transient failure走正式 launcher component-scoped repair；localized task-owned source／harness failure完成 validation、extension checkpoint重建、heartbeat pin同步與runtime重新adopt後，從最早受影響 gate重跑。
 - 外部 lease只等待owner lifecycle並bounded recheck；不得代為release。每個probe attempt只釋放自身lease並證明cleanup。
 - 中間成功與可修復failure不通知；全部gate完成或terminal blocker才回報。
@@ -84,11 +84,11 @@
 ## 狀態邊界
 
 1. Source-ready：Milestone 1A～5 與兩份 checkpoint pass。
-2. Runtime-adopted：另經正式 launcher adoption；本輪沒有明確 restart authority 時不執行。
+2. Runtime-adopted：另經正式 launcher adoption；目前Shared Data Core source已完成此層，live readiness不在此層冒充通過。
 3. Runtime-accepted：下一個真實台股交易 session 的全部 gates pass。
 
 ## Stop-and-fix 規則
 
 - Source或config一旦修改，舊的本日session evidence失效；必須重建extension、重新adopt並從最早受影響gate重跑，不得用後續時段補前一時段。
-- Credential／entitlement／人工作業、外部owner逾有效時窗、ownership不明／廣泛drift、需越界操作或正式session已錯過，才是terminal blocker。
+- Credential／entitlement／人工作業、外部owner持續阻擋、ownership不明／廣泛drift、需越界操作，或同一component blocker已完整診斷並完成至少兩輪給足等待的修復／重試仍無新證據，才成為terminal blocker。單一session窗口經過只把該gate標pending；其餘安全修復與仍有效gate繼續，最後由同一automation續排。
 - 任何可安全修復的問題不得只記錄failure後等待隔日；先在同一session window內完成修復與重驗。

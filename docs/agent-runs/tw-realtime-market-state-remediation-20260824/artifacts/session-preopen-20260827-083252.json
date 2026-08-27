@@ -1,0 +1,103 @@
+{
+  "schema_version": "omi.mdf.m5.live_session.v1",
+  "status": "passed",
+  "mode": "Live",
+  "started_at": "2026-08-27T00:32:52.5606165Z",
+  "completed_at": "2026-08-27T00:33:53.1873996Z",
+  "expected_mode": "compare",
+  "effective_mode": "compare",
+  "symbols": [
+    "2330"
+  ],
+  "lease_baseline_count": 0,
+  "lease_cleanup_count": 0,
+  "request_error_count": 0,
+  "assertions": {
+    "depth_ready_for_every_switch": true,
+    "no_trial_trade_leak": true,
+    "no_negative_latency": true,
+    "callbacks_categorized": true,
+    "owned_lease_cleanup_restored_baseline": true
+  },
+  "diagnostic_counters": {
+    "callback_count": 23,
+    "baseline_only_count": 0,
+    "cumulative_advanced_count": 0,
+    "same_cumulative_count": 23,
+    "decreasing_cumulative_count": 0,
+    "missing_cumulative_count": 0,
+    "invalid_cumulative_count": 0,
+    "trade_addition_count": 0,
+    "auction_addition_count": 23,
+    "trade_signature_suppression_count": 0,
+    "auction_signature_suppression_count": 0,
+    "non_trade_suppression_count": 0,
+    "trial_leak_count": 0,
+    "cross_date_rejected_count": 0
+  },
+  "steps": [
+    {
+      "switch_index": 0,
+      "symbol": "2330",
+      "sample_count": 117,
+      "request_error_count": 0,
+      "first_useful_depth_ms": 4,
+      "diagnostic_counters": {
+        "callback_count": 23,
+        "baseline_only_count": 0,
+        "cumulative_advanced_count": 0,
+        "same_cumulative_count": 23,
+        "decreasing_cumulative_count": 0,
+        "missing_cumulative_count": 0,
+        "invalid_cumulative_count": 0,
+        "trade_addition_count": 0,
+        "auction_addition_count": 23,
+        "trade_signature_suppression_count": 0,
+        "auction_signature_suppression_count": 0,
+        "non_trade_suppression_count": 0,
+        "trial_leak_count": 0,
+        "cross_date_rejected_count": 0
+      },
+      "latency": {
+        "event_to_bridge_ms": {
+          "sample_count": 117,
+          "missing_count": 0,
+          "negative_count": 0,
+          "p50_ms": 816.687,
+          "p95_ms": 1186.975,
+          "max_ms": 3557.247
+        },
+        "bridge_to_manager_ms": {
+          "sample_count": 117,
+          "missing_count": 0,
+          "negative_count": 0,
+          "p50_ms": 0.65,
+          "p95_ms": 15.676,
+          "max_ms": 15.676
+        },
+        "manager_to_stream_ms": {
+          "sample_count": 117,
+          "missing_count": 0,
+          "negative_count": 0,
+          "p50_ms": 2099.45,
+          "p95_ms": 4418.742,
+          "max_ms": 4841.685
+        },
+        "event_to_stream_ms": {
+          "sample_count": 117,
+          "missing_count": 0,
+          "negative_count": 0,
+          "p50_ms": 3027.321,
+          "p95_ms": 5332.177,
+          "max_ms": 5844.705
+        }
+      }
+    }
+  ],
+  "artifact_policy": {
+    "raw_provider_payload_included": false,
+    "diagnostic_events_included": false,
+    "lease_ids_included": false,
+    "credentials_included": false
+  }
+}

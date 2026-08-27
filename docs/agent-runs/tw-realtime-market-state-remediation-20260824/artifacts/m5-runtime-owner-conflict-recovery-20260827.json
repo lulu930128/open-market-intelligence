@@ -1,0 +1,54 @@
+{
+  "schema_version": "omi.mdf.m5.runtime_owner_conflict_recovery.v1",
+  "captured_at": "2026-08-27T13:50:16.7349121+08:00",
+  "source_identity": {
+    "live_remediation_checkpoint_sha256": "3de4da962ae589dbef85a8fa5aaa7f177b89ddcfcb39da7caca803c8ab5c4a8c",
+    "effective_target_count": 64,
+    "target_mismatch_count": 0
+  },
+  "conflict": {
+    "first_external_transition_at": "2026-08-27T13:35:51+08:00",
+    "first_external_effective_mode": "off",
+    "first_external_frontend_result": "passed",
+    "first_recovery_effective_mode": "compare",
+    "first_recovery_listener_pid": 55620,
+    "second_external_transition_at": "2026-08-27T13:41:27+08:00",
+    "second_external_effective_mode": "off",
+    "second_external_frontend_result": "failed",
+    "second_external_failure_code": "FRONTEND_READINESS_TIMEOUT",
+    "external_requester_identity_retained": false
+  },
+  "recovery": {
+    "attempt_count": 2,
+    "method": "official_launcher_component_scoped_prepare",
+    "expected_mode": "compare",
+    "listener_pid": 36700,
+    "launcher_pid": 58216,
+    "backend_url": "http://127.0.0.1:8400",
+    "frontend_url": "http://127.0.0.1:3000",
+    "stable_soak_seconds": 120,
+    "health": "ok",
+    "ready": "ready",
+    "frontend_result": "passed",
+    "mcp_result": "passed",
+    "global_lease_count": 0,
+    "bridge_process_running": false,
+    "result": "passed"
+  },
+  "superseded_artifacts": [
+    "m5-rollback-compare-to-off-20260827-1335.json",
+    "m5-final-off-check-20260827-1336.json",
+    "m5-final-status-20260827.json"
+  ],
+  "result": "recovered_compare_pending_preopen",
+  "limitations": [
+    "The premature off-mode artifacts remain immutable conflict evidence but are not final acceptance or the authorized final rollback.",
+    "The final compare-to-off rollback remains gated on current-source Preopen evidence."
+  ],
+  "artifact_policy": {
+    "lease_ids_included": false,
+    "raw_provider_payload_included": false,
+    "credentials_included": false,
+    "private_identity_included": false
+  }
+}

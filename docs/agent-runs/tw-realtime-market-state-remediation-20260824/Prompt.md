@@ -10,7 +10,7 @@
 - 根除 eligible session cold-start 把訂閱快照誤收為正式成交的缺口；Regular 與 Post-close 都必須先建立 cumulative baseline。
 - 提供 bounded、redacted callback diagnostics 與可執行 live-session harness，讓 cumulative integrity、trial leakage、latency 與 symbol switch 可由 artifact 自動量化。
 - 以 versioned acceptance extension checkpoint 指紋化本輪 Frontend、Market-State 與 live harness source，避免只重算舊 30-target manifest 卻漏掉新 gate owner。
-- 在 2026-08-25 08:20 起由本任務的唯一 heartbeat 進入主動待機、runtime adoption、live acceptance 與 bounded 現場排障；可安全修復的 failure 必須修復、重驗並繼續，不得在第一次失敗時直接停止。
+- 在 2026-08-26 08:20 起由本任務的唯一 heartbeat 進入主動待機、runtime adoption、live acceptance 與 bounded 現場排障；可安全修復的 failure 必須修復、重驗並繼續，不得在第一次失敗時直接停止。
 
 ## 非目標
 
@@ -31,13 +31,13 @@
 - 保留 provider、source、event time、received time、selection／fallback、freshness 與限制。
 - 現有 worktree 有大量既有變更；只做本任務的局部 diff，不 revert、不 commit、不 push。
 
-## 2026-08-25 排程驗收授權
+## 2026-08-26 排程驗收授權
 
-- 08:20 起先執行 SourceOnly base＋extension identity、正式 launcher lineage、effective `compare`、health／ready、frontend／MCP 與 global viewer baseline；通過後進入單一 `acceptance_probe` readiness 與正式 session gates。
+- 08:20 起先執行 SourceOnly base＋extension identity、正式 launcher lineage、effective `compare`、health／ready、frontend／MCP 與 global viewer baseline；啟動、frontend readiness 與 idle cleanup 分別保留最多 180／120／240 秒。Morning remediation 可持續到 10:00，runtime 一旦乾淨就立即進入當下仍可取得的正式 session gate。
 - 允許 automation 只透過正式 launcher 執行 component-scoped `Prepare`／`RestartServices`／`Check`，用來採用本輪 source、恢復 OMI runtime、等待 bounded readiness 並重新驗證；不得手動 broad-kill、建立第二個 launcher owner或改用未受控 runtime。
 - Runtime、frontend、MCP、idle cleanup、harness 或本任務 source 的 localized failure，先保存真實 redacted artifact、確認 ownership，再做最小安全修正。任何 source／config 修正後必須重跑 affected validation、重建 extension checkpoint、同步 heartbeat pin、重新 adoption，並從最早受影響 gate 重跑。
 - 外部 viewer lease 不得代為 release；先做 bounded recheck。自身 probe 必須在每次 attempt 後 owner-only release，並證明 global baseline 回復。
-- 第一次 failure、可修復 failure、成功 retry 與中間續排都不通知使用者。只有 credential／entitlement／人工作業、外部 owner 逾有效時窗、ownership 不明或廣泛 source drift、需要越界操作，或已錯過無法重現的正式 session window，才可停止並回報。
+- 第一次 failure、可修復 failure、成功 retry 與中間續排都不通知使用者。盤前或開盤窗口若在修復期間經過，只能如實標為待下個交易日補驗，不得拿盤中證據替代，但 automation 仍須繼續修復與取得可取得的 Regular evidence，直到 10:00 才做 morning terminal 判定。Credential／entitlement／人工作業、外部 owner 逾有效時窗、ownership 不明或廣泛 source drift、需要越界操作可提前回報。
 - 此授權不包含 Account／Portfolio／Order／交易、backfill、repair、production DB write／destructive probe、secret／credential 變更、unknown lease release、commit 或 push。
 
 ## 交付物

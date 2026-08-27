@@ -8,6 +8,10 @@ param(
     [string]$ExpectedCheckpointSha256 = "8acbaea6fa4566416c67dc1e1745e4a080e2b6ee8e341fd1c0edc501f56badf2",
     [string]$ExpectedExtensionCheckpointSha256 = "2ec7456200c310a778621df31747974cc468839c560d025680d870bc7d478619",
     [string]$ExpectedConvergenceCheckpointSha256 = "460903c9692e09e3e81315b12a6c39fac3f36fcfa3eb5c4176516b4190e453ba",
+    [string]$ExpectedSharedCoreCheckpointSha256 = "5eec32a6e49a5e3e7d58c3b63d4a02dfdbda12d653430229d1339314188edf8d",
+    [string]$ExpectedFreezeCheckpointSha256 = "fd68817a88287d8001f3c1e3a1ca5358adebc642327e1abd0f35dc345acf5a27",
+    [string]$ExpectedLiveRemediationCheckpointSha256 = "3de4da962ae589dbef85a8fa5aaa7f177b89ddcfcb39da7caca803c8ab5c4a8c",
+    [string]$ExpectedReleaseCheckpointSha256 = "69f37f4fb71306ec783e75355514110562067df21c1ced6769ff62d821196bc4",
     [string]$Symbol = "2330",
     [switch]$RunViewerReadiness,
     [ValidateRange(15, 180)][int]$StartupTimeoutSeconds = 90,
@@ -27,6 +31,10 @@ $script:CheckpointPath = Join-Path $script:TaskRoot "artifacts\source-checkpoint
 $script:ExtensionTaskRoot = Join-Path $script:RepoRoot "docs\agent-runs\tw-realtime-market-state-remediation-20260824"
 $script:ExtensionCheckpointPath = Join-Path $script:ExtensionTaskRoot "artifacts\acceptance-extension-checkpoint.json"
 $script:ConvergenceCheckpointPath = Join-Path $script:RepoRoot "docs\agent-runs\tw-market-data-platform-convergence-20260825\artifacts\foundation-extension-checkpoint.json"
+$script:SharedCoreCheckpointPath = Join-Path $script:RepoRoot "docs\agent-runs\tw-shared-data-core-convergence-20260826\artifacts\precommit-remediation-source-checkpoint.json"
+$script:FreezeCheckpointPath = Join-Path $script:RepoRoot "docs\agent-runs\tw-architecture-freeze-gate-20260826\artifacts\freeze-source-checkpoint.json"
+$script:LiveRemediationCheckpointPath = Join-Path $script:ExtensionTaskRoot "artifacts\live-remediation-source-checkpoint-20260827.json"
+$script:ReleaseCheckpointPath = Join-Path $script:ExtensionTaskRoot "artifacts\tw-4.3.0-source-checkpoint-20260827.json"
 $script:ArtifactsRoot = Join-Path $script:TaskRoot "artifacts"
 $script:LauncherMutexName = "OpenMarketIntelligenceLauncher"
 $script:ExpectedProjectRoot = $script:RepoRoot.TrimEnd('\')
@@ -667,6 +675,18 @@ function Test-SourceCheckpoint {
     if ($ExpectedConvergenceCheckpointSha256 -notmatch '^[0-9a-fA-F]{64}$') {
         Throw-GateFailure -Code "CONVERGENCE_CHECKPOINT_NOT_CAPTURED" -Message "ExpectedConvergenceCheckpointSha256 must be replaced after validation."
     }
+    if ($ExpectedSharedCoreCheckpointSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        Throw-GateFailure -Code "SHARED_CORE_CHECKPOINT_NOT_CAPTURED" -Message "ExpectedSharedCoreCheckpointSha256 must be replaced after validation."
+    }
+    if ($ExpectedFreezeCheckpointSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        Throw-GateFailure -Code "FREEZE_CHECKPOINT_NOT_CAPTURED" -Message "ExpectedFreezeCheckpointSha256 must be replaced after validation."
+    }
+    if ($ExpectedLiveRemediationCheckpointSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        Throw-GateFailure -Code "LIVE_REMEDIATION_CHECKPOINT_NOT_CAPTURED" -Message "ExpectedLiveRemediationCheckpointSha256 must be replaced after validation."
+    }
+    if ($ExpectedReleaseCheckpointSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        Throw-GateFailure -Code "RELEASE_CHECKPOINT_NOT_CAPTURED" -Message "ExpectedReleaseCheckpointSha256 must be replaced after validation."
+    }
     $actualExtensionHash = Get-Sha256 -Path $script:ExtensionCheckpointPath
     if ($actualExtensionHash -ne $ExpectedExtensionCheckpointSha256.ToLowerInvariant()) {
         Throw-GateFailure -Code "EXTENSION_CHECKPOINT_CHANGED" -Message "Expected extension checkpoint $ExpectedExtensionCheckpointSha256 but found $actualExtensionHash."
@@ -683,6 +703,38 @@ function Test-SourceCheckpoint {
     if ([string]$convergence.validation.result -ne "passed") {
         Throw-GateFailure -Code "CONVERGENCE_VALIDATION_NOT_PASSED" -Message "Convergence checkpoint validation result must be passed; found $([string]$convergence.validation.result)."
     }
+    $actualSharedCoreHash = Get-Sha256 -Path $script:SharedCoreCheckpointPath
+    if ($actualSharedCoreHash -ne $ExpectedSharedCoreCheckpointSha256.ToLowerInvariant()) {
+        Throw-GateFailure -Code "SHARED_CORE_CHECKPOINT_CHANGED" -Message "Expected shared-core checkpoint $ExpectedSharedCoreCheckpointSha256 but found $actualSharedCoreHash."
+    }
+    $sharedCore = Get-Content -LiteralPath $script:SharedCoreCheckpointPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$sharedCore.validation.result -ne "passed") {
+        Throw-GateFailure -Code "SHARED_CORE_VALIDATION_NOT_PASSED" -Message "Shared-core checkpoint validation result must be passed; found $([string]$sharedCore.validation.result)."
+    }
+    $actualFreezeHash = Get-Sha256 -Path $script:FreezeCheckpointPath
+    if ($actualFreezeHash -ne $ExpectedFreezeCheckpointSha256.ToLowerInvariant()) {
+        Throw-GateFailure -Code "FREEZE_CHECKPOINT_CHANGED" -Message "Expected freeze checkpoint $ExpectedFreezeCheckpointSha256 but found $actualFreezeHash."
+    }
+    $freeze = Get-Content -LiteralPath $script:FreezeCheckpointPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$freeze.validation.result -ne "passed") {
+        Throw-GateFailure -Code "FREEZE_VALIDATION_NOT_PASSED" -Message "Freeze checkpoint validation result must be passed; found $([string]$freeze.validation.result)."
+    }
+    $actualLiveRemediationHash = Get-Sha256 -Path $script:LiveRemediationCheckpointPath
+    if ($actualLiveRemediationHash -ne $ExpectedLiveRemediationCheckpointSha256.ToLowerInvariant()) {
+        Throw-GateFailure -Code "LIVE_REMEDIATION_CHECKPOINT_CHANGED" -Message "Expected live-remediation checkpoint $ExpectedLiveRemediationCheckpointSha256 but found $actualLiveRemediationHash."
+    }
+    $liveRemediation = Get-Content -LiteralPath $script:LiveRemediationCheckpointPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$liveRemediation.validation.result -ne "passed") {
+        Throw-GateFailure -Code "LIVE_REMEDIATION_VALIDATION_NOT_PASSED" -Message "Live-remediation checkpoint validation result must be passed; found $([string]$liveRemediation.validation.result)."
+    }
+    $actualReleaseHash = Get-Sha256 -Path $script:ReleaseCheckpointPath
+    if ($actualReleaseHash -ne $ExpectedReleaseCheckpointSha256.ToLowerInvariant()) {
+        Throw-GateFailure -Code "RELEASE_CHECKPOINT_CHANGED" -Message "Expected release checkpoint $ExpectedReleaseCheckpointSha256 but found $actualReleaseHash."
+    }
+    $release = Get-Content -LiteralPath $script:ReleaseCheckpointPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$release.validation.result -ne "passed") {
+        Throw-GateFailure -Code "RELEASE_VALIDATION_NOT_PASSED" -Message "Release checkpoint validation result must be passed; found $([string]$release.validation.result)."
+    }
     $extensionMismatches = @()
     $extensionPaths = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
@@ -694,6 +746,38 @@ function Test-SourceCheckpoint {
         $effectiveExtensionEntries[$relativePath] = $entry
     }
     foreach ($entry in $convergence.files) {
+        $relativePath = [string]$entry.path
+        [void]$extensionPaths.Add($relativePath)
+        $effectiveExtensionEntries[$relativePath] = $entry
+    }
+    $sharedCoreSupersededPriorTargetCount = @(
+        $sharedCore.files | Where-Object { $extensionPaths.Contains([string]$_.path) }
+    ).Count
+    foreach ($entry in $sharedCore.files) {
+        $relativePath = [string]$entry.path
+        [void]$extensionPaths.Add($relativePath)
+        $effectiveExtensionEntries[$relativePath] = $entry
+    }
+    $freezeSupersededPriorTargetCount = @(
+        $freeze.files | Where-Object { $extensionPaths.Contains([string]$_.path) }
+    ).Count
+    foreach ($entry in $freeze.files) {
+        $relativePath = [string]$entry.path
+        [void]$extensionPaths.Add($relativePath)
+        $effectiveExtensionEntries[$relativePath] = $entry
+    }
+    $liveRemediationSupersededPriorTargetCount = @(
+        $liveRemediation.files | Where-Object { $extensionPaths.Contains([string]$_.path) }
+    ).Count
+    foreach ($entry in $liveRemediation.files) {
+        $relativePath = [string]$entry.path
+        [void]$extensionPaths.Add($relativePath)
+        $effectiveExtensionEntries[$relativePath] = $entry
+    }
+    $releaseSupersededPriorTargetCount = @(
+        $release.files | Where-Object { $extensionPaths.Contains([string]$_.path) }
+    ).Count
+    foreach ($entry in $release.files) {
         $relativePath = [string]$entry.path
         [void]$extensionPaths.Add($relativePath)
         $effectiveExtensionEntries[$relativePath] = $entry
@@ -711,7 +795,12 @@ function Test-SourceCheckpoint {
         }
     }
     if ($extensionMismatches.Count -gt 0) {
-        Throw-GateFailure -Code "EXTENSION_TARGET_CHANGED" -Message "$($extensionMismatches.Count) acceptance extension target file(s) changed."
+        $mismatchSummary = @(
+            $extensionMismatches | ForEach-Object {
+                "$([string]$_.path)|expected=$([string]$_.expected)|actual=$([string]$_.actual)"
+            }
+        ) -join "; "
+        Throw-GateFailure -Code "EXTENSION_TARGET_CHANGED" -Message "$($extensionMismatches.Count) acceptance extension target file(s) changed: $mismatchSummary"
     }
 
     $actualCheckpointHash = Get-Sha256 -Path $script:CheckpointPath
@@ -761,6 +850,22 @@ function Test-SourceCheckpoint {
                 $convergence.files.path -contains [string]$_.path
             }
         ).Count
+        shared_core_checkpoint_file_sha256 = $actualSharedCoreHash
+        shared_core_target_count = @($sharedCore.files).Count
+        shared_core_target_mismatch_count = 0
+        shared_core_superseded_prior_target_count = $sharedCoreSupersededPriorTargetCount
+        freeze_checkpoint_file_sha256 = $actualFreezeHash
+        freeze_target_count = @($freeze.files).Count
+        freeze_target_mismatch_count = 0
+        freeze_superseded_prior_target_count = $freezeSupersededPriorTargetCount
+        live_remediation_checkpoint_file_sha256 = $actualLiveRemediationHash
+        live_remediation_target_count = @($liveRemediation.files).Count
+        live_remediation_target_mismatch_count = 0
+        live_remediation_superseded_prior_target_count = $liveRemediationSupersededPriorTargetCount
+        release_checkpoint_file_sha256 = $actualReleaseHash
+        release_target_count = @($release.files).Count
+        release_target_mismatch_count = 0
+        release_superseded_prior_target_count = $releaseSupersededPriorTargetCount
         effective_extension_target_count = $effectiveExtensionEntries.Count
         extension_superseded_base_target_count = @(
             $checkpoint.files | Where-Object { $extensionPaths.Contains([string]$_.path) }

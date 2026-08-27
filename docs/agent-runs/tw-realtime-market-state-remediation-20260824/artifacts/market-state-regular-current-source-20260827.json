@@ -1,0 +1,133 @@
+{
+  "schema_version": "omi.mdf.m5.market_state.v2",
+  "captured_at": "2026-08-27T09:12:27.8722224+08:00",
+  "completed_at": "2026-08-27T09:12:27.8722224+08:00",
+  "source_identity": {
+    "live_remediation_checkpoint_sha256": "3de4da962ae589dbef85a8fa5aaa7f177b89ddcfcb39da7caca803c8ab5c4a8c",
+    "live_session_harness_sha256": "73335801d153ad0c42ebc0d1cea48e72fac1852e5d13e15d6f5c05675443bb04",
+    "runtime_backend_url": "http://127.0.0.1:8400",
+    "runtime_listener_pid": 49884,
+    "effective_mode": "compare"
+  },
+  "dashboard_snapshot_id": "0f91dfbe6b01a01fea9056ab",
+  "dashboard_state_version": 1787793133000,
+  "session": {
+    "phase": "regular",
+    "presentation_state": "observing",
+    "trade_date": "2026-08-27",
+    "is_current_trading_day": true,
+    "next_transition_at": "2026-08-27T13:33:00+08:00"
+  },
+  "headline_index_field": "resolved_indices",
+  "headline_breadth_field": "resolved_breadth",
+  "index_checks": [
+    {
+      "market": "TWSE",
+      "dashboard_status": "partial",
+      "data_core_status": "partial",
+      "status_match": true,
+      "selected_value_match": true,
+      "selected_source_match": true,
+      "selected_provider_match": true,
+      "selected_event_time_match": true,
+      "selected_trade_date_match": true,
+      "selection_reason_match": true,
+      "decision_usable_match": true,
+      "resolution_contract": "omi.market.resolved_evidence_health.v1",
+      "legacy_official": false,
+      "legacy_decision_usable": false
+    },
+    {
+      "market": "TPEX",
+      "dashboard_status": "partial",
+      "data_core_status": "partial",
+      "status_match": true,
+      "selected_value_match": true,
+      "selected_source_match": true,
+      "selected_provider_match": true,
+      "selected_event_time_match": true,
+      "selected_trade_date_match": true,
+      "selection_reason_match": true,
+      "decision_usable_match": true,
+      "resolution_contract": "omi.market.resolved_evidence_health.v1",
+      "legacy_official": false,
+      "legacy_decision_usable": false
+    }
+  ],
+  "breadth_checks": [
+    {
+      "market": "TWSE",
+      "legacy_status": "partial",
+      "legacy_coverage": 383,
+      "legacy_advance": 250,
+      "legacy_decline": 94,
+      "legacy_unchanged": 39,
+      "legacy_unknown": 703,
+      "legacy_universe": 1086,
+      "legacy_classification_balanced": true,
+      "legacy_universe_balanced": true,
+      "legacy_unknown_reason_balanced": true,
+      "valid_no_trade": null,
+      "not_tradable": null,
+      "provider_missing": null,
+      "mapping_error": null,
+      "resolved_status": "partial",
+      "resolved_coverage": 383,
+      "resolved_unknown": 697,
+      "resolved_universe": 1080,
+      "resolved_classification_balanced": true,
+      "resolved_universe_balanced": true,
+      "resolved_unknown_reason_balanced": true,
+      "resolved_not_received": 5,
+      "resolved_received_unclassified": 692,
+      "resolved_reason_unknown": 0,
+      "as_of": "2026-08-27T09:11:44+08:00",
+      "warnings": [
+        "RECEIVED_UNCLASSIFIED",
+        "UNIVERSE_NOT_RECEIVED",
+        "READ_POLICY_FORBIDS_ACQUISITION"
+      ]
+    },
+    {
+      "market": "TPEX",
+      "legacy_status": "partial",
+      "legacy_coverage": 267,
+      "legacy_advance": 154,
+      "legacy_decline": 69,
+      "legacy_unchanged": 44,
+      "legacy_unknown": 620,
+      "legacy_universe": 887,
+      "legacy_classification_balanced": true,
+      "legacy_universe_balanced": true,
+      "legacy_unknown_reason_balanced": true,
+      "valid_no_trade": null,
+      "not_tradable": null,
+      "provider_missing": null,
+      "mapping_error": null,
+      "resolved_status": "partial",
+      "resolved_coverage": 267,
+      "resolved_unknown": 620,
+      "resolved_universe": 887,
+      "resolved_classification_balanced": true,
+      "resolved_universe_balanced": true,
+      "resolved_unknown_reason_balanced": true,
+      "resolved_not_received": 7,
+      "resolved_received_unclassified": 613,
+      "resolved_reason_unknown": 0,
+      "as_of": "2026-08-27T09:12:13+08:00",
+      "warnings": [
+        "RECEIVED_UNCLASSIFIED",
+        "UNIVERSE_NOT_RECEIVED",
+        "READ_POLICY_FORBIDS_ACQUISITION"
+      ]
+    }
+  ],
+  "index_gate_pass": true,
+  "breadth_gate_pass": true,
+  "artifact_policy": {
+    "raw_provider_payload_included": false,
+    "credentials_included": false,
+    "private_identity_included": false,
+    "lease_ids_included": false
+  }
+}

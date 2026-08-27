@@ -1,0 +1,23 @@
+{
+  "artifact": "wp-side-01-02-source",
+  "captured_at": "2026-08-26T19:13:38+08:00",
+  "status": "SOURCE_PASS",
+  "classified_surfaces": {
+    "dataset_catalog": [
+      "tw.corporate_events",
+      "tw.etf",
+      "tw.futures_derivatives"
+    ],
+    "compatibility_cache": [
+      "tw.disposition",
+      "tw.institutional_holding_ratio"
+    ]
+  },
+  "invariants": [
+    "read_external_io=false",
+    "read_writes_storage=false",
+    "noncanonical decision_usable=false",
+    "every classified outward route is exact and unique"
+  ],
+  "runtime_action": false
+}

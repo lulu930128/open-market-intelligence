@@ -1,0 +1,154 @@
+{
+  "schema_version": "omi.mdf.m5.daily_acceptance.v1",
+  "captured_at": "2026-08-27T13:54:12+08:00",
+  "timezone": "Asia/Taipei",
+  "expected_date": "2026-08-27",
+  "source_identity": {
+    "base_checkpoint_sha256": "8acbaea6fa4566416c67dc1e1745e4a080e2b6ee8e341fd1c0edc501f56badf2",
+    "m5_checkpoint_sha256": "2ec7456200c310a778621df31747974cc468839c560d025680d870bc7d478619",
+    "data_core_checkpoint_sha256": "460903c9692e09e3e81315b12a6c39fac3f36fcfa3eb5c4176516b4190e453ba",
+    "shared_core_checkpoint_sha256": "5eec32a6e49a5e3e7d58c3b63d4a02dfdbda12d653430229d1339314188edf8d",
+    "freeze_checkpoint_sha256": "fd68817a88287d8001f3c1e3a1ca5358adebc642327e1abd0f35dc345acf5a27",
+    "live_remediation_checkpoint_sha256": "3de4da962ae589dbef85a8fa5aaa7f177b89ddcfcb39da7caca803c8ab5c4a8c",
+    "effective_target_count": 64,
+    "mismatch_count": 0,
+    "result": "passed"
+  },
+  "gates": {
+    "source_only": {
+      "status": "pass",
+      "artifact": "m5-source-only-closing-20260827-1320.json"
+    },
+    "runtime_compare_preflight": {
+      "status": "pass",
+      "artifact": "m5-check-closing-20260827-1322.json"
+    },
+    "preopen": {
+      "status": "pending",
+      "reason": "Preopen semantics were observed before the final Market-State and cleanup-harness source checkpoint. The window had ended before the final source identity was pinned, so the evidence is retained as historical and was not promoted.",
+      "historical_artifacts": [
+        "m5-live-preopen-current-source-20260827-0851.json",
+        "session-preopen-post-live-remediation-20260827-084502.json"
+      ]
+    },
+    "opening_transition": {
+      "status": "pass",
+      "artifacts": [
+        "m5-live-opening-current-source-20260827-0858.json",
+        "session-opening-transition-20260827-085828.json",
+        "m5-live-opening-cleanup-extension-20260827.json"
+      ]
+    },
+    "regular_integrity_level5_and_switch": {
+      "status": "pass",
+      "artifacts": [
+        "m5-live-regular-current-source-retry-20260827-0908.json",
+        "session-regular-symbol-switch-2330-2317-2330-20260827-091345.json"
+      ]
+    },
+    "market_state": {
+      "status": "pass",
+      "artifacts": [
+        "market-state-regular-current-source-20260827.json",
+        "market-state-post-close-current-source-20260827.json"
+      ]
+    },
+    "closing_auction_and_formal_match": {
+      "status": "pass",
+      "artifacts": [
+        "m5-live-closing-current-source-20260827-1324.json",
+        "m5-closing-evaluation-current-source-20260827.json"
+      ]
+    },
+    "compare_to_off_rollback": {
+      "status": "pass",
+      "effective_mode": "off",
+      "artifacts": [
+        "m5-rollback-compare-to-off-20260827-1335.json",
+        "m5-final-rollback-after-race-cleared-20260827-1351.json"
+      ],
+      "note": "A late existing acceptance automation re-armed compare after the first stable check. After that owner conflict paused, the official launcher repeated the rollback successfully."
+    },
+    "final_off_runtime_check": {
+      "status": "pass",
+      "effective_mode": "off",
+      "artifacts": [
+        "m5-final-off-check-after-race-20260827-1352.json",
+        "m5-final-off-stable-check-after-race-20260827-1355.json"
+      ]
+    },
+    "final_safe_validation": {
+      "status": "pass",
+      "profile": "quick",
+      "log_directory": ".tmp/validation/20260827-133630",
+      "checks": [
+        "backend compileall",
+        "frontend TypeScript noEmit",
+        "git diff --check"
+      ]
+    }
+  },
+  "remediation_history": [
+    {
+      "status": "resolved",
+      "issue": "A late existing acceptance automation restored compare mode after the initial rollback because it retained the older keep-compare-until-Preopen policy.",
+      "observed_artifacts": [
+        "m5-restore-compare-after-external-rollback-20260827-1338.json",
+        "m5-runtime-owner-conflict-recovery-20260827.json",
+        "m5-terminal-external-runtime-owner-blocker-20260827.json"
+      ],
+      "failed_attempts": [
+        {
+          "artifact": "m5-final-rollback-after-automation-20260827-1340.json",
+          "failure_code": "RUNTIME_LINEAGE_PROBE_UNAVAILABLE"
+        },
+        {
+          "artifact": "m5-final-rollback-normal-permission-20260827-1346.json",
+          "failure_code": "RUNTIME_IDENTITY_MISMATCH"
+        },
+        {
+          "artifact": "m5-final-off-restart-services-20260827-1347.json",
+          "failure_code": "COMPARE_BOOTSTRAP_FAILED"
+        }
+      ],
+      "resolution_artifact": "m5-final-rollback-after-race-cleared-20260827-1351.json",
+      "stable_check_artifacts": [
+        "m5-final-off-check-after-race-20260827-1352.json",
+        "m5-final-off-stable-check-after-race-20260827-1355.json"
+      ],
+      "automation_state": "paused"
+    }
+  ],
+  "summary": {
+    "pass": [
+      "source_only",
+      "runtime_compare_preflight",
+      "opening_transition",
+      "regular_integrity_level5_and_switch",
+      "market_state",
+      "closing_auction_and_formal_match",
+      "compare_to_off_rollback",
+      "final_off_runtime_check",
+      "final_safe_validation"
+    ],
+    "pending": [
+      "preopen"
+    ],
+    "fail": [],
+    "runtime_accepted": false,
+    "release_ready": false,
+    "verdict": "partial_pending_preopen"
+  },
+  "limitations": [
+    "No later-session evidence was used to replace the missing final-source Preopen gate.",
+    "Provider delay units remain unknown unless independently documented and correlated.",
+    "Projection integrity is proven; provider-level exactly-once is not claimed.",
+    "Post-close official index evidence remained truthful stale or provisional and was not promoted to decision-usable final close."
+  ],
+  "artifact_policy": {
+    "raw_provider_payload_included": false,
+    "credentials_included": false,
+    "private_identity_included": false,
+    "lease_ids_included": false
+  }
+}

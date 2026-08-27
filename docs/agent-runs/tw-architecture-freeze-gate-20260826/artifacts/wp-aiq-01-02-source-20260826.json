@@ -1,0 +1,32 @@
+{
+  "artifact_version": "omi.tw.freeze_gate.aiq.v1",
+  "captured_at": "2026-08-26T19:08:00+08:00",
+  "packages": {
+    "AIQ-01": {
+      "status": "SOURCE_PASS",
+      "bundle": "TaiwanQuoteEvidenceBundle",
+      "components": [
+        "quote.snapshot",
+        "quote.order_book",
+        "quote.auction"
+      ],
+      "read_entrypoint": "read_taiwan_quote_evidence_bundle",
+      "acquire_entrypoint": "acquire_taiwan_quote_evidence_bundle",
+      "component_health_is_independent": true,
+      "component_lineage_is_independent": true
+    },
+    "AIQ-02": {
+      "status": "SOURCE_PASS",
+      "production_dependency_cutover": true,
+      "canonical_depth_to_ai_projection_tested": true,
+      "mcp_is_thin_consumer": true,
+      "targeted_tests": [
+        "145 passed, 3 subtests passed in 13.97s",
+        "118 passed, 223 subtests passed in 5.43s"
+      ]
+    }
+  },
+  "external_provider_calls": "not_run",
+  "runtime_adoption": "not_run",
+  "live_acceptance": "pending"
+}

@@ -3,8 +3,8 @@
 ## 執行狀態
 
 - 本文件是 2026-08-24 source remediation 後的新 gate extension。
-- 舊 `M5RetryRunbook20260825.md` 的30-target checkpoint `8acbaea6...`只能作historical base；正式gate必須同時驗28-target extension `91d03b63...`與13個superseded base targets，不得把base-only mismatch當成回復舊source的理由。
-- 使用者已授權2026-08-25 08:20起主動待機，以及只透過正式launcher完成component-scoped runtime adoption／repair。本文件仍不授權provider refresh、Account、Order、DB write、broad-kill、第二launcher owner或釋放未知lease。
+- 舊 `M5RetryRunbook20260825.md` 的30-target checkpoint `8acbaea6...`只能作historical base；正式gate必須同時驗28-target M5 extension `2ec74562...`、13-target Data Core convergence `460903c9...`與19-target Shared Data Core pre-commit overlay `5eec32a6...`，不得把舊層的superseded mismatch當成回復正確新source的理由。
+- 使用者已授權2026-08-26 08:20起主動待機，以及只透過正式launcher完成component-scoped runtime adoption／repair。本文件仍不授權provider refresh、Account、Order、DB write、broad-kill、第二launcher owner或釋放未知lease。
 
 ## 共用前置門檻
 
@@ -19,10 +19,10 @@
 
 ### 啟動順序
 
-1. 以preflight驗證30-target base＋28-target extension overlay；base-only的13個superseded mismatch不得單獨判定source drift。
-2. 只透過正式launcher採用目前source並啟用process-scoped `compare`；驗證listener／Python／project root lineage、health／ready、catalog、frontend proxy與stdio MCP。
+1. 以preflight依base→M5 extension→Data Core convergence→Shared Data Core pre-commit precedence驗證所有checkpoint；older overlay的superseded mismatch不得單獨判定source drift。
+2. 只透過正式launcher採用目前source並啟用process-scoped `compare`；backend啟動、frontend readiness與idle cleanup分別允許最多180／120／240秒，再驗證listener／Python／project root lineage、health／ready、catalog、frontend proxy與stdio MCP。
 3. Global lease baseline必須為0；再建立單一TW 2330 `acceptance_probe`執行acquire／sample readiness／owner-only release／idle cleanup。08:20 readiness不是Preopen pass。
-4. Readiness通過後，同一heartbeat依序續排08:30 Preopen、08:58 Opening、09:05 Regular與13:25前Closing；每個stage只接受當下真實session evidence。
+4. 08:20起作啟動、readiness、修復與必要retry；沒有固定完成期限。Runtime乾淨後立即取得當下仍有效的Preopen／08:58 Opening／09:05後Regular／13:25前後Closing evidence。已經過的session gate標pending，不得用後一時段補pass，並由同一automation續排下一個合法時窗。
 
 ### Failure處置
 
@@ -31,12 +31,12 @@
 3. External viewer lease：不得release；保存redacted owner／symbol counts並在有效時窗內bounded recheck。Owner自行清除後繼續；逾越對應session window才terminal。
 4. KGI Python／CA／login／subscription failure：先release自身probe並驗證after baseline，再讀redacted log／config status。Task-owned source、harness或runtime seam可修者，完成affected validation、extension checkpoint重建、heartbeat pin同步與runtime重新adopt後重試；需要credential、entitlement或人工作業才terminal。
 5. Source drift：列出exact target與ownership，只允許localized task-owned修正。修正後舊session evidence失效，必須重建extension、同步pin、重新adopt並從最早受影響gate重跑；ownership不明或廣泛drift才terminal。
-6. Session semantic failure：保存真實artifact與cleanup evidence；只要仍在同一有效session window且可由task-owned範圍修正，就修復並重跑。已錯過不可重現的session window才停止，不得拿後續時段補pass。
+6. Session semantic failure：保存真實artifact與cleanup evidence；只要仍在同一有效session window且可由task-owned範圍修正，就修復並重跑。若窗口已過，該gate維持pending且不得拿後續時段補pass，但仍繼續安全修復與其餘可取得gate；最後由同一automation續排。
 
 ### 通知與停止
 
 - 第一次failure、可修復failure、成功retry與中間續排一律不通知；automation繼續工作。
-- 只有credential／entitlement／人工作業、外部owner逾有效時窗、ownership不明／廣泛drift、需要Account／Order／DB／broad-kill等越界操作，或已錯過正式session window，才暫停並回報。
+- Credential／entitlement／人工作業、外部owner持續阻擋、ownership不明／廣泛drift、需要Account／Order／DB／broad-kill等越界操作，或同一component blocker在完整診斷與至少兩輪給足等待的component-scoped修復／重試後仍無新證據，才暫停並回報。時間經過本身不是terminal blocker。
 - 全部live gates、cleanup、Market-State reconciliation、compare-to-off rollback與final validation完成後，才通知最終摘要並將heartbeat設為paused。
 
 ## Gate A：MDF-M5 Core

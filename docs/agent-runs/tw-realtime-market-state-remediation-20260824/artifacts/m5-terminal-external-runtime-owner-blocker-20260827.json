@@ -1,0 +1,77 @@
+{
+  "schema_version": "omi.mdf.m5.terminal_blocker.v1",
+  "captured_at": "2026-08-27T13:53:25.6732718+08:00",
+  "failure_code": "EXTERNAL_RUNTIME_OWNER_CONFLICT",
+  "source_identity": {
+    "live_remediation_checkpoint_sha256": "3de4da962ae589dbef85a8fa5aaa7f177b89ddcfcb39da7caca803c8ab5c4a8c",
+    "effective_target_count": 64,
+    "target_mismatch_count": 0
+  },
+  "observed_transitions": [
+    {
+      "at": "2026-08-27T13:35:51+08:00",
+      "requested_by": "external_codex_bridge_owner",
+      "resulting_mode": "off"
+    },
+    {
+      "at": "2026-08-27T13:41:27+08:00",
+      "requested_by": "external_codex_bridge_owner",
+      "resulting_mode": "off",
+      "frontend_result": "failed"
+    },
+    {
+      "at": "2026-08-27T13:51:31+08:00",
+      "requested_by": "external_codex_bridge_owner",
+      "resulting_mode": "off"
+    }
+  ],
+  "repair_attempts": [
+    {
+      "attempt": 1,
+      "method": "official_launcher_component_scoped_prepare",
+      "result": "compare_restored_then_externally_overwritten"
+    },
+    {
+      "attempt": 2,
+      "method": "official_launcher_component_scoped_prepare",
+      "stable_soak_seconds": 120,
+      "validation_completed_at": "2026-08-27T13:50:16.7349121+08:00",
+      "result": "compare_passed_then_externally_overwritten"
+    }
+  ],
+  "current_safe_baseline": {
+    "effective_mode": "off",
+    "listener_pid": 51132,
+    "launcher_pid": 13480,
+    "backend_url": "http://127.0.0.1:8400",
+    "frontend_url": "http://127.0.0.1:3000",
+    "health": "ok",
+    "ready": "ready",
+    "frontend_result": "passed",
+    "mcp_result": "passed",
+    "global_lease_count": 0,
+    "bridge_process_running": false
+  },
+  "acceptance_state": {
+    "opening": "passed",
+    "regular": "passed",
+    "closing": "passed",
+    "cleanup": "passed",
+    "market_state": "passed",
+    "final_source_preopen": "pending",
+    "runtime_accepted": false,
+    "release_ready": false
+  },
+  "result": "blocked",
+  "recovery_condition": "Stop or coordinate the external Codex Bridge conversation that is issuing off-mode launcher transitions, then resume this same automation before the next valid Preopen window. Re-establish and verify a single compare owner before acquiring the acceptance probe.",
+  "limitations": [
+    "No third repair was attempted because the same external owner conflict recurred after two complete component-scoped repairs and a full stable validation.",
+    "The current off runtime is a safe cleanup baseline, not final runtime acceptance."
+  ],
+  "artifact_policy": {
+    "lease_ids_included": false,
+    "raw_provider_payload_included": false,
+    "credentials_included": false,
+    "private_identity_included": false
+  }
+}

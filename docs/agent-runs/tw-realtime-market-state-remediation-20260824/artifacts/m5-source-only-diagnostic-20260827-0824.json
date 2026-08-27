@@ -1,0 +1,26 @@
+{
+  "schema_version": "omi.market_data_foundation.m5_preflight.v2",
+  "captured_at": "2026-08-27T08:23:38.7742540+08:00",
+  "timezone": "Asia/Taipei",
+  "expected_date": "2026-08-27",
+  "runtime_action": "SourceOnly",
+  "expected_mode": "compare",
+  "target": {
+    "market": "TW",
+    "symbol": "2330"
+  },
+  "source": null,
+  "acceptance_harness": null,
+  "runtime": null,
+  "calendar": null,
+  "public_contract": null,
+  "frontend": null,
+  "mcp": null,
+  "viewer_baseline": null,
+  "viewer_readiness": null,
+  "result": "failed",
+  "failure_code": "EXTENSION_TARGET_CHANGED",
+  "failure_reason": "[EXTENSION_TARGET_CHANGED] 10 acceptance extension target file(s) changed: backend/tests/test_market_data_v2_dark_boundary.py|expected=4715a0e553df8b6d45d97afda0915c4614606bb6e04bc3405eec8f5e6601ed91|actual=76326b8f501f55b16489db3900f5a5a5b87a9f5a37d5e017a8285ef0eabdafa5; backend/app/market/quote_depth.py|expected=5d9b539ba7ecc0dd7a35e55ca866941417a8909b366f662cc1fff029381ec058|actual=9e2dc77b11f1a9f7c7d6f08d428739b06ee7aaea1cb84a5902c52a643e3ae81e; backend/app/market/schemas.py|expected=5410dbfadf43dc29a8d9b509ae1279022d44eb48030c32d80df72e0eca859a93|actual=0b514cfb4c9c726135e10ab3c427cce2246bd8a15f030af6ffd07554fc0f0b4e; backend/app/config.py|expected=d3e2506706336969b47500b70d228efe8db3dd1e698604bba1d104309882c182|actual=60671b2205bb866219da31e985b92f5f4d40cc3895536f26b8d703c44021818a; backend/app/market_data/registry.py|expected=01aa86b04eaac15286337beb23538a82a3b2dc835b68114ea6b461d80b83868f|actual=d7d72cd6b37601ca6acb368fd352d5bd1ae90db80b88a013b3d4e610450d211f; backend/app/ai/market_context/taiwan_stock.py|expected=363b864ad19c5f9ef270cbc506098f6af33d7634ad03452bc5d91cf30bc0cba1|actual=6a3e2cff6ab100c0253a9eb91078a6392564598a275866edd6eb97e327433a14; backend/app/market/providers/kgi_canonical.py|expected=59f08c1b8e4d7d27e214fc32f5232f19c7dd65097c5ea3773ceeb8fc7863315d|actual=883cb185f01d40e2193ff538581cdc09ea4075b4b993627c56fc3df1acbb5ea0; backend/app/routers/market.py|expected=cad02c36949003fafed129fa2c39a4d8e948d25a773ad1704840dc3b326c71c1|actual=06c987883933edd61cbcd2049bfba38fa7fc859af53c1ab86f87f4aac1c63bcf; backend/tests/test_market_data_registry.py|expected=80769e4f47579a85d8b047390579e7d3283e270019130d5daa164f72a757a225|actual=04b7f139fc8681fc6183d25d646f8bd0750d88f1f800eb6317afb79ca177746b; frontend/src/types/market.ts|expected=cd94a14c2fd194cd13ebb136661f535371b01c79f12fc82da5c0a3754b786cb1|actual=6f502ebc6bb812f182e8597405d9fedfe4f485c477fc8f12be346cff45f3d667",
+  "limitations": [],
+  "completed_at": "2026-08-27T08:23:49.0918948+08:00"
+}
