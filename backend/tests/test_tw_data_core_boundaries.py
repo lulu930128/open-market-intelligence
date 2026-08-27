@@ -116,6 +116,26 @@ def test_ai_mcp_and_decision_code_cannot_consume_presentation_stream() -> None:
     assert violations == []
 
 
+def test_ai_portfolio_context_does_not_own_market_price_storage() -> None:
+    path = BACKEND_APP / "ai" / "market_context" / "portfolio_context.py"
+    source = path.read_text(encoding="utf-8-sig")
+    imports = _imports(path)
+
+    assert not any(
+        module == "app.db" or module.startswith("app.db.")
+        for module in imports
+    )
+    assert ".query(" not in source
+    for storage_model in (
+        "TaiwanStockQuoteSnapshot",
+        "MarketDailyPrice",
+        "USDailyPrice",
+        "JPDailyPrice",
+        "KRDailyPrice",
+    ):
+        assert storage_model not in source
+
+
 def test_ai_freshness_does_not_query_platform_owned_taiwan_price_storage() -> None:
     paths = (
         BACKEND_APP / "ai" / "freshness.py",

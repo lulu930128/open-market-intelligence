@@ -39,6 +39,7 @@ from app.market import stock_selection_refresh
 from app.market.cross_market import refresh as cross_market_refresh
 from app.market.overnight_impact import scan_us_overnight_impact_gaps
 from app.portfolio import service as portfolio_service
+from app.portfolio.valuation import read_portfolio_market_valuation
 from app.resource_market import service as resource_market_service
 from app.resource_market.source_health import build_resource_source_health
 from app.us_market import service as us_market_service
@@ -1118,6 +1119,7 @@ def read_portfolio_context(
         trusted=trusted,
         dependencies=portfolio_context.PortfolioContextDependencies(
             portfolio_service=portfolio_service,
+            read_market_valuation=read_portfolio_market_valuation,
             now=_now,
         ),
     )

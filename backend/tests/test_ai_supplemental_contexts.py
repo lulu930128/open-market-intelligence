@@ -35,7 +35,8 @@ from app.db.models import (
     USStockMaster,
 )
 from app.portfolio import service as portfolio_service
-from app.portfolio.schemas import PortfolioHoldingCreate
+from app.portfolio.valuation import read_portfolio_market_valuation
+from app.portfolio.schemas import PortfolioHoldingCreate, PortfolioHoldingUpdate
 from app.resource_market import service as resource_service
 from app.observability.provider_health import record_provider_event
 from app.us_market import service as us_market_service
@@ -350,6 +351,7 @@ class AiSupplementalContextTests(unittest.TestCase):
         self.db.commit()
         dependencies = portfolio_context.PortfolioContextDependencies(
             portfolio_service=portfolio_service,
+            read_market_valuation=read_portfolio_market_valuation,
             now=lambda: NOW,
         )
 
@@ -370,6 +372,58 @@ class AiSupplementalContextTests(unittest.TestCase):
         self.assertEqual(ready["data"]["valuation"]["market_value_by_currency"]["USD"], 400)
         self.assertEqual(ready["data"]["valuation"]["unrealized_pnl_by_currency"]["USD"], 100)
         self.assertIsNone(ready["data"]["valuation"]["cross_currency_total"])
+
+    def test_portfolio_context_keeps_unknown_cost_and_pnl_unknown(self) -> None:
+        self.db.add(USStockMaster(symbol="AAPL", security_name="Apple Inc."))
+        self.db.commit()
+        created = portfolio_service.create_holding(
+            self.db,
+            PortfolioHoldingCreate(
+                market="us",
+                symbol="AAPL",
+                quantity=2,
+                cost_amount=1,
+            ),
+        )
+        portfolio_service.update_holding(
+            self.db,
+            created["id"],
+            PortfolioHoldingUpdate(cost_amount=None),
+        )
+        self.db.add(
+            USDailyPrice(
+                provider="alphavantage",
+                symbol="AAPL",
+                trade_date=date(2026, 7, 17),
+                currency="USD",
+                adjusted_close=200,
+                fetched_at=NOW,
+            )
+        )
+        self.db.commit()
+
+        result = portfolio_context.read_portfolio_context(
+            self.db,
+            market_data_params={},
+            trusted=True,
+            dependencies=portfolio_context.PortfolioContextDependencies(
+                portfolio_service=portfolio_service,
+                read_market_valuation=read_portfolio_market_valuation,
+                now=lambda: NOW,
+            ),
+        )
+
+        holding = result["data"]["holdings"][0]
+        self.assertIsNone(holding["cost_amount"])
+        self.assertEqual(holding["market_value"], 400)
+        self.assertIsNone(holding["unrealized_pnl"])
+        self.assertIsNone(holding["unrealized_pnl_pct"])
+        self.assertEqual(result["data"]["valuation"]["cost_by_currency"], {})
+        self.assertEqual(result["data"]["valuation"]["unrealized_pnl_by_currency"], {})
+        self.assertEqual(result["data"]["summary"]["missing_cost_count"], 1)
+        self.assertEqual(result["data"]["summary"]["currencies"], ["USD"])
+        self.assertEqual(result["data"]["slots"]["valuation"]["status"], "partial")
+        self.assertIn("portfolio_cost.us.AAPL", result["missing"])
 
     def test_unified_source_health_reads_latest_persisted_snapshots_without_refresh(self) -> None:
         self.db.add_all(
