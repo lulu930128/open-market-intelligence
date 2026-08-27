@@ -10,6 +10,20 @@
 - Windows 發行包不再包含本機 SQLite 或股票主檔 seed；空白安裝首次啟動時改由 backend 以可追蹤、有界的官方 TWSE／TPEx refresh 建立股票代號。
 - 將 launcher 與安裝捷徑圖示由 `ATRI-MyDearMoments.ico` 改名為 `OMI.ico`。
 
+## [4.3.1] - 2026-08-28
+
+### Fixed
+
+- 統一台股現貨 `closing_auction`、`close_resolution` 與 `post_close` 邊界，在正式 EOD 發布前保留可追溯的 completed-session close，不再把盤中舊價或前一日收盤誤作今日收盤。
+- 修正個股「今日」與日 K 在收盤後缺少當日資料的問題；provisional close 與 finalized official daily bar 維持分離，technical completed 不提前使用尚未發布的正式日線。
+- 正式日線到達後由既有集中 owner 完成 session close reconciliation，並保留 TWSE／TPEx、stale、trial、日期不符與 mismatch 的可觀測語意。
+
+### Validation
+
+- 台股收盤／EOD targeted backend regression：265 passed、286 subtests。
+- Frontend ESLint、TypeScript no-emit 與 `tw-eod-contract.spec.ts`（4 passed）通過。
+- 本版只完成 source／contract regression；實際 runtime 與 live market acceptance 仍需獨立驗收。
+
 ## [4.3.0] - 2026-08-27
 
 ### Changed
@@ -55,7 +69,8 @@
 - 修正 production SSR 暫時無法連到 backend 時，URL 分組選擇與區域市場 watchlist 無法在 hydration 後恢復的問題。
 - 修正 Windows release 封裝使用不同 Python ABI 與硬編碼 stdlib 路徑時，安裝包無法啟動的問題，並排除本機 Python bytecode cache。
 
-[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.0...HEAD
+[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.1...HEAD
+[4.3.1]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.0...v4.3.1
 [4.3.0]: https://github.com/lulu930128/open-market-intelligence/compare/v4.2.0...v4.3.0
 [4.0.1]: https://github.com/lulu930128/open-market-intelligence/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/lulu930128/open-market-intelligence/compare/v1.0.0...v4.0.0

@@ -7,7 +7,7 @@
 [![Release](https://img.shields.io/github/v/release/lulu930128/open-market-intelligence?display_name=tag)](https://github.com/lulu930128/open-market-intelligence/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**目前程式版本：OMI 4.3.0（台股中間封版）。**
+**目前程式版本：OMI 4.3.1（台股收盤生命週期修正版）。**
 
 Open Market Intelligence（OMI）是一套以台股為核心的市場情報與交易決策研究工作台。它把行情、技術結構、籌碼、基本面、跨市場背景與資料品質整合在同一個研究流程中，讓結論不只回答「偏多或偏空」，還能交代回測區、確認條件、失效條件、主要風險與反證。
 
