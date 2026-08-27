@@ -188,6 +188,10 @@ def _component_lineage(raw: dict[str, Any], *, event_time: datetime) -> dict[str
                 "event_at": event_time.isoformat(),
             }
         ]
+    for component in components:
+        component_time = _aware_taipei(component.get("event_at"))
+        if component_time is not None:
+            component["event_at"] = component_time.isoformat()
     event_times: list[datetime] = []
     for component in components:
         component_time = _aware_taipei(component.get("event_at"))

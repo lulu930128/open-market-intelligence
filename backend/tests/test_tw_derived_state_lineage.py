@@ -121,7 +121,7 @@ def test_market_minute_state_persists_each_component_and_time_skew() -> None:
                             "provider": "twse_mis",
                             "source": "twse_mis_index_snapshot",
                             "raw_result_id": "raw_fetch_result:11",
-                            "as_of": NOW.isoformat(),
+                            "as_of": NOW,
                         },
                         "breadth": {
                             "provider": "twse_mis",
@@ -190,6 +190,9 @@ def test_stock_state_lineage_is_attached_and_missing_lineage_fails_closed() -> N
         assert json.loads(row.component_raw_result_ids_json or "[]") == [
             "raw_fetch_result:21"
         ]
+        assert json.loads(row.component_sources_json or "[]")[0][
+            "event_at"
+        ] == NOW.isoformat()
 
         missing = {
             **source_row,

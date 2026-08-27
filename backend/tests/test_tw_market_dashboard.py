@@ -236,6 +236,34 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
                     "market": "TWSE",
                     "change": 123.4,
                     "change_pct": 0.5,
+                    "acquisition_policy": "cache_only",
+                    "current_data_core": {
+                        "index": {
+                            "status": "selected",
+                            "index_id": "TAIEX",
+                            "provider": "twse",
+                            "source": "twse_index_5s_intraday",
+                            "close": 24_321.5,
+                            "change": 123.4,
+                            "as_of": "2026-08-14T09:59:59+08:00",
+                            "trade_date": "2026-08-14",
+                            "session": "regular",
+                            "provisional": True,
+                            "official": True,
+                            "decision_usable": True,
+                            "resolved_health": {
+                                "contract_version": "omi.market.resolved_evidence_health.v1",
+                                "status": "selected",
+                                "selected_provider": "twse",
+                                "selected_source": "twse_index_5s_intraday",
+                                "selection_reason": "ACTIVE_SESSION_SELECTED",
+                                "facts_usable": True,
+                                "research_usable": True,
+                                "limitations": [],
+                            },
+                            "limitations": [],
+                        }
+                    },
                     "breadth": {
                         "market": "TWSE",
                         "status": "partial",
@@ -252,7 +280,9 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
                         "unchanged_count": 5,
                         "classified_count": 90,
                         "total_count": 100,
-                        "unknown_count": 10,
+                        "unknown_count": 4,
+                        "received_unclassified_count": 4,
+                        "not_received_count": 6,
                         "missing_count": 6,
                         "failed_batch_count": 1,
                         "warnings": ["One MIS batch failed."],
@@ -301,7 +331,7 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertEqual(parsed.resolved_indices[0].value, 24_321.5)
         self.assertEqual(
             parsed.resolved_indices[0].selected_candidate,
-            "intraday_last_trade",
+            "current_session_observation",
         )
         self.assertFalse(parsed.resolved_indices[0].official)
         self.assertEqual(parsed.resolved_indices[0].provider, "twse")
@@ -309,10 +339,10 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
             parsed.resolved_indices[0].authority,
             "official_exchange",
         )
-        self.assertEqual(parsed.resolved_indices[0].finalization, "intraday")
+        self.assertEqual(parsed.resolved_indices[0].finalization, "unknown")
         self.assertTrue(parsed.resolved_indices[0].official_source)
         self.assertFalse(parsed.resolved_indices[0].official_close_confirmed)
-        self.assertFalse(parsed.resolved_indices[0].provisional_estimate)
+        self.assertTrue(parsed.resolved_indices[0].provisional_estimate)
         self.assertTrue(parsed.resolved_indices[0].decision_usable)
         resolved_breadth = parsed.resolved_breadth["TWSE"]
         self.assertEqual(resolved_breadth.scope, "registered_universe")

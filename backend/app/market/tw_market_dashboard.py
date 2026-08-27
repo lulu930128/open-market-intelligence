@@ -681,63 +681,148 @@ def _build_resolved_indices(
     for raw_item in summary.get("indices") or []:
         if not isinstance(raw_item, dict):
             continue
-        resolution = raw_item.get("resolution")
-        if not isinstance(resolution, dict):
-            continue
-        selected_candidate = resolution.get("selected_candidate")
-        official = bool(resolution.get("official_close_confirmed"))
-        resolved.append(
-            {
-                "index_id": str(raw_item.get("index_id") or ""),
-                "market": str(raw_item.get("market") or ""),
-                "status": str(resolution.get("coverage_status") or "missing"),
-                "value": _number(resolution.get("selected_value")),
-                "change": _number(raw_item.get("change")),
-                "change_pct": _number(raw_item.get("change_pct")),
-                "event_time": resolution.get("selected_event_time"),
-                "trade_date": resolution.get("selected_trade_date"),
-                "source": resolution.get("selected_source"),
-                "provider": resolution.get("selected_provider"),
-                "selected_candidate": selected_candidate,
-                "authority": str(
-                    resolution.get("selected_authority") or "unknown"
-                ),
-                "finalization": str(
-                    resolution.get("selected_finalization") or "unknown"
-                ),
-                "official_source": bool(resolution.get("official_source")),
-                "official_close_confirmed": bool(
-                    resolution.get("official_close_confirmed")
-                ),
-                "provisional_estimate": bool(
-                    resolution.get("provisional_estimate")
-                ),
-                "selection_reason": str(
-                    resolution.get("selection_reason") or "no_eligible_candidate"
-                ),
-                "acquisition_policy": str(
-                    resolution.get("acquisition_policy")
-                    or summary.get("acquisition_policy")
-                    or "cache_only"
-                ),
-                "resolution_version": str(
-                    resolution.get("resolution_version")
-                    or summary.get("resolution_version")
-                    or "unknown"
-                ),
-                "resolution_id": str(resolution.get("resolution_id") or ""),
-                "official_close_status": str(
-                    resolution.get("official_close_status") or "not_available_yet"
-                ),
-                "official": official,
-                "provisional": not official,
-                "decision_usable": bool(resolution.get("decision_usable")),
-                "warnings": [
-                    str(warning)
-                    for warning in resolution.get("warnings") or []
-                ],
-            }
+        current_data_core = raw_item.get("current_data_core")
+        current_index = (
+            current_data_core.get("index")
+            if isinstance(current_data_core, dict)
+            and isinstance(current_data_core.get("index"), dict)
+            else None
         )
+        if current_index is not None:
+            resolved_health = (
+                current_index.get("resolved_health")
+                if isinstance(current_index.get("resolved_health"), dict)
+                else {}
+            )
+            provider = current_index.get("provider")
+            source = current_index.get("source")
+            official_source = bool(current_index.get("official"))
+            resolved.append(
+                {
+                    "index_id": str(
+                        current_index.get("index_id")
+                        or raw_item.get("index_id")
+                        or ""
+                    ),
+                    "market": str(raw_item.get("market") or ""),
+                    "status": str(
+                        resolved_health.get("status")
+                        or current_index.get("status")
+                        or "missing"
+                    ),
+                    "value": _number(current_index.get("close")),
+                    "change": _number(current_index.get("change")),
+                    "change_pct": _number(raw_item.get("change_pct")),
+                    "event_time": current_index.get("as_of"),
+                    "trade_date": current_index.get("trade_date"),
+                    "source": source,
+                    "provider": provider,
+                    "selected_candidate": (
+                        "current_session_observation" if provider else None
+                    ),
+                    "authority": (
+                        "official_exchange"
+                        if official_source
+                        else "provider"
+                        if provider
+                        else "unknown"
+                    ),
+                    "finalization": "unknown",
+                    "official_source": official_source,
+                    "official_close_confirmed": False,
+                    "provisional_estimate": bool(
+                        current_index.get("provisional")
+                    ),
+                    "selection_reason": str(
+                        resolved_health.get("selection_reason")
+                        or "no_eligible_candidate"
+                    ),
+                    "acquisition_policy": str(
+                        raw_item.get("acquisition_policy")
+                        or summary.get("acquisition_policy")
+                        or "cache_only"
+                    ),
+                    "resolution_version": str(
+                        resolved_health.get("contract_version") or "unknown"
+                    ),
+                    "resolution_id": "",
+                    "official_close_status": "not_available_yet",
+                    "official": False,
+                    "provisional": True,
+                    "decision_usable": bool(
+                        current_index.get("decision_usable")
+                    ),
+                    "warnings": list(
+                        dict.fromkeys(
+                            str(item)
+                            for item in [
+                                *(current_index.get("limitations") or []),
+                                *(resolved_health.get("limitations") or []),
+                            ]
+                        )
+                    ),
+                }
+            )
+        else:
+            resolution = raw_item.get("resolution")
+            if not isinstance(resolution, dict):
+                continue
+            selected_candidate = resolution.get("selected_candidate")
+            official = bool(resolution.get("official_close_confirmed"))
+            resolved.append(
+                {
+                    "index_id": str(raw_item.get("index_id") or ""),
+                    "market": str(raw_item.get("market") or ""),
+                    "status": str(resolution.get("coverage_status") or "missing"),
+                    "value": _number(resolution.get("selected_value")),
+                    "change": _number(raw_item.get("change")),
+                    "change_pct": _number(raw_item.get("change_pct")),
+                    "event_time": resolution.get("selected_event_time"),
+                    "trade_date": resolution.get("selected_trade_date"),
+                    "source": resolution.get("selected_source"),
+                    "provider": resolution.get("selected_provider"),
+                    "selected_candidate": selected_candidate,
+                    "authority": str(
+                        resolution.get("selected_authority") or "unknown"
+                    ),
+                    "finalization": str(
+                        resolution.get("selected_finalization") or "unknown"
+                    ),
+                    "official_source": bool(resolution.get("official_source")),
+                    "official_close_confirmed": bool(
+                        resolution.get("official_close_confirmed")
+                    ),
+                    "provisional_estimate": bool(
+                        resolution.get("provisional_estimate")
+                    ),
+                    "selection_reason": str(
+                        resolution.get("selection_reason")
+                        or "no_eligible_candidate"
+                    ),
+                    "acquisition_policy": str(
+                        resolution.get("acquisition_policy")
+                        or summary.get("acquisition_policy")
+                        or "cache_only"
+                    ),
+                    "resolution_version": str(
+                        resolution.get("resolution_version")
+                        or summary.get("resolution_version")
+                        or "unknown"
+                    ),
+                    "resolution_id": str(resolution.get("resolution_id") or ""),
+                    "official_close_status": str(
+                        resolution.get("official_close_status")
+                        or "not_available_yet"
+                    ),
+                    "official": official,
+                    "provisional": not official,
+                    "decision_usable": bool(resolution.get("decision_usable")),
+                    "warnings": [
+                        str(warning)
+                        for warning in resolution.get("warnings") or []
+                    ],
+                }
+            )
         raw_breadth = raw_item.get("breadth")
         if not isinstance(raw_breadth, dict):
             continue
@@ -753,26 +838,45 @@ def _build_resolved_indices(
             or (advance + decline + unchanged)
         )
         universe = int(raw_breadth.get("total_count") or coverage)
-        unknown = int(
-            raw_breadth.get("unknown_count")
-            if raw_breadth.get("unknown_count") is not None
-            else max(universe - coverage, 0)
-        )
+        unknown = max(universe - coverage, 0)
         missing_count = (
             int(raw_breadth.get("missing_count") or 0)
             if "missing_count" in raw_breadth
             else None
         )
+        explicit_not_received = raw_breadth.get("not_received_count")
         not_received = (
-            min(missing_count, unknown) if missing_count is not None else None
+            min(
+                max(
+                    int(
+                        explicit_not_received
+                        if explicit_not_received is not None
+                        else missing_count
+                    ),
+                    0,
+                ),
+                unknown,
+            )
+            if explicit_not_received is not None or missing_count is not None
+            else None
+        )
+        explicit_received_unclassified = raw_breadth.get(
+            "received_unclassified_count"
         )
         received_unclassified = (
-            max(unknown - not_received, 0)
+            min(
+                max(int(explicit_received_unclassified), 0),
+                max(unknown - (not_received or 0), 0),
+            )
+            if explicit_received_unclassified is not None
+            else max(unknown - not_received, 0)
             if not_received is not None
             else None
         )
         reason_unknown = (
-            0 if not_received is not None else unknown
+            max(unknown - not_received - (received_unclassified or 0), 0)
+            if not_received is not None
+            else unknown
         )
         resolved_breadth[market] = {
             "market": market,
