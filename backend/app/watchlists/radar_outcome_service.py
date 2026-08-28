@@ -10,14 +10,15 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    MarketDailyPrice,
-    MarketIntradayBar,
     WatchlistRadarOutcome,
     WatchlistRadarSnapshotItem,
     WatchlistRadarSnapshotRun,
     utc_now,
 )
-from app.market.trading_calendar import next_taiwan_trading_day
+from app.market.daily_ohlcv_platform import read_taiwan_official_daily
+from app.market.trading_calendar import TAIWAN_TZ, next_taiwan_trading_day
+from app.market.tw_intraday_platform import read_taiwan_intraday_bars
+from app.market_data.contracts import QuantityUnit
 from app.watchlists import service as watchlist_service
 from app.watchlists.radar_rule_contract import (
     RADAR_V1_RULE_VERSION,
@@ -602,40 +603,47 @@ def _next_intraday_outcome_bar(
     after_date: date,
 ) -> WatchlistRadarOutcomeBar | None:
     trade_date = next_taiwan_trading_day(after_date, include_value=False)
-    day_start = datetime.combine(trade_date, time.min)
-    day_end = day_start + timedelta(days=1)
-    rows = (
-        db.query(MarketIntradayBar)
-        .filter(MarketIntradayBar.stock_id == stock_id)
-        .filter(MarketIntradayBar.interval == "1m")
-        .filter(MarketIntradayBar.bar_time >= day_start)
-        .filter(MarketIntradayBar.bar_time < day_end)
-        .filter(MarketIntradayBar.close_price.isnot(None))
-        .order_by(MarketIntradayBar.bar_time.asc(), MarketIntradayBar.id.asc())
-        .all()
-    )
-    if not rows or rows[-1].bar_time.time() < time(13, 25):
+    try:
+        result = read_taiwan_intraday_bars(
+            db,
+            stock_id=stock_id,
+            interval="1m",
+            range_value="5d",
+        )
+    except ValueError:
+        return None
+    rows = [
+        bar
+        for bar in result.resolved.bars
+        if bar.start_at.astimezone(TAIWAN_TZ).date() == trade_date
+    ]
+    if not rows or rows[-1].start_at.astimezone(TAIWAN_TZ).time() < time(13, 25):
         return None
 
     open_price = next(
         (
-            row.open_price if row.open_price is not None else row.close_price
+            float(row.open_price if row.open_price is not None else row.close_price)
             for row in rows
             if row.close_price is not None
         ),
         None,
     )
     high_prices = [
-        row.high_price if row.high_price is not None else row.close_price
+        float(row.high_price if row.high_price is not None else row.close_price)
         for row in rows
         if row.close_price is not None
     ]
     low_prices = [
-        row.low_price if row.low_price is not None else row.close_price
+        float(row.low_price if row.low_price is not None else row.close_price)
         for row in rows
         if row.close_price is not None
     ]
-    sources = sorted({str(row.source) for row in rows if row.source})
+    sources = sorted({row.lineage.source for row in rows})
+    volume = sum(
+        int(row.volume.value)
+        for row in rows
+        if row.volume is not None and row.volume.unit is QuantityUnit.SHARE
+    ) or None
 
     return WatchlistRadarOutcomeBar(
         trade_date=trade_date,
@@ -643,8 +651,8 @@ def _next_intraday_outcome_bar(
         high_price=max(high_prices) if high_prices else None,
         low_price=min(low_prices) if low_prices else None,
         close_price=float(rows[-1].close_price),
-        trade_volume=None,
-        source=f"market_intraday_bar:{','.join(sources) or 'unknown'}",
+        trade_volume=volume,
+        source=f"tw.intraday.bars:{','.join(sources) or 'unknown'}",
     )
 
 
@@ -655,27 +663,37 @@ def _next_outcome_bar(
     after_date: date,
 ) -> WatchlistRadarOutcomeBar | None:
     expected_trade_date = next_taiwan_trading_day(after_date, include_value=False)
-    daily = (
-        db.query(MarketDailyPrice)
-        .filter(MarketDailyPrice.stock_id == stock_id)
-        .filter(MarketDailyPrice.trade_date == expected_trade_date)
-        .filter(MarketDailyPrice.close_price.isnot(None))
-        .order_by(
-            MarketDailyPrice.trade_date.asc(),
-            MarketDailyPrice.updated_at.desc(),
-            MarketDailyPrice.id.desc(),
+    try:
+        daily_result = read_taiwan_official_daily(
+            db,
+            stock_id=stock_id,
+            to_date=expected_trade_date,
+            limit=1,
         )
-        .first()
+    except ValueError:
+        daily_result = None
+    daily = (
+        daily_result.resolved.bars[-1]
+        if daily_result is not None and daily_result.resolved.bars
+        else None
     )
-    if daily is not None:
+    daily_trade_date = (
+        daily.end_at.astimezone(TAIWAN_TZ).date() if daily is not None else None
+    )
+    if daily is not None and daily_trade_date == expected_trade_date:
         return WatchlistRadarOutcomeBar(
-            trade_date=daily.trade_date,
-            open_price=daily.open_price,
-            high_price=daily.high_price,
-            low_price=daily.low_price,
+            trade_date=daily_trade_date,
+            open_price=float(daily.open_price),
+            high_price=float(daily.high_price),
+            low_price=float(daily.low_price),
             close_price=float(daily.close_price),
-            trade_volume=daily.trade_volume,
-            source="market_daily_price",
+            trade_volume=(
+                int(daily.volume.value)
+                if daily.volume is not None
+                and daily.volume.unit is QuantityUnit.SHARE
+                else None
+            ),
+            source=f"daily.ohlcv:{daily.lineage.source}",
         )
 
     return _next_intraday_outcome_bar(

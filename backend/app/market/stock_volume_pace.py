@@ -8,7 +8,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketDailyPrice, MarketIntradayBar
+from app.db.models import MarketIntradayBar
+from app.market.daily_ohlcv_platform import (
+    project_taiwan_daily_rows,
+    read_taiwan_official_daily,
+)
 from app.market.trading_calendar import TAIWAN_TZ
 
 
@@ -533,13 +537,12 @@ def build_tw_stock_volume_pace(
     stock_id: str,
     current_points: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    daily_rows = (
-        db.query(MarketDailyPrice)
-        .filter(MarketDailyPrice.stock_id == stock_id)
-        .order_by(MarketDailyPrice.trade_date.desc())
-        .limit(90)
-        .all()
+    daily_result = read_taiwan_official_daily(
+        db,
+        stock_id=stock_id,
+        limit=90,
     )
+    daily_rows = project_taiwan_daily_rows(db, daily_result)
     result = build_stock_volume_pace(
         db,
         stock_id=stock_id,
@@ -547,7 +550,7 @@ def build_tw_stock_volume_pace(
         current_points=current_points,
         market_timezone=TAIWAN_TZ,
         daily_totals=_daily_total_map(daily_rows),
-        daily_source_name="market_daily_price",
+        daily_source_name="tw.daily.ohlcv",
     )
     result["kind"] = "tw_stock_same_time_volume_pace"
     return result

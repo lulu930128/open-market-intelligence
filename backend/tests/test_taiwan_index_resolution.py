@@ -69,6 +69,7 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
         self.assertEqual(first["selected_trade_date"], "2026-08-14")
         self.assertEqual(first["selected_value"], 24_321.5)
         self.assertTrue(first["decision_usable"])
+        self.assertEqual(first["freshness_status"], "current")
         self.assertEqual(first["resolution_id"], repeated["resolution_id"])
         self.assertEqual(first["acquisition_policy"], "prefer_live")
         self.assertEqual(first["selected_provider"], "twse")
@@ -110,6 +111,7 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
         self.assertGreater(intraday_candidate["age_seconds"], 240)
         self.assertIsNone(result["selected_candidate"])
         self.assertFalse(result["decision_usable"])
+        self.assertEqual(result["freshness_status"], "stale")
 
     def test_completed_official_component_keeps_its_own_trade_date(self) -> None:
         checked_at = datetime(2026, 8, 14, 10, 0, tzinfo=TAIWAN_TZ)
@@ -206,6 +208,37 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
         self.assertFalse(result["official_source"])
         self.assertFalse(result["official_close_confirmed"])
         self.assertTrue(result["provisional_estimate"])
+        self.assertFalse(result["decision_usable"])
+        self.assertEqual(
+            result["freshness_status"],
+            "latest_completed_session",
+        )
+
+    def test_post_close_exchange_shaped_source_is_not_confirmed_by_clock(self) -> None:
+        checked_at = datetime(2026, 8, 14, 13, 34, tzinfo=TAIWAN_TZ)
+        result = resolve_taiwan_index_quote_state(
+            intraday=None,
+            index_snapshot={
+                "index_id": "TAIEX",
+                "time": "2026-08-14",
+                "as_of": "2026-08-14T13:30:05+08:00",
+                "close": 46_307.67,
+                "source": "twse_index_5s_snapshot",
+                "provider": "twse",
+            },
+            calendar_status=_calendar(
+                phase="post_close",
+                checked_at=checked_at,
+            ),
+            index_id="TAIEX",
+            acquisition_policy="cache_only",
+        )
+
+        self.assertEqual(result["official_close_status"], "pending")
+        self.assertEqual(result["selected_candidate"], "index_summary")
+        self.assertEqual(result["selected_finalization"], "provisional")
+        self.assertFalse(result["official_close_confirmed"])
+        self.assertFalse(result["decision_usable"])
 
     def test_cache_only_policy_performs_no_live_acquisition(self) -> None:
         cached = {

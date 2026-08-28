@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     MarketDailyPrice,
     MarketDatasetCoverageCheckpoint,
+    StockMaster,
     USDailyPrice,
     USStockMaster,
     utc_now,
@@ -61,6 +62,14 @@ class UniverseMember:
 
 
 @dataclass(frozen=True)
+class IneligibleUniverseMember:
+    symbol: str
+    venue: str
+    instrument_type: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class CoverageComputation:
     market: str
     dataset_id: str
@@ -74,6 +83,7 @@ class CoverageComputation:
     partial_symbols: frozenset[str]
     stale_symbols: frozenset[str]
     missing_symbols: frozenset[str]
+    ineligible_members: tuple[IneligibleUniverseMember, ...] = ()
 
     @property
     def universe_count(self) -> int:
@@ -143,6 +153,53 @@ class CoverageComputation:
                     else "missing"
                 ),
             }
+        symbol_classifications = [
+            {
+                "symbol": member.symbol,
+                "venue": member.venue,
+                "classification": (
+                    "current"
+                    if member.symbol in self.current_symbols
+                    else "partial"
+                    if member.symbol in self.partial_symbols
+                    else "stale"
+                    if member.symbol in self.stale_symbols
+                    else "missing"
+                ),
+                "reason": (
+                    "expected_session_usable_close_present"
+                    if member.symbol in self.current_symbols
+                    else "expected_session_row_close_missing"
+                    if member.symbol in self.partial_symbols
+                    else "latest_row_before_expected_session"
+                    if member.symbol in self.stale_symbols
+                    else "no_row_on_or_before_expected_session"
+                ),
+            }
+            for member in self.members
+        ]
+        ineligible_classifications = [
+            {
+                "symbol": member.symbol,
+                "venue": member.venue,
+                "instrument_type": member.instrument_type,
+                "classification": "not_eligible",
+                "reason": member.reason,
+            }
+            for member in self.ineligible_members
+        ]
+        classification_counts = {
+            "current": self.current_count,
+            "partial": self.partial_count,
+            "stale": self.stale_count,
+            "missing": self.missing_count,
+            "not_eligible": len(self.ineligible_members),
+            "halted_or_suspended": 0,
+        }
+        classification_total = sum(classification_counts.values())
+        instrument_inventory_count = self.universe_count + len(
+            self.ineligible_members
+        )
         return {
             "coverage_ratio": self.current_count / denominator,
             "observed_ratio": (self.current_count + self.partial_count) / denominator,
@@ -151,6 +208,17 @@ class CoverageComputation:
             "partial_sample": sorted(self.partial_symbols)[:10],
             "stale_sample": sorted(self.stale_symbols)[:10],
             "missing_sample": sorted(self.missing_symbols)[:10],
+            "instrument_inventory_count": instrument_inventory_count,
+            "eligible_count": self.universe_count,
+            "not_eligible_count": len(self.ineligible_members),
+            "classification_counts": classification_counts,
+            "classification_total": classification_total,
+            "classification_invariant_satisfied": (
+                classification_total == instrument_inventory_count
+            ),
+            "symbol_classifications": (
+                symbol_classifications + ineligible_classifications
+            ),
             "classification": {
                 "current": "latest row is on expected_trade_date and has a usable close",
                 "partial": "latest row is on expected_trade_date but has no usable close",
@@ -158,7 +226,7 @@ class CoverageComputation:
                 "missing": "no row exists on or before expected_trade_date",
             },
             "limitations": [
-                "Instrument-level halt/suspension eligibility is not yet resolved by this aggregate checkpoint.",
+                "Halt/suspension is never inferred from a missing row; the halted_or_suspended class remains zero until authoritative instrument-status evidence is connected.",
                 "A no-close same-day observation remains partial instead of being coerced to zero.",
             ],
         }
@@ -249,6 +317,28 @@ def _tw_universe(db: Session) -> tuple[UniverseMember, ...]:
     return tuple(
         UniverseMember(symbol=row.stock_id, venue=str(row.market or "").upper())
         for row in list_taiwan_stock_universe(db)
+    )
+
+
+def _tw_ineligible_universe(
+    db: Session,
+) -> tuple[IneligibleUniverseMember, ...]:
+    rows = (
+        db.query(StockMaster)
+        .filter(StockMaster.is_active.is_(True))
+        .filter(func.upper(StockMaster.market).in_(("TWSE", "TPEX")))
+        .filter(func.lower(StockMaster.instrument_type) != "stock")
+        .order_by(StockMaster.stock_id.asc())
+        .all()
+    )
+    return tuple(
+        IneligibleUniverseMember(
+            symbol=row.stock_id,
+            venue=str(row.market or "").upper(),
+            instrument_type=str(row.instrument_type or "unknown"),
+            reason="outside_active_ordinary_stock_dataset_scope",
+        )
+        for row in rows
     )
 
 
@@ -393,6 +483,9 @@ def compute_eod_coverage(
         partial_symbols=partial,
         stale_symbols=stale,
         missing_symbols=missing,
+        ineligible_members=(
+            _tw_ineligible_universe(db) if normalized == "TW" else ()
+        ),
     )
 
 

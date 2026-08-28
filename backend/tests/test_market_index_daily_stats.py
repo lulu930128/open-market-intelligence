@@ -7,9 +7,10 @@ from unittest.mock import Mock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, MarketDailyPrice, MarketIndexDailyStat, RawFetchResult, SourceRegistry
+from app.db.models import Base, MarketDailyPrice, MarketIndexDailyStat, RawFetchResult, SourceRegistry, StockMaster
 from app.jobs import scheduler as job_scheduler
 from app.market import index_parsers, indices
+from app.market.official_index_contract import TWSE_INDEX_SOURCE_NAME
 from app.market.providers import twse_mis_current_breadth, twse_mis_current_index
 
 
@@ -1240,6 +1241,11 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 "refresh_market_index_summary",
                 return_value=refreshed_payload,
             ) as refresh_summary,
+            patch.object(
+                job_scheduler,
+                "_reconcile_taiwan_official_index_rows",
+                return_value=[],
+            ),
         ):
             job_scheduler.reconcile_taiwan_market_index_summary(
                 now=datetime(
@@ -1257,6 +1263,53 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             refresh_daily_stats=True,
         )
         db.close.assert_called_once()
+
+    def test_official_index_reconciliation_repairs_only_missing_lineage_rows(
+        self,
+    ) -> None:
+        db = Mock()
+        requested_at = datetime(
+            2026,
+            8,
+            28,
+            15,
+            20,
+            tzinfo=timezone(timedelta(hours=8)),
+        )
+        missing = Mock()
+        missing.resolved.market_index = None
+        refreshed = Mock()
+        refreshed.postcondition_satisfied = True
+        refreshed.persistence.raw_result_ids = (101,)
+        with (
+            patch.object(
+                job_scheduler,
+                "expected_daily_price_date",
+                return_value=date(2026, 8, 28),
+            ),
+            patch.object(
+                job_scheduler,
+                "read_taiwan_official_index",
+                side_effect=(missing, missing),
+            ),
+            patch.object(
+                job_scheduler,
+                "refresh_taiwan_official_index",
+                side_effect=(refreshed, refreshed),
+            ) as refresh_official,
+        ):
+            result = job_scheduler._reconcile_taiwan_official_index_rows(
+                db,
+                requested_at=requested_at,
+            )
+
+        self.assertEqual(refresh_official.call_count, 2)
+        self.assertEqual(
+            [item["index_id"] for item in result],
+            ["TAIEX", "TPEX"],
+        )
+        self.assertTrue(all(item["status"] == "refreshed" for item in result))
+        self.assertTrue(all(item["raw_result_ids"] == [101] for item in result))
 
     def test_twse_index_5s_intraday_parses_official_index_series(self) -> None:
         indices._TWSE_INDEX_5S_CACHE.clear()
@@ -1286,6 +1339,8 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(result["points"][0]["time"], "2026-06-29T09:00:00+08:00")
         self.assertEqual(result["points"][0]["price"], 44571.76)
         self.assertEqual(result["points"][-1]["price"], 44999.90)
+        self.assertTrue(result["is_partial"])
+        self.assertEqual(result["coverage_status"], "current_session_partial")
 
     def test_official_index_ohlc_excludes_opening_reference_and_uses_closing_summary(
         self,
@@ -1513,6 +1568,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             source_name="TWSE OpenAPI Daily Trading",
             source_type="openapi",
             category="market",
+            reliability_level="official",
         )
         self.db.add(source)
         self.db.flush()
@@ -1521,12 +1577,29 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.db.flush()
         self.db.add_all(
             [
+                StockMaster(
+                    stock_id="2330",
+                    stock_name="台積電",
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                ),
+                StockMaster(
+                    stock_id="2383",
+                    stock_name="台光電",
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                ),
                 MarketDailyPrice(
                     source_id=source.id,
                     raw_result_id=raw_result.id,
                     trade_date=date(2026, 6, 15),
                     stock_id="2330",
                     stock_name="台積電",
+                    open_price=90.0,
+                    high_price=105.0,
+                    low_price=89.0,
                     close_price=100.0,
                     price_change=10.0,
                     trade_value=1000,
@@ -1537,6 +1610,9 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                     trade_date=date(2026, 6, 15),
                     stock_id="2383",
                     stock_name="台光電",
+                    open_price=55.0,
+                    high_price=56.0,
+                    low_price=49.0,
                     close_price=50.0,
                     price_change=-5.0,
                     trade_value=800,
@@ -1598,7 +1674,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 db=self.db,
             )
 
-        self.assertEqual(payload["source"], "market_daily_price:TWSE OpenAPI Daily Trading")
+        self.assertEqual(payload["source"], "tw.daily.ohlcv:TWSE")
         self.assertEqual(payload["trade_date"], date(2026, 6, 15))
         self.assertEqual(payload["index_close"], 120.0)
         self.assertEqual(payload["positive"][0]["stock_id"], "2330")
@@ -1657,7 +1733,64 @@ class MarketIndexDailyStatTests(unittest.TestCase):
 
         self.assertEqual(index_list["source"], "cache_miss")
         self.assertEqual(chart["data_quality"], "missing")
-        self.assertEqual(contributions["source"], "market_daily_price:TWSE OpenAPI Daily Trading")
+        self.assertEqual(contributions["source"], "tw.daily.ohlcv:TWSE")
+
+    def test_index_chart_uses_only_release_qualified_canonical_rows(self) -> None:
+        source = SourceRegistry(
+            source_name=TWSE_INDEX_SOURCE_NAME,
+            source_type="official",
+            category="market_index_daily",
+            reliability_level="official",
+        )
+        self.db.add(source)
+        self.db.flush()
+        raw = RawFetchResult(
+            source_id=source.id,
+            fetched_at=datetime(2026, 6, 15, 8, 0, tzinfo=timezone.utc),
+            method="GET",
+            content_hash="canonical-index-chart",
+            parser_version="index-chart-test-v1",
+        )
+        self.db.add(raw)
+        self.db.flush()
+        self.db.add_all(
+            [
+                MarketIndexDailyStat(
+                    source_id=source.id,
+                    raw_result_id=raw.id,
+                    index_id="TAIEX",
+                    market="TWSE",
+                    trade_date=date(2026, 6, 15),
+                    close_value=22_000,
+                    price_change=100,
+                    trade_volume=1_000,
+                    trade_value=2_000,
+                    transaction_count=30,
+                    source=TWSE_INDEX_SOURCE_NAME,
+                ),
+                MarketIndexDailyStat(
+                    index_id="TAIEX",
+                    market="TWSE",
+                    trade_date=date(2026, 6, 16),
+                    close_value=99_999,
+                    price_change=77_999,
+                    source="unqualified-storage-row",
+                ),
+            ]
+        )
+        self.db.commit()
+        indices._INDEX_OHLC_CACHE.clear()
+
+        chart = indices.get_market_index_ohlc_chart_data(
+            "TAIEX",
+            bars=20,
+            db=self.db,
+        )
+
+        self.assertEqual(chart["point_count"], 1)
+        self.assertEqual(chart["latest_data_date"], date(2026, 6, 15))
+        self.assertEqual(chart["points"][0]["close"], 22_000)
+        self.assertNotEqual(chart["points"][0]["close"], 99_999)
 
     def test_index_intraday_overlays_mis_snapshot_on_yahoo_history(self) -> None:
         yahoo_payload = {

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -21,11 +21,13 @@ from app.db.models import (
 from app.market.official_index_acquisition import (
     TaiwanOfficialIndexAcquisitionExecutor,
 )
+from app.market.official_index_contract import TWSE_INDEX_SOURCE_NAME
 from app.market.official_index_platform import (
     TaiwanOfficialIndexCandidateReader,
     TaiwanOfficialIndexPlatform,
     build_taiwan_official_index_read_requirement,
     read_taiwan_official_index,
+    read_taiwan_official_index_series,
 )
 from app.market.official_index_repository import TaiwanOfficialIndexRepository
 from app.market.official_index_transaction import TaiwanOfficialIndexTransaction
@@ -286,6 +288,124 @@ def test_legacy_index_row_without_raw_lineage_fails_closed(db: Session) -> None:
     assert result.limitations == (
         "INDEX_ROW_LINEAGE_MISSING",
         "READ_POLICY_FORBIDS_ACQUISITION",
+    )
+
+
+def test_index_read_clamps_future_date_and_rejects_pre_release_receipt(
+    db: Session,
+) -> None:
+    source = SourceRegistry(
+        source_name=TWSE_INDEX_SOURCE_NAME,
+        source_type="official",
+        category="market_index",
+        reliability_level="official",
+    )
+    db.add(source)
+    db.flush()
+    raw = RawFetchResult(
+        source_id=source.id,
+        fetched_at=datetime(2026, 8, 25, 6, 30),
+        method="GET",
+        content_hash="premature-index",
+        parser_version="test-index-v1",
+    )
+    db.add(raw)
+    db.flush()
+    db.add(
+        MarketIndexDailyStat(
+            source_id=source.id,
+            raw_result_id=raw.id,
+            index_id="TAIEX",
+            market="TWSE",
+            trade_date=date(2026, 8, 25),
+            close_value=100,
+            price_change=1,
+            source="fixture",
+        )
+    )
+    db.commit()
+
+    result = read_taiwan_official_index(
+        db,
+        index_id="TAIEX",
+        trade_date=date(2026, 8, 26),
+        requested_at=datetime(2026, 8, 25, 7, 20, tzinfo=timezone.utc),
+    )
+
+    assert result.resolved.market_index is None
+    assert "INDEX_RECEIPT_PREDATES_RELEASE" in result.limitations
+    assert "REQUESTED_INDEX_DATE_EXCEEDS_LATEST_RELEASED_DATE" in result.limitations
+
+
+def test_index_series_preloads_once_but_each_point_still_uses_resolver(
+    db: Session,
+) -> None:
+    source = SourceRegistry(
+        source_name=TWSE_INDEX_SOURCE_NAME,
+        source_type="official",
+        category="market_index",
+        reliability_level="official",
+    )
+    db.add(source)
+    db.flush()
+    raw = RawFetchResult(
+        source_id=source.id,
+        fetched_at=datetime(2026, 8, 25, 8, 0),
+        method="GET",
+        content_hash="index-series",
+        parser_version="test-index-v1",
+    )
+    db.add(raw)
+    db.flush()
+    for offset, trade_date in enumerate(
+        (date(2026, 8, 21), date(2026, 8, 24), date(2026, 8, 25))
+    ):
+        db.add(
+            MarketIndexDailyStat(
+                source_id=source.id,
+                raw_result_id=raw.id,
+                index_id="TAIEX",
+                market="TWSE",
+                trade_date=trade_date,
+                close_value=44_000 + offset,
+                price_change=offset,
+                trade_volume=1_000 + offset,
+                trade_value=2_000 + offset,
+                transaction_count=3_000 + offset,
+                source="fixture",
+            )
+        )
+    db.commit()
+
+    select_count = 0
+
+    def count_selects(_conn, _cursor, statement, *_args) -> None:
+        nonlocal select_count
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_count += 1
+
+    connection = db.get_bind()
+    event.listen(connection, "before_cursor_execute", count_selects)
+    try:
+        results = read_taiwan_official_index_series(
+            db,
+            index_id="TAIEX",
+            to_date=date(2026, 8, 25),
+            limit=3,
+            requested_at=REQUESTED_AT,
+        )
+    finally:
+        event.remove(connection, "before_cursor_execute", count_selects)
+
+    assert select_count == 1
+    assert [
+        result.resolved.market_index.trade_date
+        for result in results
+        if result.resolved.market_index is not None
+    ] == [date(2026, 8, 21), date(2026, 8, 24), date(2026, 8, 25)]
+    assert all(
+        result.resolved.health.status is ResolvedEvidenceStatus.SELECTED
+        for result in results
     )
 
 

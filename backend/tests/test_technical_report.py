@@ -42,8 +42,11 @@ def add_raw_source(db: Session, category: str) -> tuple[int, int]:
     )
     source = SourceRegistry(
         source_name=source_name,
-        source_type="test",
+        source_type=("official" if category == "market_daily_price" else "test"),
         category=category,
+        reliability_level=(
+            "official" if category == "market_daily_price" else "unknown"
+        ),
     )
     db.add(source)
     db.flush()
@@ -508,6 +511,49 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertIsInstance(monthly["score"], int)
         self.assertTrue(weekly["rows"])
         self.assertTrue(monthly["rows"])
+
+    def test_historical_cutoff_applies_to_all_technical_evidence(self) -> None:
+        cutoff = date(2026, 2, 20)
+        with patch(
+            "app.ai.tools.get_taiwan_stock_event_history",
+            return_value={
+                "cache_status": "current",
+                "coverage_start": "2020-01-01",
+                "coverage_end": "2026-12-31",
+                "results": [],
+            },
+        ):
+            context = ai_tools.read_stock_technical_context(
+                db=self.db,
+                stock_id="2330",
+                bars=40,
+                analysis_horizon="swing",
+                market_data_params={"trade_date": cutoff.isoformat()},
+            )
+
+        reports = context["data"]["technical_reports"]
+        self.assertNotIn("today", reports)
+        self.assertLessEqual(reports["daily"]["data"]["daily_indicator"]["time"], cutoff)
+        self.assertLessEqual(reports["weekly"]["data"]["indicator"]["time"], cutoff)
+        self.assertLessEqual(reports["monthly"]["data"]["indicator"]["time"], cutoff)
+        evidence = context["data"]["technical_evidence"]
+        completed = evidence["indicators"]["timeframes"]["daily"]["completed"]
+        self.assertLessEqual(completed["time"], cutoff)
+        self.assertIsNone(
+            evidence["indicators"]["timeframes"]["daily"]["current_partial"]
+        )
+        relative_strength = evidence["relative_strength"]
+        self.assertLessEqual(
+            date.fromisoformat(relative_strength["stock_latest_date"]),
+            cutoff,
+        )
+        benchmark_latest = relative_strength.get("benchmark_latest_date")
+        if benchmark_latest is not None:
+            self.assertLessEqual(date.fromisoformat(benchmark_latest), cutoff)
+        self.assertEqual(
+            evidence["indicators"]["corporate_action"]["relevant_analysis_end"],
+            cutoff.isoformat(),
+        )
 
     def test_stock_context_auto_horizon_defaults_to_swing_score(self) -> None:
         context = ai_tools.read_stock_context(

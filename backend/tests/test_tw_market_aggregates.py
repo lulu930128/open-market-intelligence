@@ -229,8 +229,9 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
                 }
             ],
             sample_coverage={
+                "scope": "canonical_active_stock_universe",
                 "universe_count": 1900,
-                "coverage_count": 100,
+                "covered_universe_count": 100,
                 "coverage_ratio": 100 / 1900,
             },
             as_of="2026-07-29",
@@ -247,12 +248,44 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             "equal_weighted_mean_stock_return_pct",
         )
         self.assertEqual(capability["items"][0]["trade_value_unit"], "TWD")
+        self.assertEqual(
+            capability["coverage"]["scope"],
+            "canonical_active_stock_universe",
+        )
+        self.assertEqual(capability["coverage"]["covered_stock_count"], 100)
         self.assertEqual(capability["missing"], [])
         self.assertEqual(
             capability["coverage_gaps"],
             ["market_daily_price.full_market_sector_index"],
         )
         self.assertIn("must not be treated", capability["warnings"][0])
+
+    def test_partial_daily_sample_warning_names_ordinary_active_stocks(self) -> None:
+        warning = taiwan_market._daily_sample_coverage_warning(
+            {
+                "sample_count": 100,
+                "universe_count": 1900,
+            }
+        )
+
+        self.assertIn("100/1900 ordinary active stocks", warning)
+
+    def test_daily_sample_coverage_uses_snapshot_metadata_without_second_universe(self) -> None:
+        coverage = taiwan_market._daily_sample_coverage(
+            SimpleNamespace(
+                rows=(SimpleNamespace(stock_id="2330"),),
+                universe_count=2,
+                universe_count_by_market=(("TWSE", 1), ("TPEX", 1)),
+                selected_count_by_market=(("TWSE", 1), ("TPEX", 0)),
+            )
+        )
+
+        self.assertEqual(coverage["scope"], "canonical_active_stock_universe")
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["sample_count"], 1)
+        self.assertEqual(coverage["covered_universe_count"], 1)
+        self.assertEqual(coverage["universe_count"], 2)
+        self.assertEqual(coverage["sample_count_by_market"]["OTHER"], 0)
 
     def test_contribution_reader_is_not_called_without_external_authority(
         self,
@@ -276,7 +309,16 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(capability["status"], "not_requested")
+        self.assertEqual(capability["status"], "not_fetched_due_to_policy")
+        self.assertEqual(capability["applicability_status"], "applicable")
+        self.assertEqual(capability["availability_status"], "unknown")
+        self.assertFalse(capability["policy_satisfied"])
+        self.assertEqual(capability["execution_status"], "not_executed")
+        self.assertFalse(capability["decision_usable"])
+        self.assertEqual(
+            capability["reason_codes"],
+            ["EXTERNAL_FETCH_DISABLED_FOR_REQUEST"],
+        )
         self.assertEqual(
             capability["cache_policy"],
             "external_fetch_required_bounded",

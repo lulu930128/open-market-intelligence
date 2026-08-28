@@ -4,6 +4,8 @@ import ast
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from app.market_data.contracts import DatasetHealthStatus
 from app.market_data.dataset_lifecycle import (
     dataset_lifecycle_contract,
@@ -58,6 +60,16 @@ def test_lifecycle_evaluation_keeps_missing_partial_and_stale_distinct() -> None
     assert missing.health.status is DatasetHealthStatus.MISSING
     assert partial.health.status is DatasetHealthStatus.PARTIAL
     assert stale.health.status is DatasetHealthStatus.STALE
+
+
+def test_non_repairable_dataset_cannot_be_executed_as_refresh() -> None:
+    lifecycle = dataset_lifecycle_contract("us.daily.ohlcv.priority_research")
+
+    with pytest.raises(ValueError, match="not repairable"):
+        require_refresh_contract(
+            lifecycle,
+            operation="us.reconcile_full_market_eod",
+        )
 
 
 def test_shared_lifecycle_contract_has_no_db_job_scheduler_or_provider_imports() -> None:

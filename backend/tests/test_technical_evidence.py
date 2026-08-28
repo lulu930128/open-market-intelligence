@@ -20,9 +20,11 @@ from app.market.technical_evidence import (
     classify_latest_period,
     indicator_method_catalog,
     _corporate_contract_for_points,
+    _snapshot_for_timeframe,
 )
 from app.market.technical_parameters import get_technical_analysis_parameters
 from app.market import technical_report
+from app.market.trading_calendar import next_taiwan_trading_day
 
 
 def _points(
@@ -54,6 +56,125 @@ class TechnicalEvidenceTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(technical_analysis._round_price(value), value)
                 self.assertEqual(evidence_builder.round_price(value), value)
+
+    def test_one_daily_bar_cannot_produce_formal_technical_score(self) -> None:
+        chart = {
+            "data_quality": "ok",
+            "volume_unit": "shares",
+            "points": [
+                {
+                    "time": date(2026, 8, 27),
+                    "close": 605,
+                    "volume": 11_000_000,
+                }
+            ],
+        }
+        sufficiency = technical_analysis.evaluate_technical_evidence_sufficiency(
+            chart=chart,
+            technical_reports={
+                "daily": {
+                    "data": {
+                        "daily_indicator": {
+                            "ma": {},
+                            "rsi": {},
+                            "macd": {},
+                            "kd": {},
+                        }
+                    }
+                }
+            },
+            requested_horizon="swing",
+        )
+        gated = technical_analysis.apply_technical_sufficiency_gate(
+            {
+                "selected_score": 7,
+                "selected_summary": "swing 綜合分數 +7，依 daily 證據加權。",
+                "selected_confidence": "high",
+                "composite_state": "波段偏多（swing 視角）",
+                "scores": {"short": 5, "swing": 7},
+                "today_state": {
+                    "status": "ready",
+                    "score": 3,
+                    "title": "偏多",
+                    "summary": "向上",
+                    "confidence": "high",
+                },
+                "historical_structure": {
+                    "status": "ready",
+                    "score": 7,
+                    "title": "波段偏多",
+                    "summary": "向上",
+                    "confidence": "high",
+                },
+                "score_model": {
+                    "selected_score": 7,
+                    "scores": {"short": 5, "swing": 7},
+                    "base_scores": {"short": 4, "swing": 6},
+                },
+            },
+            sufficiency=sufficiency,
+        )
+
+        self.assertFalse(sufficiency["decision_usable"])
+        self.assertEqual(sufficiency["daily_bar_count"], 1)
+        self.assertEqual(sufficiency["required_daily_bar_count"], 60)
+        self.assertIsNone(gated["selected_score"])
+        self.assertEqual(gated["raw_selected_score"], 7)
+        self.assertNotIn("+7", gated["selected_summary"])
+        self.assertEqual(gated["composite_state"], "insufficient_evidence")
+        self.assertTrue(all(value is None for value in gated["scores"].values()))
+        self.assertIsNone(gated["historical_structure"]["score"])
+        self.assertIsNone(gated["score_model"]["normalized_decision_score"])
+
+    def test_indicator_snapshot_carries_measurement_lineage_with_volume(self) -> None:
+        snapshot = _snapshot_for_timeframe(
+            _points([100, 101, 102]),
+            timeframe="daily",
+            parameters=self.parameters,
+            method_catalog=indicator_method_catalog(self.parameters),
+            latest_observation_date=date(2026, 1, 3),
+        )
+
+        self.assertEqual(snapshot["completed"]["volume_unit"], "shares")
+        self.assertEqual(snapshot["completed"]["price_unit"], "TWD")
+        self.assertEqual(
+            snapshot["completed"]["source_capability"],
+            "daily.ohlcv",
+        )
+
+    def test_sixty_continuous_daily_bars_allow_swing_score_gate(self) -> None:
+        current = date(2026, 5, 4)
+        trade_dates: list[date] = []
+        for _ in range(60):
+            trade_dates.append(current)
+            current = next_taiwan_trading_day(current, include_value=False)
+        sufficiency = technical_analysis.evaluate_technical_evidence_sufficiency(
+            chart={
+                "data_quality": "ok",
+                "volume_unit": "shares",
+                "points": [
+                    {"time": trade_date, "close": 100, "volume": 1000}
+                    for trade_date in trade_dates
+                ],
+            },
+            technical_reports={
+                "daily": {
+                    "data": {
+                        "daily_indicator": {
+                            "ma": {"ma20": 99, "ma60": 95},
+                            "rsi": {"rsi14": 55},
+                            "macd": {"histogram": 1},
+                            "kd": {},
+                        }
+                    }
+                }
+            },
+            requested_horizon="swing",
+        )
+
+        self.assertTrue(sufficiency["decision_usable"])
+        self.assertEqual(sufficiency["continuity_status"], "continuous")
+        self.assertEqual(sufficiency["available_factor_count"], 3)
 
     def test_wilder_rsi_and_sma_seeded_ema_have_explicit_warmup(self) -> None:
         closes = [
@@ -277,6 +398,33 @@ class TechnicalEvidenceTests(unittest.TestCase):
         self.assertEqual(contract["price_basis"], "raw_unadjusted")
         self.assertFalse(contract["adjustment_applied"])
         self.assertEqual(contract["affected_dates"], ["2026-08-12"])
+        self.assertEqual(contract["checked_through_date"], "2026-12-31")
+        self.assertEqual(contract["absence_semantics"], "matching_events_observed")
+        self.assertEqual(contract["source_scope"]["providers"], ["TWSE"])
+
+    def test_corporate_action_absence_is_bounded_by_checked_through_date(self) -> None:
+        contract = build_corporate_action_contract(
+            {
+                "cache_status": "current",
+                "coverage_start": "2026-01-01",
+                "coverage_end": "2026-08-24",
+                "sources": ["TWSE", "TPEX"],
+                "results": [],
+            },
+            analysis_start=date(2026, 1, 2),
+            analysis_end=date(2026, 8, 28),
+        )
+
+        self.assertEqual(contract["coverage_status"], "partial")
+        self.assertEqual(contract["checked_through_date"], "2026-08-24")
+        self.assertEqual(
+            contract["absence_semantics"],
+            "unknown_outside_checked_range",
+        )
+        self.assertEqual(
+            contract["source_scope"]["providers"],
+            ["TPEX", "TWSE"],
+        )
 
     def test_swing_confirmation_requires_right_hand_observations(self) -> None:
         points = _points([10, 11, 15, 11, 10, 12, 9])

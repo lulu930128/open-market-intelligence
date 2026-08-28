@@ -10,12 +10,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    MarketDailyPrice,
     ResourceOhlcvBar,
     ResourceQuoteSnapshot,
-    TaiwanStockQuoteSnapshot,
     USDailyPrice,
 )
+from app.market.daily_ohlcv_platform import (
+    TaiwanCanonicalDailyRow,
+    project_taiwan_daily_rows,
+    read_taiwan_official_daily,
+)
+from app.market.taiwan_quote_evidence import read_taiwan_quote_evidence_bundle
+from app.market_data.contracts import TradeObservationState
 from app.market.trading_calendar import (
     next_taiwan_trading_day,
     previous_taiwan_trading_day,
@@ -666,26 +671,19 @@ def _latest_tw_daily_at_or_before(
     reference_date: date,
     *,
     available_at: datetime | None = None,
-) -> MarketDailyPrice | None:
-    query = (
-        db.query(MarketDailyPrice)
-        .filter(
-            MarketDailyPrice.stock_id == stock_id,
-            MarketDailyPrice.trade_date <= reference_date,
+) -> TaiwanCanonicalDailyRow | None:
+    requested_at = available_at or datetime.now(timezone.utc)
+    try:
+        result = read_taiwan_official_daily(
+            db,
+            stock_id=stock_id,
+            to_date=reference_date,
+            limit=1,
+            requested_at=requested_at,
         )
-    )
-    if available_at is not None:
-        query = query.filter(MarketDailyPrice.created_at <= available_at)
-    rows = (
-        query
-        .order_by(
-            MarketDailyPrice.trade_date.desc(),
-            MarketDailyPrice.updated_at.desc(),
-            MarketDailyPrice.id.desc(),
-        )
-        .limit(12)
-        .all()
-    )
+    except ValueError:
+        return None
+    rows = project_taiwan_daily_rows(db, result)
     return next((row for row in rows if _positive(row.close_price)), None)
 
 
@@ -695,63 +693,45 @@ def _latest_tw_comparison(
     *,
     available_at: datetime | None = None,
 ) -> dict[str, Any] | None:
-    daily_query = db.query(MarketDailyPrice).filter(
-        MarketDailyPrice.stock_id == stock_id
-    )
-    if available_at is not None:
-        daily_query = daily_query.filter(MarketDailyPrice.created_at <= available_at)
-    daily_rows = (
-        daily_query
-        .order_by(
-            MarketDailyPrice.trade_date.desc(),
-            MarketDailyPrice.updated_at.desc(),
-            MarketDailyPrice.id.desc(),
+    requested_at = available_at or datetime.now(timezone.utc)
+    try:
+        bundle = read_taiwan_quote_evidence_bundle(
+            db,
+            stock_id=stock_id,
+            requested_at=requested_at,
         )
-        .limit(12)
-        .all()
-    )
+    except ValueError:
+        return None
+    daily_rows = project_taiwan_daily_rows(db, bundle.official_close)
     daily = next((row for row in daily_rows if _positive(row.close_price)), None)
-
-    quote_query = db.query(TaiwanStockQuoteSnapshot).filter(
-        TaiwanStockQuoteSnapshot.stock_id == stock_id
-    )
-    if available_at is not None:
-        quote_query = quote_query.filter(
-            TaiwanStockQuoteSnapshot.fetched_at <= available_at,
-            TaiwanStockQuoteSnapshot.quote_time <= available_at,
-        )
-    quote_rows = (
-        quote_query
-        .order_by(
-            TaiwanStockQuoteSnapshot.quote_time.desc(),
-            TaiwanStockQuoteSnapshot.id.desc(),
-        )
-        .limit(12)
-        .all()
-    )
-    quote = next(
-        (
-            row
-            for row in quote_rows
-            if row.trade_date is not None and _positive(row.last_price)
-        ),
-        None,
+    quote = bundle.quote.resolved.quote
+    quote_health = bundle.quote.resolved.health
+    quote_eligible = bool(
+        quote is not None
+        and quote.trade_state is TradeObservationState.TRADE_OBSERVED
+        and quote.trade_date is not None
+        and _positive(quote.last_trade_price)
+        and quote_health.facts_usable
     )
 
-    if quote is not None and (daily is None or quote.trade_date >= daily.trade_date):
+    if quote_eligible and quote is not None and (
+        daily is None or quote.trade_date >= daily.trade_date
+    ):
         return {
-            "price": float(quote.last_price),
+            "price": float(quote.last_trade_price),
             "trade_date": quote.trade_date,
-            "as_of": quote.quote_time,
-            "source": "taiwan_stock_quote_snapshot",
-            "session_phase": quote.session_phase,
+            "as_of": quote.lineage.event_at,
+            "source": quote.lineage.source,
+            "session_phase": bundle.quote.requirement.session.value,
             "input_lineage": {
-                "source": "taiwan_stock_quote_snapshot",
-                "stock_id": quote.stock_id,
+                "provider": quote.lineage.provider,
+                "source": quote.lineage.source,
+                "stock_id": quote.instrument.symbol,
                 "trade_date": _iso(quote.trade_date),
-                "quote_time": _iso(quote.quote_time),
-                "fetched_at": _iso(quote.fetched_at),
-                "last_price": _round(_number(quote.last_price)),
+                "quote_time": _iso(quote.lineage.event_at),
+                "fetched_at": _iso(quote.lineage.fetched_at),
+                "last_price": _round(_number(quote.last_trade_price)),
+                "resolved_status": quote_health.status.value,
             },
         }
     if daily is None:
@@ -760,10 +740,11 @@ def _latest_tw_comparison(
         "price": float(daily.close_price),
         "trade_date": daily.trade_date,
         "as_of": None,
-        "source": "market_daily_price",
+        "source": daily.selected_source,
         "session_phase": "daily_close",
         "input_lineage": {
-            "source": "market_daily_price",
+            "provider": daily.selected_provider,
+            "source": daily.selected_source,
             "stock_id": daily.stock_id,
             "trade_date": _iso(daily.trade_date),
             "created_at": _iso(daily.created_at),

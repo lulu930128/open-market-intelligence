@@ -224,11 +224,13 @@ def _daily_indicator(
     db: Session,
     stock_id: str,
     parameters: TechnicalAnalysisParameters | None = None,
+    to_date: date | None = None,
 ) -> dict[str, Any] | None:
     technical_parameters = parameters or get_technical_analysis_parameters()
     return calculate_active_latest_daily_indicator(
         db=db,
         stock_id=stock_id,
+        to_date=to_date,
         parameters=technical_parameters,
     )
 
@@ -239,6 +241,7 @@ def _aggregated_indicator(
     stock_id: str,
     timeframe: str,
     parameters: TechnicalAnalysisParameters | None = None,
+    to_date: date | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     technical_parameters = parameters or get_technical_analysis_parameters()
     chart = market_service.list_stock_ohlc_chart_data(
@@ -247,6 +250,7 @@ def _aggregated_indicator(
         timeframe=timeframe,
         bars=AGGREGATED_REPORT_BARS[timeframe],
         ensure_history=False,
+        to_date=to_date,
     )
     points = chart.get("points") or []
     indicators = calculate_active_indicator_points(
@@ -273,11 +277,38 @@ def _daily_context(
     db: Session,
     stock_id: str,
     parameters: TechnicalAnalysisParameters | None = None,
+    to_date: date | None = None,
 ) -> dict[str, Any]:
     technical_parameters = parameters or get_technical_analysis_parameters()
-    latest_indicator = _daily_indicator(db=db, stock_id=stock_id, parameters=technical_parameters)
-    latest_institutional = market_service.get_latest_stock_institutional_trade(db, stock_id)
-    latest_margin = market_service.get_latest_stock_margin_trade(db, stock_id)
+    latest_indicator = _daily_indicator(
+        db=db,
+        stock_id=stock_id,
+        parameters=technical_parameters,
+        to_date=to_date,
+    )
+    if to_date is None:
+        latest_institutional = market_service.get_latest_stock_institutional_trade(
+            db,
+            stock_id,
+        )
+        latest_margin = market_service.get_latest_stock_margin_trade(db, stock_id)
+    else:
+        institutional_rows = market_service.list_stock_institutional_trade_history(
+            db=db,
+            stock_id=stock_id,
+            to_date=to_date,
+            limit=1,
+            ascending=False,
+        )
+        margin_rows = market_service.list_stock_margin_trade_history(
+            db=db,
+            stock_id=stock_id,
+            to_date=to_date,
+            limit=1,
+            ascending=False,
+        )
+        latest_institutional = institutional_rows[0] if institutional_rows else None
+        latest_margin = margin_rows[0] if margin_rows else None
     return {
         "indicator": latest_indicator,
         "institutional": latest_institutional,
@@ -708,6 +739,7 @@ def _build_indicator_report(
     indicator: dict[str, Any] | None,
     point_count: int | None = None,
     parameters: TechnicalAnalysisParameters | None = None,
+    to_date: date | None = None,
 ) -> dict[str, Any]:
     technical_parameters = parameters or get_technical_analysis_parameters()
     if indicator is None:
@@ -757,7 +789,12 @@ def _build_indicator_report(
     donchian_position = None
     if _finite(donchian_upper) and _finite(donchian_lower) and donchian_upper != donchian_lower:
         donchian_position = (close - donchian_lower) / (donchian_upper - donchian_lower) * 100
-    daily = _daily_context(db=db, stock_id=stock_id, parameters=technical_parameters)
+    daily = _daily_context(
+        db=db,
+        stock_id=stock_id,
+        parameters=technical_parameters,
+        to_date=to_date,
+    )
     latest_institutional = daily["institutional"]
     institutional_net = (
         getattr(latest_institutional, "total_institutional_net", None)
@@ -1324,13 +1361,19 @@ def _build_daily_report(
     stock_id: str,
     include_intraday: bool = False,
     parameters: TechnicalAnalysisParameters | None = None,
+    to_date: date | None = None,
 ) -> dict[str, Any]:
     technical_parameters = parameters or get_technical_analysis_parameters()
     rows: list[dict[str, Any]] = []
     badges: list[dict[str, str]] = []
     warnings: list[str] = []
     missing: list[str] = []
-    daily = _daily_context(db=db, stock_id=stock_id, parameters=technical_parameters)
+    daily = _daily_context(
+        db=db,
+        stock_id=stock_id,
+        parameters=technical_parameters,
+        to_date=to_date,
+    )
     indicator = daily["indicator"]
 
     if indicator is None:
@@ -1412,7 +1455,8 @@ def _build_daily_report(
         indicator_date = None
     has_current_daily_indicator = indicator_date == market_session["date"]
     should_load_intraday = (
-        include_intraday
+        to_date is None
+        and include_intraday
         and market_session["is_trading_day"]
         and (
             market_session["is_intraday_window"]
@@ -1870,6 +1914,7 @@ def _build_aggregated_report(
     stock_id: str,
     timeframe: str,
     parameters: TechnicalAnalysisParameters | None = None,
+    to_date: date | None = None,
 ) -> dict[str, Any]:
     technical_parameters = parameters or get_technical_analysis_parameters()
     indicator, chart = _aggregated_indicator(
@@ -1877,6 +1922,7 @@ def _build_aggregated_report(
         stock_id=stock_id,
         timeframe=timeframe,
         parameters=technical_parameters,
+        to_date=to_date,
     )
     report = _build_indicator_report(
         db=db,
@@ -1885,6 +1931,7 @@ def _build_aggregated_report(
         indicator=indicator,
         point_count=chart.get("point_count"),
         parameters=technical_parameters,
+        to_date=to_date,
     )
     period = chart.get("period") or {}
     report.setdefault("data", {})["period"] = period
@@ -1909,12 +1956,17 @@ def build_stock_technical_report(
     timeframe: str = "daily",
     include_intraday: bool = True,
     intraday_override: dict[str, Any] | None = None,
+    to_date: date | None = None,
 ) -> dict[str, Any]:
     normalized_timeframe = timeframe.strip().lower()
     normalized_stock_id = stock_id.strip()
     technical_parameters = get_technical_analysis_parameters()
 
     if normalized_timeframe == "today":
+        if to_date is not None:
+            raise ValueError(
+                "Historical technical cutoff is not compatible with timeframe=today."
+            )
         return _with_evidence_passport(
             _build_today_report(
                 db=db,
@@ -1932,6 +1984,7 @@ def build_stock_technical_report(
                 stock_id=normalized_stock_id,
                 include_intraday=include_intraday,
                 parameters=technical_parameters,
+                to_date=to_date,
             )
         )
 
@@ -1942,6 +1995,7 @@ def build_stock_technical_report(
                 stock_id=normalized_stock_id,
                 timeframe=normalized_timeframe,
                 parameters=technical_parameters,
+                to_date=to_date,
             )
         )
 

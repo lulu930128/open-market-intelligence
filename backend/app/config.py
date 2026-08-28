@@ -138,6 +138,7 @@ class Settings(BaseSettings):
     scheduler_market_daily_repair_max_attempts: int = 4
     scheduler_market_daily_repair_provider_cooldown_seconds: int = 1800
     scheduler_market_chip_refresh_time: str = "15:10"
+    scheduler_market_chip_refresh_retry_delay_minutes: int = 30
     scheduler_market_chip_margin_refresh_time: str = "21:10"
     enable_market_chip_margin_scheduler: bool = True
     scheduler_market_margin_refresh_time: str = "21:10"
@@ -194,6 +195,9 @@ class Settings(BaseSettings):
     enable_taiwan_quote_contract_scheduler: bool = True
     scheduler_taiwan_quote_contract_symbols: str = "2330"
     scheduler_taiwan_quote_contract_max_symbols: int = 3
+    enable_taiwan_intraday_bar_scheduler: bool = True
+    scheduler_taiwan_intraday_bar_interval_seconds: int = 300
+    scheduler_taiwan_intraday_bar_max_symbols: int = 3
     enable_taiwan_futures_scheduler: bool = True
     taiwan_futures_quote_provider: str = "taifex_mis"
     scheduler_taiwan_futures_symbols: str = "TXF,MXF,TMF"

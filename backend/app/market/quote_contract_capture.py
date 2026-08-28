@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
 import json
 from typing import Any
 
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db.models import TaiwanQuoteContractSnapshot
@@ -45,9 +48,34 @@ TAIWAN_QUOTE_CONTRACT_SLOTS = (
 
 
 def _json_default(value: Any) -> Any:
-    if isinstance(value, (date, datetime)):
+    if isinstance(value, (date, datetime, time)):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
     raise TypeError(f"Unsupported quote contract snapshot value: {type(value)!r}")
+
+
+def _serialize_snapshot_payload(
+    payload: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    if payload is None:
+        return None, None
+    try:
+        return (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=_json_default,
+            ),
+            None,
+        )
+    except (TypeError, ValueError) as exc:
+        return None, f"SNAPSHOT_SERIALIZATION_FAILED: {exc}"
 
 
 def _slot_time(capture_slot: str) -> time:
@@ -71,40 +99,49 @@ def _upsert_snapshot(
     payload: dict[str, Any] | None,
     error: str | None,
 ) -> TaiwanQuoteContractSnapshot:
+    payload_json, serialization_error = _serialize_snapshot_payload(payload)
+    effective_payload = payload if payload_json is not None else None
+    effective_error = "; ".join(
+        value
+        for value in (error, serialization_error)
+        if isinstance(value, str) and value.strip()
+    ) or None
     freshness = (
-        payload.get("freshness")
-        if isinstance(payload, dict) and isinstance(payload.get("freshness"), dict)
+        effective_payload.get("freshness")
+        if isinstance(effective_payload, dict)
+        and isinstance(effective_payload.get("freshness"), dict)
         else {}
     )
     capture_status = (
         "failed"
-        if payload is None
+        if effective_payload is None
         else "captured_degraded"
-        if error or freshness.get("source_error")
+        if effective_error or freshness.get("source_error")
         else "captured"
     )
     values = {
-        "provider": payload.get("provider") if payload else None,
-        "market": payload.get("market") if payload else None,
+        "provider": effective_payload.get("provider") if effective_payload else None,
+        "market": effective_payload.get("market") if effective_payload else None,
         "scheduled_at": scheduled_at,
         "captured_at": captured_at,
-        "quote_time": payload.get("quote_time") if payload else None,
-        "session_phase": payload.get("session_phase") if payload else None,
-        "capture_status": capture_status,
-        "refresh_outcome": payload.get("refresh_outcome") if payload else "failed",
-        "freshness_status": freshness.get("status"),
-        "source": str(payload.get("source") or TWSE_MIS_SOURCE) if payload else TWSE_MIS_SOURCE,
-        "payload_json": (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                default=_json_default,
-            )
-            if payload is not None
-            else None
+        "quote_time": effective_payload.get("quote_time") if effective_payload else None,
+        "session_phase": (
+            effective_payload.get("session_phase") if effective_payload else None
         ),
-        "error": error or freshness.get("source_error"),
+        "capture_status": capture_status,
+        "refresh_outcome": (
+            effective_payload.get("refresh_outcome")
+            if effective_payload
+            else "failed"
+        ),
+        "freshness_status": freshness.get("status"),
+        "source": (
+            str(effective_payload.get("source") or TWSE_MIS_SOURCE)
+            if effective_payload
+            else TWSE_MIS_SOURCE
+        ),
+        "payload_json": payload_json,
+        "error": effective_error or freshness.get("source_error"),
         "updated_at": captured_at,
     }
     row = (
@@ -123,6 +160,10 @@ def _upsert_snapshot(
             **values,
         )
         db.add(row)
+    elif str(row.capture_status or "").startswith("captured") and capture_status == "failed":
+        # A duplicate scheduler retry must never destroy already persisted
+        # acceptance evidence with a later degraded attempt.
+        return row
     else:
         for key, value in values.items():
             setattr(row, key, value)

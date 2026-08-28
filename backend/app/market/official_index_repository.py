@@ -18,6 +18,7 @@ from app.market.official_index_contract import (
     TPEX_INDEX_SOURCE_NAME,
     TWSE_INDEX_SOURCE_NAME,
 )
+from app.market.taiwan_rules import taiwan_daily_price_release_at
 from app.market_data.contracts import (
     AuthorityClass,
     BarFinalization,
@@ -53,26 +54,29 @@ def _as_aware_utc(value: datetime) -> datetime:
 
 
 class TaiwanOfficialIndexRepository:
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        available_at: datetime | None = None,
+    ) -> None:
         self._db = db
+        self._available_at = (
+            _as_aware_utc(available_at) if available_at is not None else None
+        )
+        self._preloaded: dict[tuple[str, date], OfficialIndexRead] = {}
 
-    def load_market_index(
+    def _project_row(
         self,
         *,
         index_id: str,
         trade_date: date,
+        binding: tuple[str, str, str],
+        row: MarketIndexDailyStat | None,
+        raw: RawFetchResult | None,
+        source: SourceRegistry | None,
     ) -> OfficialIndexRead:
-        normalized_index_id = str(index_id or "").strip().upper()
-        binding = _INDEX_BINDINGS.get(normalized_index_id)
-        if binding is None:
-            raise ValueError("official Taiwan index_id must be TAIEX or TPEX")
         venue, provider, source_name = binding
-        row = (
-            self._db.query(MarketIndexDailyStat)
-            .filter(MarketIndexDailyStat.index_id == normalized_index_id)
-            .filter(MarketIndexDailyStat.trade_date == trade_date)
-            .first()
-        )
         if row is None:
             return OfficialIndexRead(limitations=("OFFICIAL_INDEX_DATE_MISSING",))
         if row.source_id is None or row.raw_result_id is None:
@@ -80,23 +84,33 @@ class TaiwanOfficialIndexRepository:
                 rows_examined=1,
                 limitations=("INDEX_ROW_LINEAGE_MISSING",),
             )
-        joined = (
-            self._db.query(RawFetchResult, SourceRegistry)
-            .join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id)
-            .filter(RawFetchResult.id == row.raw_result_id)
-            .filter(SourceRegistry.id == row.source_id)
-            .first()
-        )
-        if joined is None:
+        if (
+            raw is None
+            or source is None
+            or raw.source_id != row.source_id
+        ):
             return OfficialIndexRead(
                 rows_examined=1,
                 limitations=("INDEX_ROW_LINEAGE_BROKEN",),
             )
-        raw, source = joined
         if source.source_name != source_name:
             return OfficialIndexRead(
                 rows_examined=1,
                 limitations=("INDEX_SOURCE_IDENTITY_MISMATCH",),
+            )
+        fetched_at = _as_aware_utc(raw.fetched_at)
+        if self._available_at is not None and fetched_at > self._available_at:
+            return OfficialIndexRead(
+                rows_examined=1,
+                limitations=("INDEX_RECEIPT_AFTER_REQUESTED_AT",),
+            )
+        release_at = taiwan_daily_price_release_at(trade_date).astimezone(
+            timezone.utc
+        )
+        if fetched_at < release_at:
+            return OfficialIndexRead(
+                rows_examined=1,
+                limitations=("INDEX_RECEIPT_PREDATES_RELEASE",),
             )
         if row.close_value is None or row.price_change is None:
             return OfficialIndexRead(
@@ -111,9 +125,7 @@ class TaiwanOfficialIndexRepository:
                 row.transaction_count,
             )
         )
-        limitations = (
-            ("INDEX_MARKET_TOTALS_PARTIAL",) if incomplete else ()
-        )
+        limitations = (("INDEX_MARKET_TOTALS_PARTIAL",) if incomplete else ())
         event_at = datetime.combine(
             trade_date,
             time(13, 30),
@@ -122,7 +134,7 @@ class TaiwanOfficialIndexRepository:
         return OfficialIndexRead(
             observation=MarketIndexObservation(
                 market=Market.TW,
-                index_id=normalized_index_id,
+                index_id=index_id,
                 venue=venue,
                 lineage=SourceLineage(
                     provider=provider,
@@ -130,10 +142,10 @@ class TaiwanOfficialIndexRepository:
                     authority=AuthorityClass.EXCHANGE,
                     raw_contract_version=raw.parser_version or source.parser_type,
                     event_at=event_at,
-                    fetched_at=_as_aware_utc(raw.fetched_at),
+                    fetched_at=fetched_at,
                     cache_hit=True,
                     observation_id=(
-                        f"market_index:{normalized_index_id}:{trade_date.isoformat()}"
+                        f"market_index:{index_id}:{trade_date.isoformat()}"
                     ),
                     raw_receipt_id=f"raw_fetch_result:{raw.id}",
                     content_hash=raw.content_hash,
@@ -169,6 +181,101 @@ class TaiwanOfficialIndexRepository:
             rows_examined=1,
             limitations=limitations,
         )
+
+    def load_market_index(
+        self,
+        *,
+        index_id: str,
+        trade_date: date,
+    ) -> OfficialIndexRead:
+        normalized_index_id = str(index_id or "").strip().upper()
+        binding = _INDEX_BINDINGS.get(normalized_index_id)
+        if binding is None:
+            raise ValueError("official Taiwan index_id must be TAIEX or TPEX")
+        cache_key = (normalized_index_id, trade_date)
+        if cache_key in self._preloaded:
+            return self._preloaded[cache_key]
+        joined = (
+            self._db.query(
+                MarketIndexDailyStat,
+                RawFetchResult,
+                SourceRegistry,
+            )
+            .outerjoin(
+                RawFetchResult,
+                RawFetchResult.id == MarketIndexDailyStat.raw_result_id,
+            )
+            .outerjoin(
+                SourceRegistry,
+                SourceRegistry.id == MarketIndexDailyStat.source_id,
+            )
+            .filter(MarketIndexDailyStat.index_id == normalized_index_id)
+            .filter(MarketIndexDailyStat.trade_date == trade_date)
+            .first()
+        )
+        row, raw, source = joined if joined is not None else (None, None, None)
+        result = self._project_row(
+            index_id=normalized_index_id,
+            trade_date=trade_date,
+            binding=binding,
+            row=row,
+            raw=raw,
+            source=source,
+        )
+        self._preloaded[cache_key] = result
+        return result
+
+    def preload_market_index_series(
+        self,
+        *,
+        index_id: str,
+        to_date: date,
+        limit: int,
+    ) -> tuple[date, ...]:
+        """Load a bounded official series once for repeated Resolver reads."""
+
+        normalized_index_id = str(index_id or "").strip().upper()
+        binding = _INDEX_BINDINGS.get(normalized_index_id)
+        if binding is None:
+            raise ValueError("official Taiwan index_id must be TAIEX or TPEX")
+        if limit < 1 or limit > 5000:
+            raise ValueError("official Taiwan index series limit must be 1..5000")
+        _venue, _provider, _source_name = binding
+        rows = (
+            self._db.query(
+                MarketIndexDailyStat,
+                RawFetchResult,
+                SourceRegistry,
+            )
+            .outerjoin(
+                RawFetchResult,
+                RawFetchResult.id == MarketIndexDailyStat.raw_result_id,
+            )
+            .outerjoin(
+                SourceRegistry,
+                SourceRegistry.id == MarketIndexDailyStat.source_id,
+            )
+            .filter(MarketIndexDailyStat.index_id == normalized_index_id)
+            .filter(MarketIndexDailyStat.trade_date <= to_date)
+            .order_by(MarketIndexDailyStat.trade_date.desc())
+            .limit(limit)
+            .all()
+        )
+        trade_dates: list[date] = []
+        for row, raw, source in rows:
+            cache_key = (normalized_index_id, row.trade_date)
+            if cache_key in self._preloaded:
+                continue
+            self._preloaded[cache_key] = self._project_row(
+                index_id=normalized_index_id,
+                trade_date=row.trade_date,
+                binding=binding,
+                row=row,
+                raw=raw,
+                source=source,
+            )
+            trade_dates.append(row.trade_date)
+        return tuple(sorted(trade_dates))
 
 
 __all__ = ["OfficialIndexRead", "TaiwanOfficialIndexRepository"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -13,11 +13,13 @@ from app.db.models import (
     MarketDailyPrice,
     RawFetchResult,
     SourceRegistry,
+    StockMaster,
 )
 from app.market.financial_valuation import (
     DAILY_CLOSE_PRICE_BASIS,
     resolve_latest_completed_daily_close,
 )
+from app.sources.defaults import TWSE_RWD_DAILY_TRADING_SOURCE_NAME
 
 
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -41,20 +43,37 @@ class FinancialValuationResolverTests(unittest.TestCase):
         reliability: str = "official",
         priority: int = 10,
     ) -> None:
-        source = SourceRegistry(
-            source_name=f"daily-close-{trade_date}-{reliability}",
-            source_type="official",
-            category="daily_price",
-            enabled=True,
-            priority=priority,
-            auth_type="none",
-            reliability_level=reliability,
+        stock = self.db.query(StockMaster).filter(StockMaster.stock_id == "2327").first()
+        if stock is None:
+            self.db.add(
+                StockMaster(
+                    stock_id="2327",
+                    stock_name="國巨",
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                )
+            )
+        source = (
+            self.db.query(SourceRegistry)
+            .filter(SourceRegistry.source_name == TWSE_RWD_DAILY_TRADING_SOURCE_NAME)
+            .first()
         )
-        self.db.add(source)
+        if source is None:
+            source = SourceRegistry(
+                source_name=TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+                source_type="official",
+                category="daily_price",
+                enabled=True,
+                priority=priority,
+                auth_type="none",
+                reliability_level=reliability,
+            )
+            self.db.add(source)
         self.db.flush()
         raw = RawFetchResult(
             source_id=source.id,
-            fetched_at=datetime(2026, 7, 30, 16, 0, tzinfo=TAIPEI),
+            fetched_at=datetime.combine(trade_date, time(8)),
             method="GET",
             content_hash=f"raw-{trade_date}-{reliability}",
             parser_version="daily-close-test-v1",
@@ -68,6 +87,9 @@ class FinancialValuationResolverTests(unittest.TestCase):
                 trade_date=trade_date,
                 stock_id="2327",
                 stock_name="國巨",
+                open_price=close_price,
+                high_price=close_price,
+                low_price=close_price,
                 close_price=close_price,
             )
         )

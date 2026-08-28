@@ -11,12 +11,12 @@ from sqlalchemy import case, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    MarketIndexDailyStat,
     StockMaster,
     StockProfile,
     TaiwanIntradayStockState,
     WatchlistGroup,
 )
+from app.market.official_index_platform import read_taiwan_official_index_series
 from app.market.intraday import get_market_intraday_history
 from app.market.indices import get_market_index_summary
 from app.market.trading_calendar import (
@@ -29,6 +29,7 @@ from app.market.service import list_stock_ohlc_chart_data
 from app.market.technical_report import build_stock_technical_report
 from app.market.taiwan_industries import normalize_tw_industry_label
 from app.market.tw_intraday_state import INTRADAY_STATE_VERSION
+from app.market_data.contracts import MarketIndexObservation
 from app.watchlists.service import list_groups, list_items
 
 
@@ -553,18 +554,24 @@ def _latest_index_baseline(
     *,
     index_id: str,
     trade_date: date,
-) -> MarketIndexDailyStat | None:
+) -> MarketIndexObservation | None:
     previous_session = previous_taiwan_trading_day(
         trade_date,
         include_value=False,
     )
-    return (
-        db.query(MarketIndexDailyStat)
-        .filter(MarketIndexDailyStat.index_id == index_id)
-        .filter(MarketIndexDailyStat.trade_date <= previous_session)
-        .filter(MarketIndexDailyStat.close_value.is_not(None))
-        .order_by(MarketIndexDailyStat.trade_date.desc())
-        .first()
+    results = read_taiwan_official_index_series(
+        db,
+        index_id=index_id,
+        to_date=previous_session,
+        limit=1,
+    )
+    return next(
+        (
+            result.resolved.market_index
+            for result in reversed(results)
+            if result.resolved.market_index is not None
+        ),
+        None,
     )
 
 
@@ -969,6 +976,12 @@ def build_tw_market_dashboard(
         )
         for market in SUPPORTED_MARKETS
     }
+    for market, item in breadth.items():
+        # This sibling field remains only for dashboard-v1 compatibility.
+        # It must never compete with the canonical resolved breadth owner.
+        item["decision_usable"] = False
+        item["deprecated"] = True
+        item["canonical_ref"] = f"resolved_breadth.{market}"
     hot_groups = _build_hot_groups(
         stocks,
         state_by_stock,
@@ -1062,7 +1075,7 @@ def build_tw_market_dashboard(
             "The dashboard read path is cache-only and never triggers provider refresh.",
             "Preopen observations and all index estimates are provisional and not decision-usable.",
             "The legacy indices field contains proxy estimates; resolved_indices is the authoritative headline projection.",
-            "The legacy breadth field is an intraday-state compatibility projection; resolved_breadth preserves the index-summary breadth owner and scope.",
+            "The legacy breadth field is deprecated and never decision-usable; resolved_breadth preserves the canonical index-summary breadth owner and scope.",
             "Hot groups use current StockMaster industry/category membership.",
         ],
     }

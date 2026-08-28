@@ -228,6 +228,59 @@ class ProviderHealthTests(unittest.TestCase):
             "historical_provider_generation",
         )
 
+    def test_source_health_snapshot_supersedes_legacy_all_target_scope(self) -> None:
+        now = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
+        self.db.add_all(
+            [
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="taiwan_stock_quote_snapshot",
+                    target="all",
+                    provider="twse_mis",
+                    status="empty",
+                    ok=False,
+                    required=False,
+                    checked_at=now - timedelta(hours=2),
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="taiwan_stock_quote_snapshot",
+                    target="universe:current",
+                    provider="twse_mis",
+                    status="partial",
+                    ok=False,
+                    required=False,
+                    checked_at=now,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        with patch.object(provider_health, "_now", return_value=now):
+            operational = list_source_health_snapshots(
+                self.db,
+                market="tw",
+            )
+            audited = list_source_health_snapshots(
+                self.db,
+                market="tw",
+                include_historical=True,
+            )
+
+        self.assertEqual(
+            [entry["target"] for entry in operational],
+            ["universe:current"],
+        )
+        audited_by_target = {entry["target"]: entry for entry in audited}
+        self.assertEqual(
+            audited_by_target["all"]["snapshot_lifecycle"],
+            "historical_scope_generation",
+        )
+        self.assertEqual(
+            audited_by_target["all"]["lifecycle_reason"],
+            "newer_target_scope_exists_for_resource",
+        )
+
     def test_degraded_source_health_transition_creates_one_trace_event(self) -> None:
         checked_at = datetime(2026, 7, 24, 4, 0, tzinfo=timezone.utc)
         entry = {

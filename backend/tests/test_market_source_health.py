@@ -544,6 +544,72 @@ class TaiwanSourceHealthTests(unittest.TestCase):
             "unknown",
         )
 
+    def test_global_intraday_health_uses_selected_target_coverage(self) -> None:
+        observed_at = datetime(
+            2026,
+            7,
+            22,
+            9,
+            9,
+            tzinfo=ZoneInfo("Asia/Taipei"),
+        )
+        self.db.add(
+            MarketIntradayBar(
+                provider="yahoo_finance_chart",
+                stock_id="2330",
+                market="TWSE",
+                interval="1m",
+                bar_time=observed_at,
+                close_price=1200.0,
+                source="yahoo_finance_chart",
+            )
+        )
+        self.db.commit()
+
+        with (
+            patch(
+                "app.market.source_health.get_market_index_summary",
+                return_value={"as_of": observed_at.isoformat(), "indices": []},
+            ),
+            patch(
+                "app.market.source_health."
+                "resolve_taiwan_intraday_target_universe",
+                return_value={
+                    "version": "tw.intraday.universe.v1",
+                    "symbols": ["2330", "3711"],
+                    "eligible_count": 2,
+                    "selected_count": 2,
+                    "skipped_count": 0,
+                    "scope_semantics": "bounded_tier_a_universe_not_all_market",
+                },
+            ),
+        ):
+            health = build_taiwan_source_health(
+                self.db,
+                now=datetime(
+                    2026,
+                    7,
+                    22,
+                    9,
+                    10,
+                    tzinfo=ZoneInfo("Asia/Taipei"),
+                ),
+            )
+
+        intraday = next(
+            entry
+            for entry in health["entries"]
+            if entry["resource"] == "market_intraday_bar_1m"
+        )
+        dimensions = intraday["health_dimensions"]
+        self.assertEqual(intraday["target"], "bounded_tier_a_universe")
+        self.assertEqual(intraday["status"], "partial")
+        self.assertFalse(intraday["ok"])
+        self.assertEqual(dimensions["requested_symbol_count"], 2)
+        self.assertEqual(dimensions["current_count"], 1)
+        self.assertEqual(dimensions["missing_symbols"], ["3711"])
+        self.assertEqual(dimensions["coverage_ratio"], 0.5)
+
     def test_realtime_source_health_uses_presentation_session_before_open(self) -> None:
         self.db.add(
             StockMaster(

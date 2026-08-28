@@ -2,6 +2,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketDailyPrice, SourceRegistry, StockMaster, StockProfile, utc_now
+from app.market.daily_ohlcv_platform import read_taiwan_latest_daily_evidence
 from app.parsers.twse_common import normalize_text
 from app.stocks.instruments import (
     TAIWAN_INSTRUMENT_ETF,
@@ -382,16 +383,18 @@ def get_stock_profile(db: Session, stock_id: str) -> StockProfile:
 
 def get_latest_stock_market_cap(db: Session, stock_id: str) -> dict:
     profile = get_stock_profile(db=db, stock_id=stock_id)
-
-    latest_price = (
-        db.query(MarketDailyPrice)
-        .filter(MarketDailyPrice.stock_id == stock_id)
-        .filter(MarketDailyPrice.close_price.isnot(None))
-        .order_by(MarketDailyPrice.trade_date.desc())
-        .first()
+    try:
+        latest_price = read_taiwan_latest_daily_evidence(db, stock_id).daily
+    except ValueError:
+        # A profile can temporarily outlive or precede its active StockMaster
+        # identity.  The GET remains read-only and fails closed to an unknown
+        # market price rather than bootstrapping identity from raw daily rows.
+        latest_price = None
+    close_price = (
+        float(latest_price.close_price)
+        if latest_price is not None and latest_price.close_price is not None
+        else None
     )
-
-    close_price = latest_price.close_price if latest_price is not None else None
     issued_shares = profile.issued_shares
 
     market_cap: float | None = None

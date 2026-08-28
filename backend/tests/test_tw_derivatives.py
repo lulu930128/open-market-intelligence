@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -11,6 +11,8 @@ from sqlalchemy.orm import sessionmaker
 from app.db.models import (
     Base,
     MarketIndexDailyStat,
+    RawFetchResult,
+    SourceRegistry,
     TaiwanDerivativesLargeTraderDaily,
     TaiwanFuturesTermStructureDaily,
     TaiwanOptionChainDaily,
@@ -18,6 +20,7 @@ from app.db.models import (
 from app.jobs import backfill_tasks
 from app.market import tw_derivatives
 from app.market.providers import taifex
+from app.market.official_index_contract import TWSE_INDEX_SOURCE_NAME
 
 
 TRADE_DATE = date(2026, 7, 17)
@@ -260,12 +263,35 @@ class TaiwanDerivativesPersistenceTests(unittest.TestCase):
 
     def test_refresh_is_bounded_idempotent_and_builds_summary(self) -> None:
         with self.Session() as db:
+            source = SourceRegistry(
+                source_name=TWSE_INDEX_SOURCE_NAME,
+                source_type="official",
+                category="market_index",
+                reliability_level="official",
+            )
+            db.add(source)
+            db.flush()
+            raw = RawFetchResult(
+                source_id=source.id,
+                method="GET",
+                fetched_at=datetime(2026, 7, 17, 8, tzinfo=timezone.utc),
+                content_hash="tw-derivatives-index-fixture",
+                parser_version="test-index-v1",
+            )
+            db.add(raw)
+            db.flush()
             db.add(
                 MarketIndexDailyStat(
+                    source_id=source.id,
+                    raw_result_id=raw.id,
                     index_id="TAIEX",
                     market="tw",
                     trade_date=TRADE_DATE,
                     close_value=100,
+                    price_change=1,
+                    trade_volume=1_000,
+                    trade_value=100_000,
+                    transaction_count=100,
                     source="test",
                 )
             )

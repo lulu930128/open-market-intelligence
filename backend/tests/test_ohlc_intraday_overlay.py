@@ -16,6 +16,7 @@ from app.db.models import (
     USDailyPrice,
 )
 from app.market.ohlc_overlay import aggregate_ohlc_points
+from app.market.schemas import MarketOhlcChartRead
 from app.market.service import list_stock_ohlc_chart_data
 from app.us_market.service import list_us_ohlc_chart_data
 from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
@@ -51,10 +52,35 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.assertEqual(points[-1]["close"], 101)
 
     def test_taiwan_daily_ohlc_appends_provisional_intraday_candle(self) -> None:
+        source = SourceRegistry(
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+            source_type="official",
+            category="market_data",
+            priority=10,
+            reliability_level="official",
+        )
+        self.db.add(source)
+        self.db.flush()
+        raw = RawFetchResult(
+            source_id=source.id,
+            fetched_at=datetime(2026, 6, 26, 8, tzinfo=timezone.utc),
+            method="GET",
+            content_hash="overlay-canonical-daily",
+        )
+        self.db.add(raw)
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+            )
+        )
+        self.db.flush()
         self.db.add(
             MarketDailyPrice(
-                source_id=1,
-                raw_result_id=1,
+                source_id=source.id,
+                raw_result_id=raw.id,
                 trade_date=date(2026, 6, 26),
                 stock_id="2330",
                 stock_name="TSMC",
@@ -110,6 +136,12 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.assertEqual(chart["points"][-1]["low"], 101.0)
         self.assertEqual(chart["points"][-1]["close"], 105.0)
         self.assertEqual(chart["points"][-1]["volume"], 30)
+        self.assertEqual(chart["volume_unit"], "shares")
+        self.assertEqual(chart["trade_value_unit"], "TWD")
+        self.assertEqual(chart["currency"], "TWD")
+        projected = MarketOhlcChartRead.model_validate(chart)
+        self.assertEqual(projected.trade_value_unit, "TWD")
+        self.assertEqual(projected.currency, "TWD")
         self.assertEqual(chart["intraday_overlay"]["trade_date"], date(2026, 6, 29))
         self.assertEqual(chart["intraday_overlay"]["previous_close"], 101.0)
         self.assertTrue(chart["intraday_overlay"]["provisional"])

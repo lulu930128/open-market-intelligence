@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -9,16 +10,22 @@ from app.db.models import (
     FinancialMetricQuarterly,
     InstitutionalTradeDaily,
     MarginTradingDaily,
-    MarketDailyPrice,
     MonthlyRevenue,
     ShareholdingDistributionWeekly,
     StockMaster,
 )
 from app.market.intraday import get_intraday_trend
 from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
-from app.market.daily_ohlcv_platform import read_taiwan_official_daily
+from app.market.daily_ohlcv_platform import (
+    TaiwanCanonicalDailyRow,
+    project_taiwan_daily_bars,
+    project_taiwan_daily_rows,
+    read_taiwan_official_daily,
+)
+from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import previous_taiwan_trading_day
+from app.market.tw_daily_freshness import read_taiwan_daily_freshness
 from app.market_data.contracts import (
     DatasetHealthStatus,
     ResolvedEvidenceStatus,
@@ -35,41 +42,97 @@ MAX_CHART_BARS = 5000
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 
 
+@dataclass(frozen=True, slots=True)
+class TaiwanMarketDailySnapshot:
+    """One canonical completed-session universe and its matching coverage truth."""
+
+    trade_date: date
+    rows: tuple[TaiwanCanonicalDailyRow, ...] = ()
+    universe_count: int = 0
+    universe_count_by_market: tuple[tuple[str, int], ...] = ()
+    selected_count_by_market: tuple[tuple[str, int], ...] = ()
+    rows_examined: int = 0
+    rows_rejected: int = 0
+    duplicate_candidate_count: int = 0
+    limitations: tuple[str, ...] = ()
+
+
+def read_market_daily_snapshot(
+    db: Session,
+    *,
+    trade_date: date | None = None,
+    include_etf: bool = False,
+) -> TaiwanMarketDailySnapshot:
+    """Read rows and coverage metadata from the same canonical repository call."""
+
+    completed_date = expected_daily_price_date()
+    effective_date = min(trade_date, completed_date) if trade_date else completed_date
+    universe = TaiwanOfficialDailyBarRepository(db).load_market_universe(
+        trade_date=effective_date,
+        include_etf=include_etf,
+    )
+    return TaiwanMarketDailySnapshot(
+        trade_date=effective_date,
+        rows=tuple(project_taiwan_daily_bars(db, universe.bars)),
+        universe_count=universe.universe_count,
+        universe_count_by_market=universe.universe_count_by_market,
+        selected_count_by_market=universe.selected_count_by_market,
+        rows_examined=universe.rows_examined,
+        rows_rejected=universe.rows_rejected,
+        duplicate_candidate_count=universe.duplicate_candidate_count,
+        limitations=universe.limitations,
+    )
+
+
 def list_market_daily_prices(
     db: Session,
     trade_date: date | None = None,
     stock_id: str | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> list[MarketDailyPrice]:
-    query = db.query(MarketDailyPrice)
+) -> list[TaiwanCanonicalDailyRow]:
+    """Read selected official daily observations through the canonical owner."""
 
-    if trade_date is not None:
-        query = query.filter(MarketDailyPrice.trade_date == trade_date)
-
+    if limit < 1 or limit > 20_000:
+        raise ValueError("limit must be between 1 and 20000")
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
     if stock_id is not None:
-        query = query.filter(MarketDailyPrice.stock_id == stock_id)
-
-    return (
-        query.order_by(
-            MarketDailyPrice.trade_date.desc(),
-            MarketDailyPrice.stock_id.asc(),
+        result = read_taiwan_official_daily(
+            db,
+            stock_id=stock_id,
+            from_date=trade_date,
+            to_date=trade_date,
+            limit=1 if trade_date is not None else min(limit + offset, 5000),
         )
-        .offset(offset)
-        .limit(limit)
-        .all()
+        return project_taiwan_daily_rows(db, result)[offset : offset + limit]
+
+    snapshot = read_market_daily_snapshot(
+        db,
+        trade_date=trade_date,
+        include_etf=True,
     )
+    return list(snapshot.rows[offset : offset + limit])
 
 
-def get_latest_trade_date(db: Session) -> date | None:
-    return db.query(func.max(MarketDailyPrice.trade_date)).scalar()
+def get_latest_trade_date(
+    db: Session,
+    *,
+    requested_at: datetime | None = None,
+) -> date | None:
+    """Return the latest release-qualified Taiwan completed-session date."""
+
+    return read_taiwan_daily_freshness(
+        db,
+        checked_at=requested_at,
+    ).latest_date
 
 
 def list_latest_market_daily_prices(
     db: Session,
     limit: int = 100,
     offset: int = 0,
-) -> list[MarketDailyPrice]:
+) -> list[TaiwanCanonicalDailyRow]:
     latest_trade_date = get_latest_trade_date(db)
 
     if latest_trade_date is None:
@@ -86,13 +149,10 @@ def list_latest_market_daily_prices(
 def get_latest_stock_daily_price(
     db: Session,
     stock_id: str,
-) -> MarketDailyPrice | None:
-    return (
-        db.query(MarketDailyPrice)
-        .filter(MarketDailyPrice.stock_id == stock_id)
-        .order_by(MarketDailyPrice.trade_date.desc())
-        .first()
-    )
+) -> TaiwanCanonicalDailyRow | None:
+    result = read_taiwan_official_daily(db, stock_id=stock_id, limit=1)
+    rows = project_taiwan_daily_rows(db, result)
+    return rows[-1] if rows else None
 
 
 def list_stock_daily_history(
@@ -102,26 +162,16 @@ def list_stock_daily_history(
     to_date: date | None = None,
     limit: int = 250,
     ascending: bool = True,
-) -> list[MarketDailyPrice]:
-    query = db.query(MarketDailyPrice).filter(MarketDailyPrice.stock_id == stock_id)
-
-    if from_date is not None:
-        query = query.filter(MarketDailyPrice.trade_date >= from_date)
-
-    if to_date is not None:
-        query = query.filter(MarketDailyPrice.trade_date <= to_date)
-
-    # Get latest N rows first, then reverse to chronological order for charting.
-    rows = (
-        query.order_by(MarketDailyPrice.trade_date.desc())
-        .limit(limit)
-        .all()
+) -> list[TaiwanCanonicalDailyRow]:
+    result = read_taiwan_official_daily(
+        db,
+        stock_id=stock_id,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
     )
-
-    if ascending:
-        rows.reverse()
-
-    return rows
+    rows = project_taiwan_daily_rows(db, result)
+    return rows if ascending else list(reversed(rows))
 
 
 def list_stock_chart_data(
@@ -164,7 +214,7 @@ def _sum_nullable(values: list[int | None]) -> int | None:
     return sum(valid_values)
 
 
-def _chart_row(row: MarketDailyPrice, time_value: date | None = None) -> dict:
+def _chart_row(row: TaiwanCanonicalDailyRow, time_value: date | None = None) -> dict:
     return {
         "time": time_value or row.trade_date,
         "open": row.open_price,
@@ -204,12 +254,13 @@ def _platform_daily_read(
     stock: StockMaster,
     start_date: date,
     end_date: date,
+    requested_to_date: date | None,
 ) -> tuple[list[dict], MarketDataResultV1]:
     result = read_taiwan_official_daily(
         db,
         stock_id=stock.stock_id,
         from_date=start_date,
-        to_date=end_date,
+        to_date=requested_to_date,
         limit=MAX_CHART_BARS,
     )
     return [_platform_chart_row(bar) for bar in result.resolved.bars], result
@@ -221,6 +272,7 @@ def _daily_points_with_platform(
     stock_id: str,
     start_date: date,
     end_date: date,
+    requested_to_date: date | None,
 ) -> tuple[list[dict], date | None, MarketDataResultV1 | None]:
     stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
     if stock is not None and str(stock.market or "").strip().upper() in {"TWSE", "TPEX"}:
@@ -229,18 +281,11 @@ def _daily_points_with_platform(
             stock=stock,
             start_date=start_date,
             end_date=end_date,
+            requested_to_date=requested_to_date,
         )
         latest_date = points[-1]["time"] if points else None
         return points, latest_date, result
-    rows = list_stock_daily_history(
-        db=db,
-        stock_id=stock_id,
-        from_date=start_date,
-        to_date=end_date,
-        limit=MAX_CHART_BARS,
-        ascending=True,
-    )
-    return [_chart_row(row) for row in rows], (rows[-1].trade_date if rows else None), None
+    return [], None, None
 
 
 def _platform_quality(result: MarketDataResultV1 | None) -> tuple[str, list[str]]:
@@ -264,17 +309,6 @@ def _platform_quality(result: MarketDataResultV1 | None) -> tuple[str, list[str]
     return quality, list(dict.fromkeys(warnings))
 
 
-def _aggregate_market_rows(
-    rows: list[MarketDailyPrice],
-    timeframe: str,
-) -> list[dict]:
-    return aggregate_ohlc_points(
-        points=[_chart_row(row) for row in rows],
-        timeframe=timeframe,
-        sum_fields=("volume", "trade_value", "transaction_count"),
-    )
-
-
 def list_stock_ohlc_chart_data(
     db: Session,
     stock_id: str,
@@ -295,11 +329,15 @@ def list_stock_ohlc_chart_data(
     if bars > MAX_CHART_BARS:
         raise ValueError(f"bars must be less than or equal to {MAX_CHART_BARS}.")
 
-    end_date = to_date or date.today()
-    resolved_expected_data_date = (
-        previous_taiwan_trading_day(end_date, include_value=True)
+    latest_potentially_released_date = expected_daily_price_date()
+    end_date = (
+        min(to_date, latest_potentially_released_date)
         if to_date is not None
-        else expected_daily_price_date()
+        else latest_potentially_released_date
+    )
+    resolved_expected_data_date = previous_taiwan_trading_day(
+        end_date,
+        include_value=True,
     )
     lookback_days = bars * CHART_LOOKBACK_MULTIPLIER[timeframe]
     start_date = end_date - timedelta(days=lookback_days)
@@ -310,12 +348,14 @@ def list_stock_ohlc_chart_data(
         stock_id=stock_id,
         start_date=start_date,
         end_date=end_date,
+        requested_to_date=to_date,
     )
-    base_points = aggregate_ohlc_points(
+    available_points = aggregate_ohlc_points(
         points=daily_points,
         timeframe=timeframe,
         sum_fields=("volume", "trade_value", "transaction_count"),
-    )[-bars:]
+    )
+    base_points = available_points[-bars:]
     refresh_reasons: list[str] = []
     if len(base_points) < bars:
         refresh_reasons.append("insufficient_history")
@@ -360,15 +400,23 @@ def list_stock_ohlc_chart_data(
     return {
         "stock_id": stock_id,
         "timeframe": timeframe,
+        "requested_bar_count": bars,
+        "available_bar_count": len(available_points),
+        "returned_point_count": len(points),
         "bars": bars,
+        "bars_legacy_count": bars,
+        "deprecated_fields": ["bars"],
         "lookback_days": lookback_days,
         "from_date": start_date,
         "to_date": end_date,
+        "requested_to_date": to_date,
         "point_count": len(points),
         "points": points,
         "backfill": backfill_result,
         "intraday_overlay": intraday_overlay,
         "volume_unit": "shares",
+        "trade_value_unit": "TWD",
+        "currency": "TWD",
         "volume_semantics": (
             "provisional_cumulative_traded_shares_overlay"
             if intraday_overlay is not None
@@ -381,7 +429,7 @@ def list_stock_ohlc_chart_data(
         "latest_finalized_data_date": latest_data_date,
         "expected_data_date": resolved_expected_data_date,
         "freshness_status": freshness_status,
-        "is_current": freshness_status in {"current", "future"},
+        "is_current": freshness_status == "current",
         "refresh_recommended": freshness_status in {"missing", "stale"},
     }
 

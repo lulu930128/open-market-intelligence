@@ -115,6 +115,16 @@ def expected_daily_price_date(
     )
 
 
+def taiwan_daily_price_release_at(trade_date: date) -> datetime:
+    """Return the canonical release boundary for one Taiwan daily session."""
+
+    return datetime.combine(
+        trade_date,
+        TAIWAN_DAILY_PRICE_RELEASE_TIME,
+        tzinfo=TAIWAN_TZ,
+    )
+
+
 def expected_institutional_trade_date(
     *,
     include_today: bool | None = None,

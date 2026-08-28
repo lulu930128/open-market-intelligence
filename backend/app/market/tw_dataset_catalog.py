@@ -112,6 +112,13 @@ class TaiwanDatasetContract(CanonicalModel):
         ):
             raise ValueError("lineage-gap dataset cannot advertise repairability")
         if (
+            self.lineage_status is TaiwanDatasetLineageStatus.LINEAGE_GAP
+            and self.advertised
+        ):
+            raise ValueError(
+                "lineage-gap dataset cannot be advertised as production-ready"
+            )
+        if (
             self.convergence_status is TaiwanDatasetConvergenceStatus.PLATFORM_OWNED
             and self.lineage_status
             not in {
@@ -399,6 +406,7 @@ def _dataset(
         frequency=frequency,
         expected_state_policy=expected,
         eligibility_policy=eligibility,
+        advertised=(lineage is not TaiwanDatasetLineageStatus.LINEAGE_GAP),
         refreshable=refresh_operation is not None,
         repairable=repairable,
         refresh_operation=refresh_operation,

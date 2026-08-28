@@ -25,6 +25,7 @@ from app.market.trading_calendar import (
     TAIWAN_TZ,
     previous_taiwan_trading_day,
 )
+from app.sources.defaults import TWSE_RWD_DAILY_TRADING_SOURCE_NAME
 
 
 def make_session() -> Session:
@@ -69,9 +70,10 @@ def add_daily_history(
     count: int = 80,
 ) -> None:
     source = SourceRegistry(
-        source_name=f"test-daily-{stock_id}",
-        source_type="test",
+        source_name=TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+        source_type="official",
         category="market_daily_price",
+        reliability_level="official",
     )
     db.add(source)
     db.flush()
@@ -357,7 +359,7 @@ class NextSessionPlanServiceTests(unittest.TestCase):
         self.assertFalse(plan["readiness"]["decision_usable"])
         self.assertEqual(plan["levels"], [])
 
-    def test_missing_stock_master_keeps_math_but_blocks_decision_use(self) -> None:
+    def test_missing_stock_master_fails_closed_without_raw_daily_fallback(self) -> None:
         add_daily_history(self.db)
 
         plan = build_tw_stock_next_session_plan(
@@ -366,9 +368,9 @@ class NextSessionPlanServiceTests(unittest.TestCase):
             now=datetime(2026, 8, 9, 10, tzinfo=TAIWAN_TZ),
         )
 
-        self.assertEqual(plan["status"], "partial")
+        self.assertEqual(plan["status"], "missing")
         self.assertFalse(plan["readiness"]["decision_usable"])
-        self.assertIn("instrument_metadata_partial", plan["readiness"]["reason_codes"])
+        self.assertIn("daily_close_missing", plan["readiness"]["reason_codes"])
 
 
 class NextSessionPlanApiContractTests(unittest.TestCase):

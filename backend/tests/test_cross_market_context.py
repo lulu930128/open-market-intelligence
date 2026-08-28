@@ -17,6 +17,7 @@ from app.db.models import (
     RawFetchResult,
     ResourceQuoteSnapshot,
     SourceRegistry,
+    StockMaster,
     USDailyPrice,
 )
 from app.main import app
@@ -38,6 +39,7 @@ from app.market.cross_market.snapshot_store import (
     read_cross_market_target_context,
 )
 from app.routers.cross_market import get_cross_market_context
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
 DECISION_AT = datetime(2026, 8, 9, 1, 0, tzinfo=timezone.utc)
@@ -116,15 +118,23 @@ def add_tw_daily(
     trade_date: date = ADR_TRADE_DATE,
     available_at: datetime = DECISION_AT,
 ) -> None:
-    source = SourceRegistry(
-        source_name=f"test-cross-market-context-tw-{trade_date.isoformat()}",
-        source_type="test",
-        category="market_daily_price",
+    source = (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.source_name == TWSE_DAILY_TRADING_SOURCE_NAME)
+        .one_or_none()
     )
-    db.add(source)
-    db.flush()
+    if source is None:
+        source = SourceRegistry(
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+            source_type="official",
+            category="market_daily_price",
+            reliability_level="official",
+        )
+        db.add(source)
+        db.flush()
     raw = RawFetchResult(
         source_id=source.id,
+        fetched_at=available_at,
         method="GET",
         url="https://example.test/tw",
         status_code=200,
@@ -133,6 +143,21 @@ def add_tw_daily(
     )
     db.add(raw)
     db.flush()
+    if (
+        db.query(StockMaster)
+        .filter(StockMaster.stock_id == "2330")
+        .one_or_none()
+        is None
+    ):
+        db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="台積電",
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            )
+        )
     db.add(
         MarketDailyPrice(
             source_id=source.id,
@@ -140,6 +165,9 @@ def add_tw_daily(
             trade_date=trade_date,
             stock_id="2330",
             stock_name="台積電",
+            open_price=close_price,
+            high_price=close_price,
+            low_price=close_price,
             close_price=close_price,
             created_at=available_at,
             updated_at=available_at,

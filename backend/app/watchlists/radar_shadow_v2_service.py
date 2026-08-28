@@ -9,7 +9,6 @@ from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    MarketDailyPrice,
     RadarEvaluationEventLink,
     RadarFeatureSnapshot,
     RadarOutcomePath,
@@ -22,6 +21,7 @@ from app.db.models import (
     utc_now,
 )
 from app.market.trading_calendar import TAIWAN_TZ
+from app.market.tw_daily_freshness import read_taiwan_daily_freshness
 from app.market.tw_market_breadth_contract import TW_MARKET_BREADTH_VERSION
 from app.watchlists.radar_regime_v2 import (
     classify_instrument_regime,
@@ -2101,9 +2101,10 @@ def evaluate_pending_radar_v2_outcomes(
             }
         )
 
-    latest_available_trade_date = as_of_trade_date or (
-        db.query(func.max(MarketDailyPrice.trade_date)).scalar()
-    )
+    latest_available_trade_date = as_of_trade_date or read_taiwan_daily_freshness(
+        db,
+        checked_at=attempt_at,
+    ).latest_date
     query = (
         db.query(RadarOutcomePath)
         .join(

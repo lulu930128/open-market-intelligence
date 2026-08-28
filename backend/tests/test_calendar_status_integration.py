@@ -127,6 +127,64 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(task_args[1], date(2026, 6, 12))
         self.assertFalse(task_args[2])
 
+    def test_market_chip_daily_scheduler_adds_retry_and_startup_catchup(self) -> None:
+        fake_scheduler = SimpleNamespace(add_job=Mock())
+
+        with (
+            patch.object(scheduler.settings, "enable_scheduler", True),
+            patch.object(
+                scheduler.settings,
+                "scheduler_market_chip_refresh_time",
+                "15:10",
+            ),
+            patch.object(
+                scheduler.settings,
+                "scheduler_market_chip_refresh_retry_delay_minutes",
+                30,
+            ),
+        ):
+            added = scheduler._add_market_chip_daily_refresh_jobs(
+                fake_scheduler
+            )
+
+        self.assertTrue(added)
+        self.assertEqual(fake_scheduler.add_job.call_count, 3)
+        primary, retry, startup = fake_scheduler.add_job.call_args_list
+        self.assertIs(
+            primary.args[0],
+            scheduler.enqueue_market_chip_daily_refresh,
+        )
+        self.assertEqual(primary.kwargs["id"], "market_chip_daily_refresh")
+        self.assertEqual(primary.kwargs["hour"], 15)
+        self.assertEqual(primary.kwargs["minute"], 10)
+        self.assertIs(
+            retry.args[0],
+            scheduler.enqueue_market_chip_daily_refresh,
+        )
+        self.assertEqual(
+            retry.kwargs["id"],
+            "market_chip_daily_refresh_retry",
+        )
+        self.assertEqual(retry.kwargs["hour"], 15)
+        self.assertEqual(retry.kwargs["minute"], 40)
+        self.assertIs(
+            startup.args[0],
+            scheduler.enqueue_market_chip_daily_startup_catchup,
+        )
+        self.assertEqual(
+            startup.kwargs["id"],
+            "market_chip_daily_startup_catchup",
+        )
+
+    def test_market_chip_daily_startup_catchup_allows_closed_day_repair(self) -> None:
+        with patch.object(
+            scheduler,
+            "enqueue_market_chip_daily_refresh",
+        ) as enqueue:
+            scheduler.enqueue_market_chip_daily_startup_catchup()
+
+        enqueue.assert_called_once_with(allow_non_trading_day=True)
+
     def test_scheduler_market_chip_margin_refresh_uses_margin_window(self) -> None:
         fake_db = SimpleNamespace(close=Mock())
         calendar_status = {

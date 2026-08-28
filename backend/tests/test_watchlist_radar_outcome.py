@@ -12,6 +12,7 @@ from app.db.models import (
     MarketIntradayBar,
     RawFetchResult,
     SourceRegistry,
+    StockMaster,
     WatchlistGroup,
     WatchlistRadarOutcome,
     WatchlistRadarSnapshotItem,
@@ -19,6 +20,7 @@ from app.db.models import (
 )
 from app.watchlists import radar_outcome_service
 from app.watchlists.schemas import WatchlistRadarOutcomeSummaryRead
+from app.sources.defaults import TWSE_RWD_DAILY_TRADING_SOURCE_NAME
 
 
 def make_session() -> Session:
@@ -40,9 +42,10 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
 
     def add_source(self) -> tuple[int, int]:
         source = SourceRegistry(
-            source_name="test-market-daily-price",
-            source_type="test",
+            source_name=TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+            source_type="official",
             category="market_daily_price",
+            reliability_level="official",
         )
         self.db.add(source)
         self.db.flush()
@@ -71,6 +74,16 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
         low_price: float | None = None,
         trade_volume: int | None = None,
     ) -> None:
+        if self.db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first() is None:
+            self.db.add(
+                StockMaster(
+                    stock_id=stock_id,
+                    stock_name=stock_id,
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                )
+            )
         self.db.add(
             MarketDailyPrice(
                 source_id=source_id,
@@ -97,6 +110,16 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
         low_price: float,
         close_price: float,
     ) -> None:
+        if self.db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first() is None:
+            self.db.add(
+                StockMaster(
+                    stock_id=stock_id,
+                    stock_name=stock_id,
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                )
+            )
         self.db.add(
             MarketIntradayBar(
                 provider="test",
@@ -425,7 +448,7 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
             61.5,
         )
 
-    def test_evaluate_snapshot_uses_complete_intraday_session_fallback(self) -> None:
+    def test_evaluate_snapshot_rejects_unlined_intraday_storage_fallback(self) -> None:
         group = self.add_group()
         self.save_snapshot(
             group.id,
@@ -454,11 +477,8 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
             mode="action",
         )
 
-        self.assertEqual(summary["status"], "evaluated")
-        self.assertEqual(summary["hit_count"], 1)
-        self.assertEqual(summary["items"][0]["outcome_trade_date"], date(2026, 7, 7))
-        self.assertEqual(summary["items"][0]["outcome_close_price"], 103)
-        self.assertIn("收盤後分時資料", summary["items"][0]["reason"])
+        self.assertEqual(summary["status"], "pending")
+        self.assertEqual(summary["pending_count"], 1)
 
     def test_evaluate_snapshot_rejects_incomplete_intraday_session(self) -> None:
         group = self.add_group()

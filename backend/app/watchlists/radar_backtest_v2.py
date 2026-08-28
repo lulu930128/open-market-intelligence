@@ -2,24 +2,24 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from math import sqrt
 from statistics import mean, median, stdev
 from typing import Any, Iterable
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    MarketDailyPrice,
     RadarBacktestRun,
     RadarFeatureSnapshot,
     RadarOutcomeEventLink,
     RadarOutcomePath,
     RadarRuleEvaluation,
     RadarUniverseObservation,
+    StockMaster,
     utc_now,
 )
+from app.market.tw_daily_freshness import read_taiwan_daily_freshness_batch
 from app.market.trading_calendar import TAIWAN_TZ
 from app.watchlists.radar_rule_contract import config_hash
 from app.watchlists.radar_v2_service import json_dumps, json_loads
@@ -174,39 +174,52 @@ def point_in_time_daily_coverage(
             if str(stock_id).strip()
         }
     )
-    query = (
-        db.query(
-            MarketDailyPrice.stock_id,
-            func.count(func.distinct(MarketDailyPrice.trade_date)).label(
-                "history_days"
-            ),
-            func.max(MarketDailyPrice.trade_date).label("latest_trade_date"),
+    if not normalized_stock_ids:
+        universe_rows = (
+            db.query(StockMaster.stock_id)
+            .filter(StockMaster.is_active.is_(True))
+            .filter(StockMaster.market.in_(("TWSE", "TPEX")))
+            .order_by(StockMaster.stock_id.asc())
+            .limit(5001)
+            .all()
         )
-        .filter(MarketDailyPrice.trade_date <= as_of_date)
-        .group_by(MarketDailyPrice.stock_id)
+        if len(universe_rows) > 5000:
+            raise ValueError("Radar backtest universe exceeds the 5000-symbol bound.")
+        normalized_stock_ids = [
+            str(row.stock_id)
+            for row in universe_rows
+        ]
+    evidence = read_taiwan_daily_freshness_batch(
+        db,
+        stock_ids=normalized_stock_ids,
+        checked_at=datetime.combine(
+            as_of_date,
+            time(23, 59, 59),
+            tzinfo=TAIWAN_TZ,
+        ),
+        expected_date=as_of_date,
     )
-    if normalized_stock_ids:
-        query = query.filter(MarketDailyPrice.stock_id.in_(normalized_stock_ids))
-    rows = query.all()
     coverage = [
         {
-            "stock_id": str(row.stock_id),
-            "history_days": int(row.history_days or 0),
-            "latest_trade_date": row.latest_trade_date,
-            "has_as_of_bar": row.latest_trade_date == as_of_date,
+            "stock_id": stock_id,
+            "history_days": item.row_count,
+            "latest_trade_date": item.latest_date,
+            "has_as_of_bar": item.latest_date == as_of_date,
             "eligible": (
-                int(row.history_days or 0) >= required_history_days
-                and row.latest_trade_date == as_of_date
+                item.row_count >= required_history_days
+                and item.latest_date == as_of_date
             ),
         }
-        for row in rows
+        for stock_id in normalized_stock_ids
+        for item in [evidence[stock_id]]
+        if item.latest_date is not None
     ]
     covered_ids = {row["stock_id"] for row in coverage}
     missing_ids = [
         stock_id for stock_id in normalized_stock_ids if stock_id not in covered_ids
     ]
     eligible = [row for row in coverage if row["eligible"]]
-    requested_count = len(normalized_stock_ids) if normalized_stock_ids else len(coverage)
+    requested_count = len(normalized_stock_ids)
     coverage_ratio = len(eligible) / requested_count if requested_count else 0.0
     return {
         "scope": "bounded_local_price_universe",
@@ -220,6 +233,7 @@ def point_in_time_daily_coverage(
         "missing_stock_ids": missing_ids,
         "stocks": coverage,
         "limitations": [
+            "point_in_time_receipt_availability_applied",
             "point_in_time_listing_membership_unavailable",
             "delisted_and_survivorship_coverage_not_proven",
         ],

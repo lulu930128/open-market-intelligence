@@ -314,8 +314,11 @@ def read_taiwan_official_index(
     requested_at: datetime | None = None,
 ) -> MarketDataResultV1:
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
-    effective_trade_date = trade_date or expected_daily_price_date(
-        now=effective_requested_at
+    latest_completed = expected_daily_price_date(now=effective_requested_at)
+    effective_trade_date = (
+        min(trade_date, latest_completed)
+        if trade_date is not None and latest_completed is not None
+        else trade_date or latest_completed
     )
     if effective_trade_date is None:
         raise ValueError("latest completed Taiwan trade date is unavailable")
@@ -324,11 +327,67 @@ def read_taiwan_official_index(
         trade_date=effective_trade_date,
         requested_at=effective_requested_at,
     )
-    return MarketDataGateway().resolve_market_index(
+    result = MarketDataGateway().resolve_market_index(
         requirement,
         reader=TaiwanOfficialIndexCandidateReader(
-            TaiwanOfficialIndexRepository(db)
+            TaiwanOfficialIndexRepository(
+                db,
+                available_at=effective_requested_at,
+            )
         ),
+    )
+    if trade_date is None or trade_date <= effective_trade_date:
+        return result
+    return result.model_copy(
+        update={
+            "limitations": tuple(
+                dict.fromkeys(
+                    (
+                        *result.limitations,
+                        "REQUESTED_INDEX_DATE_EXCEEDS_LATEST_RELEASED_DATE",
+                    )
+                )
+            )
+        }
+    )
+
+
+def read_taiwan_official_index_series(
+    db: Session,
+    *,
+    index_id: str,
+    to_date: date | None = None,
+    limit: int = 250,
+    requested_at: datetime | None = None,
+) -> tuple[MarketDataResultV1, ...]:
+    """Read a bounded canonical completed-session index series."""
+
+    effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
+    latest_completed = expected_daily_price_date(now=effective_requested_at)
+    if latest_completed is None:
+        return ()
+    effective_to_date = min(to_date, latest_completed) if to_date else latest_completed
+    repository = TaiwanOfficialIndexRepository(
+        db,
+        available_at=effective_requested_at,
+    )
+    trade_dates = repository.preload_market_index_series(
+        index_id=index_id,
+        to_date=effective_to_date,
+        limit=limit,
+    )
+    gateway = MarketDataGateway()
+    reader = TaiwanOfficialIndexCandidateReader(repository)
+    return tuple(
+        gateway.resolve_market_index(
+            build_taiwan_official_index_read_requirement(
+                index_id=index_id,
+                trade_date=trade_date,
+                requested_at=effective_requested_at,
+            ),
+            reader=reader,
+        )
+        for trade_date in trade_dates
     )
 
 
@@ -384,5 +443,6 @@ __all__ = [
     "TaiwanOfficialIndexPlatform",
     "build_taiwan_official_index_read_requirement",
     "read_taiwan_official_index",
+    "read_taiwan_official_index_series",
     "refresh_taiwan_official_index",
 ]

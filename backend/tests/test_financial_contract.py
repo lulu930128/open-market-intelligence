@@ -16,6 +16,7 @@ from app.db.models import (
     MarketDailyPrice,
     RawFetchResult,
     SourceRegistry,
+    StockMaster,
     TaiwanFinancialBasisAssessment,
     TaiwanFinancialFiling,
     TaiwanFinancialNormalizedFact,
@@ -31,6 +32,7 @@ from app.market.financial_contract import (
 from app.market.financial_metric_normalization import NormalizedPeriodFact
 from app.market.schemas import TaiwanFinancialContractRead
 from app.routers.market import get_stock_financial_contract_api, router
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
 def _financial_row(
@@ -613,7 +615,7 @@ class FinancialContractTests(unittest.TestCase):
                 )
             )
             daily_source = SourceRegistry(
-                source_name="TWSE official daily close test",
+                source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
                 source_type="official",
                 category="daily_price",
                 enabled=True,
@@ -633,12 +635,24 @@ class FinancialContractTests(unittest.TestCase):
             db.add(daily_raw)
             db.flush()
             db.add(
+                StockMaster(
+                    stock_id="2327",
+                    stock_name="國巨",
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                )
+            )
+            db.add(
                 MarketDailyPrice(
                     source_id=daily_source.id,
                     raw_result_id=daily_raw.id,
                     trade_date=date(2026, 7, 30),
                     stock_id="2327",
                     stock_name="國巨",
+                    open_price=456.5,
+                    high_price=456.5,
+                    low_price=456.5,
                     close_price=456.5,
                 )
             )
@@ -665,7 +679,7 @@ class FinancialContractTests(unittest.TestCase):
             self.assertEqual(result["valuation"]["pe_ttm"], Decimal("35.87"))
             self.assertEqual(
                 result["valuation"]["price_basis"],
-                "latest_completed_daily_close:market_daily_price",
+                "latest_completed_daily_close:canonical_daily",
             )
             self.assertEqual(
                 result["valuation"]["price_trade_date"],
@@ -673,7 +687,7 @@ class FinancialContractTests(unittest.TestCase):
             )
             self.assertEqual(
                 result["valuation"]["price_source"],
-                "TWSE official daily close test",
+                TWSE_DAILY_TRADING_SOURCE_NAME,
             )
             self.assertTrue(result["quality"]["decision_usable"])
             self.assertTrue(

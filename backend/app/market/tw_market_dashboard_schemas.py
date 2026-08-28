@@ -32,6 +32,8 @@ class TaiwanDashboardBreadthRead(BaseModel):
     price_semantics: str
     provisional: bool
     decision_usable: bool
+    deprecated: bool = False
+    canonical_ref: str | None = None
     universe: int
     coverage: int
     advance: int

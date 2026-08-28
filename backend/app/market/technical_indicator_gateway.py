@@ -99,12 +99,14 @@ def calculate_active_latest_daily_indicator(
     *,
     db: Session,
     stock_id: str,
+    to_date: date | None = None,
     limit: int = 400,
     parameters: TechnicalAnalysisParameters | None = None,
 ) -> Any | None:
     points = calculate_active_daily_indicators(
         db=db,
         stock_id=stock_id,
+        to_date=to_date,
         limit=limit,
         parameters=parameters,
     )

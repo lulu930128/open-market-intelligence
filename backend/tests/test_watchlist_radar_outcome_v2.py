@@ -10,11 +10,15 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     Base,
     MarketDailyPrice,
+    RawFetchResult,
     RadarFeatureSnapshot,
     RadarOutcomePath,
     RadarRuleConfig,
     RadarRuleEvaluation,
+    SourceRegistry,
+    StockMaster,
 )
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 from app.watchlists.radar_outcome_v2_service import (
     OutcomePathBar,
     _corporate_action_context,
@@ -240,12 +244,42 @@ class WatchlistRadarOutcomeV2PersistenceTests(unittest.TestCase):
         return evaluation.id
 
     def _add_daily_bars(self, db: Session, *, count: int) -> None:
+        source = SourceRegistry(
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+            source_type="official",
+            category="market_daily_price",
+            reliability_level="official",
+        )
+        db.add(source)
+        db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="台積電",
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            )
+        )
+        db.flush()
         dates = trading_dates_after(date(2026, 7, 28), count)
         for index, trade_date in enumerate(dates, start=1):
+            raw = RawFetchResult(
+                source_id=source.id,
+                fetched_at=datetime.combine(
+                    trade_date,
+                    datetime.min.time(),
+                    tzinfo=UTC,
+                ).replace(hour=8),
+                method="GET",
+                content_hash=f"radar-outcome-{trade_date.isoformat()}",
+                parser_version="radar-outcome-test-v1",
+            )
+            db.add(raw)
+            db.flush()
             db.add(
                 MarketDailyPrice(
-                    source_id=1,
-                    raw_result_id=index,
+                    source_id=source.id,
+                    raw_result_id=raw.id,
                     trade_date=trade_date,
                     stock_id="2330",
                     stock_name="台積電",

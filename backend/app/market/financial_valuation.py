@@ -5,15 +5,18 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketDailyPrice, SourceRegistry
+from app.market.daily_ohlcv_platform import (
+    TaiwanCanonicalDailyRow,
+    project_taiwan_daily_rows,
+    read_taiwan_official_daily,
+)
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import TAIWAN_TZ
 
 
-DAILY_CLOSE_PRICE_BASIS = "latest_completed_daily_close:market_daily_price"
+DAILY_CLOSE_PRICE_BASIS = "latest_completed_daily_close:canonical_daily"
 TRUSTED_DAILY_CLOSE_SOURCE_LEVELS = frozenset(
     {"official", "regulated_filing", "verified_official_mirror"}
 )
@@ -62,8 +65,8 @@ class DailyCloseValuationInput:
         if self.row_id is None:
             return None
         return {
-            "type": "table",
-            "name": "market_daily_price",
+            "type": "canonical_evidence",
+            "name": "daily.ohlcv",
             "row_id": self.row_id,
             "source_id": self.source_id,
             "source_name": self.source_name,
@@ -92,8 +95,7 @@ def _unavailable(
     status: DailyCloseResolutionStatus,
     expected_trade_date: date,
     issue_code: str,
-    row: MarketDailyPrice | None = None,
-    source: SourceRegistry | None = None,
+    row: TaiwanCanonicalDailyRow | None = None,
 ) -> DailyCloseValuationInput:
     return DailyCloseValuationInput(
         status=status,
@@ -103,10 +105,8 @@ def _unavailable(
         expected_trade_date=expected_trade_date,
         trade_date=row.trade_date if row is not None else None,
         source_id=row.source_id if row is not None else None,
-        source_name=source.source_name if source is not None else None,
-        source_reliability=(
-            source.reliability_level if source is not None else None
-        ),
+        source_name=row.selected_source if row is not None else None,
+        source_reliability="official" if row is not None else None,
         raw_result_id=row.raw_result_id if row is not None else None,
         row_id=row.id if row is not None else None,
         issue_codes=(issue_code,),
@@ -121,68 +121,36 @@ def resolve_latest_completed_daily_close(
 ) -> DailyCloseValuationInput:
     resolved_as_of = _aware_as_of(as_of)
     expected_trade_date = expected_daily_price_date(now=resolved_as_of)
-    latest_available_date = (
-        db.query(func.max(MarketDailyPrice.trade_date))
-        .filter(
-            MarketDailyPrice.stock_id == stock_id,
-            MarketDailyPrice.trade_date <= expected_trade_date,
-            MarketDailyPrice.close_price.is_not(None),
-        )
-        .scalar()
+    result = read_taiwan_official_daily(
+        db,
+        stock_id=stock_id,
+        to_date=expected_trade_date,
+        limit=1,
+        requested_at=resolved_as_of,
     )
-    if latest_available_date is None:
+    rows = project_taiwan_daily_rows(db, result)
+    if not rows:
+        untrusted = any(
+            item.reason_code == "DAILY_SOURCE_RELIABILITY_UNTRUSTED"
+            for item in result.candidate_rejections
+        )
         return _unavailable(
-            status="missing",
+            status="untrusted" if untrusted else "missing",
             expected_trade_date=expected_trade_date,
-            issue_code="valuation_price_missing_expected_close",
+            issue_code=(
+                "valuation_price_source_untrusted"
+                if untrusted
+                else "valuation_price_missing_expected_close"
+            ),
         )
 
-    candidates = (
-        db.query(MarketDailyPrice, SourceRegistry)
-        .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-        .filter(
-            MarketDailyPrice.stock_id == stock_id,
-            MarketDailyPrice.trade_date == latest_available_date,
-            MarketDailyPrice.close_price.is_not(None),
-        )
-        .order_by(
-            SourceRegistry.priority.asc(),
-            MarketDailyPrice.updated_at.desc(),
-            MarketDailyPrice.id.desc(),
-        )
-        .all()
-    )
-    if not candidates:
-        return _unavailable(
-            status="missing",
-            expected_trade_date=expected_trade_date,
-            issue_code="valuation_price_missing_expected_close",
-        )
-
-    trusted = [
-        candidate
-        for candidate in candidates
-        if candidate[1].reliability_level
-        in TRUSTED_DAILY_CLOSE_SOURCE_LEVELS
-    ]
-    if not trusted:
-        row, source = candidates[0]
-        return _unavailable(
-            status="untrusted",
-            expected_trade_date=expected_trade_date,
-            issue_code="valuation_price_source_untrusted",
-            row=row,
-            source=source,
-        )
-
-    row, source = trusted[0]
+    row = rows[-1]
     if row.trade_date != expected_trade_date:
         return _unavailable(
             status="stale",
             expected_trade_date=expected_trade_date,
             issue_code="valuation_price_expected_close_stale",
             row=row,
-            source=source,
         )
     try:
         price = Decimal(str(row.close_price))
@@ -192,7 +160,6 @@ def resolve_latest_completed_daily_close(
             expected_trade_date=expected_trade_date,
             issue_code="valuation_price_invalid",
             row=row,
-            source=source,
         )
     if not price.is_finite() or price <= 0:
         return _unavailable(
@@ -200,7 +167,6 @@ def resolve_latest_completed_daily_close(
             expected_trade_date=expected_trade_date,
             issue_code="valuation_price_invalid",
             row=row,
-            source=source,
         )
 
     price_as_of = datetime.combine(
@@ -216,8 +182,8 @@ def resolve_latest_completed_daily_close(
         expected_trade_date=expected_trade_date,
         trade_date=row.trade_date,
         source_id=row.source_id,
-        source_name=source.source_name,
-        source_reliability=source.reliability_level,
+        source_name=row.selected_source,
+        source_reliability="official",
         raw_result_id=row.raw_result_id,
         row_id=row.id,
         issue_codes=(),

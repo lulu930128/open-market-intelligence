@@ -111,11 +111,11 @@ class TaiwanIndexContractSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["status"], "captured")
         self.assertEqual(
             snapshot["selected_candidate"],
-            "official_close",
+            "index_summary",
         )
         self.assertEqual(
             snapshot["official_close_status"],
-            "confirmed",
+            "pending",
         )
         self.assertNotEqual(
             snapshot["payload"]["quote"]["official_close_price"],

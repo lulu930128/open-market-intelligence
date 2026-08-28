@@ -52,8 +52,18 @@ def _price(
     stock_id: str,
     trade_date: date,
     complete: bool = True,
+    fetched_at: datetime | None = None,
 ) -> None:
-    raw = RawFetchResult(source_id=source.id, method="GET")
+    raw = RawFetchResult(
+        source_id=source.id,
+        method="GET",
+        fetched_at=fetched_at or datetime(
+            trade_date.year,
+            trade_date.month,
+            trade_date.day,
+            8,
+        ),
+    )
     db.add(raw)
     db.flush()
     db.add(
@@ -141,6 +151,13 @@ def test_daily_freshness_batch_returns_truthful_missing_and_stale_health() -> No
             stock_id="2330",
             trade_date=date(2026, 8, 22),
         )
+        _price(
+            db,
+            source=official,
+            stock_id="2317",
+            trade_date=date(2026, 8, 25),
+            fetched_at=datetime(2026, 8, 27, 8, 0),
+        )
         db.commit()
 
         evidence = read_taiwan_daily_freshness_batch(
@@ -154,6 +171,89 @@ def test_daily_freshness_batch_returns_truthful_missing_and_stale_health() -> No
         assert evidence["2317"].health.status is DatasetHealthStatus.MISSING
         assert evidence["2317"].latest_date is None
         assert evidence["2317"].row_count == 0
+        assert evidence["2317"].storage_latest_date == date(2026, 8, 25)
+    finally:
+        db.close()
+
+
+def test_daily_freshness_separates_storage_from_release_qualified_state() -> None:
+    db = _session()
+    try:
+        db.add(
+            StockMaster(
+                stock_id="3711",
+                stock_name="ASE Technology",
+                market="TWSE",
+                instrument_type="stock",
+            )
+        )
+        official = _source(db, TWSE_DAILY_TRADING_SOURCE_NAME)
+        _price(
+            db,
+            source=official,
+            stock_id="3711",
+            trade_date=date(2026, 8, 27),
+            fetched_at=datetime(2026, 8, 27, 8, 0),
+        )
+        _price(
+            db,
+            source=official,
+            stock_id="3711",
+            trade_date=date(2026, 8, 28),
+            fetched_at=datetime(2026, 8, 28, 6, 1),
+        )
+        db.commit()
+
+        before_release = read_taiwan_daily_freshness(
+            db,
+            stock_id="3711",
+            checked_at=datetime(2026, 8, 28, 14, 18, tzinfo=TAIPEI_TZ),
+        )
+        assert before_release.storage_latest_date == date(2026, 8, 28)
+        assert before_release.latest_date == date(2026, 8, 27)
+        assert before_release.health.status is DatasetHealthStatus.HEALTHY
+
+        after_clock_only = read_taiwan_daily_freshness(
+            db,
+            stock_id="3711",
+            checked_at=datetime(2026, 8, 28, 15, 20, tzinfo=TAIPEI_TZ),
+        )
+        assert after_clock_only.storage_latest_date == date(2026, 8, 28)
+        assert after_clock_only.latest_date == date(2026, 8, 27)
+        assert after_clock_only.health.status is DatasetHealthStatus.STALE
+
+        later_expected_date = read_taiwan_daily_freshness(
+            db,
+            stock_id="3711",
+            checked_at=datetime(2026, 9, 1, 16, 0, tzinfo=TAIPEI_TZ),
+            expected_date=date(2026, 9, 1),
+        )
+        assert later_expected_date.storage_latest_date == date(2026, 8, 28)
+        assert later_expected_date.latest_date == date(2026, 8, 27)
+
+        today_row = (
+            db.query(MarketDailyPrice)
+            .filter(MarketDailyPrice.stock_id == "3711")
+            .filter(MarketDailyPrice.trade_date == date(2026, 8, 28))
+            .one()
+        )
+        released_receipt = RawFetchResult(
+            source_id=official.id,
+            method="GET",
+            fetched_at=datetime(2026, 8, 28, 7, 18),
+        )
+        db.add(released_receipt)
+        db.flush()
+        today_row.raw_result_id = released_receipt.id
+        db.commit()
+
+        after_refresh = read_taiwan_daily_freshness(
+            db,
+            stock_id="3711",
+            checked_at=datetime(2026, 8, 28, 15, 20, tzinfo=TAIPEI_TZ),
+        )
+        assert after_refresh.latest_date == date(2026, 8, 28)
+        assert after_refresh.health.status is DatasetHealthStatus.HEALTHY
     finally:
         db.close()
 
@@ -192,7 +292,7 @@ def test_all_market_freshness_uses_full_market_checkpoint_not_cross_venue_max() 
             trade_date=date(2026, 8, 27),
         )
         db.commit()
-        persist_eod_coverage(
+        checkpoint = persist_eod_coverage(
             db,
             compute_eod_coverage(
                 db,
@@ -200,6 +300,8 @@ def test_all_market_freshness_uses_full_market_checkpoint_not_cross_venue_max() 
                 expected_trade_date=date(2026, 8, 27),
             ),
         )
+        checkpoint.checked_at = datetime(2026, 8, 27, 8, 0)
+        db.commit()
 
         evidence = read_taiwan_daily_freshness(
             db,

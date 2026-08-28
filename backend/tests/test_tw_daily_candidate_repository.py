@@ -8,8 +8,17 @@ from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, MarketDailyPrice, RawFetchResult, SourceRegistry
+from app.db.models import (
+    Base,
+    MarketDailyPrice,
+    RawFetchResult,
+    SourceRegistry,
+    StockMaster,
+)
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
+from app.market.service import read_market_daily_snapshot
+from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReader
+from app.market.daily_ohlcv_platform import build_taiwan_daily_cache_requirement
 from app.market_data.candidate_repository import (
     CandidateReadLimitExceeded,
     DailyBarCandidateQuery,
@@ -19,6 +28,7 @@ from app.market_data.contracts import InstrumentKey, InstrumentType, Market
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
+    TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
 )
 
 
@@ -93,11 +103,12 @@ def _daily_row(
     low_price: float | None = 95,
     close_price: float | None = 105,
     trade_volume: int | None = 1_000_000,
+    stock_id: str = "2330",
 ) -> MarketDailyPrice:
     return MarketDailyPrice(
         source_id=source.id,
         raw_result_id=raw.id,
-        stock_id="2330",
+        stock_id=stock_id,
         trade_date=trade_date,
         open_price=open_price,
         high_price=high_price,
@@ -179,6 +190,131 @@ def test_repository_reads_only_requested_venue_and_preserves_lineage(db: Session
     assert series.bars[0].volume is not None
     assert series.bars[0].volume.value == Decimal("1000000")
     assert series.bars[0].volume.unit.value == "share"
+
+
+def test_completed_reader_reconciles_short_priority_series_with_long_official_history(
+    db: Session,
+) -> None:
+    openapi, openapi_raw = _source_and_raw(
+        db,
+        source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+        parser_type="twse_daily_trading",
+        priority=10,
+    )
+    rwd, rwd_raw = _source_and_raw(
+        db,
+        source_name=TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+        parser_type="twse_rwd_daily_trading",
+        priority=5,
+    )
+    trade_dates = [date(2026, 8, day) for day in (18, 19, 20, 21)]
+    db.add_all(
+        [
+            _daily_row(
+                source=openapi,
+                raw=openapi_raw,
+                trade_date=trade_date,
+                close_price=100 + index,
+            )
+            for index, trade_date in enumerate(trade_dates)
+        ]
+        + [
+            _daily_row(
+                source=rwd,
+                raw=rwd_raw,
+                trade_date=trade_date,
+                close_price=200 + index,
+                high_price=210 + index,
+            )
+            for index, trade_date in enumerate(trade_dates[-2:])
+        ]
+    )
+    db.commit()
+    instrument = _query(
+        start_date=trade_dates[0],
+        end_date=trade_dates[-1],
+        max_rows=4,
+    ).instrument
+    requirement = build_taiwan_daily_cache_requirement(
+        instrument=instrument,
+        from_date=trade_dates[0],
+        to_date=trade_dates[-1],
+        requested_at=datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc),
+        max_rows=4,
+    )
+
+    result = TaiwanCompletedDailyCandidateReader(
+        TaiwanOfficialDailyBarRepository(db)
+    ).read_bar_candidates(requirement)
+
+    assert len(result.candidates) == 1
+    bars = result.candidates[0].bars
+    assert [bar.close_price for bar in bars] == [
+        Decimal("100.0"),
+        Decimal("101.0"),
+        Decimal("200.0"),
+        Decimal("201.0"),
+    ]
+    assert [bar.lineage.provider for bar in bars] == [
+        "twse_openapi",
+        "twse_openapi",
+        "twse_rwd",
+        "twse_rwd",
+    ]
+    assert "OFFICIAL_DAILY_SERIES_RECONCILED" in result.limitations
+    assert "OFFICIAL_DAILY_SAME_DATE_CONFLICT_RESOLVED" in result.limitations
+
+
+def test_rejected_alternate_source_does_not_poison_covered_canonical_date(
+    db: Session,
+) -> None:
+    openapi, openapi_raw = _source_and_raw(
+        db,
+        source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+        parser_type="twse_daily_trading",
+        priority=10,
+    )
+    rwd, rwd_raw = _source_and_raw(
+        db,
+        source_name=TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+        parser_type="twse_rwd_daily_trading",
+        priority=5,
+    )
+    trade_date = date(2026, 8, 21)
+    db.add_all(
+        [
+            _daily_row(
+                source=openapi,
+                raw=openapi_raw,
+                trade_date=trade_date,
+                open_price=None,
+            ),
+            _daily_row(
+                source=rwd,
+                raw=rwd_raw,
+                trade_date=trade_date,
+            ),
+        ]
+    )
+    db.commit()
+    requirement = build_taiwan_daily_cache_requirement(
+        instrument=_query(start_date=trade_date, end_date=trade_date).instrument,
+        from_date=trade_date,
+        to_date=trade_date,
+        requested_at=datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc),
+        max_rows=1,
+    )
+
+    result = TaiwanCompletedDailyCandidateReader(
+        TaiwanOfficialDailyBarRepository(db)
+    ).read_bar_candidates(requirement)
+
+    assert len(result.candidates[0].bars) == 1
+    assert result.candidates[0].bars[0].lineage.provider == "twse_rwd"
+    assert result.rejections
+    assert "MISSING_REQUIRED_OHLC" not in result.limitations
+    assert result.dataset_health is not None
+    assert result.dataset_health.status.value == "healthy"
 
 
 def test_incomplete_and_inconsistent_rows_are_explicit_rejections(db: Session) -> None:
@@ -263,6 +399,104 @@ def test_repository_read_does_not_commit_or_rollback(db: Session, monkeypatch) -
     result = TaiwanOfficialDailyBarRepository(db).load_daily_bars(_query())
 
     assert result.rows_accepted == 1
+
+
+def test_market_universe_returns_stock_only_rows_and_matching_coverage(
+    db: Session,
+) -> None:
+    twse, twse_raw = _source_and_raw(
+        db,
+        source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+        parser_type="twse_daily_trading",
+        priority=10,
+    )
+    tpex, tpex_raw = _source_and_raw(
+        db,
+        source_name=TPEX_DAILY_QUOTES_SOURCE_NAME,
+        parser_type="tpex_daily_quotes",
+        priority=40,
+    )
+    trade_date = date(2026, 8, 21)
+    db.add_all(
+        [
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            ),
+            StockMaster(
+                stock_id="6488",
+                stock_name="GlobalWafers",
+                market="TPEX",
+                instrument_type="stock",
+                is_active=True,
+            ),
+            StockMaster(
+                stock_id="0050",
+                stock_name="Yuanta Taiwan 50",
+                market="TWSE",
+                instrument_type="ETF",
+                is_active=True,
+            ),
+        ]
+    )
+    db.add_all(
+        [
+            _daily_row(
+                source=twse,
+                raw=twse_raw,
+                trade_date=trade_date,
+                stock_id="2330",
+            ),
+            _daily_row(
+                source=tpex,
+                raw=tpex_raw,
+                trade_date=trade_date,
+                stock_id="6488",
+            ),
+            _daily_row(
+                source=twse,
+                raw=twse_raw,
+                trade_date=trade_date,
+                stock_id="0050",
+            ),
+        ]
+    )
+    db.commit()
+
+    stocks = TaiwanOfficialDailyBarRepository(db).load_market_universe(
+        trade_date=trade_date,
+        include_etf=False,
+    )
+    stocks_and_etfs = TaiwanOfficialDailyBarRepository(db).load_market_universe(
+        trade_date=trade_date,
+        include_etf=True,
+    )
+    snapshot = read_market_daily_snapshot(
+        db,
+        trade_date=trade_date,
+        include_etf=False,
+    )
+
+    assert [bar.instrument.symbol for bar in stocks.bars] == ["2330", "6488"]
+    assert stocks.universe_count == 2
+    assert dict(stocks.universe_count_by_market) == {"TWSE": 1, "TPEX": 1}
+    assert dict(stocks.selected_count_by_market) == {"TWSE": 1, "TPEX": 1}
+    assert [row.stock_id for row in snapshot.rows] == ["2330", "6488"]
+    assert snapshot.universe_count == 2
+    assert snapshot.universe_count_by_market == stocks.universe_count_by_market
+    assert [bar.instrument.symbol for bar in stocks_and_etfs.bars] == [
+        "0050",
+        "2330",
+        "6488",
+    ]
+    assert stocks_and_etfs.universe_count == 3
+    assert dict(stocks_and_etfs.universe_count_by_market) == {
+        "TWSE": 2,
+        "TPEX": 1,
+    }
 
 
 def test_query_rejects_unbounded_or_inverted_ranges() -> None:

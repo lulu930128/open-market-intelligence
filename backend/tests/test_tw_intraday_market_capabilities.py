@@ -625,6 +625,49 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         self.assertEqual(defaulted.selected_scope_id, str(default_group.id))
         self.assertEqual(defaulted.source, "default_watchlist_group_alias")
 
+    def test_stale_intraday_state_remains_factual_but_not_decision_usable(
+        self,
+    ) -> None:
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            )
+        )
+        self.db.commit()
+        event_time = datetime(2026, 8, 28, 12, 6, tzinfo=TAIWAN_TZ)
+        checked_at = datetime(2026, 8, 28, 12, 11, tzinfo=TAIWAN_TZ)
+
+        persist_taiwan_intraday_stock_states(
+            self.db,
+            rows=[
+                self._stock_state_row(
+                    "2330",
+                    "TWSE",
+                    605,
+                    600,
+                    event_time,
+                )
+            ],
+            now=checked_at,
+        )
+        ranking = build_tw_intraday_screening_snapshot(
+            self.db,
+            parameters={"metric": "change_pct", "limit": 20},
+            generated_at=checked_at,
+        )
+
+        self.assertEqual(len(ranking["rows"]), 1)
+        row = ranking["rows"][0]
+        self.assertEqual(row["freshness_status"], "delayed")
+        self.assertEqual(row["observation_age_seconds"], 300)
+        self.assertEqual(row["allowed_age_seconds"], 90)
+        self.assertTrue(row["facts_usable"])
+        self.assertFalse(row["decision_usable"])
+
     @staticmethod
     def _stock_state_row(
         stock_id: str,

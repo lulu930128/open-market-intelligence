@@ -9,13 +9,13 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    MarketIndexDailyStat,
     TaiwanDerivativesLargeTraderDaily,
     TaiwanFuturesTermStructureDaily,
     TaiwanOptionChainDaily,
     utc_now,
 )
 from app.market.providers.taifex import OPENAPI_BASE_URL, fetch_openapi_rows
+from app.market.official_index_platform import read_taiwan_official_index
 from app.market.trading_calendar import latest_released_trading_day
 from app.observability.provider_fallback import observe_provider_fallback
 
@@ -518,13 +518,16 @@ def _latest_payload_date(*payloads: Iterable[dict[str, Any]]) -> date | None:
 def _spot_close(db: Session, trade_date: date | None) -> float | None:
     if trade_date is None:
         return None
-    row = (
-        db.query(MarketIndexDailyStat)
-        .filter(MarketIndexDailyStat.index_id == "TAIEX")
-        .filter(MarketIndexDailyStat.trade_date == trade_date)
-        .first()
+    observation = read_taiwan_official_index(
+        db,
+        index_id="TAIEX",
+        trade_date=trade_date,
+    ).resolved.market_index
+    return (
+        float(observation.close_value)
+        if observation is not None
+        else None
     )
-    return float(row.close_value) if row is not None and row.close_value is not None else None
 
 
 def _upsert_option_rows(

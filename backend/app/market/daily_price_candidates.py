@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
-from app.market_data.candidate_repository import DailyBarCandidateQuery
-from app.market_data.contracts import EvidenceFreshness, Market, MarketSession
+from app.market_data.candidate_repository import DailyBarCandidateQuery, PersistedBarSeries
+from app.market_data.contracts import BarObservation, EvidenceFreshness, Market, MarketSession
 from app.market_data.gateway import BarCandidateBatch
 from app.market_data.integration_contracts import (
     BarCapabilityRequest,
@@ -18,6 +20,75 @@ from app.market_data.resolution import BarSeriesCandidate
 
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
+
+
+def _reconcile_official_daily_series(
+    stored_series: Sequence[PersistedBarSeries],
+    *,
+    max_bars: int,
+) -> tuple[tuple[BarObservation, ...], int, tuple[str, ...]]:
+    """Build one date-complete official series while preserving per-bar lineage."""
+
+    selected_by_start: dict[
+        datetime,
+        tuple[tuple[int, str, str], BarObservation],
+    ] = {}
+    conflicts = False
+    contributing_sources: set[str] = set()
+    for item in sorted(
+        stored_series,
+        key=lambda value: (
+            value.provider_priority,
+            value.provider,
+            value.source,
+        ),
+    ):
+        rank = (item.provider_priority, item.provider, item.source)
+        for bar in item.bars:
+            current = selected_by_start.get(bar.start_at)
+            if current is not None:
+                current_rank, current_bar = current
+                if (
+                    current_bar.open_price,
+                    current_bar.high_price,
+                    current_bar.low_price,
+                    current_bar.close_price,
+                    current_bar.volume,
+                ) != (
+                    bar.open_price,
+                    bar.high_price,
+                    bar.low_price,
+                    bar.close_price,
+                    bar.volume,
+                ):
+                    conflicts = True
+                if current_rank <= rank:
+                    continue
+            selected_by_start[bar.start_at] = (rank, bar)
+
+    ordered = tuple(
+        item[1]
+        for _, item in sorted(selected_by_start.items(), key=lambda value: value[0])
+    )
+    if len(ordered) > max_bars:
+        ordered = ordered[-max_bars:]
+    ordered_starts = {bar.start_at for bar in ordered}
+    for bar in ordered:
+        contributing_sources.add(bar.lineage.source)
+    limitations: list[str] = []
+    if len(contributing_sources) > 1:
+        limitations.append("OFFICIAL_DAILY_SERIES_RECONCILED")
+    if conflicts:
+        limitations.append("OFFICIAL_DAILY_SAME_DATE_CONFLICT_RESOLVED")
+    selected_priority = min(
+        (
+            rank[0]
+            for start_at, (rank, _) in selected_by_start.items()
+            if start_at in ordered_starts
+        ),
+        default=100,
+    )
+    return ordered, selected_priority, tuple(limitations)
 
 
 class TaiwanCompletedDailyCandidateReader:
@@ -46,31 +117,43 @@ class TaiwanCompletedDailyCandidateReader:
             )
         )
 
-        candidates: list[BarSeriesCandidate] = []
         limitations: list[str] = []
-        latest_date = None
-        for item in stored.series:
-            bars = item.bars
-            if len(bars) > request.max_bars:
-                bars = bars[-request.max_bars :]
-                limitations.append("BAR_SERIES_TRUNCATED_TO_REQUEST_BOUND")
-            item_latest_date = bars[-1].end_at.astimezone(TAIWAN_TZ).date()
-            latest_date = max(latest_date, item_latest_date) if latest_date else item_latest_date
-            candidates.append(
-                BarSeriesCandidate(
-                    bars=bars,
-                    freshness=(
-                        EvidenceFreshness.FRESH
-                        if item_latest_date >= expected_date
-                        else EvidenceFreshness.STALE
-                    ),
-                    provider_priority=item.provider_priority,
-                    session=MarketSession.CLOSED,
-                )
+        bars, selected_priority, reconciliation_limitations = (
+            _reconcile_official_daily_series(
+                stored.series,
+                max_bars=request.max_bars,
             )
+        )
+        limitations.extend(reconciliation_limitations)
+        latest_date = (
+            bars[-1].end_at.astimezone(TAIWAN_TZ).date()
+            if bars
+            else None
+        )
+        candidates = (
+            BarSeriesCandidate(
+                bars=bars,
+                freshness=(
+                    EvidenceFreshness.FRESH
+                    if latest_date >= expected_date
+                    else EvidenceFreshness.STALE
+                ),
+                provider_priority=selected_priority,
+                session=MarketSession.CLOSED,
+            ),
+        ) if bars else ()
 
-        if stored.rejections:
-            limitations.extend(item.reason_code for item in stored.rejections)
+        selected_dates = {
+            bar.end_at.astimezone(TAIWAN_TZ).date()
+            for bar in bars
+        }
+        uncovered_rejections = tuple(
+            item
+            for item in stored.rejections
+            if item.event_date not in selected_dates
+        )
+        if uncovered_rejections:
+            limitations.extend(item.reason_code for item in uncovered_rejections)
         spec = DATASET_REGISTRY.get("tw.daily.ohlcv")
         dataset_health = evaluate_dataset_health(
             spec,
@@ -78,10 +161,10 @@ class TaiwanCompletedDailyCandidateReader:
             latest_date=latest_date,
             checked_at=requirement.requested_at,
             eligible=True,
-            partial=bool(stored.rejections),
+            partial=bool(uncovered_rejections),
         )
         return BarCandidateBatch(
-            candidates=tuple(candidates),
+            candidates=candidates,
             dataset_health=dataset_health,
             rejections=stored.rejections,
             limitations=tuple(dict.fromkeys(limitations)),

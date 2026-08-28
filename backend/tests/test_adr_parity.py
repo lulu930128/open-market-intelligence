@@ -31,6 +31,7 @@ from app.market.overnight_impact import (
     scan_us_overnight_impact_gaps,
 )
 from app.market.schemas import AdrParityRead, OvernightImpactRead
+from app.sources.defaults import TWSE_RWD_DAILY_TRADING_SOURCE_NAME
 
 
 def make_session() -> Session:
@@ -46,12 +47,29 @@ def add_tw_daily(
     trade_date: date,
     close_price: float,
 ) -> None:
-    source = SourceRegistry(
-        source_name=f"test-tw-{stock_id}-{trade_date.isoformat()}",
-        source_type="test",
-        category="market_daily_price",
+    if db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first() is None:
+        db.add(
+            StockMaster(
+                stock_id=stock_id,
+                stock_name="台積電",
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            )
+        )
+    source = (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.source_name == TWSE_RWD_DAILY_TRADING_SOURCE_NAME)
+        .first()
     )
-    db.add(source)
+    if source is None:
+        source = SourceRegistry(
+            source_name=TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+            source_type="official",
+            category="market_daily_price",
+            reliability_level="official",
+        )
+        db.add(source)
     db.flush()
     raw = RawFetchResult(
         source_id=source.id,
@@ -60,6 +78,11 @@ def add_tw_daily(
         status_code=200,
         content_hash=f"{stock_id}-{trade_date.isoformat()}",
         raw_text="{}",
+        fetched_at=datetime.combine(
+            trade_date,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ).replace(hour=8),
     )
     db.add(raw)
     db.flush()
@@ -70,6 +93,9 @@ def add_tw_daily(
             trade_date=trade_date,
             stock_id=stock_id,
             stock_name="台積電",
+            open_price=close_price,
+            high_price=close_price,
+            low_price=close_price,
             close_price=close_price,
         )
     )

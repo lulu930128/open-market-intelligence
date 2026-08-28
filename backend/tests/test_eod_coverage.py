@@ -115,7 +115,24 @@ def test_tw_coverage_partitions_current_partial_stale_and_missing(db: Session) -
     assert coverage.stale_symbols == {"5501"}
     assert coverage.missing_symbols == {"5502"}
     assert coverage.status == "partial"
-    venue_breakdown = coverage.detail()["venue_breakdown"]
+    detail = coverage.detail()
+    assert detail["instrument_inventory_count"] == 5
+    assert detail["eligible_count"] == 4
+    assert detail["not_eligible_count"] == 1
+    assert detail["classification_total"] == 5
+    assert detail["classification_invariant_satisfied"] is True
+    assert next(
+        item
+        for item in detail["symbol_classifications"]
+        if item["symbol"] == "0050"
+    ) == {
+        "symbol": "0050",
+        "venue": "TWSE",
+        "instrument_type": "ETF",
+        "classification": "not_eligible",
+        "reason": "outside_active_ordinary_stock_dataset_scope",
+    }
+    venue_breakdown = detail["venue_breakdown"]
     assert venue_breakdown["TWSE"] == {
         "universe_count": 2,
         "current_count": 1,

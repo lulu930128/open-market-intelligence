@@ -101,6 +101,7 @@ import app.market.tw_etf as tw_etf_service
 from app.market.tw_etf import get_taiwan_etf_overview, refresh_taiwan_etf
 from app.market.tw_etf_schemas import TaiwanEtfOverviewRead
 from app.watchlists.service import _item_to_dict
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
@@ -1036,7 +1037,7 @@ class TaiwanEtfServiceTests(unittest.TestCase):
         close_price: float,
     ) -> None:
         source = SourceRegistry(
-            source_name=f"etf-daily-close-{stock_id}",
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
             source_type="official",
             category="daily_price",
             endpoint_url="https://openapi.twse.com.tw/",
@@ -1049,7 +1050,7 @@ class TaiwanEtfServiceTests(unittest.TestCase):
         db.flush()
         raw = RawFetchResult(
             source_id=source.id,
-            fetched_at=datetime(2026, 8, 7, 14, 30, tzinfo=TAIWAN_TZ),
+            fetched_at=datetime(2026, 8, 7, 15, 30, tzinfo=TAIWAN_TZ),
             method="GET",
             content_hash=f"etf-daily-close-{stock_id}-{trade_date.isoformat()}",
             parser_version="etf-valuation-test-v1",
@@ -1062,6 +1063,9 @@ class TaiwanEtfServiceTests(unittest.TestCase):
                 raw_result_id=raw.id,
                 trade_date=trade_date,
                 stock_id=stock_id,
+                open_price=close_price,
+                high_price=close_price,
+                low_price=close_price,
                 close_price=close_price,
             )
         )

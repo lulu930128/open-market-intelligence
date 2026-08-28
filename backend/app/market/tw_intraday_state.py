@@ -39,6 +39,11 @@ SUPPORTED_INTRADAY_METRICS = (
     "vwap_deviation_pct",
     "order_book_imbalance",
 )
+INTRADAY_DECISION_MAX_AGE_SECONDS_BY_SESSION = {
+    "regular": 90,
+    "closing_auction": 90,
+    "post_close": 600,
+}
 
 
 def _number(value: Any) -> float | None:
@@ -160,6 +165,21 @@ def _freshness_status(
     if age_seconds <= 600:
         return "delayed"
     return "stale"
+
+
+def _observation_age_seconds(
+    event_time: datetime,
+    *,
+    now: datetime,
+) -> int:
+    return max(int((now - event_time).total_seconds()), 0)
+
+
+def _allowed_decision_age_seconds(session_phase: str) -> int:
+    return INTRADAY_DECISION_MAX_AGE_SECONDS_BY_SESSION.get(
+        session_phase,
+        0,
+    )
 
 
 def _component_lineage(raw: dict[str, Any], *, event_time: datetime) -> dict[str, Any]:
@@ -352,12 +372,24 @@ def persist_taiwan_intraday_stock_states(
             or raw.get("session_phase")
             or taiwan_market_session_phase(event_time)
         )
+        observation_time = price_as_of or event_time
+        observation_age_seconds = _observation_age_seconds(
+            observation_time,
+            now=checked_at,
+        )
+        allowed_age_seconds = _allowed_decision_age_seconds(session_phase)
+        freshness_status = _freshness_status(
+            observation_time,
+            now=checked_at,
+        )
         decision_usable = bool(
             has_actual_trade
             and current_price is not None
             and price_as_of is not None
             and session_phase in {"regular", "closing_auction", "post_close"}
             and component_lineage["lineage_complete"]
+            and freshness_status == "current"
+            and observation_age_seconds <= allowed_age_seconds
         )
         minute_time = event_time.replace(second=0, microsecond=0)
         if decision_usable:
@@ -416,6 +448,8 @@ def persist_taiwan_intraday_stock_states(
             and existing.has_actual_trade == has_actual_trade
             and existing.session_phase == session_phase
             and existing.state_contract_version == INTRADAY_STATE_VERSION
+            and existing.decision_usable == decision_usable
+            and existing.freshness_status == freshness_status
             and existing.cumulative_volume_lots == cumulative_volume_lots
             and existing.high_price == high_price
             and existing.low_price == low_price
@@ -437,10 +471,6 @@ def persist_taiwan_intraday_stock_states(
             sum(typical_values) / len(typical_values)
             if typical_values
             else None
-        )
-        freshness_status = _freshness_status(
-            price_as_of or event_time,
-            now=checked_at,
         )
         quality_status = (
             "ready"
@@ -632,7 +662,6 @@ def build_tw_intraday_screening_snapshot(
             == INTRADAY_STATE_VERSION
         )
         .filter(TaiwanIntradayStockState.has_actual_trade.is_(True))
-        .filter(TaiwanIntradayStockState.decision_usable.is_(True))
         .filter(StockMaster.instrument_type == "stock")
         .filter(StockMaster.is_active.is_(True))
     )
@@ -641,6 +670,7 @@ def build_tw_intraday_screening_snapshot(
             TaiwanIntradayStockState.stock_id.in_(requested_stock_ids)
         )
     queried_pairs = query.all()
+    generated = _aware_taipei(generated_at) or datetime.now(TAIWAN_TZ)
     latest_pairs: dict[
         tuple[str, str], tuple[TaiwanIntradayStockState, StockMaster]
     ] = {}
@@ -689,6 +719,31 @@ def build_tw_intraday_screening_snapshot(
             and state.low_price <= state.current_price <= state.high_price
             and state.low_price <= state.high_price
             else "partial"
+        )
+        observation_time = _aware_taipei(state.price_as_of) or event_time
+        observation_age_seconds = (
+            _observation_age_seconds(observation_time, now=generated)
+            if observation_time is not None
+            else None
+        )
+        allowed_age_seconds = _allowed_decision_age_seconds(
+            str(state.session_phase or "")
+        )
+        effective_freshness_status = (
+            _freshness_status(observation_time, now=generated)
+            if observation_time is not None
+            else "missing"
+        )
+        facts_usable = bool(
+            state.has_actual_trade
+            and state.current_price is not None
+            and state.lineage_complete
+        )
+        effective_decision_usable = bool(
+            state.decision_usable
+            and effective_freshness_status == "current"
+            and observation_age_seconds is not None
+            and observation_age_seconds <= allowed_age_seconds
         )
         rows.append({
             "rank": offset + index,
@@ -756,7 +811,8 @@ def build_tw_intraday_screening_snapshot(
             "has_actual_trade": state.has_actual_trade,
             "session_phase": state.session_phase,
             "state_contract_version": state.state_contract_version,
-            "decision_usable": state.decision_usable,
+            "facts_usable": facts_usable,
+            "decision_usable": effective_decision_usable,
             "price_snapshot_id": (
                 f"{state.market}:{state.stock_id}:{event_time.isoformat()}"
                 if event_time is not None
@@ -764,10 +820,11 @@ def build_tw_intraday_screening_snapshot(
             ),
             "price_snapshot_source": state.source,
             "price_invariant_status": price_invariant_status,
-            "freshness_status": state.freshness_status,
+            "freshness_status": effective_freshness_status,
+            "observation_age_seconds": observation_age_seconds,
+            "allowed_age_seconds": allowed_age_seconds,
             "quality_status": state.quality_status,
         })
-    generated = _aware_taipei(generated_at) or datetime.now(TAIWAN_TZ)
     latest_event = max(
         (_aware_taipei(state.event_time) for _, state, _ in ranked),
         default=None,

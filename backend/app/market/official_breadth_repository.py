@@ -3,31 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import (
-    MarketDailyPrice,
-    RawFetchResult,
-    SourceRegistry,
-    StockMaster,
-)
-from app.market_data.candidate_repository import CandidateReadLimitExceeded
+from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market_data.contracts import (
-    AuthorityClass,
     Market,
     MarketBreadthObservation,
     MarketSession,
     ObservationState,
     SourceLineage,
-)
-from app.sources.defaults import (
-    TPEX_DAILY_QUOTES_SOURCE_NAME,
-    TWSE_DAILY_TRADING_SOURCE_NAME,
 )
 
 
@@ -42,20 +30,8 @@ class OfficialBreadthRead:
     limitations: tuple[str, ...] = ()
 
 
-_SOURCE_BY_VENUE = {
-    "TWSE": ("twse_openapi", TWSE_DAILY_TRADING_SOURCE_NAME),
-    "TPEX": ("tpex_openapi", TPEX_DAILY_QUOTES_SOURCE_NAME),
-}
-
-
-def _as_aware_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
 class TaiwanOfficialBreadthRepository:
-    """Aggregate one coherent official receipt over the active stock universe."""
+    """Aggregate one coherent canonical daily receipt over an active universe."""
 
     def __init__(self, db: Session) -> None:
         self._db = db
@@ -68,87 +44,66 @@ class TaiwanOfficialBreadthRepository:
         max_rows: int,
     ) -> OfficialBreadthRead:
         normalized_venue = str(venue or "").strip().upper()
-        binding = _SOURCE_BY_VENUE.get(normalized_venue)
-        if binding is None:
+        if normalized_venue not in {"TWSE", "TPEX"}:
             raise ValueError("official Taiwan breadth requires venue=TWSE or TPEX")
-        provider, source_name = binding
-        universe_rows = (
-            self._db.query(StockMaster.stock_id)
-            .filter(StockMaster.is_active.is_(True))
-            .filter(func.upper(StockMaster.market) == normalized_venue)
-            .filter(func.lower(StockMaster.instrument_type) == "stock")
-            .order_by(StockMaster.stock_id.asc())
-            .limit(max_rows + 1)
-            .all()
+        universe = TaiwanOfficialDailyBarRepository(self._db).load_market_universe(
+            trade_date=trade_date,
+            include_etf=False,
+            venue=normalized_venue,
+            max_rows=max_rows,
         )
-        if len(universe_rows) > max_rows:
-            raise CandidateReadLimitExceeded(
-                "Taiwan breadth universe exceeded max_rows"
-            )
-        universe = tuple(str(row.stock_id) for row in universe_rows)
-        if not universe:
+        if universe.universe_count == 0:
             return OfficialBreadthRead(
                 observation=None,
-                limitations=("ACTIVE_STOCK_UNIVERSE_EMPTY",),
+                limitations=universe.limitations or ("ACTIVE_STOCK_UNIVERSE_EMPTY",),
             )
-
-        rows = (
-            self._db.query(MarketDailyPrice, RawFetchResult, SourceRegistry)
-            .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
-            .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-            .filter(SourceRegistry.source_name == source_name)
-            .filter(MarketDailyPrice.trade_date == trade_date)
-            .filter(MarketDailyPrice.stock_id.in_(universe))
-            .order_by(MarketDailyPrice.stock_id.asc())
-            .limit(max_rows + 1)
-            .all()
-        )
-        if len(rows) > max_rows:
-            raise CandidateReadLimitExceeded(
-                "Taiwan breadth row read exceeded max_rows"
-            )
-        if not rows:
+        bars = universe.bars
+        if not bars:
             return OfficialBreadthRead(
                 observation=None,
-                rows_examined=0,
-                limitations=("OFFICIAL_BREADTH_DATE_MISSING",),
+                rows_examined=universe.rows_examined,
+                limitations=tuple(
+                    dict.fromkeys(
+                        (*universe.limitations, "OFFICIAL_BREADTH_DATE_MISSING")
+                    )
+                ),
             )
-
-        raw_results = {raw.id: raw for _, raw, _ in rows}
-        sources = {source.id: source for _, _, source in rows}
-        if len(raw_results) != 1 or len(sources) != 1:
+        raw_receipts = {bar.lineage.raw_receipt_id for bar in bars}
+        sources = {(bar.lineage.provider, bar.lineage.source) for bar in bars}
+        if len(raw_receipts) != 1 or None in raw_receipts or len(sources) != 1:
             return OfficialBreadthRead(
                 observation=None,
-                rows_examined=len(rows),
-                limitations=("BREADTH_COMPONENT_LINEAGE_NOT_COHERENT",),
+                rows_examined=universe.rows_examined,
+                limitations=tuple(
+                    dict.fromkeys(
+                        (
+                            *universe.limitations,
+                            "BREADTH_COMPONENT_LINEAGE_NOT_COHERENT",
+                        )
+                    )
+                ),
             )
-        raw = next(iter(raw_results.values()))
-        source = next(iter(sources.values()))
-        row_by_symbol = {row.stock_id: row for row, _, _ in rows}
+        first_lineage = bars[0].lineage
         advance_count = decline_count = unchanged_count = unknown_count = 0
-        missing_count = 0
+        missing_count = max(universe.universe_count - len(bars), 0)
         trade_value = 0
-        trade_value_complete = True
-        for symbol in universe:
-            row = row_by_symbol.get(symbol)
-            if row is None:
-                missing_count += 1
-                continue
-            if row.price_change is None:
+        trade_value_complete = missing_count == 0
+        for bar in bars:
+            if bar.price_change is None:
                 unknown_count += 1
-            elif row.price_change > 0:
+            elif bar.price_change > 0:
                 advance_count += 1
-            elif row.price_change < 0:
+            elif bar.price_change < 0:
                 decline_count += 1
             else:
                 unchanged_count += 1
-            if row.trade_value is None:
+            if bar.turnover_value is None:
                 trade_value_complete = False
             else:
-                trade_value += int(row.trade_value)
+                trade_value += int(bar.turnover_value)
 
         incomplete = unknown_count > 0 or missing_count > 0
-        limitations: list[str] = []
+        limitations: list[str] = list(universe.limitations)
         if unknown_count:
             limitations.append("BREADTH_PRICE_CHANGE_UNKNOWN")
         if missing_count:
@@ -160,18 +115,18 @@ class TaiwanOfficialBreadthRepository:
             market=Market.TW,
             venue=normalized_venue,
             lineage=SourceLineage(
-                provider=provider,
-                source=source.source_name,
-                authority=AuthorityClass.EXCHANGE,
-                raw_contract_version=raw.parser_version or source.parser_type,
+                provider=first_lineage.provider,
+                source=first_lineage.source,
+                authority=first_lineage.authority,
+                raw_contract_version=first_lineage.raw_contract_version,
                 event_at=end_at,
-                fetched_at=_as_aware_utc(raw.fetched_at),
+                fetched_at=max(bar.lineage.fetched_at for bar in bars),
                 cache_hit=True,
                 observation_id=(
                     f"market_breadth:{normalized_venue}:{trade_date.isoformat()}"
                 ),
-                raw_receipt_id=f"raw_fetch_result:{raw.id}",
-                content_hash=raw.content_hash,
+                raw_receipt_id=first_lineage.raw_receipt_id,
+                content_hash=first_lineage.content_hash,
             ),
             session=MarketSession.CLOSED,
             trade_date=trade_date,
@@ -179,7 +134,7 @@ class TaiwanOfficialBreadthRepository:
             universe_source=(
                 f"stock_master.active.{normalized_venue}.ordinary_stock"
             ),
-            universe_count=len(universe),
+            universe_count=universe.universe_count,
             advance_count=advance_count,
             decline_count=decline_count,
             unchanged_count=unchanged_count,
@@ -198,9 +153,8 @@ class TaiwanOfficialBreadthRepository:
         )
         return OfficialBreadthRead(
             observation=observation,
-            provider_priority=max(int(source.priority), 0),
-            rows_examined=len(rows),
-            limitations=tuple(limitations),
+            rows_examined=universe.rows_examined,
+            limitations=tuple(dict.fromkeys(limitations)),
         )
 
 

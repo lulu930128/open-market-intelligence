@@ -570,7 +570,14 @@ def test_actual_tw_repository_can_flow_through_cache_gateway() -> None:
             # SQLite drops timezone offsets. RawFetchResult timestamps are stored
             # as UTC, so persist the UTC wall-clock value the repository expects
             # when it reattaches timezone information on read.
-            fetched_at=NOW.astimezone(timezone.utc),
+            fetched_at=datetime(
+                2026,
+                8,
+                21,
+                15,
+                16,
+                tzinfo=TAIPEI,
+            ).astimezone(timezone.utc),
             raw_text="[]",
             content_hash="fixture-hash",
         )
@@ -591,9 +598,23 @@ def test_actual_tw_repository_can_flow_through_cache_gateway() -> None:
         )
         db.commit()
         reader = TaiwanCompletedDailyCandidateReader(TaiwanOfficialDailyBarRepository(db))
+        after_release_requirement = _requirement(
+            RealtimePolicy.CACHE_ONLY
+        ).model_copy(
+            update={
+                "requested_at": datetime(
+                    2026,
+                    8,
+                    21,
+                    15,
+                    20,
+                    tzinfo=TAIPEI,
+                )
+            }
+        )
 
         result = MarketDataGateway().resolve_bars(
-            _requirement(RealtimePolicy.CACHE_ONLY),
+            after_release_requirement,
             reader=reader,
         )
 

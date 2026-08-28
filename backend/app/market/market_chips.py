@@ -15,10 +15,11 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     MarginTradingDaily,
     MarketChipDaily,
-    MarketIndexDailyStat,
     SourceRegistry,
 )
 from app.market.indices import ensure_market_index_daily_stat_coverage
+from app.market.official_index_platform import read_taiwan_official_index
+from app.market_data.contracts import MarketIndexObservation
 from app.market.providers import http_get, http_post
 from app.market.trading_calendar import latest_released_trading_day
 from app.parsers.twse_common import (
@@ -692,13 +693,12 @@ def _latest_market_index_stat(
     *,
     index_id: str,
     trade_date: date,
-) -> MarketIndexDailyStat | None:
-    return (
-        db.query(MarketIndexDailyStat)
-        .filter(MarketIndexDailyStat.index_id == index_id)
-        .filter(MarketIndexDailyStat.trade_date == trade_date)
-        .first()
-    )
+) -> MarketIndexObservation | None:
+    return read_taiwan_official_index(
+        db,
+        index_id=index_id,
+        trade_date=trade_date,
+    ).resolved.market_index
 
 
 def _previous_market_chip(
@@ -1048,22 +1048,25 @@ def fetch_market_chip_daily(
     if index_stat is not None:
         values.update(
             {
-                "close_value": index_stat.close_value,
+                "close_value": float(index_stat.close_value),
                 "price_change": index_stat.price_change,
                 "price_change_pct": _price_change_pct(
-                    index_stat.close_value,
-                    index_stat.price_change,
+                    float(index_stat.close_value),
+                    float(index_stat.price_change),
                 ),
-                "trade_value": index_stat.trade_value,
+                "trade_value": (
+                    int(index_stat.trade_value)
+                    if index_stat.trade_value is not None
+                    else None
+                ),
             }
         )
-        if index_stat.source_url:
-            sources.append(
-                _source_ref(
-                    name=index_stat.source,
-                    url=index_stat.source_url,
-                )
+        sources.append(
+            _source_ref(
+                name=index_stat.lineage.source,
+                url="canonical://tw.market_index.daily",
             )
+        )
 
     source_values, source_refs, source_warnings = _fetch_taiwan_market_chip_sources(
         index_id=normalized_index_id,

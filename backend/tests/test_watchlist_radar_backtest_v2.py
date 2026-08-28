@@ -10,13 +10,17 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     Base,
     MarketDailyPrice,
+    RawFetchResult,
     RadarBacktestRun,
     RadarFeatureSnapshot,
     RadarOutcomePath,
     RadarRuleEvaluation,
     RadarUniverseObservation,
+    SourceRegistry,
+    StockMaster,
     WatchlistGroup,
 )
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 from app.watchlists.radar_backtest_v2 import (
     RadarBacktestRequest,
     build_purged_walk_forward_splits,
@@ -70,6 +74,26 @@ class WatchlistRadarBacktestV2Tests(unittest.TestCase):
         self,
     ) -> None:
         with Session(self.engine) as db:
+            source = SourceRegistry(
+                source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+                source_type="official",
+                category="market_daily_price",
+                reliability_level="official",
+            )
+            db.add(source)
+            db.add_all(
+                [
+                    StockMaster(
+                        stock_id=stock_id,
+                        stock_name=stock_id,
+                        market="TWSE",
+                        instrument_type="stock",
+                        is_active=True,
+                    )
+                    for stock_id in ("2330", "2317", "2454")
+                ]
+            )
+            db.flush()
             trade_dates = [
                 date(2026, 7, 27),
                 date(2026, 7, 28),
@@ -81,12 +105,30 @@ class WatchlistRadarBacktestV2Tests(unittest.TestCase):
                 ("2317", trade_dates[:2]),
             ):
                 for trade_date in observed_dates:
+                    raw = RawFetchResult(
+                        source_id=source.id,
+                        fetched_at=datetime.combine(
+                            trade_date,
+                            datetime.min.time(),
+                            tzinfo=UTC,
+                        ).replace(hour=8),
+                        method="GET",
+                        content_hash=(
+                            f"radar-backtest-{stock_id}-{trade_date.isoformat()}"
+                        ),
+                        parser_version="radar-backtest-test-v1",
+                    )
+                    db.add(raw)
+                    db.flush()
                     db.add(
                         MarketDailyPrice(
-                            source_id=1,
-                            raw_result_id=raw_result_id,
+                            source_id=source.id,
+                            raw_result_id=raw.id,
                             trade_date=trade_date,
                             stock_id=stock_id,
+                            open_price=99,
+                            high_price=101,
+                            low_price=98,
                             close_price=100,
                         )
                     )

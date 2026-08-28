@@ -467,14 +467,22 @@ class MarketOhlcChartRead(BaseModel):
     stock_id: str
     timeframe: str
     bars: int
+    requested_bar_count: int
+    available_bar_count: int
+    returned_point_count: int
+    bars_legacy_count: int
+    deprecated_fields: list[str] = Field(default_factory=list)
     lookback_days: int
     from_date: date
     to_date: date
+    requested_to_date: date | None = None
     point_count: int
     points: list[MarketDailyChartRead]
     backfill: dict | None = None
     intraday_overlay: dict[str, Any] | None = None
     volume_unit: str | None = None
+    trade_value_unit: str | None = None
+    currency: str | None = None
     volume_semantics: str = "not_provided"
     volume_status: str = "not_provided"
     data_quality: str = "ok"

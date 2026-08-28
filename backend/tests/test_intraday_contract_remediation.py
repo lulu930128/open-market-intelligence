@@ -1405,7 +1405,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertIsNone(result["official_close_price"])
         self.assertEqual(result["high_price"], 43_686.15)
 
-    def test_taiwan_index_post_close_deadline_controls_confirmation(self) -> None:
+    def test_taiwan_index_post_close_clock_cannot_confirm_without_evidence(self) -> None:
         snapshot = {
             "time": "2026-07-27",
             "as_of": "2026-07-27T13:30:05+08:00",
@@ -1441,7 +1441,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
                 "checked_at": "2026-07-27T13:32:00+08:00",
             },
         )
-        confirmed = _compact_index_quote(
+        still_pending = _compact_index_quote(
             index_id="TAIEX",
             index_snapshot=snapshot,
             intraday=intraday,
@@ -1456,19 +1456,15 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(pending["latest_price"], 43_634.19)
         self.assertEqual(pending["high_price"], 43_686.15)
         self.assertIsNone(pending["official_close_price"])
-        self.assertEqual(confirmed["official_close_status"], "confirmed")
-        self.assertTrue(confirmed["official_close_available"])
-        self.assertEqual(confirmed["official_close_price"], 43_634.19)
-        self.assertEqual(confirmed["official_close_display"], "43,634.19")
+        self.assertEqual(still_pending["official_close_status"], "pending")
+        self.assertFalse(still_pending["official_close_available"])
+        self.assertIsNone(still_pending["official_close_price"])
+        self.assertIsNone(still_pending["official_close_display"])
         self.assertEqual(
-            confirmed["selection_reason"],
-            "confirmed_official_close",
+            still_pending["selection_reason"],
+            "latest_same_trade_date_candidate_pending_confirmation",
         )
-        self.assertNotEqual(
-            confirmed["official_close_price"],
-            confirmed["high_price"],
-        )
-        auction = confirmed["components"]["auction"]
+        auction = still_pending["components"]["auction"]
         self.assertEqual(auction["status"], "not_applicable")
         self.assertEqual(
             auction["unavailable_reason_code"],

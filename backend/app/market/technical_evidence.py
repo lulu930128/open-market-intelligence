@@ -6,9 +6,9 @@ from typing import Any, Iterable, Mapping
 
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketIndexDailyStat
 from app.market import indicator_service
 from app.market.daily_ohlcv_platform import read_taiwan_official_daily
+from app.market.official_index_platform import read_taiwan_official_index_series
 from app.market.ohlc_overlay import aggregate_ohlc_points, point_date
 from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
@@ -400,6 +400,7 @@ def _snapshot_for_timeframe(
     method_catalog: dict[str, dict[str, Any]],
     latest_observation_date: date | None = None,
     current_partial_point: Mapping[str, Any] | None = None,
+    volume_unit: str = "shares",
 ) -> dict[str, Any]:
     period = classify_latest_period(
         points,
@@ -434,6 +435,10 @@ def _snapshot_for_timeframe(
                 "event_time": current_partial_point.get("event_time"),
                 "source": current_partial_point.get("source"),
                 "volume_semantics": current_partial_point.get("volume_semantics"),
+                "volume_unit": volume_unit,
+                "price_unit": "TWD",
+                "currency": "TWD",
+                "source_capability": "daily.ohlcv",
                 "indicator_semantics": {
                     "price_based": "intraday_partial",
                     "range_based": "intraday_partial",
@@ -458,7 +463,22 @@ def _snapshot_for_timeframe(
         if partial is not None:
             partial = {**partial, "bar_status": "current_period_partial"}
     if completed is not None:
-        completed = {**completed, "bar_status": "completed"}
+        completed = {
+            **completed,
+            "bar_status": "completed",
+            "volume_unit": volume_unit,
+            "price_unit": "TWD",
+            "currency": "TWD",
+            "source_capability": "daily.ohlcv",
+        }
+    if partial is not None:
+        partial = {
+            **partial,
+            "volume_unit": volume_unit,
+            "price_unit": "TWD",
+            "currency": "TWD",
+            "source_capability": "daily.ohlcv",
+        }
     return {
         "timeframe": timeframe,
         "period": period,
@@ -529,6 +549,23 @@ def build_corporate_action_contract(
         warnings.append(
             "Known ex-dividend events occur inside the analysis window; affected pivots and breakout evidence are excluded or suppressed."
         )
+    source_names = sorted(
+        {
+            str(value).strip()
+            for value in [
+                *(history.get("sources") or []),
+                *(action.get("source") for action in actions),
+            ]
+            if str(value or "").strip()
+        }
+    )
+    absence_semantics = (
+        "matching_events_observed"
+        if actions
+        else "none_observed_in_complete_checked_range"
+        if coverage_status == "complete"
+        else "unknown_outside_checked_range"
+    )
     return {
         "price_basis": PRICE_BASIS,
         "adjustment_applied": False,
@@ -537,6 +574,14 @@ def build_corporate_action_contract(
         "cache_status": cache_status,
         "coverage_start": _json_date(coverage_start),
         "coverage_end": _json_date(coverage_end),
+        "checked_through_date": _json_date(coverage_end),
+        "source_scope": {
+            "providers": source_names,
+            "coverage_start": _json_date(coverage_start),
+            "coverage_end": _json_date(coverage_end),
+            "cache_status": cache_status,
+        },
+        "absence_semantics": absence_semantics,
         "relevant_analysis_start": _json_date(analysis_start),
         "relevant_analysis_end": _json_date(analysis_end),
         "affected_events": actions,
@@ -569,6 +614,9 @@ def _corporate_summary(contract: Mapping[str, Any]) -> dict[str, Any]:
             "coverage_status",
             "coverage_start",
             "coverage_end",
+            "checked_through_date",
+            "source_scope",
+            "absence_semantics",
             "relevant_analysis_start",
             "relevant_analysis_end",
             "affected_dates",
@@ -1495,10 +1543,13 @@ def build_technical_structure_v2(
 def _daily_points(
     db: Session,
     stock_id: str,
+    *,
+    to_date: date | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     result = read_taiwan_official_daily(
         db,
         stock_id=stock_id,
+        to_date=to_date,
         limit=MAX_DAILY_BARS,
     )
     bars = result.resolved.bars
@@ -1542,19 +1593,24 @@ def _daily_points(
     return points, lineage
 
 
-def _benchmark_points(db: Session) -> list[dict[str, Any]]:
-    rows = (
-        db.query(MarketIndexDailyStat)
-        .filter(MarketIndexDailyStat.index_id == "TAIEX")
-        .filter(MarketIndexDailyStat.close_value.isnot(None))
-        .order_by(MarketIndexDailyStat.trade_date.desc())
-        .limit(MAX_DAILY_BARS)
-        .all()
+def _benchmark_points(
+    db: Session,
+    *,
+    to_date: date | None = None,
+) -> list[dict[str, Any]]:
+    results = read_taiwan_official_index_series(
+        db,
+        index_id="TAIEX",
+        to_date=to_date,
+        limit=MAX_DAILY_BARS,
     )
-    rows = list(reversed(rows))
     return [
-        {"time": row.trade_date, "close": row.close_value}
-        for row in rows
+        {
+            "time": observation.trade_date,
+            "close": float(observation.close_value),
+        }
+        for result in results
+        if (observation := result.resolved.market_index) is not None
     ]
 
 
@@ -1566,17 +1622,18 @@ def build_tw_stock_technical_evidence(
     current_quote: Mapping[str, Any] | None = None,
     intraday_points: list[Mapping[str, Any]] | None = None,
     market_calendar_status: Mapping[str, Any] | None = None,
+    to_date: date | None = None,
 ) -> dict[str, Any]:
     parameters = get_technical_analysis_parameters()
-    daily, daily_lineage = _daily_points(db, stock_id)
+    daily, daily_lineage = _daily_points(db, stock_id, to_date=to_date)
     if not daily:
         return {
             "kind": "tw_stock_technical_evidence",
             "version": "tw.stock.technical.evidence.v1",
             "status": "missing",
-            "missing": ["market_daily_price"],
+            "missing": ["tw.daily.ohlcv"],
             "warnings": [],
-            "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            "source_refs": [{"type": "resolved_market_data", "name": "tw.daily.ohlcv"}],
         }
     weekly = aggregate_ohlc_points(points=daily, timeframe="weekly")
     monthly = aggregate_ohlc_points(points=daily, timeframe="monthly")
@@ -1591,7 +1648,7 @@ def build_tw_stock_technical_evidence(
             session_date=session_date,
             session_phase=str((market_calendar_status or {}).get("phase") or "unknown"),
         )
-        if session_date is not None
+        if session_date is not None and to_date is None
         else None
     )
     timeframes = {
@@ -1686,7 +1743,10 @@ def build_tw_stock_technical_evidence(
     )
     volume_profile = build_volume_profile(daily)
     anchored_vwap = build_anchored_vwap(swing_daily, swings)
-    relative_strength = build_relative_strength(daily, _benchmark_points(db))
+    relative_strength = build_relative_strength(
+        daily,
+        _benchmark_points(db, to_date=to_date),
+    )
     profile_corporate_actions = _corporate_contract_for_points(
         corporate_event_history,
         daily,
@@ -1776,6 +1836,14 @@ def build_tw_stock_technical_evidence(
         "price_basis": PRICE_BASIS,
         "currency": "TWD",
         "price_unit": "TWD",
+        "volume_unit": "shares",
+        "source_capability": "daily.ohlcv",
+        "measurement_lineage": {
+            "currency": "TWD",
+            "price_unit": "TWD",
+            "volume_unit": "shares",
+            "source_capability": "daily.ohlcv",
+        },
         "methods": methods,
         "timeframes": timeframes,
         "corporate_action": daily_corporate_actions,

@@ -12,11 +12,14 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     Base,
     MarketDailyPrice,
+    RawFetchResult,
     RadarFeatureSnapshot,
     RadarOutcomePath,
     RadarRuleEvaluation,
     RadarSignalEvent,
     RadarUniverseObservation,
+    SourceRegistry,
+    StockMaster,
     WatchlistGroup,
 )
 from app.watchlists.radar_active_v2_service import (
@@ -52,6 +55,72 @@ from app.routers.watchlists import (
 from app.watchlists.radar_shadow_v2_service import (
     evaluate_pending_radar_v2_outcomes,
 )
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
+
+
+def _add_canonical_daily_bar(
+    db: Session,
+    *,
+    stock_id: str,
+    trade_date: date,
+    close_price: float = 99.0,
+) -> None:
+    source = (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.source_name == TWSE_DAILY_TRADING_SOURCE_NAME)
+        .one_or_none()
+    )
+    if source is None:
+        source = SourceRegistry(
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+            source_type="official",
+            category="market_daily_price",
+            reliability_level="official",
+        )
+        db.add(source)
+        db.flush()
+    if (
+        db.query(StockMaster)
+        .filter(StockMaster.stock_id == stock_id)
+        .one_or_none()
+        is None
+    ):
+        db.add(
+            StockMaster(
+                stock_id=stock_id,
+                stock_name=stock_id,
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            )
+        )
+    raw = RawFetchResult(
+        source_id=source.id,
+        fetched_at=datetime.combine(
+            trade_date,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ).replace(hour=8),
+        method="GET",
+        content_hash=f"radar-daily-{stock_id}-{trade_date.isoformat()}",
+        parser_version="radar-test-v1",
+    )
+    db.add(raw)
+    db.flush()
+    db.add(
+        MarketDailyPrice(
+            source_id=source.id,
+            raw_result_id=raw.id,
+            trade_date=trade_date,
+            stock_id=stock_id,
+            stock_name=stock_id,
+            open_price=100.0,
+            high_price=103.0,
+            low_price=97.0,
+            close_price=close_price,
+            trade_volume=1_000_000,
+        )
+    )
 
 def _source_item(
     stock_id: str,
@@ -697,19 +766,10 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
             for index in range(1, 6):
                 trade_date = next_taiwan_trading_day(trade_date)
                 for stock_id in ("1111", "2222"):
-                    db.add(
-                        MarketDailyPrice(
-                            source_id=1,
-                            raw_result_id=index,
-                            trade_date=trade_date,
-                            stock_id=stock_id,
-                            stock_name=stock_id,
-                            open_price=100.0,
-                            high_price=103.0,
-                            low_price=97.0,
-                            close_price=99.0,
-                            trade_volume=1_000_000,
-                        )
+                    _add_canonical_daily_bar(
+                        db,
+                        stock_id=stock_id,
+                        trade_date=trade_date,
                     )
             db.commit()
 
@@ -865,19 +925,11 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
                     ),
                 )
             )
-            db.add(
-                MarketDailyPrice(
-                    source_id=1,
-                    raw_result_id=1,
-                    trade_date=date(2026, 8, 7),
-                    stock_id="DUE1",
-                    stock_name="DUE1",
-                    open_price=100.0,
-                    high_price=104.0,
-                    low_price=99.0,
-                    close_price=103.0,
-                    trade_volume=1_000_000,
-                )
+            _add_canonical_daily_bar(
+                db,
+                stock_id="DUE1",
+                trade_date=date(2026, 8, 7),
+                close_price=103.0,
             )
 
             candidate_ids: list[int] = []

@@ -7,7 +7,11 @@ from typing import Iterable
 
 from sqlalchemy.orm import Session
 
-from app.market.trading_calendar import taiwan_market_session, taiwan_presentation_session
+from app.market.trading_calendar import (
+    TAIWAN_TZ,
+    taiwan_market_session,
+    taiwan_presentation_session,
+)
 from app.market.tw_current_market_acquisition import (
     TaiwanCurrentBreadthAcquisitionExecutor,
     TaiwanCurrentIndexAcquisitionExecutor,

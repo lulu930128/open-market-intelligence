@@ -132,10 +132,27 @@ def test_lineage_gaps_are_never_advertised_as_repairable() -> None:
     ]
     assert gaps
     assert all(not dataset.repairable for dataset in gaps)
+    assert all(not dataset.advertised for dataset in gaps)
     assert all(
         dataset.convergence_status is TaiwanDatasetConvergenceStatus.LINEAGE_GAP
         for dataset in gaps
     )
+
+
+def test_etf_and_derivatives_lineage_debt_is_truthfully_not_advertised() -> None:
+    debt_families = {
+        dataset.dataset_id: dataset
+        for dataset in TW_DATASET_CATALOG.all()
+        if dataset.family in {"etf", "derivatives"}
+    }
+
+    assert debt_families
+    assert all(not dataset.advertised for dataset in debt_families.values())
+    assert all(
+        dataset.lineage_status is TaiwanDatasetLineageStatus.LINEAGE_GAP
+        for dataset in debt_families.values()
+    )
+    assert all(dataset.limitations for dataset in debt_families.values())
 
 
 def test_platform_owned_datasets_have_canonical_lineage_and_repair_paths() -> None:

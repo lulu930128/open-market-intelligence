@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.db.write_coordination import run_with_sqlite_write_retry
 from app.db.models import (
-    MarketDailyPrice,
     RadarOutcomePath,
     RadarUniverseObservation,
     WatchlistGroup,
@@ -17,6 +16,7 @@ from app.db.models import (
     WatchlistRadarSnapshotItem,
     WatchlistRadarSnapshotRun,
 )
+from app.market.tw_daily_freshness import read_taiwan_daily_freshness
 from app.watchlists.radar_rule_contract import (
     RADAR_V1_FROZEN_AT,
     RADAR_V1_LIFECYCLE_STATUS,
@@ -101,9 +101,9 @@ def get_watchlist_radar_v2_outcome_due_coverage(
 ) -> dict[str, Any]:
     resolved_group_ids = _resolve_group_ids(db=db, group_ids=group_ids)
     resolved_modes = _normalize_modes(modes)
-    latest_available_trade_date = as_of_trade_date or db.query(
-        func.max(MarketDailyPrice.trade_date)
-    ).scalar()
+    latest_available_trade_date = as_of_trade_date
+    if latest_available_trade_date is None:
+        latest_available_trade_date = read_taiwan_daily_freshness(db).latest_date
     query = (
         db.query(RadarOutcomePath)
         .join(

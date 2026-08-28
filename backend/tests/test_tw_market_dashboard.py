@@ -327,6 +327,13 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         parsed = TaiwanMarketDashboardRead.model_validate(payload)
         self.assertEqual(parsed.headline_index_field, "resolved_indices")
         self.assertEqual(parsed.headline_breadth_field, "resolved_breadth")
+        legacy_breadth = parsed.breadth["TWSE"]
+        self.assertTrue(legacy_breadth.deprecated)
+        self.assertEqual(
+            legacy_breadth.canonical_ref,
+            "resolved_breadth.TWSE",
+        )
+        self.assertFalse(legacy_breadth.decision_usable)
         self.assertEqual(len(parsed.resolved_indices), 1)
         self.assertEqual(parsed.resolved_indices[0].value, 24_321.5)
         self.assertEqual(
@@ -345,6 +352,8 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertTrue(parsed.resolved_indices[0].provisional_estimate)
         self.assertTrue(parsed.resolved_indices[0].decision_usable)
         resolved_breadth = parsed.resolved_breadth["TWSE"]
+        self.assertFalse(resolved_breadth.deprecated)
+        self.assertIsNone(resolved_breadth.canonical_ref)
         self.assertEqual(resolved_breadth.scope, "registered_universe")
         self.assertEqual(resolved_breadth.coverage, 90)
         self.assertEqual(resolved_breadth.unknown, 10)

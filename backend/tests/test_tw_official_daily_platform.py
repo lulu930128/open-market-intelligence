@@ -442,6 +442,138 @@ def test_cache_read_without_dates_uses_exact_latest_candidate_window(
     assert valuation.facts_usable is True
 
 
+def test_future_of_release_row_requires_post_release_receipt(
+    db: Session,
+) -> None:
+    source = SourceRegistry(
+        source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+        source_type="api",
+        category="market_data",
+        priority=10,
+        parser_type="twse_daily_trading",
+        reliability_level="official",
+    )
+    db.add(source)
+    db.flush()
+    previous_receipt = RawFetchResult(
+        source_id=source.id,
+        fetched_at=datetime(2026, 8, 27, 8, 0, tzinfo=timezone.utc),
+        content_hash="previous-released",
+        parser_version="twse.stock_day_all.v1",
+        raw_text="[]",
+    )
+    premature_receipt = RawFetchResult(
+        source_id=source.id,
+        fetched_at=datetime(2026, 8, 28, 6, 1, tzinfo=timezone.utc),
+        content_hash="today-premature",
+        parser_version="twse.stock_day_all.v1",
+        raw_text="[]",
+    )
+    db.add_all([previous_receipt, premature_receipt])
+    db.flush()
+    db.add(
+        StockMaster(
+            stock_id="3711",
+            stock_name="ASE Technology",
+            market="TWSE",
+            instrument_type="stock",
+        )
+    )
+    previous_row = MarketDailyPrice(
+        source_id=source.id,
+        raw_result_id=previous_receipt.id,
+        stock_id="3711",
+        trade_date=date(2026, 8, 27),
+        open_price=600,
+        high_price=610,
+        low_price=590,
+        close_price=605,
+        trade_volume=11_000_000,
+    )
+    premature_row = MarketDailyPrice(
+        source_id=source.id,
+        raw_result_id=premature_receipt.id,
+        stock_id="3711",
+        trade_date=date(2026, 8, 28),
+        open_price=608,
+        high_price=630,
+        low_price=606,
+        close_price=621,
+        trade_volume=17_504_000,
+    )
+    db.add_all([previous_row, premature_row])
+    db.commit()
+
+    before_release = read_taiwan_official_daily(
+        db,
+        stock_id="3711",
+        to_date=date(2026, 8, 28),
+        limit=20,
+        requested_at=datetime(2026, 8, 28, 6, 18, tzinfo=timezone.utc),
+    )
+    assert before_release.requirement.request.end_at.date() == date(2026, 8, 27)
+    assert [bar.end_at.date() for bar in before_release.resolved.bars] == [
+        date(2026, 8, 27)
+    ]
+    assert (
+        "REQUESTED_TO_DATE_EXCEEDS_LATEST_RELEASED_DAILY_DATE"
+        in before_release.limitations
+    )
+
+    after_clock_only = read_taiwan_official_daily(
+        db,
+        stock_id="3711",
+        to_date=date(2026, 8, 28),
+        limit=20,
+        requested_at=datetime(2026, 8, 28, 7, 20, tzinfo=timezone.utc),
+    )
+    assert [bar.end_at.date() for bar in after_clock_only.resolved.bars] == [
+        date(2026, 8, 27)
+    ]
+    assert any(
+        item.reason_code == "DAILY_RECEIPT_PREDATES_RELEASE"
+        for item in after_clock_only.candidate_rejections
+    )
+
+    post_release_receipt = RawFetchResult(
+        source_id=source.id,
+        fetched_at=datetime(2026, 8, 28, 7, 18, tzinfo=timezone.utc),
+        content_hash="today-released",
+        parser_version="twse.stock_day_all.v1",
+        raw_text="[]",
+    )
+    db.add(post_release_receipt)
+    db.flush()
+    premature_row.raw_result_id = post_release_receipt.id
+    db.commit()
+
+    after_refresh = read_taiwan_official_daily(
+        db,
+        stock_id="3711",
+        to_date=date(2026, 8, 28),
+        limit=20,
+        requested_at=datetime(2026, 8, 28, 7, 20, tzinfo=timezone.utc),
+    )
+    assert [bar.end_at.date() for bar in after_refresh.resolved.bars] == [
+        date(2026, 8, 27),
+        date(2026, 8, 28),
+    ]
+
+    chart = list_stock_ohlc_chart_data(
+        db,
+        stock_id="3711",
+        timeframe="daily",
+        bars=20,
+        to_date=date(2026, 8, 31),
+    )
+    assert (
+        "REQUESTED_TO_DATE_EXCEEDS_LATEST_RELEASED_DAILY_DATE"
+        in chart["warnings"]
+    )
+    assert chart["trade_value_unit"] == "TWD"
+    assert chart["currency"] == "TWD"
+
+
 def test_recorded_tpex_excerpt_parses_legacy_table_shape() -> None:
     fixture = _fixture("tpex_mainboard_quotes_excerpt_20260825.json")
     parsed = parse_tpex_official_daily_payload(
@@ -552,6 +684,11 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
         to_date=trade_date,
     )
     assert chart["point_count"] == 1
+    assert chart["requested_bar_count"] == 1
+    assert chart["available_bar_count"] == 1
+    assert chart["returned_point_count"] == 1
+    assert chart["bars_legacy_count"] == 1
+    assert chart["deprecated_fields"] == ["bars"]
     assert chart["points"][0]["time"] == trade_date
     assert chart["points"][0]["close"] == close
     assert chart["points"][0]["trade_value"] == row.trade_value
@@ -562,6 +699,11 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
     assert chart["data_quality"] == "ok"
     outward = MarketOhlcChartRead.model_validate(chart).model_dump(mode="json")
     assert outward["stock_id"] == symbol
+    assert outward["requested_bar_count"] == 1
+    assert outward["available_bar_count"] == 1
+    assert outward["returned_point_count"] == 1
+    assert outward["bars_legacy_count"] == 1
+    assert outward["deprecated_fields"] == ["bars"]
     assert outward["points"][0]["close"] == close
     assert outward["volume_unit"] == "shares"
     assert outward["latest_finalized_data_date"] == trade_date.isoformat()

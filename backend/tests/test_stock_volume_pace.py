@@ -12,6 +12,7 @@ from app.db.models import (
     MarketIntradayBar,
     RawFetchResult,
     SourceRegistry,
+    StockMaster,
 )
 from app.market.stock_volume_pace import (
     build_stock_volume_pace,
@@ -20,6 +21,7 @@ from app.market.stock_volume_pace import (
     mutate_market_intraday_history,
 )
 from app.market.trading_calendar import TAIWAN_TZ
+from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 from app.us_market.trading_calendar import US_MARKET_TIMEZONE
 
 
@@ -33,12 +35,22 @@ class TaiwanStockVolumePaceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_session()
         source = SourceRegistry(
-            source_name="volume-pace-test",
-            source_type="test",
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+            source_type="official",
             category="market_daily_price",
+            reliability_level="official",
         )
         self.db.add(source)
         self.db.flush()
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            )
+        )
         raw = RawFetchResult(
             source_id=source.id,
             method="GET",
@@ -73,6 +85,9 @@ class TaiwanStockVolumePaceTests(unittest.TestCase):
                 stock_id="2330",
                 stock_name="TSMC",
                 trade_volume=daily_total,
+                open_price=100,
+                high_price=100,
+                low_price=100,
                 close_price=100,
             )
         )

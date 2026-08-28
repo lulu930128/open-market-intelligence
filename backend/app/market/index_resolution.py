@@ -307,14 +307,6 @@ def resolve_taiwan_index_quote_state(
             "twse_index_5s_snapshot",
             "twse_openapi",
             "tpex_openapi",
-            "market_index_daily_stat",
-        )
-    )
-    after_confirmation_deadline = bool(
-        summary_date is not None
-        and (
-            summary_date < current_date
-            or checked_at.time() >= time(13, 33)
         )
     )
     official_price = (
@@ -333,10 +325,7 @@ def resolve_taiwan_index_quote_state(
         official_price is not None
         and expected_trade_date is not None
         and official_trade_date == expected_trade_date
-        and (
-            explicit_official_status in {"confirmed", "official", "final"}
-            or source_is_official and after_confirmation_deadline
-        )
+        and explicit_official_status in {"confirmed", "official", "final"}
     )
     official_candidate = _intraday_official_candidate(
         intraday,
@@ -360,8 +349,6 @@ def resolve_taiwan_index_quote_state(
             "confirmation_evidence": (
                 "explicit_official_status"
                 if explicit_official_status in {"confirmed", "official", "final"}
-                else "official_source_after_confirmation_deadline"
-                if summary_official_confirmed
                 else None
             ),
         }
@@ -434,7 +421,7 @@ def resolve_taiwan_index_quote_state(
         if summary_candidate["eligible"]
         and summary_date is not None
         and summary_date < current_date
-        and source_is_official
+        and explicit_official_status in {"confirmed", "official", "final"}
         else "not_available_yet"
     )
     selected_value = (
@@ -476,6 +463,18 @@ def resolve_taiwan_index_quote_state(
         and selected_trade_date
         and expected_trade_date is not None
         and selected_trade_date == expected_trade_date.isoformat()
+        and (
+            phase not in {
+                "post_close",
+                "post_close_snapshot",
+                "market_closed",
+            }
+            or (
+                selected_candidate.get("candidate") == "official_close"
+                and official_close_status
+                in {"confirmed", "confirmed_latest_session"}
+            )
+        )
         and not (
             closing_auction
             and selected_candidate.get("candidate") != "official_close"
@@ -516,6 +515,19 @@ def resolve_taiwan_index_quote_state(
         and official_close_status in {"confirmed", "confirmed_latest_session"}
     )
     selected_provisional_estimate = selected_finalization == "provisional"
+    freshness_status = (
+        "current"
+        if decision_usable
+        else "stale"
+        if phase in {"regular", "regular_live", "closing_auction"}
+        and (
+            selected_candidate is not None
+            or intraday_candidate.get("value") is not None
+        )
+        else "latest_completed_session"
+        if selected_candidate is not None
+        else "missing"
+    )
     resolution_core = {
         "version": TAIWAN_INDEX_RESOLUTION_VERSION,
         "index_id": str(index_id or snapshot.get("index_id") or "").upper()
@@ -602,6 +614,7 @@ def resolve_taiwan_index_quote_state(
         ),
         "quote_semantics": quote_semantics,
         "delivery_status": delivery_status,
+        "freshness_status": freshness_status,
         "decision_usable": decision_usable,
         "coverage_status": (
             "complete"

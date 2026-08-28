@@ -20,6 +20,8 @@ from app.market.index_resolution import (
     normalize_index_acquisition_policy,
     resolve_taiwan_index_quote_state,
 )
+from app.market.official_index_platform import read_taiwan_official_index_series
+from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market.index_parsers import as_float as _as_float
 from app.market.index_parsers import as_int as _as_int
 from app.market.index_parsers import count_with_limit as _count_with_limit
@@ -52,6 +54,7 @@ from app.market.providers import http_get
 from app.market.providers import tpex, twse, yahoo
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import (
+    TAIWAN_TZ,
     is_taiwan_trading_day,
     latest_released_trading_day,
     taiwan_presentation_session,
@@ -81,7 +84,8 @@ TPEX_DAILY_INDEX_URL = tpex.DAILY_INDEX_URL
 TPEX_DAILY_QUOTES_URL = tpex.DAILY_QUOTES_URL
 TPEX_INDEX_5S_URL = tpex.INDEX_5S_URL
 TPEX_MARKET_HIGHLIGHT_URL = tpex.MARKET_HIGHLIGHT_URL
-TAIPEI_TZ = timezone(timedelta(hours=8))
+# Compatibility name only; the trading calendar owns the timezone identity.
+TAIPEI_TZ = TAIWAN_TZ
 CACHE_TTL_SECONDS = 45
 TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS = 30
 INDEX_LIST_CACHE_TTL_SECONDS = 300
@@ -2345,15 +2349,12 @@ def _fetch_twse_index_5s_intraday(
         raise ValueError("Official 5-second index payload has no usable points.")
 
     latest_point_time = _point_datetime(points[-1])
-    session_finalized = (
-        closing_summary_value is not None
-        if index_id == "TPEX"
-        else (
-            latest_point_time is not None
-            and latest_point_time.astimezone(TAIPEI_TZ).time()
-            >= TAIWAN_INDEX_SESSION_CLOSE_TIME
-        )
-    )
+    # A 13:30 point proves only that the provider series reached the session
+    # boundary.  It does not prove official-close publication or
+    # reconciliation.  Only an explicit provider closing-summary record may
+    # mark this intraday series complete; the official daily owner remains the
+    # sole source of an official/final close.
+    session_finalized = closing_summary_value is not None
 
     payload = {
         "stock_id": config["index_id"],
@@ -3664,31 +3665,24 @@ def _source_contribution_quote_rows(market: str) -> tuple[list[dict], dict[str, 
     }
 
 
-def _latest_market_daily_price_date(
-    db: Session,
-    *,
-    market: str,
-) -> date | None:
-    source_name = _market_source_name(market)
-    return (
-        db.query(func.max(MarketDailyPrice.trade_date))
-        .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-        .filter(SourceRegistry.source_name == source_name)
-        .scalar()
-    )
-
-
 def _local_contribution_quote_rows(
     db: Session,
     *,
     market: str,
     shares_by_code: dict[str, int],
 ) -> tuple[list[dict], dict[str, int], str, dict[str, str]]:
-    source_name = _market_source_name(market)
-    latest_trade_date = _latest_market_daily_price_date(db, market=market)
+    # Import lazily to avoid the calendar_status -> market_chips -> indices
+    # cycle while keeping the completed-session owner in Data Core.
+    from app.market.tw_daily_freshness import read_taiwan_daily_freshness
+
+    latest_trade_date = read_taiwan_daily_freshness(
+        db,
+        venue=market,
+    ).latest_date
+    canonical_source = f"tw.daily.ohlcv:{market}"
 
     if latest_trade_date is None:
-        return [], shares_by_code, f"market_daily_price:{source_name}", {
+        return [], shares_by_code, canonical_source, {
             "code": "stock_id",
             "name": "stock_name",
             "close": "close_price",
@@ -3697,26 +3691,27 @@ def _local_contribution_quote_rows(
             "date": "trade_date",
         }
 
-    rows = (
-        db.query(MarketDailyPrice)
-        .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-        .filter(SourceRegistry.source_name == source_name)
-        .filter(MarketDailyPrice.trade_date == latest_trade_date)
-        .order_by(MarketDailyPrice.stock_id.asc())
-        .all()
+    universe = TaiwanOfficialDailyBarRepository(db).load_market_universe(
+        trade_date=latest_trade_date,
+        venue=market,
+        max_rows=5000,
     )
     payload_rows = [
         {
-            "stock_id": row.stock_id,
-            "stock_name": row.stock_name,
-            "close_price": row.close_price,
-            "price_change": row.price_change,
-            "trade_value": row.trade_value,
-            "trade_date": row.trade_date,
+            "stock_id": bar.instrument.symbol,
+            "stock_name": bar.instrument_name,
+            "close_price": float(bar.close_price),
+            "price_change": (
+                float(bar.price_change) if bar.price_change is not None else None
+            ),
+            "trade_value": (
+                int(bar.turnover_value) if bar.turnover_value is not None else None
+            ),
+            "trade_date": bar.end_at.astimezone(TAIWAN_TZ).date(),
         }
-        for row in rows
+        for bar in universe.bars
     ]
-    return payload_rows, shares_by_code, f"market_daily_price:{source_name}", {
+    return payload_rows, shares_by_code, canonical_source, {
         "code": "stock_id",
         "name": "stock_name",
         "close": "close_price",
@@ -4074,44 +4069,45 @@ def _cached_market_index_close_points(
     bars: int,
 ) -> list[dict]:
     multiplier = 1 if timeframe == "daily" else 7 if timeframe == "weekly" else 31
-    rows = (
-        db.query(MarketIndexDailyStat)
-        .filter(MarketIndexDailyStat.index_id == index_id)
-        .filter(MarketIndexDailyStat.close_value.isnot(None))
-        .order_by(MarketIndexDailyStat.trade_date.desc())
-        .limit(min(bars * multiplier, MAX_INDEX_BARS))
-        .all()
+    results = read_taiwan_official_index_series(
+        db,
+        index_id=index_id,
+        limit=min(bars * multiplier, MAX_INDEX_BARS),
     )
-    grouped: dict[date, list[MarketIndexDailyStat]] = defaultdict(list)
-    for row in reversed(rows):
-        grouped[_index_stat_period_key(row.trade_date, timeframe)].append(row)
+    grouped: dict[date, list] = defaultdict(list)
+    for result in results:
+        observation = result.resolved.market_index
+        if observation is not None:
+            grouped[
+                _index_stat_period_key(observation.trade_date, timeframe)
+            ].append(observation)
 
     points: list[dict] = []
-    for period_rows in grouped.values():
-        latest = period_rows[-1]
+    for period_observations in grouped.values():
+        latest = period_observations[-1]
         points.append(
             {
                 "time": latest.trade_date,
                 "open": None,
                 "high": None,
                 "low": None,
-                "close": latest.close_value,
+                "close": float(latest.close_value),
                 "volume": sum(
-                    row.trade_volume
-                    for row in period_rows
-                    if row.trade_volume is not None
+                    int(observation.trade_volume.value)
+                    for observation in period_observations
+                    if observation.trade_volume is not None
                 )
                 or None,
                 "trade_value": sum(
-                    row.trade_value
-                    for row in period_rows
-                    if row.trade_value is not None
+                    int(observation.trade_value)
+                    for observation in period_observations
+                    if observation.trade_value is not None
                 )
                 or None,
                 "transaction_count": sum(
-                    row.transaction_count
-                    for row in period_rows
-                    if row.transaction_count is not None
+                    observation.transaction_count
+                    for observation in period_observations
+                    if observation.transaction_count is not None
                 )
                 or None,
             }
@@ -4173,7 +4169,7 @@ def get_market_index_ohlc_chart_data(
         },
         "data_quality": "partial" if points else "missing",
         "warnings": [
-            "Cached MarketIndexDailyStat only owns close/change and activity; open/high/low remain unknown until explicit OHLC refresh."
+            "Canonical official index daily evidence owns close/change and activity; open/high/low remain unknown until an official OHLC capability is available."
         ],
         **freshness,
     }

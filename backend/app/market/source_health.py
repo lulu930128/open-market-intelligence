@@ -40,6 +40,9 @@ from app.market.taiwan_rules import (
     is_equity_only_dataset_required,
 )
 from app.market.tw_daily_freshness import read_taiwan_daily_freshness
+from app.market.tw_intraday_universe import (
+    resolve_taiwan_intraday_target_universe,
+)
 from app.market_data.contracts import DatasetHealthStatus
 from app.observability.provider_health import (
     enrich_source_health_entries,
@@ -521,6 +524,14 @@ def _stock_intraday_entry(
     current_time: datetime,
     required: bool,
 ) -> TaiwanSourceHealthEntry:
+    if stock_id is None:
+        return _stock_intraday_universe_entry(
+            db,
+            calendar_status=calendar_status,
+            current_time=current_time,
+            required=required,
+        )
+
     query = db.query(MarketIntradayBar).filter(MarketIntradayBar.interval == "1m")
     if stock_id is not None:
         query = query.filter(MarketIntradayBar.stock_id == stock_id)
@@ -542,6 +553,202 @@ def _stock_intraday_entry(
         current_time=current_time,
         phase=str(calendar_status.get("phase") or "unknown"),
         stale_after_seconds=stale_after_seconds,
+    )
+    return TaiwanSourceHealthEntry(
+        resource="market_intraday_bar_1m",
+        label="Taiwan stock intraday 1m bars",
+        frequency="realtime",
+        target=_target(stock_id=stock_id),
+        status=status_value,
+        ok=ok,
+        row_count=row_count,
+        required=required,
+        latest_data_date=latest_data_date,
+        latest_data_key=observed_at.isoformat() if observed_at else None,
+        latest_updated_at=getattr(latest, "updated_at", None) if latest else None,
+        expected_data_date=expected_data_date,
+        freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
+        data_quality=data_quality,
+        reason=reason,
+        provider=getattr(latest, "provider", None) if latest else "yahoo_finance_chart",
+        source=getattr(latest, "source", None) if latest else None,
+        latest_observed_at=observed_at,
+        age_seconds=age_seconds,
+        stale_after_seconds=stale_after_seconds,
+        health_dimensions={
+            "version": "tw.intraday.health.v1",
+            "target_scope": "single_symbol",
+            "requested_symbol_count": 1,
+            "current_count": 1 if ok else 0,
+            "missing_symbols": [stock_id] if row_count <= 0 else [],
+        },
+    )
+
+
+def _stock_intraday_universe_entry(
+    db: Session,
+    *,
+    calendar_status: dict[str, Any],
+    current_time: datetime,
+    required: bool,
+) -> TaiwanSourceHealthEntry:
+    universe = resolve_taiwan_intraday_target_universe(db)
+    symbols = [str(value) for value in universe.get("symbols") or []]
+    expected_data_date = _expected_observation_date(calendar_status)
+    phase = str(calendar_status.get("phase") or "unknown")
+    stale_after_seconds = 20 * 60
+    target_statuses: list[dict[str, Any]] = []
+    latest = None
+    latest_observed_at: datetime | None = None
+    row_count = 0
+
+    for symbol in symbols:
+        query = (
+            db.query(MarketIntradayBar)
+            .filter(MarketIntradayBar.interval == "1m")
+            .filter(MarketIntradayBar.stock_id == symbol)
+        )
+        symbol_row_count = query.count()
+        row_count += symbol_row_count
+        symbol_latest = _latest_or_none(
+            query,
+            MarketIntradayBar.bar_time.desc(),
+            MarketIntradayBar.id.desc(),
+        )
+        observed_at = _taiwan_observed_at(
+            symbol_latest.bar_time if symbol_latest else None
+        )
+        latest_data_date = observed_at.date() if observed_at else None
+        status_value, ok, _quality, reason, age_seconds = (
+            _realtime_observation_status(
+                row_count=symbol_row_count,
+                latest_data_date=latest_data_date,
+                expected_data_date=expected_data_date,
+                observed_at=observed_at,
+                current_time=current_time,
+                phase=phase,
+                stale_after_seconds=stale_after_seconds,
+            )
+        )
+        target_statuses.append(
+            {
+                "stock_id": symbol,
+                "status": status_value,
+                "ok": ok,
+                "row_count": symbol_row_count,
+                "latest_observed_at": (
+                    observed_at.isoformat() if observed_at else None
+                ),
+                "age_seconds": age_seconds,
+                "reason": reason,
+            }
+        )
+        if observed_at is not None and (
+            latest_observed_at is None or observed_at > latest_observed_at
+        ):
+            latest_observed_at = observed_at
+            latest = symbol_latest
+
+    requested_count = len(symbols)
+    healthy = [item for item in target_statuses if item["ok"]]
+    current_count = sum(item["status"] == "current" for item in target_statuses)
+    available_count = sum(
+        item["status"] in {"current", "available"} for item in target_statuses
+    )
+    missing_symbols = [
+        item["stock_id"] for item in target_statuses if item["row_count"] <= 0
+    ]
+    stale_symbols = [
+        item["stock_id"] for item in target_statuses if item["status"] == "stale"
+    ]
+    pending_symbols = [
+        item["stock_id"] for item in target_statuses if item["status"] == "pending"
+    ]
+
+    if requested_count == 0:
+        status_value = "not_configured"
+        ok = False
+        data_quality = "empty"
+        reason = "No eligible Tier-A Taiwan intraday targets are configured."
+    elif len(healthy) == requested_count:
+        status_value = "current" if current_count == requested_count else "available"
+        ok = True
+        data_quality = "ok"
+        reason = "Every selected Tier-A target has usable intraday evidence."
+    elif healthy:
+        status_value = "partial"
+        ok = False
+        data_quality = "partial"
+        reason = (
+            f"Intraday evidence covers {len(healthy)} of {requested_count} "
+            "selected Tier-A targets."
+        )
+    elif pending_symbols and len(pending_symbols) == requested_count:
+        status_value = "pending"
+        ok = False
+        data_quality = "pending"
+        reason = "Every selected Tier-A target is awaiting current-session evidence."
+    elif stale_symbols:
+        status_value = "stale"
+        ok = False
+        data_quality = "stale"
+        reason = "No selected Tier-A target has usable current intraday evidence."
+    else:
+        status_value = "empty"
+        ok = False
+        data_quality = "empty"
+        reason = "No selected Tier-A target has local intraday evidence."
+
+    latest_data_date = (
+        latest_observed_at.date() if latest_observed_at is not None else None
+    )
+    age_seconds = (
+        max(int((current_time - latest_observed_at).total_seconds()), 0)
+        if latest_observed_at is not None
+        else None
+    )
+    coverage_ratio = (
+        round(len(healthy) / requested_count, 4) if requested_count else None
+    )
+    return TaiwanSourceHealthEntry(
+        resource="market_intraday_bar_1m",
+        label="Taiwan stock intraday 1m bars",
+        frequency="realtime",
+        target="bounded_tier_a_universe",
+        status=status_value,
+        ok=ok,
+        row_count=row_count,
+        required=required,
+        latest_data_date=latest_data_date,
+        latest_data_key=(
+            latest_observed_at.isoformat() if latest_observed_at else None
+        ),
+        latest_updated_at=getattr(latest, "updated_at", None) if latest else None,
+        expected_data_date=expected_data_date,
+        freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
+        data_quality=data_quality,
+        reason=reason,
+        provider=getattr(latest, "provider", None) if latest else "yahoo_finance_chart",
+        source=getattr(latest, "source", None) if latest else None,
+        latest_observed_at=latest_observed_at,
+        age_seconds=age_seconds,
+        stale_after_seconds=stale_after_seconds,
+        health_dimensions={
+            "version": "tw.intraday.health.v1",
+            "target_scope": "bounded_tier_a_universe",
+            "universe": universe,
+            "requested_symbol_count": requested_count,
+            "available_count": available_count,
+            "current_count": current_count,
+            "missing_count": len(missing_symbols),
+            "stale_count": len(stale_symbols),
+            "pending_count": len(pending_symbols),
+            "coverage_ratio": coverage_ratio,
+            "missing_symbols": missing_symbols,
+            "stale_symbols": stale_symbols,
+            "pending_symbols": pending_symbols,
+            "targets": target_statuses,
+        },
     )
     return TaiwanSourceHealthEntry(
         resource="market_intraday_bar_1m",

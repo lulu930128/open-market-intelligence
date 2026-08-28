@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -58,6 +59,93 @@ def _captured_payload() -> dict[str, object]:
             "is_stale": False,
         },
     }
+
+
+def test_fixed_slot_capture_serializes_decimal_values() -> None:
+    db, engine = _db()
+    captured_at = datetime(2026, 6, 30, 8, 50, 1, tzinfo=TAIWAN_TZ)
+    payload = _captured_payload()
+    payload["best_bid_price"] = Decimal("2410.00")
+    payload["indicative_match_price"] = Decimal("2412.50")
+    try:
+        with (
+            patch(
+                "app.market.quote_contract_capture.refresh_taiwan_realtime_snapshot"
+            ),
+            patch(
+                "app.market.quote_contract_capture.get_taiwan_stock_quote_depth",
+                return_value=payload,
+            ),
+        ):
+            result = capture_taiwan_quote_contract_snapshot(
+                db=db,
+                stock_id="2330",
+                capture_slot="08:50",
+                now=captured_at,
+            )
+
+        assert result["capture_status"] == "captured"
+        replay = get_taiwan_quote_contract_replay(
+            db=db,
+            stock_id="2330",
+            trade_date=captured_at.date(),
+        )
+        quote = next(
+            item["quote"]
+            for item in replay["snapshots"]
+            if item["capture_slot"] == "08:50"
+        )
+        assert quote["best_bid_price"] == 2410
+        assert quote["indicative_match_price"] == 2412.5
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_fixed_slot_capture_persists_serialization_failure() -> None:
+    db, engine = _db()
+    captured_at = datetime(2026, 6, 30, 8, 50, 1, tzinfo=TAIWAN_TZ)
+    payload = _captured_payload()
+    payload["unsupported"] = object()
+    try:
+        with (
+            patch(
+                "app.market.quote_contract_capture.refresh_taiwan_realtime_snapshot"
+            ),
+            patch(
+                "app.market.quote_contract_capture.get_taiwan_stock_quote_depth",
+                return_value=payload,
+            ),
+        ):
+            result = capture_taiwan_quote_contract_snapshot(
+                db=db,
+                stock_id="2330",
+                capture_slot="08:50",
+                now=captured_at,
+            )
+
+        assert result["capture_status"] == "failed"
+        assert "SNAPSHOT_SERIALIZATION_FAILED" in str(result["error"])
+        row = db.query(TaiwanQuoteContractSnapshot).one()
+        assert row.capture_status == "failed"
+        assert row.payload_json is None
+        assert "SNAPSHOT_SERIALIZATION_FAILED" in str(row.error)
+
+        replay = get_taiwan_quote_contract_replay(
+            db=db,
+            stock_id="2330",
+            trade_date=captured_at.date(),
+        )
+        failed = next(
+            item
+            for item in replay["snapshots"]
+            if item["capture_slot"] == "08:50"
+        )
+        assert failed["status"] == "failed"
+        assert "08:50" in replay["missing_slots"]
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_session_phase_boundaries_follow_taiwan_stock_depth_rules() -> None:

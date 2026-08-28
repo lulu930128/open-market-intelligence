@@ -7,7 +7,6 @@ from typing import Any, Iterable
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    MarketDailyPrice,
     RadarEvaluationEventLink,
     RadarFeatureSnapshot,
     RadarOutcomeEventLink,
@@ -15,7 +14,9 @@ from app.db.models import (
     RadarRuleEvaluation,
     utc_now,
 )
-from app.market.trading_calendar import next_taiwan_trading_day
+from app.market.daily_ohlcv_platform import read_taiwan_official_daily
+from app.market.trading_calendar import TAIWAN_TZ, next_taiwan_trading_day
+from app.market_data.contracts import QuantityUnit
 from app.watchlists.radar_rule_contract import (
     RADAR_V2_OUTCOME_CONFIG,
     RADAR_V2_OUTCOME_CONFIG_HASH,
@@ -61,7 +62,7 @@ class OutcomePathBar:
     low_price: float
     close_price: float
     volume: int | None = None
-    source: str = "market_daily_price"
+    source: str = "tw.daily.ohlcv"
 
 
 def trading_dates_after(signal_trade_date: date, horizon: int) -> list[date]:
@@ -368,32 +369,34 @@ def _daily_bars(
     stock_id: str,
     expected_dates: list[date],
 ) -> tuple[list[OutcomePathBar], list[date], list[str]]:
-    rows = (
-        db.query(MarketDailyPrice)
-        .filter(MarketDailyPrice.stock_id == stock_id)
-        .filter(MarketDailyPrice.trade_date.in_(expected_dates))
-        .order_by(
-            MarketDailyPrice.trade_date.asc(),
-            MarketDailyPrice.updated_at.desc(),
-            MarketDailyPrice.id.desc(),
+    if not expected_dates:
+        return [], [], []
+    try:
+        result = read_taiwan_official_daily(
+            db,
+            stock_id=stock_id,
+            from_date=min(expected_dates),
+            to_date=max(expected_dates),
+            limit=len(expected_dates),
         )
-        .all()
-    )
-    selected: dict[date, MarketDailyPrice] = {}
-    for row in rows:
-        selected.setdefault(row.trade_date, row)
+    except ValueError:
+        return [], list(expected_dates), []
+    selected = {
+        bar.end_at.astimezone(TAIWAN_TZ).date(): bar
+        for bar in result.resolved.bars
+    }
 
     bars: list[OutcomePathBar] = []
     invalid_dates: list[str] = []
     for trade_date in expected_dates:
-        row = selected.get(trade_date)
-        if row is None:
+        bar = selected.get(trade_date)
+        if bar is None:
             continue
         values = (
-            row.open_price,
-            row.high_price,
-            row.low_price,
-            row.close_price,
+            bar.open_price,
+            bar.high_price,
+            bar.low_price,
+            bar.close_price,
         )
         if any(value is None or float(value) <= 0 for value in values):
             invalid_dates.append(trade_date.isoformat())
@@ -401,11 +404,17 @@ def _daily_bars(
         bars.append(
             OutcomePathBar(
                 trade_date=trade_date,
-                open_price=float(row.open_price),
-                high_price=float(row.high_price),
-                low_price=float(row.low_price),
-                close_price=float(row.close_price),
-                volume=row.trade_volume,
+                open_price=float(bar.open_price),
+                high_price=float(bar.high_price),
+                low_price=float(bar.low_price),
+                close_price=float(bar.close_price),
+                volume=(
+                    int(bar.volume.value)
+                    if bar.volume is not None
+                    and bar.volume.unit is QuantityUnit.SHARE
+                    else None
+                ),
+                source=f"tw.daily.ohlcv:{bar.lineage.source}",
             )
         )
     missing_dates = [

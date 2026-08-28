@@ -232,11 +232,50 @@ def source_health_provider_generation_map(
     }
 
 
+def source_health_scope_generation_map(
+    db: Session,
+    *,
+    market: str | None = None,
+    resource: str | None = None,
+) -> dict[tuple[str, str], datetime]:
+    """Return the newest target-scope generation for each health resource."""
+
+    query = db.query(
+        SourceHealthSnapshot.market,
+        SourceHealthSnapshot.resource,
+        func.max(SourceHealthSnapshot.checked_at),
+    ).filter(
+        or_(
+            SourceHealthSnapshot.target.like("universe:%"),
+            SourceHealthSnapshot.target.like("bounded_%"),
+        )
+    )
+    if market:
+        query = query.filter(
+            SourceHealthSnapshot.market == _normalized_market(market)
+        )
+    if resource:
+        query = query.filter(SourceHealthSnapshot.resource == resource)
+    rows = query.group_by(
+        SourceHealthSnapshot.market,
+        SourceHealthSnapshot.resource,
+    ).all()
+    return {
+        (
+            str(row_market or "").lower(),
+            str(row_resource or ""),
+        ): _utc_datetime(checked_at)
+        for row_market, row_resource, checked_at in rows
+        if isinstance(checked_at, datetime)
+    }
+
+
 def source_health_snapshot_lifecycle(
     snapshot: SourceHealthSnapshot,
     *,
     now: datetime,
     current_provider_checked_at: datetime | None,
+    current_scope_checked_at: datetime | None = None,
     historical_target_after_seconds: int = (
         DEFAULT_SOURCE_HEALTH_SNAPSHOT_STALE_SECONDS
     ),
@@ -251,9 +290,18 @@ def source_health_snapshot_lifecycle(
     age_seconds = max(int((current - checked_at).total_seconds()), 0)
     target = str(snapshot.target or "all")
     current_provider_generation = checked_at >= generation_at
+    scope_generation_at = (
+        _utc_datetime(current_scope_checked_at)
+        if isinstance(current_scope_checked_at, datetime)
+        else checked_at
+    )
+    current_scope_generation = checked_at >= scope_generation_at
     if not current_provider_generation:
         lifecycle = "historical_provider_generation"
         lifecycle_reason = "newer_provider_generation_exists_for_logical_scope"
+    elif target == "all" and not current_scope_generation:
+        lifecycle = "historical_scope_generation"
+        lifecycle_reason = "newer_target_scope_exists_for_resource"
     elif (
         target != "all"
         and age_seconds > max(historical_target_after_seconds, 0)
@@ -283,6 +331,10 @@ def source_health_snapshot_lifecycle(
             else "historical"
         ),
         "provider_generation_checked_at": generation_at.isoformat(),
+        "scope_generation": (
+            "current" if current_scope_generation else "historical"
+        ),
+        "scope_generation_checked_at": scope_generation_at.isoformat(),
         "canonical_scope": target == "all",
         "operational_freshness_status": (
             "current"
@@ -301,6 +353,7 @@ def source_health_snapshot_to_dict(
     now: datetime | None = None,
     stale_after_seconds: int = DEFAULT_SOURCE_HEALTH_SNAPSHOT_STALE_SECONDS,
     current_provider_checked_at: datetime | None = None,
+    current_scope_checked_at: datetime | None = None,
 ) -> dict[str, Any]:
     current = _utc_datetime(now or _now())
     checked_at = _utc_datetime(snapshot.checked_at)
@@ -309,6 +362,7 @@ def source_health_snapshot_to_dict(
         snapshot,
         now=current,
         current_provider_checked_at=current_provider_checked_at,
+        current_scope_checked_at=current_scope_checked_at,
     )
     stored = _json_dict(snapshot.snapshot_json)
     output = {
@@ -806,6 +860,11 @@ def list_source_health_snapshots(
         resource=resource,
         target=target,
     )
+    scope_generation_map = source_health_scope_generation_map(
+        db,
+        market=market,
+        resource=resource,
+    )
     snapshots = (
         query.order_by(SourceHealthSnapshot.checked_at.desc(), SourceHealthSnapshot.id.desc())
         .limit(limit if include_historical else min(limit * 4, 4000))
@@ -821,6 +880,12 @@ def list_source_health_snapshots(
                     str(snapshot.market or "").lower(),
                     str(snapshot.resource or ""),
                     str(snapshot.target or "all"),
+                )
+            ),
+            current_scope_checked_at=scope_generation_map.get(
+                (
+                    str(snapshot.market or "").lower(),
+                    str(snapshot.resource or ""),
                 )
             ),
         )
@@ -841,6 +906,7 @@ __all__ = [
     "record_provider_event",
     "source_health_snapshot_to_dict",
     "source_health_provider_generation_map",
+    "source_health_scope_generation_map",
     "source_health_snapshot_lifecycle",
     "sync_source_health_snapshots",
 ]

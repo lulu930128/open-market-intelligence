@@ -6,7 +6,12 @@ from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketDailyPrice, StockMaster
+from app.db.models import StockMaster
+from app.market.daily_ohlcv_platform import (
+    TaiwanCanonicalDailyRow,
+    project_taiwan_daily_rows,
+    read_taiwan_official_daily,
+)
 from app.market.taiwan_rules import (
     TAIWAN_DAILY_PRICE_RELEASE_TIME,
     expected_daily_price_date,
@@ -34,19 +39,16 @@ def _list_daily_history(
     db: Session,
     stock_id: str,
     limit: int,
-) -> list[MarketDailyPrice]:
-    rows = (
-        db.query(MarketDailyPrice)
-        .filter(MarketDailyPrice.stock_id == stock_id)
-        .order_by(
-            MarketDailyPrice.trade_date.desc(),
-            MarketDailyPrice.id.desc(),
+) -> list[TaiwanCanonicalDailyRow]:
+    try:
+        result = read_taiwan_official_daily(
+            db,
+            stock_id=stock_id,
+            limit=limit,
         )
-        .limit(limit)
-        .all()
-    )
-    rows.reverse()
-    return rows
+    except ValueError:
+        return []
+    return project_taiwan_daily_rows(db, result)
 
 
 def _number(value: Any) -> float | None:
@@ -87,9 +89,8 @@ def _row_value(row: Any, key: str) -> Any:
 def normalize_daily_history(rows: Iterable[Any]) -> tuple[list[dict[str, Any]], int]:
     """Return one deterministic row per trade date in ascending order.
 
-    `market_daily_price` is unique per source/stock/date, so multiple providers
-    may leave more than one row for a stock and date.  The newest local row id
-    wins without mutating or merging source data.
+    Compatibility input is still normalized deterministically, but production
+    reads arrive pre-selected from the canonical daily resolver.
     """
 
     selected: dict[date, dict[str, Any]] = {}

@@ -8,7 +8,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    MarketDailyPrice,
     RadarBacktestRun,
     RadarOutcomePath,
     RadarRuleConfig,
@@ -17,7 +16,9 @@ from app.db.models import (
     RadarWatchlistProjection,
     WatchlistRadarSnapshotRun,
 )
+from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market.trading_calendar import next_taiwan_trading_day
+from app.market.tw_daily_freshness import read_taiwan_daily_freshness
 from app.watchlists.radar_rule_contract import (
     RADAR_V1_FROZEN_AT,
     RADAR_V1_LIFECYCLE_STATUS,
@@ -667,9 +668,7 @@ def get_radar_v2_outcome_summary(
     )
     by_evaluation = {row.evaluation_id: row for row in outcome_rows}
     stock_ids = sorted({row.stock_id for row in observations})
-    latest_available_trade_date = db.query(
-        func.max(MarketDailyPrice.trade_date)
-    ).scalar()
+    latest_available_trade_date = read_taiwan_daily_freshness(db).latest_date
     expected_dates_by_evaluation: dict[int, list[date]] = {}
     for observation in observations:
         if observation.evaluation_id is None:
@@ -693,28 +692,16 @@ def get_radar_v2_outcome_summary(
             for trade_date in dates
         }
     )
+    stock_id_set = set(stock_ids)
+    daily_repository = TaiwanOfficialDailyBarRepository(db)
     available_daily_bars = {
-        (str(stock_id), trade_date)
-        for stock_id, trade_date in (
-            db.query(
-                MarketDailyPrice.stock_id,
-                MarketDailyPrice.trade_date,
-            )
-            .filter(MarketDailyPrice.stock_id.in_(stock_ids))
-            .filter(MarketDailyPrice.trade_date.in_(expected_dates))
-            .filter(MarketDailyPrice.open_price.is_not(None))
-            .filter(MarketDailyPrice.high_price.is_not(None))
-            .filter(MarketDailyPrice.low_price.is_not(None))
-            .filter(MarketDailyPrice.close_price.is_not(None))
-            .filter(MarketDailyPrice.open_price > 0)
-            .filter(MarketDailyPrice.high_price > 0)
-            .filter(MarketDailyPrice.low_price > 0)
-            .filter(MarketDailyPrice.close_price > 0)
-            .distinct()
-            .all()
-            if stock_ids and expected_dates
-            else []
-        )
+        (bar.instrument.symbol, trade_date)
+        for trade_date in expected_dates
+        for bar in daily_repository.load_market_universe(
+            trade_date=trade_date,
+            include_etf=True,
+        ).bars
+        if bar.instrument.symbol in stock_id_set
     }
     last_reconciled_at = max(
         (

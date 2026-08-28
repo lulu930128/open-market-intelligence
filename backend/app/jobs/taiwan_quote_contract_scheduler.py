@@ -61,16 +61,37 @@ def collect_taiwan_quote_contract_snapshots(
             "trade_date": local_now.date().isoformat(),
             "requested_count": len(symbols),
         }
-        results = [
-            capture_taiwan_quote_contract_snapshot(
-                db=db,
-                stock_id=stock_id,
-                capture_slot=capture_slot,
-                now=local_now,
-                contract_context=contract_context,
-            )
-            for stock_id in symbols
-        ]
+        results: list[dict[str, Any]] = []
+        for stock_id in symbols:
+            try:
+                results.append(
+                    capture_taiwan_quote_contract_snapshot(
+                        db=db,
+                        stock_id=stock_id,
+                        capture_slot=capture_slot,
+                        now=local_now,
+                        contract_context=contract_context,
+                    )
+                )
+            except Exception as exc:
+                db.rollback()
+                logger.exception(
+                    "Taiwan quote contract symbol capture failed "
+                    "slot=%s date=%s stock_id=%s.",
+                    capture_slot,
+                    local_now.date(),
+                    stock_id,
+                )
+                results.append(
+                    {
+                        "stock_id": stock_id,
+                        "trade_date": local_now.date(),
+                        "capture_slot": capture_slot,
+                        "capture_status": "failed",
+                        "persistence_status": "failed",
+                        "error": str(exc) or exc.__class__.__name__,
+                    }
+                )
         captured_count = sum(
             str(item.get("capture_status") or "").startswith("captured")
             for item in results

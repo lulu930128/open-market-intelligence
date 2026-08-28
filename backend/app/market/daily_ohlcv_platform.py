@@ -23,6 +23,7 @@ from app.market.providers.tw_official_daily import (
 from app.market.tw_universe import list_taiwan_stock_universe
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market_data.contracts import (
+    BarObservation,
     CanonicalModel,
     DatasetHealth,
     InstrumentKey,
@@ -83,6 +84,32 @@ class TaiwanLatestDailyEvidence:
     resolved_health: ResolvedEvidenceHealth
     dataset_health: DatasetHealth | None
     limitations: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TaiwanCanonicalDailyRow:
+    """Compatibility projection backed by a selected canonical daily bar."""
+
+    id: int
+    source_id: int
+    raw_result_id: int
+    trade_date: date
+    stock_id: str
+    stock_name: str | None
+    trade_volume: int | None
+    trade_value: int | None
+    open_price: float
+    high_price: float
+    low_price: float
+    close_price: float
+    price_change: float | None
+    transaction_count: int | None
+    created_at: datetime
+    updated_at: datetime
+    selected_provider: str
+    selected_source: str
+    volume_unit: str = "shares"
+    trade_value_unit: str = "TWD"
 
 
 class TaiwanDailyRefreshResult(CanonicalModel):
@@ -219,9 +246,19 @@ def read_taiwan_official_daily(
     if limit < 1 or limit > 5000:
         raise ValueError("limit must be between 1 and 5000")
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
-    effective_to_date = to_date or expected_daily_price_date(
+    latest_potentially_released_date = expected_daily_price_date(
         now=effective_requested_at.astimezone(TAIWAN_TZ)
     )
+    effective_to_date = (
+        min(to_date, latest_potentially_released_date)
+        if to_date
+        else latest_potentially_released_date
+    )
+    boundary_limitations: tuple[str, ...] = ()
+    if to_date is not None and to_date > latest_potentially_released_date:
+        boundary_limitations = (
+            "REQUESTED_TO_DATE_EXCEEDS_LATEST_RELEASED_DAILY_DATE",
+        )
     instrument_type = (
         InstrumentType.ETF
         if "etf" in str(stock.instrument_type or "").strip().lower()
@@ -233,7 +270,10 @@ def read_taiwan_official_daily(
         instrument_type=instrument_type,
         venue=venue,
     )
-    repository = TaiwanOfficialDailyBarRepository(db)
+    repository = TaiwanOfficialDailyBarRepository(
+        db,
+        available_at=effective_requested_at,
+    )
     effective_from_date = from_date
     if effective_from_date is None:
         effective_from_date = repository.latest_candidate_start_date(
@@ -248,11 +288,20 @@ def read_taiwan_official_daily(
         requested_at=effective_requested_at,
         max_rows=limit,
     )
-    return MarketDataGateway().resolve_bars(
+    result = MarketDataGateway().resolve_bars(
         requirement,
         reader=TaiwanCompletedDailyCandidateReader(
             repository
         ),
+    )
+    if not boundary_limitations:
+        return result
+    return result.model_copy(
+        update={
+            "limitations": tuple(
+                dict.fromkeys((*result.limitations, *boundary_limitations))
+            )
+        }
     )
 
 
@@ -260,6 +309,7 @@ def read_taiwan_latest_daily_evidence(
     db: Session,
     stock_id: str,
     *,
+    to_date: date | None = None,
     requested_at: datetime | None = None,
 ) -> TaiwanLatestDailyEvidence:
     """Project the latest canonical official bar for AI/valuation consumers."""
@@ -267,6 +317,7 @@ def read_taiwan_latest_daily_evidence(
     result = read_taiwan_official_daily(
         db,
         stock_id=stock_id,
+        to_date=to_date,
         limit=1,
         requested_at=requested_at,
     )
@@ -303,6 +354,67 @@ def read_taiwan_latest_daily_evidence(
         dataset_health=result.dataset_health,
         limitations=tuple(dict.fromkeys(limitations)),
     )
+
+
+def project_taiwan_daily_rows(
+    db: Session,
+    result: MarketDataResultV1,
+) -> list[TaiwanCanonicalDailyRow]:
+    """Project selected bars for legacy readers without exposing raw candidates."""
+
+    return project_taiwan_daily_bars(db, tuple(result.resolved.bars))
+
+
+def project_taiwan_daily_bars(
+    db: Session,
+    bars: tuple[BarObservation, ...],
+) -> list[TaiwanCanonicalDailyRow]:
+    """Project an already-selected canonical bar collection."""
+
+    metadata = TaiwanOfficialDailyBarRepository(db).lineage_metadata(
+        tuple(
+            bar.lineage.observation_id
+            for bar in bars
+            if bar.lineage.observation_id is not None
+        )
+    )
+    projected: list[TaiwanCanonicalDailyRow] = []
+    for bar in bars:
+        item = metadata.get(bar.lineage.observation_id or "")
+        if item is None:
+            continue
+        volume = None
+        if bar.volume is not None and bar.volume.unit.value == "share":
+            volume = int(bar.volume.value)
+        projected.append(
+            TaiwanCanonicalDailyRow(
+                id=int(item["id"]),
+                source_id=int(item["source_id"]),
+                raw_result_id=int(item["raw_result_id"]),
+                trade_date=bar.end_at.astimezone(TAIWAN_TZ).date(),
+                stock_id=bar.instrument.symbol,
+                stock_name=bar.instrument_name,
+                trade_volume=volume,
+                trade_value=(
+                    int(bar.turnover_value)
+                    if bar.turnover_value is not None
+                    else None
+                ),
+                open_price=float(bar.open_price),
+                high_price=float(bar.high_price),
+                low_price=float(bar.low_price),
+                close_price=float(bar.close_price),
+                price_change=(
+                    float(bar.price_change) if bar.price_change is not None else None
+                ),
+                transaction_count=bar.trade_count,
+                created_at=item["created_at"],
+                updated_at=item["updated_at"],
+                selected_provider=bar.lineage.provider,
+                selected_source=bar.lineage.source,
+            )
+        )
+    return projected
 
 
 def _unique(*groups: tuple[str, ...]) -> tuple[str, ...]:
@@ -647,6 +759,7 @@ def refresh_taiwan_official_daily_venue(
 
 
 __all__ = [
+    "TaiwanCanonicalDailyRow",
     "TaiwanDailyPriceEvidence",
     "TaiwanDailyRefreshResult",
     "TaiwanLatestDailyEvidence",
@@ -655,6 +768,8 @@ __all__ = [
     "build_taiwan_daily_cache_requirement",
     "read_taiwan_official_daily",
     "read_taiwan_latest_daily_evidence",
+    "project_taiwan_daily_bars",
+    "project_taiwan_daily_rows",
     "refresh_taiwan_official_daily",
     "refresh_taiwan_official_daily_venue",
 ]
