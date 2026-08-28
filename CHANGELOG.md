@@ -10,6 +10,20 @@
 - Windows 發行包不再包含本機 SQLite 或股票主檔 seed；空白安裝首次啟動時改由 backend 以可追蹤、有界的官方 TWSE／TPEx refresh 建立股票代號。
 - 將 launcher 與安裝捷徑圖示由 `ATRI-MyDearMoments.ico` 改名為 `OMI.ico`。
 
+## [4.3.2] - 2026-08-29
+
+### Fixed
+
+- 將台股 completed daily 的發布日期、official-source reconciliation、coverage 與 continuity 收斂到共用 canonical owner，避免未發布或樣本不足資料被當成完整市場事實。
+- 強化 technical sufficiency、measurement unit lineage、intraday freshness 與市場 aggregate quality gate；不足 evidence 不再產生可交易的強方向分數。
+- 讓 explicit 台股 capability selection 實際限制 Backend reader scope，並統一 AI、MCP snapshot 與 Dashboard 的 outward status projection。
+
+### Validation
+
+- 台股 Backend 與 AI／MCP targeted regression、architecture guards、compile 與 staged-diff 檢查已於 source checkpoint 通過。
+- 本版只建立台股 source commit checkpoint；runtime adoption、下一交易日 live evidence 與完整 product acceptance 依使用者後續大幅調整完成後另行總驗證。
+- 美股修改不在本版 commit 範圍內。
+
 ## [4.3.1] - 2026-08-28
 
 ### Fixed
@@ -69,7 +83,8 @@
 - 修正 production SSR 暫時無法連到 backend 時，URL 分組選擇與區域市場 watchlist 無法在 hydration 後恢復的問題。
 - 修正 Windows release 封裝使用不同 Python ABI 與硬編碼 stdlib 路徑時，安裝包無法啟動的問題，並排除本機 Python bytecode cache。
 
-[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.1...HEAD
+[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.2...HEAD
+[4.3.2]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.1...v4.3.2
 [4.3.1]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.0...v4.3.1
 [4.3.0]: https://github.com/lulu930128/open-market-intelligence/compare/v4.2.0...v4.3.0
 [4.0.1]: https://github.com/lulu930128/open-market-intelligence/compare/v4.0.0...v4.0.1
