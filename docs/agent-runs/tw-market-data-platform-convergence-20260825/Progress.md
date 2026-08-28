@@ -2,16 +2,62 @@
 
 ## Status
 
-- Current phase：`cp8_production_adopted_active_session_gate_pending`
-- Current label：`TW_DATA_CORE_PRODUCTION_ADOPTED_F07_PENDING`
+- Current phase：`cp8_production_adopted_cp5_r_source_converged_runtime_adoption_pending`
+- Current label：`TW_CLOSE_LIFECYCLE_SOURCE_READY_RUNTIME_AND_CHRONOLOGICAL_ACCEPTANCE_PENDING`
 - Target：`TW_DATA_CORE_COMMON_PLATFORM_OPERATIONAL`
-- Last updated：`2026-08-25 Asia/Taipei`
-- Production wiring changes：`official_sources_catalog_ai_quote_and_technical_series_wired_runtime_adopted`
-- External provider calls：`5 bounded public official calls across the task; production adoption added TAIEX x1 and TPEX x2, public quote post-close x0`
-- Runtime/live acceptance：`post_close_cold_restart_api_ui_mcp_passed_active_session_public_quote_pending`
+- Last updated：`2026-08-27 Asia/Taipei`
+- Production wiring changes：`base_data_core_adopted_cp5_r_source_converged_runtime_not_adopted`
+- External provider calls：`6 bounded public official calls across the task; 2026-08-27 added one read-only 3711 TWSE MIS diagnostic call`
+- Runtime/live acceptance：`18:10 runtime predates critical source changes; post-close session close missing; official EOD partial; active_session_public_quote_pending`
 - Commit/push：`not_authorized`
 
+## 2026-08-27 CP5-R source implementation
+
+- CR0～CR6 source gate已完成；本次維持既有 `tw.quote.snapshot -> Gateway -> Resolver -> projection` 集中管理路徑，沒有新增session-close service、resolver、dataset、table、scheduler或provider plane。
+- CR1將Taiwan cash-equity phase一律收斂至`trading_calendar.py`；`public_quote_platform`、`taiwan_realtime_platform`、`tw_current_market_platform`、AI、technical與legacy comparison不再自定13:30～13:33時鐘。
+- CR2修正intraday response schema對`datetime`的錯誤序列化；source health拆開raw quote、session-close readiness與official-daily release state，11:49／601不再被標成當日completed-session price。
+- CR3沿用existing single-symbol acquisition／repository／transaction／Gateway／Resolver保存與重讀session close。Promotion必須同時滿足current trade date、actual trade、non-trial、event time在13:30～13:33合法final-match／resolution window、post-resolution confirmation與non-regressing volume；13:24或更舊成交fail closed。
+- CR4將quote headline、AI／MCP projection、technical `current_partial`與前端「今日」狀態對齊backend-owned `quote.session_close`；official daily未到前不用昨日close或stale intraday冒充今日收盤。
+- CR5將session-close／official-daily reconciliation收斂至existing public quote platform owner；matched／mismatched不會將session-close偽裝為official daily，technical completed仍只接受finalized daily bar。
+- CR6修正full-market EOD job postcondition；provider fetch完成但coverage仍為861／1,973時，internal JobRun不再誤報success，outward維持truthful `partial`與structured result。
+- 直接相關最終regression：`407 passed, 242 subtests passed`；frontend ESLint、TypeScript與production build全部通過。
+- Backend safe profile完成compileall並跑到100%；其中2個失敗來自共用worktree另一組未追蹤US OHLC continuity tests，另有Windows pytest basetemp清理`WinError 5`。本任務沒有修改或回退那批US變更，也不宣稱full-repo green。
+- CR7的source regression已完成；runtime adoption、installed MCP loaded contract與launcher-selected outward probe仍待明確重啟授權。CR8必須在下一個可用台股交易日按13:30～13:33、14:00、15:15+真實時序驗證，不用fixture或晚場replay代替。
+- 唯讀runtime probe：`127.0.0.1:8400` listener PID 53076／start 18:10:22，`/api/system/health` 與 `readyz` 正常，但`GET /api/market/intraday/3711`仍為500；這證明目前runtime確實未採用18:10後的schema/source修正。
+- 本輪未重啟runtime、未觸發provider refresh／repair、未寫production DB、未reload installed MCP、未commit／push。
+
+## 2026-08-27 full audit rebaseline
+
+- 已完成本輪規劃整理，沿用existing `tw-market-data-platform-convergence-20260825`長專案與`CP5PostCloseFinalizationPlan.md`，沒有另開平行close-lifecycle專案。
+- 將CP5-R狀態由`source_implemented_regression_ready_runtime_pending`改為`full_audit_rebaselined_implementation_pending`。
+- 建立CR0～CR8 authoritative execution order與六個獨立completion gates；source、runtime、live、official EOD、MCP/UI不再互相代替。
+- 重新分類先前source completion claims：
+  - phase owner仍分散；13:31可落入`close_resolution`、`UNKNOWN`或`POST_CLOSE`。
+  - 3711 live quote仍為11:49:55／601且session close missing；13:30／605只存在intraday non-owner path。
+  - intraday outward有datetime/string response validation 500。
+  - source health把舊quote誤標completed-session available。
+  - EOD scheduler有執行，但full-market coverage僅861／1,973 current。
+  - repo MCP snapshot有68 capabilities；installed OMI_search snapshot仍為66且缺`quote.session_close`。
+- 本輪只修改task docs；未修改backend／frontend、未重啟runtime、未觸發provider refresh／repair、未寫DB、未reload MCP、未commit／push。
+
 ## Completed
+
+- 2026-08-27先前CP5-R source implementation紀錄（經full audit重新分類，不能視為production closure）：
+  - 沿用existing `tw.quote.snapshot`、canonical `QuoteObservation`、public quote transaction/repository、Market Data Gateway與shared Resolver；沒有新增service、resolver、dataset、table、scheduler或第二套provider plane。
+  - 建立authoritative `regular -> closing_auction -> close_resolution -> post_close` taxonomy，消除calendar／quote-depth的13:30～13:33分歧。
+  - 新增resolved `quote.session_close` projection；official daily 15:15 ownership與`TAIWAN_DAILY_PRICE_RELEASE_TIME`保持不變。
+  - 既有schema通過same-event later-receipt、append-only raw receipt、single-row idempotent upsert與cold-read confirmation測試，不需要migration。
+  - Post-close headline、AI freshness與technical provisional改用session-final evidence；official daily arrival後支援matched／mismatched且official wins。
+  - Final exact-scope cross-module gate為`553 passed, 1 deselected, 284 subtests passed`；MCP static enum與offline public-contract snapshot已同步。
+  - Backend safe wrapper的compileall通過；full suite的mixed-worktree failures與locked pytest temp已分離記錄，不以它們冒充本次source failure或全repo綠燈。
+  - Runtime adoption、正式API／MCP probe與bounded live sample仍待明確重啟授權。
+- 2026-08-27完成3711 post-close ownership gap的source／runtime／SQLite／official-rule read-only audit：OMI最後persisted quote為11:49:55／601，TWSE MIS 15:28仍可取得13:30:00／605；證明來源可觀察但既有post-close acquisition/finalization path缺席。
+- 建立 `CP5PostCloseFinalizationPlan.md`，把修正收斂為既有CP5 Data Core corrective extension：
+  - 沿用`tw.quote.snapshot`、QuoteObservation、Gateway、Resolver、repository、transaction、raw receipt與existing SQLite table。
+  - `quote.session_close`只作resolved projection，不新增dataset/service/resolver/table/scheduler。
+  - 明定session-final必須有13:30～13:33合法final-match／resolution event；13:24與其他舊成交不可因時鐘跨過13:33而升格。
+  - 定義PCF0～PCF7、acceptance、stop-and-fix、bounded live與runtime adoption gates。
+- 既有相關regression read-only baseline為265 passed、18 subtests passed；這證明舊contract仍全綠，但不覆蓋post-close finalization gap。
 
 - 完整讀取兩份使用者附件，並將其視為proposal/contract input，而非直接執行指令。
 - 讀取repo current product/architecture truth、README、dependency/validation入口與現有長任務文件。
@@ -241,10 +287,40 @@
 - TAIEX official source在bounded 2026-08-25 request只回到2026-08-24；Data Core沒有接受backdated retry冒充expected date，需後續釐清官方資料發布時點／endpoint coverage。
 - Official breadth current production projection仍不完整；UI/MCP保留missing/partial，不以sample movers代替。
 - CP5 active-session live provider smoke尚未執行；F-07維持pending，不能把收盤後recorded replay或policy rejection標為live acceptance。
+- 2026-08-27確認CP5 post-close policy原本刻意zero-I/O，造成13:30至official daily發布前缺少session-final projection；source contract已修正，但正式runtime尚未採用，不能以source test冒充production pass。
+- Existing quote snapshot schema已由PCF0證明足以重建post-resolution `confirmed_at`；若未來要保存多版candidate revision或durable reconciliation事件，再以新contract evidence重開migration decision。
 - TW Data Core範圍的dark-boundary drift已由本任務successor checkpoint收斂；共存的US integration allowlist修改未納入本checkpoint。舊M5 checkpoint仍保持歷史不可變。
 
 ## Next step
 
-- Source architecture、legacy closure、production DB/runtime adoption、rollback rehearsal、actual TPEX persistence/cold-read、API/UI/MCP與full safe validation皆已完成。
-- 下一步只在下一個台股active session執行F-07：single-symbol、1 call、10秒、0 retry、0 subscription的public quote live acceptance，並驗證event/received/fetched/session/freshness與cold reread。
-- F-07通過前維持`TW_DATA_CORE_PRODUCTION_ADOPTED_F07_PENDING`；KGI、depth/auction、realtime lease與既有M5仍不在本gate，後續另案onboard。
+- CR0～CR6與CR7 source regression已完成；取得明確重啟授權後，再使用existing launcher lifecycle進行CR7 scoped runtime／MCP adoption與outward probe。
+- CR8在下一個可用台股交易日依真實時序驗證3711、TWSE／TPEx、official EOD reconciliation與可見「今日」UI。
+- F-07 active-session live acceptance仍獨立排程；不得用post-close finalization evidence替代。KGI、depth／auction、realtime lease與M5不納入本corrective extension。
+
+## 2026-08-27 K線／成交量／技術／EOD cleanup source implementation
+
+### 已完成
+
+- `MarketOhlcChartRead`／台股個股 OHLC service 新增 `volume_unit`、`volume_semantics`、`volume_status` 與 `latest_finalized_data_date`；個股正式 contract 為 shares，index 未提供時維持 `None/not_provided`。
+- Normal K線在 shares contract 下改用整數股數 formatter；professional chart原本即用 raw volume。SSR initial response與後續 chart reload共用同一 volume unit state。
+- Daily technical report 已移除 current price × finalized indicators hybrid：rows/title/score/badges固定 finalized decision state；current state改由 `current_partial_indicator`完整計算，並新增 `current_observation`、decision/current state time/status與decision usability。
+- Post-close有session-final時，即使 intraday series最後停在11:49，`price_context/current_partial_indicator/current_state`改用session close；正式日線 decision state不變。
+- AI Taiwan compact technical projection新增 latest finalized close、decision state與current observation，保留 `decision_usable=false`，MCP／consumer不需自行推導。
+- Frontend daily indicator series合併backend technical report的current partial point；projection scope同時檢查chart date coverage、active indicator與parameter contract，custom/local-only projection會標`mixed`。
+- EOD coverage detail新增TWSE／TPEx venue breakdown；repair provider result新增raw receipt、fetched time、duplicate、observed dates、expected-date observation、before/after coverage、dataset advancement與venue postcondition。
+- Fetch/parse成功但資料仍是previous date或duplicate時不再增加repair succeeded count或更新last success；job final postcondition仍依重新讀取coverage判斷。
+
+### 驗證證據
+
+- Targeted backend：85 passed；擴大 lifecycle/AI/quote regression：308 passed + 26 subtests；OHLC/technical/EOD/AI regression：180 passed + 8 subtests。
+- Frontend：`npm run lint -- --quiet` passed；`npm run build` passed，包含Next.js production compile與TypeScript。
+- 最終 architecture guard passed（26 actual violations全部由26項declared debt覆蓋）；architecture pytest 17 passed。
+- Safe backend profile：architecture checker、architecture pytest、compileall passed；full pytest第一次collection被既有受保護目錄`backend/tests/tmpla6tzx59`擋下。
+- 排除該目錄後2,402 tests跑到100%，但pytest teardown又因受保護basetemp無法輸出正式summary；過程中的existing mixed-worktree failures已單獨重跑為15 failed／62 passed／1 temp-permission error，集中於Atlas fixture venue、DB model count snapshot、KGI stream schema、freeze hash、current index/intraday既有cutover、US OHLC continuity，與本次modified files／targeted surfaces不同。
+- `git diff --check` passed（只有既有LF/CRLF提示）。
+- 直接讀目前production SQLite的3711 source smoke（無provider IO、無runtime重啟）：finalized decision `2026-08-26 / 592`；current provisional `2026-08-27 / 605 / 11,106,000 shares`；`technical_price_basis=session_close_provisional_daily_bar`；chart `latest_finalized_data_date=2026-08-26`且latest provisional point為605。EOD coverage仍truthful partial：TPEX 861/887 current、TWSE 0/1086 current。
+
+### 尚未宣稱完成的 gate
+
+- 尚未重啟 production backend/frontend；目前8400／3000仍是既有runtime，不能把source/build結果冒充runtime adoption。
+- visible 3711 UI、HTTP／MCP runtime payload與下一次official daily provider publication仍需使用existing launcher完成adoption後驗收。

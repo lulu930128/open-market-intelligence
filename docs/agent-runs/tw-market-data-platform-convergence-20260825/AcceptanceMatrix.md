@@ -64,6 +64,8 @@
 | D-07 | scheduler startup catch-up與retry/backoff由lifecycle operation使用 | passed | immediate startup、recomputed scheduler decision、Registry-bounded enqueue tests |
 | D-08 | cache-only EOD API不repair | passed | current API/tests標示cache_only |
 | D-09 | actual full-market coverage artifact | passed | read-only production recomputation/checkpoint parity artifact；status truthful partial |
+| D-10 | provider transport success與dataset advancement分離 | passed | previous-date duplicate payload regression：transport success但`dataset_status=stale_payload`、success count不增加、postcondition false |
+| D-11 | TWSE／TPEx venue coverage可直接觀測 | passed | checkpoint detail輸出venue universe/current/partial/stale/missing與coverage ratio；partition regression通過 |
 
 ## E. Actual vertical slice 2 — official index and breadth
 
@@ -87,6 +89,15 @@
 | F-05 | bounded `prefer_live`與truthful `require_live` | passed | 1 call/1 symbol/10秒/0 subscription；cache-hit zero-call、timeout receipt、trial/stale/post-close policy tests |
 | F-06 | stable API data smoke | passed | actual persisted 2330 row經provider-neutral route handler回`MarketDataResultV1`；OpenAPI exact method/path inventory |
 | F-07 | active-session public source live acceptance | pending | Production runtime已採用；收盤後2330 explicit acquisition以0 external calls truthful回`SESSION_NOT_SUPPORTED_BY_RESOURCE`。下一個台股active session仍須完成actual public-source sample，不得以recorded replay或post-close結果代替 |
+| F-08 | post-close finalization不新增第二套Data Core／Resolver／dataset／table | passed | same `tw.quote.snapshot`、Gateway、Resolver、repository、transaction與raw receipt；model/catalog inventory無新增session-close plane或schema |
+| F-09 | 13:30～13:33 centralized close-resolution taxonomy | passed | calendar／MarketSession／quote-depth／MIS／AI與frontend calendar-authority parity tests |
+| F-10 | existing single-symbol quote path可bounded post-close confirmation | passed | 1 symbol／1 call／10秒／0 retry／0 subscription，persist後mandatory reread與generic post-close zero-I/O guard |
+| F-11 | session-final promotion要求legal final-match event與post-resolution confirmation | passed | 13:24 rejection、13:30 match、13:31 resolving、13:33 confirmation、trial／date mismatch／volume regression fixtures |
+| F-12 | `quote.session_close`與`quote.official_close`雙owner outward contract | passed | 14:00 3711 605／previous official 592／current official pending golden test |
+| F-13 | session close freshness不遮蔽source freshness或official release state | passed | stale intraday不升格、session-close unavailable、dual owner/pending-release projection tests |
+| F-14 | technical provisional／completed與official reconciliation正確 | partial | source tests涵蓋provisional gate、matched/mismatched與official wins；runtime 15:15 rollover／restart probe待PCF7 |
+| F-15 | arbitrary TWSE／TPEx target不依賴fixed capture universe | passed | 3711 + TPEx recorded canonical evidence；production path不讀configured capture universe |
+| F-16 | HTTP／SSE／MCP／frontend只消費同一backend projection | partial | capability advertised=>projection與AI/decision shared-contract tests通過；runtime transport parity probe待PCF7 |
 
 ## G. Dataset, provider onboarding and consumers
 
@@ -100,6 +111,8 @@
 | G-06 | HTTP/SSE/MCP `omi.decision.v4` parity維持 | passed | outward decision/MCP contract suite通過，provider/freshness/limitations由backend projection提供 |
 | G-07 | Frontend/MCP/Kuro不重算market semantics | passed | backend-authoritative metadata優先；legacy local technical math僅`presentation_only`且不回流AI/MCP |
 | G-08 | Backend authoritative technical series跨surface一致 | passed | vendor-conflict golden test證明API/AI共同resolve official bars並輸出相同RSI/MACD/KD；frontend authority contract guard |
+| G-09 | OHLCV volume unit與latest finalized date outward明確 | passed | `volume_unit=shares`、volume semantics/status、`latest_finalized_data_date` schema/service/official daily platform tests |
+| G-10 | finalized decision與provisional current technical state完全分流 | partial | source tests證明decision/current observation分流、post-close 605取代11:49 601、AI compact contract與frontend build通過；production launcher adoption／visible UI仍待執行 |
 
 ## H. Final common-platform closure
 

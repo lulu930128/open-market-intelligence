@@ -1,0 +1,138 @@
+{
+  "schema_version": "omi.tw.close_lifecycle.live_acceptance.v1",
+  "status": "partial",
+  "gate": "closing_formal_match",
+  "window": {
+    "started_at": "2026-08-28T13:28:40+08:00",
+    "formal_match_at": "2026-08-28T13:30:00+08:00",
+    "close_resolution_ended_at": "2026-08-28T13:33:00+08:00"
+  },
+  "runtime": {
+    "backend": "http://127.0.0.1:8400",
+    "frontend_proxy": "http://127.0.0.1:3000/omi-data",
+    "version": "4.3.1",
+    "effective_realtime_mode": "off",
+    "runtime_drift": false
+  },
+  "attempt": {
+    "symbols": [
+      "3711",
+      "1101",
+      "1240",
+      "3711",
+      "1101",
+      "1240"
+    ],
+    "step_duration_seconds": 30,
+    "sample_interval_ms": 500,
+    "strategy": "preformal_cycle_then_formal_cycle",
+    "failure_code": "LEASE_ACQUIRE_FAILED",
+    "failure_stage": "second_cycle_3711_close_resolution_acquire",
+    "automatic_artifact_written": false
+  },
+  "root_cause": {
+    "component": "closing_acceptance_probe_lifecycle",
+    "provider_descriptor": "KGI_QUOTE_SNAPSHOT_DESCRIPTOR",
+    "supported_sessions": [
+      "pre_open",
+      "opening_auction",
+      "continuous",
+      "closing_auction"
+    ],
+    "close_resolution_subscription_supported": false,
+    "sequential_probe_limitation": "only_the_symbol_held_across_13_30_can_observe_the_formal_callback",
+    "safe_remediation_requirement": "pre_acquired_concurrent_owner_safe_leases_or_explicitly_validated_close_resolution_subscription_semantics",
+    "descriptor_expanded_to_manufacture_pass": false
+  },
+  "close_resolution_evidence": {
+    "checked_at": "2026-08-28T13:30:48+08:00",
+    "calendar_phase": "close_resolution",
+    "presentation_state": "observing",
+    "symbols": [
+      {
+        "symbol": "3711",
+        "quote_time": "2026-08-28T13:29:04+08:00",
+        "trade_date": "2026-08-28",
+        "last_price": 620.0,
+        "cumulative_volume_lots": 16550,
+        "observation_semantics": "close_resolution_candidate",
+        "session_close_available": false,
+        "official_close_status": "pending",
+        "frontend_proxy_match": true
+      },
+      {
+        "symbol": "1101",
+        "quote_time": "2026-08-28T13:29:33+08:00",
+        "trade_date": "2026-08-28",
+        "last_price": 24.4,
+        "cumulative_volume_lots": 14526,
+        "observation_semantics": "close_resolution_candidate",
+        "session_close_available": false,
+        "official_close_status": "pending",
+        "frontend_proxy_match": true
+      },
+      {
+        "symbol": "1240",
+        "quote_time": "2026-08-28T13:25:19+08:00",
+        "trade_date": "2026-08-28",
+        "last_price": 57.3,
+        "cumulative_volume_lots": 11,
+        "observation_semantics": "close_resolution_candidate",
+        "session_close_available": false,
+        "official_close_status": "pending",
+        "frontend_proxy_match": true
+      }
+    ]
+  },
+  "post_resolution_evidence": {
+    "checked_at": "2026-08-28T13:34:17+08:00",
+    "calendar_phase": "post_close",
+    "presentation_state": "completed",
+    "symbols": [
+      {
+        "symbol": "3711",
+        "quote_semantics": "session_close_unavailable",
+        "session_close_status": "unavailable",
+        "session_close_price": null,
+        "official_close_status": "pending"
+      },
+      {
+        "symbol": "1101",
+        "quote_semantics": "session_close_unavailable",
+        "session_close_status": "unavailable",
+        "session_close_price": null,
+        "official_close_status": "pending"
+      },
+      {
+        "symbol": "1240",
+        "quote_semantics": "session_close_unavailable",
+        "session_close_status": "unavailable",
+        "session_close_price": null,
+        "official_close_status": "pending"
+      }
+    ],
+    "intraday_current_partial_status": "independently_missing",
+    "previous_session_mislabeled_as_today": false
+  },
+  "cleanup": {
+    "owned_lease_baseline_restored": true,
+    "global_lease_count": 0,
+    "bridge_process_running": false,
+    "external_overlap_observed": false,
+    "unknown_lease_released": false
+  },
+  "acceptance": {
+    "closing_auction_classification": "passed",
+    "formal_match_evidence": "partial",
+    "session_final_projection": "failed_truthfully_unavailable",
+    "closing_gate": "partial",
+    "later_evidence_may_backfill_gate": false,
+    "product_acceptance": "pending"
+  },
+  "artifact_policy": {
+    "raw_provider_payload_included": false,
+    "lease_ids_included": false,
+    "credentials_included": false,
+    "private_identity_included": false
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "artifact_version": 1,
+  "generated_at": "2026-08-28T09:07:00+08:00",
+  "acceptance_date": "2026-08-28",
+  "stage": "opening",
+  "result": "passed",
+  "live_symbols": [
+    {
+      "symbol": "3711",
+      "venue": "TWSE",
+      "event_time": "2026-08-28T09:04:40+08:00",
+      "session": "continuous",
+      "instrument_phase": "regular_traded",
+      "last_trade_price": 615.0,
+      "open": 608.0,
+      "high": 618.0,
+      "low": 608.0,
+      "cumulative_volume_lots": 1790,
+      "cumulative_volume_shares": 1790000,
+      "last_trade_volume_lots": 1,
+      "last_trade_volume_shares": 1000,
+      "actual_trade_occurred": true,
+      "provider": "kgi_superpy",
+      "source": "kgi_superpy_quote_all",
+      "session_close_available": false
+    },
+    {
+      "symbol": "1101",
+      "venue": "TWSE",
+      "event_time": "2026-08-28T09:01:15+08:00",
+      "session": "continuous",
+      "instrument_phase": "regular_traded",
+      "last_trade_price": 24.15,
+      "open": 24.1,
+      "high": 24.2,
+      "low": 24.1,
+      "cumulative_volume_lots": 921,
+      "cumulative_volume_shares": 921000,
+      "last_trade_volume_lots": 1,
+      "last_trade_volume_shares": 1000,
+      "actual_trade_occurred": true,
+      "provider": "kgi_superpy",
+      "source": "kgi_superpy_quote_all",
+      "session_close_available": false
+    },
+    {
+      "symbol": "1240",
+      "venue": "TPEX",
+      "event_time": "2026-08-28T09:00:14+08:00",
+      "session": "continuous",
+      "instrument_phase": "regular_traded",
+      "last_trade_price": 57.3,
+      "open": 57.3,
+      "high": 57.3,
+      "low": 57.3,
+      "cumulative_volume_lots": 1,
+      "cumulative_volume_shares": 1000,
+      "last_trade_volume_lots": 1,
+      "last_trade_volume_shares": 1000,
+      "actual_trade_occurred": true,
+      "provider": "kgi_superpy",
+      "source": "kgi_superpy_quote_all",
+      "session_close_available": false
+    }
+  ],
+  "callback_classification": {
+    "initial_run_callback_count": 238,
+    "initial_run_trade_addition_count": 57,
+    "initial_run_auction_addition_count": 34,
+    "initial_run_non_trade_suppression_count": 145,
+    "retry_3711_callback_count": 216,
+    "retry_3711_cumulative_advanced_count": 64,
+    "retry_3711_decreasing_cumulative_count": 1,
+    "retry_3711_trade_addition_count": 64,
+    "retry_3711_non_trade_suppression_count": 151,
+    "trial_leak_count": 0,
+    "negative_latency_count": 0
+  },
+  "outward_contract": {
+    "quote_snapshot_trade_date_for_all_symbols": "2026-08-28",
+    "quote_snapshot_actual_trade_for_all_symbols": true,
+    "daily_finalized_latest_date": "2026-08-27",
+    "daily_current_partial_status": "missing_at_opening_sample",
+    "technical_today_status": "waiting_intraday",
+    "technical_today_missing": [
+      "intraday_trend.points"
+    ],
+    "previous_daily_was_not_presented_as_today": true,
+    "truthful_partial_preserved": true
+  },
+  "lifecycle": {
+    "lease_baseline_count": 0,
+    "lease_cleanup_count": 0,
+    "cleanup_bridge_process_running": false,
+    "same_task_retry_observed_during_initial_cleanup": true,
+    "external_owner_overlap_observed": false,
+    "request_error_count": 0
+  },
+  "acceptance": {
+    "opening_live": "passed",
+    "opening_outward_truthfulness": "passed",
+    "opening_current_partial_availability": "partial",
+    "regular_live": "pending",
+    "product": "pending"
+  },
+  "limitations": [
+    "The initial 3711 segment ended before the first regular match; a bounded retry captured a 09:04:40 actual trade inside the Opening gate.",
+    "At the Opening sample, persisted intraday/current-partial bars were still unavailable even though canonical quote snapshots contained actual trades; the API truthfully returned waiting or missing instead of relabeling the previous official daily bar.",
+    "The initial cleanup loop observed the same task's bounded 3711 retry, but active leases remained sequential and the final global baseline returned to zero with the bridge stopped."
+  ],
+  "artifact_policy": {
+    "raw_provider_payload_included": false,
+    "lease_ids_included": false,
+    "credentials_included": false,
+    "private_identity_included": false
+  }
+}

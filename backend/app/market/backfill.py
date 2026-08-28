@@ -24,6 +24,7 @@ from app.market.trading_calendar import (
     previous_taiwan_trading_day,
     taiwan_today,
 )
+from app.market.taiwan_rules import expected_daily_price_date
 from app.http_client import get as http_get, post as http_post
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
@@ -34,6 +35,48 @@ from app.utils.hash import sha256_text
 
 TWSE_STOCK_DAY_URL = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
 TPEX_TRADING_STOCK_URL = "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
+
+
+def _official_daily_backfill_window(
+    *,
+    start_date: date,
+    end_date: date,
+) -> tuple[date | None, bool]:
+    """Cap canonical daily persistence at the latest released Taiwan session."""
+    released_end_date = expected_daily_price_date()
+    if start_date > released_end_date:
+        return None, True
+    effective_end_date = min(end_date, released_end_date)
+    return effective_end_date, effective_end_date != end_date
+
+
+def _unreleased_daily_backfill_result(
+    *,
+    stock_id: str,
+    start_date: date,
+    end_date: date,
+) -> dict:
+    return {
+        "stock_id": stock_id,
+        "stock_name": None,
+        "source_id": None,
+        "start_date": start_date,
+        "end_date": end_date,
+        "effective_end_date": None,
+        "release_limited": True,
+        "requested_month_count": 0,
+        "fetched_month_count": 0,
+        "skipped_existing_month_count": 0,
+        "parsed_count": 0,
+        "inserted_count": 0,
+        "skipped_count": 0,
+        "status": "skipped_unreleased",
+        "message": (
+            "Taiwan official daily backfill skipped because the requested range "
+            "has not reached the canonical release window."
+        ),
+        "months": [],
+    }
 
 
 def _month_starts(start_date: date, end_date: date) -> list[date]:
@@ -349,6 +392,19 @@ def backfill_twse_stock_day(
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
 
+    requested_end_date = end_date
+    effective_end_date, release_limited = _official_daily_backfill_window(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if effective_end_date is None:
+        return _unreleased_daily_backfill_result(
+            stock_id=stock_id,
+            start_date=start_date,
+            end_date=requested_end_date,
+        )
+    end_date = effective_end_date
+
     source = _get_source(
         db=db,
         source_id=source_id,
@@ -596,7 +652,9 @@ def backfill_twse_stock_day(
         "stock_name": stock_name,
         "source_id": source.id,
         "start_date": start_date,
-        "end_date": end_date,
+        "end_date": requested_end_date,
+        "effective_end_date": end_date,
+        "release_limited": release_limited,
         "requested_month_count": len(month_starts),
         "fetched_month_count": fetched_month_count,
         "skipped_existing_month_count": skipped_existing_month_count,
@@ -620,6 +678,19 @@ def backfill_tpex_trading_stock(
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
+
+    requested_end_date = end_date
+    effective_end_date, release_limited = _official_daily_backfill_window(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if effective_end_date is None:
+        return _unreleased_daily_backfill_result(
+            stock_id=stock_id,
+            start_date=start_date,
+            end_date=requested_end_date,
+        )
+    end_date = effective_end_date
 
     source = _get_source(
         db=db,
@@ -889,7 +960,9 @@ def backfill_tpex_trading_stock(
         "stock_name": stock_name,
         "source_id": source.id,
         "start_date": start_date,
-        "end_date": end_date,
+        "end_date": requested_end_date,
+        "effective_end_date": end_date,
+        "release_limited": release_limited,
         "requested_month_count": len(month_starts),
         "fetched_month_count": fetched_month_count,
         "skipped_existing_month_count": skipped_existing_month_count,

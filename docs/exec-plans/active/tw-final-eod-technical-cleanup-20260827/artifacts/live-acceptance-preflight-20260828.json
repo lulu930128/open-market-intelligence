@@ -1,0 +1,61 @@
+{
+  "artifact_version": 1,
+  "generated_at": "2026-08-28T08:24:00+08:00",
+  "acceptance_date": "2026-08-28",
+  "stage": "source_runtime_preflight",
+  "result": "passed",
+  "source": {
+    "head": "ba1682e5e4545ba5df146c98fad6d738aa2b352e",
+    "required_fix_is_ancestor": true,
+    "required_release_is_ancestor": true,
+    "version": "4.3.1",
+    "task_scope_dirty_override": false,
+    "unrelated_dirty_worktree_preserved": true
+  },
+  "runtime": {
+    "launcher_managed": true,
+    "lineage": [
+      "scripts/omi-launcher.ps1",
+      "scripts/run-service-logged.ps1",
+      ".venv/Scripts/python.exe -m uvicorn"
+    ],
+    "project_root": "C:/project/Open Market Intelligence",
+    "python": ".venv/Scripts/python.exe",
+    "backend_endpoint": "http://127.0.0.1:8400",
+    "frontend_endpoint": "http://127.0.0.1:3000",
+    "loaded_api_version": "4.3.1",
+    "health": "ok",
+    "ready": "ready",
+    "database_revision": "20260826_0072",
+    "database_head_revision": "20260826_0072",
+    "frontend_proxy": "passed",
+    "stdio_mcp": "passed",
+    "canonical_market_data_mode": "off",
+    "active_realtime_leases": 0,
+    "bridge_process_running": false
+  },
+  "calendar": {
+    "date": "2026-08-28",
+    "is_trading_day": true,
+    "phase": "preopen_pending",
+    "source": "TWSE Holiday Schedule OpenAPI",
+    "cache_status": "current",
+    "official_daily_release_time": "15:15"
+  },
+  "preopen_symbol_candidates": {
+    "required": "3711",
+    "twse": "1101",
+    "tpex": "1240",
+    "selection": "first active stock by stock_id from canonical stock master for each venue",
+    "limitations": [
+      "Realtime descriptor eligibility and normal-trading status remain to be verified at the preopen gate.",
+      "Candidates are not derived from scheduler_taiwan_quote_contract_symbols."
+    ]
+  },
+  "acceptance": {
+    "source_ready": "passed",
+    "runtime_adopted": "passed",
+    "live_accepted": "pending",
+    "product_accepted": "pending"
+  }
+}

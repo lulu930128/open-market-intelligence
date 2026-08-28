@@ -152,3 +152,13 @@ Provider IO
 - `market.breadth`、chips、ETF、fundamentals與derivatives共用lifecycle/health/lineage envelope，但保留各自typed payload與market-specific policy，不硬塞進quote/bar schema。
 - CP2使用production DB中已保存之TWSE/TPEx public raw receipt的精確row excerpt，於in-memory SQLite重播完整write/readback；未對production DB寫入，也未切換runtime。
 - 後續真實外部refresh、quota或runtime adoption仍須維持bounded operation與對應gate，不得以fixture replay誤稱live runtime adoption。
+
+## 2026-08-27 K線／成交量／技術／EOD corrective extension
+
+- 本延伸沿用既有 `MarketOhlcChartRead`、technical report／indicator engine、Dataset Registry EOD lifecycle、frontend chart components 與同一個長任務，不新增資料平台、Resolver、資料表、scheduler 或 consumer-side market owner。
+- OHLCV outward contract 必須明示成交量 canonical unit；台股個股為 shares。Frontend 不得在「股」標籤下偷偷除以 1,000。
+- `latest_data_date` 明確代表 latest finalized official daily date；若 points 含 session-close provisional overlay，必須另由 `intraday_overlay`／`latest_finalized_data_date` 說明，不能把 provisional point 說成 official daily finalized。
+- Daily technical report 的 decision fields／rows／score 只使用 finalized official daily indicator。今日 provisional indicator 以 `current_observation`／`current_partial_indicator` 獨立投影，整組 price/range/volume/momentum state 需由同一 provisional bar 計算並標示 `decision_usable=false`。
+- Frontend 台股日K必須優先合併 backend current partial point；只有明確 presentation-only indicator 或 parameter mismatch 才可 local calculate，且整體 projection scope 必須標成 `mixed`／`presentation_only`，不可誤標 `backend_authoritative`。
+- EOD repair 必須分開 provider fetch/parse transport success 與 dataset advancement/postcondition。Previous-date／duplicate payload 不得增加 repair succeeded count 或更新 repair last-success；TWSE／TPEx venue coverage 必須可直接觀測。
+- Source validation、runtime adoption、official provider publication 與 visible UI acceptance 仍是不同 gate；未重啟既有 launcher 前不得宣稱 production runtime 已載入本次 source。

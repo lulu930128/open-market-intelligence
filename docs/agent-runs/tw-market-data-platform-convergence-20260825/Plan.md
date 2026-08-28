@@ -144,6 +144,41 @@ RefreshRequirementV1(dataset=tw.daily_ohlcv.official, trade_date, venue bounds)
 - Rollback：per-capability rollout mode退回legacy；不 broad-kill unknown runtime/lease。
 - Gate split：recorded actual payload、isolated persistence/readback、provider-neutral API與legacy consumer source cutover構成CP5 source/platform gate；active-session public-source live acceptance留到CP8 runtime adoption window，未執行前不得宣稱live operational。
 
+### CP5-R — Post-close session finalization corrective extension
+
+- Scope：依 `CP5PostCloseFinalizationPlan.md`，在既有 `tw.quote.snapshot -> Gateway -> Resolver -> TW projection` 內補齊13:30收盤至official daily發布前的session-final語意。
+- Current state：2026-08-27 CR0～CR6與CR7 source regression已完成，標為`source_converged_runtime_adoption_pending`；runtime adoption、live materialization、official EOD reconciliation與visible UI acceptance仍依獨立gate處理。
+- Architecture：`quote.session_close` 是既有quote observation的resolved projection；不新增service、resolver、registry plane、dataset、table、transaction owner或全市場scheduler。
+- Acceptance：
+  - global `close_resolution` phase只有一個calendar owner，instrument delayed state分離。
+  - existing single-symbol bounded acquisition可在post-close重新確認last actual trade，persist後mandatory reread。
+  - session-final必須是current-date actual/non-trial evidence，且provider event time在13:30～13:33合法final-match／resolution window；13:24或其他舊cache不可promotion。
+  - post-close headline優先current-day session close；previous official只能作dated reference，current-day official維持pending release。
+  - technical current partial只接受session-final evidence，completed只接受official daily。
+  - official daily arrival後由existing lifecycle／health seam完成matched／mismatched projection與observability。
+- Validation：PCF0～PCF7 targeted tests、backend safe profile、TWSE／TPEx各一個bounded live sample、3711 golden case、cold restart、HTTP／SSE／MCP parity。
+- Rollback：application-level rollback，保留raw receipts與相容schema；不刪資料、不以DB downgrade作首選。
+- Gate split：source-ready、runtime-adopted、post-close live-accepted與official-reconciled分開；F-07 active-session live acceptance仍是獨立gate。
+- Execution order：依focused plan的CR0～CR8執行：baseline freeze -> phase owner -> outward/schema/health -> session-close materialization -> consumer convergence -> reconciliation -> existing EOD postcondition -> scoped runtime/MCP adoption -> chronological UI/live acceptance。
+
+### CP7-R — K線／成交量／技術／EOD semantic cleanup
+
+- Scope：在既有 OHLCV、technical engine/report、EOD lifecycle 與 frontend chart owner 內根除 unit、finalized/provisional 與假成功語意；不建立新架構。
+- Execution order：
+  1. OHLCV additive contract：`volume_unit=shares`、volume semantics/status、`latest_finalized_data_date`。
+  2. Technical split：top-level decision state固定 finalized；current observation 由完整 provisional indicator point重建，禁止 current price × previous indicator hybrid。
+  3. Frontend convergence：daily chart合併 backend `current_partial_indicator`；authority scope同時檢查 chart date coverage、active indicator與parameter contract；shares formatter不再除以1,000。
+  4. EOD outcome：保留既有 `refresh_source()` compatibility port，但將 transport success、observed trade dates、duplicate、venue coverage advancement與postcondition分開記錄。
+  5. AI/MCP projection：compact technical report同時輸出 finalized decision state與 non-decision-usable current observation，不自行重算。
+  6. Gate：targeted backend regression、architecture/compile、frontend lint/build；production runtime與visible UI需既有 launcher adoption後另驗。
+- Acceptance：
+  - 3711 類案例在 session close可用時，technical `price_context/current_state/current_partial_indicator`同為605；decision state仍是8/26 official daily 592。
+  - chart volume 11,106,000 shares顯示為11,106,000，不顯示11,106卻標「股」。
+  - 官方日線未前進時，`latest_finalized_data_date`維持8/26，provisional 8/27不冒充finalized。
+  - provider fetch/parse成功但observed trade date仍8/26時，dataset status為`stale_payload`、repair success count不增加、postcondition仍false。
+  - frontend有backend authoritative current partial時今日點不local重算；custom/local-only indicator啟用時scope至少為`mixed`。
+- Rollback：全部為additive outward fields與application behavior；可回退application build，不需要schema downgrade或資料刪除。
+
 ### CP6 — Provider onboarding seam and durable TW dataset convergence
 
 - Scope：完成market-owned TW catalog/port registry與dataset-family application adapters；依風險納入chips、ETF、fundamentals/events、derivatives。
@@ -220,3 +255,8 @@ RefreshRequirementV1(dataset=tw.daily_ohlcv.official, trade_date, venue bounds)
 - 2026-08-25：Production rollback保留additive schema並回退application build；0067/0068 downgrade只作emergency compatibility proof，已有新canonical writes後不得把移除lineage columns當首選rollback。
 - 2026-08-25：歷史Foundation/M5 checkpoint不重寫；共同平台以獨立successor extension checkpoint精確承接intentional source drift。US manifest只授權market-owned integration exact path。
 - 2026-08-25：backend full suite已達2280 tests、正常teardown約310秒；safe-validation仍bounded，但預設timeout由300秒提高至420秒，避免測試全綠後被wrapper誤標timeout。
+- 2026-08-27：台股post-close finalization直接作為CP5 corrective extension；沿用`tw.quote.snapshot`、QuoteObservation、Gateway、Resolver、repository、transaction、raw receipt與Dataset Registry，不建立第二套session-close架構。
+- 2026-08-27：`quote.session_close`是market-owned resolved projection，不是新的provider dataset；post-resolution confirmation以`fetched_at/received_at`證明，但成交`event_time`仍必須在13:30～13:33合法final-match／resolution window。
+- 2026-08-27：full audit推翻「PCF1～PCF6可直接視為完成」的closure claim；source、18:10 runtime與SQLite/EOD資料各處於不同版本／狀態，後續一律依CR0～CR8與六個獨立gate重驗。
+- 2026-08-27：EOD scheduler已確認有註冊並執行；本次要修的是provider publication／coverage postcondition與job outcome語意，不新增第三套scheduler。
+- 2026-08-27：Frontend local Taiwan clock、intraday POST_CLOSE inference與source-health outside-session shortcut均列為需移除的consumer-side business semantics。

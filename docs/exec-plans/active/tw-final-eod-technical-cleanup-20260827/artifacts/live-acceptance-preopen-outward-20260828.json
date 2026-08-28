@@ -1,0 +1,105 @@
+{
+  "artifact_version": 1,
+  "generated_at": "2026-08-28T08:37:00+08:00",
+  "acceptance_date": "2026-08-28",
+  "stage": "preopen",
+  "result": "passed",
+  "window": {
+    "started_at": "2026-08-28T08:30:51+08:00",
+    "sampling_completed_at": "2026-08-28T08:33:55+08:00",
+    "cleanup_completed_at": "2026-08-28T08:35:58+08:00",
+    "calendar_phase": "preopen"
+  },
+  "symbols": [
+    {
+      "symbol": "3711",
+      "venue": "TWSE",
+      "quote_time": "2026-08-28T08:31:29+08:00",
+      "instrument_phase": "preopen_auction",
+      "semantics": "preopen_indicative_match_and_depth",
+      "actual_trade_occurred": false,
+      "last_trade_available": false,
+      "auction_book_available": true,
+      "indicative_match_status": "indicative",
+      "today_ohlc_available": false,
+      "today_cumulative_volume_available": false,
+      "session_close_available": false,
+      "official_close_status": "not_available_yet"
+    },
+    {
+      "symbol": "1101",
+      "venue": "TWSE",
+      "quote_time": "2026-08-28T08:32:37+08:00",
+      "instrument_phase": "preopen_auction",
+      "semantics": "preopen_indicative_match_and_depth",
+      "actual_trade_occurred": false,
+      "last_trade_available": false,
+      "auction_book_available": true,
+      "indicative_match_status": "indicative",
+      "today_ohlc_available": false,
+      "today_cumulative_volume_available": false,
+      "session_close_available": false,
+      "official_close_status": "not_available_yet"
+    },
+    {
+      "symbol": "1240",
+      "venue": "TPEX",
+      "quote_time": "2026-08-28T08:32:34+08:00",
+      "instrument_phase": "preopen_auction",
+      "semantics": "preopen_indicative_match_and_depth",
+      "actual_trade_occurred": false,
+      "last_trade_available": false,
+      "auction_book_available": true,
+      "indicative_match_status": "indicative",
+      "today_ohlc_available": false,
+      "today_cumulative_volume_available": false,
+      "session_close_available": false,
+      "official_close_status": "not_available_yet"
+    }
+  ],
+  "callback_classification": {
+    "callback_count": 39,
+    "auction_addition_count": 39,
+    "trade_addition_count": 0,
+    "trial_leak_count": 0,
+    "cumulative_advanced_count": 0,
+    "decreasing_cumulative_count": 0,
+    "callbacks_categorized": true,
+    "negative_latency_count": 0
+  },
+  "outward_read_after_cleanup": {
+    "public_quote_status_for_all_symbols": "policy_unsatisfied",
+    "public_quote_selection_reason_for_all_symbols": "CACHE_ONLY_NO_ELIGIBLE_CANDIDATE",
+    "public_quote_missing_field_for_all_symbols": "last_trade_price",
+    "intraday_point_count_for_all_symbols": 0,
+    "intraday_current_trade_available_for_all_symbols": false,
+    "session_close_available_for_all_symbols": false
+  },
+  "lifecycle": {
+    "lease_baseline_count": 0,
+    "lease_cleanup_count": 0,
+    "cleanup_bridge_process_running": false,
+    "cleanup_waited_seconds": 125.299,
+    "external_overlap_observed": false,
+    "request_error_count": 0
+  },
+  "assertions": {
+    "realtime_descriptor_eligible_for_all_symbols": true,
+    "depth_ready_for_all_symbols": true,
+    "trial_or_indicative_did_not_promote_to_trade": true,
+    "trial_or_indicative_did_not_create_today_bar": true,
+    "trial_or_indicative_did_not_create_session_close": true,
+    "stale_or_wrong_date_candidate_not_selected": true,
+    "owner_only_cleanup_restored_zero_baseline": true
+  },
+  "limitations": [
+    "The cached quote-depth projection became stale after the owned probe was released; the live harness assertions use samples captured while the lease was active.",
+    "Preopen evidence does not satisfy the Opening or Regular session gate."
+  ],
+  "artifact_policy": {
+    "raw_provider_payload_included": false,
+    "lease_ids_included": false,
+    "credentials_included": false,
+    "private_identity_included": false
+  }
+}
