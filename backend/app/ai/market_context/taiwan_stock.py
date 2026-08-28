@@ -39,7 +39,12 @@ from app.ai.taiwan_intraday_contract import (
     resolve_taiwan_current_price,
 )
 from app.market.live_snapshot import classify_market_snapshot, market_status_from_session
-from app.market.financial_contract import build_database_financial_contract
+from app.market.financial_contract import (
+    FINANCIAL_CONTRACT_VERSION,
+    build_database_financial_contract,
+)
+from app.ai.market_date_request import parse_market_trade_date
+from app.stocks.instruments import is_taiwan_etf
 from app.market.tw_company_profile import (
     TaiwanCompanyProfileRead,
     project_taiwan_company_profile,
@@ -70,8 +75,52 @@ def _requested_quote_evidence_capabilities(
     )
     return selected or None
 _technical_analysis_summary = technical_analysis._technical_analysis_summary
+_evaluate_technical_evidence_sufficiency = (
+    technical_analysis.evaluate_technical_evidence_sufficiency
+)
+_apply_technical_sufficiency_gate = (
+    technical_analysis.apply_technical_sufficiency_gate
+)
 _technical_price_levels = technical_analysis._technical_price_levels
 TAIPEI_TZ = timezone(timedelta(hours=8))
+
+
+def _read_stock_fundamental_inputs(
+    *,
+    db: Session,
+    stock_id: str,
+    revenue_months: int,
+    financial_quarters: int,
+    applicable: bool,
+    market_service: Any,
+) -> dict[str, Any]:
+    if not applicable:
+        return {
+            "latest_revenue": None,
+            "latest_financial": None,
+            "revenue_history": [],
+            "financial_history": [],
+        }
+    return {
+        "latest_revenue": market_service.get_latest_stock_monthly_revenue(
+            db,
+            stock_id,
+        ),
+        "latest_financial": market_service.get_latest_stock_financial_metric(
+            db,
+            stock_id,
+        ),
+        "revenue_history": market_service.list_stock_monthly_revenue_history(
+            db=db,
+            stock_id=stock_id,
+            limit=max(revenue_months, 1),
+        ),
+        "financial_history": market_service.list_stock_financial_metric_history(
+            db=db,
+            stock_id=stock_id,
+            limit=max(financial_quarters, 1),
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -961,6 +1010,13 @@ def read_stock_quote_context(
         else None
     )
     company_profile = _company_profile_payload(stock, stock_profile)
+    fundamentals_applicable = not (
+        stock is not None
+        and is_taiwan_etf(
+            getattr(stock, "instrument_type", None),
+            stock_id=normalized_stock_id,
+        )
+    )
 
     latest_daily_evidence = dependencies.read_taiwan_latest_daily_evidence(
         db,
@@ -1350,7 +1406,7 @@ def read_stock_quote_context(
     )
 
     source_refs = (
-        [{"type": "table", "name": "market_daily_price"}]
+        [{"type": "resolved_market_data", "name": "tw.daily.ohlcv"}]
         if latest_daily is not None
         else []
     )
@@ -1765,6 +1821,199 @@ def read_stock_broker_branch_context(
     )
 
 
+def read_stock_technical_context(
+    db: Session,
+    stock_id: str,
+    *,
+    bars: int = 120,
+    analysis_horizon: str = "swing",
+    market_data_params: dict[str, Any] | None = None,
+    dependencies: TaiwanStockDependencies,
+) -> dict[str, Any]:
+    """Read only the hard dependencies of explicit Taiwan technical evidence."""
+
+    normalized_stock_id = stock_id.strip()
+    stock = dependencies.stock_service.get_stock(
+        db=db,
+        stock_id=normalized_stock_id,
+    )
+    requested_trade_date = parse_market_trade_date(
+        (market_data_params or {}).get("trade_date")
+    )
+    latest_daily_evidence = dependencies.read_taiwan_latest_daily_evidence(
+        db,
+        normalized_stock_id,
+        to_date=requested_trade_date,
+    )
+    latest_daily = _latest_daily_value(latest_daily_evidence)
+    chart = dependencies.market_service.list_stock_ohlc_chart_data(
+        db=db,
+        stock_id=normalized_stock_id,
+        timeframe="daily",
+        bars=max(int(bars), 1),
+        ensure_history=False,
+        to_date=requested_trade_date,
+    )
+    missing: list[str] = []
+    warnings: list[str] = []
+    technical_reports: dict[str, Any] = {}
+    for timeframe in ("daily", "weekly", "monthly"):
+        try:
+            technical_reports[timeframe] = dependencies.build_stock_technical_report(
+                db=db,
+                stock_id=normalized_stock_id,
+                timeframe=timeframe,
+                include_intraday=False,
+                to_date=requested_trade_date,
+            )
+        except Exception as exc:
+            missing.append(f"technical_report.{timeframe}")
+            warnings.append(
+                f"{timeframe.title()} technical report unavailable: {exc}"
+            )
+    technical_analysis = _technical_analysis_summary(
+        technical_reports=technical_reports,
+        requested_horizon=analysis_horizon,
+    )
+    technical_sufficiency = _evaluate_technical_evidence_sufficiency(
+        chart=chart,
+        technical_reports=technical_reports,
+        requested_horizon=analysis_horizon,
+    )
+    technical_analysis = _apply_technical_sufficiency_gate(
+        technical_analysis,
+        sufficiency=technical_sufficiency,
+    )
+    technical_levels = _technical_price_levels(
+        technical_reports=technical_reports,
+        latest_daily=latest_daily,
+        resolved_current_price=None,
+    )
+    market_calendar_status = dependencies.build_taiwan_calendar_status()
+    technical_evidence: dict[str, Any] = {}
+    if dependencies.build_tw_stock_technical_evidence is not None:
+        try:
+            corporate_event_history = dependencies.get_taiwan_stock_event_history(
+                normalized_stock_id,
+                market=getattr(stock, "market", None),
+                years=10,
+                max_results=200,
+                now=dependencies.now(),
+            )
+            technical_evidence = dependencies.build_tw_stock_technical_evidence(
+                db=db,
+                stock_id=normalized_stock_id,
+                corporate_event_history=corporate_event_history,
+                current_quote=None,
+                intraday_points=[],
+                market_calendar_status=market_calendar_status,
+                to_date=requested_trade_date,
+            )
+            warnings.extend(str(item) for item in technical_evidence.get("warnings") or [])
+        except Exception as exc:
+            missing.append("technical_evidence")
+            warnings.append(f"Canonical technical evidence unavailable: {exc}")
+    source_refs = [
+        {"type": "table", "name": "stock_master"},
+        {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
+        {"type": "derived", "name": "app.market.technical_report"},
+        {"type": "derived", "name": "app.market.technical_evidence"},
+    ]
+    serialized_chart = {
+        **chart,
+        "from_date": _json_value(chart.get("from_date")),
+        "to_date": _json_value(chart.get("to_date")),
+        "returned_point_count": len(chart.get("points") or []),
+        "volume_unit": chart.get("volume_unit") or "shares",
+        "trade_value_unit": chart.get("trade_value_unit") or "TWD",
+        "points": [
+            {key: _json_value(value) for key, value in point.items()}
+            for point in chart.get("points") or []
+        ],
+    }
+    as_of = _json_value(
+        chart.get("latest_data_date")
+        or chart.get("to_date")
+        or getattr(latest_daily, "trade_date", None)
+    )
+    compact = _build_stock_compact_evidence(
+        stock=stock,
+        company_profile={"status": "not_requested"},
+        stock_id=normalized_stock_id,
+        as_of=as_of,
+        latest_daily=latest_daily,
+        latest_institutional=None,
+        latest_margin=None,
+        shareholding=[],
+        branch_summary={"buy_top": [], "sell_top": [], "trade_dates": []},
+        latest_revenue=None,
+        revenue_history=[],
+        latest_financial=None,
+        financial_history=[],
+        technical_reports=technical_reports,
+        technical_analysis=technical_analysis,
+        technical_levels=technical_levels,
+        technical_evidence=technical_evidence,
+        quote={},
+        intraday_bars={
+            "enabled": False,
+            "series": {},
+            "payload_level": _payload_level(market_data_params),
+        },
+        source_health={"entries": []},
+        overnight_impact=None,
+        event_context={},
+        missing=missing,
+        warnings=warnings,
+        source_refs=source_refs,
+    )
+    envelope = {
+        "kind": "stock_technical_context",
+        "generated_at": dependencies.now(),
+        "as_of": as_of,
+        "scope": {
+            "type": "stock",
+            "id": normalized_stock_id,
+            "market": "TW",
+        },
+        "data": {
+            "stock": _stock_dict(stock),
+            "latest_daily": _row_dict(
+                latest_daily,
+                (
+                    "trade_date",
+                    "stock_id",
+                    "stock_name",
+                    "trade_volume",
+                    "trade_value",
+                    "open_price",
+                    "high_price",
+                    "low_price",
+                    "close_price",
+                    "price_change",
+                    "transaction_count",
+                ),
+            ),
+            "chart": serialized_chart,
+            "technical_reports": technical_reports,
+            "technical_evidence": technical_evidence,
+            "technical_indicators": technical_evidence.get("indicators"),
+            "analysis": technical_analysis,
+            "technical_levels": technical_levels,
+            "compact": compact,
+            "market_calendar_status": market_calendar_status,
+        },
+        "missing": list(dict.fromkeys(missing)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "source_refs": source_refs,
+    }
+    return _with_evidence_passport(
+        envelope,
+        analysis=technical_analysis,
+        confidence=str(technical_analysis.get("selected_confidence") or ""),
+    )
+
+
 def read_stock_context(
     db: Session,
     stock_id: str,
@@ -1793,33 +2042,45 @@ def read_stock_context(
         else None
     )
     company_profile = _company_profile_payload(stock, stock_profile)
+    fundamentals_applicable = not (
+        stock is not None
+        and is_taiwan_etf(
+            getattr(stock, "instrument_type", None),
+            stock_id=normalized_stock_id,
+        )
+    )
 
+    requested_trade_date = parse_market_trade_date(
+        (market_data_params or {}).get("trade_date")
+    )
     latest_daily_evidence = dependencies.read_taiwan_latest_daily_evidence(
         db,
         normalized_stock_id,
+        to_date=requested_trade_date,
     )
     latest_daily = _latest_daily_value(latest_daily_evidence)
     latest_institutional = dependencies.market_service.get_latest_stock_institutional_trade(db, normalized_stock_id)
     latest_margin = dependencies.market_service.get_latest_stock_margin_trade(db, normalized_stock_id)
-    latest_revenue = dependencies.market_service.get_latest_stock_monthly_revenue(db, normalized_stock_id)
-    latest_financial = dependencies.market_service.get_latest_stock_financial_metric(db, normalized_stock_id)
+    fundamental_inputs = _read_stock_fundamental_inputs(
+        db=db,
+        stock_id=normalized_stock_id,
+        revenue_months=revenue_months,
+        financial_quarters=financial_quarters,
+        applicable=fundamentals_applicable,
+        market_service=dependencies.market_service,
+    )
+    latest_revenue = fundamental_inputs["latest_revenue"]
+    latest_financial = fundamental_inputs["latest_financial"]
     shareholding = dependencies.market_service.list_latest_stock_shareholding_distribution(db, normalized_stock_id)
-    revenue_history = dependencies.market_service.list_stock_monthly_revenue_history(
-        db=db,
-        stock_id=normalized_stock_id,
-        limit=max(revenue_months, 1),
-    )
-    financial_history = dependencies.market_service.list_stock_financial_metric_history(
-        db=db,
-        stock_id=normalized_stock_id,
-        limit=max(financial_quarters, 1),
-    )
+    revenue_history = fundamental_inputs["revenue_history"]
+    financial_history = fundamental_inputs["financial_history"]
     chart = dependencies.market_service.list_stock_ohlc_chart_data(
         db=db,
         stock_id=normalized_stock_id,
         timeframe="daily",
         bars=max(bars, 1),
         ensure_history=False,
+        to_date=requested_trade_date,
     )
     branch_summary = dependencies.get_broker_branch_trade_summary(
         db=db,
@@ -1837,12 +2098,15 @@ def read_stock_context(
                 stock_id=normalized_stock_id,
                 timeframe=timeframe,
                 include_intraday=False,
+                to_date=requested_trade_date,
             )
         except Exception as exc:
             warnings.append(f"{timeframe.title()} technical report unavailable: {exc}")
             missing.append(f"technical_report.{timeframe}")
 
-    if include_intraday or normalized_horizon == "intraday":
+    if requested_trade_date is None and (
+        include_intraday or normalized_horizon == "intraday"
+    ):
         try:
             technical_reports["today"] = dependencies.build_stock_technical_report(
                 db=db,
@@ -1862,6 +2126,15 @@ def read_stock_context(
     technical_analysis = _technical_analysis_summary(
         technical_reports=technical_reports,
         requested_horizon=analysis_horizon,
+    )
+    technical_sufficiency = _evaluate_technical_evidence_sufficiency(
+        chart=chart,
+        technical_reports=technical_reports,
+        requested_horizon=analysis_horizon,
+    )
+    technical_analysis = _apply_technical_sufficiency_gate(
+        technical_analysis,
+        sufficiency=technical_sufficiency,
     )
     technical_levels: dict[str, Any] = {}
     overnight_impact: dict[str, Any] | None = None
@@ -1893,8 +2166,9 @@ def read_stock_context(
     _add_missing(missing, "institutional_trade_daily", latest_institutional)
     _add_missing(missing, "margin_trading_daily", latest_margin)
     _add_missing(missing, "shareholding_distribution_weekly", shareholding)
-    _add_missing(missing, "monthly_revenue", latest_revenue)
-    _add_missing(missing, "financial_metric_quarterly", latest_financial)
+    if fundamentals_applicable:
+        _add_missing(missing, "monthly_revenue", latest_revenue)
+        _add_missing(missing, "financial_metric_quarterly", latest_financial)
     _add_missing(missing, "broker_branch_trade_daily", branch_summary.get("buy_top") or branch_summary.get("sell_top"))
     _add_missing(missing, "us_overnight_tw_impact", overnight_impact)
 
@@ -1913,13 +2187,11 @@ def read_stock_context(
 
     source_refs = [
         {"type": "table", "name": "stock_master"},
-        {"type": "table", "name": "market_daily_price"},
+        {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
         {"type": "table", "name": "institutional_trade_daily"},
         {"type": "table", "name": "margin_trading_daily"},
         {"type": "table", "name": "shareholding_distribution_weekly"},
         {"type": "table", "name": "broker_branch_trade_daily"},
-        {"type": "table", "name": "monthly_revenue"},
-        {"type": "table", "name": "financial_metric_quarterly"},
         {"type": "derived", "name": "app.market.technical_report"},
         {"type": "table", "name": "us_daily_price"},
         {"type": "table", "name": "us_watchlist_group"},
@@ -1927,6 +2199,13 @@ def read_stock_context(
         {"type": "derived", "name": "app.market.calendar_status"},
         {"type": "derived", "name": "app.market.overnight_impact"},
     ]
+    if fundamentals_applicable:
+        source_refs.extend(
+            [
+                {"type": "table", "name": "monthly_revenue"},
+                {"type": "table", "name": "financial_metric_quarterly"},
+            ]
+        )
     market_calendar_status = dependencies.build_taiwan_calendar_status()
     source_health = dependencies.build_taiwan_source_health(
         db=db,
@@ -2072,6 +2351,7 @@ def read_stock_context(
                 current_quote=quote,
                 intraday_points=list((intraday_series.get("1m") or {}).get("points") or []),
                 market_calendar_status=market_calendar_status,
+                to_date=requested_trade_date,
             )
             for item in technical_evidence.get("warnings") or []:
                 warnings.append(str(item))
@@ -2110,20 +2390,35 @@ def read_stock_context(
     financial_price, financial_price_as_of, financial_price_basis = (
         _financial_valuation_input(resolved_current_price)
     )
-    financial_contract = build_database_financial_contract(
-        db,
-        stock_id=normalized_stock_id,
-        mode="current_comparable",
-        as_of=dependencies.now(),
-        financial_history=financial_history,
-        revenue_history=revenue_history,
-        price=financial_price,
-        price_as_of=financial_price_as_of,
-        price_basis=financial_price_basis,
-        normalized_period_limit=max(
-            5,
-            min(financial_quarters + 1, 41),
-        ),
+    financial_contract = (
+        build_database_financial_contract(
+            db,
+            stock_id=normalized_stock_id,
+            mode="current_comparable",
+            as_of=dependencies.now(),
+            financial_history=financial_history,
+            revenue_history=revenue_history,
+            price=financial_price,
+            price_as_of=financial_price_as_of,
+            price_basis=financial_price_basis,
+            normalized_period_limit=max(
+                5,
+                min(financial_quarters + 1, 41),
+            ),
+        )
+        if fundamentals_applicable
+        else {
+            "contract_version": FINANCIAL_CONTRACT_VERSION,
+            "status": "not_applicable",
+            "applicability_status": "not_applicable",
+            "availability_status": "not_applicable",
+            "reason_codes": ["ETF_FUNDAMENTALS_NOT_APPLICABLE"],
+            "quality": {
+                "status": "not_applicable",
+                "decision_usable": False,
+                "reason_codes": ["ETF_FUNDAMENTALS_NOT_APPLICABLE"],
+            },
+        }
     )
 
     decision_evidence = _stock_decision_evidence(
@@ -2221,6 +2516,7 @@ def read_stock_context(
                 warnings=warnings,
                 source_refs=source_refs,
                 financial_contract=financial_contract,
+                fundamentals_applicable=fundamentals_applicable,
             ),
             "market_calendar_status": market_calendar_status,
             "source_health": source_health,

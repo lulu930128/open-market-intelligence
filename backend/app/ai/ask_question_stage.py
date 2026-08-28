@@ -155,8 +155,19 @@ def build_question_stage(
     question_intent = question_understanding.intent
     if scope_type == "data_freshness":
         question_intent = "data_freshness"
+    raw_selection = (
+        payload.selection if isinstance(payload.selection, dict) else {}
+    )
+    explicit_data_only_selection = bool(
+        payload.mode == "data_only"
+        and any(
+            key in raw_selection
+            for key in ("required", "include", "optional", "exclude")
+        )
+    )
     if (
-        position_context.get("has_position_context")
+        not explicit_data_only_selection
+        and position_context.get("has_position_context")
         and question_intent in POSITION_CONTEXT_PROMOTABLE_INTENTS
     ):
         question_intent = "position_risk_decision"
@@ -194,6 +205,7 @@ def build_question_stage(
     question_understanding_payload["intents"] = merged_intents
     question_understanding_payload["position_context"] = position_context
     policy["question_intent"] = question_intent
+    policy["explicit_data_only_intent_lock"] = explicit_data_only_selection
     policy["question_understanding"] = question_understanding_payload
     policy["response_preferences"] = response_preference_payload
     if position_context.get("has_position_context"):

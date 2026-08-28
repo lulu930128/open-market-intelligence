@@ -45,6 +45,14 @@ class MarketService(Protocol):
         limit: int,
     ) -> list[Any]: ...
 
+    def read_market_daily_snapshot(
+        self,
+        db: Session,
+        *,
+        trade_date: Any,
+        include_etf: bool,
+    ) -> Any: ...
+
 
 @dataclass(frozen=True)
 class TaiwanMarketDependencies:
@@ -148,9 +156,10 @@ def _build_tw_market_compact(
         "scope": "omi_local_daily_sample",
         "scope_label": "OMI 台股本機日線樣本",
         "is_full_market": False,
+        "coverage_status": "sample_only",
         "as_of": as_of,
         "latest_trade_date": latest_trade_date,
-        "source": "market_daily_price",
+        "source": "tw.daily.ohlcv",
         "currency": "TWD",
         "price_unit": "TWD_per_share",
         "volume_unit": "shares",
@@ -1082,46 +1091,24 @@ def _market_breadth_from_index_summary(
 
 
 def _daily_sample_coverage(
-    db: Session,
-    *,
-    sample_stock_ids: set[str],
+    snapshot: Any,
 ) -> dict[str, Any]:
-    universe_rows = (
-        db.query(StockMaster.stock_id, StockMaster.market)
-        .filter(StockMaster.is_active.is_(True))
-        .filter(StockMaster.instrument_type == "stock")
-        .all()
-    )
-    universe_by_market: dict[str, int] = {"TWSE": 0, "TPEX": 0, "OTHER": 0}
-    sample_by_market: dict[str, int] = {"TWSE": 0, "TPEX": 0, "OTHER": 0}
-
-    def _market_key(value: Any) -> str:
-        normalized = str(value or "").strip().upper()
-        if normalized in {"TWSE", "上市"}:
-            return "TWSE"
-        if normalized in {"TPEX", "上櫃"}:
-            return "TPEX"
-        return "OTHER"
-
-    universe_stock_ids: set[str] = set()
-    known_sample_ids: set[str] = set()
-    for stock_id, market in universe_rows:
-        universe_stock_ids.add(stock_id)
-        key = _market_key(market)
-        universe_by_market[key] += 1
-        if stock_id in sample_stock_ids:
-            sample_by_market[key] += 1
-            known_sample_ids.add(stock_id)
-    sample_by_market["OTHER"] += len(sample_stock_ids - known_sample_ids)
-
-    universe_count = len(universe_rows)
-    sample_count = len(sample_stock_ids)
-    covered_universe_count = len(sample_stock_ids & universe_stock_ids)
+    universe_by_market = {
+        **{"TWSE": 0, "TPEX": 0, "OTHER": 0},
+        **dict(getattr(snapshot, "universe_count_by_market", ()) or ()),
+    }
+    sample_by_market = {
+        **{"TWSE": 0, "TPEX": 0, "OTHER": 0},
+        **dict(getattr(snapshot, "selected_count_by_market", ()) or ()),
+    }
+    universe_count = int(getattr(snapshot, "universe_count", 0) or 0)
+    sample_count = len(getattr(snapshot, "rows", ()) or ())
+    covered_universe_count = sum(sample_by_market.values())
     coverage_ratio = (
         covered_universe_count / universe_count if universe_count else None
     )
     return {
-        "scope": "active_stock_master",
+        "scope": "canonical_active_stock_universe",
         "status": (
             "complete"
             if universe_count and covered_universe_count >= universe_count
@@ -1138,6 +1125,15 @@ def _daily_sample_coverage(
         "sample_count_by_market": sample_by_market,
         "universe_count_by_market": universe_by_market,
     }
+
+
+def _daily_sample_coverage_warning(sample_coverage: dict[str, Any]) -> str:
+    return (
+        "Daily ranking and industry sample coverage is "
+        f"{sample_coverage.get('sample_count')}/{sample_coverage.get('universe_count')} "
+        "ordinary active stocks; sample-derived rankings must not be treated as "
+        "full-market results."
+    )
 
 
 def _capability_parameters(
@@ -1203,13 +1199,26 @@ def _market_indices_capability(
         )
         if item is None:
             continue
+        completed_official = item.get("completed_official_index")
+        if not isinstance(completed_official, dict):
+            completed_official = None
         close = (
-            item.get("close")
+            completed_official.get("close")
+            if completed_official is not None
+            else item.get("close")
             if item.get("close") is not None
             else item.get("value")
         )
-        change = item.get("change")
-        change_pct = item.get("change_pct")
+        change = (
+            completed_official.get("change")
+            if completed_official is not None
+            else item.get("change")
+        )
+        change_pct = (
+            completed_official.get("change_pct")
+            if completed_official is not None
+            else item.get("change_pct")
+        )
         if (
             change_pct is None
             and isinstance(close, (int, float))
@@ -1218,13 +1227,17 @@ def _market_indices_capability(
         ):
             change_pct = change / (close - change) * 100
         official_as_of = _json_scalar(
-            item.get("as_of")
+            (completed_official or {}).get("lineage", {}).get("event_at")
+            or item.get("as_of")
             or item.get("quote_time")
             or item.get("trade_date")
             or item.get("date")
         )
         trade_date = _date_iso(
-            item.get("trade_date") or item.get("date") or official_as_of
+            (completed_official or {}).get("trade_date")
+            or item.get("trade_date")
+            or item.get("date")
+            or official_as_of
         )
         live_series: dict[str, Any] = {}
         if active_index_session and hasattr(db, "query"):
@@ -1323,14 +1336,15 @@ def _market_indices_capability(
                 "index_id": index_id,
                 "name": item.get("name") or item.get("label") or label,
                 "market": str(item.get("market") or market).upper(),
-                "close": close,
+                "close": selected_value,
                 "official_close": {
                     "value": close,
                     "change": change,
                     "change_pct": change_pct,
                     "trade_date": trade_date,
                     "as_of": official_as_of,
-                    "source": item.get("source")
+                    "source": (completed_official or {}).get("lineage", {}).get("source")
+                    or item.get("source")
                     or summary.get("source")
                     or "market_index_summary",
                 },
@@ -1363,6 +1377,10 @@ def _market_indices_capability(
                 ),
                 "current_for_requested_session": current_for_requested_session,
                 "decision_usable": current_for_requested_session,
+                "coverage_status": resolution.get("coverage_status"),
+                "finalization": resolution.get("selected_finalization"),
+                "provisional": resolution.get("provisional_estimate") is True,
+                "delivery_status": resolution.get("delivery_status"),
                 "source": resolution.get("selected_source")
                 or item.get("source")
                 or summary.get("source")
@@ -1376,8 +1394,14 @@ def _market_indices_capability(
                 "official_close_status": resolution.get(
                     "official_close_status"
                 ),
+                "canonical_status_ref": resolution.get("resolution_id"),
                 "resolution": resolution,
-                "freshness": item.get("freshness")
+                "freshness": {
+                    "status": resolution.get("freshness_status"),
+                    "decision_usable": current_for_requested_session,
+                    "event_time": resolution.get("selected_event_time"),
+                },
+                "source_freshness": item.get("freshness")
                 or item.get("quote_status")
                 or {},
             }
@@ -1435,6 +1459,9 @@ def _market_indices_capability(
         "market_session": session_phase,
         "current_for_requested_session": current_count == 2,
         "is_current": current_count == 2,
+        "decision_usable": is_complete and current_count == 2,
+        "canonical_status_ref": "items[].resolution_id",
+        "status_authority": "tw.index.resolution.v1",
         "is_complete": is_complete,
         "coverage_status": "complete" if is_complete else "partial" if items else "missing",
         "observation_mix": sorted(
@@ -1499,9 +1526,15 @@ def _market_index_contributions_capability(
     if data_params.get("external_fetch_allowed") is not True:
         return {
             "kind": "tw_market_index_contributions",
-            "status": "not_requested",
+            "status": "not_fetched_due_to_policy",
             "as_of": None,
             "indices": {},
+            "applicability_status": "applicable",
+            "availability_status": "unknown",
+            "policy_satisfied": False,
+            "execution_status": "not_executed",
+            "decision_usable": False,
+            "reason_codes": ["EXTERNAL_FETCH_DISABLED_FOR_REQUEST"],
             "cache_policy": "external_fetch_required_bounded",
             "missing": [],
             "warnings": [
@@ -1638,6 +1671,17 @@ def _market_index_contributions_capability(
             if rows
             else "unavailable"
         ),
+        "applicability_status": "applicable",
+        "availability_status": "available" if rows else "missing",
+        "policy_satisfied": len(rows) == len(index_ids),
+        "execution_status": (
+            "completed"
+            if len(rows) == len(index_ids)
+            else "partial"
+            if rows
+            else "failed"
+        ),
+        "decision_usable": len(rows) == len(index_ids),
         "as_of": max(trade_dates) if trade_dates else None,
         "index_ids": index_ids,
         "indices": rows,
@@ -2227,11 +2271,14 @@ def _sample_sector_capability(
         "is_full_market": False,
         "coverage": {
             **sample_coverage,
-            "scope": "active_stock_master",
+            "scope": sample_coverage.get("scope")
+            or "canonical_active_stock_universe",
             "full_market_universe_count": sample_coverage.get(
                 "universe_count"
             ),
-            "covered_stock_count": sample_coverage.get("coverage_count"),
+            "covered_stock_count": sample_coverage.get(
+                "covered_universe_count"
+            ),
             "coverage_status": "sample_only",
             "is_full_market": False,
         },
@@ -2400,7 +2447,7 @@ def read_market_overview(
     ):
         _append_source_ref_once(
             source_refs,
-            {"type": "table", "name": "market_daily_price"},
+            {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
         )
     source_health_requested = (
         "source.health" in requested_capabilities
@@ -2480,7 +2527,7 @@ def read_market_overview(
     if "market.indices" in requested_capabilities:
         _append_source_ref_once(
             source_refs,
-            {"type": "table", "name": "market_daily_price"},
+            {"type": "resolved_market_data", "name": "tw.market_index.current"},
         )
         market_aggregates["indices"] = _market_indices_capability(
             db=db,
@@ -2505,7 +2552,7 @@ def read_market_overview(
     if "market.index_contributions" in requested_capabilities:
         _append_source_ref_once(
             source_refs,
-            {"type": "table", "name": "market_daily_price"},
+            {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
         )
         market_aggregates[
             "index_contributions"
@@ -2641,7 +2688,7 @@ def read_market_overview(
             )
 
     if latest_trade_date is None:
-        sample_coverage = _daily_sample_coverage(db, sample_stock_ids=set())
+        sample_coverage = _daily_sample_coverage(None)
         if market_breadth is None:
             missing.append("market_breadth.full_market")
         no_daily_warnings = [
@@ -2673,7 +2720,7 @@ def read_market_overview(
             ] = _aggregate_freshness(
                 "market.sectors",
                 market_aggregates["sectors"],
-                dataset="market_daily_price",
+                dataset="tw.daily.ohlcv",
             )
         slots.update(
             _market_aggregate_slots(
@@ -2743,13 +2790,14 @@ def read_market_overview(
             },
         )
 
-    rows = dependencies.market_service.list_market_daily_prices(
-        db=db,
+    daily_snapshot = dependencies.market_service.read_market_daily_snapshot(
+        db,
         trade_date=latest_trade_date,
-        limit=10000,
+        include_etf=False,
     )
+    rows = list(daily_snapshot.rows)
+    sample_coverage = _daily_sample_coverage(daily_snapshot)
     stock_ids = sorted({row.stock_id for row in rows if row.stock_id})
-    sample_coverage = _daily_sample_coverage(db, sample_stock_ids=set(stock_ids))
     stock_industries: dict[str, str | None] = {}
     for index in range(0, len(stock_ids), 500):
         chunk = stock_ids[index : index + 500]
@@ -2817,7 +2865,7 @@ def read_market_overview(
         "scope": "omi_sample",
         "label": "OMI 樣本股廣度",
         "trade_date": latest_trade_date.isoformat(),
-        "source": "market_daily_price",
+        "source": "tw.daily.ohlcv",
         "advance_count": advance_count,
         "decline_count": decline_count,
         "unchanged_count": unchanged_count,
@@ -2896,7 +2944,7 @@ def read_market_overview(
         ] = _aggregate_freshness(
             "market.sectors",
             market_aggregates["sectors"],
-            dataset="market_daily_price",
+            dataset="tw.daily.ohlcv",
         )
     top_industries = sorted(
         [row for row in industry_summary if row["industry"] != "未分類" and row["count"] >= 2],
@@ -2931,11 +2979,7 @@ def read_market_overview(
         missing.append("market_daily_price.change_pct")
     if not omit_sample_rankings and sample_coverage.get("status") != "complete":
         missing.append("market_daily_price.full_market_coverage")
-        warnings.append(
-            "Daily ranking and industry sample coverage is "
-            f"{sample_coverage.get('sample_count')}/{sample_coverage.get('universe_count')} "
-            "active stocks; sample-derived rankings must not be treated as full-market results."
-        )
+        warnings.append(_daily_sample_coverage_warning(sample_coverage))
 
     if market_breadth is None:
         market_breadth = sample_breadth

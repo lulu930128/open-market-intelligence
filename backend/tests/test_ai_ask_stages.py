@@ -181,6 +181,46 @@ class AiAskStagesTests(unittest.TestCase):
             "position_risk_decision",
         )
 
+    def test_explicit_data_only_selection_does_not_promote_saved_position(
+        self,
+    ) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        payload = AiAskRequest(
+            question="只讀 3711 最近 20 根正式日 K",
+            target={"type": "tw_stock", "id": "3711"},
+            mode="data_only",
+            selection={
+                "include": [
+                    "target.identity",
+                    "daily.ohlcv",
+                    "data.freshness",
+                ]
+            },
+            position_context={
+                "source": "portfolio_holding",
+                "holding_id": 3711,
+                "entry_price": 600,
+                "quantity": 10,
+                "cost_amount": 6000,
+                "currency": "TWD",
+            },
+        )
+
+        stage = ask_stages.build_question_stage(
+            payload=payload,
+            scope_type="stock",
+            server_policy=object(),
+            progress=progress,
+            build_policy=lambda request, server_policy: {},
+            infer_mode=lambda request, scope_type, policy: "data_only",
+            normalize_analysis_horizon=lambda value: value,
+        )
+
+        self.assertNotEqual(stage.question_intent, "position_risk_decision")
+        self.assertTrue(stage.position_context["has_position_context"])
+        self.assertTrue(stage.policy["explicit_data_only_intent_lock"])
+        self.assertEqual(stage.requested_mode, "data_only")
+
     def test_execute_tool_stages_runs_tw_stock_refresh_and_preserves_warnings(self) -> None:
         events = []
         progress = pipeline_progress.OmiPipelineProgress(events.append)

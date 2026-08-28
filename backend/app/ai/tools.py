@@ -19,6 +19,7 @@ from app.ai.market_context import (
 )
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
 from app.ai.market_payload_contract import has_payload_value as _has_payload_value
+from app.ai.market_date_request import parse_market_trade_date
 from app.market import service as market_service
 from app.market.broker_branch import get_broker_branch_trade_summary
 from app.market.calendar_status import build_market_calendar_status, build_taiwan_calendar_status
@@ -451,6 +452,180 @@ def read_stock_context(
             now=_now,
         ),
     )
+
+
+def read_stock_technical_context(
+    db: Session,
+    stock_id: str,
+    *,
+    bars: int = 120,
+    analysis_horizon: str = "swing",
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return taiwan_stock.read_stock_technical_context(
+        db=db,
+        stock_id=stock_id,
+        bars=bars,
+        analysis_horizon=analysis_horizon,
+        market_data_params=market_data_params,
+        dependencies=taiwan_stock.TaiwanStockDependencies(
+            market_service=market_service,
+            stock_service=stock_service,
+            build_stock_technical_report=build_stock_technical_report,
+            build_taiwan_calendar_status=build_taiwan_calendar_status,
+            build_taiwan_source_health=build_taiwan_source_health,
+            build_us_overnight_impact_report=build_us_overnight_impact_report,
+            get_broker_branch_trade_summary=get_broker_branch_trade_summary,
+            get_market_intraday_history=get_market_intraday_history,
+            read_taiwan_quote_evidence=read_taiwan_quote_evidence_projection,
+            acquire_taiwan_quote_evidence=acquire_taiwan_quote_evidence_projection,
+            get_taiwan_stock_event_history=get_taiwan_stock_event_history,
+            read_taiwan_latest_daily_evidence=read_taiwan_latest_daily_evidence,
+            build_tw_stock_technical_evidence=build_tw_stock_technical_evidence,
+            now=_now,
+        ),
+    )
+
+
+def read_stock_daily_context(
+    db: Session,
+    stock_id: str,
+    *,
+    bars: int = 20,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read the bounded Taiwan daily capability without supplemental readers."""
+
+    def json_value(value: Any) -> Any:
+        isoformat = getattr(value, "isoformat", None)
+        return isoformat() if callable(isoformat) else value
+
+    stock = stock_service.get_stock(db=db, stock_id=stock_id)
+    requested_trade_date = parse_market_trade_date(
+        (market_data_params or {}).get("trade_date")
+    )
+    chart = market_service.list_stock_ohlc_chart_data(
+        db=db,
+        stock_id=stock_id,
+        timeframe="daily",
+        bars=max(int(bars), 1),
+        ensure_history=False,
+        include_intraday=False,
+        to_date=requested_trade_date,
+    )
+    serialized_chart = {
+        **chart,
+        "from_date": json_value(chart.get("from_date")),
+        "to_date": json_value(chart.get("to_date")),
+        "requested_to_date": json_value(chart.get("requested_to_date")),
+        "latest_data_date": json_value(chart.get("latest_data_date")),
+        "latest_finalized_data_date": json_value(
+            chart.get("latest_finalized_data_date")
+        ),
+        "expected_data_date": json_value(chart.get("expected_data_date")),
+        "returned_point_count": len(chart.get("points") or []),
+        "points": [
+            {key: json_value(value) for key, value in point.items()}
+            for point in chart.get("points") or []
+            if isinstance(point, dict)
+        ],
+    }
+    freshness_status = str(chart.get("freshness_status") or "missing")
+    missing = [] if serialized_chart["points"] else ["market_daily_price"]
+    warnings = list(chart.get("warnings") or [])
+    compact = {
+        "target": {
+            "type": "tw_stock",
+            "id": stock_id,
+            "market": "TW",
+            "exchange": str(getattr(stock, "market", "") or "").upper(),
+            "instrument_type": getattr(stock, "instrument_type", None),
+        },
+        "chart": serialized_chart,
+        "freshness_by_domain": {"chart": freshness_status},
+        "freshness_by_capability": {
+            "daily.ohlcv": {
+                "status": freshness_status,
+                "release_status": "released",
+                "latest": serialized_chart.get("latest_data_date"),
+                "is_current": freshness_status == "current",
+                "refresh_recommended": freshness_status in {"missing", "stale"},
+            },
+            "data.freshness": {
+                "status": freshness_status,
+                "is_current": freshness_status == "current",
+            },
+        },
+        "slots": {
+            "daily_chart": {
+                "status": "ready" if serialized_chart["points"] else "missing",
+                "freshness": {"status": freshness_status},
+            }
+        },
+    }
+    return {
+        "kind": "stock_daily_context",
+        "generated_at": _now(),
+        "as_of": serialized_chart.get("latest_data_date"),
+        "scope": {"stock_id": stock_id},
+        "data": {
+            "stock": {
+                key: getattr(stock, key, None)
+                for key in (
+                    "stock_id",
+                    "stock_name",
+                    "market",
+                    "instrument_type",
+                )
+            },
+            "chart": serialized_chart,
+            "compact": compact,
+        },
+        "missing": missing,
+        "warnings": warnings,
+        "source_refs": [
+            {"type": "table", "name": "stock_master"},
+            {"type": "table", "name": "market_daily_price"},
+        ],
+    }
+
+
+def read_stock_identity_context(
+    db: Session,
+    stock_id: str,
+) -> dict[str, Any]:
+    """Read only canonical Taiwan instrument identity for locked selections."""
+
+    stock = stock_service.get_stock(db=db, stock_id=stock_id)
+    target = {
+        "type": "tw_stock",
+        "id": stock_id,
+        "label": getattr(stock, "stock_name", None),
+        "market": "TW",
+        "exchange": str(getattr(stock, "market", "") or "").upper(),
+        "instrument_type": getattr(stock, "instrument_type", None),
+    }
+    return {
+        "kind": "stock_identity_context",
+        "generated_at": _now(),
+        "scope": {"stock_id": stock_id},
+        "target": target,
+        "data": {
+            "target": target,
+            "stock": {
+                key: getattr(stock, key, None)
+                for key in (
+                    "stock_id",
+                    "stock_name",
+                    "market",
+                    "instrument_type",
+                )
+            },
+        },
+        "missing": [],
+        "warnings": [],
+        "source_refs": [{"type": "table", "name": "stock_master"}],
+    }
 
 
 def read_stock_quote_context(

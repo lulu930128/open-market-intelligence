@@ -760,6 +760,10 @@ class AiFreshnessGuardTests(unittest.TestCase):
         db = make_session()
         try:
             source_id, raw_result_id = add_raw_source(db, "market_daily_price")
+            db.get(SourceRegistry, source_id).source_name = (
+                TWSE_DAILY_TRADING_SOURCE_NAME
+            )
+            db.get(SourceRegistry, source_id).reliability_level = "official"
             trade_date = date(2026, 6, 4)
             db.add_all(
                 [
@@ -790,6 +794,9 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         trade_date=trade_date,
                         stock_id="2330",
                         stock_name="TSMC",
+                        open_price=95.0,
+                        high_price=101.0,
+                        low_price=94.0,
                         close_price=100.0,
                         price_change=5.0,
                         trade_volume=1_000_000,
@@ -801,6 +808,9 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         trade_date=trade_date,
                         stock_id="2303",
                         stock_name="UMC",
+                        open_price=52.0,
+                        high_price=53.0,
+                        low_price=49.0,
                         close_price=50.0,
                         price_change=-2.0,
                         trade_volume=2_000_000,
@@ -812,6 +822,9 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         trade_date=trade_date,
                         stock_id="2603",
                         stock_name="EMC",
+                        open_price=29.0,
+                        high_price=31.0,
+                        low_price=28.0,
                         close_price=30.0,
                         price_change=1.0,
                         trade_volume=3_000_000,

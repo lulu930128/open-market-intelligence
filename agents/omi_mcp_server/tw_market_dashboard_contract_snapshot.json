@@ -21,6 +21,18 @@
             "default": null,
             "title": "As Of"
           },
+          "canonical_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Canonical Ref"
+          },
           "coverage": {
             "title": "Coverage",
             "type": "integer"
@@ -50,6 +62,11 @@
           "decline": {
             "title": "Decline",
             "type": "integer"
+          },
+          "deprecated": {
+            "default": false,
+            "title": "Deprecated",
+            "type": "boolean"
           },
           "failed_batch_count": {
             "anyOf": [
@@ -1163,7 +1180,7 @@
     "title": "TaiwanMarketDashboardRead",
     "type": "object"
   },
-  "digest": "70479f355559963757862b1b562e0ec4659197327744ac240de751afba36b381",
+  "digest": "86303d7685858bd3c052734deb58748d690e0a5508dab6733bd021a675bb3fbb",
   "schema_version": "omi.mcp.tw_market_dashboard_snapshot.v1",
   "stock_detail_contract_version": "omi.tw_stock_dashboard_detail.v2",
   "stock_detail_output_schema": {
@@ -1268,6 +1285,10 @@
       },
       "MarketOhlcChartRead": {
         "properties": {
+          "available_bar_count": {
+            "title": "Available Bar Count",
+            "type": "integer"
+          },
           "backfill": {
             "anyOf": [
               {
@@ -1285,10 +1306,21 @@
             "title": "Bars",
             "type": "integer"
           },
+          "bars_legacy_count": {
+            "title": "Bars Legacy Count",
+            "type": "integer"
+          },
           "data_quality": {
             "default": "ok",
             "title": "Data Quality",
             "type": "string"
+          },
+          "deprecated_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deprecated Fields",
+            "type": "array"
           },
           "expected_data_date": {
             "anyOf": [
@@ -1344,6 +1376,19 @@
             "default": null,
             "title": "Latest Data Date"
           },
+          "latest_finalized_data_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Latest Finalized Data Date"
+          },
           "lookback_days": {
             "title": "Lookback Days",
             "type": "integer"
@@ -1364,6 +1409,27 @@
             "title": "Refresh Recommended",
             "type": "boolean"
           },
+          "requested_bar_count": {
+            "title": "Requested Bar Count",
+            "type": "integer"
+          },
+          "requested_to_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Requested To Date"
+          },
+          "returned_point_count": {
+            "title": "Returned Point Count",
+            "type": "integer"
+          },
           "stock_id": {
             "title": "Stock Id",
             "type": "string"
@@ -1377,6 +1443,28 @@
             "title": "To Date",
             "type": "string"
           },
+          "volume_semantics": {
+            "default": "not_provided",
+            "title": "Volume Semantics",
+            "type": "string"
+          },
+          "volume_status": {
+            "default": "not_provided",
+            "title": "Volume Status",
+            "type": "string"
+          },
+          "volume_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Volume Unit"
+          },
           "warnings": {
             "items": {
               "type": "string"
@@ -1389,6 +1477,10 @@
           "stock_id",
           "timeframe",
           "bars",
+          "requested_bar_count",
+          "available_bar_count",
+          "returned_point_count",
+          "bars_legacy_count",
           "lookback_days",
           "from_date",
           "to_date",

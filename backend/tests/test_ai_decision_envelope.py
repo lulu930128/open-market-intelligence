@@ -867,7 +867,10 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             "continuity": "continuous",
         }
         selection = capability_contract.normalize_selection(
-            selection={"include": ["intraday.bars"]},
+            selection={
+                "include": ["intraday.bars"],
+                "limits": {"intraday.bars": 2},
+            },
             output="evidence_only",
             realtime_policy="prefer_live",
             payload_level="compact",
@@ -891,6 +894,229 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertTrue(quality["facts_usable"])
         self.assertFalse(quality["decision_usable"])
         self.assertEqual(quality["completeness"], "complete")
+
+    def test_v4_daily_sequence_does_not_call_short_history_complete(self) -> None:
+        response = _v2_response()
+        response["result"]["data"]["compact"]["chart"] = {
+            "status": "current",
+            "interval": "1d",
+            "point_count": 1,
+            "returned_point_count": 1,
+            "latest_data_date": "2026-08-27",
+            "provider": "twse_openapi",
+            "source": "twse_daily_trading",
+            "volume_unit": "shares",
+            "points": [
+                {
+                    "time": "2026-08-27",
+                    "open_price": 600,
+                    "high_price": 610,
+                    "low_price": 590,
+                    "close_price": 605,
+                    "volume": 11_000_000,
+                }
+            ],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["daily.ohlcv"],
+                "limits": {"daily.points": 20},
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="general",
+        )
+        response["query_plan"] = {
+            "target_type": "stock",
+            "selection": selection,
+        }
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+        quality = canonical["evidence"]["quality"]["capabilities"][
+            "daily.ohlcv"
+        ]
+
+        self.assertEqual(quality["coverage_status"], "insufficient_history")
+        self.assertEqual(quality["continuity"]["status"], "insufficient_history")
+        self.assertFalse(quality["decision_usable"])
+        self.assertIn("insufficient_history", quality["reason_codes"])
+        freshness = canonical["evidence"]["data"]["data.freshness"]
+        self.assertEqual(freshness["temporal_status"], "current")
+        self.assertEqual(freshness["completeness_status"], "partial")
+        self.assertEqual(freshness["usability_status"], "limited")
+        self.assertEqual(freshness["status"], "partial")
+        self.assertFalse(freshness["is_current"])
+
+    def test_v4_daily_points_selection_preserves_measurement_metadata(self) -> None:
+        response = _v2_response()
+        response["result"]["data"]["compact"]["chart"] = {
+            "status": "current",
+            "latest_data_date": "2026-08-27",
+            "expected_data_date": "2026-08-27",
+            "volume_unit": "shares",
+            "trade_value_unit": "TWD",
+            "currency": "TWD",
+            "points": [
+                {
+                    "time": "2026-08-27",
+                    "open_price": 600,
+                    "high_price": 610,
+                    "low_price": 590,
+                    "close_price": 605,
+                    "volume": 11_000_000,
+                    "trade_value": 6_655_000_000,
+                }
+            ],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["daily.ohlcv"],
+                "fields": {
+                    "daily.ohlcv": [
+                        "latest_data_date",
+                        "expected_data_date",
+                        "limitations",
+                        "points",
+                    ]
+                },
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="general",
+        )
+        response["query_plan"] = {
+            "target_type": "stock",
+            "selection": selection,
+        }
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+        daily = canonical["evidence"]["data"]["daily.ohlcv"]
+        manifest = next(
+            item
+            for item in canonical["evidence"]["manifest"]["capabilities"]
+            if item["capability"] == "daily.ohlcv"
+        )
+        quality = canonical["evidence"]["quality"]["capabilities"][
+            "daily.ohlcv"
+        ]
+
+        expected_fields = [
+            "latest_data_date",
+            "expected_data_date",
+            "limitations",
+            "points",
+            "volume_unit",
+            "trade_value_unit",
+            "currency",
+        ]
+        self.assertEqual(selection["fields"]["daily.ohlcv"], expected_fields)
+        self.assertEqual(manifest["fields"], expected_fields)
+        self.assertEqual(daily["volume_unit"], "shares")
+        self.assertEqual(daily["trade_value_unit"], "TWD")
+        self.assertEqual(daily["currency"], "TWD")
+        self.assertNotIn("volume_unit_missing", quality["issues"])
+
+    def test_v4_daily_sequence_detects_taiwan_trading_day_gap(self) -> None:
+        response = _v2_response()
+        response["result"]["data"]["compact"]["chart"] = {
+            "status": "current",
+            "interval": "1d",
+            "point_count": 2,
+            "returned_point_count": 2,
+            "latest_data_date": "2026-08-21",
+            "provider": "twse_openapi",
+            "source": "twse_daily_trading",
+            "volume_unit": "shares",
+            "points": [
+                {"time": "2026-05-21", "close_price": 100, "volume": 1000},
+                {"time": "2026-08-21", "close_price": 110, "volume": 1200},
+            ],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["daily.ohlcv"],
+                "limits": {"daily.points": 2},
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="general",
+        )
+        response["query_plan"] = {
+            "target_type": "stock",
+            "selection": selection,
+        }
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+        quality = canonical["evidence"]["quality"]["capabilities"][
+            "daily.ohlcv"
+        ]
+
+        self.assertEqual(quality["coverage_status"], "partial")
+        self.assertEqual(quality["continuity"]["status"], "gap_detected")
+        self.assertGreater(
+            quality["continuity"]["missing_trading_day_count"],
+            0,
+        )
+        self.assertFalse(quality["decision_usable"])
+
+    def test_v4_market_sample_ranking_is_never_projected_as_complete(self) -> None:
+        response = _v2_response()
+        response["target"] = {"type": "market", "id": "TW", "market": "TW"}
+        response["resolution"]["target"] = dict(response["target"])
+        response["result"]["data"]["compact"]["sample_ranking"] = {
+            "kind": "tw_market_sample_ranking",
+            "status": "partial",
+            "scope": "omi_local_daily_sample",
+            "scope_label": "OMI 台股本機日線樣本",
+            "is_full_market": False,
+            "coverage_status": "sample_only",
+            "as_of": "2026-08-28",
+            "latest_trade_date": "2026-08-28",
+            "sample_coverage": {
+                "status": "partial",
+                "sample_count": 1_944,
+                "covered_universe_count": 1_944,
+                "universe_count": 1_973,
+                "coverage_ratio": 1_944 / 1_973,
+            },
+            "warnings": ["bounded local sample"],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"required": ["market.sample_ranking"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            question_intent="market_overview",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "market"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+        quality = canonical["evidence"]["quality"]["capabilities"][
+            "market.sample_ranking"
+        ]
+
+        self.assertEqual(quality["coverage_status"], "sample_only")
+        self.assertFalse(quality["decision_usable"])
 
     def test_v4_stale_quote_remains_fact_usable_but_not_decision_usable(
         self,
@@ -3750,6 +3976,13 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertEqual(
             source_health["summary"]["returned_problem_count"],
             len(source_health["entries"]),
+        )
+        self.assertEqual(len(source_health["problems_preview"]), 5)
+        self.assertTrue(
+            all(
+                entry["status"] != "current"
+                for entry in source_health["problems_preview"]
+            )
         )
         self.assertTrue(
             all(

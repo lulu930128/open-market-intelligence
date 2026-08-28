@@ -9,6 +9,7 @@ from typing import Any
 from app.observability.status_taxonomy import (
     status_dimensions_from_quality_contract,
 )
+from app.market.trading_calendar import next_taiwan_trading_day
 
 
 QUALITY_VERSION = "omi.data.quality.v1"
@@ -639,6 +640,78 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
     }
 
 
+def _daily_trading_continuity_summary(
+    value: Any,
+    *,
+    market: str,
+) -> dict[str, Any]:
+    points = _series_points(value)
+    timestamps = [parsed for point in points if (parsed := _point_time(point))]
+    duplicate_count = 0
+    non_monotonic_count = 0
+    gap_count = 0
+    missing_trading_day_count = 0
+    issues: list[str] = []
+    normalized_market = market.strip().upper()
+    for previous, current in zip(timestamps, timestamps[1:]):
+        previous_date = previous.date()
+        current_date = current.date()
+        if current_date == previous_date:
+            duplicate_count += 1
+            continue
+        if current_date < previous_date:
+            non_monotonic_count += 1
+            continue
+        if normalized_market in {"TW", "TAIWAN"}:
+            expected_next = next_taiwan_trading_day(
+                previous_date,
+                include_value=False,
+            )
+            if current_date != expected_next:
+                gap_count += 1
+                cursor = expected_next
+                while cursor < current_date:
+                    missing_trading_day_count += 1
+                    cursor = next_taiwan_trading_day(
+                        cursor,
+                        include_value=False,
+                    )
+    if duplicate_count:
+        issues.append("duplicate_trade_date")
+    if non_monotonic_count:
+        issues.append("unordered_trade_date")
+    if gap_count:
+        issues.append("missing_trading_day")
+    if not timestamps:
+        status = "unknown"
+    elif duplicate_count:
+        status = "duplicate"
+    elif non_monotonic_count:
+        status = "unordered"
+    elif gap_count:
+        status = "gap_detected"
+    elif len(timestamps) < 2:
+        status = "insufficient_history"
+        issues.append("insufficient_series_points")
+    else:
+        status = "continuous"
+    return {
+        "status": status,
+        "point_count_inspected": len(points),
+        "timestamp_count": len(timestamps),
+        "duplicate_count": duplicate_count,
+        "non_monotonic_count": non_monotonic_count,
+        "gap_count": gap_count,
+        "missing_trading_day_count": missing_trading_day_count,
+        "calendar": (
+            "taiwan_trading_calendar"
+            if normalized_market in {"TW", "TAIWAN"}
+            else None
+        ),
+        "issues": list(dict.fromkeys(issues)),
+    }
+
+
 def _price_value(value: Any) -> float | None:
     for key, raw_value in _iter_values(value, keys=PRICE_KEYS):
         if key not in PRICE_KEYS:
@@ -720,6 +793,12 @@ def _semantic_payload_empty(capability_id: str, payload: Any) -> bool:
         == "valid_empty"
     ):
         return False
+    if (
+        capability_id == "quote.session_close"
+        and isinstance(payload, dict)
+        and payload.get("available") is False
+    ):
+        return True
     if capability_id == "ownership.distribution":
         rows = (
             payload
@@ -825,16 +904,49 @@ def _canonical_release_status(
 
 def _canonical_coverage_status(
     *,
+    capability_id: str,
+    manifest_item: dict[str, Any],
     payload: Any,
     payload_included: bool,
+    continuity: dict[str, Any],
 ) -> str:
+    if (
+        capability_id == "market.sample_ranking"
+        and isinstance(payload, dict)
+        and payload.get("is_full_market") is False
+    ):
+        return "sample_only"
     explicit = _normalized_status(
         _first_semantic_value(
             payload,
             keys={"coverage_status"},
         )
     )
-    if explicit in {"complete", "partial", "sample_only"}:
+    if capability_id in {"daily.ohlcv", "intraday.bars"}:
+        requested_limit = manifest_item.get("requested_limit")
+        effective_limit = manifest_item.get("effective_limit")
+        returned_count = manifest_item.get("returned_count")
+        if not isinstance(returned_count, int) or isinstance(returned_count, bool):
+            returned_count = 0
+        target_count = (
+            requested_limit
+            if isinstance(requested_limit, int)
+            and not isinstance(requested_limit, bool)
+            and requested_limit > 0
+            else effective_limit
+            if isinstance(effective_limit, int)
+            and not isinstance(effective_limit, bool)
+            and effective_limit > 0
+            else None
+        )
+        if returned_count <= 0:
+            return "valid_empty" if explicit == "valid_empty" else "missing"
+        if target_count is not None and returned_count < target_count:
+            return "insufficient_history"
+        if continuity.get("status") not in {"continuous", "not_applicable"}:
+            return "partial"
+        return "complete"
+    if explicit in {"complete", "partial", "sample_only", "valid_empty"}:
         return explicit
     if isinstance(payload, dict):
         coverage = _dict(payload.get("coverage"))
@@ -866,7 +978,12 @@ def _canonical_reason_codes(
         values.append(f"availability_{availability_status}")
     if freshness_status in {"stale", "delayed", "pending_release"}:
         values.append(f"freshness_{freshness_status}")
-    if coverage_status in {"partial", "sample_only"}:
+    if coverage_status in {
+        "partial",
+        "sample_only",
+        "insufficient_history",
+        "missing",
+    }:
         values.append(f"coverage_{coverage_status}")
     return list(dict.fromkeys(values))
 
@@ -961,6 +1078,15 @@ def _quality_for_capability(
         else {}
     )
     projected_payload_included = capability_id in projected_data
+    explicitly_unavailable = bool(
+        projected_payload_included
+        and isinstance(payload, dict)
+        and (
+            payload.get("available") is False
+            or _normalized_status(payload.get("availability_status"))
+            in {"missing", "unavailable", "error"}
+        )
+    )
     semantic_payload_empty = _semantic_payload_empty(
         capability_id,
         payload,
@@ -968,7 +1094,14 @@ def _quality_for_capability(
     payload_included = bool(
         projected_payload_included and not semantic_payload_empty
     )
-    semantic_quality = _financial_semantic_quality(capability_id, payload)
+    payload_applicability = _normalized_status(
+        _first_semantic_value(payload, keys={"applicability_status"})
+    )
+    semantic_quality = (
+        None
+        if payload_applicability == "not_applicable"
+        else _financial_semantic_quality(capability_id, payload)
+    )
 
     candidates = [
         candidate
@@ -1064,6 +1197,9 @@ def _quality_for_capability(
     continuity = (
         _continuity_summary(payload, market=market)
         if capability_id == "intraday.bars"
+        else _daily_trading_continuity_summary(payload, market=market)
+        if capability_id == "daily.ohlcv"
+        and market.strip().upper() in {"TW", "TAIWAN"}
         else {
             "status": "not_applicable",
             "point_count_inspected": 0,
@@ -1071,6 +1207,19 @@ def _quality_for_capability(
             "issues": [],
         }
     )
+    coverage_status = _canonical_coverage_status(
+        capability_id=capability_id,
+        manifest_item=item,
+        payload=payload,
+        payload_included=payload_included,
+        continuity=continuity,
+    )
+    if explicitly_unavailable:
+        coverage_status = "missing"
+    continuity_limited = continuity.get("status") not in {
+        "continuous",
+        "not_applicable",
+    }
     status = canonical_candidate["status"]
     status_class = canonical_candidate["status_class"]
     applicability_status = (
@@ -1094,6 +1243,8 @@ def _quality_for_capability(
         applicability_status=applicability_status,
         freshness_status=freshness_status,
     )
+    if explicitly_unavailable and release_status == "unknown":
+        release_status = "not_released"
     if applicability_status == "not_applicable":
         status = "not_applicable"
         status_class = "neutral"
@@ -1119,12 +1270,15 @@ def _quality_for_capability(
         else "empty"
         if not payload_included
         else "partial"
-        if status_class == "limited" or continuity.get("status") == "partial"
+        if status_class == "limited"
+        or continuity_limited
+        or coverage_status not in {"complete", "valid_empty"}
         else "complete"
     )
     decision_usable = bool(
         status_class == "ready"
-        and continuity.get("status") != "partial"
+        and not continuity_limited
+        and coverage_status == "complete"
         and not units["missing_volume_unit"]
     )
     stale_intraday_facts_usable = bool(
@@ -1134,7 +1288,7 @@ def _quality_for_capability(
         and temporal.get("latest_date")
         and _has_payload_observation_timestamp(payload)
         and _has_payload_provenance(payload)
-        and continuity.get("status") != "partial"
+        and not continuity_limited
         and not units["missing_volume_unit"]
     )
     stale_quote_facts_usable = bool(
@@ -1192,6 +1346,8 @@ def _quality_for_capability(
     if semantic_payload_empty:
         issues.append("semantic_payload_empty")
     issues.extend(str(value) for value in continuity.get("issues") or [])
+    if coverage_status == "insufficient_history":
+        issues.append("insufficient_history")
     if units["missing_volume_unit"]:
         issues.append("volume_unit_missing")
     if realtime_policy_unsatisfied:
@@ -1212,12 +1368,10 @@ def _quality_for_capability(
         "available"
         if payload_included
         else "unavailable"
+        if explicitly_unavailable
+        else "unavailable"
         if applicability_status == "not_applicable"
         else "missing"
-    )
-    coverage_status = _canonical_coverage_status(
-        payload=payload,
-        payload_included=payload_included,
     )
     usability_status = (
         "not_applicable"
@@ -1225,7 +1379,9 @@ def _quality_for_capability(
         else "unusable"
         if not facts_usable
         else "limited"
-        if not decision_usable or coverage_status in {"partial", "sample_only"}
+        if not decision_usable
+        or coverage_status
+        in {"partial", "sample_only", "insufficient_history", "valid_empty"}
         else "usable"
     )
     reason_codes = _canonical_reason_codes(
@@ -1774,7 +1930,13 @@ def _consumer_capability_status(item: dict[str, Any]) -> dict[str, Any]:
             "missing_fields": [],
             "coverage_gaps": (
                 list(item.get("reason_codes") or [])
-                if item.get("coverage_status") in {"partial", "sample_only"}
+                if item.get("coverage_status")
+                in {
+                    "partial",
+                    "sample_only",
+                    "insufficient_history",
+                    "missing",
+                }
                 else []
             ),
             "warning_codes": list(item.get("issues") or []),
@@ -1983,7 +2145,12 @@ def apply_quality_contract(
             freshness_categories["pending_release"].append(capability_id)
         if "valid_empty" in set(item.get("reason_codes") or []):
             freshness_categories["valid_empty"].append(capability_id)
-        if coverage_status in {"partial", "sample_only"}:
+        if coverage_status in {
+            "partial",
+            "sample_only",
+            "insufficient_history",
+            "missing",
+        }:
             freshness_categories["coverage_gaps"].append(
                 {
                     "capability": capability_id,

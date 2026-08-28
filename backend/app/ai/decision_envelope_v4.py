@@ -3283,6 +3283,19 @@ def _fit_budget(
                     returned_market_counts.get(market, 0) + 1
                 )
             source_health["entries"] = sampled_entries
+            source_health["problems_preview"] = [
+                {
+                    key: (
+                        str(entry[key])[:240]
+                        if key == "reason" and entry.get(key) is not None
+                        else deepcopy(entry[key])
+                    )
+                    for key in compact_entry_fields
+                    if key in entry
+                }
+                for entry in ordered_entries[:5]
+                if str(entry.get("status") or "") in problem_statuses
+            ]
             source_health["summary"] = {
                 **original_summary,
                 "entry_count": total_entry_count,

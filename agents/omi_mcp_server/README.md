@@ -1,5 +1,10 @@
 # OMI MCP Server
 
+> 本文件說明 adapter 啟動與 transport 行為。Public schema、capability inventory
+> 與 readiness 以 OMI backend runtime 及
+> [`docs/architecture/OmiDecisionContract.md`](../../docs/architecture/OmiDecisionContract.md)
+> 為準；本文列出的 tools 不應被視為永久完整 inventory。
+
 OMI 的 stdio MCP thin adapter：
 
 ```text

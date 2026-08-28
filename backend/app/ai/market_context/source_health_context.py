@@ -13,6 +13,7 @@ from app.observability.provider_health import (
     ERROR_STATUSES,
     list_provider_events,
     source_health_provider_generation_map,
+    source_health_scope_generation_map,
     source_health_snapshot_to_dict,
 )
 from app.observability.status_taxonomy import summarize_status_dimensions
@@ -95,6 +96,7 @@ def _row_dict(
     *,
     generated_at: datetime,
     current_provider_checked_at: datetime | None,
+    current_scope_checked_at: datetime | None,
     event_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output = source_health_snapshot_to_dict(
@@ -102,6 +104,7 @@ def _row_dict(
         now=generated_at,
         stale_after_seconds=int(SOURCE_HEALTH_CURRENT_TTL.total_seconds()),
         current_provider_checked_at=current_provider_checked_at,
+        current_scope_checked_at=current_scope_checked_at,
     )
     row_freshness = _snapshot_freshness(
         checked_at=row.checked_at,
@@ -386,6 +389,11 @@ def read_unified_source_health_context(
         resource=requested_resource,
         target=requested_target,
     )
+    scope_generations = source_health_scope_generation_map(
+        db,
+        market=requested_market,
+        resource=requested_resource,
+    )
     classified_entries = [
         _row_dict(
             row,
@@ -397,6 +405,12 @@ def read_unified_source_health_context(
                     str(row.target or "all"),
                 )
             ),
+            current_scope_checked_at=scope_generations.get(
+                (
+                    str(row.market or "").lower(),
+                    str(row.resource or ""),
+                )
+            ),
             event_diagnostics=event_diagnostics.get(_snapshot_key(row)),
         )
         for row in rows
@@ -405,6 +419,16 @@ def read_unified_source_health_context(
         entry
         for entry in classified_entries
         if entry.get("is_operational") is True
+    ]
+    required_operational_entries = [
+        entry
+        for entry in operational_entries
+        if entry.get("required") is not False
+    ]
+    optional_operational_entries = [
+        entry
+        for entry in operational_entries
+        if entry.get("required") is False
     ]
     historical_entries = [
         entry
@@ -438,7 +462,7 @@ def read_unified_source_health_context(
         if status in PROBLEM_STATUSES
     )
     operational_status_counts: dict[str, int] = {}
-    for entry in operational_entries:
+    for entry in required_operational_entries:
         entry_status = str(entry.get("status") or "unknown")
         operational_status_counts[entry_status] = (
             operational_status_counts.get(entry_status, 0) + 1
@@ -454,12 +478,18 @@ def read_unified_source_health_context(
         for entry_status, count in operational_status_counts.items()
         if entry_status in PROBLEM_STATUSES
     )
+    optional_operational_problem_count = sum(
+        str(entry.get("status") or "unknown") in PROBLEM_STATUSES
+        for entry in optional_operational_entries
+    )
     historical_problem_count = sum(
         count
         for entry_status, count in historical_status_counts.items()
         if entry_status in PROBLEM_STATUSES
     )
-    status_dimensions = summarize_status_dimensions(operational_entries)
+    status_dimensions = summarize_status_dimensions(
+        required_operational_entries
+    )
     recent_error_count = sum(
         int(entry.get("recent_error_count") or 0)
         for entry in entries
@@ -539,6 +569,15 @@ def read_unified_source_health_context(
         "operational_stale_entry_count": operational_stale_count,
         "operational_expired_age_count": operational_expired_age_count,
         "operational_entry_count": len(operational_entries),
+        "required_operational_entry_count": len(
+            required_operational_entries
+        ),
+        "optional_operational_entry_count": len(
+            optional_operational_entries
+        ),
+        "optional_operational_problem_count": (
+            optional_operational_problem_count
+        ),
         "historical_entry_count": len(historical_entries),
         "current_ttl_seconds": int(SOURCE_HEALTH_CURRENT_TTL.total_seconds()),
         "expired_ttl_seconds": int(SOURCE_HEALTH_EXPIRED_TTL.total_seconds()),
@@ -638,6 +677,15 @@ def read_unified_source_health_context(
                 "matched_problem_count": matched_problem_count,
                 "returned_problem_count": returned_problem_count,
                 "operational_entry_count": len(operational_entries),
+                "required_operational_entry_count": len(
+                    required_operational_entries
+                ),
+                "optional_operational_entry_count": len(
+                    optional_operational_entries
+                ),
+                "optional_operational_problem_count": (
+                    optional_operational_problem_count
+                ),
                 "operational_problem_count": operational_problem_count,
                 "operational_status_counts": operational_status_counts,
                 "historical_entry_count": len(historical_entries),
@@ -676,6 +724,15 @@ def read_unified_source_health_context(
                     "matched_problem_count": matched_problem_count,
                     "returned_problem_count": returned_problem_count,
                     "operational_entry_count": len(operational_entries),
+                    "required_operational_entry_count": len(
+                        required_operational_entries
+                    ),
+                    "optional_operational_entry_count": len(
+                        optional_operational_entries
+                    ),
+                    "optional_operational_problem_count": (
+                        optional_operational_problem_count
+                    ),
                     "operational_problem_count": operational_problem_count,
                     "operational_status_counts": operational_status_counts,
                     "historical_entry_count": len(historical_entries),

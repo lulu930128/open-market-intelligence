@@ -1180,6 +1180,176 @@ def build_query_plan(
             realtime_policy=str(selection["realtime_policy"]),
         )
 
+    identity_only_selection = bool(
+        scope_type == "stock"
+        and has_explicit_capability_selection
+        and "target.identity" in selected_capability_set
+        and selected_capability_set
+        <= {"target.identity", "data.freshness", "news.events"}
+    )
+    if identity_only_selection:
+        return QueryPlan(
+            intent=question_intent,
+            intents=intents,
+            target_type="tw_stock",
+            response_mode=response_mode,
+            reader_profile="identity_only",
+            payload_level=payload_level,
+            diagnostics_level=diagnostics_level,
+            required_capabilities=("stock_master",),
+            optional_capabilities=(),
+            excluded_capabilities=(),
+            required_readers=("get_stock",),
+            excluded_readers=(
+                "list_stock_ohlc_chart_data",
+                "read_cross_market_context",
+                "read_market_chips_context",
+                "build_stock_technical_report",
+                "get_broker_branch_trade_summary",
+                "read_taiwan_source_health",
+                "read_fundamentals",
+            ),
+            freshness_scope=("stock_master",),
+            external_refresh_allowed=False,
+            requested_domains=requested_domains,
+            excluded_domains=excluded_domains,
+            matched_positive_terms=positive_terms,
+            matched_negative_terms=negative_terms,
+            capability_selection_mode=capability_selection_mode,
+            selected_action_reason=(
+                "Explicit Taiwan identity selection executes only the stock "
+                "master reader; selected external evidence is attached by its "
+                "own outward projection."
+            ),
+            requested_provider=requested_provider,
+            strict_provider=strict_provider,
+            selection=selection,
+            selected_capabilities=tuple(selection["required"]),
+            optional_selected_capabilities=tuple(selection["optional"]),
+            max_response_bytes=int(selection["max_response_bytes"]),
+            realtime_policy=str(selection["realtime_policy"]),
+        )
+
+    technical_capabilities = {
+        "technical.structure",
+        "technical.indicators",
+        "technical.swings",
+        "technical.fibonacci",
+        "technical.divergence",
+        "technical.breakout",
+        "technical.volume_profile",
+        "technical.anchored_vwap",
+        "technical.relative_strength",
+    }
+    technical_only_selection = bool(
+        scope_type == "stock"
+        and has_explicit_capability_selection
+        and bool(selected_capability_set & technical_capabilities)
+        and selected_capability_set
+        <= {
+            "target.identity",
+            "daily.ohlcv",
+            "data.freshness",
+            *technical_capabilities,
+        }
+    )
+    if technical_only_selection:
+        return QueryPlan(
+            intent=question_intent,
+            intents=intents,
+            target_type="tw_stock",
+            response_mode=response_mode,
+            reader_profile="technical_only",
+            payload_level=payload_level,
+            diagnostics_level=diagnostics_level,
+            required_capabilities=("stock_master", "market_daily_price"),
+            optional_capabilities=(),
+            excluded_capabilities=(),
+            required_readers=(
+                "get_stock",
+                "list_stock_ohlc_chart_data",
+                "build_stock_technical_report",
+                "build_tw_stock_technical_evidence",
+            ),
+            excluded_readers=(
+                "read_cross_market_context",
+                "read_market_chips_context",
+                "get_broker_branch_trade_summary",
+                "read_taiwan_source_health",
+                "read_fundamentals",
+            ),
+            freshness_scope=("stock_master", "market_daily_price"),
+            external_refresh_allowed=False,
+            requested_domains=requested_domains,
+            excluded_domains=excluded_domains,
+            matched_positive_terms=positive_terms,
+            matched_negative_terms=negative_terms,
+            capability_selection_mode=capability_selection_mode,
+            selected_action_reason=(
+                "Explicit Taiwan technical selection executes only identity, "
+                "released daily bars, technical derivation, and freshness dependencies."
+            ),
+            requested_provider=requested_provider,
+            strict_provider=strict_provider,
+            selection=selection,
+            selected_capabilities=tuple(selection["required"]),
+            optional_selected_capabilities=tuple(selection["optional"]),
+            max_response_bytes=int(selection["max_response_bytes"]),
+            realtime_policy=str(selection["realtime_policy"]),
+        )
+
+    daily_only_selection = bool(
+        scope_type == "stock"
+        and has_explicit_capability_selection
+        and "daily.ohlcv" in selected_capability_set
+        and selected_capability_set
+        <= {
+            "target.identity",
+            "daily.ohlcv",
+            "data.freshness",
+        }
+    )
+    if daily_only_selection:
+        return QueryPlan(
+            intent=question_intent,
+            intents=intents,
+            target_type="tw_stock",
+            response_mode=response_mode,
+            reader_profile="daily_only",
+            payload_level=payload_level,
+            diagnostics_level=diagnostics_level,
+            required_capabilities=("stock_master", "market_daily_price"),
+            optional_capabilities=(),
+            excluded_capabilities=(),
+            required_readers=("get_stock", "list_stock_ohlc_chart_data"),
+            excluded_readers=(
+                "read_cross_market_context",
+                "read_market_chips_context",
+                "build_stock_technical_report",
+                "get_broker_branch_trade_summary",
+                "read_taiwan_source_health",
+                "read_fundamentals",
+            ),
+            freshness_scope=("stock_master", "market_daily_price"),
+            external_refresh_allowed=False,
+            requested_domains=requested_domains,
+            excluded_domains=excluded_domains,
+            matched_positive_terms=positive_terms,
+            matched_negative_terms=negative_terms,
+            capability_selection_mode=capability_selection_mode,
+            selected_action_reason=(
+                "Explicit Taiwan daily selection executes only identity, "
+                "canonical daily bars, and freshness dependencies."
+            ),
+            requested_provider=requested_provider,
+            strict_provider=strict_provider,
+            selection=selection,
+            selected_capabilities=tuple(selection["required"]),
+            optional_selected_capabilities=tuple(selection["optional"]),
+            max_response_bytes=int(selection["max_response_bytes"]),
+            realtime_policy=str(selection["realtime_policy"]),
+        )
+
     if (
         scope_type == "stock"
         and question_intent == "broker_branch"

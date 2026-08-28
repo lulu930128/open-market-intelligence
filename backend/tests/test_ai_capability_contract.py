@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, Mock, patch
 
 from app.ai import (
     agentic_execution,
@@ -13,10 +13,88 @@ from app.ai import (
     public_contract,
     query_plan,
 )
+from app.ai.market_context import taiwan_stock
 from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def test_session_close_unavailable_payload_fails_closed_across_status_axes(
+        self,
+    ) -> None:
+        quality = data_quality_contract.build_quality_contract(
+            canonical={
+                "ok": True,
+                "request_status": "completed",
+                "target": {"type": "tw_stock", "market": "TW"},
+                "status": {"readiness": {"decision_required": False}},
+                "evidence": {},
+            },
+            selection={"output": "evidence_only"},
+            manifest={
+                "capabilities": [
+                    {
+                        "capability": "quote.session_close",
+                        "domain": "quote",
+                        "slot": "quote_session_close",
+                        "required": True,
+                        "status": "unavailable",
+                        "returned_count": 1,
+                    }
+                ]
+            },
+            projected_data={
+                "quote.session_close": {
+                    "status": "unavailable",
+                    "available": False,
+                    "price": None,
+                    "finalization": "unavailable",
+                    "freshness": {
+                        "status": "unavailable",
+                        "is_current": False,
+                    },
+                    "facts_usable": False,
+                    "research_usable": False,
+                    "decision_usable": False,
+                }
+            },
+            realtime_assessments={},
+            scope_type="stock",
+        )
+
+        item = quality["capabilities"]["quote.session_close"]
+        self.assertEqual(item["availability_status"], "unavailable")
+        self.assertEqual(item["coverage_status"], "missing")
+        self.assertEqual(item["release_status"], "not_released")
+        self.assertEqual(item["usability_status"], "unusable")
+        self.assertFalse(item["facts_usable"])
+        self.assertFalse(item["decision_usable"])
+
+    def test_tw_etf_fundamentals_gate_runs_before_readers(self) -> None:
+        market_service = Mock()
+
+        result = taiwan_stock._read_stock_fundamental_inputs(
+            db=object(),
+            stock_id="0050",
+            revenue_months=12,
+            financial_quarters=8,
+            applicable=False,
+            market_service=market_service,
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "latest_revenue": None,
+                "latest_financial": None,
+                "revenue_history": [],
+                "financial_history": [],
+            },
+        )
+        market_service.get_latest_stock_monthly_revenue.assert_not_called()
+        market_service.get_latest_stock_financial_metric.assert_not_called()
+        market_service.list_stock_monthly_revenue_history.assert_not_called()
+        market_service.list_stock_financial_metric_history.assert_not_called()
+
     def test_stock_cross_market_capabilities_share_canonical_lineage(self) -> None:
         selection = capability_contract.normalize_selection(
             selection={
@@ -138,6 +216,7 @@ class AiCapabilityContractTests(unittest.TestCase):
                             "scope": "omi_local_daily_sample",
                             "scope_label": "OMI 台股本機日線樣本",
                             "is_full_market": False,
+                            "coverage_status": "sample_only",
                             "as_of": "2026-07-31",
                             "latest_trade_date": "2026-07-31",
                             "source": "market_daily_price",
@@ -179,6 +258,7 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertNotIn("market.sample_ranking", unavailable)
         self.assertEqual(sample["scope"], "omi_local_daily_sample")
         self.assertFalse(sample["is_full_market"])
+        self.assertEqual(sample["coverage_status"], "sample_only")
         self.assertEqual(sample["volume_unit"], "shares")
         self.assertEqual(sample["trade_value_unit"], "TWD")
         self.assertFalse(
@@ -1651,6 +1731,42 @@ class AiCapabilityContractTests(unittest.TestCase):
                 question_intent="quote",
             )
 
+    def test_daily_points_selection_adds_semantic_companion_fields(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["daily.ohlcv"],
+                "fields": {
+                    "daily.ohlcv": ["points", "volume_unit"],
+                },
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="general",
+        )
+
+        self.assertEqual(
+            selection["fields"]["daily.ohlcv"],
+            [
+                "points",
+                "volume_unit",
+                "trade_value_unit",
+                "currency",
+            ],
+        )
+        self.assertEqual(
+            capability_contract.normalize_selection(
+                selection={"include": ["daily.ohlcv"]},
+                output="evidence_only",
+                realtime_policy="cache_only",
+                payload_level="compact",
+                scope_type="stock",
+                question_intent="general",
+            )["fields"],
+            {},
+        )
+
     def test_selection_reports_known_capability_unsupported_for_scope(self) -> None:
         selection = capability_contract.normalize_selection(
             selection={
@@ -1994,8 +2110,77 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
         self.assertEqual(source_health["returned_count"], 2)
         self.assertEqual(len(source_health["entries"]), 2)
+        self.assertEqual(len(source_health["problems_preview"]), 2)
+        self.assertTrue(
+            all(
+                entry["status"] in {"stale", "empty"}
+                for entry in source_health["problems_preview"]
+            )
+        )
         self.assertTrue(source_health["truncated"])
         self.assertTrue(source_health["is_partial"])
+
+    def test_source_health_summary_projection_keeps_problem_preview(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["diagnostics.source_health"],
+                "fields": {"diagnostics.source_health": ["summary"]},
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="summary",
+            scope_type="source_health",
+            question_intent="general",
+        )
+        response = {
+            "target": {"type": "source_health"},
+            "result": {
+                "data": {
+                    "summary": {"entry_count": 2, "problem_count": 1},
+                    "entries": [
+                        {"resource": "quote", "status": "current"},
+                        {"resource": "daily", "status": "stale"},
+                    ],
+                }
+            },
+        }
+
+        projected, unavailable = capability_contract.project_selected_data(
+            response=response,
+            selection=selection,
+        )
+
+        source_health = projected["diagnostics.source_health"]
+        self.assertNotIn("diagnostics.source_health", unavailable)
+        self.assertEqual(source_health["summary"]["problem_count"], 1)
+        self.assertEqual(source_health["summary"]["returned_problem_count"], 0)
+        self.assertEqual(
+            source_health["problems_preview"],
+            [{"resource": "daily", "status": "stale"}],
+        )
+
+    def test_bounded_projection_preserves_nested_health_slot_evidence(self) -> None:
+        payload = {
+            "health_dimensions": {
+                "scheduler_contract": {
+                    "slot_coverage": {
+                        "2026-08-28": {
+                            "missing_symbol_slots": {
+                                "3711": ["08:30", "08:35"]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        projected = capability_contract._bounded_value(payload, limit=20)
+
+        self.assertEqual(
+            projected["health_dimensions"]["scheduler_contract"]
+            ["slot_coverage"]["2026-08-28"]["missing_symbol_slots"]["3711"],
+            ["08:30", "08:35"],
+        )
 
     def test_projection_uses_real_compact_taiwan_field_names(self) -> None:
         selection = capability_contract.normalize_selection(
@@ -2386,6 +2571,78 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.selection["limits"]["intraday.bars"], 12)
+
+    def test_tw_explicit_daily_selection_uses_bounded_daily_reader(self) -> None:
+        plan = query_plan.build_query_plan(
+            payload=AiAskRequest(
+                question="只讀 3711 最近 20 根正式日 K",
+                target={"type": "tw_stock", "id": "3711"},
+                mode="data_only",
+                selection={
+                    "include": [
+                        "target.identity",
+                        "daily.ohlcv",
+                        "data.freshness",
+                    ],
+                    "limits": {"daily.ohlcv": 20},
+                },
+            ),
+            scope_type="stock",
+            target_market="TW",
+            question_intent="general",
+            effective_mode="data_only",
+        )
+
+        self.assertEqual(plan.reader_profile, "daily_only")
+        self.assertEqual(
+            plan.required_readers,
+            ("get_stock", "list_stock_ohlc_chart_data"),
+        )
+        self.assertFalse(plan.external_refresh_allowed)
+        self.assertIn("read_fundamentals", plan.excluded_readers)
+        self.assertIn("read_taiwan_source_health", plan.excluded_readers)
+        self.assertEqual(plan.selection["limits"]["daily.ohlcv"], 20)
+
+    def test_tw_explicit_technical_selection_uses_only_technical_dependencies(
+        self,
+    ) -> None:
+        plan = query_plan.build_query_plan(
+            payload=AiAskRequest(
+                question="只讀 3711 最近 60 根日 K 與技術結構",
+                target={"type": "tw_stock", "id": "3711"},
+                mode="data_only",
+                output="evidence_only",
+                selection={
+                    "include": [
+                        "target.identity",
+                        "daily.ohlcv",
+                        "technical.structure",
+                        "technical.indicators",
+                        "data.freshness",
+                    ],
+                    "limits": {"daily.ohlcv": 60},
+                },
+            ),
+            scope_type="stock",
+            target_market="TW",
+            question_intent="trend_view",
+            effective_mode="data_only",
+        )
+
+        self.assertEqual(plan.reader_profile, "technical_only")
+        self.assertEqual(
+            plan.required_readers,
+            (
+                "get_stock",
+                "list_stock_ohlc_chart_data",
+                "build_stock_technical_report",
+                "build_tw_stock_technical_evidence",
+            ),
+        )
+        self.assertIn("read_fundamentals", plan.excluded_readers)
+        self.assertIn("read_cross_market_context", plan.excluded_readers)
+        self.assertIn("get_broker_branch_trade_summary", plan.excluded_readers)
+        self.assertFalse(plan.external_refresh_allowed)
 
     def test_crypto_capability_plan_is_target_provider_and_interval_bounded(self) -> None:
         plan, warnings = agentic_planning.plan_crypto_asset_tools(

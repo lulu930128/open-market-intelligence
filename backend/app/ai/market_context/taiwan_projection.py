@@ -2314,12 +2314,48 @@ def _compact_technical_report(
     }
 
 
+def _neutralize_insufficient_technical_report(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    result = dict(report)
+    result.update(
+        {
+            "title": "技術證據不足",
+            "summary": "歷史或核心指標不足，僅保留非方向性的觀測值。",
+            "score": None,
+            "confidence": None,
+            "value": None,
+            "value_label": None,
+        }
+    )
+    score_contract = dict(result.get("score_contract") or {})
+    score_contract["score"] = None
+    result["score_contract"] = score_contract
+    decision_state = dict(result.get("decision_state") or {})
+    decision_state.update({"headline": None, "qualifier": None, "position": None})
+    result["decision_state"] = decision_state
+    current_observation = result.get("current_observation")
+    if isinstance(current_observation, dict):
+        current_observation = dict(current_observation)
+        current_observation.update(
+            {
+                "decision_usable": False,
+                "headline": None,
+                "qualifier": None,
+                "position": None,
+            }
+        )
+        result["current_observation"] = current_observation
+    return result
+
+
 def _compact_technical_evidence(
     *,
     analysis: dict[str, Any],
     technical_levels: dict[str, Any],
     technical_reports: dict[str, Any],
 ) -> dict[str, Any]:
+    decision_usable = bool(analysis.get("decision_usable"))
     score_model = (
         analysis.get("score_model")
         if isinstance(analysis.get("score_model"), dict)
@@ -2348,9 +2384,41 @@ def _compact_technical_evidence(
         for timeframe, report in technical_reports.items()
         if isinstance(report, dict)
     }
+    if not decision_usable:
+        report_score_contracts = {
+            timeframe: {**contract, "score": None}
+            for timeframe, contract in report_score_contracts.items()
+        }
+    compact_reports = {
+        timeframe: _compact_technical_report(
+            report,
+            timeframe=timeframe,
+            analysis=analysis,
+        )
+        for timeframe, report in technical_reports.items()
+        if isinstance(report, dict)
+    }
+    if not decision_usable:
+        compact_reports = {
+            timeframe: _neutralize_insufficient_technical_report(report)
+            for timeframe, report in compact_reports.items()
+        }
+    insufficient_reason_codes = list(
+        (analysis.get("sufficiency") or {}).get("reason_codes") or []
+    )
     return {
+        "status": analysis.get("status") or "partial",
+        "decision_usable": decision_usable,
         "currency": "TWD",
         "price_unit": "TWD",
+        "volume_unit": "shares",
+        "source_capability": "daily.ohlcv",
+        "measurement_lineage": {
+            "price_unit": "TWD",
+            "currency": "TWD",
+            "volume_unit": "shares",
+            "source_capability": "daily.ohlcv",
+        },
         "score_unit": "model_points",
         "score_contracts": {
             "selected_composite": composite_score_contract,
@@ -2373,8 +2441,13 @@ def _compact_technical_evidence(
             "scores": analysis.get("scores") or {},
             "score_range": (analysis.get("score_model") or {}).get("score_range"),
             "selected_score_contract": composite_score_contract,
+            "decision_usable": decision_usable,
+            "sufficiency": analysis.get("sufficiency") or {},
         },
         "levels": {
+            "status": "ready" if decision_usable else "unavailable",
+            "decision_usable": decision_usable,
+            "reason_codes": [] if decision_usable else insufficient_reason_codes,
             "currency": "TWD",
             "price_unit": "TWD",
             "latest_price": technical_levels.get("latest_price"),
@@ -2382,18 +2455,10 @@ def _compact_technical_evidence(
             "technical_price_basis": technical_levels.get("technical_price_basis"),
             "bid_ask_price_used": bool(technical_levels.get("bid_ask_price_used")),
             "context": technical_levels.get("context") or {},
-            "entry": technical_levels.get("entry") or {},
-            "risk": technical_levels.get("risk") or {},
+            "entry": (technical_levels.get("entry") or {}) if decision_usable else {},
+            "risk": (technical_levels.get("risk") or {}) if decision_usable else {},
         },
-        "reports": {
-            timeframe: _compact_technical_report(
-                report,
-                timeframe=timeframe,
-                analysis=analysis,
-            )
-            for timeframe, report in technical_reports.items()
-            if isinstance(report, dict)
-        },
+        "reports": compact_reports,
     }
 
 
@@ -3832,12 +3897,14 @@ def _build_stock_compact_evidence(
     source_refs: list[dict[str, Any]],
     technical_evidence: dict[str, Any] | None = None,
     financial_contract: dict[str, Any] | None = None,
+    fundamentals_applicable: bool = True,
 ) -> dict[str, Any]:
     target = {
         "type": "tw_stock",
         "id": stock_id,
         "label": stock.stock_name if stock else None,
         "market": stock.market if stock else "TW",
+        "instrument_type": getattr(stock, "instrument_type", None),
     }
     technical = _compact_technical_evidence(
         analysis=technical_analysis,
@@ -4010,6 +4077,29 @@ def _build_stock_compact_evidence(
         )
     )
     fundamentals = {
+        "status": (
+            "not_applicable"
+            if not fundamentals_applicable
+            else "ready"
+            if latest_revenue is not None or latest_financial is not None
+            else "missing"
+        ),
+        "applicability_status": (
+            "applicable" if fundamentals_applicable else "not_applicable"
+        ),
+        "availability_status": (
+            "available"
+            if fundamentals_applicable
+            and (latest_revenue is not None or latest_financial is not None)
+            else "missing"
+            if fundamentals_applicable
+            else "not_applicable"
+        ),
+        "reason_codes": (
+            []
+            if fundamentals_applicable
+            else ["ETF_FUNDAMENTALS_NOT_APPLICABLE"]
+        ),
         "contract_version": FINANCIAL_CONTRACT_VERSION,
         "currency": "TWD",
         "source_amount_unit": "TWD_thousands",

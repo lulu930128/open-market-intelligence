@@ -859,6 +859,45 @@ class AiSupplementalContextTests(unittest.TestCase):
             "active_canonical_scope",
         )
 
+    def test_unified_source_health_keeps_optional_problem_informational(self) -> None:
+        self.db.add(
+            SourceHealthSnapshot(
+                market="tw",
+                resource="taiwan_stock_quote_snapshot",
+                target="universe:bounded",
+                provider="twse_mis",
+                status="empty",
+                ok=False,
+                required=False,
+                checked_at=NOW,
+            )
+        )
+        self.db.commit()
+
+        result = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={"market": "tw", "limit": 20},
+            now=lambda: NOW,
+        )
+        summary = result["data"]["summary"]
+
+        self.assertEqual(summary["operational_entry_count"], 1)
+        self.assertEqual(summary["required_operational_entry_count"], 0)
+        self.assertEqual(summary["optional_operational_entry_count"], 1)
+        self.assertEqual(summary["optional_operational_problem_count"], 1)
+        self.assertEqual(summary["operational_problem_count"], 0)
+        self.assertEqual(
+            result["data"]["slots"]["health_entries"]["status"],
+            "ready",
+        )
+        self.assertEqual(result["data"]["entries"][0]["status"], "empty")
+        self.assertFalse(
+            any(
+                "operational non-current" in warning
+                for warning in result["warnings"]
+            )
+        )
+
     def test_unified_source_health_hides_expired_target_specific_scope(self) -> None:
         self.db.add(
             SourceHealthSnapshot(

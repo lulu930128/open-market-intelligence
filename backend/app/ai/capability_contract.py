@@ -1214,6 +1214,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "limitations",
             "candidates",
             "available_bar_count",
+            "requested_bar_count",
             "interval",
             "latest_data_date",
             "expected_data_date",
@@ -1222,6 +1223,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "truncated",
             "points",
             "bars",
+            "bars_legacy_count",
+            "deprecated_fields",
             "bar_time",
             "open_price",
             "high_price",
@@ -1261,6 +1264,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "limitations",
             "candidates",
             "available_bar_count",
+            "requested_bar_count",
             "interval",
             "latest_data_date",
             "expected_data_date",
@@ -1268,7 +1272,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "returned_point_count",
             "truncated",
             "points",
-            "bars",
+            "bars_legacy_count",
+            "deprecated_fields",
             "bar_time",
             "open_price",
             "high_price",
@@ -1902,6 +1907,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         scopes=("stock", "us_stock", "jp_stock", "kr_stock"),
         paths=("compact.fundamentals", "data"),
         fields=(
+            "status",
+            "applicability_status",
+            "availability_status",
+            "reason_codes",
             "latest_revenue",
             "revenue_history",
             "period",
@@ -1920,6 +1929,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "ratio_unit",
         ),
         default_fields=(
+            "status",
+            "applicability_status",
+            "availability_status",
+            "reason_codes",
             "latest_revenue",
             "revenue_history",
             "currency",
@@ -1946,6 +1959,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "data",
         ),
         fields=(
+            "status",
+            "applicability_status",
+            "availability_status",
+            "reason_codes",
             "latest_financial",
             "financial_history",
             "financial_contract",
@@ -1969,6 +1986,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "per_share_unit",
         ),
         default_fields=(
+            "status",
+            "applicability_status",
+            "availability_status",
+            "reason_codes",
             "latest_financial",
             "financial_history",
             "financial_contract",
@@ -3326,6 +3347,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "scope",
             "scope_label",
             "is_full_market",
+            "coverage_status",
             "as_of",
             "latest_trade_date",
             "source",
@@ -3350,6 +3372,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "scope",
             "scope_label",
             "is_full_market",
+            "coverage_status",
             "as_of",
             "latest_trade_date",
             "source",
@@ -4465,6 +4488,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "filters",
             "summary",
             "entries",
+            "problems_preview",
             "provider_events",
             "warnings",
             "freshness",
@@ -4480,6 +4504,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "filters",
             "summary",
             "entries",
+            "problems_preview",
             "provider_events",
             "warnings",
             "freshness",
@@ -4904,6 +4929,13 @@ def _canonicalize_capability_mapping(
     return output
 
 
+CAPABILITY_FIELD_COMPANIONS: dict[str, dict[str, tuple[str, ...]]] = {
+    "daily.ohlcv": {
+        "points": ("volume_unit", "trade_value_unit", "currency"),
+    },
+}
+
+
 def _normalized_fields(
     raw_fields: Any,
     *,
@@ -4935,7 +4967,17 @@ def _normalized_fields(
             raise ValueError(
                 f"Unsupported field(s) for {normalized_id}: {', '.join(unknown_fields)}"
             )
-        output[normalized_id] = list(fields)
+        effective_fields = list(fields)
+        for trigger_field, companion_fields in CAPABILITY_FIELD_COMPANIONS.get(
+            normalized_id,
+            {},
+        ).items():
+            if trigger_field not in effective_fields:
+                continue
+            for companion_field in companion_fields:
+                if companion_field not in effective_fields:
+                    effective_fields.append(companion_field)
+        output[normalized_id] = effective_fields
     return output
 
 
@@ -5669,8 +5711,12 @@ def _project_fields(
 
 
 def _bounded_value(value: Any, *, limit: int, depth: int = 0) -> Any:
-    if depth >= 6:
-        return None
+    if depth >= 64:
+        return {
+            "projection_status": "truncated",
+            "reason": "maximum_nesting_depth_exceeded",
+            "maximum_depth": 64,
+        }
     if isinstance(value, list):
         bounded = value[-limit:] if len(value) > limit else value
         return [
@@ -5929,14 +5975,17 @@ def _reconcile_projected_series_counts(
         return value
     if capability_id == "diagnostics.source_health":
         entries = value.get("entries")
-        if not isinstance(entries, list):
-            return value
+        projected_entries_present = isinstance(entries, list)
+        if not projected_entries_present:
+            entries = []
         original_entries = (
             original_value.get("entries")
             if isinstance(original_value, dict)
             and isinstance(original_value.get("entries"), list)
             else []
         )
+        if not projected_entries_present and not original_entries:
+            return value
         summary = (
             dict(value.get("summary"))
             if isinstance(value.get("summary"), dict)
@@ -5983,6 +6032,13 @@ def _reconcile_projected_series_counts(
         summary["problem_count"] = total_problem_count
         summary["total_problem_count"] = total_problem_count
         summary["returned_problem_count"] = returned_problem_count
+        problem_entries = [
+            entry
+            for entry in original_entries
+            if isinstance(entry, dict)
+            and str(entry.get("status") or "") in problem_statuses
+        ]
+        value["problems_preview"] = problem_entries[:5]
         value["summary"] = summary
         value["returned_count"] = len(entries)
         value["truncated"] = entry_count > len(entries)

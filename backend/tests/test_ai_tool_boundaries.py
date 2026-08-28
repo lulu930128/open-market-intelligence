@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import date, datetime, timezone
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -53,11 +53,116 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "7ac6d7aa7055cedf142df66ab7e01459c205f3cdc19cb3133a15e7fcabdfe928"
+    "0e16262ba5ea50e49c2c45b3d92a355d69a8f059781dfd0403d05b801298d824"
 )
 
 
 class AIToolBoundaryTests(unittest.TestCase):
+    def test_explicit_tw_daily_execution_uses_only_bounded_daily_reader(
+        self,
+    ) -> None:
+        payload = AiAskRequest(
+            question="只讀 3711 最近 20 根正式日 K",
+            target={"type": "tw_stock", "id": "3711"},
+            mode="data_only",
+            market_data_params={
+                "reader_profile": "daily_only",
+                "trade_date": "2026-08-27",
+            },
+        )
+        policy = {
+            "query_plan": {
+                "reader_profile": "daily_only",
+                "trade_date": "2026-08-27",
+                "include_intraday": False,
+                "selection": {"limits": {"daily.ohlcv": 20}},
+            }
+        }
+        expected = {"kind": "stock_daily_context"}
+
+        with (
+            patch.object(
+                ask_execution.tools,
+                "read_stock_daily_context",
+                return_value=expected,
+            ) as daily_reader,
+            patch.object(
+                ask_execution.tools,
+                "read_stock_context",
+            ) as broad_reader,
+        ):
+            action, result = ask_execution._read_data_only(
+                db=object(),
+                payload=payload,
+                scope_type="stock",
+                policy=policy,
+            )
+
+        self.assertEqual(action, "omi.read_stock_daily")
+        self.assertIs(result, expected)
+        daily_reader.assert_called_once_with(
+            db=ANY,
+            stock_id="3711",
+            bars=20,
+            market_data_params={
+                "reader_profile": "daily_only",
+                "trade_date": "2026-08-27",
+                "realtime_policy": "prefer_live",
+                "external_fetch_allowed": False,
+                "fallback_to_cached": True,
+                "include_intraday": False,
+            },
+        )
+        broad_reader.assert_not_called()
+
+    def test_explicit_tw_technical_execution_uses_bounded_technical_reader(
+        self,
+    ) -> None:
+        payload = AiAskRequest(
+            question="只讀 3711 技術結構",
+            target={"type": "tw_stock", "id": "3711"},
+            mode="data_only",
+            analysis_horizon="swing",
+            market_data_params={"reader_profile": "technical_only"},
+        )
+        policy = {
+            "query_plan": {
+                "reader_profile": "technical_only",
+                "selection": {"limits": {"daily.ohlcv": 60}},
+            }
+        }
+        expected = {"kind": "stock_technical_context"}
+
+        with (
+            patch.object(
+                ask_execution.tools,
+                "read_stock_technical_context",
+                return_value=expected,
+            ) as technical_reader,
+            patch.object(
+                ask_execution.tools,
+                "read_stock_context",
+            ) as broad_reader,
+        ):
+            action, result = ask_execution._read_data_only(
+                db=object(),
+                payload=payload,
+                scope_type="stock",
+                question_intent="trend_view",
+                policy=policy,
+            )
+
+        self.assertEqual(action, "omi.read_stock_technical")
+        self.assertIs(result, expected)
+        technical_reader.assert_called_once_with(
+            db=ANY,
+            stock_id="3711",
+            bars=60,
+            analysis_horizon="swing",
+            market_data_params=ANY,
+        )
+        broad_reader.assert_not_called()
+
     def test_explicit_us_market_uses_supplemental_index_without_tw_reader(
         self,
     ) -> None:

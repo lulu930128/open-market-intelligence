@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 from app.market.technical_parameters import get_technical_analysis_parameters
+from app.market.trading_calendar import next_taiwan_trading_day
 
 
 def _json_value(value: Any) -> Any:
@@ -12,6 +13,20 @@ def _json_value(value: Any) -> Any:
         return value.isoformat()
 
     return value
+
+
+def _technical_point_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def normalize_analysis_horizon(value: str | None) -> str:
@@ -511,6 +526,185 @@ def _technical_analysis_summary(
         "components": components,
         "components_by_horizon": score_components_by_horizon,
     }
+
+
+def evaluate_technical_evidence_sufficiency(
+    *,
+    chart: dict[str, Any],
+    technical_reports: dict[str, Any],
+    requested_horizon: str,
+) -> dict[str, Any]:
+    """Gate formal Taiwan technical scores on released daily evidence."""
+
+    horizon = normalize_analysis_horizon(requested_horizon)
+    required_daily_bars = {
+        "intraday": 20,
+        "short": 20,
+        "swing": 60,
+        "long": 120,
+    }[horizon]
+    required_factor_count = 2 if horizon in {"intraday", "short"} else 3
+    points = [
+        point
+        for point in chart.get("points") or []
+        if isinstance(point, dict)
+    ]
+    daily_bar_count = len(points)
+    parsed_dates = [
+        parsed.date()
+        for point in points
+        if (parsed := _technical_point_datetime(point.get("time"))) is not None
+    ]
+    continuity_status = "continuous"
+    continuity_issues: list[str] = []
+    if len(parsed_dates) < 2:
+        continuity_status = "insufficient_history"
+        continuity_issues.append("insufficient_series_points")
+    else:
+        for previous, current in zip(parsed_dates, parsed_dates[1:]):
+            if current <= previous:
+                continuity_status = (
+                    "duplicate" if current == previous else "unordered"
+                )
+                continuity_issues.append(
+                    "duplicate_trade_date"
+                    if current == previous
+                    else "unordered_trade_date"
+                )
+                break
+            if current != next_taiwan_trading_day(
+                previous,
+                include_value=False,
+            ):
+                continuity_status = "gap_detected"
+                continuity_issues.append("missing_trading_day")
+                break
+
+    daily_report = (
+        technical_reports.get("daily")
+        if isinstance(technical_reports.get("daily"), dict)
+        else {}
+    )
+    daily_data = (
+        daily_report.get("data")
+        if isinstance(daily_report.get("data"), dict)
+        else {}
+    )
+    indicator = (
+        daily_data.get("daily_indicator")
+        if isinstance(daily_data.get("daily_indicator"), dict)
+        else daily_data.get("indicator")
+        if isinstance(daily_data.get("indicator"), dict)
+        else {}
+    )
+    major_indicator_groups = {
+        key: indicator.get(key)
+        for key in ("ma", "rsi", "macd", "kd")
+    }
+    available_factor_count = sum(
+        1
+        for value in major_indicator_groups.values()
+        if isinstance(value, dict)
+        and any(item is not None for item in value.values())
+    )
+    continuity_ok = continuity_status == "continuous"
+    count_sufficient = daily_bar_count >= required_daily_bars
+    factors_sufficient = available_factor_count >= required_factor_count
+    volume_unit = str(chart.get("volume_unit") or "").strip().lower()
+    volume_lineage_ok = volume_unit in {"share", "shares"}
+    decision_usable = bool(
+        count_sufficient
+        and factors_sufficient
+        and continuity_ok
+        and volume_lineage_ok
+        and chart.get("data_quality") not in {"missing", "stale"}
+    )
+    reason_codes: list[str] = []
+    if not count_sufficient:
+        reason_codes.append("INSUFFICIENT_DAILY_BARS")
+    if not factors_sufficient:
+        reason_codes.append("INSUFFICIENT_MAJOR_INDICATORS")
+    if not continuity_ok:
+        reason_codes.append("DAILY_CONTINUITY_NOT_SATISFIED")
+    if not volume_lineage_ok:
+        reason_codes.append("DAILY_VOLUME_UNIT_MISSING")
+    if chart.get("data_quality") in {"missing", "stale"}:
+        reason_codes.append("DAILY_DATA_QUALITY_NOT_USABLE")
+    return {
+        "status": "ready" if decision_usable else "partial",
+        "decision_usable": decision_usable,
+        "daily_bar_count": daily_bar_count,
+        "required_daily_bar_count": required_daily_bars,
+        "available_factor_count": available_factor_count,
+        "required_factor_count": required_factor_count,
+        "major_indicators": {
+            key: bool(
+                isinstance(value, dict)
+                and any(item is not None for item in value.values())
+            )
+            for key, value in major_indicator_groups.items()
+        },
+        "continuity_status": continuity_status,
+        "continuity_ok": continuity_ok,
+        "continuity_issues": continuity_issues,
+        "volume_unit": chart.get("volume_unit"),
+        "volume_lineage_ok": volume_lineage_ok,
+        "source_capability": "daily.ohlcv",
+        "reason_codes": reason_codes,
+    }
+
+
+def apply_technical_sufficiency_gate(
+    analysis: dict[str, Any],
+    *,
+    sufficiency: dict[str, Any],
+) -> dict[str, Any]:
+    result = dict(analysis)
+    result["sufficiency"] = sufficiency
+    result["status"] = sufficiency.get("status")
+    result["decision_usable"] = bool(sufficiency.get("decision_usable"))
+    if result["decision_usable"]:
+        return result
+    raw_selected_score = result.get("selected_score")
+    result["raw_selected_score"] = raw_selected_score
+    result["selected_score"] = None
+    result["selected_title"] = "技術證據不足"
+    result["composite_score_title"] = "技術證據不足"
+    result["selected_summary"] = (
+        "日線歷史、核心指標或序列連續性不足，無法形成正式技術方向。"
+    )
+    result["selected_confidence"] = None
+    result["composite_state"] = "insufficient_evidence"
+    result["scores"] = {
+        key: None for key in (result.get("scores") or {})
+    }
+    result["intraday_score"] = None
+    for state_key in ("today_state", "historical_structure"):
+        state = dict(result.get(state_key) or {})
+        if not state:
+            continue
+        state.update(
+            {
+                "status": "partial",
+                "score": None,
+                "title": "技術證據不足",
+                "summary": result["selected_summary"],
+                "confidence": None,
+            }
+        )
+        result[state_key] = state
+    score_model = dict(result.get("score_model") or {})
+    score_model["raw_selected_score"] = raw_selected_score
+    score_model["selected_score"] = None
+    score_model["normalized_decision_score"] = None
+    score_model["scores"] = {
+        key: None for key in (score_model.get("scores") or {})
+    }
+    score_model["base_scores"] = {
+        key: None for key in (score_model.get("base_scores") or {})
+    }
+    result["score_model"] = score_model
+    return result
 
 
 def _first_value(row: dict[str, Any], keys: tuple[str, ...]) -> Any:

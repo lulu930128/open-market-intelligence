@@ -498,11 +498,11 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertTrue(result["is_complete"])
         self.assertEqual(result["observation_mix"], ["current_session_index_snapshot"])
         self.assertEqual(result["items"][0]["latest_value"], 24_100.0)
-        self.assertEqual(result["items"][0]["close"], 24_000.0)
+        self.assertEqual(result["items"][0]["close"], 24_100.0)
         self.assertEqual(result["items"][0]["official_close"]["value"], 24_000.0)
         self.assertTrue(result["items"][0]["live_snapshot"]["is_partial"])
 
-    def test_taiwan_market_indices_treat_post_close_timestamp_as_current_trade_date(
+    def test_taiwan_market_indices_keep_unconfirmed_post_close_summary_provisional(
         self,
     ) -> None:
         summary = {
@@ -531,8 +531,9 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             generated_at=datetime.fromisoformat("2026-08-04T19:50:00+08:00"),
         )
 
-        self.assertEqual(result["status"], "ready")
-        self.assertTrue(result["current_for_requested_session"])
+        self.assertEqual(result["status"], "partial")
+        self.assertFalse(result["current_for_requested_session"])
+        self.assertFalse(result["decision_usable"])
         self.assertEqual(result["oldest_as_of"], "2026-08-04T13:30:00+08:00")
         self.assertEqual(result["newest_as_of"], "2026-08-04T13:30:00+08:00")
         self.assertEqual(result["items"][0]["trade_date"], "2026-08-04")
@@ -540,6 +541,10 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             result["items"][0]["official_close"]["as_of"],
             "2026-08-04T13:30:00+08:00",
         )
+        self.assertEqual(result["items"][0]["official_close_status"], "pending")
+        self.assertEqual(result["items"][0]["finalization"], "provisional")
+        self.assertTrue(result["items"][0]["provisional"])
+        self.assertFalse(result["items"][0]["decision_usable"])
 
     def test_aggregate_freshness_separates_temporal_currentness_from_coverage(self) -> None:
         freshness = taiwan_market._aggregate_freshness(
@@ -1093,6 +1098,7 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         technical = taiwan_projection._compact_technical_evidence(
             analysis={
                 "selected_score": -4.2,
+                "decision_usable": True,
                 "score_model": {
                     "version": "technical_factor_weight_v1",
                     "score_range": "-7..+7",
@@ -1137,6 +1143,62 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             "tw_technical_daily_raw_v1",
         )
         self.assertEqual(daily["weight_in_composite"], 0.45)
+
+    def test_insufficient_technical_projection_removes_direction_and_action_levels(
+        self,
+    ) -> None:
+        technical = taiwan_projection._compact_technical_evidence(
+            analysis={
+                "status": "partial",
+                "decision_usable": False,
+                "selected_score": None,
+                "raw_selected_score": 7,
+                "selected_title": "技術證據不足",
+                "selected_summary": "日線歷史不足，無法形成正式技術方向。",
+                "composite_state": "insufficient_evidence",
+                "scores": {"swing": None},
+                "sufficiency": {
+                    "reason_codes": ["INSUFFICIENT_DAILY_BARS"],
+                },
+                "score_model": {"score_range": "-7..+7"},
+            },
+            technical_levels={
+                "latest_price": 621,
+                "entry": {"preferred": 610},
+                "risk": {"short_term_stop": 598},
+            },
+            technical_reports={
+                "daily": {
+                    "kind": "tw_stock_technical_report",
+                    "timeframe": "daily",
+                    "title": "波段偏多",
+                    "summary": "強勢向上",
+                    "score": 11,
+                    "confidence": "high",
+                    "data": {
+                        "decision_state": {
+                            "headline": "偏多",
+                            "position": "bullish",
+                        }
+                    },
+                }
+            },
+        )
+
+        self.assertFalse(technical["decision_usable"])
+        self.assertNotIn("raw_selected_score", technical["analysis"])
+        self.assertEqual(technical["analysis"]["composite_state"], "insufficient_evidence")
+        self.assertEqual(technical["levels"]["status"], "unavailable")
+        self.assertEqual(technical["levels"]["entry"], {})
+        self.assertEqual(technical["levels"]["risk"], {})
+        self.assertIsNone(technical["reports"]["daily"]["score"])
+        self.assertEqual(
+            technical["reports"]["daily"]["title"],
+            "技術證據不足",
+        )
+        self.assertIsNone(
+            technical["reports"]["daily"]["decision_state"]["headline"]
+        )
 
     def test_taiwan_technical_projection_keeps_finalized_and_current_observation_separate(
         self,

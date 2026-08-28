@@ -16,7 +16,7 @@ from app.ai import (
     tools,
 )
 from app.ai import ask_policy
-from app.ai.market_date_request import requested_us_trade_date
+from app.ai.market_date_request import parse_market_trade_date, requested_us_trade_date
 from app.ai.schemas import AiAskRequest
 
 
@@ -182,6 +182,21 @@ def _us_market_data_params(
     return params
 
 
+def _tw_market_data_params(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize explicit Taiwan selection before any reader is dispatched."""
+
+    params = _market_data_params(payload, policy=policy)
+    requested_trade_date = parse_market_trade_date(params.get("trade_date"))
+    if requested_trade_date is not None:
+        params["trade_date"] = requested_trade_date.isoformat()
+        params["include_intraday"] = False
+    return params
+
+
 def _watchlist_radar_mode(question_intent: str) -> str:
     if question_intent in {"risk_check", "exit_decision"}:
         return "risk"
@@ -304,7 +319,7 @@ def _read_market_context(
                 policy=policy,
                 allow_persisted_cache=False,
             ),
-            market_data_params=_market_data_params(payload, policy=policy),
+            market_data_params=_tw_market_data_params(payload, policy=policy),
         )
     reference = REGIONAL_MARKET_REFERENCES.get(market)
     if reference is None:
@@ -459,6 +474,16 @@ def _read_data_only(
         stock_id = _require_scope_id(payload, "stock")
         if _uses_reader_profile(
             payload,
+            expected="identity_only",
+            question_intent=question_intent,
+            policy=policy,
+        ):
+            return "omi.read_stock_identity", tools.read_stock_identity_context(
+                db=db,
+                stock_id=stock_id,
+            )
+        if _uses_reader_profile(
+            payload,
             expected="event_only",
             question_intent=question_intent,
             policy=policy,
@@ -497,13 +522,78 @@ def _read_data_only(
                 branch_days=payload.branch_days,
                 market_data_params=_market_data_params(payload, policy=policy),
             )
+        if _uses_reader_profile(
+            payload,
+            expected="daily_only",
+            question_intent=question_intent,
+            policy=policy,
+        ):
+            query_plan = (
+                policy.get("query_plan")
+                if isinstance(policy, dict)
+                and isinstance(policy.get("query_plan"), dict)
+                else {}
+            )
+            selection = (
+                query_plan.get("selection")
+                if isinstance(query_plan.get("selection"), dict)
+                else {}
+            )
+            limits = (
+                selection.get("limits")
+                if isinstance(selection.get("limits"), dict)
+                else {}
+            )
+            daily_limit = limits.get(
+                "daily.ohlcv",
+                limits.get("daily.points", 20),
+            )
+            return "omi.read_stock_daily", tools.read_stock_daily_context(
+                db=db,
+                stock_id=stock_id,
+                bars=max(int(daily_limit or 20), 1),
+                market_data_params=_tw_market_data_params(payload, policy=policy),
+            )
+        if _uses_reader_profile(
+            payload,
+            expected="technical_only",
+            question_intent=question_intent,
+            policy=policy,
+        ):
+            query_plan = (
+                policy.get("query_plan")
+                if isinstance(policy, dict)
+                and isinstance(policy.get("query_plan"), dict)
+                else {}
+            )
+            selection = (
+                query_plan.get("selection")
+                if isinstance(query_plan.get("selection"), dict)
+                else {}
+            )
+            limits = (
+                selection.get("limits")
+                if isinstance(selection.get("limits"), dict)
+                else {}
+            )
+            daily_limit = limits.get(
+                "daily.ohlcv",
+                limits.get("daily.points", 120),
+            )
+            return "omi.read_stock_technical", tools.read_stock_technical_context(
+                db=db,
+                stock_id=stock_id,
+                bars=max(int(daily_limit or 120), 1),
+                analysis_horizon=payload.analysis_horizon,
+                market_data_params=_tw_market_data_params(payload, policy=policy),
+            )
         return "omi.read_stock_context", tools.read_stock_context(
             db=db,
             stock_id=stock_id,
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
-            market_data_params=_market_data_params(payload, policy=policy),
+            market_data_params=_tw_market_data_params(payload, policy=policy),
         )
 
     if scope_type == "tw_index":
@@ -1008,6 +1098,19 @@ def _check_freshness(
             question_intent=question_intent,
         ):
             return freshness.check_stock_broker_branch_freshness(
+                db=db,
+                stock_id=stock_id,
+            )
+        if _uses_reader_profile(
+            payload,
+            expected="daily_only",
+            question_intent=question_intent,
+        ) or _uses_reader_profile(
+            payload,
+            expected="technical_only",
+            question_intent=question_intent,
+        ):
+            return freshness.check_stock_daily_price_freshness(
                 db=db,
                 stock_id=stock_id,
             )
