@@ -1,7 +1,7 @@
 # Open Market Intelligence
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · <strong>日本語</strong>
+  <a href="./README.md">English</a> · <a href="./README.zh-TW.md">繁體中文</a> · <strong>日本語</strong>
 </p>
 
 <p align="center">
