@@ -1,4 +1,5 @@
 from datetime import date
+import logging
 from secrets import compare_digest
 from typing import Literal
 
@@ -28,10 +29,12 @@ from app.ai.schemas import (
 )
 from app.config import settings
 from app.db.session import get_db
+from app.market_data.errors import MarketDataContractError
 from app.watchlists import service as watchlist_service
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 AI_TRUST_TOKEN_HEADER = "x-omi-ai-trust-token"
 
 
@@ -255,6 +258,21 @@ def ask_omi(
         return ai_ask.ask(db=db, payload=payload, server_policy=_ai_server_policy(request))
     except watchlist_service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except MarketDataContractError as exc:
+        logger.exception(
+            "AI ask failed because a market-data contract invariant was violated",
+            extra={"error_code": exc.code},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": exc.code,
+                "message": "Market data service contract validation failed.",
+                "field": None,
+                "retryable": False,
+                "request_valid": True,
+            },
+        ) from exc
     except ValueError as exc:
         message = str(exc)
         field = (

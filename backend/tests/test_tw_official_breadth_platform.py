@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -232,12 +232,38 @@ def test_actual_official_receipt_replays_through_storage_gateway_and_contract(
         resource_id=resource_id,
     )
 
-    result = read_taiwan_official_breadth(
-        db,
-        venue=venue,
-        trade_date=trade_date,
-        requested_at=REQUESTED_AT,
-    )
+    statements: list[str] = []
+
+    def capture_select(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    engine = db.get_bind()
+    event.listen(engine, "before_cursor_execute", capture_select)
+    try:
+        result = read_taiwan_official_breadth(
+            db,
+            venue=venue,
+            trade_date=trade_date,
+            requested_at=REQUESTED_AT,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_select)
+
+    raw_receipt_selects = [
+        statement
+        for statement in statements
+        if "raw_fetch_result" in statement.lower()
+    ]
+    assert raw_receipt_selects
+    assert all("raw_text" not in statement.lower() for statement in raw_receipt_selects)
 
     breadth = result.resolved.breadth
     assert result.result_kind == "market_breadth"

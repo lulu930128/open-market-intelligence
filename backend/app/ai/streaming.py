@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import date, datetime
 import json
+import logging
 from queue import Queue
 from threading import Thread
 from typing import Any
@@ -13,10 +14,13 @@ from app.ai import ask as ai_ask
 from app.ai import llm as ai_llm
 from app.ai import stage_events
 from app.ai.schemas import AiAskRequest
+from app.market_data.errors import MarketDataContractError
 from app.watchlists import service as watchlist_service
 
 
 DEFAULT_DELTA_CHARS = 160
+MAX_FAILURE_DELTA_CHARS = 600
+logger = logging.getLogger(__name__)
 
 
 def _json_default(value: Any) -> str:
@@ -81,7 +85,40 @@ def _lines_from_report(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _failure_answer_text(response: dict[str, Any]) -> str | None:
+    request_status = str(response.get("request_status") or "").strip().lower()
+    failed = response.get("ok") is False or request_status in {
+        "cancelled",
+        "failed",
+        "rejected",
+        "transport_error",
+    }
+    if not failed:
+        return None
+
+    error = response.get("error") if isinstance(response.get("error"), dict) else {}
+    error_code = _first_text(error.get("code"))
+    error_message = _first_text(
+        error.get("message"),
+        error.get("detail"),
+        error.get("error"),
+    )
+    if error_message:
+        text = f"OMI 無法完成這次請求：{error_message}"
+    elif error_code:
+        text = f"OMI 無法完成這次請求（{error_code}）。"
+    else:
+        text = "OMI 無法完成這次請求，請查看錯誤資訊與資料限制。"
+    if len(text) <= MAX_FAILURE_DELTA_CHARS:
+        return text
+    return text[: MAX_FAILURE_DELTA_CHARS - 1].rstrip() + "…"
+
+
 def extract_answer_text(response: dict[str, Any]) -> str:
+    failure_text = _failure_answer_text(response)
+    if failure_text:
+        return failure_text
+
     canonical_answer = (
         response.get("answer")
         if isinstance(response.get("answer"), dict)
@@ -165,6 +202,21 @@ def chunk_text(text: str, *, max_chars: int = DEFAULT_DELTA_CHARS) -> Iterator[s
 def _error_payload(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, watchlist_service.WatchlistGroupNotFoundError):
         return {"status_code": 404, "error": str(exc), "kind": "watchlist_not_found"}
+    if isinstance(exc, MarketDataContractError):
+        logger.error(
+            "AI stream failed because a market-data contract invariant was violated",
+            exc_info=(type(exc), exc, exc.__traceback__),
+            extra={"error_code": exc.code},
+        )
+        return {
+            "status_code": 500,
+            "error": "Market data service contract validation failed.",
+            "message": "Market data service contract validation failed.",
+            "kind": "market_data_contract_error",
+            "code": exc.code,
+            "retryable": False,
+            "request_valid": True,
+        }
     if isinstance(exc, ValueError):
         return {"status_code": 400, "error": str(exc), "kind": "bad_request"}
     if isinstance(exc, ai_llm.OpenAIConfigurationError):

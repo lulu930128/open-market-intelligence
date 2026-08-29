@@ -84,8 +84,19 @@ class USDailyPriceRefreshResultRead(BaseModel):
     skipped_count: int = 0
     inserted_count: int
     updated_count: int
+    unchanged_count: int = 0
     expected_trade_date: date | None = None
     latest_eligible_trade_date: date | None = None
+    selected_event_at: datetime | None = None
+    selected_source: str | None = None
+    fallback_used: bool = False
+    selection_reason: str | None = None
+    external_call_count: int = 0
+    providers_attempted: list[str] = Field(default_factory=list)
+    resource_attempts: list[dict[str, str]] = Field(default_factory=list)
+    persistence_committed: bool = False
+    postcondition_satisfied: bool = False
+    raw_result_ids: list[int] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     message: str
 
@@ -134,10 +145,43 @@ class USOhlcChartRead(BaseModel):
     backfill: dict | None = None
     intraday_overlay: dict | None = None
     latest_data_date: date | None = None
+    latest_trade_date: date | None = None
+    latest_finalized_data_date: date | None = None
     expected_data_date: date | None = None
+    expected_trade_date: date | None = None
     freshness_status: str = "missing"
+    coverage_status: str = "missing"
+    request_coverage_status: str = "missing"
+    continuity_status: str = "missing"
+    history_status: str = "missing"
+    history_fetch_scope: str = "unknown"
+    first_data_date: date | None = None
+    continuity_start_date: date | None = None
+    contiguous_through_date: date | None = None
+    latest_expected_date_present: bool = False
+    missing_trade_date_count: int = 0
+    missing_trade_dates: list[date] = Field(default_factory=list)
+    missing_trade_dates_truncated: bool = False
+    requested_bar_count: int = 0
+    available_bar_count: int = 0
+    expected_previous_close_trade_date: date | None = None
+    previous_close: float | None = None
+    previous_close_trade_date: date | None = None
+    previous_close_provider: str | None = None
+    previous_close_fetched_at: datetime | None = None
+    previous_close_status: str = "missing"
     is_current: bool = False
     refresh_recommended: bool = True
+    coverage_refresh_recommended: bool = True
+    selected_provider: str | None = None
+    selected_source: str | None = None
+    selected_event_at: datetime | None = None
+    fallback_used: bool = False
+    selection_reason: str | None = None
+    facts_usable: bool = False
+    decision_usable: bool = False
+    usability_status: str = "unusable"
+    limitations: list[str] = Field(default_factory=list)
 
 
 class USIntradayTrendPointRead(BaseModel):
@@ -187,6 +231,9 @@ class USIntradayTrendRead(BaseModel):
     previous_close_source: str | None = None
     previous_close_trade_date: str | None = None
     previous_close_provider: str | None = None
+    expected_previous_close_trade_date: str | None = None
+    previous_close_status: str = "unknown"
+    rejected_previous_close_trade_date: str | None = None
     regular_session_close: float | None = None
     regular_session_close_time: str | None = None
     point_count: int

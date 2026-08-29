@@ -7,7 +7,7 @@ selection, refresh, commit, or rollback while serving these reads.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 
 from pydantic import Field, model_validator
@@ -28,10 +28,16 @@ class DailyBarCandidateQuery(CanonicalModel):
     instrument: InstrumentKey
     start_date: date
     end_date: date
+    available_at: datetime | None = None
     max_rows: int = Field(default=500, ge=1, le=5000)
 
     @model_validator(mode="after")
     def _validate_range(self) -> DailyBarCandidateQuery:
+        if self.available_at is not None and (
+            self.available_at.tzinfo is None
+            or self.available_at.utcoffset() is None
+        ):
+            raise ValueError("available_at must be timezone-aware")
         if self.start_date > self.end_date:
             raise ValueError("start_date cannot be after end_date")
         if (
@@ -69,6 +75,12 @@ class PersistedBarSeries(CanonicalModel):
             raise ValueError("persisted bars must share one instrument")
         if any(bar.interval != interval for bar in self.bars):
             raise ValueError("persisted bars must share one interval")
+        if any(bar.lineage.provider != self.provider for bar in self.bars):
+            raise ValueError("persisted bars must match declared provider lineage")
+        if any(bar.lineage.source != self.source for bar in self.bars):
+            raise ValueError("persisted bars must match declared source lineage")
+        if any(bar.lineage.authority is not self.authority for bar in self.bars):
+            raise ValueError("persisted bars must match declared authority lineage")
         if any(
             current.start_at >= following.start_at
             for current, following in zip(self.bars, self.bars[1:])

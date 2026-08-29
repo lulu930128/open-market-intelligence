@@ -105,7 +105,9 @@ def project_resolved_us_bars(
         **_health_payload(value),
         "interval": interval,
         "available_bar_count": available,
+        "point_count": available,
         "returned_bar_count": len(selected),
+        "returned_point_count": len(selected),
         "truncated": available > len(selected),
         "bars": [
             {
@@ -117,6 +119,8 @@ def project_resolved_us_bars(
                 "close_price": str(bar.close_price),
                 "volume": str(bar.volume.value) if bar.volume else None,
                 "volume_unit": bar.volume.unit.value if bar.volume else None,
+                "volume_status": bar.volume_status,
+                "price_basis": bar.price_basis,
                 "finalization": bar.finalization.value,
                 "provider": bar.lineage.provider,
                 "source": bar.lineage.source,

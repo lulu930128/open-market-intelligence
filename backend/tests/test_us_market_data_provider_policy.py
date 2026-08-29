@@ -19,6 +19,7 @@ from app.market_data.policies import DataPurpose, DataRequirement, RealtimePolic
 from app.us_market.market_data_policy import (
     US_PROVIDER_DESCRIPTORS,
     build_us_acquisition_plan,
+    us_provider_order,
 )
 
 
@@ -64,10 +65,13 @@ def _health(provider: str, capability: str) -> ProviderResourceHealth:
 def test_us_descriptors_are_market_owned_and_capability_specific() -> None:
     assert [item.provider_key for item in US_PROVIDER_DESCRIPTORS] == [
         "yahoo_chart",
-        "alphavantage",
     ]
     assert "intraday.bars" in US_PROVIDER_DESCRIPTORS[0].capabilities
-    assert US_PROVIDER_DESCRIPTORS[1].capabilities == ("daily.ohlcv",)
+    assert "daily.ohlcv" not in US_PROVIDER_DESCRIPTORS[0].capabilities
+    assert us_provider_order("daily.ohlcv") == (
+        "yahoo_chart",
+        "alpaca",
+    )
     assert not any(item.can_produce_live for item in US_PROVIDER_DESCRIPTORS)
 
 
@@ -94,7 +98,6 @@ def test_require_live_is_truthfully_unfillable_without_live_provider() -> None:
     assert {
         item.reason_code for item in plan.skipped_providers
     } == {
-        "CAPABILITY_NOT_SUPPORTED_BY_PROVIDER",
         "LIVE_NOT_SUPPORTED_BY_PROVIDER",
     }
 
@@ -104,12 +107,12 @@ def test_daily_routes_are_deterministic_and_fallback_bounded() -> None:
         _requirement("daily.ohlcv", session=MarketSession.CLOSED),
         {
             "yahoo_chart": _health("yahoo_chart", "daily.ohlcv"),
-            "alphavantage": _health("alphavantage", "daily.ohlcv"),
+            "alpaca": _health("alpaca", "daily.ohlcv"),
         },
     )
     assert [route.provider_key for route in plan.routes] == [
         "yahoo_chart",
-        "alphavantage",
+        "alpaca",
     ]
     assert all(route.route_timeout_seconds <= 30 for route in plan.routes)
 
@@ -119,16 +122,18 @@ def test_daily_provider_session_eligibility_fails_closed_during_continuous_sessi
         _requirement("daily.ohlcv", session=MarketSession.CONTINUOUS),
         {
             "yahoo_chart": _health("yahoo_chart", "daily.ohlcv"),
-            "alphavantage": _health("alphavantage", "daily.ohlcv"),
+            "alpaca": _health("alpaca", "daily.ohlcv"),
         },
     )
 
-    assert [route.provider_key for route in plan.routes] == ["yahoo_chart"]
-    assert any(
-        item.provider_key == "alphavantage"
-        and item.reason_code == "SESSION_NOT_SUPPORTED_BY_PROVIDER"
+    assert plan.routes == ()
+    assert {
+        (item.provider_key, item.reason_code)
         for item in plan.skipped_providers
-    )
+    } == {
+        ("yahoo_chart", "SESSION_NOT_SUPPORTED_BY_PROVIDER"),
+        ("alpaca", "SESSION_NOT_SUPPORTED_BY_PROVIDER"),
+    }
 
 
 def test_cache_only_never_builds_us_provider_routes() -> None:

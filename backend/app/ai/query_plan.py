@@ -252,10 +252,14 @@ CAPABILITY_HINTS = {
     ),
     "quote.session_close": (
         "今日收盤",
+        "今日的收盤",
+        "今天收盤",
+        "今天的收盤",
         "當日收盤",
         "盤後收盤",
         "session close",
         "completed session close",
+        "today's close",
     ),
     "chips.institutional": (
         "三大法人",

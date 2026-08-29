@@ -109,8 +109,7 @@ fill plan 與 error 不得分叉。
 
 Consumer 不得指定 SQL、內部 Python function、任意 provider URL 或無界 backfill。
 `/api/ai/tools` 是 public request schema 與 capability catalog 的真相來源，
-目前 registry v3 共 55 個 capabilities，並包含
-`x-omi-capability-registry-version` 與 `x-omi-capabilities`。Repo MCP
+並包含 registry version 與 capability metadata。Repo MCP
 `tools/list` 從此 endpoint 取得 schema，只添加 adapter-local
 `include_raw`；backend 無法連線時才使用相容 fallback schema。
 
@@ -247,9 +246,16 @@ continuation 表達，不靜默回傳完整大包。
 - `evidence.freshness_by_capability`：單一 capability 的 dataset、latest、
   expected、release/cooldown 與 refresh 建議。Quality authority 優先使用此層；
   `freshness_by_domain` 只做總覽與缺少細粒度資料時的 fallback。
+  對已進入 Market Data Foundation 的資料，這一層以 canonical `DatasetHealth`
+  與 `ResolvedEvidenceHealth` 為 truth owner；provider/source health 只保留獨立
+  diagnostic。缺少 source-health row 代表 provider diagnostic unknown，不得把已
+  healthy/current 的 canonical dataset 改判為 missing。
 - `evidence.quality`：availability、freshness、completeness、release phase、
   temporal alignment、unit、continuity、facts usability 與 decision usability
   的唯一 canonical 結論；manifest、slots、passport 與 readiness 都引用此層。
+  Payload存在不等於coverage complete；`is_full_market=false`的
+  `market.sample_ranking`固定為`coverage_status=sample_only`，不得由generic
+  payload truthiness升級成complete或decision usable。
 - `evidence.passport.source_trust`：依本次 selected capabilities 的 canonical
   quality 聚合，`trust_scope=selected_capabilities`；不得被未選取的基本面或跨市場
   context 缺口降級。producer 原始 passport trust 保留在
@@ -280,6 +286,15 @@ Registry 目前涵蓋：
   market breadth。
 - 美股：quote/intraday、daily price、technical indicators／structure、SEC company facts；technical quality會保留raw price basis、corporate-action coverage、warm-up與decision-usability限制。
 - Crypto：ticker/quote、OHLCV、order book、derivatives。
+
+Generic 台股 quote intent 只預設要求 `quote.snapshot`；`quote.session_close` 只有
+在 explicit selection 或問題明確要求今日／當日／盤後 completed-session close 時
+加入。Session close 不得成為所有 quote 問題的隱性 blocking dependency。
+
+`CapabilitySpec.paths` 是 outward capability projection 的唯一 executable path
+owner。`capability_projection_registry` 的 advertised projector 必須由這組 paths
+派生；shadow producer（例如 advanced technical shadow payload）不得另建一套可
+advertise 的 production path vocabulary。
 
 缺資料或 stale 時，backend 只為該 capability 建立一個 deterministic
 `action_id`。Action 說明 target、operation、fields、limit、預估 calls、
@@ -429,8 +444,10 @@ Rejected target 使用精簡 v4 envelope：requested target 會標
 - v4 目前由既有 decision pipeline 經 backend-owned v4 canonicalizer 投影；
   這是 private implementation detail，consumer 不得依賴 predecessor 或
   source contract metadata。
-- backend 內部 v2/v3 builder 暫時保留，避免破壞既有 evidence pipeline 與
-  regression seam；它們不屬於 public API。
+- Public `omi.decision.v4` 不得隨意 breaking；改變既有 consumer contract 必須有明確 impact、版本或 migration window、cutover 與 removal gate。Backend private predecessor／builder 不屬於 public API，不因曾有 caller 就自動永久相容。任何暫留 seam 都必須有明確 owner、reason、scope、consumer、sunset condition、removal gate、negative test 與必要 architecture debt，且不得擴張成新的 caller contract。
+- Private seam 的最後已記錄狀態由 [`CurrentImplementationState.md`](CurrentImplementationState.md) 導航；source inventory 由 tests／architecture debt 提供，不在本文件固定列舉。
+
+Temporal evidence 必須遵守 [`MarketTemporalContract.md`](MarketTemporalContract.md)：Market Session、item finalization、authority、release、reconciliation 與 freshness 分別輸出。`official_final` 若存在只能是保留 constituent fields 的 derived label，不是混合 session／release 的 primitive enum。
 
 ## 程式所有權
 

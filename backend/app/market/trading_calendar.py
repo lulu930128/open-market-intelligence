@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -65,6 +66,28 @@ TAIWAN_MARKET_HOLIDAYS: dict[int, dict[date, str]] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class TaiwanEmergencyMarketClosure:
+    """Market-owned overlay for closures announced outside the annual schedule."""
+
+    name: str
+    reason_code: str
+    source: str
+
+
+# Annual schedule caches can prove that a date was absent from the published
+# schedule, but that negative knowledge must not suppress a later emergency
+# closure.  These overlays therefore have higher precedence than the verified
+# annual cache and remain distinct from scheduled holidays.
+TAIWAN_EMERGENCY_MARKET_CLOSURES: dict[date, TaiwanEmergencyMarketClosure] = {
+    date(2026, 7, 10): TaiwanEmergencyMarketClosure(
+        name="Typhoon emergency market closure",
+        reason_code="TW_TYPHOON_EMERGENCY_CLOSURE",
+        source="Taiwan exchange emergency closure notice",
+    ),
+}
+
+
 def taiwan_now(now: datetime | None = None) -> datetime:
     if now is not None:
         return now.astimezone(TAIWAN_TZ)
@@ -77,6 +100,9 @@ def taiwan_today(now: datetime | None = None) -> date:
 
 
 def taiwan_market_holiday_name(value: date) -> str | None:
+    emergency_closure = TAIWAN_EMERGENCY_MARKET_CLOSURES.get(value)
+    if emergency_closure is not None:
+        return emergency_closure.name
     cached = cached_market_holiday("tw", value)
     if cached.covered:
         return cached.name
@@ -249,8 +275,10 @@ def latest_released_trading_day(
 
 __all__ = [
     "TAIWAN_CLOSE_RESOLUTION_TIME",
+    "TAIWAN_EMERGENCY_MARKET_CLOSURES",
     "TAIWAN_MARKET_HOLIDAYS",
     "TAIWAN_PRESENTATION_ROLLOVER_TIME",
+    "TaiwanEmergencyMarketClosure",
     "is_taiwan_market_holiday",
     "is_taiwan_trading_day",
     "latest_released_trading_day",

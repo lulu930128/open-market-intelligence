@@ -253,6 +253,21 @@ class BarTransactionPort(Protocol):
     ) -> PersistenceSummary: ...
 
 
+def _post_acquisition_reread_requirement(
+    requirement: DataRequirementV2,
+    receipts: Iterable[RawFetchReceiptV1],
+) -> DataRequirementV2:
+    """Advance only the reread cutoff to include evidence fetched by this request."""
+
+    latest_receipt_at = max(
+        (receipt.fetched_at for receipt in receipts),
+        default=requirement.requested_at,
+    )
+    if latest_receipt_at <= requirement.requested_at:
+        return requirement
+    return requirement.model_copy(update={"requested_at": latest_receipt_at})
+
+
 class QuoteTransactionPort(Protocol):
     def persist_quote_acquisition(
         self,
@@ -325,6 +340,20 @@ def _is_satisfied(status: ResolvedEvidenceStatus) -> bool:
     }
 
 
+def _bar_requirement_satisfied(
+    requirement: DataRequirementV2,
+    *,
+    status: ResolvedEvidenceStatus,
+    bar_count: int,
+) -> bool:
+    if not _is_satisfied(status):
+        return False
+    request = requirement.request
+    if not isinstance(request, BarCapabilityRequest) or request.coverage is None:
+        return True
+    return bar_count >= request.coverage.minimum_bar_count
+
+
 def _unique(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in values if item))
 
@@ -332,10 +361,17 @@ def _unique(values: tuple[str, ...]) -> tuple[str, ...]:
 def _merge_provider_health(
     *groups: tuple[ProviderResourceHealth, ...],
 ) -> tuple[ProviderResourceHealth, ...]:
-    merged: dict[tuple[str, str, str], ProviderResourceHealth] = {}
+    merged: dict[tuple[str, str, str, str | None], ProviderResourceHealth] = {}
     for group in groups:
         for item in group:
-            merged[(item.provider, item.market.value, item.capability)] = item
+            merged[
+                (
+                    item.provider,
+                    item.market.value,
+                    item.capability,
+                    item.resource_id,
+                )
+            ] = item
     return tuple(merged.values())
 
 
@@ -456,7 +492,11 @@ class MarketDataGateway:
         acquisition_health: tuple[ProviderResourceHealth, ...] = ()
         persistence = _not_persisted("PERSISTENCE_NOT_REQUIRED")
 
-        if _is_satisfied(resolved.health.status):
+        if _bar_requirement_satisfied(
+            requirement,
+            status=resolved.health.status,
+            bar_count=len(resolved.bars),
+        ):
             acquisition = _not_attempted("PRE_RESOLUTION_SATISFIED")
         elif not allows_external_acquisition(requirement.realtime_policy):
             acquisition = _not_attempted("READ_POLICY_FORBIDS_ACQUISITION")
@@ -492,8 +532,12 @@ class MarketDataGateway:
                         acquired,
                     )
                     self._validate_persistence_result(acquired, persistence)
-                    final_batch = self._read(requirement, reader)
-                    resolved = self._resolve(requirement, final_batch)
+                    reread_requirement = _post_acquisition_reread_requirement(
+                        requirement,
+                        acquired.receipts,
+                    )
+                    final_batch = self._read(reread_requirement, reader)
+                    resolved = self._resolve(reread_requirement, final_batch)
                 elif acquisition.attempted:
                     persistence = _not_persisted("NO_PERSISTABLE_ACQUISITION_EVIDENCE")
                 else:
@@ -514,6 +558,7 @@ class MarketDataGateway:
             limitations=_unique(
                 (
                     *final_batch.limitations,
+                    *resolved.composition.limitations,
                     *acquisition.limitations,
                 )
             ),

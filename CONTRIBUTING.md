@@ -1,6 +1,6 @@
 # Contributing to Open Market Intelligence
 
-感謝你願意改善 OMI。這個專案優先維持台股核心、本機優先、evidence-driven 與資料限制可見；它不是自動交易或保證績效的工具。
+感謝你願意改善 OMI。這個專案以台股作為 primary／reference market、美股作為 first-class research market，並優先維持本機優先、evidence-driven 與資料限制可見；它不是自動交易或保證績效的工具。
 
 ## 開始之前
 

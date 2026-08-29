@@ -19,6 +19,8 @@ from app.market_data.integration_contracts import (
     AcquisitionStatus,
     AcquisitionSummary,
     BarCapabilityRequest,
+    BarCoverageRequirement,
+    BarSeriesResolutionMode,
     DataRequirementV2,
     DatasetCapabilityRequest,
     DatasetTarget,
@@ -27,6 +29,8 @@ from app.market_data.integration_contracts import (
     MarketDataResultV1,
     PersistenceSummary,
     RawFetchReceiptV1,
+    RefreshCoverageScopeV1,
+    RefreshCursorV1,
     RefreshRequirementV1,
     RequestBounds,
     SnapshotCapabilityRequest,
@@ -90,6 +94,47 @@ def test_requirement_v2_serializes_typed_target_request_and_bounds() -> None:
     assert payload["request"]["kind"] == "bars"
     assert payload["request"]["capability_id"] == "daily.ohlcv"
     assert payload["bounds"]["max_external_calls"] == 0
+    assert payload["request"]["series_resolution"] == "single_candidate"
+
+
+def test_bar_coverage_is_explicit_and_does_not_repurpose_max_bars() -> None:
+    request = _bar_request().model_copy(
+        update={"coverage": BarCoverageRequirement(minimum_bar_count=2)}
+    )
+    requirement = _requirement(request=request)
+
+    assert requirement.request.max_bars == 2
+    assert requirement.request.coverage is not None
+    assert requirement.request.coverage.minimum_bar_count == 2
+
+    with pytest.raises(ValidationError, match="cannot exceed max_bars"):
+        _requirement(
+            request=_bar_request().model_copy(
+                update={"coverage": BarCoverageRequirement(minimum_bar_count=3)}
+            )
+        )
+
+
+def test_timestamp_composition_is_explicit_and_completed_session_only() -> None:
+    composed_request = _bar_request().model_copy(
+        update={"series_resolution": BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP}
+    )
+    composed = _requirement(request=composed_request)
+    assert (
+        composed.request.series_resolution
+        is BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP
+    )
+
+    with pytest.raises(ValidationError, match="requires completed_session"):
+        _requirement(
+            request=composed_request,
+            realtime_policy=RealtimePolicy.PREFER_LIVE,
+            bounds=RequestBounds(
+                max_rows=10,
+                max_provider_attempts=1,
+                max_external_calls=1,
+            ),
+        )
 
 
 def test_requirement_forbids_provider_control_and_external_cache_work() -> None:
@@ -135,6 +180,14 @@ def test_refresh_requirement_is_separate_bounded_mutation_without_provider() -> 
         to_date=date(2026, 8, 21),
         requested_at=NOW,
         purpose=DataPurpose.REPAIR,
+        reason_code="EXPECTED_SESSION_MISSING",
+        coverage=RefreshCoverageScopeV1(
+            scope_key="TW:2330",
+            target_count=1,
+            requested_symbols=("2330",),
+            minimum_observation_count=260,
+        ),
+        continuation=RefreshCursorV1(checkpoint_id="repair-20260821"),
         max_provider_attempts=2,
         max_external_calls=2,
         timeout_seconds=30,
@@ -143,11 +196,43 @@ def test_refresh_requirement_is_separate_bounded_mutation_without_provider() -> 
         postcondition="Latest persisted trade date reaches 2026-08-21.",
     )
     assert refresh.max_symbols == 1
+    assert refresh.reason_code == "EXPECTED_SESSION_MISSING"
+    assert refresh.coverage is not None
+    assert refresh.coverage.target_count == 1
+    assert refresh.coverage.minimum_observation_count == 260
+    assert refresh.continuation is not None
+    assert refresh.continuation.checkpoint_id == "repair-20260821"
 
     payload = refresh.model_dump(mode="python")
     payload["provider"] = "twse_openapi"
     with pytest.raises(ValidationError, match="Extra inputs"):
         RefreshRequirementV1(**payload)
+
+
+def test_refresh_coverage_fails_closed_when_scope_exceeds_budget() -> None:
+    values = {
+        "dataset_id": "tw.daily.ohlcv",
+        "target": InstrumentTarget(instrument=_instrument()),
+        "requested_at": NOW,
+        "purpose": DataPurpose.REPAIR,
+        "reason_code": "EXPECTED_SESSION_MISSING",
+        "coverage": RefreshCoverageScopeV1(
+            scope_key="TW:two-symbols",
+            target_count=2,
+            requested_symbols=("2330", "2317"),
+        ),
+        "max_provider_attempts": 1,
+        "max_external_calls": 1,
+        "timeout_seconds": 30,
+        "max_symbols": 1,
+        "max_range_days": 1,
+        "postcondition": "Expected completed session rereads as resolved evidence.",
+    }
+    with pytest.raises(ValidationError, match="exceeds max_symbols"):
+        RefreshRequirementV1(**values)
+
+    with pytest.raises(ValidationError, match="cursor or checkpoint_id"):
+        RefreshCursorV1()
 
 
 def test_v1_adapter_preserves_policy_without_adding_cache_io() -> None:
@@ -218,4 +303,12 @@ def test_raw_receipt_and_persistence_contracts_preserve_transaction_evidence() -
             committed=True,
             receipts_written=1,
             raw_result_ids=(1, 1),
+        )
+    with pytest.raises(ValidationError, match="cannot exceed observations_written"):
+        PersistenceSummary(
+            attempted=True,
+            committed=True,
+            observations_written=1,
+            observations_inserted=1,
+            observations_updated=1,
         )

@@ -1,0 +1,186 @@
+schema_version = 1
+
+[[rules]]
+id = "shared_market_data_reverse_dependency"
+kind = "python_forbidden_import"
+description = "Shared Market Data Foundation cannot depend on market-specific service namespaces."
+roots = ["backend/app/market_data"]
+extensions = [".py"]
+forbidden_prefixes = [
+  "app.market",
+  "app.us_market",
+  "app.jp_market",
+  "app.kr_market",
+  "app.crypto_market",
+]
+
+[[rules]]
+id = "shared_market_data_database_dependency"
+kind = "python_forbidden_import"
+description = "Shared Market Data Foundation cannot own SQLAlchemy models or database sessions."
+roots = ["backend/app/market_data"]
+extensions = [".py"]
+forbidden_prefixes = ["app.db", "sqlalchemy"]
+
+[[rules]]
+id = "shared_market_data_integration_dependency"
+kind = "python_forbidden_import"
+description = "Shared Market Data Foundation cannot import provider acquisition or ingestion implementations."
+roots = ["backend/app/market_data"]
+extensions = [".py"]
+forbidden_prefixes = ["app.sources", "app.pipelines"]
+
+[[rules]]
+id = "shared_market_data_transaction"
+kind = "python_forbidden_call"
+description = "Shared Market Data Foundation cannot commit, rollback, or flush database transactions."
+roots = ["backend/app/market_data"]
+extensions = [".py"]
+forbidden_call_names = ["commit", "rollback", "flush"]
+
+[[rules]]
+id = "router_transaction"
+kind = "python_forbidden_call"
+description = "FastAPI routers are transport boundaries and cannot own database transactions."
+roots = ["backend/app/routers"]
+extensions = [".py"]
+forbidden_call_names = ["commit", "rollback", "flush"]
+
+[[rules]]
+id = "get_side_effect"
+kind = "fastapi_get_side_effect"
+description = "GET handlers cannot directly trigger acquisition, refresh, repair, jobs, persistence, or dynamic side-effect flags."
+roots = ["backend/app/routers"]
+extensions = [".py"]
+side_effect_call_prefixes = [
+  "acquire_",
+  "backfill_",
+  "create_",
+  "delete_",
+  "dispatch_",
+  "enqueue_",
+  "ensure_",
+  "persist_",
+  "reconcile_",
+  "refresh_",
+  "reload_",
+  "repair_",
+  "send_",
+  "start_",
+  "stop_",
+  "subscribe_",
+  "sync_",
+  "update_",
+  "write_",
+]
+side_effect_keywords = [
+  "ensure_daily",
+  "ensure_history",
+  "ensure_latest",
+  "force",
+  "refresh",
+  "reload_all",
+  "repair",
+  "subscribe",
+]
+
+[[rules]]
+id = "ai_market_provider_dependency"
+kind = "python_forbidden_import"
+description = "AI decision code cannot import market provider implementations directly."
+roots = ["backend/app/ai"]
+extensions = [".py"]
+forbidden_prefixes = [
+  "app.market.providers",
+  "app.us_market.providers",
+  "app.jp_market.providers",
+  "app.kr_market.providers",
+  "app.crypto_market.providers",
+]
+
+[[rules]]
+id = "external_adapter_backend_dependency"
+kind = "python_forbidden_import"
+description = "MCP and external adapters cannot import OMI database or market provider implementations."
+roots = ["agents"]
+extensions = [".py"]
+forbidden_prefixes = [
+  "app.db",
+  "sqlalchemy",
+  "app.sources",
+  "app.pipelines",
+  "app.market.providers",
+  "app.us_market.providers",
+  "app.jp_market.providers",
+  "app.kr_market.providers",
+  "app.crypto_market.providers",
+]
+
+[[rules]]
+id = "frontend_provider_selection"
+kind = "frontend_provider_selection"
+description = "Frontend production requests cannot select a market-data provider."
+roots = ["frontend/src"]
+extensions = [".ts", ".tsx"]
+request_call_prefixes = ["request", "fetch"]
+production_path_prefixes = ["/api/"]
+diagnostic_path_fragments = ["/diagnostics/"]
+
+[[rules]]
+id = "legacy_root_architecture_review"
+kind = "forbidden_path"
+description = "Historical architecture review must not return to the repository root."
+paths = ["ARCHITECTURE_REVIEW.md"]
+
+[[rules]]
+id = "tw_consumer_canonical_storage_access"
+kind = "python_forbidden_import_names"
+description = "Taiwan outward and research consumers must use canonical daily, quote, and index owners instead of normalized storage rows."
+roots = [
+  "backend/app/ai",
+  "backend/app/market/adr_parity.py",
+  "backend/app/market/financial_valuation.py",
+  "backend/app/market/next_session_plan.py",
+  "backend/app/market/official_breadth_repository.py",
+  "backend/app/market/service.py",
+  "backend/app/market/stock_volume_pace.py",
+  "backend/app/market/technical_evidence.py",
+  "backend/app/market/market_chips.py",
+  "backend/app/market/tw_derivatives.py",
+  "backend/app/market/tw_market_dashboard.py",
+  "backend/app/watchlists/radar_outcome_service.py",
+  "backend/app/watchlists/radar_outcome_v2_service.py",
+  "backend/app/watchlists/radar_automation.py",
+  "backend/app/watchlists/radar_backtest_v2.py",
+  "backend/app/watchlists/radar_shadow_v2_service.py",
+  "backend/app/watchlists/radar_v2_service.py",
+]
+extensions = [".py"]
+modules = ["app.db.models"]
+forbidden_names = [
+  "MarketDailyPrice",
+  "MarketIndexDailyStat",
+  "TaiwanStockQuoteSnapshot",
+]
+
+[[rules]]
+id = "tw_radar_canonical_intraday_access"
+kind = "python_forbidden_import_names"
+description = "Taiwan radar outcome readers must use tw.intraday.bars instead of persisted bar rows."
+roots = ["backend/app/watchlists/radar_outcome_service.py"]
+extensions = [".py"]
+modules = ["app.db.models"]
+forbidden_names = ["MarketIntradayBar"]
+
+[[rules]]
+id = "us_consumer_canonical_daily_access"
+kind = "python_forbidden_import_names"
+description = "US outward, AI, and cross-market consumers must use the canonical US daily platform instead of USDailyPrice rows."
+roots = [
+  "backend/app/ai",
+  "backend/app/market",
+  "backend/app/watchlists",
+]
+extensions = [".py"]
+modules = ["app.db.models"]
+forbidden_names = ["USDailyPrice"]

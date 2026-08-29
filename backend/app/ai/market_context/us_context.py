@@ -23,10 +23,10 @@ from app.ai.market_payload_contract import (
     payload_level as _market_payload_level,
     requested_intraday_interval as _requested_intraday_interval,
 )
-from app.db.models import USDailyPrice, USSecCompanyFact, USStockMaster
+from app.db.models import USSecCompanyFact, USStockMaster
 from app.market.calendar_status import build_us_calendar_status
 from app.observability.source_health_contract import summarize_source_health
-from app.us_market.chart_projection import filter_ohlc_source_rows
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 from app.us_market.trading_calendar import (
@@ -45,9 +45,62 @@ class USContextDependencies:
     now: Callable[[], datetime]
 
 
-def _select_latest_daily(rows: list[USDailyPrice]) -> USDailyPrice | None:
-    canonical_rows = filter_ohlc_source_rows(rows)
-    return canonical_rows[-1] if canonical_rows else None
+@dataclass(frozen=True)
+class _ResolvedDailyContextRow:
+    provider: str
+    symbol: str
+    trade_date: Any
+    currency: str
+    open_price: float | None
+    high_price: float | None
+    low_price: float | None
+    close_price: float | None
+    adjusted_close: float | None
+    trade_volume: int | float | None
+    fetched_at: datetime | None
+    source: str | None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolved_daily_context_rows(
+    projection: dict[str, Any],
+    *,
+    symbol: str,
+    limit: int,
+) -> list[_ResolvedDailyContextRow]:
+    rows: list[_ResolvedDailyContextRow] = []
+    for bar in projection.get("bars") or []:
+        if not isinstance(bar, dict):
+            continue
+        end_at = _parse_market_datetime(bar.get("end_at"))
+        if end_at is None:
+            continue
+        volume = _optional_float(bar.get("volume"))
+        rows.append(
+            _ResolvedDailyContextRow(
+                provider=str(bar.get("provider") or "unresolved"),
+                symbol=symbol,
+                trade_date=end_at.astimezone(US_MARKET_TIMEZONE).date(),
+                currency="USD",
+                open_price=_optional_float(bar.get("open_price")),
+                high_price=_optional_float(bar.get("high_price")),
+                low_price=_optional_float(bar.get("low_price")),
+                close_price=_optional_float(bar.get("close_price")),
+                adjusted_close=None,
+                trade_volume=(
+                    int(volume) if volume is not None and volume.is_integer() else volume
+                ),
+                fetched_at=_parse_market_datetime(bar.get("fetched_at")),
+                source=str(bar.get("source")) if bar.get("source") else None,
+            )
+        )
+    return rows[-limit:]
 
 
 def _latest_tool_result(tool_runs: list[dict[str, Any]], tool_name: str) -> dict[str, Any] | None:
@@ -351,7 +404,7 @@ def _us_intraday_latest_time(intraday_summary: dict[str, Any] | None) -> str | N
 
 
 def _us_daily_quote(
-    latest_daily: USDailyPrice | None,
+    latest_daily: _ResolvedDailyContextRow | None,
     *,
     intraday_requested: bool,
     calendar_status: dict[str, Any] | None = None,
@@ -546,7 +599,6 @@ def read_us_stock_context(
     daily_limit = _market_data_int(market_data_params, "daily_limit", 10, minimum=1, maximum=200)
     timeframe = _market_data_str(market_data_params, "timeframe", "daily") or "daily"
     bars = _market_data_int(market_data_params, "bars", 90, minimum=1, maximum=5000)
-    provider = _market_data_str(market_data_params, "provider", "auto") or "auto"
     include_intraday = _market_data_bool(market_data_params, "include_intraday", False)
     payload_level = _market_payload_level(market_data_params)
     session_scope = _market_data_str(market_data_params, "session_scope", "regular") or "regular"
@@ -570,19 +622,37 @@ def read_us_stock_context(
         .filter(USStockMaster.symbol == normalized_symbol)
         .first()
     )
-    daily_rows = (
-        dependencies.us_market_service.list_us_daily_prices(
-            db=db,
-            symbol=normalized_symbol,
-            from_date=requested_trade_date_value,
-            to_date=requested_trade_date_value,
-            limit=daily_limit,
-        )
-        if needs_daily
-        else []
+    context_now = dependencies.now()
+    daily_rows: list[_ResolvedDailyContextRow] = []
+    daily_platform_result = None
+    daily_projection: dict[str, Any] = {}
+    if needs_daily:
+        try:
+            daily_platform_result = USDailyOhlcvPlatform(db).read(
+                symbol=normalized_symbol,
+                bars=bars,
+                now=context_now,
+                to_date=requested_trade_date_value,
+            )
+            daily_projection = daily_platform_result.projection
+            daily_rows = _resolved_daily_context_rows(
+                daily_projection,
+                symbol=normalized_symbol,
+                limit=daily_limit,
+            )
+        except (LookupError, ValueError) as exc:
+            daily_projection = {"limitations": [str(exc)]}
+    selected_daily_provider = daily_projection.get("selected_provider")
+    selected_daily_date = daily_projection.get("latest_trade_date")
+    latest_daily = next(
+        (
+            row
+            for row in reversed(daily_rows)
+            if row.provider == selected_daily_provider
+            and row.trade_date.isoformat() == selected_daily_date
+        ),
+        None,
     )
-    latest_daily = _select_latest_daily(daily_rows)
-    selected_daily_provider = latest_daily.provider if latest_daily else None
     profile = (
         None
         if is_index or not needs_profile
@@ -754,16 +824,11 @@ def read_us_stock_context(
     chart: dict[str, Any] = {}
     if needs_chart:
         try:
-            chart = dependencies.us_market_service.list_us_ohlc_chart_data(
+            chart = dependencies.us_market_service.read_us_daily_ohlcv_chart(
                 db=db,
                 symbol=normalized_symbol,
                 timeframe=timeframe,
                 bars=bars,
-                ensure_history=False,
-                include_intraday=False,
-                outputsize="compact",
-                adjusted=False,
-                provider=provider,
                 to_date=requested_trade_date_value,
             )
             if intraday_requested and session_scope != "regular":
@@ -774,21 +839,8 @@ def read_us_stock_context(
             missing.append("us_ohlc_chart")
             warnings.append(f"US OHLC chart unavailable: {exc}")
 
-    daily_canary_builder = getattr(
-        dependencies.us_market_service,
-        "get_us_daily_resolved_canary",
-        None,
-    )
-    if callable(daily_canary_builder) and chart:
-        daily_resolved_candidate = daily_canary_builder(
-            db=db,
-            symbol=normalized_symbol,
-            legacy_chart=chart,
-            instrument_type=instrument_type,
-            venue=getattr(stock, "exchange", None) if stock is not None else None,
-        )
-        if isinstance(daily_resolved_candidate, dict):
-            resolved_market_data.update(daily_resolved_candidate)
+    if daily_projection:
+        resolved_market_data["daily_ohlcv"] = daily_projection
 
     resolved_research: dict[str, Any] = {}
     research_builder = getattr(
@@ -842,16 +894,15 @@ def read_us_stock_context(
 
     source_refs: list[dict[str, Any]] = []
     for row in daily_rows[:3]:
-        if row.source_url:
-            source_refs.append(
-                {
-                    "kind": "us_daily_price",
-                    "provider": row.provider,
-                    "symbol": row.symbol,
-                    "date": row.trade_date.isoformat(),
-                    "url": row.source_url,
-                }
-            )
+        source_refs.append(
+            {
+                "kind": "us_daily_price",
+                "provider": row.provider,
+                "source": row.source,
+                "symbol": row.symbol,
+                "date": row.trade_date.isoformat(),
+            }
+        )
     if profile and profile.source_url:
         source_refs.append(
             {
@@ -893,7 +944,6 @@ def read_us_stock_context(
     if intraday_summary:
         _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "yahoo_finance_chart"})
 
-    context_now = dependencies.now()
     us_calendar_status = build_us_calendar_status(now=context_now)
     intraday_quote = _us_intraday_quote(
         intraday_summary,
@@ -1081,7 +1131,7 @@ def read_us_stock_context(
             "timeframe": timeframe,
             "bars": bars,
             "payload_level": payload_level,
-            "requested_provider": provider,
+            "requested_provider": None,
             "selected_provider": selected_daily_provider,
             "requested_trade_date": requested_trade_date,
             "intraday": intraday_summary or {},
@@ -1091,9 +1141,15 @@ def read_us_stock_context(
         freshness={
             "price": (
                 "historical"
-                if requested_trade_date is not None and latest_daily
+                if requested_trade_date is not None
+                and daily_platform_result is not None
+                and daily_platform_result.postcondition_satisfied
                 else "current"
-                if latest_daily or intraday_quote
+                if (
+                    daily_platform_result is not None
+                    and daily_platform_result.postcondition_satisfied
+                )
+                or intraday_quote
                 else "missing"
             ),
             "profile": "current" if profile else "missing",
@@ -1102,7 +1158,12 @@ def read_us_stock_context(
             ),
             "insider_transactions": insider_status,
             "institutional_holdings": institutional_status,
-            "chart": "current" if chart else "missing",
+            "chart": (
+                "current"
+                if daily_platform_result is not None
+                and daily_platform_result.postcondition_satisfied
+                else "missing"
+            ),
             "intraday": (
                 "current"
                 if intraday_quote

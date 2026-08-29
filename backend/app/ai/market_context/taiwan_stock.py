@@ -1161,10 +1161,6 @@ def read_stock_quote_context(
         missing.append(str(item))
     for item in event_context.get("warnings") or []:
         warnings.append(str(item))
-    for source_ref in event_context.get("source_refs") or []:
-        if isinstance(source_ref, dict):
-            _append_source_ref_once(source_refs, source_ref)
-
     intraday_read_allowed = bool(
         str(params.get("realtime_policy") or "") == "cache_only"
         or cached_fallback_allowed
@@ -1424,6 +1420,9 @@ def read_stock_quote_context(
         source_refs,
         {"type": "derived", "name": "app.market.source_health"},
     )
+    for source_ref in event_context.get("source_refs") or []:
+        if isinstance(source_ref, dict):
+            _append_source_ref_once(source_refs, source_ref)
     intraday_domain_status = (
         str((intraday_series.get("1m") or {}).get("freshness_status") or "unavailable")
         if intraday_requested
@@ -1966,6 +1965,7 @@ def read_stock_technical_context(
         missing=missing,
         warnings=warnings,
         source_refs=source_refs,
+        latest_daily_evidence=latest_daily_evidence,
     )
     envelope = {
         "kind": "stock_technical_context",
@@ -2517,6 +2517,7 @@ def read_stock_context(
                 source_refs=source_refs,
                 financial_contract=financial_contract,
                 fundamentals_applicable=fundamentals_applicable,
+                latest_daily_evidence=latest_daily_evidence,
             ),
             "market_calendar_status": market_calendar_status,
             "source_health": source_health,

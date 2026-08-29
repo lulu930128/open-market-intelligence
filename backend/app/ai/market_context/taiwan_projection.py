@@ -2597,6 +2597,118 @@ def _freshness_for_resource(
     }
 
 
+def _canonical_field(value: Any, field: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(field)
+    return getattr(value, field, None)
+
+
+def _enum_value(value: Any) -> str | None:
+    raw = getattr(value, "value", value)
+    text = str(raw or "").strip().lower()
+    return text or None
+
+
+def _canonical_daily_freshness(
+    *,
+    canonical_daily_evidence: Any,
+    source_health: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Project canonical daily truth while keeping provider health diagnostic."""
+
+    dataset_health = _canonical_field(canonical_daily_evidence, "dataset_health")
+    resolved_health = _canonical_field(canonical_daily_evidence, "resolved_health")
+    if dataset_health is None and resolved_health is None:
+        return None
+
+    provider_entry = next(
+        (
+            _compact_source_health_entry(item)
+            for item in _source_health_entries(source_health)
+            if item.get("resource") == "market_daily_price"
+        ),
+        None,
+    )
+    provider_diagnostic = {
+        "status": (
+            str(provider_entry.get("status") or "unknown")
+            if provider_entry is not None
+            else "unknown"
+        ),
+        "reason": (
+            provider_entry.get("reason")
+            if provider_entry is not None
+            else "No source-health row is available for market_daily_price."
+        ),
+    }
+
+    resolved_status = _enum_value(_canonical_field(resolved_health, "status"))
+    dataset_status = _enum_value(_canonical_field(dataset_health, "status"))
+    if dataset_status is not None:
+        status = {
+            "healthy": "current",
+            "stale": "stale",
+            "partial": "partial",
+            "missing": "missing",
+            "not_applicable": "not_applicable",
+            "unavailable": "unavailable",
+            "unknown": "unknown",
+        }.get(dataset_status, "unknown")
+        if status == "current":
+            status = {
+                "partial": "partial",
+                "stale": "stale",
+                "missing": "missing",
+                "policy_unsatisfied": "unavailable",
+            }.get(resolved_status, status)
+        return {
+            "status": status,
+            "dataset": (
+                _canonical_field(dataset_health, "dataset_id")
+                or "market_daily_price"
+            ),
+            "is_current": status == "current",
+            "latest": _json_value(_canonical_field(dataset_health, "latest_date")),
+            "expected": _json_value(
+                _canonical_field(dataset_health, "expected_date")
+            ),
+            "refresh_recommended": bool(
+                _canonical_field(dataset_health, "refreshable")
+                and status in {"missing", "partial", "stale", "unavailable"}
+            ),
+            "reason": _canonical_field(dataset_health, "detail_code"),
+            "canonical_status_ref": "dataset_health",
+            "resolved_status": resolved_status,
+            "provider_diagnostic": provider_diagnostic,
+        }
+
+    if resolved_status is None:
+        return None
+    status = {
+        "selected": "current",
+        "fallback": "current",
+        "partial": "partial",
+        "stale": "stale",
+        "missing": "missing",
+        "policy_unsatisfied": "unavailable",
+    }.get(resolved_status, "unknown")
+    return {
+        "status": status,
+        "dataset": "market_daily_price",
+        "is_current": status == "current",
+        "latest": _json_value(
+            _canonical_field(resolved_health, "selected_event_at")
+        ),
+        "expected": None,
+        "refresh_recommended": False,
+        "reason": _canonical_field(resolved_health, "selection_reason"),
+        "canonical_status_ref": "resolved_evidence_health",
+        "provider": _canonical_field(resolved_health, "selected_provider"),
+        "source": _canonical_field(resolved_health, "selected_source"),
+        "provider_diagnostic": provider_diagnostic,
+    }
+
+
 def _build_freshness_by_capability(
     *,
     quote: dict[str, Any],
@@ -2604,6 +2716,7 @@ def _build_freshness_by_capability(
     source_health: dict[str, Any] | None,
     overnight_impact: dict[str, Any] | None,
     missing: list[str],
+    canonical_daily_evidence: Any = None,
 ) -> dict[str, Any]:
     quote_freshness = _quote_freshness_domain(quote)
     intraday_resource = _intraday_bar_freshness_resource(intraday_bars)
@@ -2654,7 +2767,15 @@ def _build_freshness_by_capability(
         },
     }
     for capability_id, resource in CAPABILITY_FRESHNESS_RESOURCES.items():
-        output[capability_id] = _freshness_for_resource(
+        canonical_freshness = (
+            _canonical_daily_freshness(
+                canonical_daily_evidence=canonical_daily_evidence,
+                source_health=source_health,
+            )
+            if resource == "market_daily_price"
+            else None
+        )
+        output[capability_id] = canonical_freshness or _freshness_for_resource(
             source_health=source_health,
             resource=resource,
             missing=missing,
@@ -3898,6 +4019,7 @@ def _build_stock_compact_evidence(
     technical_evidence: dict[str, Any] | None = None,
     financial_contract: dict[str, Any] | None = None,
     fundamentals_applicable: bool = True,
+    latest_daily_evidence: Any = None,
 ) -> dict[str, Any]:
     target = {
         "type": "tw_stock",
@@ -4168,6 +4290,7 @@ def _build_stock_compact_evidence(
         source_health=source_health,
         overnight_impact=overnight_impact,
         missing=missing,
+        canonical_daily_evidence=latest_daily_evidence,
     )
     freshness_by_capability.update(
         event_context.get("freshness_by_capability")

@@ -126,9 +126,9 @@ Outcome v2 同時保存：
 
 Frontend 只呈現 backend 的 version、score、regime、quality、tag 與 limitation，不重算 Radar 邏輯。
 
-## 正式切換條件
+## Version promotion 條件
 
-`active_version` 從 v1 切到 v2 前，至少需要：
+任何 `active_version` promotion 至少需要：
 
 1. migration、v1 golden contract、API 相容性與 scheduler regression 全部通過。
 2. T+1/T+3/T+5 outcome 累積到預先定義的 coverage/sample gate。
@@ -137,7 +137,7 @@ Frontend 只呈現 backend 的 version、score、regime、quality、tag 與 limi
 5. shadow comparison 與 rollback 演練通過。
 6. 使用者明確核准 active-version 切換。
 
-## 2026-07-31 Active Contract
+## Active v2 contract
 
 台股 Radar 的 operational default 已切換為 `radar_v2.0`。這是產品路由與責任
 歸屬的切換，不代表績效推廣門檻已通過。
@@ -180,7 +180,7 @@ Frontend 只呈現 backend 的 version、score、regime、quality、tag 與 limi
 v1 code、schema 與歷史資料目前不刪除；移除 v1 必須等 rollback 觀察期、
 consumer migration 與回測/outcome coverage 都完成後另立任務。
 
-## 2026-08-01 v2 正式版與 v1 凍結
+## Legacy v1 freeze 與 audit boundary
 
 - 台股 Radar frontend 的主畫面、latest outcome、history 與 detail 只呼叫 v2 contract。
 - frontend 不重算 v2 `summary_state`；直接呈現 backend 的 return、MFE、MAE、

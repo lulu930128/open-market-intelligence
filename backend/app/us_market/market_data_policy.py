@@ -15,13 +15,18 @@ from app.market_data.provider_policy import (
     ProviderDescriptor,
     plan_acquisition,
 )
+from app.market_data.provider_catalog import AcquisitionMode
+from app.us_market.market_data.descriptors import (
+    US_DAILY_CANDIDATE_DESCRIPTORS,
+    US_DAILY_PROVIDER_DESCRIPTORS,
+)
 
 
 US_PROVIDER_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
     ProviderDescriptor(
         provider_key="yahoo_chart",
         market=Market.US,
-        capabilities=("quote.snapshot", "intraday.bars", "daily.ohlcv"),
+        capabilities=("quote.snapshot", "intraday.bars"),
         priority=100,
         supported_sessions=(
             MarketSession.PRE_OPEN,
@@ -34,24 +39,50 @@ US_PROVIDER_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         can_produce_live=False,
         max_timeout_seconds=25,
     ),
-    ProviderDescriptor(
-        provider_key="alphavantage",
-        market=Market.US,
-        capabilities=("daily.ohlcv",),
-        priority=110,
-        supported_sessions=(MarketSession.CLOSED,),
-        supports_external_fetch=True,
-        can_produce_live=False,
-        max_timeout_seconds=30,
-    ),
 )
+
+
+def _provider_descriptors(
+    capability_id: str,
+    *,
+    include_daily_candidates: bool = True,
+) -> tuple[ProviderDescriptor, ...]:
+    """Project the canonical V2 Daily catalog into the legacy policy shape.
+
+    Quote/intraday callers still use the legacy policy contract. Daily priority
+    and eligibility are owned only by ``US_DAILY_PROVIDER_DESCRIPTORS``.
+    """
+
+    if capability_id != "daily.ohlcv":
+        return tuple(
+            item for item in US_PROVIDER_DESCRIPTORS
+            if capability_id in item.capabilities
+        )
+    daily_descriptors = (
+        US_DAILY_CANDIDATE_DESCRIPTORS
+        if include_daily_candidates
+        else US_DAILY_PROVIDER_DESCRIPTORS
+    )
+    return tuple(
+        ProviderDescriptor(
+            provider_key=item.provider_key,
+            market=item.market,
+            capabilities=(item.capability_id,),
+            priority=item.priority,
+            supported_sessions=item.supported_sessions,
+            supports_external_fetch=AcquisitionMode.FETCH in item.acquisition_modes,
+            can_produce_live=item.can_produce_live,
+            max_timeout_seconds=item.max_timeout_seconds,
+        )
+        for item in daily_descriptors
+    )
 
 
 def us_provider_priority(provider_key: str, capability_id: str) -> int:
     """Return the single market-owned priority for one provider capability."""
 
     normalized_provider = str(provider_key).strip().lower()
-    for descriptor in US_PROVIDER_DESCRIPTORS:
+    for descriptor in _provider_descriptors(capability_id):
         if (
             descriptor.provider_key == normalized_provider
             and capability_id in descriptor.capabilities
@@ -66,8 +97,7 @@ def us_provider_order(capability_id: str) -> tuple[str, ...]:
         for descriptor in sorted(
             (
                 item
-                for item in US_PROVIDER_DESCRIPTORS
-                if capability_id in item.capabilities
+                for item in _provider_descriptors(capability_id)
             ),
             key=lambda item: (item.priority, item.provider_key),
         )
@@ -89,7 +119,10 @@ def build_us_acquisition_plan(
         raise ValueError("US acquisition planning requires a US instrument")
     return plan_acquisition(
         requirement,
-        US_PROVIDER_DESCRIPTORS,
+        _provider_descriptors(
+            requirement.capability_id,
+            include_daily_candidates=False,
+        ),
         provider_health,
         max_provider_attempts=max_provider_attempts,
         overall_timeout_seconds=overall_timeout_seconds,

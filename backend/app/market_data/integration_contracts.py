@@ -86,6 +86,24 @@ class SnapshotCapabilityRequest(CanonicalModel):
         return _normalize_required_fields(value)
 
 
+class BarSeriesResolutionMode(str, Enum):
+    """Provider-neutral bar-series selection semantics.
+
+    Timestamp composition is explicit so a market-specific requirement cannot
+    silently change whole-series selection for other markets.
+    """
+
+    SINGLE_CANDIDATE = "single_candidate"
+    COMPOSE_BY_TIMESTAMP = "compose_by_timestamp"
+
+
+class BarCoverageRequirement(CanonicalModel):
+    """Provider-neutral minimum depth required by an explicit bar operation."""
+
+    contract_version: str = "omi.market.bar_coverage_requirement.v1"
+    minimum_bar_count: int = Field(ge=1, le=5000)
+
+
 class BarCapabilityRequest(CanonicalModel):
     kind: Literal["bars"] = "bars"
     capability_id: str = Field(min_length=1, max_length=128)
@@ -95,6 +113,10 @@ class BarCapabilityRequest(CanonicalModel):
     max_bars: int = Field(default=500, ge=1, le=5000)
     completed_only: bool = False
     price_basis: Literal["raw", "adjusted", "provider_default"] = "raw"
+    series_resolution: BarSeriesResolutionMode = (
+        BarSeriesResolutionMode.SINGLE_CANDIDATE
+    )
+    coverage: BarCoverageRequirement | None = None
 
     @field_validator("start_at", "end_at")
     @classmethod
@@ -130,8 +152,14 @@ CapabilityRequest = Annotated[
 ]
 
 
+class FreshnessBasis(str, Enum):
+    WALL_CLOCK = "wall_clock"
+    COMPLETED_SESSION_DATE = "completed_session_date"
+
+
 class FreshnessRequirement(CanonicalModel):
     max_age_seconds: int = Field(ge=1, le=2_678_400)
+    basis: FreshnessBasis = FreshnessBasis.WALL_CLOCK
 
 
 class QualityRequirement(CanonicalModel):
@@ -206,6 +234,19 @@ class DataRequirementV2(CanonicalModel):
         if isinstance(self.request, BarCapabilityRequest):
             if self.request.max_bars > self.bounds.max_rows:
                 raise ValueError("bar max_bars cannot exceed bounds.max_rows")
+            if (
+                self.request.coverage is not None
+                and self.request.coverage.minimum_bar_count > self.request.max_bars
+            ):
+                raise ValueError("bar coverage minimum cannot exceed max_bars")
+            if (
+                self.request.series_resolution
+                is BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP
+                and self.realtime_policy is not RealtimePolicy.COMPLETED_SESSION
+            ):
+                raise ValueError(
+                    "compose_by_timestamp currently requires completed_session policy"
+                )
         return self
 
 
@@ -244,6 +285,39 @@ def adapt_v1_requirement(requirement: DataRequirement) -> DataRequirementV2:
     )
 
 
+class RefreshCoverageScopeV1(CanonicalModel):
+    """Bounded coverage intent for a mutation without provider routing details."""
+
+    contract_version: str = "omi.market.refresh_coverage_scope.v1"
+    scope_key: str = Field(min_length=1, max_length=192)
+    target_count: int | None = Field(default=None, ge=0, le=100_000)
+    requested_symbols: tuple[str, ...] = Field(default=(), max_length=5_000)
+    minimum_observation_count: int | None = Field(default=None, ge=1, le=5000)
+
+    @model_validator(mode="after")
+    def _validate_target_count(self) -> RefreshCoverageScopeV1:
+        if self.target_count is not None and self.requested_symbols:
+            if self.target_count != len(self.requested_symbols):
+                raise ValueError(
+                    "coverage target_count must match requested_symbols when both are set"
+                )
+        return self
+
+
+class RefreshCursorV1(CanonicalModel):
+    """Opaque, dataset-owned continuation identity safe for shared dispatch."""
+
+    contract_version: str = "omi.market.refresh_cursor.v1"
+    cursor: str | None = Field(default=None, max_length=512)
+    checkpoint_id: str | None = Field(default=None, max_length=192)
+
+    @model_validator(mode="after")
+    def _require_identity(self) -> RefreshCursorV1:
+        if self.cursor is None and self.checkpoint_id is None:
+            raise ValueError("refresh cursor requires cursor or checkpoint_id")
+        return self
+
+
 class RefreshRequirementV1(CanonicalModel):
     contract_version: str = "omi.market.refresh_requirement.v1"
     dataset_id: str = Field(min_length=1, max_length=128)
@@ -252,6 +326,11 @@ class RefreshRequirementV1(CanonicalModel):
     to_date: date | None = None
     requested_at: datetime
     purpose: Literal[DataPurpose.REPAIR, DataPurpose.BACKGROUND_COLLECTOR]
+    reason_code: str = Field(
+        default="LEGACY_UNSPECIFIED_REFRESH_REASON", min_length=1, max_length=64
+    )
+    coverage: RefreshCoverageScopeV1 | None = None
+    continuation: RefreshCursorV1 | None = None
     max_provider_attempts: int = Field(ge=1, le=8)
     max_external_calls: int = Field(ge=1, le=20)
     timeout_seconds: int = Field(ge=1, le=120)
@@ -273,6 +352,14 @@ class RefreshRequirementV1(CanonicalModel):
                 raise ValueError("refresh from_date cannot be after to_date")
             if (self.to_date - self.from_date).days + 1 > self.max_range_days:
                 raise ValueError("refresh range exceeds max_range_days")
+        if self.coverage is not None:
+            if (
+                self.coverage.target_count is not None
+                and self.coverage.target_count > self.max_symbols
+            ):
+                raise ValueError("coverage target_count exceeds max_symbols")
+            if len(self.coverage.requested_symbols) > self.max_symbols:
+                raise ValueError("coverage requested_symbols exceeds max_symbols")
         return self
 
 
@@ -367,6 +454,8 @@ class PersistenceSummary(CanonicalModel):
     committed: bool = False
     receipts_written: int = Field(default=0, ge=0, le=20)
     observations_written: int = Field(default=0, ge=0, le=5000)
+    observations_inserted: int = Field(default=0, ge=0, le=5000)
+    observations_updated: int = Field(default=0, ge=0, le=5000)
     observations_unchanged: int = Field(default=0, ge=0, le=5000)
     raw_result_ids: tuple[int, ...] = Field(default=(), max_length=20)
     limitations: tuple[str, ...] = ()
@@ -377,6 +466,8 @@ class PersistenceSummary(CanonicalModel):
             (
                 self.receipts_written,
                 self.observations_written,
+                self.observations_inserted,
+                self.observations_updated,
                 self.observations_unchanged,
                 len(self.raw_result_ids),
             )
@@ -387,6 +478,10 @@ class PersistenceSummary(CanonicalModel):
             raise ValueError("committed persistence must be attempted")
         if len(set(self.raw_result_ids)) != len(self.raw_result_ids):
             raise ValueError("raw_result_ids must be unique")
+        if self.observations_inserted + self.observations_updated > self.observations_written:
+            raise ValueError(
+                "inserted and updated observation counts cannot exceed observations_written"
+            )
         return self
 
 
@@ -442,16 +537,21 @@ __all__ = [
     "AcquisitionSummary",
     "AcquisitionResourceAttempt",
     "BarCapabilityRequest",
+    "BarCoverageRequirement",
+    "BarSeriesResolutionMode",
     "CapabilityRequest",
     "DataRequirementV2",
     "DatasetCapabilityRequest",
     "DatasetTarget",
+    "FreshnessBasis",
     "FreshnessRequirement",
     "InstrumentTarget",
     "MarketDataResultV1",
     "PersistenceSummary",
     "QualityRequirement",
     "RawFetchReceiptV1",
+    "RefreshCoverageScopeV1",
+    "RefreshCursorV1",
     "RefreshRequirementV1",
     "RequestBounds",
     "RequirementTarget",

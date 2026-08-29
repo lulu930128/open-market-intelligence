@@ -31,6 +31,36 @@ jobs:
         shell: powershell
         run: .\scripts\check-release-version.ps1
 
+  architecture:
+    name: Architecture guard (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install architecture test dependencies
+        run: python -m pip install pydantic==2.13.4 pytest==9.1.0
+
+      - name: Run architecture checker
+        run: python scripts\check-architecture.py
+
+      - name: Run architecture tests
+        env:
+          PYTHONPATH: backend
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m pytest -p no:cacheprovider backend\tests\architecture
+
   backend:
     name: Backend (Python ${{ matrix.python-version }})
     runs-on: windows-latest

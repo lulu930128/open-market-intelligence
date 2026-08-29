@@ -21,7 +21,12 @@ from app.jp_market.trading_calendar import (
     next_jp_trading_day,
     previous_jp_trading_day,
 )
-from app.market.trading_calendar import is_taiwan_trading_day, latest_released_trading_day
+from app.market.trading_calendar import (
+    is_taiwan_trading_day,
+    latest_released_trading_day,
+    next_taiwan_trading_day,
+    taiwan_market_holiday_name,
+)
 from app.us_market.trading_calendar import (
     expected_us_daily_price_date,
     is_us_early_close_day,
@@ -45,6 +50,23 @@ class TaiwanTradingCalendarTests(unittest.TestCase):
         self.assertFalse(is_taiwan_trading_day(date(2026, 2, 16)))
         self.assertFalse(is_taiwan_trading_day(date(2026, 2, 27)))
         self.assertFalse(is_taiwan_trading_day(date(2026, 6, 19)))
+
+    def test_2026_typhoon_closure_is_owned_by_calendar_overlay(self) -> None:
+        self.assertFalse(is_taiwan_trading_day(date(2026, 7, 10)))
+        self.assertEqual(
+            next_taiwan_trading_day(date(2026, 7, 9)),
+            date(2026, 7, 13),
+        )
+
+    def test_verified_schedule_absence_cannot_suppress_emergency_closure(self) -> None:
+        with patch(
+            "app.market.trading_calendar.cached_market_holiday",
+            return_value=SimpleNamespace(covered=True, name=None),
+        ):
+            self.assertEqual(
+                taiwan_market_holiday_name(date(2026, 7, 10)),
+                "Typhoon emergency market closure",
+            )
 
     def test_release_day_skips_holiday_and_waits_for_release_time(self) -> None:
         timezone = ZoneInfo("Asia/Taipei")

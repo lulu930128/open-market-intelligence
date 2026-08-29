@@ -12,6 +12,7 @@ from app.observability.provider_health import (
     list_source_health_snapshots,
 )
 from app.observability.schemas import ProviderEventRead, SourceHealthSnapshotRead
+from app.us_market.daily_rollout import us_daily_rollout_snapshot
 
 router = APIRouter()
 
@@ -33,6 +34,7 @@ def health_check():
         settings.us_canonical_market_data_mode
         or settings.canonical_market_data_mode
     )
+    us_daily_rollout = us_daily_rollout_snapshot()
     return {
         "status": "ok",
         "app_name": settings.app_name,
@@ -58,6 +60,23 @@ def health_check():
             ),
             "us_canonical_shadow_symbol_count": us_canary_symbol_count,
             "us_canonical_canary_max_symbols": settings.us_canonical_canary_max_symbols,
+            "us_daily_read_binding_mode": us_daily_rollout["read_binding_mode"],
+            "us_daily_acquisition_rollout_mode": us_daily_rollout[
+                "acquisition_rollout_mode"
+            ],
+            "us_daily_acquisition_enabled": us_daily_rollout[
+                "acquisition_enabled"
+            ],
+            "us_daily_acquisition_scope": us_daily_rollout[
+                "acquisition_scope"
+            ],
+            "us_daily_acquisition_canary_target_count": us_daily_rollout[
+                "canary_target_count"
+            ],
+            "us_daily_acquisition_configuration_status": us_daily_rollout[
+                "configuration_status"
+            ],
+            "us_daily_acquisition_limitations": us_daily_rollout["limitations"],
         },
     }
 

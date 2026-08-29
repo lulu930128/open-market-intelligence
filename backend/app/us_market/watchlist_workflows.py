@@ -206,7 +206,7 @@ def get_us_watchlist_ranking(
             "selected_session": resolved_daily.get("selected_session"),
             "selection_reason": resolved_daily.get("selection_reason"),
             "fallback_used": bool(resolved_daily.get("fallback_used")),
-            "price_basis": "raw_unadjusted",
+            "price_basis": latest.get("price_basis") if latest else None,
             "has_extended_hours": False,
             "intraday_previous_close": None,
             "intraday_points": [],

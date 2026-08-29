@@ -43,6 +43,14 @@ class RefreshBounds(CanonicalModel):
     max_range_days: int = Field(ge=1, le=3650)
 
 
+class AdditionalRefreshOperation(CanonicalModel):
+    """An additive bounded mutation owned by the same canonical dataset."""
+
+    operation: str = Field(min_length=1, max_length=128)
+    bounds: RefreshBounds
+    postcondition: str = Field(min_length=1, max_length=256)
+
+
 class DatasetSpec(CanonicalModel):
     registry_version: str = "omi.market.dataset_registry.v1"
     dataset_id: str = Field(min_length=1, max_length=128)
@@ -60,6 +68,7 @@ class DatasetSpec(CanonicalModel):
     refreshable: bool = False
     refresh_operation: str | None = Field(default=None, max_length=128)
     refresh_bounds: RefreshBounds | None = None
+    additional_refresh_operations: tuple[AdditionalRefreshOperation, ...] = ()
     postcondition: str = Field(min_length=1, max_length=256)
     repairable: bool = False
 
@@ -72,8 +81,19 @@ class DatasetSpec(CanonicalModel):
                 raise ValueError("refreshable dataset requires refresh_operation")
             if self.refresh_bounds is None:
                 raise ValueError("refreshable dataset requires refresh_bounds")
-        elif self.refresh_operation is not None or self.refresh_bounds is not None:
+        elif (
+            self.refresh_operation is not None
+            or self.refresh_bounds is not None
+            or self.additional_refresh_operations
+        ):
             raise ValueError("non-refreshable dataset cannot advertise refresh metadata")
+        operation_names = tuple(
+            operation.operation for operation in self.additional_refresh_operations
+        )
+        if self.refresh_operation in operation_names or len(set(operation_names)) != len(
+            operation_names
+        ):
+            raise ValueError("dataset refresh operation names must be unique")
         if self.repairable and not self.refreshable:
             raise ValueError("repairable dataset must be refreshable")
         return self
@@ -107,6 +127,9 @@ INTERNAL_DATASET_REFRESH_OPERATIONS = frozenset(
         "tw.refresh_current_index",
         "tw.refresh_current_breadth",
         "us.reconcile_full_market_eod",
+        "us.reconcile_priority_daily_ohlcv",
+        "us.ensure_daily_history_coverage",
+        "us.refresh_daily_ohlcv",
     }
 )
 
@@ -281,7 +304,7 @@ DATASET_REGISTRY = DatasetRegistry(
             refreshable=True,
             refresh_operation="tw.refresh_daily_price",
             refresh_bounds=RefreshBounds(
-                max_calls=1,
+                max_calls=2,
                 timeout_seconds=30,
                 max_symbols=1,
                 max_range_days=3650,
@@ -380,21 +403,33 @@ DATASET_REGISTRY = DatasetRegistry(
             schema_version="omi.market.bar.v1",
             market=Market.US,
             scope_kind="us_stock",
-            owner="app.us_market.service",
-            read_operation="get_us_daily_prices",
+            owner="app.us_market.daily_ohlcv_platform.USDailyOhlcvPlatform",
+            read_operation="read",
             projection_id="daily.ohlcv.us_stock.US",
             capability_ids=("daily.ohlcv",),
             frequency=DatasetFrequency.DAILY,
             expected_state_policy=ExpectedStatePolicy.REQUESTED_OR_LATEST_COMPLETED,
             eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT,
-            storage_reference="us_daily_price",
+            storage_reference="source_registry+raw_fetch_result+us_daily_price",
             refreshable=True,
-            refresh_operation="us.refresh_daily_price",
+            refresh_operation="us.refresh_daily_ohlcv",
             refresh_bounds=RefreshBounds(
-                max_calls=1,
+                max_calls=2,
                 timeout_seconds=30,
                 max_symbols=1,
                 max_range_days=3650,
+            ),
+            additional_refresh_operations=(
+                AdditionalRefreshOperation(
+                    operation="us.ensure_daily_history_coverage",
+                    bounds=RefreshBounds(
+                        max_calls=2,
+                        timeout_seconds=30,
+                        max_symbols=1,
+                        max_range_days=3650,
+                    ),
+                    postcondition="A provider-coherent stored series reaches the requested completed session and minimum observation count.",
+                ),
             ),
             postcondition="Latest stored trade date reaches the bounded requested/expected date.",
             repairable=True,
@@ -428,7 +463,7 @@ DATASET_REGISTRY = DatasetRegistry(
             schema_version="omi.market.eod_coverage.v1",
             market=Market.US,
             scope_kind="full_market_stock_universe",
-            owner="app.market_data.eod_coverage",
+            owner="app.us_market.full_market_eod.USFullMarketEodLifecycle",
             read_operation="cached_eod_coverage_projection",
             projection_id="daily.ohlcv.full_market.US",
             capability_ids=("daily.ohlcv",),
@@ -506,11 +541,36 @@ DATASET_REGISTRY = DatasetRegistry(
             ),
             repairable=True,
         ),
+        DatasetSpec(
+            dataset_id="us.daily.ohlcv.priority_research",
+            schema_version="omi.market.bar.continuity.v1",
+            market=Market.US,
+            scope_kind="priority_research_universe",
+            owner="app.us_market.ohlc_priority",
+            read_operation="reconcile_us_priority_ohlc",
+            projection_id="daily.ohlcv.priority_research.US",
+            capability_ids=("daily.ohlcv", "technical.structure"),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.LATEST_COMPLETED_SESSION,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT,
+            storage_reference="us_daily_price+job_run",
+            refreshable=True,
+            refresh_operation="us.reconcile_priority_daily_ohlcv",
+            refresh_bounds=RefreshBounds(
+                max_calls=20,
+                timeout_seconds=120,
+                max_symbols=20,
+                max_range_days=3650,
+            ),
+            postcondition="A bounded priority-universe shard rereads the same Gateway-first platform and reports unresolved expected-session coverage truthfully.",
+            repairable=True,
+        ),
     )
 )
 
 
 __all__ = [
+    "AdditionalRefreshOperation",
     "DATASET_REGISTRY",
     "DatasetFrequency",
     "DatasetRegistry",

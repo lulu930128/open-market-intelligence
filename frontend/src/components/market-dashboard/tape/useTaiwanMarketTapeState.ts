@@ -57,6 +57,7 @@ export function useTaiwanMarketTapeState({
     initialSummary ? "success" : "idle"
   );
   const requestSeqRef = useRef(0);
+  const hasHydratedSummaryRef = useRef(initialSummary !== null);
   const indexSummaryRefreshKeysRef = useRef(new Set<string>());
   const chipRefreshRequestKeysRef = useRef(new Set<string>());
   const onErrorRef = useRef(onError);
@@ -174,13 +175,20 @@ export function useTaiwanMarketTapeState({
       }, delay);
     }
 
-    const initialTimer = window.setTimeout(() => {
-      void load().finally(scheduleRefresh);
-    }, 0);
+    let initialTimer: number | undefined;
+    if (hasHydratedSummaryRef.current) {
+      scheduleRefresh();
+    } else {
+      initialTimer = window.setTimeout(() => {
+        void load().finally(scheduleRefresh);
+      }, 0);
+    }
 
     return () => {
       disposed = true;
-      window.clearTimeout(initialTimer);
+      if (initialTimer !== undefined) {
+        window.clearTimeout(initialTimer);
+      }
       if (refreshTimer !== undefined) {
         window.clearTimeout(refreshTimer);
       }

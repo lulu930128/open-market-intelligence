@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import math
 from typing import Any
@@ -8,7 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ai.evidence_passport import build_evidence_passport
-from app.db.models import StockMaster, USDailyPrice, USWatchlistGroup, USWatchlistItem
+from app.db.models import StockMaster, USWatchlistGroup, USWatchlistItem
 from app.market.adr_parity import (
     AdrMapping,
     build_adr_parity_report,
@@ -19,7 +20,8 @@ from app.market.calendar_status import expected_us_trade_date
 from app.market.cross_market.refresh import build_cross_market_refresh_plan
 from app.market.cross_market.snapshot_store import read_cross_market_target_context
 from app.market.fx_flow_context import build_fx_flow_context
-from app.us_market import service as us_market_service
+from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 
 
 def expected_us_daily_price_date() -> date:
@@ -154,26 +156,37 @@ def _clamp(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
 
 
-def _latest_two_daily_rows(db: Session, symbol: str) -> list[USDailyPrice]:
-    rows = (
-        db.query(USDailyPrice)
-        .filter(USDailyPrice.symbol == symbol)
-        .order_by(USDailyPrice.trade_date.desc(), USDailyPrice.updated_at.desc(), USDailyPrice.id.desc())
-        .limit(8)
-        .all()
-    )
+@dataclass(frozen=True)
+class _ResolvedDailyClose:
+    provider: str
+    trade_date: date
+    close_price: float
 
-    unique_by_date: list[USDailyPrice] = []
-    seen_dates: set[date] = set()
-    for row in rows:
-        if row.trade_date in seen_dates or row.close_price is None:
-            continue
-        unique_by_date.append(row)
-        seen_dates.add(row.trade_date)
-        if len(unique_by_date) == 2:
-            break
 
-    return unique_by_date
+def _latest_two_daily_rows(
+    db: Session,
+    symbol: str,
+    *,
+    expected_trade_date: date,
+) -> list[_ResolvedDailyClose]:
+    try:
+        resolved = USDailyOhlcvPlatform(db).read(
+            symbol=symbol,
+            bars=90,
+            to_date=expected_trade_date,
+        )
+    except (LookupError, ValueError):
+        return []
+    rows: list[_ResolvedDailyClose] = []
+    for bar in reversed(resolved.result.resolved.bars[-2:]):
+        rows.append(
+            _ResolvedDailyClose(
+                provider=bar.lineage.provider,
+                trade_date=bar.end_at.date(),
+                close_price=float(bar.close_price),
+            )
+        )
+    return rows
 
 
 def _factor_from_symbol(
@@ -185,8 +198,13 @@ def _factor_from_symbol(
     weight: float,
     score_cap: float,
     source: str,
+    expected_trade_date: date,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    rows = _latest_two_daily_rows(db, symbol)
+    rows = _latest_two_daily_rows(
+        db,
+        symbol,
+        expected_trade_date=expected_trade_date,
+    )
     if len(rows) < 2:
         return None, f"us_daily_price.{symbol}"
 
@@ -251,7 +269,11 @@ def _basket_from_group(
     valid: list[dict[str, Any]] = []
     missing_count = 0
     for item in items:
-        rows = _latest_two_daily_rows(db, item.symbol)
+        rows = _latest_two_daily_rows(
+            db,
+            item.symbol,
+            expected_trade_date=expected_trade_date or expected_us_daily_price_date(),
+        )
         if len(rows) < 2:
             missing_count += 1
             continue
@@ -496,7 +518,11 @@ def scan_us_overnight_impact_gaps(
 
     for item in required_symbols:
         symbol = str(item["symbol"])
-        rows = _latest_two_daily_rows(db, symbol)
+        rows = _latest_two_daily_rows(
+            db,
+            symbol,
+            expected_trade_date=expected_trade_date,
+        )
         latest_date = rows[0].trade_date if rows else None
         previous_date = rows[1].trade_date if len(rows) >= 2 else None
 
@@ -780,6 +806,7 @@ def build_us_overnight_impact_report(
             weight=weight,
             score_cap=spec["score_cap"],
             source="us_daily_price",
+            expected_trade_date=expected_trade_date,
         )
         if factor is not None:
             factors.append(factor)
@@ -1089,12 +1116,11 @@ def ensure_current_us_overnight_impact_report(
 
     for symbol in refresh_symbols:
         try:
-            result = us_market_service.refresh_us_daily_prices(
+            result = refresh_us_daily_ohlcv(
                 db=db,
                 symbol=symbol,
                 outputsize=outputsize,
                 adjusted=False,
-                provider=provider,
             )
             refresh_metadata["results"].append(
                 {

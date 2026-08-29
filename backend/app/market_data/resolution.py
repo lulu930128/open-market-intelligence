@@ -16,6 +16,8 @@ from app.market_data.contracts import (
     AuctionObservation,
     BarFinalization,
     BarObservation,
+    BarSeriesComposition,
+    BarSeriesCompositionStatus,
     CandidateSummary,
     DepthObservation,
     EvidenceFreshness,
@@ -35,7 +37,14 @@ from app.market_data.contracts import (
     ResolvedTradingStatus,
     TradingStatusObservation,
 )
-from app.market_data.integration_contracts import DataRequirementV2
+from app.market_data.errors import MarketDataContractError
+from app.market_data.integration_contracts import (
+    BarCapabilityRequest,
+    BarSeriesResolutionMode,
+    DataRequirementV2,
+    FreshnessBasis,
+    InstrumentTarget,
+)
 from app.market_data.policies import RealtimePolicy, parse_realtime_policy
 from app.market_data.quality_policy import (
     QualityEvaluation,
@@ -80,20 +89,29 @@ class BarSeriesCandidate:
 
     def __post_init__(self) -> None:
         if not self.bars:
-            raise ValueError("bar series candidates require at least one bar")
+            raise MarketDataContractError("bar series candidates require at least one bar")
         if self.provider_priority < 0:
-            raise ValueError("provider_priority must be non-negative")
+            raise MarketDataContractError("provider_priority must be non-negative")
         instrument = self.bars[0].instrument
         interval = self.bars[0].interval
         if any(bar.instrument != instrument for bar in self.bars):
-            raise ValueError("candidate bars must share one instrument key")
+            raise MarketDataContractError("candidate bars must share one instrument key")
         if any(bar.interval != interval for bar in self.bars):
-            raise ValueError("candidate bars must share one interval")
+            raise MarketDataContractError("candidate bars must share one interval")
+        provider = self.bars[0].lineage.provider
+        source = self.bars[0].lineage.source
+        authority = self.bars[0].lineage.authority
+        if any(bar.lineage.provider != provider for bar in self.bars):
+            raise MarketDataContractError("candidate bars must share one provider lineage")
+        if any(bar.lineage.source != source for bar in self.bars):
+            raise MarketDataContractError("candidate bars must share one source lineage")
+        if any(bar.lineage.authority is not authority for bar in self.bars):
+            raise MarketDataContractError("candidate bars must share one authority lineage")
         if any(
             current.start_at >= following.start_at
             for current, following in zip(self.bars, self.bars[1:])
         ):
-            raise ValueError("candidate bars must be strictly ordered")
+            raise MarketDataContractError("candidate bars must be strictly ordered")
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,7 +184,14 @@ def _evaluate(
         observed_at=observed_at,
         now=now,
         max_age=max_age,
-        completed_session=policy is RealtimePolicy.COMPLETED_SESSION,
+        completed_session=(
+            policy is RealtimePolicy.COMPLETED_SESSION
+            or (
+                requirement is not None
+                and requirement.freshness.basis
+                is FreshnessBasis.COMPLETED_SESSION_DATE
+            )
+        ),
     )
     if temporal_rejection:
         return _EvaluatedCandidate(
@@ -580,6 +605,337 @@ def resolve_trading_status(
     )
 
 
+def _bar_material_signature(bar: BarObservation) -> tuple[object, ...]:
+    volume = (
+        (bar.volume.value, bar.volume.unit.value)
+        if bar.volume is not None
+        else None
+    )
+    return (
+        bar.open_price,
+        bar.high_price,
+        bar.low_price,
+        bar.close_price,
+        volume,
+        bar.volume_status,
+        bar.turnover_value,
+        bar.turnover_currency,
+        bar.trade_count,
+        bar.price_change,
+        bar.price_basis,
+        bar.finalization,
+    )
+
+
+def _bar_candidate_rank(candidate: BarSeriesCandidate) -> tuple[int, str, str]:
+    lineage = candidate.bars[0].lineage
+    return candidate.provider_priority, lineage.provider, lineage.source
+
+
+def _bar_candidate_summaries(
+    candidates: Sequence[BarSeriesCandidate],
+    *,
+    policy: RealtimePolicy,
+    now: datetime,
+    max_age: timedelta,
+    requirement: DataRequirementV2,
+) -> tuple[CandidateSummary, ...]:
+    summaries: list[CandidateSummary] = []
+    for candidate in candidates[:MAX_CANDIDATE_SUMMARIES]:
+        latest = candidate.bars[-1]
+        quality = evaluate_candidate_quality(
+            latest,
+            requirement=requirement,
+            freshness=candidate.freshness,
+            now=now,
+        )
+        evaluated = _evaluate(
+            ResolutionCandidate(
+                observation=latest,
+                freshness=candidate.freshness,
+                provider_priority=candidate.provider_priority,
+                session=candidate.session,
+                quality=quality,
+            ),
+            policy=policy,
+            now=now,
+            max_age=max_age,
+        )
+        eligible = evaluated.eligible
+        reason_code = evaluated.reason_code
+        if policy is RealtimePolicy.COMPLETED_SESSION and latest.finalization not in {
+            BarFinalization.FINAL,
+            BarFinalization.CORRECTED,
+        }:
+            eligible = False
+            reason_code = "BAR_NOT_FINALIZED"
+        summaries.append(
+            CandidateSummary(
+                provider=latest.lineage.provider,
+                source=latest.lineage.source,
+                freshness=evaluated.freshness,
+                authority=latest.lineage.authority,
+                session=candidate.session,
+                event_at=_observation_time(latest),
+                eligible=eligible,
+                reason_code=reason_code,
+            )
+        )
+    return tuple(summaries)
+
+
+def _resolve_composed_bar_series(
+    candidates: Sequence[BarSeriesCandidate],
+    *,
+    policy: RealtimePolicy,
+    now: datetime,
+    max_age: timedelta,
+    requirement: DataRequirementV2,
+) -> ResolvedBarSeries:
+    if policy is not RealtimePolicy.COMPLETED_SESSION:
+        raise MarketDataContractError(
+            "timestamp bar-series composition requires completed_session policy"
+        )
+    if not isinstance(requirement.target, InstrumentTarget) or not isinstance(
+        requirement.request, BarCapabilityRequest
+    ):
+        raise MarketDataContractError(
+            "timestamp bar-series composition requires an instrument bar request"
+        )
+
+    summaries = _bar_candidate_summaries(
+        candidates,
+        policy=policy,
+        now=now,
+        max_age=max_age,
+        requirement=requirement,
+    )
+    eligible_by_bucket: dict[
+        tuple[object, str, datetime, datetime],
+        list[tuple[tuple[int, str, str], BarSeriesCandidate, BarObservation]],
+    ] = {}
+    rejected_quality: list[QualityEvaluation] = []
+    for candidate in candidates:
+        if candidate.session not in {MarketSession.POST_CLOSE, MarketSession.CLOSED}:
+            continue
+        rank = _bar_candidate_rank(candidate)
+        for bar in candidate.bars:
+            if bar.instrument != requirement.target.instrument:
+                raise MarketDataContractError(
+                    "candidate bar instrument does not match the requested instrument"
+                )
+            if bar.interval != requirement.request.interval:
+                raise MarketDataContractError(
+                    "candidate bar interval does not match the requested interval"
+                )
+            if bar.finalization not in {
+                BarFinalization.FINAL,
+                BarFinalization.CORRECTED,
+            }:
+                continue
+            quality = evaluate_candidate_quality(
+                bar,
+                requirement=requirement,
+                freshness=None,
+                now=now,
+            )
+            if not quality.eligible:
+                rejected_quality.append(quality)
+                continue
+            key = (bar.instrument, bar.interval, bar.start_at, bar.end_at)
+            eligible_by_bucket.setdefault(key, []).append((rank, candidate, bar))
+
+    if not eligible_by_bucket:
+        missing_fields = tuple(
+            dict.fromkeys(
+                field
+                for quality in rejected_quality
+                for field in quality.missing_fields
+            )
+        )
+        limitations = tuple(
+            dict.fromkeys(
+                limitation
+                for quality in rejected_quality
+                for limitation in quality.limitations
+            )
+        )
+        return ResolvedBarSeries(
+            health=ResolvedEvidenceHealth(
+                status=ResolvedEvidenceStatus.POLICY_UNSATISFIED,
+                selection_reason="COMPLETED_SESSION_COMPOSITION_NO_ELIGIBLE_BAR",
+                missing_fields=missing_fields,
+                facts_usable=False,
+                research_usable=False,
+                limitations=(
+                    "No bar satisfied the completed-session composition policy.",
+                    *limitations,
+                ),
+            ),
+            candidates=summaries,
+            composition=BarSeriesComposition(
+                applied=True,
+                status=BarSeriesCompositionStatus.NO_ELIGIBLE_BARS,
+                limitations=("BAR_SERIES_COMPOSITION_NO_ELIGIBLE_BAR",),
+            ),
+        )
+
+    retained_keys = tuple(
+        sorted(
+            eligible_by_bucket,
+            key=lambda key: (key[2], key[3]),
+        )[-requirement.request.max_bars :]
+    )
+    retained_candidate_ids = {
+        id(candidate)
+        for key in retained_keys
+        for _, candidate, _ in eligible_by_bucket[key]
+    }
+    primary_candidate = min(
+        (
+            candidate
+            for candidate in candidates
+            if id(candidate) in retained_candidate_ids
+        ),
+        key=_bar_candidate_rank,
+    )
+    primary_id = id(primary_candidate)
+
+    selected_entries: list[
+        tuple[tuple[int, str, str], BarSeriesCandidate, BarObservation]
+    ] = []
+    filled_bucket_count = 0
+    conflict_bucket_count = 0
+    for key in retained_keys:
+        entries = sorted(eligible_by_bucket[key], key=lambda item: item[0])
+        winner = entries[0]
+        selected_entries.append(winner)
+        if id(winner[1]) != primary_id and not any(
+            id(candidate) == primary_id for _, candidate, _ in entries
+        ):
+            filled_bucket_count += 1
+        winner_signature = _bar_material_signature(winner[2])
+        if any(
+            _bar_material_signature(bar) != winner_signature
+            for _, _, bar in entries[1:]
+        ):
+            conflict_bucket_count += 1
+
+    bars = tuple(entry[2] for entry in selected_entries)
+    latest = bars[-1]
+    composite_freshness = (
+        EvidenceFreshness.FRESH
+        if latest.end_at >= requirement.request.end_at
+        else EvidenceFreshness.STALE
+    )
+    selected_quality = combine_quality_evaluations(
+        tuple(
+            evaluate_candidate_quality(
+                bar,
+                requirement=requirement,
+                freshness=(composite_freshness if bar is latest else None),
+                now=now,
+            )
+            for bar in bars
+        )
+    )
+    selected_candidate_ids = tuple(
+        dict.fromkeys(id(candidate) for _, candidate, _ in selected_entries)
+    )
+    selected_candidates = tuple(
+        sorted(
+            (
+                candidate
+                for candidate in candidates
+                if id(candidate) in selected_candidate_ids
+            ),
+            key=_bar_candidate_rank,
+        )
+    )
+    contributing_providers = tuple(
+        dict.fromkeys(candidate.bars[0].lineage.provider for candidate in selected_candidates)
+    )
+    contributing_sources = tuple(
+        dict.fromkeys(candidate.bars[0].lineage.source for candidate in selected_candidates)
+    )
+    composition_limitations: list[str] = []
+    if len(selected_candidates) > 1:
+        composition_limitations.append(
+            "BAR_SERIES_COMPOSED_FROM_MULTIPLE_CANDIDATES"
+        )
+    if conflict_bucket_count:
+        composition_limitations.append(
+            "BAR_SERIES_SAME_TIMESTAMP_CONFLICT_RESOLVED"
+        )
+    if conflict_bucket_count:
+        composition_status = BarSeriesCompositionStatus.COMPOSED_WITH_CONFLICTS
+    elif len(selected_candidates) > 1:
+        composition_status = BarSeriesCompositionStatus.COMPOSED
+    else:
+        composition_status = BarSeriesCompositionStatus.SINGLE_CONTRIBUTOR
+
+    state = getattr(latest, "state", ObservationState.AVAILABLE)
+    if composite_freshness is EvidenceFreshness.STALE:
+        status = ResolvedEvidenceStatus.STALE
+    elif state is ObservationState.PARTIAL:
+        status = ResolvedEvidenceStatus.PARTIAL
+    else:
+        status = ResolvedEvidenceStatus.SELECTED
+    unique_contributor = selected_candidates[0] if len(selected_candidates) == 1 else None
+    unique_lineage = unique_contributor.bars[0].lineage if unique_contributor else None
+    health_limitations = tuple(
+        dict.fromkeys(
+            (
+                *(
+                    (
+                        "Resolved bar series is stale and must not be presented as current.",
+                    )
+                    if status is ResolvedEvidenceStatus.STALE
+                    else ()
+                ),
+                *selected_quality.limitations,
+            )
+        )
+    )
+    return ResolvedBarSeries(
+        bars=bars,
+        health=ResolvedEvidenceHealth(
+            status=status,
+            selected_provider=(unique_lineage.provider if unique_lineage else None),
+            selected_source=(unique_lineage.source if unique_lineage else None),
+            selected_session=MarketSession.CLOSED,
+            selected_event_at=_observation_time(latest),
+            fallback_used=False,
+            selection_reason=(
+                "COMPLETED_SESSION_COMPOSED_WITH_CONFLICTS"
+                if conflict_bucket_count
+                else (
+                    "COMPLETED_SESSION_COMPOSED_BY_TIMESTAMP"
+                    if len(selected_candidates) > 1
+                    else "COMPLETED_SESSION_SINGLE_CONTRIBUTOR"
+                )
+            ),
+            missing_fields=selected_quality.missing_fields,
+            facts_usable=selected_quality.facts_usable,
+            research_usable=(
+                status is ResolvedEvidenceStatus.SELECTED
+                and selected_quality.research_usable
+            ),
+            limitations=health_limitations,
+        ),
+        candidates=summaries,
+        composition=BarSeriesComposition(
+            applied=True,
+            status=composition_status,
+            contributing_providers=contributing_providers,
+            contributing_sources=contributing_sources,
+            filled_bucket_count=filled_bucket_count,
+            conflict_bucket_count=conflict_bucket_count,
+            limitations=tuple(composition_limitations),
+        ),
+    )
+
+
 def resolve_bar_series(
     candidates: Sequence[BarSeriesCandidate],
     *,
@@ -589,6 +945,19 @@ def resolve_bar_series(
     requirement: DataRequirementV2 | None = None,
 ) -> ResolvedBarSeries:
     parsed_policy = parse_realtime_policy(policy, allow_internal=True)
+    if (
+        requirement is not None
+        and isinstance(requirement.request, BarCapabilityRequest)
+        and requirement.request.series_resolution
+        is BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP
+    ):
+        return _resolve_composed_bar_series(
+            candidates,
+            policy=parsed_policy,
+            now=now,
+            max_age=max_age,
+            requirement=requirement,
+        )
     projected: list[ResolutionCandidate[BarObservation]] = []
     series_by_identity: dict[int, tuple[BarObservation, ...]] = {}
     for candidate in candidates:
@@ -611,6 +980,22 @@ def resolve_bar_series(
                     for bar in candidate.bars
                 )
             )
+            if (
+                isinstance(requirement.request, BarCapabilityRequest)
+                and requirement.request.coverage is not None
+                and len(candidate.bars)
+                < requirement.request.coverage.minimum_bar_count
+            ):
+                quality = QualityEvaluation(
+                    eligible=False,
+                    reason_code=QualityReasonCode.BAR_COVERAGE_INSUFFICIENT,
+                    reason_codes=(QualityReasonCode.BAR_COVERAGE_INSUFFICIENT,),
+                    facts_usable=True,
+                    research_usable=False,
+                    limitations=(
+                        "Candidate bar series does not satisfy the explicit minimum history depth.",
+                    ),
+                )
         projected_candidate = ResolutionCandidate(
             observation=latest,
             freshness=candidate.freshness,

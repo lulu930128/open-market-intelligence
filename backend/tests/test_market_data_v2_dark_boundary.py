@@ -214,6 +214,13 @@ def test_foundation_reference_matches_current_validated_checkpoint() -> None:
         / "tw-realtime-market-state-remediation-20260824"
         / "artifacts"
         / "tw-4.3.0-source-checkpoint-20260827.json",
+        REPO_ROOT
+        / "docs"
+        / "exec-plans"
+        / "active"
+        / "tw-us-shared-core-4-4-0-consolidation-20260829"
+        / "artifacts"
+        / "foundation-extension-checkpoint.json",
     )
     extensions = [
         json.loads(path.read_text(encoding="utf-8")) for path in extension_paths

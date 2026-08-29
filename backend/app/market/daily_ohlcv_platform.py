@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -23,6 +23,7 @@ from app.market.providers.tw_official_daily import (
 from app.market.tw_universe import list_taiwan_stock_universe
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market_data.contracts import (
+    AuthorityClass,
     BarObservation,
     CanonicalModel,
     DatasetHealth,
@@ -39,12 +40,14 @@ from app.market_data.integration_contracts import (
     AcquisitionStatus,
     AcquisitionSummary,
     BarCapabilityRequest,
+    BarSeriesResolutionMode,
     DataRequirementV2,
     DatasetTarget,
     FreshnessRequirement,
     InstrumentTarget,
     MarketDataResultV1,
     PersistenceSummary,
+    QualityRequirement,
     RefreshRequirementV1,
     RequestBounds,
 )
@@ -154,12 +157,24 @@ def build_taiwan_daily_read_requirement(
             end_at=end_at,
             max_bars=min(max(range_days, 1), 5000),
             completed_only=True,
+            price_basis="raw",
+            series_resolution=BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP,
         ),
         purpose=DataPurpose.REPAIR,
         realtime_policy=RealtimePolicy.COMPLETED_SESSION,
         session=MarketSession.CLOSED,
         requested_at=refresh.requested_at,
         freshness=FreshnessRequirement(max_age_seconds=2_678_400),
+        quality=QualityRequirement(
+            required_fields=(
+                "open_price",
+                "high_price",
+                "low_price",
+                "close_price",
+            ),
+            minimum_authority=AuthorityClass.EXCHANGE,
+            allow_partial=False,
+        ),
         bounds=RequestBounds(
             max_provider_attempts=0,
             max_external_calls=0,
@@ -202,12 +217,24 @@ def build_taiwan_daily_cache_requirement(
             end_at=datetime.combine(to_date, time(13, 30), tzinfo=TAIWAN_TZ),
             max_bars=max_rows,
             completed_only=True,
+            price_basis="raw",
+            series_resolution=BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP,
         ),
         purpose=DataPurpose.VIEWER,
         realtime_policy=RealtimePolicy.COMPLETED_SESSION,
         session=MarketSession.CLOSED,
         requested_at=requested_at,
         freshness=FreshnessRequirement(max_age_seconds=2_678_400),
+        quality=QualityRequirement(
+            required_fields=(
+                "open_price",
+                "high_price",
+                "low_price",
+                "close_price",
+            ),
+            minimum_authority=AuthorityClass.EXCHANGE,
+            allow_partial=False,
+        ),
         bounds=RequestBounds(
             max_provider_attempts=0,
             max_external_calls=0,
@@ -294,6 +321,19 @@ def read_taiwan_official_daily(
             repository
         ),
     )
+    composition_limitations: list[str] = []
+    if "BAR_SERIES_COMPOSED_FROM_MULTIPLE_CANDIDATES" in result.limitations:
+        composition_limitations.append("OFFICIAL_DAILY_SERIES_RECONCILED")
+    if "BAR_SERIES_SAME_TIMESTAMP_CONFLICT_RESOLVED" in result.limitations:
+        composition_limitations.append("OFFICIAL_DAILY_SAME_DATE_CONFLICT_RESOLVED")
+    if composition_limitations:
+        result = result.model_copy(
+            update={
+                "limitations": tuple(
+                    dict.fromkeys((*result.limitations, *composition_limitations))
+                )
+            }
+        )
     if not boundary_limitations:
         return result
     return result.model_copy(

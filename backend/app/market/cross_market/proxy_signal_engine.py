@@ -7,11 +7,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import USDailyPrice
 from app.market.cross_market.schemas import (
     CrossMarketContextSignalRead,
     CrossMarketRelationRead,
 )
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 
 
 PROXY_METHODOLOGY_VERSION = "cross_market.simple_sector_residual.v1"
@@ -23,6 +23,15 @@ class ProxyBenchmarkRule:
     benchmark_symbol: str
     beta: float
     methodology: str
+
+
+@dataclass(frozen=True)
+class _ResolvedPriceRow:
+    provider: str
+    trade_date: date
+    close_price: float
+    adjusted_close: None
+    fetched_at: datetime | None
 
 
 PROXY_BENCHMARK_RULES: dict[str, ProxyBenchmarkRule] = {
@@ -48,22 +57,26 @@ def _price_rows(
     *,
     expected_trade_date: date,
     data_available_at: datetime | None,
-) -> list[USDailyPrice]:
-    query = db.query(USDailyPrice).filter(
-        USDailyPrice.symbol == symbol,
-        USDailyPrice.trade_date <= expected_trade_date,
-    )
-    if data_available_at is not None:
-        query = query.filter(USDailyPrice.fetched_at <= data_available_at)
-    return (
-        query.order_by(
-            USDailyPrice.trade_date.desc(),
-            USDailyPrice.fetched_at.desc(),
-            USDailyPrice.id.desc(),
+) -> list[_ResolvedPriceRow]:
+    try:
+        result = USDailyOhlcvPlatform(db).read(
+            symbol=symbol,
+            bars=90,
+            now=data_available_at,
+            to_date=expected_trade_date,
         )
-        .limit(2)
-        .all()
-    )
+    except (LookupError, ValueError):
+        return []
+    return [
+        _ResolvedPriceRow(
+            provider=bar.lineage.provider,
+            trade_date=bar.end_at.date(),
+            close_price=float(bar.close_price),
+            adjusted_close=None,
+            fetched_at=bar.lineage.fetched_at,
+        )
+        for bar in reversed(result.result.resolved.bars[-2:])
+    ]
 
 
 def _return_snapshot(

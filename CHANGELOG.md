@@ -10,6 +10,26 @@
 - Windows 發行包不再包含本機 SQLite 或股票主檔 seed；空白安裝首次啟動時改由 backend 以可追蹤、有界的官方 TWSE／TPEx refresh 建立股票代號。
 - 將 launcher 與安裝捷徑圖示由 `ATRI-MyDearMoments.ico` 改名為 `OMI.ico`。
 
+## [4.4.0] - 2026-08-29
+
+### Changed
+
+- 將 TW／US Daily、Shared Market Data Foundation、AI outward contract、MCP schema 與 Frontend compatibility 收斂為同一個 source consolidation 基線。
+- 美股 Daily 由 market-owned descriptors、canonical acquisition、raw receipt／lineage、Shared Resolver、bounded history coverage與cache-only outward projection組成；AAPL／TSM保留Yahoo→Alpaca fallback與260-bar coverage證據。
+- `omi.decision.v4` 的US Daily capability limit現在實際限制Backend canonical reader與chart reader，不再出現selection要求260根但context只讀90根的落差。
+
+### Fixed
+
+- 已released／finalized的台股Daily bar不再被同日期provisional intraday overlay取代；較新的未finalized session仍可形成暫估bar。
+- Yahoo Daily INDEX即使回傳volume 0，也會canonicalize為`not_applicable`而不是0 shares；STOCK／ETF與intraday volume規則維持不變。
+
+### Validation
+
+- Shared／TW／US／AI targeted matrix：282 passed、27 subtests；補充AI／API／US architecture matrix：54 passed、64 subtests。
+- Architecture pytest：18 passed；checker：PASS，22 actual／22 declared debt；affected Backend modules compileall通過。
+- Frontend ESLint與TypeScript no-emit通過。
+- 本版建立Source consolidation立腳點；4.4.0 runtime尚未restart採用，`^SOX`第二個Daily provider、完整Live／Product acceptance與publication仍是獨立gate。
+
 ## [4.3.2] - 2026-08-29
 
 ### Fixed
@@ -83,7 +103,8 @@
 - 修正 production SSR 暫時無法連到 backend 時，URL 分組選擇與區域市場 watchlist 無法在 hydration 後恢復的問題。
 - 修正 Windows release 封裝使用不同 Python ABI 與硬編碼 stdlib 路徑時，安裝包無法啟動的問題，並排除本機 Python bytecode cache。
 
-[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.2...HEAD
+[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.4.0...HEAD
+[4.4.0]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.2...v4.4.0
 [4.3.2]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.1...v4.3.2
 [4.3.1]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.0...v4.3.1
 [4.3.0]: https://github.com/lulu930128/open-market-intelligence/compare/v4.2.0...v4.3.0

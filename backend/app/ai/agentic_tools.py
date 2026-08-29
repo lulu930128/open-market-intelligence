@@ -23,7 +23,6 @@ from app.ai.market_context import (
 )
 from app.ai.market_context import common as market_context_common
 from app.db.models import (
-    USDailyPrice,
     USCompanyProfile,
     USCorporateAction,
     USSecCompanyFact,
@@ -43,6 +42,7 @@ from app.portfolio.valuation import read_portfolio_market_valuation
 from app.resource_market import service as resource_market_service
 from app.resource_market.source_health import build_resource_source_health
 from app.us_market import service as us_market_service
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 from app.watchlists import backfill_service as watchlist_backfill_service
@@ -52,7 +52,6 @@ DEFAULT_TOOL_BUDGET = agentic_policy.DEFAULT_TOOL_BUDGET
 MAX_TOOL_CALLS = agentic_policy.MAX_TOOL_CALLS
 MAX_EXTERNAL_FETCHES = agentic_policy.MAX_EXTERNAL_FETCHES
 MAX_TOTAL_SECONDS = agentic_policy.MAX_TOTAL_SECONDS
-US_DAILY_STALE_DAYS = agentic_policy.US_DAILY_STALE_DAYS
 PROFILE_STALE_DAYS = agentic_policy.PROFILE_STALE_DAYS
 TW_STOCK_REFRESH_KEYS = agentic_policy.TW_STOCK_REFRESH_KEYS
 ToolDefinition = agentic_policy.ToolDefinition
@@ -110,15 +109,6 @@ def _annotate_timeout_fallback(
         run["result_summary"] = summary
 
 
-def _latest_us_daily_price(db: Session, symbol: str) -> USDailyPrice | None:
-    return (
-        db.query(USDailyPrice)
-        .filter(USDailyPrice.symbol == symbol)
-        .order_by(USDailyPrice.trade_date.desc(), USDailyPrice.id.desc())
-        .first()
-    )
-
-
 def _latest_profile(db: Session, symbol: str) -> USCompanyProfile | None:
     return us_market_service.get_us_company_profile(db=db, symbol=symbol)
 
@@ -174,8 +164,14 @@ def scan_us_stock_gaps(
     needs_profile = "us_company_profile" in required_capabilities
     needs_sec = "us_sec_company_fact" in required_capabilities
     needs_corporate_actions = "us_corporate_action" in required_capabilities
-    latest_daily = (
-        _latest_us_daily_price(db, normalized_symbol) if needs_daily else None
+    daily_platform_result = (
+        USDailyOhlcvPlatform(db).read(
+            symbol=normalized_symbol,
+            bars=2,
+            now=_now(),
+        )
+        if needs_daily
+        else None
     )
     profile = _latest_profile(db, normalized_symbol) if needs_profile else None
     sec_metric_count = _sec_metric_count(db, normalized_symbol) if needs_sec else 0
@@ -188,18 +184,25 @@ def scan_us_stock_gaps(
     warnings: list[str] = []
     expected_dates: dict[str, Any] = {}
 
-    today = _today()
-    latest_daily_date = latest_daily.trade_date if latest_daily else None
-    expected_dates["us_daily_price_latest"] = _json_value(latest_daily_date)
-    if "us_daily_price" in required_capabilities and latest_daily_date is None:
-        missing.append("us_daily_price")
-    elif (
+    daily_projection = (
+        daily_platform_result.projection if daily_platform_result is not None else {}
+    )
+    latest_daily_date = daily_projection.get("latest_trade_date")
+    expected_dates["us_daily_price_latest"] = latest_daily_date
+    expected_dates["us_daily_price_expected"] = daily_projection.get(
+        "expected_trade_date"
+    )
+    if (
         "us_daily_price" in required_capabilities
-        and latest_daily_date is not None
-        and (today - latest_daily_date).days > US_DAILY_STALE_DAYS
+        and (
+            daily_platform_result is None
+            or not daily_platform_result.postcondition_satisfied
+        )
     ):
         missing.append("us_daily_price")
-        warnings.append("US daily price cache is stale for the requested symbol.")
+        warnings.append(
+            "US daily price does not satisfy the canonical expected-session, lineage, and research-usability postcondition."
+        )
 
     profile_fetched_at = profile.fetched_at if profile else None
     expected_dates["us_company_profile_fetched_at"] = _json_value(profile_fetched_at)

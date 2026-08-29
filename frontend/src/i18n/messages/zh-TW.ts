@@ -3860,8 +3860,8 @@ export const zhTW = {
       disclaimerBody:
         "OMI 不是自動交易系統，也不是證券投資顧問。任何價格、籌碼、基本面、技術位階、AI 摘要或派報內容都只供研究與檢核，不能取代交易所公告、券商資訊、公開說明書、專業顧問或使用者自己的風險判斷。",
       catalogEyebrow: "Source Catalog",
-      catalogTitle: "目前使用或保留的資料來源",
-      documentSource: "依 README.md「資料來源信任模型」與近期 quote-depth / crypto 文件整理",
+      catalogTitle: "目前接入、啟用或保留的資料來源",
+      documentSource: "依 executable dataset registry、market-owned provider contract 與 source-health contract 盤點",
       table: {
         area: "區域",
         source: "來源",
@@ -3874,9 +3874,14 @@ export const zhTW = {
           reliability: "優先官方來源；顯示前仍需檢查交易日、筆數、代號與解析品質。",
         },
         twIntraday: {
-          area: "台股盤中與五檔",
-          source: "nStock minute data、TWSE MIS snapshot / quote depth",
-          reliability: "適合本機監控與選股細節；盤中來源可能延遲、空值、暫停或只適用單一標的短快取。",
+          area: "台股盤中分 K",
+          source: "nStock minute data、Yahoo chart intraday",
+          reliability: "適合本機監控與選股細節；盤中來源可能延遲、空值、暫停或只適用單一標的短快取。active session 資料未必能事後修復。",
+        },
+        twRealtimeBroker: {
+          area: "台股即時報價 / 五檔 / 試撮",
+          source: "KGI SuperPy、TWSE MIS",
+          reliability: "KGI 是需憑證、行情權限與 active viewer lease 的 broker stream；TWSE MIS 是公開 best-effort。兩者都必須保留 session、round-lot、深度上限與 indicative auction 限制。",
         },
         twMarketIndex: {
           area: "台股大盤 / 指數",
@@ -3903,10 +3908,25 @@ export const zhTW = {
           source: "MOPS / MOPSOV",
           reliability: "官方公開資訊來源族群；表格與欄位格式可能變動，parser 需保留 quality check。",
         },
+        twEtf: {
+          area: "台股 ETF profile / NAV / PCF / iNAV",
+          source: "TWSE OpenAPI、MOPS、元大 / 富邦 / 統一 / 群益 / 復華 / 野村 / 國泰投信官方頁面或 API",
+          reliability: "發行商支援的資源不完全相同；PCF、日淨值與盤中 iNAV 不可互相替代。外部更新必須是 bounded refresh，讀取頁面只看已保存資料。",
+        },
+        twCorporateEvents: {
+          area: "台股公司事件 / 處置",
+          source: "TWSE / TPEx 除權息與處置資料、MOPS 法說會",
+          reliability: "目前與歷史來源分開抓取；coverage、發布窗口、部分成功與 file-cache lineage gap 必須如實顯示。",
+        },
         twBrokerBranch: {
           area: "券商分點",
           source: "nStock branch Top15",
           reliability: "便利型非官方來源；多日模式是已存 Top15 snapshot 加總，不是完整分點帳本。",
+        },
+        usReferenceData: {
+          area: "美股 reference data / 交易日",
+          source: "Nasdaq Trader symbol directory、SEC company tickers / exchange、OpenFIGI、NYSE calendar",
+          reliability: "交易所與 SEC reference 優先；OpenFIGI 映射需要 key、受配額限制，且映射未核准時不得猜測。交易日仍須保留 market timezone 與 fallback provenance。",
         },
         usOhlcIntraday: {
           area: "美股 OHLC / 盤中",
@@ -3917,6 +3937,16 @@ export const zhTW = {
           area: "美股基本面",
           source: "SEC EDGAR company facts",
           reliability: "公司申報官方來源；ETF、基金、ADR 或非公司資產可能沒有完整 facts。",
+        },
+        usCorporateEvents: {
+          area: "美股公司事件",
+          source: "Alpha Vantage earnings calendar、dividends、splits",
+          reliability: "earnings 依 API key 與方案提供；股利與拆股目前只涵蓋已更新的本機 watchlist symbols，不能呈現成全市場完整 coverage。",
+        },
+        usOwnership: {
+          area: "美股機構持倉 / 內部人申報",
+          source: "SEC EDGAR submissions、Form 13F data sets、Form 4 filings",
+          reliability: "13F 是延遲季報且需經核准的 symbol mapping；Form 4 是交易異動，不等於完整目前持倉。缺漏、修正申報與解析 issue 必須可見。",
         },
         usProfileActions: {
           area: "美股 profile / actions",
@@ -3930,13 +3960,23 @@ export const zhTW = {
         },
         jpOhlcFundamentals: {
           area: "日股 OHLC / 基本面",
-          source: "Yahoo chart、J-Quants 設定槽",
-          reliability: "外部 context layer；J-Quants 需 key 與方案支援，缺資料時要標示 missing / partial。",
+          source: "JPX listed issues / calendar、Yahoo chart / quote summary、J-Quants statements / summary",
+          reliability: "JPX 提供 reference 與交易日；Yahoo 是 best-effort，J-Quants 需 key 與方案支援。缺資料、限流或未授權時要標示 missing / partial。",
+        },
+        jpMarketFlows: {
+          area: "日股信用 / 投資人別",
+          source: "J-Quants margin interest、investor types",
+          reliability: "資料頻率與方案 entitlement 依 endpoint 而異；未設定憑證、plan restricted 或 rate limited 不能顯示成零。",
         },
         krOhlcFundamentals: {
           area: "韓股 OHLC / 基本面",
           source: "KRX Data、OpenDART、Yahoo chart fallback",
           reliability: "外部 context layer；KRX/OpenDART 是正式方向，Yahoo chart 只作可見 fallback。缺 key、缺 corp_code、stale 或 partial 必須顯示。",
+        },
+        krIndexFlows: {
+          area: "韓股指數 / 投資人別 / 交易日",
+          source: "Naver index APIs、KRX investor trading / market calendar",
+          reliability: "Naver 指數是非官方盤中 context；KRX investor flow 與 calendar 依官方資料處理。全市場廣度限制、fallback 與 verified-year 範圍必須可見。",
         },
         cryptoTwdSpot: {
           area: "Crypto TWD spot",
@@ -3947,6 +3987,11 @@ export const zhTW = {
           area: "Crypto USDT spot / perpetual",
           source: "Binance、OKX",
           reliability: "Binance 是主要 verified realtime/reference；OKX 是 secondary source。stale、disabled 或 failure 要進 source health。",
+        },
+        cryptoDerivativesMetrics: {
+          area: "Crypto 衍生品進階指標",
+          source: "Binance、OKX、Bybit、CoinGlass、OMI local aggregation",
+          reliability: "funding、open interest、long/short ratio、CVD 等指標的 provider coverage 不同；local aggregation 只能由已觀測事件推導，不能補成不存在的交易所真值。",
         },
         cryptoLiquidation: {
           area: "Crypto 清算 / 熱力圖",
@@ -3959,9 +4004,9 @@ export const zhTW = {
           reliability: "排名、市值與流通量 context；不是交易執行價格來源。",
         },
         commodityReference: {
-          area: "商品 futures reference",
-          source: "Resource contract",
-          reliability: "目前 provider pending、watch-only；正式 provider 接入前不得產生假 quote / OHLCV。",
+          area: "商品期貨 / 外匯 reference",
+          source: "Yahoo chart resource contract",
+          reliability: "黃金、白銀、銅、能源期貨與主要匯率是 delayed / best-effort、watch-only context；不具交易執行能力，GET 只讀 cache，外部更新走明確 bounded POST。",
         },
         macro: {
           area: "Macro",
@@ -3986,7 +4031,7 @@ export const zhTW = {
         noWarranty: "OMI 不保證資料完整、即時、不中斷、無錯誤，也不保證任何模型、AI 或指標可帶來獲利。",
         noAutoTrading: "OMI 只做研究與情境判斷輔助，不提供自動下單、代客操作或保證收益功能。",
       },
-      footer: "新增或替換資料來源時，應同步更新 source registry、parser、quality behavior、README trust notes 與這份 disclosure。",
+      footer: "新增或替換資料來源時，應同步更新 backend registry / contract、adapter / parser、quality 與 source-health behavior，以及這份 disclosure；實際可用性仍以 runtime status 為準。",
     },
     dispatch: {
       title: "派報",

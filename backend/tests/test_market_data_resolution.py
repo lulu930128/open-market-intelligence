@@ -11,6 +11,7 @@ from app.market_data.contracts import (
     AuthorityClass,
     BarFinalization,
     BarObservation,
+    BarSeriesCompositionStatus,
     EvidenceFreshness,
     InstrumentKey,
     InstrumentTradability,
@@ -26,6 +27,8 @@ from app.market_data.contracts import (
     TradingStatusObservation,
 )
 from app.market_data.integration_contracts import (
+    BarCapabilityRequest,
+    BarSeriesResolutionMode,
     DataRequirementV2,
     FreshnessRequirement,
     InstrumentTarget,
@@ -116,6 +119,61 @@ def _quality_requirement(*, allow_partial: bool = False) -> DataRequirementV2:
         freshness=FreshnessRequirement(max_age_seconds=300),
         quality=QualityRequirement(allow_partial=allow_partial),
         bounds=RequestBounds(max_provider_attempts=1, max_external_calls=1),
+    )
+
+
+def _bar_requirement(
+    *,
+    series_resolution: BarSeriesResolutionMode,
+    end_at: datetime,
+    max_bars: int = 4,
+) -> DataRequirementV2:
+    return DataRequirementV2(
+        target=InstrumentTarget(instrument=_instrument()),
+        request=BarCapabilityRequest(
+            capability_id="bars.ohlcv.daily",
+            interval="1d",
+            start_at=NOW,
+            end_at=end_at,
+            max_bars=max_bars,
+            completed_only=True,
+            price_basis="raw",
+            series_resolution=series_resolution,
+        ),
+        purpose=DataPurpose.RESEARCH,
+        realtime_policy=RealtimePolicy.COMPLETED_SESSION,
+        session=MarketSession.CLOSED,
+        requested_at=end_at + timedelta(hours=1),
+        freshness=FreshnessRequirement(max_age_seconds=86_400),
+        quality=QualityRequirement(
+            required_fields=("open_price", "high_price", "low_price", "close_price"),
+            minimum_authority=AuthorityClass.EXCHANGE,
+        ),
+        bounds=RequestBounds(
+            max_provider_attempts=0,
+            max_external_calls=0,
+            max_subscriptions=0,
+            max_rows=max_bars,
+        ),
+    )
+
+
+def _daily_bar(provider: str, day: int, close: str) -> BarObservation:
+    start = NOW + timedelta(days=day)
+    return BarObservation(
+        instrument=_instrument(),
+        lineage=_lineage(provider, authority=AuthorityClass.EXCHANGE, cache_hit=True),
+        interval="1d",
+        start_at=start,
+        end_at=start + timedelta(hours=4, minutes=30),
+        open_price=Decimal(close) - 1,
+        high_price=Decimal(close) + 1,
+        low_price=Decimal(close) - 2,
+        close_price=Decimal(close),
+        volume=Quantity(value=1000, unit=QuantityUnit.SHARE),
+        volume_status="observed",
+        price_basis="raw",
+        finalization=BarFinalization.FINAL,
     )
 
 
@@ -478,6 +536,121 @@ def test_completed_bar_series_requires_final_or_corrected_bars() -> None:
             freshness=EvidenceFreshness.FRESH,
             session=MarketSession.CLOSED,
         )
+
+    first = bar(BarFinalization.FINAL, 3)
+    mixed = bar(BarFinalization.FINAL, 4).model_copy(
+        update={"lineage": _lineage("other", authority=AuthorityClass.CACHE, cache_hit=True)}
+    )
+    with pytest.raises(ValueError, match="one provider lineage"):
+        BarSeriesCandidate(
+            bars=(first, mixed),
+            freshness=EvidenceFreshness.FRESH,
+            session=MarketSession.CLOSED,
+        )
+
+    mixed_source = bar(BarFinalization.FINAL, 4).model_copy(
+        update={
+            "lineage": first.lineage.model_copy(
+                update={"source": "cache.alternate"}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="one source lineage"):
+        BarSeriesCandidate(
+            bars=(first, mixed_source),
+            freshness=EvidenceFreshness.FRESH,
+            session=MarketSession.CLOSED,
+        )
+
+    mixed_authority = bar(BarFinalization.FINAL, 4).model_copy(
+        update={
+            "lineage": first.lineage.model_copy(
+                update={"authority": AuthorityClass.EXCHANGE}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="one authority lineage"):
+        BarSeriesCandidate(
+            bars=(first, mixed_authority),
+            freshness=EvidenceFreshness.FRESH,
+            session=MarketSession.CLOSED,
+        )
+
+
+def test_default_bar_resolution_keeps_whole_series_selection() -> None:
+    primary = BarSeriesCandidate(
+        bars=(_daily_bar("priority", 2, "202"), _daily_bar("priority", 3, "203")),
+        freshness=EvidenceFreshness.FRESH,
+        provider_priority=5,
+        session=MarketSession.CLOSED,
+    )
+    history = BarSeriesCandidate(
+        bars=tuple(_daily_bar("history", day, str(100 + day)) for day in range(4)),
+        freshness=EvidenceFreshness.FRESH,
+        provider_priority=10,
+        session=MarketSession.CLOSED,
+    )
+
+    result = resolve_bar_series(
+        [primary, history],
+        policy=RealtimePolicy.COMPLETED_SESSION,
+        now=NOW + timedelta(days=4),
+        max_age=timedelta(days=2),
+        requirement=_bar_requirement(
+            series_resolution=BarSeriesResolutionMode.SINGLE_CANDIDATE,
+            end_at=primary.bars[-1].end_at,
+        ),
+    )
+
+    assert result.bars == primary.bars
+    assert result.composition.status is BarSeriesCompositionStatus.NOT_APPLIED
+
+
+def test_completed_bar_composition_fills_history_and_reports_conflicts() -> None:
+    priority = BarSeriesCandidate(
+        bars=(_daily_bar("priority", 2, "202"), _daily_bar("priority", 3, "203")),
+        freshness=EvidenceFreshness.FRESH,
+        provider_priority=5,
+        session=MarketSession.CLOSED,
+    )
+    history = BarSeriesCandidate(
+        bars=tuple(_daily_bar("history", day, str(100 + day)) for day in range(4)),
+        freshness=EvidenceFreshness.STALE,
+        provider_priority=10,
+        session=MarketSession.CLOSED,
+    )
+
+    result = resolve_bar_series(
+        [priority, history],
+        policy=RealtimePolicy.COMPLETED_SESSION,
+        now=NOW + timedelta(days=4),
+        max_age=timedelta(days=2),
+        requirement=_bar_requirement(
+            series_resolution=BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP,
+            end_at=priority.bars[-1].end_at,
+        ),
+    )
+
+    assert [bar.close_price for bar in result.bars] == [
+        Decimal("100"),
+        Decimal("101"),
+        Decimal("202"),
+        Decimal("203"),
+    ]
+    assert [bar.lineage.provider for bar in result.bars] == [
+        "history",
+        "history",
+        "priority",
+        "priority",
+    ]
+    assert result.health.selected_provider is None
+    assert result.health.selected_source is None
+    assert result.composition.status is BarSeriesCompositionStatus.COMPOSED_WITH_CONFLICTS
+    assert result.composition.contributing_providers == ("priority", "history")
+    assert result.composition.filled_bucket_count == 2
+    assert result.composition.conflict_bucket_count == 2
+    assert "BAR_SERIES_COMPOSED_FROM_MULTIPLE_CANDIDATES" in result.composition.limitations
+    assert "BAR_SERIES_SAME_TIMESTAMP_CONFLICT_RESOLVED" in result.composition.limitations
 
 
 def test_candidate_summaries_are_bounded_and_never_include_raw_payloads() -> None:

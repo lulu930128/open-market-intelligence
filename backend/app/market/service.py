@@ -380,6 +380,7 @@ def list_stock_ohlc_chart_data(
             intraday=get_intraday_trend(db=db, stock_id=stock_id),
             end_date=end_date,
             null_fields=("trade_value", "transaction_count"),
+            finalized_through=latest_data_date,
         )
     points = aggregate_ohlc_points(
         points=daily_points,

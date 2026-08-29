@@ -29,6 +29,9 @@ US_EARLY_CLOSE_DATES_V1 = frozenset(
         date(2028, 11, 24),
     }
 )
+US_SPECIAL_CLOSURE_DATES_V1 = {
+    date(2025, 1, 9): "National Day of Mourning for President Jimmy Carter",
+}
 
 
 def _observed_fixed_holiday(year: int, month: int, day: int) -> date:
@@ -102,6 +105,14 @@ def us_market_holiday_names(year: int) -> dict[date, str]:
 
     if year >= 2022:
         holidays[_observed_fixed_holiday(year, 6, 19)] = "Juneteenth National Independence Day"
+
+    holidays.update(
+        {
+            closure_date: name
+            for closure_date, name in US_SPECIAL_CLOSURE_DATES_V1.items()
+            if closure_date.year == year
+        }
+    )
 
     return holidays
 
@@ -226,6 +237,7 @@ __all__ = [
     "US_PRE_MARKET_OPEN_TIME",
     "US_SESSION_CLOSE_TIME",
     "US_SESSION_OPEN_TIME",
+    "US_SPECIAL_CLOSURE_DATES_V1",
     "expected_us_daily_price_date",
     "is_us_early_close_day",
     "is_us_daily_price_finalized",

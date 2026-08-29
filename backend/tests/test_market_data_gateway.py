@@ -47,6 +47,7 @@ from app.market_data.integration_contracts import (
     AcquisitionStatus,
     AcquisitionSummary,
     BarCapabilityRequest,
+    BarCoverageRequirement,
     DataRequirementV2,
     FreshnessRequirement,
     InstrumentTarget,
@@ -308,6 +309,41 @@ def test_cache_only_resolves_persisted_candidate_with_zero_acquisition() -> None
     assert result.resolved.health.status is ResolvedEvidenceStatus.SELECTED
     assert result.acquisition.attempted is False
     assert result.acquisition.limitations == ("PRE_RESOLUTION_SATISFIED",)
+
+
+def test_explicit_bar_coverage_does_not_short_circuit_on_fresh_short_series() -> None:
+    base = _requirement(RealtimePolicy.PREFER_LIVE, max_calls=1)
+    requirement = base.model_copy(
+        update={
+            "request": base.request.model_copy(
+                update={"coverage": BarCoverageRequirement(minimum_bar_count=2)}
+            )
+        }
+    )
+    reader = FakeReader([_batch(freshness=EvidenceFreshness.FRESH)])
+    acquisition = FakeAcquisition(
+        AcquisitionSummary(
+            attempted=True,
+            status=AcquisitionStatus.COMPLETED,
+            providers_attempted=("twse_openapi",),
+            resource_attempts=(_attempt(),),
+            external_calls=1,
+        ),
+        observations=(_bar(cache_hit=False),),
+        receipts=(_receipt(),),
+    )
+
+    result = MarketDataGateway().resolve_bars(
+        requirement,
+        reader=reader,
+        descriptors=(_descriptor(),),
+        acquisition_port=acquisition,
+        transaction_port=FakeTransaction(),
+    )
+
+    assert acquisition.calls == 1
+    assert result.acquisition.attempted is True
+    assert "PRE_RESOLUTION_SATISFIED" not in result.acquisition.limitations
 
 
 def test_gateway_centrally_rejects_missing_quality_field_before_cache_satisfaction() -> None:

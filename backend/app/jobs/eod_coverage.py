@@ -13,6 +13,7 @@ from app.market_data.eod_coverage import (
     normalize_coverage_market,
     reconcile_eod_coverage,
 )
+from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
 
 
 def run_eod_coverage_reconcile_job(
@@ -42,6 +43,11 @@ def run_eod_coverage_reconcile_job(
             taiwan_venue_refresher=(
                 refresh_taiwan_official_daily_venue
                 if market.strip().upper() == "TW"
+                else None
+            ),
+            us_port=(
+                US_FULL_MARKET_EOD_LIFECYCLE
+                if market.strip().upper() == "US"
                 else None
             ),
         )

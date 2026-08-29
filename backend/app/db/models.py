@@ -826,6 +826,14 @@ class MarketIntradayBar(Base):
     __tablename__ = "market_intraday_bar"
 
     __table_args__ = (
+        Index(
+            "ix_market_intraday_bar_stock_market_interval_time",
+            "stock_id",
+            "market",
+            "interval",
+            "bar_time",
+            "id",
+        ),
         UniqueConstraint(
             "provider",
             "stock_id",
@@ -4376,6 +4384,19 @@ class USDailyPrice(Base):
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_registry.id"), nullable=True, index=True
+    )
+    raw_result_id: Mapped[int | None] = mapped_column(
+        ForeignKey("raw_fetch_result.id"), nullable=True, index=True
+    )
+    authority: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    raw_contract_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finalization: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    price_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    volume_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    volume_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

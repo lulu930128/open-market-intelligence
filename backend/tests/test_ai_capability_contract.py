@@ -18,6 +18,179 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def _quality_item(
+        self,
+        *,
+        capability: str,
+        payload: dict,
+        returned_count: int = 1,
+        requested_limit: int | None = None,
+    ) -> dict:
+        manifest_item = {
+            "capability": capability,
+            "domain": "technical" if capability == "technical.structure" else "price",
+            "slot": capability.replace(".", "_"),
+            "required": True,
+            "status": "available",
+            "returned_count": returned_count,
+        }
+        if requested_limit is not None:
+            manifest_item["requested_limit"] = requested_limit
+            manifest_item["effective_limit"] = requested_limit
+        quality = data_quality_contract.build_quality_contract(
+            canonical={
+                "ok": True,
+                "request_status": "completed",
+                "target": {"type": "us_stock", "market": "US"},
+                "status": {"readiness": {"decision_required": True}},
+                "evidence": {},
+            },
+            selection={"output": "decision_with_evidence"},
+            manifest={"capabilities": [manifest_item]},
+            projected_data={capability: payload},
+            realtime_assessments={},
+            scope_type="stock",
+        )
+        return quality["capabilities"][capability]
+
+    def test_payload_semantic_missing_caps_generic_quality(self) -> None:
+        item = self._quality_item(
+            capability="technical.structure",
+            payload={
+                "status": "missing",
+                "quality": {
+                    "status": "missing",
+                    "facts_usable": False,
+                    "decision_usable": False,
+                    "reason_codes": ["DAILY_OHLCV_MISSING"],
+                },
+                "limitations": ["CANONICAL_DAILY_OHLCV_UNAVAILABLE"],
+            },
+        )
+
+        self.assertEqual(item["status"], "missing")
+        self.assertEqual(item["status_class"], "blocked")
+        self.assertEqual(item["availability_status"], "missing")
+        self.assertEqual(item["usability_status"], "unusable")
+        self.assertFalse(item["facts_usable"])
+        self.assertFalse(item["decision_usable"])
+        self.assertIn("DAILY_OHLCV_MISSING", item["reason_codes"])
+
+    def test_cache_only_does_not_clear_daily_refresh_recommendation(self) -> None:
+        item = self._quality_item(
+            capability="daily.ohlcv",
+            returned_count=0,
+            requested_limit=20,
+            payload={
+                "status": "missing",
+                "point_count": 0,
+                "freshness": {
+                    "status": "missing",
+                    "refresh_recommended": True,
+                    "refresh_allowed": False,
+                    "refresh_requested": False,
+                },
+                "quality": {
+                    "facts_usable": False,
+                    "decision_usable": False,
+                },
+            },
+        )
+
+        self.assertEqual(item["freshness_status"], "missing")
+        self.assertTrue(item["refresh_recommended"])
+        self.assertFalse(item["refresh_allowed"])
+        self.assertFalse(item["refresh_requested"])
+        self.assertFalse(item["facts_usable"])
+        self.assertFalse(item["decision_usable"])
+
+    def test_stale_daily_can_keep_facts_but_not_decision_usability(self) -> None:
+        item = self._quality_item(
+            capability="daily.ohlcv",
+            returned_count=2,
+            requested_limit=2,
+            payload={
+                "status": "stale",
+                "points": [
+                    {"time": "2026-08-27", "close": 100},
+                    {"time": "2026-08-28", "close": 101},
+                ],
+                "volume_unit": "shares",
+                "quality": {
+                    "status": "stale",
+                    "facts_usable": True,
+                    "decision_usable": False,
+                },
+            },
+        )
+
+        self.assertEqual(item["status"], "stale")
+        self.assertEqual(item["status_class"], "limited")
+        self.assertTrue(item["facts_usable"])
+        self.assertFalse(item["decision_usable"])
+        self.assertEqual(item["usability_status"], "limited")
+        self.assertTrue(item["refresh_recommended"])
+
+    def test_stale_daily_uses_typed_top_level_canonical_quality(self) -> None:
+        item = self._quality_item(
+            capability="daily.ohlcv",
+            returned_count=2,
+            requested_limit=2,
+            payload={
+                "status": "stale",
+                "freshness_status": "stale",
+                "expected_trade_date": "2026-08-28",
+                "latest_trade_date": "2026-08-27",
+                "points": [
+                    {"time": "2026-08-26", "close": 100},
+                    {"time": "2026-08-27", "close": 101},
+                ],
+                "volume_unit": "shares",
+                "facts_usable": True,
+                "decision_usable": False,
+                "refresh_recommended": True,
+                "selected_provider": "yahoo_chart",
+                "selected_source": "yahoo.chart.1d",
+            },
+        )
+
+        self.assertEqual(item["status"], "stale")
+        self.assertEqual(item["status_class"], "limited")
+        self.assertEqual(item["availability_status"], "available")
+        self.assertEqual(item["freshness_status"], "stale")
+        self.assertTrue(item["facts_usable"])
+        self.assertFalse(item["decision_usable"])
+        self.assertEqual(item["usability_status"], "limited")
+        self.assertTrue(item["refresh_recommended"])
+        self.assertEqual(item["selected_provider"], "yahoo_chart")
+        self.assertEqual(item["selected_source"], "yahoo.chart.1d")
+
+    def test_current_daily_still_requires_structural_quality_for_decision(self) -> None:
+        item = self._quality_item(
+            capability="daily.ohlcv",
+            returned_count=2,
+            requested_limit=2,
+            payload={
+                "status": "current",
+                "points": [
+                    {"time": "2026-08-27", "close": 100},
+                    {"time": "2026-08-28", "close": 101},
+                ],
+                "volume_unit": "shares",
+                "quality": {
+                    "status": "current",
+                    "facts_usable": True,
+                    "decision_usable": True,
+                },
+            },
+        )
+
+        self.assertEqual(item["status"], "current")
+        self.assertEqual(item["status_class"], "ready")
+        self.assertTrue(item["facts_usable"])
+        self.assertTrue(item["decision_usable"])
+        self.assertFalse(item["refresh_recommended"])
+
     def test_session_close_unavailable_payload_fails_closed_across_status_axes(
         self,
     ) -> None:
@@ -355,6 +528,34 @@ class AiCapabilityContractTests(unittest.TestCase):
                 target_market="TW",
                 question_intent="quote",
             )
+
+    def test_tw_generic_quote_defaults_do_not_require_session_close(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection=None,
+            output="decision_with_evidence",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            target_market="TW",
+            question_intent="quote",
+        )
+
+        self.assertIn("quote.snapshot", selection["required"])
+        self.assertNotIn("quote.session_close", selection["required"])
+
+    def test_tw_explicit_close_question_requires_session_close(self) -> None:
+        plan = query_plan.build_query_plan(
+            payload=AiAskRequest(
+                question="2330 今天收盤價是多少？",
+                target={"type": "tw_stock", "id": "2330"},
+            ),
+            scope_type="stock",
+            target_market="TW",
+            question_intent="quote",
+            effective_mode="brief",
+        )
+
+        self.assertIn("quote.session_close", plan.selection["required"])
 
     def test_quote_capability_projects_session_close_identity_fields(self) -> None:
         spec = capability_contract.CAPABILITIES["quote.snapshot"]

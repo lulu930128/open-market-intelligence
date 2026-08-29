@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -66,6 +66,36 @@ def _db() -> tuple[Session, object]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     return Session(engine), engine
+
+
+def _read_without_raw_receipt_body(engine, reader):
+    statements: list[str] = []
+
+    def capture_select(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_select)
+    try:
+        result = reader()
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_select)
+
+    raw_receipt_selects = [
+        statement
+        for statement in statements
+        if "raw_fetch_result" in statement.lower()
+    ]
+    assert raw_receipt_selects
+    assert all("raw_text" not in statement.lower() for statement in raw_receipt_selects)
+    return result
 
 
 def _binding(provider: str, source: str, capability: str):
@@ -136,6 +166,14 @@ def test_current_index_shared_plan_falls_back_persists_and_rereads() -> None:
             ),
             acquisition=acquisition,
         )
+        reread = _read_without_raw_receipt_body(
+            engine,
+            lambda: read_taiwan_current_index(
+                db,
+                index_id="TAIEX",
+                requested_at=NOW,
+            ),
+        )
         projected = project_taiwan_current_index(result)
 
         assert calls == ["mis:TAIEX", "yahoo:TAIEX"]
@@ -149,6 +187,7 @@ def test_current_index_shared_plan_falls_back_persists_and_rereads() -> None:
         assert result.dataset_health.status is DatasetHealthStatus.HEALTHY
         assert projected["close"] == 24_100.0
         assert projected["raw_result_id"]
+        assert reread.resolved.market_index is not None
     finally:
         db.close()
         engine.dispose()
@@ -190,6 +229,14 @@ def test_current_breadth_preserves_unknown_and_not_received_partition() -> None:
             descriptors=(TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR,),
             acquisition=TaiwanCurrentBreadthAcquisitionExecutor((adapter,)),
         )
+        reread = _read_without_raw_receipt_body(
+            engine,
+            lambda: read_taiwan_current_breadth(
+                db,
+                venue="TWSE",
+                requested_at=NOW,
+            ),
+        )
         projected = project_taiwan_current_breadth(result)
 
         assert calls == ["mis-breadth:TWSE"]
@@ -202,6 +249,7 @@ def test_current_breadth_preserves_unknown_and_not_received_partition() -> None:
         assert projected["decision_usable"] is False
         assert result.dataset_health is not None
         assert result.dataset_health.status is DatasetHealthStatus.PARTIAL
+        assert reread.resolved.breadth is not None
     finally:
         db.close()
         engine.dispose()

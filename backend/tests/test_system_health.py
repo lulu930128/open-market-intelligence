@@ -53,6 +53,47 @@ class SystemHealthTests(unittest.TestCase):
             expected_us_mode != "off"
             and (expected_us_mode == "on" or expected_us_canary_count > 0),
         )
+        self.assertEqual(runtime["us_daily_read_binding_mode"], "canonical")
+        self.assertEqual(
+            runtime["us_daily_acquisition_rollout_mode"],
+            expected_us_mode,
+        )
+        self.assertIn(
+            runtime["us_daily_acquisition_scope"],
+            {"none", "canary_targets", "all"},
+        )
+        self.assertIn(
+            runtime["us_daily_acquisition_configuration_status"],
+            {"valid", "invalid"},
+        )
+
+    def test_health_check_keeps_invalid_canary_configuration_visible(self) -> None:
+        with (
+            unittest.mock.patch.object(
+                settings,
+                "us_canonical_market_data_mode",
+                "canary",
+            ),
+            unittest.mock.patch.object(
+                settings,
+                "us_canonical_shadow_symbols",
+                "AAPL,TSM,^SOX",
+            ),
+            unittest.mock.patch.object(
+                settings,
+                "us_canonical_canary_max_symbols",
+                2,
+            ),
+        ):
+            runtime = health_check()["runtime"]
+
+        self.assertEqual(
+            runtime["us_daily_acquisition_configuration_status"],
+            "invalid",
+        )
+        self.assertFalse(runtime["us_daily_acquisition_enabled"])
+        self.assertEqual(runtime["us_daily_acquisition_scope"], "none")
+        self.assertIn("exceeds max_symbols=2", runtime["us_daily_acquisition_limitations"][0])
 
     def test_liveness_check_does_not_depend_on_runtime_or_database(self) -> None:
         payload = liveness_check()

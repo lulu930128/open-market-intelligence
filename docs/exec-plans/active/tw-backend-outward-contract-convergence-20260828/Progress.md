@@ -2,12 +2,12 @@
 
 ## 狀態
 
-- 任務狀態：`consumer_convergence_source_implemented_runtime_adoption_pending`
+- 任務狀態：`4_4_0_source_consolidation_passed_runtime_adoption_pending`
 - Source acceptance：`passed_consumer_convergence_targeted_with_known_full_suite_baseline_failures`
 - Runtime acceptance：`backend_running_pre_consumer_source_mcp_not_reverified`
 - Live acceptance：`failed_current_session_and_pending_next_session`
 - Product acceptance：`not_ready`
-- 最後更新：`2026-08-28 Asia/Taipei`
+- 最後更新：`2026-08-29 Asia/Taipei`
 - Source baseline：`4936d4631bef18bb5ec26c1f50799e91a2a8b3be`
 
 ## 授權與邊界
@@ -247,6 +247,39 @@
 3. OMI_search adapter/tunnel與Codex host schema分別adopt；Backend ready不得代替MCP host accepted。
 4. 下一交易日保留H1–H8既有quote/index/intraday/live gates；通過前不歸檔active plan、不commit/push/release。
 
+## 2026-08-29 R2 Daily lineage／series composition P1修復
+
+### Source implementation
+
+- `BarSeriesCandidate`繼續強制單一instrument、interval、provider、source與authority；internal invariant改用`MarketDataContractError`，仍保留`ValueError`相容性，但AI transport不再誤報為使用者400。
+- `BarCapabilityRequest.series_resolution`新增additive typed mode：default=`single_candidate`；只有TW completed daily requirement啟用`compose_by_timestamp`，US whole-series selection未改。
+- `TaiwanCompletedDailyCandidateReader`不再先混合provider；每個`PersistedBarSeries`各自投影為single-lineage candidate。Shared Resolver逐bar做quality／finalization／authority／price-basis gate後，以provider priority、provider、source deterministic rank按timestamp組合。
+- `ResolvedBarSeries.composition`明確輸出contributors、filled/conflict bucket count與limitations；multi-provider composite的`selected_provider`／`selected_source`維持`None`，每根bar保留原始receipt lineage。
+- TW platform保留`OFFICIAL_DAILY_SERIES_RECONCILED`與`OFFICIAL_DAILY_SAME_DATE_CONFLICT_RESOLVED`相容投影；沒有新增canonical DB table、consumer fallback、provider IO或read-path write。
+- Direct與SSE對`MarketDataContractError`回500 structured internal error與bounded message；server log保留diagnostic，對外不洩漏Python invariant字串。
+
+### Validation
+
+- Core/TW/AI/US targeted matrix：`72 passed`。
+- Shared Gateway／quality／US／architecture matrix：`62 passed`。
+- Consumer／technical／valuation／AI／MCP contract matrix：`190 passed / 14 subtests passed / 1 unrelated failure`；唯一failure是`eod_coverage.py::_repair_us_eod rollback`已移除但舊JSON debt allowlist尚未同步，沒有新增transaction owner。
+- `ruff check`（本輪production與test files）：PASS；changed-module compileall：PASS。
+- Architecture checker：PASS，`22 actual violations / 22 declared debt`；architecture pytest：PASS。
+- Backend safe profile的checker、architecture pytest與compileall均PASS；default full pytest collection被既有`backend/tests/tmpla6tzx59` WinError 5擋住。
+- 排除該既有ACL artifact並只停用pytest dead-symlink teardown cleanup後，完整Backend：`2523 passed / 16 failed / 1 error / 476 subtests passed`。16+1為既有dirty-worktree baseline：DB固定count、financial status、KGI stream schema/semantics、dark checkpoint、source health、stale transaction debt allowlist、US Alpaca rollout與runtime temp ACL；本輪相關tests均green。
+
+### Read-only production-data evidence
+
+- 正式SQLite唯讀probe：2330回2457根、3711回2014根，兩者均由`twse_openapi`歷史與`twse_rwd`最新eligible bar組成；每根bar保留真實provider/source，沒有mixed candidate ValueError。
+- 兩者composite latest均為2026-08-27並truthfully標成`stale`；2026-08-28 row沒有通過現有receipt release qualification，3711另帶`DAILY_RECEIPT_PREDATES_RELEASE`，本輪未繞過或修改資料。
+- 3711實際public v4問題以read-only DB、`allow_external_fetch=false`、`allow_llm=false`走Direct與SSE：兩者皆回`omi.decision.v4`；Direct `transport_ok/request_valid/execution_completed/data_available=true`，SSE final正常且`done.ok=true`，均不含`candidate bars must share one provider lineage`。`quality_status=blocked`保留目前evidence limits，不偽裝成完整決策品質。
+
+### Acceptance狀態
+
+- R2 Source：`passed`。
+- Runtime／Frontend visible／MCP host：`pending_authorization`；唯讀identity確認PID 60180於17:49:49啟動，早於`resolution.py`本輪17:58:42更新，雖`/api/system/health=ok`且root/interpreter正確，仍未載入本輪source，不能用health或source probe代替runtime acceptance。
+- 本輪沒有production DB mutation、provider IO、runtime restart、MCP reload、scheduler enable、commit或push。
+
 ## 2026-08-29 Final cleanup source結果
 
 ### F1 — Historical technical observation boundary
@@ -293,3 +326,39 @@
 - MCP offline snapshot未變更且schema parity通過；adapter沒有新增selection、unit或coverage邏輯。
 - Read-only runtime probe：`/api/system/health=ok`、`readyz=ready`，但PID 28256的launcher始於`01:02:06`，本輪`capability_contract.py`更新於`01:32:50`；explicit daily fields仍只回原四欄manifest、unit為null且quality含`volume_unit_missing`，確認F4 source尚未adopt。
 - 本輪未執行provider IO、production DB mutation、runtime restart、scheduler enable、commit、push或release。F4僅完成Source seal；Runtime、Live與Product acceptance維持pending。
+
+## 2026-08-29 F5 AI pipeline canonical truth convergence
+
+### Source implementation
+
+- `trading_calendar`新增typed emergency-closure overlay；2026-07-10颱風臨時休市的precedence高於verified annual cache的negative lookup，因此`next_taiwan_trading_day(2026-07-09)`為2026-07-13，technical與v4 daily continuity不再產生假缺口。
+- TW stock context不再只解包`TaiwanLatestDailyEvidence.daily`後丟棄health；`daily.ohlcv`與共用daily-dependent capabilities優先投影canonical `DatasetHealth`／`ResolvedEvidenceHealth`。Provider source-health仍可見為`provider_diagnostic`，但row absence只標unknown，不改寫canonical current/missing。
+- Generic TW quote selection移除隱性`quote.session_close`；明確「今日／今天／當日／盤後收盤」與explicit capability仍選入session close。
+- Shared `FreshnessRequirement`新增additive `completed_session_date` basis；TW session-close candidate繼續由market owner比對expected trade date，shared quality/Resolver不再套wall-clock age。週日仍可使用週五completed session；週一close完成後舊週五candidate因trade-date mismatch失效。
+- `capability_projection_registry`的advertised projector全部改由`CapabilitySpec.paths`執行，validator禁止advertised projection繞過owner；TW `technical.structure` fixture不再把shadow `structure_v2`當production projection path。
+- Quote-only context的event source refs改在canonical source-ref集合初始化後合併；避免有event evidence時引用尚未建立的local並確保lineage不被後續重建丟棄。
+
+### Validation
+
+- 新增calendar/cache precedence、7/9→7/13 continuity、canonical freshness precedence、generic/explicit close selection、Sunday/new-session close validity與projection owner regression。
+- Calendar／freshness／capability／v4／session-close／registry／shared Resolver與quality matrix：`259 passed`。
+- AI P1 reliability／freshness guard／capability resolution／SSE regression：`107 passed`。
+- Quote-only outward contract與intraday remediation regression：`74 passed`。
+- Architecture checker：PASS，`22 actual violations / 22 declared debt`；registry architecture tests包含於前述matrix並通過。
+- 本輪核心修改檔與新增tests的targeted Ruff：PASS；完整納入既有dirty `taiwan_stock.py`與`test_tw_public_quote_platform.py`時仍有2個unused local與1個unused import baseline，本輪未移除他人／既有未完成編輯。
+- Changed Backend app compileall與targeted `git diff --check`：PASS（只有既有LF→CRLF提示）。
+
+### Acceptance狀態
+
+- F5 Source：`passed`。
+- Frontend／UI：依使用者要求未修改、未驗證visible UI。
+- Runtime／Live／Product：`pending_authorization`；running Backend未restart，不宣告已載入本輪source。
+- 本輪未執行provider IO、production DB mutation、scheduler enable、runtime restart、commit、push或release。
+
+## 2026-08-29 OMI 4.4.0 finalized Daily overlay closeout
+
+- `list_stock_ohlc_chart_data()`現在把canonical completed Daily的latest date傳入共用overlay helper作為finalized-through boundary。
+- 若intraday evidence與released Daily同日期或更早，保留official close、volume、trade value與transaction count，`intraday_overlay=None`且volume semantics維持`finalized_traded_shares`。
+- 若intraday trade date晚於latest finalized Daily，既有provisional overlay仍可使用；GET維持cache-only，沒有新增provider IO或DB write。
+- Targeted negative／positive regression納入4.4.0矩陣並通過；architecture guard維持`22 actual / 22 declared`。
+- 本段只接受Source；running Backend尚未restart採用，Runtime／Live／Product維持pending／partial。

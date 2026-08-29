@@ -170,6 +170,31 @@ def _us_market_data_params(
     )
     if selected_capabilities:
         params["requested_capabilities"] = selected_capabilities
+    selection = (
+        query_plan.get("selection")
+        if isinstance(query_plan.get("selection"), dict)
+        else {}
+    )
+    selection_limits = (
+        selection.get("limits")
+        if isinstance(selection.get("limits"), dict)
+        else {}
+    )
+    daily_selection_limit = selection_limits.get(
+        "daily.ohlcv",
+        selection_limits.get("daily.points"),
+    )
+    if (
+        "daily.ohlcv" in selected_capabilities
+        and isinstance(daily_selection_limit, int)
+        and not isinstance(daily_selection_limit, bool)
+        and daily_selection_limit > 0
+    ):
+        existing_bars = params.get("bars")
+        if existing_bars is None:
+            params["bars"] = daily_selection_limit
+        elif isinstance(existing_bars, int) and not isinstance(existing_bars, bool):
+            params["bars"] = max(existing_bars, daily_selection_limit)
     requested_trade_date = requested_us_trade_date(
         payload.question,
         explicit_value=params.get("trade_date"),

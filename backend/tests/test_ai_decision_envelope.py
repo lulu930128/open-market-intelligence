@@ -530,6 +530,170 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             explicit_bytes,
         )
 
+    def test_v4_summary_budget_adapts_for_intraday_required_envelope(self) -> None:
+        base_response = _v2_response()
+        base_response["question"] = (
+            "用當沖和盤中角度分析目前標的。"
+            "請優先使用 OMI 可用的即時、今日、1分/5分、量價、技術指標、"
+            "法人與市場資料。"
+        )
+        base_response["target"] = {
+            "type": "tw_stock",
+            "id": "5347",
+            "market": "TW",
+            "label": "世界",
+        }
+        compact = base_response["result"]["data"]["compact"]
+        compact["quote"] = {
+            "price": 100,
+            "quote_time": "2026-08-29T10:00:00+08:00",
+            "provider": "test",
+            "components": {
+                "session_close": {
+                    "status": "ready",
+                    "available": True,
+                    "price": 99,
+                    "trade_date": "2026-08-28",
+                }
+            },
+        }
+        compact["chart"] = {
+            "points": [
+                {"date": "2026-08-28", "close": 99, "volume": 1_000}
+            ],
+            "point_count": 1,
+        }
+        compact["intraday_bars"] = {
+            "points": [
+                {
+                    "bar_time": "2026-08-29T10:00:00+08:00",
+                    "close": 100,
+                    "volume": 10,
+                }
+            ],
+            "point_count": 1,
+            "interval": "1m",
+        }
+        compact["technical"] = {
+            "latest_price": 100,
+            "trend": "bullish",
+        }
+        compact["chips"] = {
+            "institutional": {
+                "trade_date": "2026-08-28",
+                "foreign_net": 100,
+            }
+        }
+        base_response["freshness"] = {
+            "status": "current",
+            "datasets": {
+                "quote": "current",
+                "intraday": "current",
+            },
+        }
+        # Model the bounded but metadata-heavy limitations seen on the real
+        # intraday path so the minimum canonical envelope exceeds 32 KiB.
+        base_response["warnings"] = [
+            f"intraday-limit-{index}-" + ("x" * 4_000)
+            for index in range(4)
+        ]
+        required = [
+            "target.identity",
+            "quote.snapshot",
+            "daily.ohlcv",
+            "technical.structure",
+            "data.freshness",
+            "intraday.bars",
+            "quote.session_close",
+            "chips.institutional",
+        ]
+
+        adaptive_response = deepcopy(base_response)
+        adaptive_selection = capability_contract.normalize_selection(
+            selection={"include": required},
+            output="decision_with_evidence",
+            realtime_policy="require_live",
+            payload_level="summary",
+            scope_type="stock",
+            question_intent="entry_decision",
+        )
+        adaptive_response["query_plan"] = {
+            "selection": adaptive_selection,
+            "target_type": "stock",
+            "payload_level": "summary",
+        }
+
+        adaptive = decision_envelope.for_requested_contract(
+            adaptive_response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        self.assertTrue(adaptive["ok"])
+        self.assertEqual(adaptive["request_status"], "completed")
+        self.assertEqual(
+            adaptive["projection"]["response_budget_source"],
+            "payload_default_adaptive",
+        )
+        self.assertGreater(
+            adaptive["projection"]["minimum_required_envelope_bytes"],
+            32_768,
+        )
+        self.assertGreater(
+            adaptive["projection"]["effective_max_response_bytes"],
+            32_768,
+        )
+        self.assertLessEqual(
+            adaptive["projection"]["effective_max_response_bytes"],
+            65_536,
+        )
+        self.assertEqual(
+            adaptive["projection"]["max_response_ceiling_bytes"],
+            65_536,
+        )
+        self.assertEqual(
+            adaptive["projection"]["adaptation_reason"],
+            "minimum_required_envelope_exceeds_payload_default",
+        )
+        self.assertTrue(adaptive["projection"]["required_payload_preserved"])
+
+        explicit_response = deepcopy(base_response)
+        explicit_selection = capability_contract.normalize_selection(
+            selection={
+                "include": required,
+                "max_response_bytes": 32_768,
+            },
+            output="decision_with_evidence",
+            realtime_policy="require_live",
+            payload_level="summary",
+            scope_type="stock",
+            question_intent="entry_decision",
+        )
+        explicit_response["query_plan"] = {
+            "selection": explicit_selection,
+            "target_type": "stock",
+            "payload_level": "summary",
+        }
+
+        explicit = decision_envelope.for_requested_contract(
+            explicit_response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        self.assertFalse(explicit["ok"])
+        self.assertEqual(explicit["request_status"], "rejected")
+        self.assertEqual(
+            explicit["error"]["code"],
+            "RESPONSE_BUDGET_TOO_SMALL",
+        )
+        self.assertEqual(
+            explicit["projection"]["response_budget_source"],
+            "caller_explicit",
+        )
+        self.assertEqual(
+            explicit["projection"]["max_response_ceiling_bytes"],
+            32_768,
+        )
+
     def test_v4_hard_caps_rich_multi_capability_minimum_budget_envelope(
         self,
     ) -> None:
@@ -1073,6 +1237,46 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             0,
         )
         self.assertFalse(quality["decision_usable"])
+
+    def test_v4_daily_sequence_ignores_taiwan_emergency_market_closure(self) -> None:
+        response = _v2_response()
+        response["result"]["data"]["compact"]["chart"] = {
+            "status": "current",
+            "interval": "1d",
+            "point_count": 2,
+            "returned_point_count": 2,
+            "latest_data_date": "2026-07-13",
+            "provider": "twse_openapi",
+            "source": "twse_daily_trading",
+            "volume_unit": "shares",
+            "points": [
+                {"time": "2026-07-09", "close_price": 100, "volume": 1000},
+                {"time": "2026-07-13", "close_price": 101, "volume": 1200},
+            ],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["daily.ohlcv"], "limits": {"daily.points": 2}},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            question_intent="general",
+        )
+        response["query_plan"] = {
+            "target_type": "stock",
+            "selection": selection,
+        }
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+        continuity = canonical["evidence"]["quality"]["capabilities"][
+            "daily.ohlcv"
+        ]["continuity"]
+
+        self.assertEqual(continuity["status"], "continuous")
+        self.assertEqual(continuity["missing_trading_day_count"], 0)
 
     def test_v4_market_sample_ranking_is_never_projected_as_complete(self) -> None:
         response = _v2_response()
@@ -3832,6 +4036,120 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertEqual(daily["returned_point_count"], 2)
         self.assertTrue(daily["truncated"])
         self.assertEqual(daily["volume_unit"], "shares")
+
+    def test_v4_preserves_stale_us_daily_facts_from_canonical_result(
+        self,
+    ) -> None:
+        response = _v2_response(freshness_by_domain={"chart": "stale"})
+        response["target"] = {
+            "type": "us_stock",
+            "id": "AAPL",
+            "market": "US",
+        }
+        response["resolution"]["target"] = dict(response["target"])
+        selection = capability_contract.normalize_selection(
+            selection={
+                "include": ["daily.ohlcv"],
+                "limits": {"daily.points": 2},
+            },
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="full",
+            scope_type="us_stock",
+            question_intent="general",
+        )
+        response["query_plan"] = {
+            "target_type": "us_stock",
+            "payload_level": "full",
+            "selection": selection,
+        }
+        canonical_result = {
+            "kind": "us_stock_context",
+            "data": {
+                "resolved_market_data": {
+                    "daily_ohlcv": {
+                        "kind": "us_bar_series",
+                        "schema_version": "omi.market.bars.v1",
+                        "status": "stale",
+                        "selected_provider": "yahoo_chart",
+                        "selected_source": "yahoo.chart.1d",
+                        "selected_event_at": "2026-08-27T20:00:00Z",
+                        "fallback_used": False,
+                        "selection_reason": "COMPLETED_SESSION_STALE",
+                        "facts_usable": True,
+                        "research_usable": False,
+                        "decision_usable": False,
+                        "refresh_recommended": True,
+                        "usability_status": "facts_only",
+                        "expected_trade_date": "2026-08-28",
+                        "latest_trade_date": "2026-08-27",
+                        "freshness_status": "stale",
+                        "is_current": False,
+                        "available_bar_count": 2,
+                        "point_count": 2,
+                        "returned_point_count": 2,
+                        "truncated": False,
+                        "bars": [
+                            {
+                                "end_at": "2026-08-26T20:00:00Z",
+                                "close_price": "100",
+                                "volume": "1000",
+                                "volume_unit": "share",
+                                "provider": "yahoo_chart",
+                                "source": "yahoo.chart.1d",
+                                "event_at": "2026-08-26T20:00:00Z",
+                            },
+                            {
+                                "end_at": "2026-08-27T20:00:00Z",
+                                "close_price": "101",
+                                "volume": "1100",
+                                "volume_unit": "share",
+                                "provider": "yahoo_chart",
+                                "source": "yahoo.chart.1d",
+                                "event_at": "2026-08-27T20:00:00Z",
+                            },
+                        ],
+                        "limitations": [
+                            "Selected evidence is stale and must not be presented as current."
+                        ],
+                    }
+                },
+                "compact": {
+                    "freshness_by_domain": {"chart": "stale"},
+                    "slots": {"daily_chart": {"status": "stale"}},
+                },
+            },
+        }
+        response["result"] = canonical_result
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+            canonical_result=canonical_result,
+        )
+
+        daily = canonical["evidence"]["data"]["daily.ohlcv"]
+        self.assertEqual(daily["expected_trade_date"], "2026-08-28")
+        self.assertEqual(daily["latest_trade_date"], "2026-08-27")
+        self.assertEqual(daily["freshness_status"], "stale")
+        self.assertTrue(daily["facts_usable"])
+        self.assertFalse(daily["decision_usable"])
+        self.assertTrue(daily["refresh_recommended"])
+        quality = canonical["evidence"]["quality"]["capabilities"][
+            "daily.ohlcv"
+        ]
+        self.assertEqual(quality["status"], "stale")
+        self.assertEqual(quality["availability_status"], "available")
+        self.assertEqual(quality["freshness_status"], "stale")
+        self.assertTrue(quality["facts_usable"])
+        self.assertFalse(quality["decision_usable"])
+        self.assertEqual(quality["usability_status"], "limited")
+        self.assertTrue(quality["refresh_recommended"])
+        freshness = canonical["evidence"]["freshness_by_capability"][
+            "daily.ohlcv"
+        ]
+        self.assertEqual(freshness["status"], "stale")
+        self.assertEqual(freshness["availability_status"], "available")
 
     def test_v4_projects_source_health_entries_from_canonical_result(
         self,

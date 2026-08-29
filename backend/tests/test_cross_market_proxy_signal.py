@@ -6,7 +6,13 @@ import unittest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, USDailyPrice
+from app.db.models import (
+    Base,
+    RawFetchResult,
+    SourceRegistry,
+    USDailyPrice,
+    USStockMaster,
+)
 from app.market.cross_market.context import build_cross_market_target_context
 from app.market.cross_market.maintenance import (
     approve_relation,
@@ -17,6 +23,7 @@ from app.market.cross_market.schemas import (
     CrossMarketRelationEvidenceCandidate,
     InstrumentRefRead,
 )
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE, us_session_close_time
 
 
 DECISION_AT = datetime(2026, 8, 9, 13, 0, tzinfo=timezone.utc)
@@ -148,21 +155,66 @@ def add_price_pair(
     previous_close: float,
     latest_close: float,
 ) -> None:
+    if db.query(USStockMaster).filter(USStockMaster.symbol == symbol).first() is None:
+        db.add(
+            USStockMaster(
+                symbol=symbol,
+                exchange="INDEX" if symbol.startswith("^") else "NASDAQ",
+                asset_type="index" if symbol.startswith("^") else "stock",
+                is_active=True,
+            )
+        )
+    source = SourceRegistry(
+        source_name=f"test.canonical.{symbol}",
+        source_type="test",
+        category="market_data",
+    )
+    db.add(source)
+    db.flush()
     for trade_date, close in (
         (date(2026, 8, 6), previous_close),
         (EXPECTED_DATE, latest_close),
     ):
+        content_hash = f"{symbol}-{trade_date.isoformat()}-{close}"
+        raw = RawFetchResult(
+            source_id=source.id,
+            fetched_at=DECISION_AT,
+            method="GET",
+            url=f"https://example.test/us/{symbol}",
+            content_hash=content_hash,
+            parser_version="test.canonical.v1",
+        )
+        db.add(raw)
+        db.flush()
         db.add(
             USDailyPrice(
-                provider="test",
+                provider="yahoo_chart",
                 symbol=symbol,
                 trade_date=trade_date,
                 currency="USD",
+                open_price=close,
+                high_price=close,
+                low_price=close,
                 close_price=close,
                 adjusted_close=close,
+                trade_volume=1_000,
                 fetched_at=DECISION_AT,
                 created_at=DECISION_AT,
                 updated_at=DECISION_AT,
+                source_id=source.id,
+                raw_result_id=raw.id,
+                authority="vendor",
+                raw_contract_version="test.canonical.v1",
+                event_at=datetime.combine(
+                    trade_date,
+                    us_session_close_time(trade_date),
+                    tzinfo=US_MARKET_TIMEZONE,
+                ),
+                finalization="final",
+                price_basis="raw",
+                volume_unit="shares",
+                volume_status="observed",
+                raw_payload_hash=content_hash,
             )
         )
     db.flush()

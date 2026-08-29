@@ -1050,6 +1050,101 @@ def _financial_semantic_quality(
         "source": "payload.semantic_quality",
         "status": "partial" if facts_available else "blocked",
         "status_class": "limited" if facts_available else "blocked",
+        "facts_usable": facts_available,
+        "decision_usable": False,
+        "issues": list(dict.fromkeys(issues)),
+    }
+
+
+def _explicit_bool(*values: Any) -> bool | None:
+    for value in values:
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _payload_semantic_quality(
+    capability_id: str,
+    payload: Any,
+) -> dict[str, Any] | None:
+    financial = _financial_semantic_quality(capability_id, payload)
+    if financial is not None:
+        return financial
+    if not isinstance(payload, dict):
+        return None
+
+    quality = _dict(payload.get("quality"))
+    has_typed_top_level_quality = bool(
+        capability_id == "daily.ohlcv"
+        and (
+            _normalized_status(payload.get("freshness_status")) != "unknown"
+            or any(
+                isinstance(payload.get(key), bool)
+                for key in (
+                    "facts_usable",
+                    "research_usable",
+                    "decision_usable",
+                )
+            )
+        )
+    )
+    if not quality and not has_typed_top_level_quality:
+        return None
+    explicit_status = _normalized_status(
+        quality.get("status")
+        or payload.get("freshness_status")
+        or payload.get("status")
+    )
+    facts_usable = _explicit_bool(
+        quality.get("facts_usable"),
+        payload.get("facts_usable"),
+        quality.get("research_usable"),
+        payload.get("research_usable"),
+    )
+    decision_usable = _explicit_bool(
+        quality.get("decision_usable"),
+        payload.get("decision_usable"),
+    )
+    issues = [
+        str(value)
+        for values in (
+            quality.get("issues"),
+            quality.get("reason_codes"),
+            payload.get("reason_codes"),
+            payload.get("limitations"),
+        )
+        if isinstance(values, (list, tuple))
+        for value in values
+        if str(value).strip()
+    ]
+    if (
+        explicit_status == "unknown"
+        and facts_usable is None
+        and decision_usable is None
+        and not issues
+    ):
+        return None
+
+    if explicit_status == "unknown":
+        explicit_status = "missing" if facts_usable is False else "partial"
+    status_class = _status_class(explicit_status)
+    if facts_usable is False:
+        status_class = "blocked"
+    elif decision_usable is False and status_class == "ready":
+        status_class = "limited"
+    elif (
+        facts_usable is True
+        and status_class == "blocked"
+        and explicit_status == "stale"
+    ):
+        status_class = "limited"
+
+    return {
+        "source": "payload.semantic_quality",
+        "status": explicit_status,
+        "status_class": status_class,
+        "facts_usable": facts_usable,
+        "decision_usable": decision_usable,
         "issues": list(dict.fromkeys(issues)),
     }
 
@@ -1078,6 +1173,11 @@ def _quality_for_capability(
         else {}
     )
     projected_payload_included = capability_id in projected_data
+    payload_quality = _dict(payload.get("quality")) if isinstance(payload, dict) else {}
+    explicit_payload_status = _normalized_status(
+        payload_quality.get("status")
+        or (payload.get("status") if isinstance(payload, dict) else None)
+    )
     explicitly_unavailable = bool(
         projected_payload_included
         and isinstance(payload, dict)
@@ -1085,6 +1185,7 @@ def _quality_for_capability(
             payload.get("available") is False
             or _normalized_status(payload.get("availability_status"))
             in {"missing", "unavailable", "error"}
+            or explicit_payload_status in {"missing", "unavailable", "error"}
         )
     )
     semantic_payload_empty = _semantic_payload_empty(
@@ -1092,7 +1193,9 @@ def _quality_for_capability(
         payload,
     )
     payload_included = bool(
-        projected_payload_included and not semantic_payload_empty
+        projected_payload_included
+        and not semantic_payload_empty
+        and not explicitly_unavailable
     )
     payload_applicability = _normalized_status(
         _first_semantic_value(payload, keys={"applicability_status"})
@@ -1100,7 +1203,7 @@ def _quality_for_capability(
     semantic_quality = (
         None
         if payload_applicability == "not_applicable"
-        else _financial_semantic_quality(capability_id, payload)
+        else _payload_semantic_quality(capability_id, payload)
     )
 
     candidates = [
@@ -1183,14 +1286,14 @@ def _quality_for_capability(
             "status": "missing",
             "status_class": "blocked",
         }
+    if semantic_quality is not None:
+        candidates.append(semantic_quality)
     status_classes = {candidate["status_class"] for candidate in candidates}
     contradiction_codes: list[str] = []
     if "ready" in status_classes and ({"limited", "blocked"} & status_classes):
         contradiction_codes.append("status_sources_disagree")
     if "neutral" in status_classes and ({"ready", "limited", "blocked"} & status_classes):
         contradiction_codes.append("applicability_sources_disagree")
-    if semantic_quality is not None:
-        candidates.append(semantic_quality)
 
     temporal = _temporal_summary(payload)
     units = _unit_summary(payload)
@@ -1259,6 +1362,20 @@ def _quality_for_capability(
         status = str(semantic_quality["status"])
         status_class = str(semantic_quality["status_class"])
         canonical_candidate = semantic_quality
+        freshness_status = _canonical_freshness_status(
+            status=status,
+            payload=payload,
+            realtime=realtime,
+            payload_included=payload_included,
+        )
+        release_status = _canonical_release_status(
+            payload=payload,
+            payload_included=payload_included,
+            applicability_status=applicability_status,
+            freshness_status=freshness_status,
+        )
+        if explicitly_unavailable and release_status == "unknown":
+            release_status = "not_released"
     capability_freshness_status = (
         _normalized_status(freshness_by_capability.get(capability_id))
         if freshness_by_capability.get(capability_id) is not None
@@ -1314,6 +1431,30 @@ def _quality_for_capability(
             or stale_quote_facts_usable
         )
     )
+    semantic_facts_usable = (
+        semantic_quality.get("facts_usable")
+        if semantic_quality is not None
+        and isinstance(semantic_quality.get("facts_usable"), bool)
+        else None
+    )
+    if semantic_facts_usable is False:
+        facts_usable = False
+    elif semantic_facts_usable is True:
+        facts_usable = bool(
+            payload_included
+            and coverage_status not in {"missing", "valid_empty"}
+            and not units["missing_volume_unit"]
+        )
+    semantic_decision_usable = (
+        semantic_quality.get("decision_usable")
+        if semantic_quality is not None
+        and isinstance(semantic_quality.get("decision_usable"), bool)
+        else None
+    )
+    if semantic_decision_usable is False:
+        decision_usable = False
+    elif semantic_decision_usable is True:
+        decision_usable = bool(decision_usable and facts_usable)
     intraday_research_usable = bool(
         payload_included
         and (
@@ -1367,6 +1508,8 @@ def _quality_for_capability(
     availability_status = (
         "available"
         if payload_included
+        else "missing"
+        if explicitly_unavailable and explicit_payload_status == "missing"
         else "unavailable"
         if explicitly_unavailable
         else "unavailable"
@@ -1466,6 +1609,16 @@ def _quality_for_capability(
             if applicability_status == "not_applicable"
             else realtime.get("refresh_possible_now")
         ),
+        "refresh_allowed": _explicit_bool(
+            realtime.get("refresh_allowed"),
+            payload_freshness.get("refresh_allowed"),
+            payload.get("refresh_allowed") if isinstance(payload, dict) else None,
+        ),
+        "refresh_requested": _explicit_bool(
+            realtime.get("refresh_requested"),
+            payload_freshness.get("refresh_requested"),
+            payload.get("refresh_requested") if isinstance(payload, dict) else None,
+        ),
         "refresh_recommended": (
             False
             if applicability_status == "not_applicable"
@@ -1476,9 +1629,16 @@ def _quality_for_capability(
             else bool(
                 realtime.get("refresh_recommended")
                 or payload_freshness.get("refresh_recommended")
+                or (
+                    payload.get("refresh_recommended")
+                    if isinstance(payload, dict)
+                    else False
+                )
                 or _dict(
                     freshness_by_capability.get(capability_id)
                 ).get("refresh_recommended")
+                or freshness_status
+                in {"missing", "stale", "delayed", "future", "unavailable"}
             )
         ),
         "source_grade": _first_semantic_value(
@@ -1488,6 +1648,14 @@ def _quality_for_capability(
         "selected_provider": _first_semantic_value(
             payload,
             keys={"selected_provider", "provider"},
+        ),
+        "selected_source": _first_semantic_value(
+            payload,
+            keys={"selected_source", "source"},
+        ),
+        "selection_reason": _first_semantic_value(
+            payload,
+            keys={"selection_reason"},
         ),
         "fallback_used": bool(
             _first_semantic_value(payload, keys={"fallback_used"})
@@ -1918,9 +2086,13 @@ def _consumer_capability_status(item: dict[str, Any]) -> dict[str, Any]:
             "computed_at",
             "served_at",
             "refresh_possible_now",
+            "refresh_allowed",
+            "refresh_requested",
             "refresh_recommended",
             "source_grade",
             "selected_provider",
+            "selected_source",
+            "selection_reason",
             "fallback_used",
             "reason_codes",
         )
@@ -1992,8 +2164,14 @@ def apply_quality_contract(
         item["canonical_status_ref"] = (
             f"evidence.capability_status.{item.get('capability')}"
         )
-        if capability_quality.get("refresh_recommended") is False:
-            item["refresh_recommended"] = False
+        item["refresh_recommended"] = bool(
+            capability_quality.get("refresh_recommended")
+        )
+        item["refresh_possible_now"] = capability_quality.get(
+            "refresh_possible_now"
+        )
+        item["refresh_allowed"] = capability_quality.get("refresh_allowed")
+        item["refresh_requested"] = capability_quality.get("refresh_requested")
         item["quality_ref"] = (
             f"evidence.quality.capabilities.{item.get('capability')}"
         )

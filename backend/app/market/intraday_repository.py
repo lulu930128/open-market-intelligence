@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from pydantic import ValidationError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.db.models import (
     MarketIntradayBar,
@@ -39,6 +39,13 @@ from app.market_data.resolution import BarSeriesCandidate
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
+
+_RAW_FETCH_LINEAGE_COLUMNS = (
+    RawFetchResult.id,
+    RawFetchResult.source_id,
+    RawFetchResult.content_hash,
+    RawFetchResult.parser_version,
+)
 
 
 def _as_taipei(value: datetime) -> datetime:
@@ -88,6 +95,7 @@ class TaiwanIntradayBarRepository:
                 RawFetchResult,
                 SourceRegistry,
             )
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
             .join(
                 MarketIntradayBarLineage,
                 MarketIntradayBarLineage.bar_id == MarketIntradayBar.id,

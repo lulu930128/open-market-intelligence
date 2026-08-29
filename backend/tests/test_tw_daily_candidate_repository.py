@@ -18,13 +18,21 @@ from app.db.models import (
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market.service import read_market_daily_snapshot
 from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReader
-from app.market.daily_ohlcv_platform import build_taiwan_daily_cache_requirement
+from app.market.daily_ohlcv_platform import (
+    build_taiwan_daily_cache_requirement,
+    read_taiwan_official_daily,
+)
 from app.market_data.candidate_repository import (
     CandidateReadLimitExceeded,
     DailyBarCandidateQuery,
     MAX_DAILY_CANDIDATE_RANGE_DAYS,
 )
-from app.market_data.contracts import InstrumentKey, InstrumentType, Market
+from app.market_data.contracts import (
+    BarSeriesCompositionStatus,
+    InstrumentKey,
+    InstrumentType,
+    Market,
+)
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
@@ -192,7 +200,7 @@ def test_repository_reads_only_requested_venue_and_preserves_lineage(db: Session
     assert series.bars[0].volume.unit.value == "share"
 
 
-def test_completed_reader_reconciles_short_priority_series_with_long_official_history(
+def test_completed_reader_emits_single_lineage_candidates_for_canonical_composition(
     db: Session,
 ) -> None:
     openapi, openapi_raw = _source_and_raw(
@@ -208,6 +216,15 @@ def test_completed_reader_reconciles_short_priority_series_with_long_official_hi
         priority=5,
     )
     trade_dates = [date(2026, 8, day) for day in (18, 19, 20, 21)]
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="TSMC",
+            market="TWSE",
+            instrument_type="stock",
+            is_active=True,
+        )
+    )
     db.add_all(
         [
             _daily_row(
@@ -247,8 +264,22 @@ def test_completed_reader_reconciles_short_priority_series_with_long_official_hi
         TaiwanOfficialDailyBarRepository(db)
     ).read_bar_candidates(requirement)
 
-    assert len(result.candidates) == 1
-    bars = result.candidates[0].bars
+    assert len(result.candidates) == 2
+    assert all(
+        len({bar.lineage.provider for bar in candidate.bars}) == 1
+        for candidate in result.candidates
+    )
+    assert result.limitations == ()
+
+    outward = read_taiwan_official_daily(
+        db,
+        stock_id="2330",
+        from_date=trade_dates[0],
+        to_date=trade_dates[-1],
+        requested_at=datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc),
+        limit=4,
+    )
+    bars = outward.resolved.bars
     assert [bar.close_price for bar in bars] == [
         Decimal("100.0"),
         Decimal("101.0"),
@@ -261,8 +292,14 @@ def test_completed_reader_reconciles_short_priority_series_with_long_official_hi
         "twse_rwd",
         "twse_rwd",
     ]
-    assert "OFFICIAL_DAILY_SERIES_RECONCILED" in result.limitations
-    assert "OFFICIAL_DAILY_SAME_DATE_CONFLICT_RESOLVED" in result.limitations
+    assert (
+        outward.resolved.composition.status
+        is BarSeriesCompositionStatus.COMPOSED_WITH_CONFLICTS
+    )
+    assert outward.resolved.composition.filled_bucket_count == 2
+    assert outward.resolved.composition.conflict_bucket_count == 2
+    assert "OFFICIAL_DAILY_SERIES_RECONCILED" in outward.limitations
+    assert "OFFICIAL_DAILY_SAME_DATE_CONFLICT_RESOLVED" in outward.limitations
 
 
 def test_rejected_alternate_source_does_not_poison_covered_canonical_date(

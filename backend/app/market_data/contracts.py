@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -380,6 +380,8 @@ class BarObservation(CanonicalModel):
     low_price: Decimal
     close_price: Decimal
     volume: Quantity | None = None
+    volume_status: Literal["observed", "missing", "not_applicable"] | None = None
+    price_basis: Literal["raw", "adjusted", "provider_default"] | None = None
     instrument_name: str | None = Field(default=None, max_length=120)
     turnover_value: Decimal | None = Field(default=None, ge=0)
     turnover_currency: str | None = Field(default=None, min_length=3, max_length=3)
@@ -414,6 +416,10 @@ class BarObservation(CanonicalModel):
             raise ValueError(
                 "turnover_value and turnover_currency must be provided together"
             )
+        if self.volume_status == "observed" and self.volume is None:
+            raise ValueError("observed volume_status requires volume")
+        if self.volume_status in {"missing", "not_applicable"} and self.volume is not None:
+            raise ValueError(f"{self.volume_status} volume_status requires volume=None")
         return self
 
 
@@ -550,6 +556,7 @@ class ProviderResourceHealth(CanonicalModel):
     provider: str = Field(min_length=1, max_length=64)
     market: Market
     capability: str = Field(min_length=1, max_length=64)
+    resource_id: str | None = Field(default=None, min_length=1, max_length=128)
     enablement: EnablementStatus
     connection: ConnectionStatus
     entitlement: EntitlementStatus
@@ -636,6 +643,76 @@ class CandidateSummary(CanonicalModel):
         return value
 
 
+class BarSeriesCompositionStatus(str, Enum):
+    NOT_APPLIED = "not_applied"
+    NO_ELIGIBLE_BARS = "no_eligible_bars"
+    SINGLE_CONTRIBUTOR = "single_contributor"
+    COMPOSED = "composed"
+    COMPOSED_WITH_CONFLICTS = "composed_with_conflicts"
+
+
+class BarSeriesComposition(CanonicalModel):
+    """How a resolved bar series was assembled from eligible candidates.
+
+    This is deliberately separate from the market temporal reconciliation
+    axis, which compares two already-identified evidence objects.
+    """
+
+    contract_version: str = "omi.market.bar_series_composition.v1"
+    applied: bool = False
+    status: BarSeriesCompositionStatus = BarSeriesCompositionStatus.NOT_APPLIED
+    contributing_providers: tuple[str, ...] = Field(default=(), max_length=8)
+    contributing_sources: tuple[str, ...] = Field(default=(), max_length=8)
+    filled_bucket_count: int = Field(default=0, ge=0, le=5000)
+    conflict_bucket_count: int = Field(default=0, ge=0, le=5000)
+    limitations: tuple[str, ...] = Field(default=(), max_length=16)
+
+    @model_validator(mode="after")
+    def _validate_composition(self) -> BarSeriesComposition:
+        if len(set(self.contributing_providers)) != len(self.contributing_providers):
+            raise ValueError("contributing_providers must be unique")
+        if len(set(self.contributing_sources)) != len(self.contributing_sources):
+            raise ValueError("contributing_sources must be unique")
+        if not self.applied:
+            if self.status is not BarSeriesCompositionStatus.NOT_APPLIED:
+                raise ValueError("non-applied composition must use status=not_applied")
+            if any(
+                (
+                    self.contributing_providers,
+                    self.contributing_sources,
+                    self.filled_bucket_count,
+                    self.conflict_bucket_count,
+                    self.limitations,
+                )
+            ):
+                raise ValueError("non-applied composition cannot report composition work")
+        elif self.status is BarSeriesCompositionStatus.NOT_APPLIED:
+            raise ValueError("applied composition requires an applied status")
+        if (
+            self.status is BarSeriesCompositionStatus.NO_ELIGIBLE_BARS
+            and any(
+                (
+                    self.contributing_providers,
+                    self.contributing_sources,
+                    self.filled_bucket_count,
+                    self.conflict_bucket_count,
+                )
+            )
+        ):
+            raise ValueError("no-eligible-bars composition cannot report contributors")
+        if (
+            self.status is BarSeriesCompositionStatus.COMPOSED_WITH_CONFLICTS
+            and self.conflict_bucket_count == 0
+        ):
+            raise ValueError("conflict composition status requires a conflict bucket")
+        if (
+            self.conflict_bucket_count > 0
+            and self.status is not BarSeriesCompositionStatus.COMPOSED_WITH_CONFLICTS
+        ):
+            raise ValueError("conflict buckets require composed_with_conflicts status")
+        return self
+
+
 class ResolvedQuote(CanonicalModel):
     contract_version: str = "omi.market.resolved_quote.v1"
     quote: QuoteObservation | None = None
@@ -662,6 +739,7 @@ class ResolvedBarSeries(CanonicalModel):
     bars: tuple[BarObservation, ...] = ()
     health: ResolvedEvidenceHealth
     candidates: tuple[CandidateSummary, ...] = ()
+    composition: BarSeriesComposition = BarSeriesComposition()
 
     @model_validator(mode="after")
     def _validate_bar_series_identity(self) -> ResolvedBarSeries:

@@ -153,7 +153,6 @@ async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
         bars: 60,
         ensure_history: false,
         outputsize: "compact",
-        provider: "yahoo_chart",
       }
     ),
     fetchJson<IntradayTrendResponse>(

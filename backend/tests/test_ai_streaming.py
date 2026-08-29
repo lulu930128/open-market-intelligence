@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.ai import ask as ai_ask
 from app.ai import streaming as ai_streaming
-from app.ai.schemas import AiAskRequest
+from app.ai.schemas import AiAskRequest, AiAskV4Request
 from app.db.models import Base
+from app.market_data.errors import MarketDataContractError
+from app.routers import ai as ai_router
 
 
 def make_session() -> Session:
@@ -144,6 +148,55 @@ class AiStreamingTests(unittest.TestCase):
                     },
                 ),
             )
+        finally:
+            engine = db.get_bind()
+            db.close()
+            engine.dispose()
+
+    def test_market_data_contract_error_is_internal_and_sanitized_across_transports(
+        self,
+    ) -> None:
+        db = make_session()
+        raw_message = "candidate bars must share one provider lineage"
+        payload = AiAskV4Request(question="2330 近況", mode="auto")
+        try:
+            with patch.object(
+                ai_streaming.ai_ask,
+                "ask",
+                side_effect=MarketDataContractError(raw_message),
+            ):
+                payload_text = "".join(
+                    ai_streaming.iter_ask_sse_events(
+                        db=db,
+                        payload=payload,
+                        server_policy=ai_ask.AiAskServerPolicy(),
+                    )
+                )
+
+            events = parse_sse_events(payload_text)
+            stream_error = events[-2][1]
+            self.assertEqual(stream_error["status_code"], 500)
+            self.assertEqual(stream_error["kind"], "market_data_contract_error")
+            self.assertEqual(stream_error["code"], "MARKET_DATA_CONTRACT_VIOLATION")
+            self.assertTrue(stream_error["request_valid"])
+            self.assertNotIn(raw_message, json.dumps(stream_error))
+
+            request = SimpleNamespace(headers={}, client=None)
+            with patch.object(
+                ai_router.ai_ask,
+                "ask",
+                side_effect=MarketDataContractError(raw_message),
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    ai_router.ask_omi(request=request, payload=payload, db=db)
+
+            self.assertEqual(caught.exception.status_code, 500)
+            self.assertEqual(
+                caught.exception.detail["code"],
+                "MARKET_DATA_CONTRACT_VIOLATION",
+            )
+            self.assertTrue(caught.exception.detail["request_valid"])
+            self.assertNotIn(raw_message, json.dumps(caught.exception.detail))
         finally:
             engine = db.get_bind()
             db.close()
@@ -320,6 +373,101 @@ class AiStreamingTests(unittest.TestCase):
 
         self.assertIn("資料可信但需留意量能", text)
         self.assertIn("追蹤法人與成交量", text)
+
+    def test_extract_answer_text_uses_bounded_failure_copy_for_rejection(
+        self,
+    ) -> None:
+        text = ai_streaming.extract_answer_text(
+            {
+                "ok": False,
+                "request_status": "rejected",
+                "action": "omi.ask",
+                "target": {"label": "世界"},
+                "error": {
+                    "code": "RESPONSE_BUDGET_TOO_SMALL",
+                    "message": "x" * 1_000,
+                },
+            }
+        )
+
+        self.assertIn("OMI 無法完成這次請求", text)
+        self.assertNotIn("OMI 已完成", text)
+        self.assertLessEqual(len(text), ai_streaming.MAX_FAILURE_DELTA_CHARS)
+
+    def test_extract_answer_text_keeps_completion_fallback_for_success(
+        self,
+    ) -> None:
+        text = ai_streaming.extract_answer_text(
+            {
+                "ok": True,
+                "request_status": "completed",
+                "action": "omi.ask",
+                "target": {"label": "世界"},
+            }
+        )
+
+        self.assertEqual(text, "OMI 已完成 omi.ask：世界。")
+
+    def test_stream_preserves_rejected_business_status_without_completion_delta(
+        self,
+    ) -> None:
+        db = make_session()
+        rejected = {
+            "kind": "omi_decision",
+            "contract_version": "omi.decision.v4",
+            "ok": False,
+            "request_status": "rejected",
+            "action": "omi.ask",
+            "target": {"type": "tw_stock", "id": "5347", "label": "世界"},
+            "answer": {},
+            "evidence": {},
+            "execution": {},
+            "error": {
+                "code": "RESPONSE_BUDGET_TOO_SMALL",
+                "message": "max_response_bytes is too small.",
+            },
+        }
+        try:
+            with patch.object(
+                ai_streaming.ai_ask,
+                "ask",
+                return_value=rejected,
+            ):
+                payload_text = "".join(
+                    ai_streaming.iter_ask_sse_events(
+                        db=db,
+                        payload=AiAskV4Request(
+                            question="用當沖和盤中角度分析目前標的。",
+                            target={"type": "tw_stock", "id": "5347"},
+                        ),
+                        server_policy=ai_ask.AiAskServerPolicy(),
+                    )
+                )
+
+            events = parse_sse_events(payload_text)
+            delta = "".join(
+                data["text"]
+                for event_name, data in events
+                if event_name == "delta"
+            )
+            self.assertIn("OMI 無法完成這次請求", delta)
+            self.assertNotIn("OMI 已完成", delta)
+            self.assertEqual(events[-2], ("final", rejected))
+            self.assertEqual(
+                events[-1],
+                (
+                    "done",
+                    {
+                        "ok": False,
+                        "transport_ok": True,
+                        "request_status": "rejected",
+                    },
+                ),
+            )
+        finally:
+            engine = db.get_bind()
+            db.close()
+            engine.dispose()
 
     def test_extract_answer_text_prefers_consumer_human_answer(self) -> None:
         text = ai_streaming.extract_answer_text(

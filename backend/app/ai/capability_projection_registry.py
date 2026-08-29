@@ -12,11 +12,37 @@ from app.market_data.registry import DATASET_REGISTRY
 Projector = Callable[[Mapping[str, Any]], Any]
 
 
-def _path_projector(*paths: tuple[str, ...]) -> Projector:
+def _capability_contract_projector(capability_id: str) -> Projector:
+    """Use CapabilitySpec.paths as the single executable projection vocabulary."""
+
     def project(payload: Mapping[str, Any]) -> Any:
-        for path in paths:
-            current: Any = payload
-            for segment in path:
+        # Import lazily so the production capability registry remains the owner
+        # without creating an import cycle during module initialization.
+        from app.ai.capability_contract import CAPABILITIES
+
+        spec = CAPABILITIES[capability_id]
+        result = payload.get("result")
+        result = result if isinstance(result, Mapping) else {}
+        data = result.get("data") if isinstance(result.get("data"), Mapping) else None
+        if data is None:
+            data = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
+        compact = (
+            data.get("compact")
+            if isinstance(data.get("compact"), Mapping)
+            else payload.get("compact")
+            if isinstance(payload.get("compact"), Mapping)
+            else {}
+        )
+        source: Mapping[str, Any] = {
+            "target": payload.get("target") or {},
+            "result": result,
+            "data": data,
+            "compact": compact,
+            "freshness": payload.get("freshness") or result.get("freshness") or {},
+        }
+        for raw_path in spec.paths:
+            current: Any = source
+            for segment in raw_path.split("."):
                 if not isinstance(current, Mapping) or segment not in current:
                     current = None
                     break
@@ -59,11 +85,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="stock",
         market="TW",
         dataset_ids=("tw.quote.snapshot",),
-        projector_name="compact.quote.components.session_close",
-        projector=_path_projector(
-            ("data", "compact", "quote", "components", "session_close"),
-            ("compact", "quote", "components", "session_close"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("quote.session_close"),
         fixture_context={
             "data": {
                 "compact": {
@@ -87,11 +110,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="stock",
         market="TW",
         dataset_ids=("tw.quote.snapshot",),
-        projector_name="compact.quote",
-        projector=_path_projector(
-            ("data", "compact", "quote"),
-            ("compact", "quote"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("quote.snapshot"),
         fixture_context={
             "data": {
                 "compact": {
@@ -111,12 +131,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="us_stock",
         market="US",
         dataset_ids=("us.intraday.bars", "us.daily.ohlcv"),
-        projector_name="compact.quote",
-        projector=_path_projector(
-            ("data", "resolved_market_data", "quote_snapshot"),
-            ("data", "compact", "quote"),
-            ("compact", "quote"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("quote.snapshot"),
         fixture_context={
             "data": {
                 "compact": {
@@ -136,11 +152,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="stock",
         market="TW",
         dataset_ids=("tw.intraday.bars",),
-        projector_name="compact.intraday_bars",
-        projector=_path_projector(
-            ("data", "compact", "intraday_bars"),
-            ("compact", "intraday_bars"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("intraday.bars"),
         fixture_context={
             "data": {
                 "compact": {
@@ -159,12 +172,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="us_stock",
         market="US",
         dataset_ids=("us.intraday.bars",),
-        projector_name="compact.intraday_bars",
-        projector=_path_projector(
-            ("data", "resolved_market_data", "intraday_bars"),
-            ("data", "compact", "intraday_bars"),
-            ("compact", "intraday_bars"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("intraday.bars"),
         fixture_context={
             "data": {
                 "compact": {
@@ -183,12 +192,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="stock",
         market="TW",
         dataset_ids=("tw.daily.ohlcv",),
-        projector_name="compact.chart",
-        projector=_path_projector(
-            ("data", "compact", "chart"),
-            ("data", "chart"),
-            ("compact", "chart"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("daily.ohlcv"),
         fixture_context={
             "data": {
                 "compact": {
@@ -206,11 +211,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="stock",
         market="TW",
         dataset_ids=("tw.technical.daily",),
-        projector_name="data.technical_indicators",
-        projector=_path_projector(
-            ("data", "technical_indicators"),
-            ("data", "technical_evidence", "indicators"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("technical.indicators"),
         fixture_context={
             "data": {
                 "technical_indicators": {
@@ -229,16 +231,12 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="stock",
         market="TW",
         dataset_ids=("tw.technical.daily",),
-        projector_name="data.technical_advanced.structure_v2",
-        projector=_path_projector(
-            ("data", "technical_advanced", "structure_v2"),
-            ("data", "technical_evidence", "structure_v2"),
-            ("data", "compact", "technical"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("technical.structure"),
         fixture_context={
             "data": {
-                "technical_advanced": {
-                    "structure_v2": {
+                "compact": {
+                    "technical": {
                         "schema_version": "omi.research.technical.structure.v1",
                         "status": "partial",
                         "trend_state": "neutral",
@@ -253,11 +251,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="us_stock",
         market="US",
         dataset_ids=("us.daily.ohlcv",),
-        projector_name="data.resolved_research.technical_indicators",
-        projector=_path_projector(
-            ("data", "resolved_research", "technical_indicators"),
-            ("data", "compact", "technical_indicators"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("technical.indicators"),
         fixture_context={
             "data": {
                 "resolved_research": {
@@ -277,11 +272,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="us_stock",
         market="US",
         dataset_ids=("us.daily.ohlcv",),
-        projector_name="data.resolved_research.technical_structure",
-        projector=_path_projector(
-            ("data", "resolved_research", "technical_structure"),
-            ("data", "compact", "technical"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("technical.structure"),
         fixture_context={
             "data": {
                 "resolved_research": {
@@ -300,13 +292,8 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         scope_type="us_stock",
         market="US",
         dataset_ids=("us.daily.ohlcv",),
-        projector_name="data.chart",
-        projector=_path_projector(
-            ("data", "resolved_market_data", "daily_ohlcv"),
-            ("data", "compact", "chart"),
-            ("data", "chart"),
-            ("compact", "chart"),
-        ),
+        projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("daily.ohlcv"),
         fixture_context={
             "data": {
                 "chart": {
@@ -344,11 +331,19 @@ CAPABILITY_PROJECTION_REGISTRY = {spec.key: spec for spec in CAPABILITY_PROJECTI
 
 
 def validate_capability_projection_registry() -> tuple[str, ...]:
+    from app.ai.capability_contract import CAPABILITIES
+
     errors: list[str] = []
     if len(CAPABILITY_PROJECTION_REGISTRY) != len(CAPABILITY_PROJECTION_SPECS):
         errors.append("projection registration keys must be unique")
     dataset_ids = {spec.dataset_id for spec in DATASET_REGISTRY.all()}
     for spec in CAPABILITY_PROJECTION_SPECS:
+        if spec.advertised and spec.capability_id not in CAPABILITIES:
+            errors.append(f"{spec.key} references unknown capability")
+        if spec.advertised and spec.projector_name != "capability_contract.paths":
+            errors.append(
+                f"{spec.key} advertised projection bypasses CapabilitySpec.paths"
+            )
         missing_datasets = sorted(set(spec.dataset_ids) - dataset_ids)
         if missing_datasets:
             errors.append(f"{spec.key} references unknown datasets {missing_datasets}")

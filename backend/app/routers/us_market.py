@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.jobs import backfill_tasks
 from app.jobs.job_types import (
+    US_OHLC_HISTORY_REPAIR_JOB_TYPE,
     US_SEC_13F_HISTORY_SYNC_JOB_TYPE,
     US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
     US_SEC_13F_QUARTER_SYNC_JOB_TYPE,
@@ -26,6 +27,11 @@ from app.settings.refresh_execution import (
     resolve_subresource_refresh_interval_seconds,
 )
 from app.us_market.errors import USMarketDataFetchError
+from app.us_market.daily_ohlcv_chart import (
+    read_us_daily_ohlcv_chart,
+    read_us_daily_ohlcv_history,
+)
+from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
 from app.us_market.schemas import (
     MacroSeriesObservationRead,
     USDailyPriceRead,
@@ -90,17 +96,14 @@ from app.us_market.service import (
     list_macro_series_observations,
     list_us_company_profiles,
     list_us_corporate_actions,
-    list_us_ohlc_chart_data,
     list_us_watchlist_groups,
     list_us_watchlist_items,
-    list_us_daily_prices,
     list_us_sec_company_facts,
     list_us_short_volumes,
     list_us_stocks,
     refresh_fred_macro_series,
     refresh_us_company_profile_from_alphavantage,
     refresh_us_corporate_actions_from_alphavantage,
-    refresh_us_daily_prices as refresh_us_daily_prices_service,
     refresh_us_sec_companyfacts,
     refresh_us_short_volume_from_finra,
     repair_us_daily_price_quality,
@@ -268,6 +271,48 @@ def _enqueue_us_daily_price_quality_repair(
             outputsize,
             adjusted,
             sleep_seconds,
+        ),
+    )
+
+
+def _enqueue_us_ohlc_history_repair(
+    *,
+    db: Session,
+    symbol: str,
+    timeframe: str,
+    bars: int,
+    provider: str | None,
+    adjusted: bool,
+    max_provider_calls: int,
+    force_full: bool,
+) -> dict:
+    normalized_symbol = symbol.upper().strip()
+    target = f"{normalized_symbol}:{timeframe}:{bars}"
+    request = {
+        "symbol": normalized_symbol,
+        "timeframe": timeframe,
+        "bars": bars,
+        "provider": provider,
+        "adjusted": adjusted,
+        "max_provider_calls": max_provider_calls,
+        "force_full": force_full,
+    }
+    return enqueue_serialized_job(
+        db=db,
+        job_type=US_OHLC_HISTORY_REPAIR_JOB_TYPE,
+        target=target,
+        request=request,
+        progress_total=1,
+        message="Queued US OHLC continuity repair.",
+        task=backfill_tasks.run_us_ohlc_history_repair_job,
+        task_args=(
+            normalized_symbol,
+            timeframe,
+            bars,
+            provider,
+            adjusted,
+            max_provider_calls,
+            force_full,
         ),
     )
 
@@ -868,20 +913,40 @@ def refresh_us_daily_prices(
     symbol: str,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     adjusted: bool = False,
-    provider: str = Query(default="auto", pattern="^(auto|alphavantage|yahoo_chart)$"),
+    provider: str = Query(
+        default="auto",
+        pattern="^(auto|alphavantage|yahoo_chart)$",
+        deprecated=True,
+        description=(
+            "Compatibility-only. Canonical refresh owns provider resolution; "
+            "non-auto values are rejected."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     try:
-        return refresh_us_daily_prices_service(
+        if provider != "auto":
+            raise ValueError(
+                "provider is compatibility-only; canonical refresh requires provider=auto"
+            )
+        if adjusted:
+            raise ValueError(
+                "canonical US daily refresh currently supports price_basis=raw only"
+            )
+        return refresh_us_daily_ohlcv(
             db=db,
             symbol=symbol,
             outputsize=outputsize,
             adjusted=adjusted,
-            provider=provider,
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
     except USMarketConfigurationError as exc:
@@ -896,22 +961,31 @@ def refresh_us_daily_prices(
 @router.get("/daily/{symbol}/history", response_model=list[USDailyPriceRead])
 def list_us_daily_history(
     symbol: str,
-    provider: str | None = None,
+    provider: str | None = Query(
+        default=None,
+        deprecated=True,
+        description="Compatibility-only; canonical history no longer selects providers.",
+    ),
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    return list_us_daily_prices(
-        db=db,
-        symbol=symbol,
-        provider=provider,
-        from_date=from_date,
-        to_date=to_date,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        return read_us_daily_ohlcv_history(
+            db=db,
+            symbol=symbol,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+            offset=offset,
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/ohlc/{symbol}", response_model=USOhlcChartRead)
@@ -919,30 +993,25 @@ def get_us_ohlc_chart_data(
     symbol: str,
     timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     bars: int = Query(default=90, ge=1, le=5000),
-    ensure_history: bool = False,
-    include_intraday: bool = False,
-    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
-    adjusted: bool = False,
-    provider: str = Query(default="auto", pattern="^(auto|alphavantage|yahoo_chart)$"),
     to_date: date | None = None,
     db: Session = Depends(get_db),
 ):
     try:
-        return list_us_ohlc_chart_data(
+        return read_us_daily_ohlcv_chart(
             db=db,
             symbol=symbol,
             timeframe=timeframe,
             bars=bars,
-            ensure_history=ensure_history,
-            include_intraday=include_intraday,
-            outputsize=outputsize,
-            adjusted=adjusted,
-            provider=provider,
             to_date=to_date,
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
     except USMarketConfigurationError as exc:
@@ -952,6 +1021,34 @@ def get_us_ohlc_chart_data(
         ) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
+
+
+@router.post(
+    "/diagnostics/providers/{provider}/ohlc/{symbol}/repair",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    deprecated=True,
+)
+def repair_us_ohlc_history_api(
+    symbol: str,
+    provider: str = Path(pattern="^(alphavantage|yahoo_chart)$"),
+    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    bars: int = Query(default=180, ge=1, le=5000),
+    adjusted: bool = False,
+    max_provider_calls: int = Query(default=2, ge=1, le=2),
+    force_full: bool = False,
+    db: Session = Depends(get_db),
+):
+    return _enqueue_us_ohlc_history_repair(
+        db=db,
+        symbol=symbol,
+        timeframe=timeframe,
+        bars=bars,
+        provider=provider,
+        adjusted=adjusted,
+        max_provider_calls=max_provider_calls,
+        force_full=force_full,
+    )
 
 
 @router.get("/intraday/{symbol}", response_model=USIntradayTrendRead)

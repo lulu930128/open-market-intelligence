@@ -1049,6 +1049,80 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             freshness["ownership.distribution"]["refresh_recommended"]
         )
 
+    def test_canonical_daily_health_precedes_absent_source_health_row(self) -> None:
+        canonical_evidence = SimpleNamespace(
+            dataset_health=SimpleNamespace(
+                dataset_id="tw.daily.ohlcv",
+                status="healthy",
+                latest_date="2026-08-28",
+                expected_date="2026-08-28",
+                refreshable=True,
+                detail_code=None,
+            ),
+            resolved_health=SimpleNamespace(
+                status="selected",
+                selected_provider="twse_openapi",
+                selected_source="twse_daily_trading",
+            ),
+        )
+
+        freshness = taiwan_projection._build_freshness_by_capability(
+            quote={},
+            intraday_bars={"enabled": False},
+            source_health={"entries": []},
+            overnight_impact=None,
+            missing=[],
+            canonical_daily_evidence=canonical_evidence,
+        )
+
+        self.assertEqual(freshness["daily.ohlcv"]["status"], "current")
+        self.assertTrue(freshness["technical.structure"]["is_current"])
+        self.assertEqual(
+            freshness["daily.ohlcv"]["canonical_status_ref"],
+            "dataset_health",
+        )
+        self.assertEqual(
+            freshness["daily.ohlcv"]["provider_diagnostic"]["status"],
+            "unknown",
+        )
+
+    def test_canonical_missing_daily_health_is_not_masked_by_provider_row(self) -> None:
+        canonical_evidence = SimpleNamespace(
+            dataset_health=SimpleNamespace(
+                dataset_id="tw.daily.ohlcv",
+                status="missing",
+                latest_date=None,
+                expected_date="2026-08-28",
+                refreshable=True,
+                detail_code="DATASET_DATE_MISSING",
+            ),
+            resolved_health=SimpleNamespace(status="missing"),
+        )
+
+        freshness = taiwan_projection._build_freshness_by_capability(
+            quote={},
+            intraday_bars={"enabled": False},
+            source_health={
+                "entries": [
+                    {
+                        "resource": "market_daily_price",
+                        "status": "current",
+                        "ok": True,
+                    }
+                ]
+            },
+            overnight_impact=None,
+            missing=[],
+            canonical_daily_evidence=canonical_evidence,
+        )
+
+        self.assertEqual(freshness["daily.ohlcv"]["status"], "missing")
+        self.assertTrue(freshness["daily.ohlcv"]["refresh_recommended"])
+        self.assertEqual(
+            freshness["daily.ohlcv"]["provider_diagnostic"]["status"],
+            "current",
+        )
+
     def test_missing_shareholding_remains_refreshable_during_release_window(
         self,
     ) -> None:

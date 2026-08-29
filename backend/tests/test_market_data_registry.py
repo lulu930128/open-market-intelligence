@@ -44,6 +44,7 @@ def test_registry_contains_per_symbol_and_full_market_eod_datasets() -> None:
         "tw.market_breadth.daily",
         "tw.market_index.daily",
         "us.daily.ohlcv.full_market",
+        "us.daily.ohlcv.priority_research",
     }
     for spec in specs:
         assert spec.owner
@@ -67,6 +68,11 @@ def test_refreshable_datasets_have_executable_operation_bounds_and_postcondition
         assert spec.refresh_bounds.max_calls >= 1
         assert spec.refresh_bounds.timeout_seconds >= 1
         assert spec.postcondition
+        for operation in spec.additional_refresh_operations:
+            assert operation.operation in executable
+            assert operation.bounds.max_calls >= 1
+            assert operation.bounds.timeout_seconds >= 1
+            assert operation.postcondition
 
 
 def test_public_quote_dataset_declares_bounded_shared_platform_contract() -> None:
@@ -85,6 +91,15 @@ def test_public_quote_dataset_declares_bounded_shared_platform_contract() -> Non
     assert spec.refresh_bounds.timeout_seconds == 10
     assert spec.refresh_bounds.max_symbols == 1
     assert spec.refresh_bounds.max_range_days == 1
+
+
+def test_priority_us_ohlc_advertises_only_its_executable_shared_platform_repair() -> None:
+    spec = DATASET_REGISTRY.get("us.daily.ohlcv.priority_research")
+    assert spec.refreshable is True
+    assert spec.repairable is True
+    assert spec.refresh_operation == "us.reconcile_priority_daily_ohlcv"
+    assert spec.refresh_bounds is not None
+    assert spec.refresh_bounds.max_symbols == 20
 
 
 def test_non_refreshable_dataset_cannot_advertise_operation_or_repairability() -> None:
@@ -168,9 +183,17 @@ def test_advertised_foundation_scopes_have_real_projectors_and_fixture_payloads(
     for spec in CAPABILITY_PROJECTION_SPECS:
         projected = spec.projector(spec.fixture_context)
         if spec.advertised:
+            assert spec.projector_name == "capability_contract.paths"
             assert projected not in (None, {}, [])
         else:
             assert projected["status"] == "unavailable"
+
+    tw_structure = next(
+        spec
+        for spec in CAPABILITY_PROJECTION_SPECS
+        if spec.key == ("technical.structure", "stock", "TW")
+    )
+    assert "technical_advanced" not in tw_structure.fixture_context["data"]
 
 
 def test_us_general_defaults_and_explicit_capabilities_are_truthful() -> None:

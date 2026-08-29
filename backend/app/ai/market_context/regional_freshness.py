@@ -26,7 +26,6 @@ from app.db.models import (
     KRStockMaster,
     USCompanyProfile,
     USCorporateAction,
-    USDailyPrice,
     USSecCompanyFact,
     USShortVolumeDaily,
     USStockMaster,
@@ -34,6 +33,8 @@ from app.db.models import (
 from app.jp_market.trading_calendar import expected_jp_daily_price_date
 from app.kr_market.trading_calendar import expected_kr_daily_price_date
 from app.market.calendar_status import expected_us_trade_date
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
 
 
 SUPPORTED_REGIONAL_FRESHNESS_MARKETS = {"US", "JP", "KR", "CRYPTO"}
@@ -69,7 +70,7 @@ def _kr_expected(now: datetime) -> date | None:
 REGIONAL_TABLE_SPECS: dict[str, tuple[RegionalTableSpec, ...]] = {
     "US": (
         RegionalTableSpec("us_stock_master", USStockMaster, USStockMaster.last_seen_at, USStockMaster.symbol),
-        RegionalTableSpec("us_daily_price", USDailyPrice, USDailyPrice.trade_date, USDailyPrice.symbol, _us_expected),
+        RegionalTableSpec("us_daily_price", None, None, None, _us_expected),
         RegionalTableSpec("us_company_profile", USCompanyProfile, USCompanyProfile.fetched_at, USCompanyProfile.symbol),
         RegionalTableSpec("us_sec_company_fact", USSecCompanyFact, USSecCompanyFact.filed_date, USSecCompanyFact.symbol),
         RegionalTableSpec("us_corporate_action", USCorporateAction, USCorporateAction.event_date, USCorporateAction.symbol),
@@ -105,6 +106,54 @@ def _table_state(
     symbol: str | None,
     checked_at: datetime,
 ) -> dict[str, Any]:
+    if spec.name == "us_daily_price":
+        expected = _us_expected(checked_at)
+        if expected is None:
+            return {
+                "latest": None,
+                "row_count": 0,
+                "availability": "missing",
+                "freshness": "missing",
+                "expected": None,
+            }
+        if symbol:
+            try:
+                result = USDailyOhlcvPlatform(db).read(
+                    symbol=symbol,
+                    bars=90,
+                    now=checked_at,
+                    to_date=expected,
+                )
+            except (LookupError, ValueError):
+                latest = None
+                row_count = 0
+                current = False
+            else:
+                latest = result.projection.get("latest_trade_date")
+                row_count = len(result.result.resolved.bars)
+                current = result.postcondition_satisfied
+        else:
+            coverage = US_FULL_MARKET_EOD_LIFECYCLE.compute_coverage(
+                db,
+                expected_trade_date=expected,
+            )
+            latest = coverage.latest_data_date
+            row_count = len(coverage.current_symbols)
+            current = bool(coverage.members) and not (
+                coverage.partial_symbols
+                or coverage.stale_symbols
+                or coverage.missing_symbols
+            )
+        availability = "available" if latest is not None and row_count > 0 else "missing"
+        return {
+            "latest": _json_value(latest),
+            "row_count": row_count,
+            "availability": availability,
+            "freshness": (
+                "missing" if availability == "missing" else "current" if current else "stale"
+            ),
+            "expected": _json_value(expected),
+        }
     query = db.query(func.max(spec.latest_column), func.count(spec.model.id))
     if symbol and spec.symbol_column is not None:
         query = query.filter(spec.symbol_column == symbol)

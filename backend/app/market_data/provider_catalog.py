@@ -247,14 +247,46 @@ def _target_facts(
 
 def _health_index(
     records: Iterable[ProviderResourceHealth],
-) -> dict[tuple[str, Market, str], ProviderResourceHealth]:
-    indexed: dict[tuple[str, Market, str], ProviderResourceHealth] = {}
+) -> dict[tuple[str, Market, str, str | None], ProviderResourceHealth]:
+    indexed: dict[tuple[str, Market, str, str | None], ProviderResourceHealth] = {}
     for record in records:
-        key = (record.provider, record.market, record.capability)
+        key = (
+            record.provider,
+            record.market,
+            record.capability,
+            record.resource_id,
+        )
         if key in indexed:
-            raise ValueError("provider health records must be unique by provider/market/capability")
+            raise ValueError(
+                "provider health records must be unique by "
+                "provider/market/capability/resource"
+            )
         indexed[key] = record
     return indexed
+
+
+def _descriptor_health(
+    indexed: dict[tuple[str, Market, str, str | None], ProviderResourceHealth],
+    descriptor: ProviderCapabilityDescriptorV2,
+) -> ProviderResourceHealth | None:
+    exact = indexed.get(
+        (
+            descriptor.provider_key,
+            descriptor.market,
+            descriptor.capability_id,
+            descriptor.resource_id,
+        )
+    )
+    if exact is not None:
+        return exact
+    return indexed.get(
+        (
+            descriptor.provider_key,
+            descriptor.market,
+            descriptor.capability_id,
+            None,
+        )
+    )
 
 
 def _health_decision(
@@ -447,7 +479,7 @@ def plan_data_acquisition_v2(
         if reason is None:
             reason, health_limitations = _health_decision(
                 descriptor,
-                health.get((descriptor.provider_key, descriptor.market, descriptor.capability_id)),
+                _descriptor_health(health, descriptor),
                 requested_at=requirement.requested_at,
             )
         else:
@@ -547,7 +579,7 @@ def plan_refresh_acquisition_v1(
         if reason is None:
             reason, health_limitations = _health_decision(
                 descriptor,
-                health.get((descriptor.provider_key, descriptor.market, descriptor.capability_id)),
+                _descriptor_health(health, descriptor),
                 requested_at=requirement.requested_at,
             )
         else:

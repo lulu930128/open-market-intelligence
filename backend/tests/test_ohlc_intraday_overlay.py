@@ -146,6 +146,84 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.assertEqual(chart["intraday_overlay"]["previous_close"], 101.0)
         self.assertTrue(chart["intraday_overlay"]["provisional"])
 
+    def test_taiwan_finalized_daily_bar_blocks_same_date_intraday_overlay(self) -> None:
+        source = SourceRegistry(
+            source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+            source_type="official",
+            category="market_data",
+            priority=10,
+            reliability_level="official",
+        )
+        self.db.add(source)
+        self.db.flush()
+        raw = RawFetchResult(
+            source_id=source.id,
+            fetched_at=datetime(2026, 6, 29, 8, tzinfo=timezone.utc),
+            method="GET",
+            content_hash="same-date-finalized-daily",
+        )
+        self.db.add(raw)
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+            )
+        )
+        self.db.flush()
+        self.db.add(
+            MarketDailyPrice(
+                source_id=source.id,
+                raw_result_id=raw.id,
+                trade_date=date(2026, 6, 29),
+                stock_id="2330",
+                stock_name="TSMC",
+                open_price=101.0,
+                high_price=107.0,
+                low_price=100.0,
+                close_price=106.0,
+                trade_volume=5000,
+                trade_value=530000,
+                transaction_count=321,
+            )
+        )
+        self.db.commit()
+
+        intraday = {
+            "stock_id": "2330",
+            "symbol": "2330.TW",
+            "source": "yahoo_finance_chart",
+            "previous_close": 101.0,
+            "points": [
+                {
+                    "time": "2026-06-29T13:30:00+08:00",
+                    "price": 106.0,
+                    "open": 101.0,
+                    "high": 107.0,
+                    "low": 100.0,
+                    "volume": 4500,
+                }
+            ],
+        }
+
+        with patch("app.market.service.get_intraday_trend", return_value=intraday):
+            chart = list_stock_ohlc_chart_data(
+                self.db,
+                stock_id="2330",
+                timeframe="daily",
+                bars=5,
+                include_intraday=True,
+                to_date=date(2026, 6, 29),
+            )
+
+        self.assertIsNone(chart["intraday_overlay"])
+        self.assertEqual(chart["volume_semantics"], "finalized_traded_shares")
+        self.assertEqual(chart["points"][-1]["close"], 106.0)
+        self.assertEqual(chart["points"][-1]["volume"], 5000)
+        self.assertEqual(chart["points"][-1]["trade_value"], 530000)
+        self.assertEqual(chart["points"][-1]["transaction_count"], 321)
+
     def test_taiwan_daily_ohlc_refreshes_when_full_window_is_stale(self) -> None:
         source = SourceRegistry(
             source_name=TWSE_DAILY_TRADING_SOURCE_NAME,

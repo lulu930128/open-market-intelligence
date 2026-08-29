@@ -17,6 +17,8 @@ from app.jobs.job_types import (
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
     WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
+    US_OHLC_HISTORY_REPAIR_JOB_TYPE,
+    US_PRIORITY_OHLC_RECONCILE_JOB_TYPE,
     US_SEC_FORM4_SYNC_JOB_TYPE,
     US_SEC_13F_HISTORY_SYNC_JOB_TYPE,
     US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
@@ -413,6 +415,31 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 float(request.get("sleep_seconds", 1.0)),
                 int(request.get("max_consecutive_errors", 5)),
                 int(request.get("error_backoff_seconds", 1800)),
+            ),
+            request,
+        )
+
+    if job_type == US_OHLC_HISTORY_REPAIR_JOB_TYPE:
+        return (
+            backfill_tasks.run_us_ohlc_history_repair_job,
+            (
+                str(request.get("symbol") or job.target.split(":", 1)[0]),
+                str(request.get("timeframe") or "daily"),
+                int(request.get("bars", 180)),
+                str(request.get("provider") or "yahoo_chart"),
+                bool(request.get("adjusted", False)),
+                int(request.get("max_provider_calls", 2)),
+                bool(request.get("force_full", False)),
+            ),
+            request,
+        )
+
+    if job_type == US_PRIORITY_OHLC_RECONCILE_JOB_TYPE:
+        return (
+            backfill_tasks.run_us_priority_ohlc_reconcile_job,
+            (
+                int(request.get("max_runtime_seconds", 600)),
+                request.get("cursor_symbol"),
             ),
             request,
         )

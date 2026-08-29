@@ -39,7 +39,10 @@ class USMarketServiceBoundaryTests(unittest.TestCase):
         with (
             patch.object(service, "expected_us_daily_price_date") as expected_date,
             patch.object(service, "_get_us_intraday_overlay") as intraday_overlay,
-            patch.object(service, "refresh_us_daily_prices") as refresh_daily,
+            patch.object(
+                service,
+                "_refresh_us_watchlist_daily_through_platform",
+            ) as refresh_daily,
             patch.object(service, "refresh_us_sec_companyfacts") as refresh_sec,
         ):
             dependencies = service._us_watchlist_workflow_dependencies()

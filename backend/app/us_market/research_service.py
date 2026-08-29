@@ -9,11 +9,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    USDailyPrice,
     USCompanyProfile,
     USCorporateAction,
     USStockMaster,
 )
+from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
 from app.research.coverage import build_market_coverage_gate
 from app.research.technical import (
     US_DAILY_PROFILE,
@@ -34,18 +34,12 @@ US_RESEARCH_SCHEMA_VERSION = "omi.us_market.research.v1"
 
 
 def _coverage_gate(db: Session, *, expected_trade_date, now: datetime) -> dict[str, Any]:
-    observed_count = int(
-        db.query(func.count(USStockMaster.id))
-        .filter(USStockMaster.is_active.is_(True))
-        .scalar()
-        or 0
+    coverage = US_FULL_MARKET_EOD_LIFECYCLE.compute_coverage(
+        db,
+        expected_trade_date=expected_trade_date,
     )
-    fresh_count = int(
-        db.query(func.count(func.distinct(USDailyPrice.symbol)))
-        .filter(USDailyPrice.trade_date >= expected_trade_date)
-        .scalar()
-        or 0
-    )
+    observed_count = len(coverage.members)
+    fresh_count = len(coverage.current_symbols)
     latest_master_update = db.query(func.max(USStockMaster.updated_at)).scalar()
     version_suffix = (
         latest_master_update.isoformat()
@@ -118,12 +112,6 @@ def build_us_market_research(
     if resolved_now.tzinfo is None or resolved_now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     expected_trade_date = expected_us_daily_price_date(now=resolved_now)
-    stock = (
-        db.query(USStockMaster)
-        .filter(USStockMaster.symbol == normalized_symbol)
-        .first()
-    )
-    venue = str(getattr(stock, "exchange", None) or "").strip().upper()
     coverage_gate = (
         _coverage_gate(
             db,
@@ -136,12 +124,7 @@ def build_us_market_research(
     missing: list[str] = []
     warnings: list[str] = []
     daily_ohlcv: dict[str, Any] = {}
-    if not venue:
-        missing.append("instrument_venue")
-        warnings.append(
-            "US resolved daily research requires a canonical venue; provider data was not selected."
-        )
-    else:
+    try:
         daily_ohlcv = read_resolved_us_daily_bars_for_symbol(
             db=db,
             symbol=normalized_symbol,
@@ -151,6 +134,9 @@ def build_us_market_research(
         )
         if not daily_ohlcv:
             missing.append("resolved_daily_ohlcv")
+    except LookupError as exc:
+        missing.append("instrument_identity")
+        warnings.append(str(exc))
 
     corporate_action_count = int(
         db.query(func.count(USCorporateAction.id))

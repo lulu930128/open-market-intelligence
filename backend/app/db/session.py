@@ -2,6 +2,7 @@ from collections.abc import Generator
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 from app.db.models import Base
@@ -13,10 +14,18 @@ if settings.database_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False, "timeout": 30}
 
 
-engine = create_engine(
-    settings.database_url,
-    connect_args=connect_args,
-)
+engine_options: dict[str, object] = {"connect_args": connect_args}
+
+# SQLite connections are local file handles, not scarce remote database
+# connections.  A bounded QueuePool lets slow provider-facing requests retain
+# every slot and turn otherwise cheap cache reads into 30 second pool waits.
+# NullPool closes each connection with its Session, so one slow request cannot
+# starve unrelated API/health requests.  WAL + busy_timeout below continue to
+# provide the SQLite read/write concurrency policy.
+if settings.database_url.startswith("sqlite"):
+    engine_options["poolclass"] = NullPool
+
+engine = create_engine(settings.database_url, **engine_options)
 
 if settings.database_url.startswith("sqlite"):
     @event.listens_for(engine, "connect")

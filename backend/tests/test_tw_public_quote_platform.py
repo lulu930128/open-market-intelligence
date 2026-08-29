@@ -651,7 +651,7 @@ def test_non_trading_day_reads_previous_session_without_false_today_promotion(
         read_taiwan_session_close(
             db,
             stock_id="2330",
-            requested_at=datetime(2026, 8, 29, 10, 0, tzinfo=TAIWAN_TZ),
+            requested_at=datetime(2026, 8, 30, 10, 0, tzinfo=TAIWAN_TZ),
         )
     )
     assert weekend["status"] == "session_final"
@@ -659,6 +659,15 @@ def test_non_trading_day_reads_previous_session_without_false_today_promotion(
     assert weekend["freshness"]["expected_trade_date"] == datetime(
         2026, 8, 28
     ).date()
+
+    after_new_completed_session = project_taiwan_session_close(
+        read_taiwan_session_close(
+            db,
+            stock_id="2330",
+            requested_at=datetime(2026, 8, 31, 13, 34, tzinfo=TAIWAN_TZ),
+        )
+    )
+    assert after_new_completed_session["status"] == "unavailable"
 
 
 def test_official_daily_reconciles_session_close_and_wins_on_mismatch(

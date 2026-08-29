@@ -19,10 +19,12 @@
 - `technical.indicators` top-level與completed/current-partial observations都繼承`volume_unit=shares`與`source_capability=daily.ohlcv`。
 - 驗證：technical gate、TW market projection、quality contract與decision envelope targeted tests。
 
-### R2 — Coverage-aware official daily series reconciliation
+### R2 — Coverage-aware official daily series composition
 
-- 在TW completed-daily candidate/resolution boundary依trade date整合相同exchange authority的official sources；同日由deterministic provider priority選擇，跨日保留各bar原始lineage。
+- `BarSeriesCandidate`保持單一provider／source／authority；TW completed-daily requirement明確啟用Shared `compose_by_timestamp`，default仍為whole-series `single_candidate`。
+- Shared quality先逐bar判斷eligible，再依timestamp整合official sources；同日由deterministic provider priority選擇，跨日保留各bar原始lineage。
 - Request 20時，不得讓只有2根的高優先series壓掉另一official source的完整history。
+- Composite metadata使用`composition`，不占用Market Temporal Contract既有的evidence `reconciliation` axis，也不偽造`selected_provider`。
 - 真正storage缺口仍保持`insufficient_history`；不得以consumer fallback或無界backfill掩蓋。
 - 驗證：RWD 2根 + OpenAPI長history、同日衝突、release-qualified filter與cache-only zero-I/O tests。
 
@@ -507,3 +509,13 @@ Official acquisition
 - Sector capability保留canonical stock snapshot scope，partial coverage warning使用ordinary active-stock denominator語意；compatibility missing keys與sample-only gate不變。
 - 驗證effective field順序、explicit companion去重、default selection不變、unsupported field拒絕、v4 payload／manifest／quality一致，以及TW market context與MCP schema parity。
 - Source acceptance可標`passed`；未經named runtime adoption與live evidence前，不更新Runtime／Live／Product或將active plan歸檔。
+
+### F5 — AI pipeline canonical truth convergence
+
+- Calendar：臨時休市使用高於年度schedule cache的market-owned overlay；continuity、expected date與presentation session不得各自補例外。
+- Freshness：TW daily capability先投影canonical `DatasetHealth`／`ResolvedEvidenceHealth`；source health只保留provider diagnostic，row absence不得製造canonical missing。
+- Selection：generic quote只要求snapshot；session close僅由explicit capability或明確close question加入。
+- Temporal：completed-session freshness使用expected trade-date basis，不以固定86,400秒淘汰週末／長假仍有效的上一completed session。
+- Projection：advertised capability projector全部由`CapabilitySpec.paths`派生；shadow payload不得成為第二個production path owner。
+- Scope：Backend、shared Market Data contracts、tests與current architecture docs；Frontend／UI不修改，Runtime／DB／provider／commit／push仍需另行授權。
+- Acceptance：2026-07-10不再是TW交易日且7/9下一交易日為7/13；7/9→7/13 daily continuity為continuous；canonical healthy/missing均不被source-health row absence/presence反轉；generic/explicit close selection分流；週日仍接受週五session close，而下一completed session會使舊close失效；registry negative gate拒絕advertised projector繞過`CapabilitySpec.paths`。

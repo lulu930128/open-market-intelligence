@@ -17,7 +17,7 @@ from app.db.models import (
     ResourceQuoteSnapshot,
     SourceRegistry,
     StockMaster,
-    USDailyPrice,
+    USStockMaster,
     USWatchlistGroup,
     USWatchlistItem,
 )
@@ -26,6 +26,11 @@ from app.market.overnight_impact import (
     build_us_overnight_impact_report,
     ensure_current_us_overnight_impact_report,
     scan_us_overnight_impact_gaps,
+)
+from app.us_market.sources import USDailyPriceRecord
+from app.us_market.trading_calendar import previous_us_trading_day
+from us_daily_test_support import (
+    upsert_canonical_us_daily_price_records as upsert_us_daily_price_records,
 )
 
 
@@ -107,34 +112,58 @@ def add_us_move(
     change_pct: float,
     latest_date: date = date(2026, 6, 5),
 ) -> None:
-    db.add(
-        USDailyPrice(
+    identity = (
+        db.query(USStockMaster)
+        .filter(USStockMaster.symbol == symbol)
+        .first()
+    )
+    if not symbol.startswith("^") and identity is None:
+        db.add(
+            USStockMaster(
+                symbol=symbol,
+                exchange="NYSE",
+                asset_type="stock",
+                is_active=True,
+            )
+        )
+        db.commit()
+    previous_date = previous_us_trading_day(latest_date, include_value=False)
+    latest_close = previous_close * (1 + change_pct / 100)
+    upsert_us_daily_price_records(
+        db,
+        [
+            USDailyPriceRecord(
             provider="yahoo_chart",
             symbol=symbol,
-            trade_date=latest_date - timedelta(days=1),
+            trade_date=previous_date,
             open_price=previous_close,
             high_price=previous_close,
             low_price=previous_close,
             close_price=previous_close,
             adjusted_close=previous_close,
             trade_volume=1_000_000,
-        )
+            dividend_amount=None,
+            split_coefficient=None,
+            source_url=None,
+            raw_payload_hash=f"{symbol}-{previous_date.isoformat()}-{previous_close}",
+            ),
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol=symbol,
+                trade_date=latest_date,
+                open_price=latest_close,
+                high_price=latest_close,
+                low_price=latest_close,
+                close_price=latest_close,
+                adjusted_close=latest_close,
+                trade_volume=1_100_000,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url=None,
+                raw_payload_hash=f"{symbol}-{latest_date.isoformat()}-{latest_close}",
+            ),
+        ],
     )
-    latest_close = previous_close * (1 + change_pct / 100)
-    db.add(
-        USDailyPrice(
-            provider="yahoo_chart",
-            symbol=symbol,
-            trade_date=latest_date,
-            open_price=latest_close,
-            high_price=latest_close,
-            low_price=latest_close,
-            close_price=latest_close,
-            adjusted_close=latest_close,
-            trade_volume=1_100_000,
-        )
-    )
-    db.commit()
 
 
 def add_us_group(db: Session, group_name: str, moves: dict[str, float]) -> None:
@@ -365,7 +394,7 @@ class OvernightImpactTests(unittest.TestCase):
             "app.market.overnight_impact.expected_us_daily_price_date",
             return_value=expected_date,
         ), patch(
-            "app.market.overnight_impact.us_market_service.refresh_us_daily_prices",
+            "app.market.overnight_impact.refresh_us_daily_ohlcv",
             side_effect=refresh_daily,
         ) as refresh_mock:
             report = ensure_current_us_overnight_impact_report(

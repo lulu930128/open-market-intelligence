@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import time
 from typing import Any, Callable
 
@@ -10,7 +10,6 @@ from app.db.models import (
     ProviderEvent,
     ResourceOhlcvBar,
     ResourceQuoteSnapshot,
-    USDailyPrice,
 )
 from app.market.adr_parity import resolve_adr_mapping
 from app.market.calendar_status import expected_us_trade_date
@@ -20,7 +19,8 @@ from app.market.cross_market.types import taiwan_stock_ref
 from app.observability.provider_health import ERROR_STATUSES, record_provider_event
 from app.resource_market import service as resource_market_service
 from app.resource_market.fx_freshness import evaluate_fx_freshness, fx_daily_data_date
-from app.us_market import service as us_market_service
+from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 
 
 MAX_REFRESH_SYMBOLS = 8
@@ -53,18 +53,22 @@ def _normalized_now(value: datetime | None) -> datetime:
     return now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
 
 
-def _latest_us_trade_date(db: Session, symbol: str):
-    row = (
-        db.query(USDailyPrice)
-        .filter(USDailyPrice.symbol == symbol)
-        .order_by(
-            USDailyPrice.trade_date.desc(),
-            USDailyPrice.updated_at.desc(),
-            USDailyPrice.id.desc(),
+def _latest_us_trade_date(
+    db: Session,
+    symbol: str,
+    *,
+    expected_trade_date: date,
+):
+    try:
+        latest = USDailyOhlcvPlatform(db).read(
+            symbol=symbol,
+            bars=90,
+            to_date=expected_trade_date,
         )
-        .first()
-    )
-    return row.trade_date if row is not None else None
+    except (LookupError, ValueError):
+        return None
+    value = latest.projection.get("latest_trade_date")
+    return date.fromisoformat(value) if value else None
 
 
 def _latest_fx_evidence(
@@ -313,7 +317,11 @@ def build_cross_market_refresh_plan(
         )
 
     for symbol, targets in sorted(us_targets.items()):
-        latest_date = _latest_us_trade_date(db, symbol)
+        latest_date = _latest_us_trade_date(
+            db,
+            symbol,
+            expected_trade_date=expected_date,
+        )
         status = (
             "missing"
             if latest_date is None
@@ -448,12 +456,11 @@ def refresh_cross_market_context_sources(
         symbol = source["symbol"]
         try:
             if source_kind == "us_daily_price":
-                result = us_market_service.refresh_us_daily_prices(
+                result = refresh_us_daily_ohlcv(
                     db=db,
                     symbol=symbol,
                     outputsize=outputsize,
                     adjusted=False,
-                    provider=provider,
                 )
                 success = result.get("status") in {"success", "partial_success"}
             elif source_kind == "resource_quote":

@@ -6,6 +6,7 @@ import time as monotonic_time
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketIntradayBar, StockMaster
+from app.market.daily_ohlcv_platform import read_taiwan_latest_daily_evidence
 from app.market.public_quote_platform import (
     project_taiwan_session_close,
     read_taiwan_public_last_trade_quote,
@@ -31,7 +32,9 @@ from app.observability.provider_fallback import observe_provider_fallback
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
-INTRADAY_CACHE_TTL_SECONDS = 4.75
+# This only bounds projection recomputation. Canonical freshness remains owned by
+# resolved evidence metadata and is never inferred from this process-local TTL.
+INTRADAY_CACHE_TTL_SECONDS = 12.0
 _INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
 _INTRADAY_CACHE_LOCK = Lock()
 _INTRADAY_FETCH_LOCKS: dict[str, Lock] = {}
@@ -794,6 +797,12 @@ def _apply_platform_quote_contract(
             if health is not None
             else "PUBLIC_QUOTE_PLATFORM_UNAVAILABLE"
         )
+    canonical_previous_close = _as_float(result.get("previous_close"))
+    quote_previous_close = (
+        float(quote.previous_close)
+        if quote is not None and quote.previous_close is not None
+        else None
+    )
     result.update(
         {
             "provider": price_provider,
@@ -808,11 +817,9 @@ def _apply_platform_quote_contract(
                 else result.get("trade_date")
             ),
             "previous_close": (
-                float(quote.previous_close)
-                if current_trade_available
-                and quote is not None
-                and quote.previous_close is not None
-                else result.get("previous_close")
+                canonical_previous_close
+                if canonical_previous_close is not None
+                else quote_previous_close
             ),
             "history_price_source": price_provider,
             "latest_history_time": (
@@ -898,6 +905,47 @@ def _apply_platform_quote_contract(
     return result
 
 
+def _attach_canonical_previous_close(
+    db: Session,
+    *,
+    stock_id: str,
+    result: dict,
+) -> dict:
+    """Attach the close before the latest persisted intraday session, if known."""
+
+    point_dates = [
+        _normalize_bar_time(point_time).date()
+        for point in result.get("points") or []
+        if isinstance(point, dict)
+        and (point_time := _point_datetime(point)) is not None
+    ]
+    latest_intraday_date = max(point_dates, default=None)
+    previous_session_bound = (
+        latest_intraday_date - timedelta(days=1)
+        if latest_intraday_date is not None
+        else None
+    )
+    try:
+        evidence = read_taiwan_latest_daily_evidence(
+            db,
+            stock_id,
+            to_date=previous_session_bound,
+        )
+    except Exception as exc:
+        observe_provider_fallback(
+            exc,
+            operation="intraday.previous_close_cache_read",
+        )
+        return result
+
+    daily = evidence.daily
+    if daily is None or daily.close_price is None:
+        return result
+
+    result["previous_close"] = float(daily.close_price)
+    return result
+
+
 def _attach_cached_public_quote(
     db: Session,
     *,
@@ -910,7 +958,11 @@ def _attach_cached_public_quote(
             stock_id=stock_id,
         )
         if project_taiwan_session_close(session_close_result)["available"]:
-            return _apply_platform_quote_contract(result, session_close_result)
+            return _attach_canonical_previous_close(
+                db,
+                stock_id=stock_id,
+                result=_apply_platform_quote_contract(result, session_close_result),
+            )
     except Exception as exc:
         observe_provider_fallback(
             exc,
@@ -927,14 +979,22 @@ def _attach_cached_public_quote(
             exc,
             operation="intraday.public_quote_cache_read",
         )
-        return _apply_platform_quote_contract(
-            result,
-            None,
-            unavailable_reason=(
-                f"PUBLIC_QUOTE_PLATFORM_{type(exc).__name__.upper()}"
+        return _attach_canonical_previous_close(
+            db,
+            stock_id=stock_id,
+            result=_apply_platform_quote_contract(
+                result,
+                None,
+                unavailable_reason=(
+                    f"PUBLIC_QUOTE_PLATFORM_{type(exc).__name__.upper()}"
+                ),
             ),
         )
-    return _apply_platform_quote_contract(result, quote_result)
+    return _attach_canonical_previous_close(
+        db,
+        stock_id=stock_id,
+        result=_apply_platform_quote_contract(result, quote_result),
+    )
 
 
 def _load_intraday_trend_uncached(

@@ -1,25 +1,21 @@
-# Open Market Intelligence 4.3
+# Open Market Intelligence 4.4
 
-> Local-first · Taiwan-first · Evidence-first
+> Local-first · Taiwan-reference · Multi-market research · Evidence-first
 
 [![CI](https://github.com/lulu930128/open-market-intelligence/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lulu930128/open-market-intelligence/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/lulu930128/open-market-intelligence/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/lulu930128/open-market-intelligence/actions/workflows/codeql.yml)
 [![Release](https://img.shields.io/github/v/release/lulu930128/open-market-intelligence?display_name=tag)](https://github.com/lulu930128/open-market-intelligence/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**目前程式版本：OMI 4.3.2（台股 Backend outward contract 收斂版）。**
+**目前程式版本：OMI 4.4.0（TW／US Shared Core source consolidation 基線）。**
 
-Open Market Intelligence（OMI）是一套以台股為核心的市場情報與交易決策研究工作台。它把行情、技術結構、籌碼、基本面、跨市場背景與資料品質整合在同一個研究流程中，讓結論不只回答「偏多或偏空」，還能交代回測區、確認條件、失效條件、主要風險與反證。
+Open Market Intelligence（OMI）是一套本機優先的市場情報與交易決策研究工作台。台股是 primary／reference market，美股是 first-class research market；其他市場可作 secondary／context，並共同遵守 Canonical Observation、Resolver、freshness 與 outward contract。OMI 把行情、技術結構、籌碼、基本面、跨市場關係與資料品質整合在同一個研究流程中，讓結論不只回答「偏多或偏空」，還能交代回測區、確認條件、失效條件、主要風險與反證。
 
 OMI 不是自動交易系統，也不代替使用者下單。它的工作是把資料、情境與風險整理成可檢查、可反駁、可持續追蹤的決策依據。
 
-## 4.3.0 台股中間封版
+## 目前狀態
 
-這個 checkpoint 凍結 2026-08-27 的台股 Shared Data Core source、跨市場估值 ownership 邊界、current Market-State 投影，以及 M5 live acceptance 證據。
-
-- 已通過：SourceOnly、runtime compare preflight、Opening、Regular／Level 5／symbol switch、Market-State、Closing Auction／formal match、compare→off rollback、off stable checks 與 final validation。
-- 待重驗：final-source Preopen。真實盤前時窗已過，不能用後續 session 補證，因此目前仍是 `runtime_accepted=false`、`release_ready=false`。
-- Runtime 已透過正式 launcher 回到 `off`，並完成兩次穩定檢查。美股共用市場資料架構遷移不包含在這個 checkpoint，會另行驗收。
+Release、Source、Runtime、Live 與 Product acceptance 是不同 gate。最後已記錄的市場整合與 live-session checkpoint 請讀 [`CurrentImplementationState.md`](docs/architecture/CurrentImplementationState.md)；版本歷史請讀 [`CHANGELOG.md`](CHANGELOG.md)。README 不固定保存容易過期的 PID、port、capability 數量或單次驗收戰況。
 
 ![OMI 4.0 台股 Dashboard 與 Radar v2](docs/assets/readme/omi-v4-dashboard-radar-2k.png)
 
@@ -42,7 +38,7 @@ _OMI 4.0 實際本機 runtime，2560×1440。畫面保留資料日期、Radar �
 
 ![OMI 4.0 台積電個股研究工作台](docs/assets/readme/omi-v4-stock-research-2k.png)
 
-個股頁把日 K、均線、量價、技術摘要、修復與風險階梯、報價深度、ADR／匯率／美股隔夜背景及籌碼、法人、分點、營收、盈餘等研究入口放在同一個工作面。台股仍是判斷核心；其他市場只提供可追溯的 context，不取代台股 evidence。
+台股個股頁把日 K、均線、量價、技術摘要、修復與風險階梯、報價深度、ADR／匯率／美股隔夜背景及籌碼、法人、分點、營收、盈餘等研究入口放在同一個工作面。在這個頁面中，跨市場資料是可追溯的 relation／context evidence；美股另有可獨立研究的 first-class workflow。
 
 ### 專業圖表：從讀圖到標記交易假設
 
@@ -63,11 +59,11 @@ OMI 4.0 把過去分散的市場功能收斂成一個可被 UI、HTTP、SSE、MC
 | 核心面向 | 4.0 現況 |
 | --- | --- |
 | 決策合約 | `omi.decision.v4` 是唯一 public request／response contract。 |
-| Evidence 選取 | Capability registry v3、selection v2，共 55 個 bounded capabilities。 |
+| Evidence 選取 | Capability registry 與 bounded selection 由 backend source／runtime schema 提供，不在 README 固定 inventory。 |
 | Radar | Radar v2 正式運行；保留分類、排序、風險、失效與 outcome 追蹤。 |
 | 台股資料真相 | 區分盤中／盤後、session 累積量／區間量、official close、partial bar 與來源狀態。 |
 | 財務語意 | 台灣 Q1–Q3 YTD 與 Q4 年度語意在 backend 正規化，避免錯誤 EPS／TTM／估值推導。 |
-| 跨市場背景 | ADR、匯率、美股隔夜與區域市場作為台股 context layer，不升格成另一個決策核心。 |
+| 市場研究 | 台股是 reference implementation；美股可獨立研究，也可提供 ADR、匯率與隔夜關係 evidence。 |
 | 可觀測性 | Source health、provider events、jobs、warnings、missing data 與 readiness 可被 UI／API 看見。 |
 | 外部整合 | Repo MCP、OMI_search 與 Kuro-facing consumer 讀取同一個 backend-owned answer contract。 |
 
@@ -98,8 +94,8 @@ flowchart LR
 
 | 層級 | 市場與資料 | 角色 |
 | --- | --- | --- |
-| 核心市場 | 台股個股、上市／上櫃指數、廣度、籌碼、分點、基本面、期貨／選擇權 | 主要 production research path。 |
-| 隔夜背景 | 美股指數、科技股、ADR、USD/TWD、FRED macro | 解釋隔夜衝擊與次日台股情境。 |
+| Primary／reference | 台股個股、上市／上櫃指數、廣度、籌碼、分點、基本面、期貨／選擇權 | 優先 production coverage、UI pattern 與市場語意驗證。 |
+| First-class research | 美股行情、日線／盤中 OHLCV、技術、基本面、ADR、watchlist 與 portfolio context | 可獨立研究，也可解釋台股隔夜情境；逐能力揭露 readiness。 |
 | 區域背景 | 日股、韓股、港股相關 context | 供應鏈、風險偏好與區域同步性參照。 |
 | 風險參照 | Crypto、黃金、原油與其他資源商品 | Best-effort risk context，不作交易級即時 feed。 |
 
@@ -295,6 +291,8 @@ npm run dev
 | 運作模型 | [`docs/product/OperatingModel.md`](docs/product/OperatingModel.md) |
 | 品質標準 | [`docs/product/QualityBar.md`](docs/product/QualityBar.md) |
 | 產品路線 | [`docs/product/Roadmap.md`](docs/product/Roadmap.md) |
+| 架構導航 | [`docs/architecture/index.md`](docs/architecture/index.md) |
+| 最後已記錄狀態 | [`docs/architecture/CurrentImplementationState.md`](docs/architecture/CurrentImplementationState.md) |
 | Backend 邊界 | [`docs/architecture/BackendArchitecture.md`](docs/architecture/BackendArchitecture.md) |
 | Decision v4 contract | [`docs/architecture/OmiDecisionContract.md`](docs/architecture/OmiDecisionContract.md) |
 | HTTP／SSE／MCP | [`docs/ExternalInterfaces.md`](docs/ExternalInterfaces.md) |
@@ -337,8 +335,9 @@ Open Market Intelligence/
 ├─ backend/
 │  ├─ app/
 │  │  ├─ ai/                 decision core、evidence、tools、contract
-│  │  ├─ market/             台股市場、技術、籌碼與共用市場能力
-│  │  ├─ us_market/          美股 context
+│  │  ├─ market_data/        provider-neutral Canonical／Resolver／registry
+│  │  ├─ market/             台股市場、技術、籌碼與市場特有能力
+│  │  ├─ us_market/          美股市場、session、provider integration 與研究能力
 │  │  ├─ jp_market/          日股 context
 │  │  ├─ kr_market/          韓股 context
 │  │  ├─ crypto_market/      Crypto provider/runtime
@@ -376,7 +375,8 @@ Open Market Intelligence/
 
 ## 已知限制
 
-- 台股是主要 production path；美股、日股、韓股與其他市場仍是 bounded context layer。
+- 台股是 primary／reference production path；美股是 first-class research market，但各 dataset／capability 的 source、runtime、live 與 product readiness 仍須逐項判讀。
+- 日股、韓股、Crypto、Resource 與其他市場預設是 bounded secondary／context markets。
 - 部分市場、宏觀與基本面 refresh 依 provider、API key 與 release schedule 而定。
 - ADR ratio 來自帶驗證 metadata 的 versioned registry，不是 filing 自動同步。
 - USD/TWD 與商品資料是 best-effort delayed context，不是交易級 FX feed。

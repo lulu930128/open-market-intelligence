@@ -19,6 +19,7 @@ from app.db.models import (
     SourceRegistry,
     StockMaster,
     USDailyPrice,
+    USStockMaster,
 )
 from app.main import app
 from app.market.cross_market.context import build_cross_market_target_context
@@ -39,6 +40,7 @@ from app.market.cross_market.snapshot_store import (
     read_cross_market_target_context,
 )
 from app.routers.cross_market import get_cross_market_context
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE, us_session_close_time
 from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
@@ -183,13 +185,64 @@ def add_adr_close(
     trade_date: date = ADR_TRADE_DATE,
     fetched_at: datetime = DECISION_AT,
 ) -> None:
+    if db.query(USStockMaster).filter(USStockMaster.symbol == "TSM").first() is None:
+        db.add(
+            USStockMaster(
+                symbol="TSM",
+                exchange="NYSE",
+                asset_type="stock",
+                is_active=True,
+            )
+        )
+    source = (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.source_name == "test.canonical.TSM")
+        .first()
+    )
+    if source is None:
+        source = SourceRegistry(
+            source_name="test.canonical.TSM",
+            source_type="test",
+            category="market_data",
+        )
+        db.add(source)
+        db.flush()
+    content_hash = f"TSM-{trade_date.isoformat()}-{close_price}"
+    raw = RawFetchResult(
+        source_id=source.id,
+        fetched_at=fetched_at,
+        method="GET",
+        url="https://example.test/us/TSM",
+        content_hash=content_hash,
+        parser_version="test.canonical.v1",
+    )
+    db.add(raw)
+    db.flush()
     db.add(
         USDailyPrice(
             provider="yahoo_chart",
             symbol="TSM",
             trade_date=trade_date,
+            open_price=close_price,
+            high_price=close_price,
+            low_price=close_price,
             close_price=close_price,
+            trade_volume=1000,
             fetched_at=fetched_at,
+            source_id=source.id,
+            raw_result_id=raw.id,
+            authority="vendor",
+            raw_contract_version="test.canonical.v1",
+            event_at=datetime.combine(
+                trade_date,
+                us_session_close_time(trade_date),
+                tzinfo=US_MARKET_TIMEZONE,
+            ),
+            finalization="final",
+            price_basis="raw",
+            volume_unit="shares",
+            volume_status="observed",
+            raw_payload_hash=content_hash,
         )
     )
     db.commit()

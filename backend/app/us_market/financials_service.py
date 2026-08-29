@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Sequence
 
 from sqlalchemy.orm import Session
 
-from app.db.models import USDailyPrice, USSecCompanyFact
+from app.db.models import USSecCompanyFact
 from app.config import settings
 from app.us_market import catalog_store, fundamentals_store
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 from app.us_market.sec_fundamentals import (
     CANONICAL_METRICS,
     CanonicalFact,
@@ -159,23 +161,35 @@ def _empty_contract(
     }
 
 
-def _latest_price(db: Session, *, symbol: str) -> USDailyPrice | None:
-    preferred = (
-        db.query(USDailyPrice)
-        .filter(USDailyPrice.symbol == symbol)
-        .filter(USDailyPrice.provider == "yahoo_chart")
-        .filter(USDailyPrice.close_price.isnot(None))
-        .order_by(USDailyPrice.trade_date.desc(), USDailyPrice.id.desc())
-        .first()
-    )
-    if preferred is not None:
-        return preferred
-    return (
-        db.query(USDailyPrice)
-        .filter(USDailyPrice.symbol == symbol)
-        .filter(USDailyPrice.close_price.isnot(None))
-        .order_by(USDailyPrice.trade_date.desc(), USDailyPrice.id.desc())
-        .first()
+@dataclass(frozen=True, slots=True)
+class ResolvedValuationPrice:
+    close_price: Decimal
+    trade_date: date
+    provider: str | None
+    source: str | None
+    event_at: str | None
+    price_basis: str | None
+
+
+def _latest_price(db: Session, *, symbol: str) -> ResolvedValuationPrice | None:
+    resolved = USDailyOhlcvPlatform(db).read(symbol=symbol, bars=1)
+    if not resolved.postcondition_satisfied:
+        return None
+    bars = resolved.projection.get("bars") or []
+    if not bars:
+        return None
+    bar = bars[-1]
+    close = bar.get("close_price")
+    end_at = bar.get("end_at")
+    if close is None or end_at is None:
+        return None
+    return ResolvedValuationPrice(
+        close_price=Decimal(str(close)),
+        trade_date=datetime.fromisoformat(str(end_at)).date(),
+        provider=resolved.projection.get("selected_provider"),
+        source=resolved.projection.get("selected_source"),
+        event_at=resolved.projection.get("selected_event_at"),
+        price_basis=bar.get("price_basis"),
     )
 
 
@@ -590,9 +604,9 @@ def build_us_sec_financial_contract(
             {
                 "type": "daily_price",
                 "provider": price_row.provider,
-                "row_id": price_row.id,
                 "trade_date": price_row.trade_date.isoformat(),
-                "source_url": price_row.source_url,
+                "source": price_row.source,
+                "event_at": price_row.event_at,
             }
         )
 
@@ -658,7 +672,8 @@ def build_us_sec_financial_contract(
             "pe_ttm": str(pe_ttm) if pe_ttm is not None else None,
             "price": str(price) if price is not None else None,
             "price_as_of": price_row.trade_date.isoformat() if price_row else None,
-            "price_basis": price_row.provider if price_row else None,
+            "price_basis": price_row.price_basis if price_row else None,
+            "price_provider": price_row.provider if price_row else None,
             "financial_basis": (
                 eps_ttm.metric_code if eps_ttm is not None else "ttm_diluted_eps"
             ),

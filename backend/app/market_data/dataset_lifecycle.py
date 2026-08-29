@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
+from enum import Enum
 
 from app.market_data.contracts import CanonicalModel, DatasetHealth, Market
+from app.market_data.integration_contracts import RefreshRequirementV1
 from app.market_data.registry import (
+    AdditionalRefreshOperation,
     DATASET_REGISTRY,
     DatasetRegistry,
     EligibilityPolicy,
@@ -31,6 +35,7 @@ class DatasetLifecycleContract(CanonicalModel):
     refreshable: bool
     refresh_operation: str | None = None
     refresh_bounds: RefreshBounds | None = None
+    additional_refresh_operations: tuple[AdditionalRefreshOperation, ...] = ()
     postcondition: str
     repairable: bool
 
@@ -39,6 +44,114 @@ class DatasetLifecycleEvaluation(CanonicalModel):
     contract_version: str = "omi.market.dataset_lifecycle_evaluation.v1"
     lifecycle: DatasetLifecycleContract
     health: DatasetHealth
+
+
+class DatasetOperationStatus(str, Enum):
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class DatasetOperationResult(CanonicalModel):
+    """Typed, bounded result returned by an injected market-owned operation."""
+
+    contract_version: str = "omi.market.dataset_operation_result.v1"
+    dataset_id: str
+    operation: str
+    status: DatasetOperationStatus
+    expected_date: date | None = None
+    latest_date: date | None = None
+    target_count: int | None = None
+    completed_count: int = 0
+    next_cursor: str | None = None
+    checkpoint_id: str | None = None
+    postcondition_met: bool = False
+    limitations: tuple[str, ...] = ()
+
+    def model_post_init(self, __context: object) -> None:
+        if self.target_count is not None and self.completed_count > self.target_count:
+            raise ValueError("completed_count cannot exceed target_count")
+        if self.status is DatasetOperationStatus.COMPLETED and not self.postcondition_met:
+            raise ValueError("completed operation requires a satisfied postcondition")
+        if self.status is DatasetOperationStatus.PARTIAL and self.next_cursor is None:
+            raise ValueError("partial operation requires next_cursor")
+
+
+DatasetOperation = Callable[[RefreshRequirementV1], DatasetOperationResult]
+
+
+class DatasetOperationRegistry:
+    """Dependency-injected executable bindings; Shared Core owns no market imports."""
+
+    def __init__(self) -> None:
+        self._bindings: dict[tuple[str, str], DatasetOperation] = {}
+
+    def register(
+        self,
+        *,
+        dataset_id: str,
+        operation: str,
+        handler: DatasetOperation,
+        registry: DatasetRegistry = DATASET_REGISTRY,
+    ) -> None:
+        lifecycle = dataset_lifecycle_contract(dataset_id, registry=registry)
+        require_refresh_contract(lifecycle, operation=operation)
+        key = (dataset_id, operation)
+        if key in self._bindings:
+            raise ValueError(f"dataset operation already registered: {dataset_id}/{operation}")
+        self._bindings[key] = handler
+
+    def execute(
+        self,
+        requirement: RefreshRequirementV1,
+        *,
+        operation: str | None = None,
+        registry: DatasetRegistry = DATASET_REGISTRY,
+    ) -> DatasetOperationResult:
+        lifecycle = dataset_lifecycle_contract(requirement.dataset_id, registry=registry)
+        selected_operation = operation or lifecycle.refresh_operation or ""
+        bounds = require_refresh_contract(lifecycle, operation=selected_operation)
+        if requirement.max_external_calls > bounds.max_calls:
+            raise ValueError("refresh requirement exceeds registry max_calls")
+        if requirement.timeout_seconds > bounds.timeout_seconds:
+            raise ValueError("refresh requirement exceeds registry timeout_seconds")
+        if requirement.max_symbols > bounds.max_symbols:
+            raise ValueError("refresh requirement exceeds registry max_symbols")
+        if requirement.max_range_days > bounds.max_range_days:
+            raise ValueError("refresh requirement exceeds registry max_range_days")
+        try:
+            handler = self._bindings[(requirement.dataset_id, selected_operation)]
+        except KeyError as exc:
+            raise LookupError(
+                f"no executable binding for dataset operation: "
+                f"{requirement.dataset_id}/{selected_operation}"
+            ) from exc
+        result = handler(requirement)
+        if (
+            result.dataset_id != requirement.dataset_id
+            or result.operation != selected_operation
+        ):
+            raise ValueError("dataset operation result identity does not match binding")
+        return result
+
+    def missing_repairable_bindings(
+        self,
+        *,
+        registry: DatasetRegistry = DATASET_REGISTRY,
+    ) -> tuple[str, ...]:
+        missing = []
+        for spec in registry.all():
+            if not spec.repairable or not spec.refresh_operation:
+                continue
+            required_operations = (spec.refresh_operation,) + tuple(
+                operation.operation for operation in spec.additional_refresh_operations
+            )
+            if any(
+                (spec.dataset_id, operation) not in self._bindings
+                for operation in required_operations
+            ):
+                missing.append(spec.dataset_id)
+        return tuple(sorted(missing))
 
 
 def dataset_lifecycle_contract(
@@ -62,6 +175,7 @@ def dataset_lifecycle_contract(
         refreshable=spec.refreshable,
         refresh_operation=spec.refresh_operation,
         refresh_bounds=spec.refresh_bounds,
+        additional_refresh_operations=spec.additional_refresh_operations,
         postcondition=spec.postcondition,
         repairable=spec.repairable,
     )
@@ -74,16 +188,24 @@ def require_refresh_contract(
 ) -> RefreshBounds:
     if not lifecycle.refreshable or not lifecycle.repairable:
         raise ValueError(f"dataset '{lifecycle.dataset_id}' is not repairable")
-    if lifecycle.refresh_operation != operation:
+    if lifecycle.refresh_operation == operation:
+        bounds = lifecycle.refresh_bounds
+    else:
+        additional = next(
+            (
+                candidate
+                for candidate in lifecycle.additional_refresh_operations
+                if candidate.operation == operation
+            ),
+            None,
+        )
+        bounds = additional.bounds if additional is not None else None
+    if bounds is None:
         raise ValueError(
-            f"dataset '{lifecycle.dataset_id}' does not own refresh operation "
+            f"dataset '{lifecycle.dataset_id}' does not own bounded refresh operation "
             f"'{operation}'"
         )
-    if lifecycle.refresh_bounds is None:
-        raise ValueError(
-            f"dataset '{lifecycle.dataset_id}' has no executable refresh bounds"
-        )
-    return lifecycle.refresh_bounds
+    return bounds
 
 
 def evaluate_lifecycle(
@@ -117,6 +239,9 @@ def evaluate_lifecycle(
 __all__ = [
     "DatasetLifecycleContract",
     "DatasetLifecycleEvaluation",
+    "DatasetOperationRegistry",
+    "DatasetOperationResult",
+    "DatasetOperationStatus",
     "dataset_lifecycle_contract",
     "evaluate_lifecycle",
     "require_refresh_contract",

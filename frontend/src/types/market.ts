@@ -3174,8 +3174,22 @@ export type USDailyPriceRefreshResultRead = {
   skipped_count: number;
   inserted_count: number;
   updated_count: number;
+  unchanged_count: number;
   expected_trade_date: string | null;
   latest_eligible_trade_date: string | null;
+  selected_event_at: string | null;
+  selected_source: string | null;
+  fallback_used: boolean;
+  selection_reason: string | null;
+  external_call_count: number;
+  providers_attempted: string[];
+  resource_attempts: Array<{
+    provider: string;
+    resource_id: string;
+  }>;
+  persistence_committed: boolean;
+  postcondition_satisfied: boolean;
+  raw_result_ids: number[];
   warnings: string[];
   message: string;
 };
@@ -3198,13 +3212,19 @@ export type USOhlcChartRead = {
   to_date: string;
   point_count: number;
   points: USOhlcPointRead[];
+  volume_unit: string | null;
+  volume_semantics: string | null;
+  volume_status: "available" | "not_applicable" | "not_provided" | string;
   backfill: Record<string, unknown> | null;
   intraday_overlay: Record<string, unknown> | null;
   latest_data_date: string | null;
+  latest_trade_date: string | null;
   latest_finalized_data_date: string | null;
   expected_data_date: string | null;
+  expected_trade_date: string | null;
   freshness_status: "current" | "stale" | "missing" | "future" | string;
   coverage_status: "complete" | "best_available" | "partial" | "missing" | string;
+  request_coverage_status: "complete" | "best_available" | "partial" | "missing" | string;
   continuity_status: "complete" | "partial" | "missing" | string;
   history_status:
     | "complete"
@@ -3230,6 +3250,16 @@ export type USOhlcChartRead = {
   previous_close_status: "current" | "partial" | "missing" | string;
   is_current: boolean;
   refresh_recommended: boolean;
+  coverage_refresh_recommended: boolean;
+  selected_provider: string | null;
+  selected_source: string | null;
+  selected_event_at: string | null;
+  fallback_used: boolean;
+  selection_reason: string | null;
+  facts_usable: boolean;
+  decision_usable: boolean;
+  usability_status: "decision_usable" | "facts_only" | "unusable" | string;
+  limitations: string[];
 };
 
 export type USTechnicalQualityRead = {

@@ -215,6 +215,10 @@ class Settings(BaseSettings):
     scheduler_us_market_refresh_outputsize: str = "compact"
     scheduler_us_market_refresh_adjusted: bool = False
     scheduler_us_market_refresh_sleep_seconds: float = 12.0
+    enable_us_priority_ohlc_scheduler: bool = False
+    scheduler_us_priority_ohlc_interval_minutes: int = 30
+    scheduler_us_priority_ohlc_startup_delay_seconds: int = 0
+    scheduler_us_priority_ohlc_max_runtime_seconds: int = 600
     enable_eod_coverage_scheduler: bool = True
     scheduler_eod_coverage_markets: str = "TW,US"
     scheduler_eod_coverage_interval_minutes: int = 30
@@ -283,6 +287,9 @@ class Settings(BaseSettings):
 
     finmind_token: str | None = None
     alphavantage_api_key: str | None = None
+    twelve_data_api_key: str | None = None
+    alpaca_api_key_id: str | None = None
+    alpaca_api_secret_key: str | None = None
     fred_api_key: str | None = None
     enable_kgi_superpy_quote: bool = False
     canonical_market_data_mode: Literal["off", "shadow", "compare"] = "off"

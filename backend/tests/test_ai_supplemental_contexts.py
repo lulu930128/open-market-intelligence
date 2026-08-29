@@ -27,8 +27,10 @@ from app.db.models import (
     MacroSeriesObservation,
     MarginTradingDaily,
     MarketChipDaily,
+    RawFetchResult,
     ResourceOhlcvBar,
     ResourceQuoteSnapshot,
+    SourceRegistry,
     SourceHealthSnapshot,
     StockMaster,
     USDailyPrice,
@@ -40,6 +42,7 @@ from app.portfolio.schemas import PortfolioHoldingCreate, PortfolioHoldingUpdate
 from app.resource_market import service as resource_service
 from app.observability.provider_health import record_provider_event
 from app.us_market import service as us_market_service
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE, us_session_close_time
 
 
 NOW = datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc)
@@ -1128,22 +1131,67 @@ class AiSupplementalContextTests(unittest.TestCase):
         self.assertEqual(one_minute["latest"]["price"], 3210.0)
 
     def test_tw_cross_market_context_reads_bounded_local_cache(self) -> None:
+        self.db.add(
+            USStockMaster(
+                symbol="^GSPC",
+                exchange="INDEX",
+                asset_type="index",
+                is_active=True,
+            )
+        )
+        source = SourceRegistry(
+            source_name="test.canonical.^GSPC",
+            source_type="test",
+            category="market_data",
+        )
+        self.db.add(source)
+        self.db.flush()
+        daily_rows = []
+        for trade_date, close_price in (
+            (date(2026, 7, 16), 6300.0),
+            (date(2026, 7, 17), 6363.0),
+        ):
+            content_hash = f"^GSPC-{trade_date.isoformat()}-{close_price}"
+            raw = RawFetchResult(
+                source_id=source.id,
+                fetched_at=NOW,
+                method="GET",
+                url="https://example.test/us/%5EGSPC",
+                content_hash=content_hash,
+                parser_version="test.canonical.v1",
+            )
+            self.db.add(raw)
+            self.db.flush()
+            daily_rows.append(
+                USDailyPrice(
+                    provider="yahoo_chart",
+                    symbol="^GSPC",
+                    trade_date=trade_date,
+                    open_price=close_price,
+                    high_price=close_price,
+                    low_price=close_price,
+                    close_price=close_price,
+                    adjusted_close=close_price,
+                    fetched_at=NOW,
+                    source_id=source.id,
+                    raw_result_id=raw.id,
+                    authority="vendor",
+                    raw_contract_version="test.canonical.v1",
+                    event_at=datetime.combine(
+                        trade_date,
+                        us_session_close_time(trade_date),
+                        tzinfo=US_MARKET_TIMEZONE,
+                    ),
+                    finalization="final",
+                    price_basis="raw",
+                    volume_unit="not_applicable",
+                    volume_status="not_applicable",
+                    raw_payload_hash=content_hash,
+                )
+            )
         self.db.add_all(
             [
-                USDailyPrice(
-                    provider="yahoo_chart",
-                    symbol="^GSPC",
-                    trade_date=date(2026, 7, 16),
-                    adjusted_close=6300.0,
-                    fetched_at=NOW,
-                ),
-                USDailyPrice(
-                    provider="yahoo_chart",
-                    symbol="^GSPC",
-                    trade_date=date(2026, 7, 17),
-                    adjusted_close=6363.0,
-                    fetched_at=NOW,
-                ),
+                *daily_rows,
                 ResourceQuoteSnapshot(
                     provider="yahoo_chart",
                     exchange="FX",

@@ -2671,8 +2671,8 @@ export const jaJP = {
       disclaimerBody:
         "OMI は自動売買システム、証券会社、投資助言業者、証券アナリストではありません。価格、需給、ファンダメンタル、テクニカル水準、AI 要約、配信内容は調査と確認のためのもので、取引所公告、証券会社データ、開示資料、専門家助言、利用者自身のリスク判断を代替しません。",
       catalogEyebrow: "Source Catalog",
-      catalogTitle: "現在使用または予約しているデータソース",
-      documentSource: "README.md の trust notes と quote-depth / crypto 文書に基づく整理",
+      catalogTitle: "接続済み・有効・予約済みのデータソース",
+      documentSource: "実行可能な dataset registry、market-owned provider contract、source-health contract に基づく棚卸し",
       table: {
         area: "領域",
         source: "ソース",
@@ -2685,9 +2685,14 @@ export const jaJP = {
           reliability: "公式ソースを優先しますが、取引日、件数、銘柄対応、parser 品質の確認が必要です。",
         },
         twIntraday: {
-          area: "台湾株 ザラ場 / 気配",
-          source: "nStock minute data、TWSE MIS snapshot / quote depth",
-          reliability: "ローカル監視と選択銘柄の詳細向けです。遅延、空値、停止、単一銘柄の短期キャッシュ制約があります。",
+          area: "台湾株 イントラデイ足",
+          source: "nStock minute data、Yahoo chart intraday",
+          reliability: "ローカル監視や個別銘柄の確認向けです。遅延、空データ、停止、単一銘柄の短期キャッシュに限られ、取引時間中のデータは後から修復できない場合があります。",
+        },
+        twRealtimeBroker: {
+          area: "台湾株 リアルタイム / 板 / オークション",
+          source: "KGI SuperPy、TWSE MIS",
+          reliability: "KGI は認証情報、権限、active viewer lease が必要な broker stream です。TWSE MIS は公開 best-effort で、session、round-lot、板の上限、indicative auction の制約を表示します。",
         },
         twMarketIndex: {
           area: "台湾市場 / 指数",
@@ -2714,10 +2719,25 @@ export const jaJP = {
           source: "MOPS / MOPSOV",
           reliability: "公式開示ソース群です。表や列形式が変わる可能性があるため quality check が必要です。",
         },
+        twEtf: {
+          area: "台湾 ETF profile / NAV / PCF / iNAV",
+          source: "TWSE OpenAPI、MOPS、元大 / 富邦 / 統一 / 群益 / 復華 / 野村 / 国泰の公式ページまたは API",
+          reliability: "発行会社ごとに対応 resource が異なり、PCF、日次 NAV、イントラデイ iNAV は代替できません。外部更新は bounded refresh、表示は保存済みデータを使用します。",
+        },
+        twCorporateEvents: {
+          area: "台湾株 コーポレートイベント / 処置銘柄",
+          source: "TWSE / TPEx の権利落ち・配当落ち・処置データ、MOPS 説明会",
+          reliability: "現在分と履歴を別々に取得します。coverage、公開時刻、partial success、file-cache lineage gap を明示します。",
+        },
         twBrokerBranch: {
           area: "証券会社分点",
           source: "nStock branch Top15",
           reliability: "便利な非公式ソースです。複数日表示は保存済み Top15 snapshot の集計で、完全な分点台帳ではありません。",
+        },
+        usReferenceData: {
+          area: "米国株 reference data / 取引日",
+          source: "Nasdaq Trader symbol directory、SEC company tickers / exchange、OpenFIGI、NYSE calendar",
+          reliability: "取引所と SEC の reference を優先します。OpenFIGI は key と quota が必要で、未承認 mapping を推測しません。calendar は market timezone と fallback provenance を保持します。",
         },
         usOhlcIntraday: {
           area: "米株 OHLC / ザラ場",
@@ -2728,6 +2748,16 @@ export const jaJP = {
           area: "米株 ファンダメンタル",
           source: "SEC EDGAR company facts",
           reliability: "企業申告の公式ソースです。ETF、ファンド、ADR、非企業資産では facts が不完全な場合があります。",
+        },
+        usCorporateEvents: {
+          area: "米国株 コーポレートイベント",
+          source: "Alpha Vantage earnings calendar、dividends、splits",
+          reliability: "earnings は API key とプランに依存します。配当と分割はローカルで更新済みの watchlist 銘柄のみを対象とし、全市場 coverage として表示しません。",
+        },
+        usOwnership: {
+          area: "米国株 機関保有 / インサイダー申告",
+          source: "SEC EDGAR submissions、Form 13F data sets、Form 4 filings",
+          reliability: "13F は遅延する四半期報告で承認済み symbol mapping が必要です。Form 4 は取引台帳であり、完全な現在保有ではありません。欠落、訂正、parser issue を明示します。",
         },
         usProfileActions: {
           area: "米株 profile / actions",
@@ -2741,8 +2771,23 @@ export const jaJP = {
         },
         jpOhlcFundamentals: {
           area: "日本株 OHLC / ファンダメンタル",
-          source: "Yahoo chart、J-Quants provider slot",
-          reliability: "外部 context layer です。J-Quants は key とプランが必要で、欠損は表示したままにします。",
+          source: "JPX listed issues / calendar、Yahoo chart / quote summary、J-Quants statements / summary",
+          reliability: "JPX は reference と calendar、Yahoo は best-effort、J-Quants は key と対応プランが必要です。欠損、rate limit、未認証を明示します。",
+        },
+        jpMarketFlows: {
+          area: "日本株 信用残 / 投資部門別",
+          source: "J-Quants margin interest、investor types",
+          reliability: "頻度と entitlement は endpoint ごとに異なります。認証情報なし、plan restricted、rate limited をゼロとして表示しません。",
+        },
+        krOhlcFundamentals: {
+          area: "韓国株 OHLC / ファンダメンタルズ",
+          source: "KRX Data、OpenDART、Yahoo chart fallback",
+          reliability: "KRX / OpenDART を主系統とし、Yahoo chart は明示的な fallback です。key、corp_code、stale、partial の不足を表示します。",
+        },
+        krIndexFlows: {
+          area: "韓国株 指数 / 投資家別 / 取引日",
+          source: "Naver index APIs、KRX investor trading / market calendar",
+          reliability: "Naver 指数は非公式のイントラデイ context、KRX は公式の投資家別と calendar です。全市場 breadth の制限、fallback、verified-year 範囲を明示します。",
         },
         cryptoTwdSpot: {
           area: "Crypto TWD spot",
@@ -2753,6 +2798,11 @@ export const jaJP = {
           area: "Crypto USDT spot / perpetual",
           source: "Binance、OKX",
           reliability: "Binance が主要 verified realtime/reference provider、OKX は secondary source です。stale、disabled、failure は source health に表示します。",
+        },
+        cryptoDerivativesMetrics: {
+          area: "Crypto 高度なデリバティブ指標",
+          source: "Binance、OKX、Bybit、CoinGlass、OMI local aggregation",
+          reliability: "funding、open interest、long/short ratio、CVD は provider ごとに coverage が異なります。local aggregation は観測イベントからのみ導出し、取引所の欠損データを捏造しません。",
         },
         cryptoLiquidation: {
           area: "Crypto 清算 / ヒートマップ",
@@ -2765,9 +2815,9 @@ export const jaJP = {
           reliability: "ランキング、時価総額、供給量 context です。執行価格ソースではありません。",
         },
         commodityReference: {
-          area: "商品 futures reference",
-          source: "Resource contract",
-          reliability: "現在は provider_pending の watch-only です。正式 provider 接続前に quote / OHLCV を生成しません。",
+          area: "商品先物 / FX リファレンス",
+          source: "Yahoo chart resource contract",
+          reliability: "金属、エネルギー先物、主要 FX は delayed / best-effort の watch-only context で、執行機能はありません。GET は cache、外部更新は明示的な bounded POST を使用します。",
         },
         macro: {
           area: "Macro",
@@ -2792,7 +2842,7 @@ export const jaJP = {
         noWarranty: "OMI はデータの完全性、リアルタイム性、継続性、正確性、またはモデル、AI、指標による利益を保証しません。",
         noAutoTrading: "OMI は調査とシナリオ判断を支援するだけで、自動発注、口座運用、利益保証は提供しません。",
       },
-      footer: "データソースを追加または置換するときは、source registry、parser、quality behavior、README trust notes、この disclosure を同時に更新してください。",
+      footer: "ソースの追加・置換時は backend registry / contract、adapter / parser、quality と source-health behavior、この disclosure を同時に更新します。実際の可用性は runtime status を正とします。",
     },
     dispatch: {
       title: "メール配信",

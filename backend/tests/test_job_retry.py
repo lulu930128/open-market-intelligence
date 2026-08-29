@@ -629,6 +629,70 @@ class JobRetryTests(unittest.TestCase):
         self.assertEqual(serialized["request"], None)
         self.assertEqual(serialized["result"], {"status": "success"})
 
+    def test_retry_config_recreates_us_ohlc_history_repair(self) -> None:
+        request = {
+            "symbol": "UMC",
+            "timeframe": "daily",
+            "bars": 180,
+            "provider": "yahoo_chart",
+            "adjusted": False,
+            "max_provider_calls": 2,
+            "force_full": False,
+        }
+        job = SimpleNamespace(
+            id=201,
+            job_type="us_market.ohlc_history_repair",
+            status="error",
+            target="UMC:daily:180",
+            progress_current=1,
+            progress_total=1,
+            message="Job failed.",
+            error_message="continuity failed",
+            request_json=json.dumps(request),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, retried_request = _retry_config(job)
+
+        self.assertIs(task, backfill_tasks.run_us_ohlc_history_repair_job)
+        self.assertEqual(
+            task_args,
+            ("UMC", "daily", 180, "yahoo_chart", False, 2, False),
+        )
+        self.assertEqual(retried_request, request)
+
+    def test_retry_config_recreates_priority_us_ohlc_reconcile(self) -> None:
+        request = {
+            "max_runtime_seconds": 600,
+            "cursor_symbol": "UMC",
+        }
+        job = SimpleNamespace(
+            id=202,
+            job_type="us_market.priority_ohlc_reconcile",
+            status="error",
+            target="priority-research",
+            progress_current=1,
+            progress_total=1,
+            message="Job failed.",
+            error_message="provider unavailable",
+            request_json=json.dumps(request),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, retried_request = _retry_config(job)
+
+        self.assertIs(task, backfill_tasks.run_us_priority_ohlc_reconcile_job)
+        self.assertEqual(task_args, (600, "UMC"))
+        self.assertEqual(retried_request, request)
+
 
 if __name__ == "__main__":
     unittest.main()

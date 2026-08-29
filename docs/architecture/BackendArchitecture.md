@@ -106,7 +106,7 @@ Market Data Resolver / FX
 - 擁有 market/business transaction logic。
 - 直接 commit/rollback/flush。
 
-Public route / method / response shape 預設向後相容。
+Public canonical contract 不得隨意破壞；breaking change 必須有明確 consumer impact、版本或 migration window、cutover 與 removal gate。Private、diagnostic、migration-only surface 不因曾有 caller 就自動永久相容。任何暫留 compatibility seam 都必須登錄 owner、reason、consumer、scope、sunset condition、removal gate、negative test 與必要的 architecture debt。
 
 ## 5. Provider / Integration Layer
 
@@ -142,19 +142,19 @@ KGI Account Port
 
 它們可共用登入/runtime，不共用單一 capability health。
 
-例如：
+能力狀態可以彼此不同，例如：
 
 ```text
-KGI TW Quote = live
-KGI Historical KBar = plan_restricted
-KGI Account = unavailable/503
+Capability A = available
+Capability B = plan_restricted
+Capability C = unavailable
 ```
 
-這是合法狀態。
+這只是抽象語意範例，不代表 current runtime state；實際狀態由 runtime capability schema 與 live evidence 判定。
 
 ## 6. Canonical Observation Layer
 
-Shared boundary：`backend/app/market_data/`。Foundation v1 已建立typed contracts、pure resolution與Dataset Registry；Taiwan Data Core v2另以additive Gateway、typed requirement/result、candidate repository、bounded acquisition port與transaction owner完成第一批production source cutover。2026-08-25 production DB/runtime已由migration、launcher PID/port lineage、API/data、visible UI、MCP與cold restart evidence證明採用；active-session public quote acceptance仍是獨立gate。
+Shared boundary：`backend/app/market_data/`。此 boundary 保存 provider-neutral typed contracts、pure resolution、Dataset Registry、Gateway ports 與 quality／health primitives；market-specific acquisition、persistence owner 與 consumer projection 留在各自明確 owner。實際 source、runtime、live 與 product adoption 狀態另見 [`CurrentImplementationState.md`](CurrentImplementationState.md)。
 
 核心 contracts：
 
@@ -211,6 +211,8 @@ Shared boundary：`backend/app/market_data/`。Foundation v1 已建立typed cont
 - OHLCV
 - finalization：provisional / final / corrected / unknown
 
+`BarFinalization` 只描述該 bar／time bucket 的成熟程度，不代表 official daily 已發布。Market Session、item finalization、authority、release、reconciliation 與 freshness 的正交規則見 [`MarketTemporalContract.md`](MarketTemporalContract.md)；不得建立混合這些維度的 universal temporal enum。
+
 ### TradingStatusObservation
 
 Instrument tradability 只表示標的是否可交易：
@@ -230,7 +232,7 @@ Instrument tradability 只表示標的是否可交易：
 
 ### ProviderResourceHealth
 
-Provider resource health 保留獨立維度：enablement、connection、entitlement、operational request health、evidence freshness；不得用單一 status 壓平原因。
+Provider resource health 保留獨立維度：enablement、connection、entitlement、operational request health、evidence freshness；不得用單一 status 壓平原因。同一 provider 的不同 endpoint／feed／capability 以 additive `resource_id` 分開識別；缺少 `resource_id` 的舊 producer 只作相容 fallback，不得覆蓋更精確的 resource-level evidence。
 
 ## 7. Resolution / Control Plane
 
@@ -258,7 +260,7 @@ Public policy 使用需求語意，不直接暴露 provider：
 - prefer_live
 - require_live
 
-`completed_session` 在 Foundation v1 是 internal data requirement，尚未加入 public `omi.decision.v4` request enum。
+Internal data requirement 不自動成為 public request enum。Outward request policy 由 [`OmiDecisionContract.md`](OmiDecisionContract.md) 管理，consumer 不得依賴 internal requirement 名稱。
 
 ## 8. Lease Lifecycle
 
@@ -311,6 +313,43 @@ Public policy 使用需求語意，不直接暴露 provider：
 - US-specific symbol / exchange / fundamentals semantics。
 
 TW 與 US 都依賴共通 Canonical / Resolver，而不是互相複製 fallback architecture。
+
+#### United States completed-session consumer boundary
+
+美股completed daily的正式read／refresh owner固定為`USDailyOhlcvPlatform`。US market boundary負責instrument identity、calendar／release、provider acquisition與receipt + canonical bar transaction；Shared Gateway負責plan與mandatory reread，Shared Resolver／Quality負責final selection、fallback與decision usability。
+
+- GET、AI、research、valuation、technical、watchlist、overnight／ADR與cross-market consumer只讀resolved bars或US stable projection，不得import `USDailyPrice`來選provider、判current或找previous close。
+- Historical／point-in-time read以typed requirement的`requested_at`傳入raw receipt `available_at` cutoff；晚到backfill不會倒灌當時的research context。
+- Public chart與daily history的legacy response shape只是canonical selected bars的compatibility projection；deprecated provider參數不控制selection，也不觸發acquisition。
+- Explicit refresh固定走`read -> resolve -> plan -> acquire -> persist -> reread -> resolve -> postcondition`；provider fetch成功但persist／reread／expected-session postcondition失敗時不得回success。
+- Daily provider inventory由V2 executable descriptors投影：Yahoo Chart是P1；Alpaca SIP historical bars已完成P2 source integration，但production route仍受credential、bounded live、runtime與Product gate控制；Alpha Vantage Daily在上述gate完成前保留作rollback。Twelve Data僅建立Quote／Intraday source-ready client與pure canonical adapter，不進Daily production plan。
+- Completed-session executor只判斷expected session是否已有完整final OHLCV；Yahoo提供舊bar但缺expected session時必須標為stale／partial並繼續P2。Provider winner、fallback與series coherence仍只由Shared Resolver決定。
+- Provider diagnostics與舊parser／storage helper可留在US-owned quarantine供遷移／診斷，但production consumer不得import；runtime rollout在source binding可用後仍獨立維持off，直到migration與launcher adoption另行驗證。
+
+`us_consumer_canonical_daily_access` architecture rule封住AI、market與watchlist consumer對raw US daily ORM的回流。Source gate不代表runtime、live或product accepted。
+
+#### Taiwan completed-session consumer boundary
+
+台股 completed daily 的 public／research read owner 固定為
+`TaiwanOfficialDailyBarRepository` 與 `daily_ohlcv_platform`。Repository 同時持有
+official source identity、raw receipt、15:15 release qualification、active instrument
+identity與deterministic duplicate reconciliation；consumer 不得再以
+`MAX(market_daily_price.trade_date)`、raw row存在或自己的provider priority決定
+completed session truth。
+
+衍生 consumer 只可從 canonical read port 取值：
+
+- Chart、legacy daily routes、valuation、next-session、ADR、volume pace、technical、chips、derivatives、Radar outcome/automation/backtest、index contribution與stock market-cap使用resolved daily series／universe或market-owned freshness projection。
+- Completed index chart與dashboard previous-session baseline使用official index series；current-session dashboard headline仍使用current-market resolver，兩者不共用raw latest-row heuristic。
+- Official breadth從同一canonical daily universe聚合，並額外要求component receipt coherence；不另列TWSE/TPEX provider winner。
+- Completed-session stock sector／ranking由同一次canonical snapshot同時取得selected rows、active-stock denominator與TWSE／TPEX coverage counts；AI層不得另查第二份universe或把ETF列入stock aggregate。
+- Official index exact/series由`official_index_platform`經`MarketDataGateway`與Resolver讀取；series可以bounded preload，但每一session仍經相同resolution policy。
+- Historical／future `trade_date`只可在Data Core boundary clamp；AI、MCP、Frontend不得自行重做release calendar。
+
+`tw_consumer_canonical_storage_access` Architecture Guard v2以AST import-name規則封住
+protected normalized models。正式repository／transaction owner仍可讀storage；outward與
+research consumer重新引入protected model時必須直接失敗，不以broad allowlist或新增
+consumer-side fallback吸收。
 
 ## 10. Shared Research
 
@@ -513,73 +552,31 @@ Market Data Foundation 採 Strangler Pattern。
 
 ### Phase 2 — Provider Shadow
 
-KGI TW / MIS 同時產 legacy + canonical shadow。
+同一份 bounded provider input 同時產生 legacy 與 canonical shadow；shadow 不改 outward selection。
 
 ### Phase 3 — Resolver Shadow
 
-比較 legacy selection 與 new resolver selection。
+比較 legacy selection 與新 Resolver selection，保留差異、lineage 與 fail-closed gate。
 
-### Phase 4 — Research Lease
+### Phase 4 — Controlled Acquisition
 
-AI/MCP require_live 可取得 bounded KGI research lease。
+需要 live evidence 時只能透過 policy 允許的 bounded lease／acquisition port；read path 不建立無界 subscription。
 
 ### Phase 5 — Consumer Cutover
 
-依序切 AI/MCP、backend API、frontend。
+依 bounded consumer slice 切換 backend API、AI、MCP、Frontend 與其他 consumer，並驗證 outward parity。
 
 ### Phase 6 — Dataset Registry
 
-先納入 TW/US quote、intraday、daily price，再擴大。
+把 dataset lifecycle、refresh bounds、health 與 projection 對齊 executable registry；不另建重複 business inventory。
 
 ### Phase 7 — Capability Validation
 
-CI 保護 truthful capability。
+Architecture／contract tests 保護 advertised、refreshable、supported 與 decision-usable capability 的 truthful projection。
 
 ### Phase 8 — Legacy Removal
 
-全部驗收後才刪 provider masquerading / legacy fallback。
-
-### Foundation v1 source status（2026-08-19）
-
-- Phase 1 typed contract：source-complete。
-- Phase 2 KGI TW / MIS direct canonical adapter 與同 payload shadow/compare seam：source-complete，預設 mode `off`。
-- Pure resolver、internal `completed_session` 與 acquisition port contract：source-complete；尚未接 production Research Lease。
-- Dataset Registry v1：保留 TW quote/intraday/daily 與 US intraday/daily 五個 per-target 核心 dataset，另註冊 TW/US 兩個 full-market EOD coverage lifecycle dataset。
-- Capability projection validation：TW/US core fixture registrations 已建立；`technical.indicators` 與 `technical.structure` 已有 US resolved daily research projection，US full-market aggregates仍受 coverage gate 阻擋。
-- Runtime adoption、KGI live smoke、canary/on、consumer cutover、DB persistence：尚未驗收，也不屬於本次 source-complete。
-
-### Taiwan Data Core v2 source status（2026-08-25）
-
-- `DataRequirementV2`／`RefreshRequirementV1`、`MarketDataGateway`、provider capability-resource descriptor、candidate repository ports、typed acquisition/persistence summary與`MarketDataResultV1`已建立；Gateway只做pre-read／plan／acquire／persist／mandatory reread／Resolver，不擁有provider或DB transaction。
-- TWSE／TPEx official daily OHLCV已完成actual payload -> canonical -> source/raw + typed row transaction -> cold reread -> Resolver -> chart/API projection；cache-only daily read不接受`ensure_history`隱性backfill。
-- Full-market EOD expected date、eligibility、venue-bounded repair、postcondition/checkpoint、startup catch-up與retry由Dataset Lifecycle contract約束；powered-off後可修completed-session EOD，不宣稱修復未保存intraday/depth。
-- Official index與official breadth是不同canonical payload；breadth只由同venue/date/raw receipt official daily rows與registered universe導出，unknown與missing保持分離。
-- Public request-time第一個capability是single-symbol TWSE MIS `quote.last_trade`，定位為personal-research best effort/no-SLA；quote不製造minute bar，未取得授權前不推定raw/value-added資料可向外轉播。
-- Taiwan market-owned catalog現有28個production dataset contracts與18個bounded operations；Data Core health surface讀actual storage/lineage，lineage gap不冒充canonical或fresh。
-- Taiwan AI quote context只讀Data Core projection；daily technical API與AI evidence共用Resolver-selected official OHLCV及`tw.technical.indicators.v3` algorithm/price-basis/parameter contract。Frontend只在authority metadata匹配時使用backend authoritative values，local math僅是presentation compatibility。
-- `/indices/summary`分離current-session observation與completed official index/breadth；completed components只接受Data Core evidence，missing時fail closed，不回復legacy completed row。
-- 已移除direct MIS snapshot-to-bar、台股OHLC GET隱性backfill與completed dashboard legacy fallback。Current-session index/intraday、depth/auction與KGI是尚未onboard的獨立capabilities，不得誤稱已完成。
-- Production DB已由0066採用0067 index lineage與0068 public quote lineage；offline backup與clone downgrade/upgrade rehearsal通過。Named launcher runtime、Data Core API、TPEX actual official index persistence/cold read、visible browser與MCP `omi.decision.v4`均已驗收。
-- TAIEX 2026-08-25 official source response缺target date、current public quote legacy row lineage incomplete、official breadth不完整與active-session F-07都保持truthful outward。F-07完成前label維持`TW_DATA_CORE_PRODUCTION_ADOPTED_F07_PENDING`，不得標記common platform operational。
-
-### US first-class Foundation source status（2026-08-23）
-
-- US capability truth gate已修正：market.breadth在真實US projection完成前只宣告TW，US target會truthful unsupported。
-- Shared provider policy可接受market owner注入的US quote／intraday／daily descriptors；Yahoo／Alpha Vantage catalog仍由app.us_market擁有，shared Foundation不持有production provider catalog。
-- Yahoo chart 1m／1d與Alpha Vantage daily已有pure canonical adapters，輸出provider-neutral quote／bars、US session mapping、timezone-aware lineage、bar finalization與raw price basis；adapter不做IO、DB write或fallback。
-- US resolved quote／bars已有neutral schema projection seam；legacy TW-named schema只列compatibility，不再作新US canonical identity。
-- Yahoo intraday在canonical mode shadow／compare時重用同一已取得payload做bounded comparison；off不執行canonical conversion，shadow／compare不改legacy selected outward result。
-- Production AI／API已可在compare canary通過後消費resolved US quote／intraday／daily projection；KGI US live仍因source readiness未通過而fail closed。
-
-### US first-class Shared Research 與 consumer convergence（2026-08-23）
-
-- `app.research.technical` 是provider-neutral pure research boundary；TW compatibility wrapper與US engine共用SMA-seeded EMA、Wilder RSI、MACD、KD與PVO numerical primitives。
-- Versioned `MarketAnalysisProfile` 分開US／TW的windows、minimum bars、currency、calendar、timezone、session、benchmark、price basis與corporate-action policy；US v1使用MA 5／10／20／50／60／200，completed daily raw-unadjusted bars。
-- `app.us_market.research_service` 只讀resolved cache，不觸發provider IO或DB write；輸出 `omi.us_market.research.v1`、`omi.research.technical.indicators.v1`與`omi.research.technical.structure.v1`。
-- US corporate-action completeness尚無checkpoint，因此AAPL等有足夠bars的technical facts可用，但 `decision_usable=false`，不得把raw-price structure描述成完整決策證據。
-- `/api/us-market/intraday/{symbol}` 由backend依America/New_York session anchor聚合1m／5m／15m／30m／1h／4h，regular、pre-market與after-hours不混桶，並揭露source/effective interval、aggregation method與partial-bar status。
-- Frontend不再用GET隱性補抓US OHLC，也不再自行產生canonical MA／technical title或professional intraday aggregation；read/refresh ownership已分開。
-- Local universe與provider-reported sector/industry coverage已有versioned gate；因expected full universe、standard taxonomy與effective membership date尚未證明，US `market.breadth`、`market.sectors`與`market.hot_groups`繼續truthful unsupported。
+Migration 完成條件同時包含 new path works、production consumer 已切換、old production path unreachable、compatibility seam 有明確處置，以及相關 architecture debt 被移除。最後已記錄的 implementation checkpoint 不放在本文件，統一由 [`CurrentImplementationState.md`](CurrentImplementationState.md) 導航。
 
 ## 21. 驗證層級
 
@@ -587,10 +584,10 @@ CI 保護 truthful capability。
 
 - Canonical serialization。
 - KGI TW / MIS adapter。
-- KGI US / Yahoo / AlphaVantage adapter（後續 integration milestone）。
+- 適用 market/provider adapter 的 canonical conversion 與 failure contract。
 - Resolver primary/fallback。
 - require_live / prefer_live / cache_only。
-- Viewer / Research Lease lifecycle（後續 integration milestone）。
+- Viewer / Research Lease lifecycle 與 bounded ownership。
 - Trading Status。
 - Dataset expected / stale / not-applicable。
 - Provider / Dataset / Resolved Health。

@@ -1,0 +1,226 @@
+schema_version = 1
+baseline_git_head = "add7e1fb1e3610b10eacf82db001e40f6e4257c4"
+baseline_scope = "working_tree_at_2026-08-27"
+
+# Exact debt entries are generated from current source after the checker is in place.
+# Each entry must identify one rule + path + stable symbol/call-site occurrence.
+
+[[debt]]
+id = "frontend-kr-stock-refresh-provider"
+rule = "frontend_provider_selection"
+path = "frontend/src/components/KRMarketPanel.tsx"
+occurrence = 'requestJson:request:/api/kr-market/daily/${encodeURIComponent(selectedStock.symbol)}/refresh:provider:"auto"'
+reason = "Legacy KR refresh request still exposes provider selection from the production frontend."
+owner = "KR market API and frontend owners"
+closure_gate = "Backend policy owns selection and the production request no longer sends provider."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "frontend-jp-ranking-refresh-provider"
+rule = "frontend_provider_selection"
+path = "frontend/src/components/market-dashboard/ranking/useJpRankingState.ts"
+occurrence = 'requestBackfillJob:request:/api/jp-market/watchlists/groups/${currentGroupId}/refresh-daily:provider:"auto"'
+reason = "Legacy JP ranking refresh still sends provider=auto from a production consumer."
+owner = "JP market API and frontend owners"
+closure_gate = "Backend policy owns selection and the production request no longer sends provider."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "frontend-kr-ranking-refresh-provider"
+rule = "frontend_provider_selection"
+path = "frontend/src/components/market-dashboard/ranking/useKrRankingState.ts"
+occurrence = 'requestBackfillJob:request:/api/kr-market/watchlists/groups/${currentGroupId}/refresh-daily:provider:"auto"'
+reason = "Legacy KR ranking refresh still sends provider=auto from a production consumer."
+owner = "KR market API and frontend owners"
+closure_gate = "Backend policy owns selection and the production request no longer sends provider."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "get-jp-intraday-refresh"
+rule = "get_side_effect"
+path = "backend/app/routers/jp_market.py"
+occurrence = "get_jp_intraday_trend_api:keyword:get_jp_intraday_trend:refresh"
+reason = "Legacy JP GET forwards a dynamic refresh flag to the service."
+owner = "JP market API owner"
+closure_gate = "GET is cache-only and explicit refresh uses a bounded command route."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "get-jp-ohlc-ensure-history"
+rule = "get_side_effect"
+path = "backend/app/routers/jp_market.py"
+occurrence = "get_jp_ohlc_chart_data:keyword:list_jp_ohlc_chart_data:ensure_history"
+reason = "Legacy JP OHLC GET forwards ensure_history."
+owner = "JP market API owner"
+closure_gate = "GET rejects or removes ensure_history and history acquisition uses an explicit command."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "get-kr-index-intraday-refresh"
+rule = "get_side_effect"
+path = "backend/app/routers/kr_market.py"
+occurrence = "get_kr_index_intraday_chart:keyword:get_kr_index_intraday_trend:refresh"
+reason = "Legacy KR index intraday GET forwards a dynamic refresh flag."
+owner = "KR market API owner"
+closure_gate = "GET is cache-only and explicit refresh uses a bounded command route."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "get-kr-index-intraday-reload-all"
+rule = "get_side_effect"
+path = "backend/app/routers/kr_market.py"
+occurrence = "get_kr_index_intraday_chart:keyword:get_kr_index_intraday_trend:reload_all"
+reason = "Legacy KR index intraday GET forwards reload_all."
+owner = "KR market API owner"
+closure_gate = "GET cannot request reload_all; bounded reload moves to an explicit command."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "get-kr-index-ohlc-ensure-history"
+rule = "get_side_effect"
+path = "backend/app/routers/kr_market.py"
+occurrence = "get_kr_index_ohlc_chart:keyword:list_kr_index_ohlc_chart_data:ensure_history"
+reason = "Legacy KR index OHLC GET forwards ensure_history."
+owner = "KR market API owner"
+closure_gate = "GET rejects or removes ensure_history and history acquisition uses an explicit command."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "get-kr-stock-ohlc-ensure-history"
+rule = "get_side_effect"
+path = "backend/app/routers/kr_market.py"
+occurrence = "get_kr_ohlc_chart_data:keyword:list_kr_ohlc_chart_data:ensure_history"
+reason = "Legacy KR stock OHLC GET forwards ensure_history."
+owner = "KR market API owner"
+closure_gate = "GET rejects or removes ensure_history and history acquisition uses an explicit command."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "get-kr-stock-intraday-refresh"
+rule = "get_side_effect"
+path = "backend/app/routers/kr_market.py"
+occurrence = "get_kr_stock_intraday_chart:keyword:get_kr_stock_intraday_trend:refresh"
+reason = "Legacy KR stock intraday GET forwards a dynamic refresh flag."
+owner = "KR market API owner"
+closure_gate = "GET is cache-only and explicit refresh uses a bounded command route."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-db-models"
+rule = "shared_market_data_database_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:app.db.models"
+reason = "Legacy EOD coverage combines shared lifecycle semantics with persistence models."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Move persistence models behind market-owned repository and transaction ports."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-sqlalchemy"
+rule = "shared_market_data_database_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:sqlalchemy"
+reason = "Legacy EOD coverage performs SQLAlchemy queries inside the shared boundary."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Shared lifecycle code becomes provider-neutral and persistence-free."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-sqlalchemy-orm"
+rule = "shared_market_data_database_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:sqlalchemy.orm"
+reason = "Legacy EOD coverage accepts and owns ORM sessions inside the shared boundary."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Session ownership moves to an explicit market/job transaction boundary."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-fetch-pipeline"
+rule = "shared_market_data_integration_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:app.pipelines.fetch_pipeline"
+reason = "Legacy EOD repair calls an ingestion implementation from the shared boundary."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Acquisition is invoked through an explicit market-owned port."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-source-defaults"
+rule = "shared_market_data_integration_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:app.sources.defaults"
+reason = "Legacy EOD repair knows provider/source implementation constants."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Dataset contract or acquisition port owns source identity outside shared lifecycle code."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-source-service"
+rule = "shared_market_data_integration_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:app.sources.service"
+reason = "Legacy EOD repair resolves ingestion sources from the shared boundary."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Source lookup moves behind a market-owned acquisition port."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-taiwan-rules"
+rule = "shared_market_data_reverse_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:app.market.taiwan_rules"
+reason = "Legacy shared EOD module imports Taiwan-specific release policy."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Taiwan expected-state policy is injected through a typed market-owned contract."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-taiwan-calendar"
+rule = "shared_market_data_reverse_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:app.market.trading_calendar"
+reason = "Legacy shared EOD module imports Taiwan-specific calendar implementation."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Calendar semantics are provided through a market-owned expected-state port."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-taiwan-universe"
+rule = "shared_market_data_reverse_dependency"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "<module>:import:app.market.tw_universe"
+reason = "Legacy shared EOD module builds a Taiwan-specific universe."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Universe membership is supplied by a market-owned typed port."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-tw-rollback"
+rule = "shared_market_data_transaction"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "_repair_tw_eod:call:db.rollback"
+reason = "Legacy Taiwan EOD repair owns rollback inside the shared boundary."
+owner = "Market Data Foundation migration owner"
+closure_gate = "A market/job transaction owner contains rollback and reports bounded result."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-repair-state-commit"
+rule = "shared_market_data_transaction"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "_update_repair_state:call:db.commit"
+reason = "Legacy repair-state helper commits from the shared boundary."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Checkpoint persistence moves behind an explicit transaction owner."
+new_occurrences_allowed = false
+
+[[debt]]
+id = "shared-eod-coverage-commit"
+rule = "shared_market_data_transaction"
+path = "backend/app/market_data/eod_coverage.py"
+occurrence = "persist_eod_coverage:call:db.commit"
+reason = "Legacy coverage persistence commits from the shared boundary."
+owner = "Market Data Foundation migration owner"
+closure_gate = "Coverage persistence moves behind an explicit transaction owner."
+new_occurrences_allowed = false

@@ -5,17 +5,15 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from time import monotonic, sleep
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
     MarketDailyPrice,
     MarketDatasetCoverageCheckpoint,
     StockMaster,
-    USDailyPrice,
-    USStockMaster,
     utc_now,
 )
 from app.market.taiwan_rules import (
@@ -39,8 +37,6 @@ from app.sources.defaults import (
     TWSE_DAILY_TRADING_SOURCE_NAME,
 )
 from app.sources.service import get_source_by_name
-from app.us_market.service import refresh_us_daily_prices
-from app.us_market.trading_calendar import expected_us_daily_price_date
 
 
 CHECKPOINT_VERSION = "omi.market.eod_coverage.v1"
@@ -53,6 +49,27 @@ TW_REFRESH_OPERATION = "tw.reconcile_full_market_eod"
 US_REFRESH_OPERATION = "us.reconcile_full_market_eod"
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 TaiwanVenueRefresher = Callable[..., dict[str, Any]]
+
+
+class USFullMarketEodPort(Protocol):
+    """US-owned lifecycle port injected at the job/composition boundary."""
+
+    def expected_trade_date(self, *, now: datetime | None = None) -> date: ...
+
+    def compute_coverage(
+        self,
+        db: Session,
+        *,
+        expected_trade_date: date,
+    ) -> "CoverageComputation": ...
+
+    def refresh_symbol(
+        self,
+        db: Session,
+        *,
+        symbol: str,
+        expected_trade_date: date,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -263,12 +280,19 @@ def normalize_coverage_market(value: str) -> str:
     return normalized
 
 
-def expected_eod_trade_date(market: str, *, now: datetime | None = None) -> date:
+def expected_eod_trade_date(
+    market: str,
+    *,
+    now: datetime | None = None,
+    us_port: USFullMarketEodPort | None = None,
+) -> date:
     normalized = normalize_coverage_market(market)
     eod_lifecycle_contract(normalized)
     if normalized == "TW":
         return expected_daily_price_date(now=now)
-    return expected_us_daily_price_date(now=now)
+    if us_port is None:
+        raise ValueError("US EOD expected state requires an injected market-owned port")
+    return us_port.expected_trade_date(now=now)
 
 
 def taiwan_bulk_eod_refresh_window(
@@ -342,23 +366,10 @@ def _tw_ineligible_universe(
     )
 
 
-def _us_universe(db: Session) -> tuple[UniverseMember, ...]:
-    rows = (
-        db.query(USStockMaster.symbol, USStockMaster.exchange)
-        .filter(USStockMaster.is_active.is_(True))
-        .filter(func.lower(USStockMaster.asset_type) == "stock")
-        .filter(USStockMaster.is_test_issue.is_(False))
-        .order_by(USStockMaster.symbol.asc())
-        .all()
-    )
-    return tuple(
-        UniverseMember(symbol=row.symbol, venue=str(row.exchange or "UNKNOWN"))
-        for row in rows
-    )
-
-
 def build_eod_universe(db: Session, market: str) -> tuple[UniverseMember, ...]:
-    return _tw_universe(db) if normalize_coverage_market(market) == "TW" else _us_universe(db)
+    if normalize_coverage_market(market) != "TW":
+        raise ValueError("US universe ownership is outside Shared EOD lifecycle")
+    return _tw_universe(db)
 
 
 def _universe_hash(members: tuple[UniverseMember, ...]) -> str:
@@ -400,9 +411,17 @@ def compute_eod_coverage(
     *,
     market: str,
     expected_trade_date: date | None = None,
+    us_port: USFullMarketEodPort | None = None,
 ) -> CoverageComputation:
     normalized = normalize_coverage_market(market)
-    expected = expected_trade_date or expected_eod_trade_date(normalized)
+    expected = expected_trade_date or expected_eod_trade_date(
+        normalized,
+        us_port=us_port,
+    )
+    if normalized == "US":
+        if us_port is None:
+            raise ValueError("US EOD coverage requires an injected market-owned port")
+        return us_port.compute_coverage(db, expected_trade_date=expected)
     members = build_eod_universe(db, normalized)
     symbols = [member.symbol for member in members]
 
@@ -431,35 +450,6 @@ def compute_eod_coverage(
                 .all()
             )
         }
-    elif symbols:
-        latest_by_symbol = {
-            str(symbol): latest
-            for symbol, latest in (
-                db.query(USDailyPrice.symbol, func.max(USDailyPrice.trade_date))
-                .filter(USDailyPrice.symbol.in_(symbols))
-                .filter(USDailyPrice.trade_date <= expected)
-                .group_by(USDailyPrice.symbol)
-                .all()
-            )
-            if latest is not None
-        }
-        usable_expected_symbols = {
-            str(symbol)
-            for (symbol,) in (
-                db.query(USDailyPrice.symbol)
-                .filter(USDailyPrice.symbol.in_(symbols))
-                .filter(USDailyPrice.trade_date == expected)
-                .filter(
-                    or_(
-                        USDailyPrice.close_price.isnot(None),
-                        USDailyPrice.adjusted_close.isnot(None),
-                    )
-                )
-                .distinct()
-                .all()
-            )
-        }
-
     current, partial, stale, missing = _classify_symbols(
         members=members,
         latest_by_symbol=latest_by_symbol,
@@ -718,17 +708,20 @@ def should_enqueue_eod_reconcile(
     market: str,
     expected_trade_date: date | None = None,
     now: datetime | None = None,
+    us_port: USFullMarketEodPort | None = None,
 ) -> bool:
     normalized = normalize_coverage_market(market)
     decision_now = now or utc_now()
     expected = expected_trade_date or expected_eod_trade_date(
         normalized,
         now=decision_now,
+        us_port=us_port,
     )
     computation = compute_eod_coverage(
         db,
         market=normalized,
         expected_trade_date=expected,
+        us_port=us_port,
     )
     dataset_id = eod_lifecycle_contract(normalized).dataset_id
     scope_key = TW_SCOPE_KEY if normalized == "TW" else US_SCOPE_KEY
@@ -1089,6 +1082,7 @@ def _repair_us_eod(
     max_consecutive_errors: int,
     error_backoff_seconds: int,
     progress_callback: ProgressCallback | None,
+    us_port: USFullMarketEodPort,
 ) -> dict[str, Any]:
     candidates = _rotate_after_cursor(computation.unresolved_symbols, row.cursor_symbol)
     targets = candidates[:max_symbols]
@@ -1120,12 +1114,10 @@ def _repair_us_eod(
             progress_callback(index - 1, max(len(targets), 1), f"Refreshing US EOD {symbol}.")
         attempted += 1
         try:
-            refresh_us_daily_prices(
-                db=db,
+            us_port.refresh_symbol(
+                db,
                 symbol=symbol,
-                outputsize="compact",
-                adjusted=False,
-                provider="yahoo_chart",
+                expected_trade_date=computation.expected_trade_date,
             )
             succeeded += 1
             consecutive_errors = 0
@@ -1142,7 +1134,6 @@ def _repair_us_eod(
                 mark_success=True,
             )
         except Exception as exc:
-            db.rollback()
             failure = provider_http_failure(exc)
             error: dict[str, Any] = {"symbol": symbol, "message": str(exc)}
             if failure is not None:
@@ -1185,6 +1176,7 @@ def _repair_us_eod(
         db,
         market="US",
         expected_trade_date=computation.expected_trade_date,
+        us_port=us_port,
     )
     refreshed_row = persist_eod_coverage(
         db,
@@ -1249,6 +1241,7 @@ def reconcile_eod_coverage(
     error_backoff_seconds: int = 1800,
     progress_callback: ProgressCallback | None = None,
     taiwan_venue_refresher: TaiwanVenueRefresher | None = None,
+    us_port: USFullMarketEodPort | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_coverage_market(market)
     bounds = eod_reconcile_bounds(normalized)
@@ -1265,6 +1258,7 @@ def reconcile_eod_coverage(
         db,
         market=normalized,
         expected_trade_date=expected_trade_date,
+        us_port=us_port,
     )
     row = persist_eod_coverage(db, computation)
     if computation.status == "healthy":
@@ -1369,6 +1363,8 @@ def reconcile_eod_coverage(
             max_calls=min(bounds.max_calls, bounds.max_symbols),
             venue_refresher=taiwan_venue_refresher,
         )
+    if us_port is None:
+        raise ValueError("US EOD repair requires an injected market-owned port")
     return _repair_us_eod(
         db,
         row=row,
@@ -1380,6 +1376,7 @@ def reconcile_eod_coverage(
         max_consecutive_errors=min(max(int(max_consecutive_errors), 1), 20),
         error_backoff_seconds=max(int(error_backoff_seconds), 60),
         progress_callback=progress_callback,
+        us_port=us_port,
     )
 
 
@@ -1388,6 +1385,7 @@ __all__ = [
     "FULL_MARKET_SCOPE_KIND",
     "TW_DATASET_ID",
     "US_DATASET_ID",
+    "USFullMarketEodPort",
     "build_eod_universe",
     "cached_eod_coverage_projection",
     "compute_eod_coverage",

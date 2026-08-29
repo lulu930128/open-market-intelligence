@@ -119,6 +119,7 @@ def _descriptor(
 def _health(
     provider: str,
     *,
+    resource_id: str | None = None,
     operational: OperationalStatus = OperationalStatus.HEALTHY,
     connection: ConnectionStatus = ConnectionStatus.CONNECTED,
     checked_at: datetime = NOW,
@@ -127,6 +128,7 @@ def _health(
         provider=provider,
         market=Market.TW,
         capability="daily.ohlcv",
+        resource_id=resource_id,
         enablement=EnablementStatus.ENABLED,
         connection=connection,
         entitlement=EntitlementStatus.ENTITLED,
@@ -282,6 +284,39 @@ def test_health_is_strict_but_unknown_can_be_explicitly_bounded() -> None:
         [_health("fake_stale", checked_at=NOW - timedelta(minutes=10))],
     )
     assert stale.skipped_resources[0].reason_code == "HEALTH_STALE"
+
+
+def test_resource_health_isolated_by_exact_provider_resource_identity() -> None:
+    descriptors = (
+        _descriptor("fake_vendor", "sip_daily", priority=100),
+        _descriptor("fake_vendor", "iex_daily", priority=110),
+    )
+    plan = plan_data_acquisition_v2(
+        _requirement(),
+        descriptors,
+        (
+            _health("fake_vendor", resource_id="sip_daily"),
+            _health(
+                "fake_vendor",
+                resource_id="iex_daily",
+                operational=OperationalStatus.FAILED,
+            ),
+        ),
+    )
+
+    assert [route.resource_id for route in plan.routes] == ["sip_daily"]
+    assert plan.skipped_resources[0].resource_id == "iex_daily"
+    assert plan.skipped_resources[0].reason_code == "OPERATIONAL_FAILED"
+
+
+def test_legacy_capability_health_without_resource_remains_compatible() -> None:
+    plan = plan_data_acquisition_v2(
+        _requirement(max_attempts=1, max_calls=1),
+        [_descriptor("fake_legacy", "daily")],
+        [_health("fake_legacy")],
+    )
+
+    assert [route.resource_id for route in plan.routes] == ["daily"]
 
 
 def test_attempt_and_call_budgets_truncate_routes_truthfully() -> None:

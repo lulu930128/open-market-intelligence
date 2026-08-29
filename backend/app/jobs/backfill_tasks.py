@@ -40,6 +40,9 @@ from app.market.tw_derivatives import (
 )
 from app.us_market import service as us_market_service
 from app.us_market import ownership_service as us_ownership_service
+from app.us_market.daily_ohlcv_chart import read_us_daily_ohlcv_chart
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.ohlc_priority import reconcile_us_priority_ohlc
 from app.us_market import ownership_13f_analytics as us_13f_analytics
 from app.us_market import ownership_13f_mapping as us_13f_mapping
 from app.us_market import ownership_13f_service as us_13f_service
@@ -649,6 +652,210 @@ def run_us_watchlist_daily_refresh_job(
             outputsize=outputsize,
             adjusted=adjusted,
             sleep_seconds=sleep_seconds,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def _us_ohlc_repair_snapshot(chart: dict) -> dict:
+    return {
+        key: chart.get(key)
+        for key in (
+            "symbol",
+            "timeframe",
+            "requested_bar_count",
+            "available_bar_count",
+            "expected_data_date",
+            "latest_trade_date",
+            "latest_expected_date_present",
+            "coverage_status",
+            "request_coverage_status",
+            "continuity_status",
+            "history_status",
+            "history_fetch_scope",
+            "missing_trade_date_count",
+            "missing_trade_dates",
+            "missing_trade_dates_truncated",
+            "expected_previous_close_trade_date",
+            "previous_close_trade_date",
+            "previous_close_status",
+            "freshness_status",
+            "is_current",
+            "refresh_recommended",
+            "selected_provider",
+            "selected_source",
+            "selected_event_at",
+            "facts_usable",
+            "decision_usable",
+            "usability_status",
+            "limitations",
+        )
+    }
+
+
+def _us_ohlc_repair_postcondition(snapshot: dict) -> bool:
+    return bool(
+        snapshot.get("is_current")
+        and snapshot.get("coverage_status") in {"complete", "best_available"}
+        and (
+            snapshot.get("timeframe") != "daily"
+            or snapshot.get("previous_close_status") == "current"
+        )
+    )
+
+
+def _run_canonical_us_ohlc_repair(
+    db: Session,
+    *,
+    symbol: str,
+    timeframe: str,
+    bars: int,
+    provider: str | None,
+    adjusted: bool,
+    max_provider_calls: int,
+    force_full: bool,
+) -> dict:
+    if provider not in {None, "auto", "alphavantage", "yahoo_chart"}:
+        raise ValueError("legacy provider path is compatibility-only")
+    if adjusted:
+        raise ValueError(
+            "canonical US daily repair currently supports price_basis=raw only"
+        )
+    before = _us_ohlc_repair_snapshot(
+        read_us_daily_ohlcv_chart(
+            db,
+            symbol=symbol,
+            timeframe=timeframe,
+            bars=bars,
+        )
+    )
+    if _us_ohlc_repair_postcondition(before):
+        return {
+            "status": "noop",
+            "symbol": before.get("symbol") or symbol,
+            "timeframe": timeframe,
+            "bars": bars,
+            "provider": "canonical",
+            "provider_path_compatibility": provider,
+            "provider_call_budget": max_provider_calls,
+            "provider_call_count": 0,
+            "before": before,
+            "after": before,
+            "refreshes": [],
+            "postcondition_met": True,
+            "message": "Canonical US OHLC contracts were already satisfied.",
+        }
+
+    source_multiplier = {"daily": 1, "weekly": 6, "monthly": 24}[timeframe]
+    source_bars = (
+        5000
+        if force_full
+        else min(5000, max(bars + 1, bars * source_multiplier))
+    )
+    refreshed = USDailyOhlcvPlatform(db).ensure_history_coverage(
+        symbol=symbol,
+        bars=source_bars,
+        max_provider_calls=max_provider_calls,
+    )
+    after = _us_ohlc_repair_snapshot(
+        read_us_daily_ohlcv_chart(
+            db,
+            symbol=symbol,
+            timeframe=timeframe,
+            bars=bars,
+        )
+    )
+    postcondition_met = _us_ohlc_repair_postcondition(after)
+    acquisition = refreshed.result.acquisition
+    persistence = refreshed.result.persistence
+    return {
+        "status": "success" if postcondition_met else "partial_success",
+        "symbol": refreshed.identity.instrument.symbol,
+        "timeframe": timeframe,
+        "bars": bars,
+        "provider": "canonical",
+        "provider_path_compatibility": provider,
+        "provider_call_budget": max_provider_calls,
+        "provider_call_count": acquisition.external_calls,
+        "inserted_count": persistence.observations_inserted,
+        "updated_count": persistence.observations_updated,
+        "unchanged_count": persistence.observations_unchanged,
+        "before": before,
+        "after": after,
+        "refreshes": [
+            {
+                "selected_provider": refreshed.projection.get("selected_provider"),
+                "selected_source": refreshed.projection.get("selected_source"),
+                "fallback_used": bool(refreshed.projection.get("fallback_used")),
+                "selection_reason": refreshed.projection.get("selection_reason"),
+                "external_calls": acquisition.external_calls,
+                "providers_attempted": list(acquisition.providers_attempted),
+                "persistence_committed": persistence.committed,
+                "inserted_count": persistence.observations_inserted,
+                "updated_count": persistence.observations_updated,
+                "unchanged_count": persistence.observations_unchanged,
+                "raw_result_ids": list(persistence.raw_result_ids),
+                "postcondition_satisfied": refreshed.postcondition_satisfied,
+                "temporal_postcondition_satisfied": refreshed.temporal_postcondition_satisfied,
+                "coverage_postcondition_satisfied": refreshed.coverage_postcondition_satisfied,
+            }
+        ],
+        "postcondition_met": postcondition_met,
+        "message": (
+            "Canonical US OHLC repair satisfied cache reread and chart coverage."
+            if postcondition_met
+            else "Canonical US OHLC refresh completed but chart coverage remains limited."
+        ),
+    }
+
+
+def run_us_ohlc_history_repair_job(
+    job_id: int,
+    symbol: str,
+    timeframe: str,
+    bars: int,
+    provider: str | None,
+    adjusted: bool,
+    max_provider_calls: int,
+    force_full: bool,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, f"Repairing {symbol} US OHLC continuity.")
+        result = _run_canonical_us_ohlc_repair(
+            db,
+            symbol=symbol,
+            timeframe=timeframe,
+            bars=bars,
+            provider=provider,
+            adjusted=adjusted,
+            max_provider_calls=max_provider_calls,
+            force_full=force_full,
+        )
+        progress(1, 1, f"Checked {symbol} US OHLC continuity.")
+        if not result.get("postcondition_met"):
+            after = result.get("after") or {}
+            raise JobExecutionError(
+                "US OHLC repair postcondition failed: "
+                f"symbol={symbol} timeframe={timeframe} bars={bars} "
+                f"coverage={after.get('coverage_status')} "
+                f"missing_dates={after.get('missing_trade_date_count')}.",
+                result=result,
+            )
+        return result
+
+    run_tracked_job(job_id, worker)
+
+
+def run_us_priority_ohlc_reconcile_job(
+    job_id: int,
+    max_runtime_seconds: int,
+    cursor_symbol: str | None,
+) -> None:
+    def worker(_db: Session, progress: ProgressCallback):
+        return reconcile_us_priority_ohlc(
+            max_runtime_seconds=max_runtime_seconds,
+            cursor_symbol=cursor_symbol,
             progress_callback=progress,
         )
 

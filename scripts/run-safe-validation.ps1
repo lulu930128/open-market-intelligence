@@ -9,10 +9,10 @@ capturing stdout/stderr under .tmp/validation/<timestamp>, and warning when comm
 OMI ports already have listeners.
 
 Profiles:
-  quick    backend compileall + frontend tsc
-  backend  backend compileall + pytest
+  quick    architecture guard + backend compileall + frontend tsc
+  backend  architecture guard + backend compileall + pytest
   frontend frontend lint + tsc, optional build/e2e
-  full     backend compileall + pytest + frontend lint + tsc + build
+  full     architecture guard + backend compileall + pytest + frontend lint + tsc + build
 
 E2E is opt-in because it starts a Next dev server and a browser. Use a short
 timeout first when debugging browser or worker hangs.
@@ -43,7 +43,8 @@ param(
     [switch]$SkipGitCheck,
 
     [int]$CompileTimeoutSeconds = 120,
-    [int]$BackendTestTimeoutSeconds = 300,
+    [int]$ArchitectureTimeoutSeconds = 120,
+    [int]$BackendTestTimeoutSeconds = 420,
     [int]$FrontendTimeoutSeconds = 180,
     [int]$BuildTimeoutSeconds = 360,
     [int]$E2ETimeoutSeconds = 240,
@@ -424,6 +425,30 @@ if ($StopPortOwners) {
 $steps = @()
 
 if ($Profile -in @("quick", "backend", "full")) {
+    $steps += @{
+        Name = "architecture checker"
+        WorkingDirectory = $repoRoot
+        FilePath = $python
+        Arguments = @("scripts\check-architecture.py")
+        TimeoutSeconds = $ArchitectureTimeoutSeconds
+        Environment = $pythonEnv
+    }
+
+    $steps += @{
+        Name = "architecture pytest"
+        WorkingDirectory = $repoRoot
+        FilePath = $python
+        Arguments = @(
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "backend\tests\architecture"
+        )
+        TimeoutSeconds = $ArchitectureTimeoutSeconds
+        Environment = $pythonEnv
+    }
+
     $steps += @{
         Name = "backend compileall"
         WorkingDirectory = $repoRoot

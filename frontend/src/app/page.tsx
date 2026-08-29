@@ -72,7 +72,7 @@ function shouldUseTaiwanOhlcIntraday(calendarStatus: MarketCalendarStatusEnvelop
 function stockOhlcPath(stockId: string, includeIntraday: boolean) {
   const params = new URLSearchParams({
     timeframe: "daily",
-    bars: "180",
+    bars: "260",
     ensure_history: "false",
   });
 
@@ -253,7 +253,7 @@ export default async function Page({
           isIndexProduct
             ? `/api/market/indices/${encodeURIComponent(
                 initialSelectedStockId
-              )}/ohlc?timeframe=daily&bars=180&ensure_history=false`
+              )}/ohlc?timeframe=daily&bars=260&ensure_history=false`
             : stockOhlcPath(initialSelectedStockId, includeInitialStockIntraday),
           null
         )
@@ -279,6 +279,7 @@ export default async function Page({
   const initialChartData: ChartPoint[] = initialOhlc?.points ?? [];
   const initialChartIntradayOverlay: OhlcIntradayOverlay | null =
     initialOhlc?.intraday_overlay ?? null;
+  const initialChartStockId = initialOhlc?.stock_id ?? null;
   const initialChartVolumeUnit = initialOhlc?.volume_unit ?? null;
 
   return (
@@ -296,6 +297,7 @@ export default async function Page({
       initialSelectedKrSymbol={initialSelectedKrSymbol}
       initialChartData={initialChartData}
       initialChartIntradayOverlay={initialChartIntradayOverlay}
+      initialChartStockId={initialChartStockId}
       initialChartVolumeUnit={initialChartVolumeUnit}
       initialIndicatorData={initialIndicatorData}
       initialRankingData={null}

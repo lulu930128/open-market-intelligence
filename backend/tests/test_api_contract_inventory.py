@@ -268,8 +268,8 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 416)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 415)
+        self.assertEqual(len(operations), 417)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 416)
         self.assertIn(("get", "/api/market-data/eod-coverage"), operations)
         self.assertIn(("post", "/api/market-data/eod-coverage/reconcile"), operations)
         self.assertIn(
@@ -358,6 +358,13 @@ class APIContractInventoryTests(unittest.TestCase):
         )
         self.assertIn(
             ("post", "/api/us-market/sec/ownership/jobs/form4-sync"),
+            operations,
+        )
+        self.assertIn(
+            (
+                "post",
+                "/api/us-market/diagnostics/providers/{provider}/ohlc/{symbol}/repair",
+            ),
             operations,
         )
         self.assertIn(

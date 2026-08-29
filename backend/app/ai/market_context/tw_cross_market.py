@@ -11,8 +11,8 @@ from app.db.models import (
     JPDailyPrice,
     KRIndexDailyPrice,
     ResourceQuoteSnapshot,
-    USDailyPrice,
 )
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 
 
 US_TARGETS = (
@@ -95,6 +95,48 @@ def _daily_asset(
         "currency": getattr(latest, "currency", None),
         "status": _daily_status(latest.trade_date, now=now),
         "source_url": getattr(latest, "source_url", None),
+    }
+
+
+def _us_daily_asset(
+    db: Session,
+    *,
+    symbol: str,
+    label: str,
+    now: datetime,
+) -> dict[str, Any] | None:
+    try:
+        result = USDailyOhlcvPlatform(db).read(
+            symbol=symbol,
+            bars=90,
+            now=now,
+        )
+    except (LookupError, ValueError):
+        return None
+    bars = list(result.result.resolved.bars)
+    if not bars:
+        return None
+    latest = bars[-1]
+    previous = bars[-2] if len(bars) > 1 else None
+    close = float(latest.close_price)
+    previous_close = float(previous.close_price) if previous is not None else None
+    change_pct = (
+        (close - previous_close) / previous_close * 100
+        if previous_close not in (None, 0)
+        else None
+    )
+    return {
+        "id": symbol,
+        "label": label,
+        "price": close,
+        "change_pct": change_pct,
+        "as_of": latest.end_at.date().isoformat(),
+        "provider": latest.lineage.provider,
+        "currency": "USD",
+        "status": "current" if result.postcondition_satisfied else "stale",
+        "source_url": None,
+        "source": latest.lineage.source,
+        "freshness_reason": result.projection.get("selection_reason"),
     }
 
 
@@ -185,13 +227,10 @@ def read_tw_cross_market_context(
     now: datetime,
 ) -> dict[str, Any]:
     us_assets = [
-        _daily_asset(
+        _us_daily_asset(
             db,
-            model=USDailyPrice,
-            identity_field="symbol",
-            identity=symbol,
+            symbol=symbol,
             label=label,
-            close_field="adjusted_close",
             now=now,
         )
         for symbol, label in US_TARGETS

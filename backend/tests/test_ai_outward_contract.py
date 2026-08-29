@@ -551,18 +551,34 @@ class QueryPlanContractTests(unittest.TestCase):
             now=Mock(return_value="2026-07-19T00:00:00Z"),
         )
 
-        result = taiwan_stock.read_stock_quote_context(
-            db=SimpleNamespace(),
-            stock_id="2330",
-            market_data_params={"payload_level": "compact"},
-            dependencies=dependencies,
-        )
+        with patch.object(
+            taiwan_stock.taiwan_events,
+            "build_tw_stock_event_context",
+            return_value={
+                "data": {},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [
+                    {"type": "resolved_market_data", "name": "tw.events"}
+                ],
+            },
+        ):
+            result = taiwan_stock.read_stock_quote_context(
+                db=SimpleNamespace(),
+                stock_id="2330",
+                market_data_params={"payload_level": "compact"},
+                dependencies=dependencies,
+            )
 
         self.assertEqual(result["kind"], "stock_quote_context")
         self.assertEqual(result["data"]["compact"]["status"], "ready")
         self.assertEqual(
             result["data"]["compact"]["slots"]["technical"]["status"],
             "not_requested",
+        )
+        self.assertIn(
+            {"type": "resolved_market_data", "name": "tw.events"},
+            result["source_refs"],
         )
         stock_service.get_stock.assert_called_once()
         market_service.get_latest_stock_daily_price.assert_called_once()

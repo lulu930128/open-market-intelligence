@@ -559,7 +559,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 ),
                 patch.object(
                     agentic_tools.us_market_service,
-                    "list_us_ohlc_chart_data",
+                    "read_us_daily_ohlcv_chart",
                     return_value={
                         "timeframe": "daily",
                         "bars": 90,
@@ -587,7 +587,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 )
 
             list_chart.assert_called_once()
-            self.assertFalse(list_chart.call_args.kwargs["include_intraday"])
+            self.assertNotIn("include_intraday", list_chart.call_args.kwargs)
             compact = context["data"]["compact"]
             self.assertEqual(compact["quote"]["source"], "yahoo_finance_chart")
             self.assertTrue(compact["quote"]["is_realtime"])
@@ -3203,8 +3203,8 @@ class AiFreshnessGuardTests(unittest.TestCase):
                     },
                 ) as intraday,
                 patch.object(
-                    ai_ask.agentic_tools.us_market_service,
-                    "refresh_us_daily_prices",
+                    ai_ask.agentic_tools.agentic_execution,
+                    "refresh_us_daily_ohlcv",
                     return_value={
                         "status": "success",
                         "provider": "yahoo_chart",

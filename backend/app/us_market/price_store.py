@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
-from app.db.models import USDailyPrice, utc_now
+from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice, utc_now
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE, us_session_close_time
 from app.us_market.chart_projection import should_skip_daily_price_update as _should_skip_us_daily_price_update
 from app.us_market.sources import USDailyPriceRecord, normalize_us_symbol
 from app.us_market.symbols import us_symbol_storage_candidates
@@ -16,6 +17,62 @@ def upsert_us_daily_price_records(
     inserted_count = 0
     updated_count = 0
 
+    def lineage(record: USDailyPriceRecord, normalized_symbol: str) -> dict:
+        source_name = f"legacy_compat.{record.provider}.daily"
+        source = (
+            db.query(SourceRegistry)
+            .filter(SourceRegistry.source_name == source_name)
+            .first()
+        )
+        if source is None:
+            source = SourceRegistry(
+                source_name=source_name,
+                source_type="compatibility_adapter",
+                category="market_data",
+                endpoint_url=record.source_url,
+                enabled=True,
+            )
+            db.add(source)
+            db.flush()
+        fetched_at = utc_now()
+        content_hash = str(record.raw_payload_hash or "").strip() or (
+            f"legacy:{record.provider}:{normalized_symbol}:{record.trade_date.isoformat()}"
+        )
+        raw = RawFetchResult(
+            source_id=source.id,
+            fetched_at=fetched_at,
+            url=record.source_url,
+            method="GET",
+            content_hash=content_hash,
+            parser_version="us_daily_legacy_compat.v1",
+        )
+        db.add(raw)
+        db.flush()
+        is_index = normalized_symbol.startswith("^")
+        return {
+            "fetched_at": fetched_at,
+            "source_id": source.id,
+            "raw_result_id": raw.id,
+            "authority": "vendor",
+            "raw_contract_version": f"{record.provider}.legacy_compat.v1",
+            "event_at": datetime.combine(
+                record.trade_date,
+                us_session_close_time(record.trade_date),
+                tzinfo=US_MARKET_TIMEZONE,
+            ),
+            "finalization": "final",
+            "price_basis": "raw",
+            "volume_unit": "shares" if record.trade_volume is not None else None,
+            "volume_status": (
+                "observed"
+                if record.trade_volume is not None
+                else "not_applicable"
+                if is_index
+                else "missing"
+            ),
+            "raw_payload_hash": content_hash,
+        }
+
     for record in records:
         normalized_symbol = normalize_us_symbol(record.symbol)
         existing = (
@@ -25,8 +82,8 @@ def upsert_us_daily_price_records(
             .filter(USDailyPrice.trade_date == record.trade_date)
             .first()
         )
-
         if existing is None:
+            lineage_fields = lineage(record, normalized_symbol)
             db.add(
                 USDailyPrice(
                     provider=record.provider,
@@ -41,15 +98,20 @@ def upsert_us_daily_price_records(
                     dividend_amount=record.dividend_amount,
                     split_coefficient=record.split_coefficient,
                     source_url=record.source_url,
-                    raw_payload_hash=record.raw_payload_hash,
-                    fetched_at=utc_now(),
+                    **lineage_fields,
                 )
             )
             inserted_count += 1
             continue
 
-        if _should_skip_us_daily_price_update(existing=existing, record=record):
+        if (
+            existing.source_id is not None
+            and existing.raw_result_id is not None
+            and _should_skip_us_daily_price_update(existing=existing, record=record)
+        ):
             continue
+
+        lineage_fields = lineage(record, normalized_symbol)
 
         existing.open_price = record.open_price
         existing.high_price = record.high_price
@@ -60,8 +122,8 @@ def upsert_us_daily_price_records(
         existing.dividend_amount = record.dividend_amount
         existing.split_coefficient = record.split_coefficient
         existing.source_url = record.source_url
-        existing.raw_payload_hash = record.raw_payload_hash
-        existing.fetched_at = utc_now()
+        for field, value in lineage_fields.items():
+            setattr(existing, field, value)
         existing.updated_at = utc_now()
         updated_count += 1
 

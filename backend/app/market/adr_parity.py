@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     ResourceOhlcvBar,
     ResourceQuoteSnapshot,
-    USDailyPrice,
 )
 from app.market.daily_ohlcv_platform import (
     TaiwanCanonicalDailyRow,
@@ -27,6 +26,7 @@ from app.market.trading_calendar import (
 )
 from app.market.cross_market.relation_store import build_relation_registry_read
 from app.resource_market.fx_freshness import evaluate_fx_freshness, fx_daily_data_date
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,15 @@ class AdrMapping:
     source_label: str
     source_url: str
     verified_on: date
+
+
+@dataclass(frozen=True)
+class _ResolvedAdrDailyRow:
+    symbol: str
+    provider: str
+    trade_date: date
+    fetched_at: datetime | None
+    close_price: float
 
 
 @dataclass(frozen=True)
@@ -364,6 +373,7 @@ def build_adr_parity_report(
     adr_row = _latest_adr_row(
         db,
         mapping.adr_symbol,
+        expected_trade_date=expected_adr_trade_date,
         available_at=data_available_at,
     )
     if adr_row is None:
@@ -647,22 +657,35 @@ def _latest_adr_row(
     db: Session,
     symbol: str,
     *,
+    expected_trade_date: date | None = None,
     available_at: datetime | None = None,
-) -> USDailyPrice | None:
-    query = db.query(USDailyPrice).filter(USDailyPrice.symbol == symbol)
-    if available_at is not None:
-        query = query.filter(USDailyPrice.fetched_at <= available_at)
-    rows = (
-        query
-        .order_by(
-            USDailyPrice.trade_date.desc(),
-            USDailyPrice.updated_at.desc(),
-            USDailyPrice.id.desc(),
+) -> _ResolvedAdrDailyRow | None:
+    try:
+        result = USDailyOhlcvPlatform(db).read(
+            symbol=symbol,
+            bars=90,
+            now=available_at,
+            to_date=expected_trade_date,
         )
-        .limit(8)
-        .all()
+    except (LookupError, ValueError):
+        return None
+    bar = next(
+        (
+            candidate
+            for candidate in reversed(result.result.resolved.bars)
+            if _positive(float(candidate.close_price))
+        ),
+        None,
     )
-    return next((row for row in rows if _positive(row.close_price)), None)
+    if bar is None:
+        return None
+    return _ResolvedAdrDailyRow(
+        symbol=symbol,
+        provider=bar.lineage.provider,
+        trade_date=bar.end_at.date(),
+        fetched_at=bar.lineage.fetched_at,
+        close_price=float(bar.close_price),
+    )
 
 
 def _latest_tw_daily_at_or_before(

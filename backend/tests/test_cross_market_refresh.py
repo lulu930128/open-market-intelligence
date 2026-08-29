@@ -17,7 +17,7 @@ from app.db.models import (
     ProviderEvent,
     ResourceOhlcvBar,
     ResourceQuoteSnapshot,
-    USDailyPrice,
+    USStockMaster,
 )
 from app.jobs import backfill_tasks
 from app.jobs.job_types import CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE
@@ -34,6 +34,10 @@ from app.market.cross_market.schemas import (
 )
 from app.routers import jobs as jobs_router
 from app.routers.cross_market import refresh_cross_market_context
+from app.us_market.sources import USDailyPriceRecord
+from us_daily_test_support import (
+    upsert_canonical_us_daily_price_records as upsert_us_daily_price_records,
+)
 
 
 NOW = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
@@ -102,14 +106,25 @@ def add_relation(db: Session) -> None:
 
 
 def add_current_sources(db: Session) -> None:
-    db.add(
-        USDailyPrice(
+    db.add(USStockMaster(symbol="TSM", exchange="NYSE", is_active=True))
+    db.commit()
+    upsert_us_daily_price_records(
+        db,
+        [USDailyPriceRecord(
             provider="yahoo_chart",
             symbol="TSM",
             trade_date=EXPECTED_DATE,
+            open_price=198,
+            high_price=202,
+            low_price=197,
             close_price=200,
-            fetched_at=NOW,
-        )
+            adjusted_close=None,
+            trade_volume=1000,
+            dividend_amount=None,
+            split_coefficient=None,
+            source_url=None,
+            raw_payload_hash="tsm-current",
+        )],
     )
     db.add(
         ResourceQuoteSnapshot(
@@ -328,7 +343,7 @@ class CrossMarketRefreshTests(unittest.TestCase):
         return_value=EXPECTED_DATE,
     )
     @patch("app.market.cross_market.refresh.resource_market_service.refresh_resource_market_snapshot")
-    @patch("app.market.cross_market.refresh.us_market_service.refresh_us_daily_prices")
+    @patch("app.market.cross_market.refresh.refresh_us_daily_ohlcv")
     def test_worker_is_bounded_and_isolates_provider_results(
         self,
         refresh_us,
@@ -372,7 +387,6 @@ class CrossMarketRefreshTests(unittest.TestCase):
             symbol="TSM",
             outputsize="compact",
             adjusted=False,
-            provider="auto",
         )
         self.assertEqual(progress[-1][0], 2)
 
@@ -382,7 +396,7 @@ class CrossMarketRefreshTests(unittest.TestCase):
     )
     @patch("app.market.cross_market.refresh.resource_market_service.refresh_resource_market_snapshot")
     @patch(
-        "app.market.cross_market.refresh.us_market_service.refresh_us_daily_prices",
+        "app.market.cross_market.refresh.refresh_us_daily_ohlcv",
         side_effect=RuntimeError("provider timeout"),
     )
     def test_worker_keeps_partial_failure_visible(

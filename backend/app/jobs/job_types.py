@@ -23,6 +23,8 @@ WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE = (
 )
 CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE = "cross_market.context_refresh"
 MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE = "market_data.eod_coverage_reconcile"
+US_OHLC_HISTORY_REPAIR_JOB_TYPE = "us_market.ohlc_history_repair"
+US_PRIORITY_OHLC_RECONCILE_JOB_TYPE = "us_market.priority_ohlc_reconcile"
 US_SEC_FORM4_SYNC_JOB_TYPE = "us_market.sec_form4_sync"
 US_SEC_13F_QUARTER_SYNC_JOB_TYPE = "us_market.sec_13f_quarter_sync"
 US_SEC_13F_MAPPING_SYNC_JOB_TYPE = "us_market.sec_13f_mapping_sync"

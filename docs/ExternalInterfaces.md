@@ -8,11 +8,9 @@
 > selection 與 `evidence.quality`，不應依賴 legacy `analysis.human_answer`
 > 或 adapter 自製摘要。
 
-> 文件基準：2026-08-10（Asia/Taipei）
->
-> Backend OpenAPI：`4.0.1`
->
-> AI 問答 contract：`omi.decision.v4`
+> 本文件描述 normative integration boundary 與判讀方式，不保存容易過期的
+> build ID、route 數量或 capability inventory。實際 OpenAPI、AI tool schema、
+> provider contract 與 readiness 必須從目前 source／runtime 取得。
 
 本文件說明 Open Market Intelligence（OMI）目前可供 Frontend、Kuro、MCP、ChatGPT 或其他本機程式使用的接口，以及各接口可以做到、不能做到與必須保留的限制。它不是自動交易 API 規格，也不代表每一條 FastAPI route 都是承諾長期穩定的 public API。
 
@@ -98,14 +96,13 @@ Frontend / Kuro / MCP / ChatGPT / local scripts
 - MCP：`http://127.0.0.1:8797/mcp`
 - HTTP transport：`omi-search-http-mcp` `0.2.0`
 - MCP server：`omi-search-mcp` `0.4.0`
-- 2026-08-10 已驗證 build ID：`6ffe9eb74fcedf59`
-- Public tools：7 個；完整列表見第 10 節
+- Build ID 與 public tools 必須由目前 adapter/runtime probe 取得；不要使用本文作固定 inventory。
 
 `127.0.0.1:8797` 只供本機或受控 tunnel 的 target 使用。ChatGPT 網頁不能直接連 localhost；需要 Secure MCP Tunnel 或等價的受控連線層。
 
 ## 4. 接口分級
 
-2026-08-10 由目前 source 產生的 OpenAPI 有 374 個 operations：216 GET、121 POST、18 PATCH、15 DELETE、4 PUT。這只是 route inventory，不代表 374 條都是同等穩定或安全的 public contract。
+OpenAPI operation inventory 由目前 source 產生；route 存在不代表它是穩定、安全或建議的 public contract。整合方應依本節分級與 live schema 判讀，而不是依賴文件中的固定數量。
 
 ### A. 建議 public integration surface
 
@@ -362,36 +359,18 @@ interval），不得把兩者相加或混稱成同一個量。
 
 `source_health` 的 `market_data_params` 支援 `market`、`resource`、`target`、`provider`、`status_filter`、`problems_only`、`include_healthy` 與 bounded `health_limit`。`total_*` 是套用 market/resource/target/provider 後的基礎集合，`matched_*` 是再套用 status/problem filter 的命中集合，`returned_*` 則是 limit 後實際回傳集合。
 
-## 8. 目前 capability readiness
+## 8. Capability readiness
 
-以下是 Backend `capability_status` contract 在 2026-08-10 的分類；它與即時 source health 是兩件事。完整 response 同時包含 15 項 provider contracts、57 項正式 capability aggregate 與 210 筆 `(scope_type, capability_id)` resolution。
+Capability readiness 是 executable、runtime-derived truth，不能由本文件的靜態表格回答。查詢時至少同時讀取：
 
-### 已連接或有條件連接
+- `/api/ai/tools` 的 public request schema、capability catalog 與 limits。
+- Backend capability status／projection registry。
+- Dataset、Provider 與 Resolved Evidence Health。
+- 目前 caller 的 trust、credential、quota 與 target scope。
 
-| Capability | 狀態 | Provider / cadence | 限制 |
-| --- | --- | --- | --- |
-| 台股全市場 breadth | `connected` | TWSE/TPEX，intraday 或 daily 依來源 | 全市場 official breadth 與 OMI sample movers 不可混用 |
-| 台股市場籌碼/rankings | `connected` | TWSE/TPEX local cache，盤後日更 | Aggregate 與 per-stock DB coverage 分開揭露 |
-| 台指期法人 OI / PCR | `connected` | TAIFEX official daily | 不是夜盤即時法人部位 |
-| 韓股 intraday | `connected` | Yahoo chart / Naver cache，bounded | External refresh 仍需 server trust |
-| 資源商品 quote/OHLCV | `connected` | Yahoo chart best-effort | 延遲、watch-only、無 execution |
-| Portfolio context | `connected_private` | OMI local portfolio | 只給 trusted caller，幣別不靜默合併 |
-| FRED macro | `connected_key_required_for_refresh` | FRED release schedule | Cache 可讀，refresh 需 key |
-| 台灣選擇權 chain / IV / Greeks | `connected_derived` | TAIFEX 盤後 | Chain/Delta 為官方；IV/Gamma/Vega/Theta 是 OMI 衍生且有零利率/零股息假設 |
-| 台灣大額交易人部位 | `connected` | TAIFEX 盤後 | Top 5/10 concentration 不等於外資方向 |
-| 台指期 basis / term structure | `connected_derived` | TAIFEX + TAIEX 盤後 | Basis、annualized basis、curve shape 為同日收盤衍生值 |
+狀態必須如實區分 `supported`、`planned`、`unsupported`、`provider_not_connected`、`plan_restricted`、`rate_limited`、`partial`、`missing`、`stale` 與 `not_applicable`。其中 `provider_not_connected` 是明確 blocked contract，不是「查到 0 筆」。
 
-### 尚未連接
-
-| Capability | 目前狀態 | 缺少什麼 |
-| --- | --- | --- |
-| 一般新聞/事件 | `provider_not_connected` | Attribution、license、去重、entity mapping、retention、quota policy |
-| 美股 options flow / earnings | `provider_not_connected` | 授權 provider 與獨立的 options/earnings quota contract |
-| 日本 TDnet disclosure | `provider_not_connected` | Issuer mapping、document identity/storage、語言與 bounded polling policy |
-| 韓國 OpenDART disclosure | `provider_not_connected` | API key policy、corp-code mapping、report normalization、bounded backfill |
-| 港股市場 | `provider_not_connected` | Symbol master、calendar、quote/daily provider、freshness、watchlist contract |
-
-`provider_not_connected` 是明確 blocked contract，不是「查到 0 筆」。未來加入券商或授權 API 時，應先在 Backend 補 provider、freshness、source health 與 bounded refresh，再由既有 outward target 暴露；不應直接在 Frontend/Kuro/MCP 接 provider。
+加入新 provider 或 capability 時，應先在 Backend 對齊 Canonical Observation、Resolver、freshness、health、bounded refresh 與 outward projection；Frontend、Kuro、MCP 不得直接接 provider 補洞。
 
 ## 9. SSE streaming contract
 
@@ -598,17 +577,13 @@ Invoke-RestMethod "http://127.0.0.1:8797/health"
 
 能力 readiness 應透過 `target.type=capability_status` 查詢；runtime freshness/provider incident 應透過 `target.type=source_health` 或 source-health endpoints 查詢。兩者不能互相替代。
 
-## 15. 相關文件與程式位置
+## 15. 相關文件與 discovery 入口
 
-- `README.md`
-- `docs/architecture/BackendArchitecture.md`
-- `docs/agent-runs/omi-ai-decision-core/ContractMap.md`
-- `docs/agent-runs/productized-market-payload-contract/ContractDesign.md`
-- `backend/app/ai/schemas.py`
-- `backend/app/ai/scope_resolution.py`
-- `backend/app/ai/ask_policy.py`
-- `backend/app/ai/market_context/capability_context.py`
-- `backend/app/routers/ai.py`
-- `agents/omi_mcp_server/server.py`
-- `agents/omi_mcp_server/README.md`
-- `C:\GPT_MCPtool\OMI_search\README.md`
+- [`README.md`](../README.md)
+- [`docs/architecture/index.md`](architecture/index.md)
+- [`docs/architecture/BackendArchitecture.md`](architecture/BackendArchitecture.md)
+- [`docs/architecture/OmiDecisionContract.md`](architecture/OmiDecisionContract.md)
+- [`agents/omi_mcp_server/README.md`](../agents/omi_mcp_server/README.md)
+- Runtime OpenAPI 與 `/api/ai/tools`
+
+程式 owner 與檔案位置應從目前 repo 搜尋 route、contract version、capability ID 與 tool name；既有 `docs/agent-runs/` 只供歷史 lineage，不作 current implementation map。

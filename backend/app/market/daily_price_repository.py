@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from pydantic import ValidationError
 from sqlalchemy import and_, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.db.models import MarketDailyPrice, RawFetchResult, SourceRegistry, StockMaster
 from app.market.taiwan_rules import taiwan_daily_price_release_at
@@ -40,6 +40,14 @@ from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
     TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+)
+
+
+_RAW_FETCH_LINEAGE_COLUMNS = (
+    RawFetchResult.id,
+    RawFetchResult.fetched_at,
+    RawFetchResult.content_hash,
+    RawFetchResult.parser_version,
 )
 
 
@@ -219,6 +227,7 @@ class TaiwanOfficialDailyBarRepository:
 
         stored_query = (
             self._db.query(MarketDailyPrice, RawFetchResult, SourceRegistry)
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
             .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
             .filter(MarketDailyPrice.stock_id == instrument.symbol)
@@ -327,6 +336,10 @@ class TaiwanOfficialDailyBarRepository:
                         if row.trade_volume is not None
                         else None
                     ),
+                    volume_status=(
+                        "observed" if row.trade_volume is not None else "missing"
+                    ),
+                    price_basis="raw",
                     instrument_name=row.stock_name,
                     turnover_value=(
                         Decimal(row.trade_value)
@@ -453,6 +466,7 @@ class TaiwanOfficialDailyBarRepository:
                 SourceRegistry,
                 StockMaster,
             )
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
             .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
             .join(StockMaster, StockMaster.stock_id == MarketDailyPrice.stock_id)

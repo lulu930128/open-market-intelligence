@@ -53,6 +53,7 @@ from app.market_data.gateway import (
 )
 from app.market_data.integration_contracts import (
     DataRequirementV2,
+    FreshnessBasis,
     FreshnessRequirement,
     InstrumentTarget,
     MarketDataResultV1,
@@ -67,7 +68,6 @@ from app.market_data.resolution import ResolutionCandidate
 
 
 PUBLIC_QUOTE_MAX_AGE_SECONDS = 15
-SESSION_CLOSE_MAX_AGE_SECONDS = 86_400
 _ACTIVE_SESSIONS = {
     MarketSession.PRE_OPEN,
     MarketSession.OPENING_AUCTION,
@@ -204,7 +204,11 @@ def build_taiwan_session_close_requirement(
             "purpose": DataPurpose.RESEARCH,
             "session": target_session,
             "freshness": FreshnessRequirement(
-                max_age_seconds=SESSION_CLOSE_MAX_AGE_SECONDS
+                # Session-close validity is owned by the expected Taiwan trade
+                # date checked by the candidate reader.  Wall-clock age is not
+                # authoritative across weekends or exchange holidays.
+                max_age_seconds=PUBLIC_QUOTE_MAX_AGE_SECONDS,
+                basis=FreshnessBasis.COMPLETED_SESSION_DATE,
             ),
         }
     )
@@ -943,7 +947,6 @@ def read_taiwan_public_quote_projection(
 
 __all__ = [
     "PUBLIC_QUOTE_MAX_AGE_SECONDS",
-    "SESSION_CLOSE_MAX_AGE_SECONDS",
     "TaiwanPublicQuoteCandidateReader",
     "acquire_taiwan_session_close",
     "acquire_taiwan_public_last_trade_quote",

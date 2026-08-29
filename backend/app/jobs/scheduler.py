@@ -1,10 +1,12 @@
 from datetime import datetime, time, timedelta
+import json
 import logging
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.db.session import SessionLocal
+from app.db.models import JobRun
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.eod_coverage import enqueue_eod_coverage_reconcile
 from app.jobs.job_types import (
@@ -13,6 +15,7 @@ from app.jobs.job_types import (
     TAIWAN_BROKER_BRANCH_BEHAVIOR_SHADOW_JOB_TYPE,
     TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
+    US_PRIORITY_OHLC_RECONCILE_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
     WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
 )
@@ -79,6 +82,7 @@ from app.market_data.eod_coverage import (
     expected_eod_trade_date,
     should_enqueue_eod_reconcile,
 )
+from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
 from app.market.tw_intraday_state import (
     attach_current_market_lineage_to_stock_rows,
     persist_taiwan_intraday_stock_states,
@@ -2225,18 +2229,37 @@ def _add_market_chip_daily_refresh_jobs(scheduler: Any) -> bool:
 
 
 def enqueue_market_eod_coverage_reconcile() -> None:
+    from app.us_market.daily_rollout import (
+        us_daily_full_market_acquisition_enabled,
+    )
+
     markets = [item.upper() for item in _split_csv(settings.scheduler_eod_coverage_markets)]
     for market in markets:
         if market not in {"TW", "US"}:
             logger.warning("Skipping unsupported EOD coverage scheduler market=%s.", market)
             continue
+        if market == "US" and not us_daily_full_market_acquisition_enabled():
+            logger.info(
+                "Skipping US full-market EOD coverage while Daily acquisition "
+                "rollout is not on."
+            )
+            continue
         db = SessionLocal()
         try:
-            expected_trade_date = expected_eod_trade_date(market)
+            us_port = (
+                US_FULL_MARKET_EOD_LIFECYCLE
+                if market.strip().upper() == "US"
+                else None
+            )
+            expected_trade_date = expected_eod_trade_date(
+                market,
+                us_port=us_port,
+            )
             if not should_enqueue_eod_reconcile(
                 db,
                 market=market,
                 expected_trade_date=expected_trade_date,
+                us_port=us_port,
             ):
                 continue
             job, created = enqueue_eod_coverage_reconcile(
@@ -2298,6 +2321,76 @@ def _add_market_eod_coverage_reconcile_job(scheduler: Any) -> bool:
     return True
 
 
+def enqueue_us_priority_ohlc_reconcile() -> None:
+    db = SessionLocal()
+    try:
+        latest_completed = (
+            db.query(JobRun)
+            .filter(JobRun.job_type == US_PRIORITY_OHLC_RECONCILE_JOB_TYPE)
+            .filter(JobRun.status == "success")
+            .order_by(JobRun.ended_at.desc(), JobRun.id.desc())
+            .first()
+        )
+        cursor_symbol = None
+        if latest_completed is not None and latest_completed.result_json:
+            try:
+                previous_result = json.loads(latest_completed.result_json)
+            except (TypeError, json.JSONDecodeError):
+                previous_result = None
+            if isinstance(previous_result, dict):
+                cursor_symbol = previous_result.get("cursor_symbol")
+        request = {
+            "max_runtime_seconds": settings.scheduler_us_priority_ohlc_max_runtime_seconds,
+            "cursor_symbol": cursor_symbol,
+        }
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type=US_PRIORITY_OHLC_RECONCILE_JOB_TYPE,
+            target="priority-research",
+            request=request,
+            progress_total=1,
+            message="Queued by cache-only priority US OHLC continuity audit scheduler.",
+            task=backfill_tasks.run_us_priority_ohlc_reconcile_job,
+            task_args=(
+                request["max_runtime_seconds"],
+                request["cursor_symbol"],
+            ),
+        )
+        logger.info(
+            "Priority US OHLC reconcile %s job_id=%s.",
+            "queued" if created else "deduped",
+            job.id,
+        )
+    except Exception:
+        logger.exception("Failed to enqueue priority US OHLC continuity audit.")
+    finally:
+        db.close()
+
+
+def _add_us_priority_ohlc_reconcile_job(scheduler: Any) -> bool:
+    if not settings.enable_us_priority_ohlc_scheduler:
+        return False
+    scheduler.add_job(
+        enqueue_us_priority_ohlc_reconcile,
+        trigger="interval",
+        minutes=max(int(settings.scheduler_us_priority_ohlc_interval_minutes), 5),
+        id="us_priority_ohlc_reconcile",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=(
+            datetime.now(_timezone())
+            + timedelta(
+                seconds=max(
+                    int(settings.scheduler_us_priority_ohlc_startup_delay_seconds),
+                    0,
+                )
+            )
+        ),
+    )
+    return True
+
+
 def start_scheduler() -> Any | None:
     if (
         not settings.enable_scheduler
@@ -2316,6 +2409,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
         and not settings.enable_watchlist_radar_scheduler
+        and not settings.enable_us_priority_ohlc_scheduler
         and not settings.enable_eod_coverage_scheduler
     ):
         logger.info("Job scheduler disabled.")
@@ -2417,6 +2511,9 @@ def start_scheduler() -> Any | None:
     market_chip_margin_refresh_enabled = _add_market_chip_margin_refresh_job(
         scheduler
     )
+    us_priority_ohlc_reconcile_enabled = _add_us_priority_ohlc_reconcile_job(
+        scheduler
+    )
     market_eod_coverage_reconcile_enabled = _add_market_eod_coverage_reconcile_job(
         scheduler
     )
@@ -2430,6 +2527,23 @@ def start_scheduler() -> Any | None:
         scheduler
     )
     scheduler.start()
+    logger.info(
+        "Market chip daily scheduler enabled=%s primary=%s retry_delay=%sm.",
+        market_chip_daily_refresh_enabled,
+        settings.scheduler_market_chip_refresh_time,
+        max(int(settings.scheduler_market_chip_refresh_retry_delay_minutes), 1),
+    )
+    logger.info(
+        "Taiwan intraday bar scheduler enabled=%s interval=%ss max_symbols=%s.",
+        taiwan_intraday_bar_scheduler_enabled,
+        max(int(settings.scheduler_taiwan_intraday_bar_interval_seconds), 60),
+        max(int(settings.scheduler_taiwan_intraday_bar_max_symbols), 1),
+    )
+    logger.info(
+        "Priority US OHLC cache-only audit scheduler enabled=%s interval=%sm.",
+        us_priority_ohlc_reconcile_enabled,
+        max(int(settings.scheduler_us_priority_ohlc_interval_minutes), 5),
+    )
     logger.info(
         "Full-market EOD coverage scheduler enabled=%s markets=%s interval=%sm.",
         market_eod_coverage_reconcile_enabled,

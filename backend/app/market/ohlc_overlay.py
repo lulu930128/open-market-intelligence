@@ -133,6 +133,7 @@ def append_intraday_overlay(
     intraday: dict,
     end_date: date,
     null_fields: tuple[str, ...] = (),
+    finalized_through: date | None = None,
 ) -> tuple[list[dict], dict | None]:
     overlay_result = intraday_overlay_point(intraday, null_fields=null_fields)
     if overlay_result is None:
@@ -141,6 +142,8 @@ def append_intraday_overlay(
     overlay, metadata = overlay_result
     overlay_date = point_date(overlay["time"])
     if overlay_date is None or overlay_date > end_date:
+        return points, None
+    if finalized_through is not None and overlay_date <= finalized_through:
         return points, None
 
     next_points = [

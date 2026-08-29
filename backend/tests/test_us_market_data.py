@@ -71,6 +71,7 @@ from app.us_market.sources import (
     parse_yahoo_daily_prices,
     parse_yahoo_intraday_prices,
 )
+from us_daily_test_support import upsert_canonical_us_daily_price_records
 from app.us_market.trading_calendar import (
     expected_us_daily_price_date,
     is_us_daily_price_finalized,
@@ -854,6 +855,17 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
 
+    def _add_market_identity(self, symbol: str, exchange: str = "NASDAQ") -> None:
+        self.db.add(
+            USStockMaster(
+                symbol=symbol,
+                exchange=exchange,
+                asset_type="stock",
+                is_active=True,
+            )
+        )
+        self.db.commit()
+
     def test_us_daily_prices_read_legacy_index_alias_rows(self) -> None:
         self.db.add(
             USDailyPrice(
@@ -877,6 +889,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
 
     @patch("app.ai.agentic_tools.us_market_service.get_us_intraday_trend")
     def test_read_us_stock_context_fetches_intraday_when_requested(self, mock_intraday) -> None:
+        self._add_market_identity("MU")
         upsert_us_daily_price_records(
             self.db,
             [
@@ -988,7 +1001,8 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self,
         mock_intraday,
     ) -> None:
-        upsert_us_daily_price_records(
+        self._add_market_identity("AAPL")
+        upsert_canonical_us_daily_price_records(
             self.db,
             [
                 USDailyPriceRecord(
@@ -1068,6 +1082,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
     def test_read_us_stock_context_does_not_fallback_when_trade_date_is_missing(
         self,
     ) -> None:
+        self._add_market_identity("AAPL")
         upsert_us_daily_price_records(
             self.db,
             [
@@ -1355,34 +1370,43 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(health["filters"]["symbol"], "IBM")
         self.assertEqual(entries[("daily_price", "yahoo_chart")]["status"], "stale")
         self.assertEqual(entries[("daily_price", "yahoo_chart")]["freshness_lag_days"], 4)
-        self.assertEqual(entries[("daily_price", "alphavantage")]["status"], "empty")
+        self.assertNotIn(("daily_price", "alphavantage"), entries)
         self.assertEqual(entries[("profile", "alphavantage")]["status"], "available")
         self.assertEqual(entries[("sec_facts", "sec_edgar")]["status"], "empty")
         self.assertEqual(health["summary"]["stale_count"], 1)
         self.assertGreaterEqual(health["summary"]["empty_count"], 1)
 
     def test_us_source_health_marks_preclose_daily_row_as_partial(self) -> None:
-        self.db.add_all(
+        upsert_canonical_us_daily_price_records(
+            self.db,
             [
-                USDailyPrice(
+                USDailyPriceRecord(
                     provider="yahoo_chart",
                     symbol="IBM",
                     trade_date=date(2026, 6, 1),
+                    open_price=87.0,
+                    high_price=89.0,
+                    low_price=86.5,
                     close_price=88.5,
+                    adjusted_close=None,
                     trade_volume=1200,
-                    fetched_at=datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc),
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
                     raw_payload_hash="ibm-finalized",
-                ),
-                USDailyPrice(
-                    provider="yahoo_chart",
-                    symbol="IBM",
-                    trade_date=date(2026, 6, 2),
-                    close_price=90.6,
-                    trade_volume=300,
-                    fetched_at=datetime(2026, 6, 2, 14, 0, tzinfo=timezone.utc),
-                    raw_payload_hash="ibm-preclose",
-                ),
-            ]
+                )
+            ],
+        )
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="IBM",
+                trade_date=date(2026, 6, 2),
+                close_price=90.6,
+                trade_volume=300,
+                fetched_at=datetime(2026, 6, 2, 14, 0, tzinfo=timezone.utc),
+                raw_payload_hash="ibm-preclose",
+            )
         )
         self.db.commit()
 
@@ -1500,7 +1524,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             self.db,
             USWatchlistItemCreate(group_id=group.id, symbol="IBM"),
         )
-        upsert_us_daily_price_records(
+        upsert_canonical_us_daily_price_records(
             self.db,
             [
                 USDailyPriceRecord(
@@ -1589,9 +1613,12 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["results"][0]["symbol"], "AAPL")
         self.assertEqual(ranking["results"][0]["change_pct"], 10.0)
         self.assertEqual(ranking["results"][0]["selected_provider"], "yahoo_chart")
-        self.assertEqual(ranking["results"][0]["selected_source"], "yahoo.chart.1d")
+        self.assertEqual(
+            ranking["results"][0]["selected_source"],
+            "yahoo.chart.1d",
+        )
         self.assertEqual(ranking["results"][0]["selected_session"], "closed")
-        self.assertEqual(ranking["results"][0]["price_basis"], "raw_unadjusted")
+        self.assertEqual(ranking["results"][0]["price_basis"], "raw")
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
         self.assertEqual(self.db.query(MarketDailyPrice).count(), 0)
 
@@ -1640,7 +1667,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                         raw_payload_hash=f"{provider}-{trade_date.isoformat()}",
                     )
                 )
-        upsert_us_daily_price_records(self.db, records)
+        upsert_canonical_us_daily_price_records(self.db, records)
 
         with patch(
             "app.us_market.service.expected_us_daily_price_date",
@@ -1653,7 +1680,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(row["close"], 110.0)
         self.assertEqual(row["previous_close"], 100.0)
         self.assertEqual(row["change_pct"], 10.0)
-        self.assertEqual(row["price_basis"], "raw_unadjusted")
+        self.assertEqual(row["price_basis"], "raw")
         self.assertFalse(row["fallback_used"])
 
     def test_us_watchlist_technical_radar_flags_ohlcv_breakout(self) -> None:
@@ -1708,7 +1735,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 raw_payload_hash="aapl-breakout",
             )
         )
-        upsert_us_daily_price_records(self.db, records)
+        upsert_canonical_us_daily_price_records(self.db, records)
 
         with patch(
             "app.us_market.service._latest_distinct_us_daily_rows",
@@ -1744,8 +1771,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             self.db,
             USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
         )
-        self.db.add(
-            USDailyPrice(
+        upsert_canonical_us_daily_price_records(
+            self.db,
+            [USDailyPriceRecord(
                 provider="yahoo_chart",
                 symbol="AAPL",
                 trade_date=date(2026, 6, 5),
@@ -1754,10 +1782,13 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 low_price=98.0,
                 close_price=100.0,
                 trade_volume=1000,
+                adjusted_close=None,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url=None,
                 raw_payload_hash="aapl-1",
-            )
+            )],
         )
-        self.db.commit()
 
         with patch(
             "app.us_market.service.expected_us_daily_price_date",
@@ -1789,8 +1820,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             self.db,
             USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
         )
-        self.db.add(
-            USDailyPrice(
+        upsert_canonical_us_daily_price_records(
+            self.db,
+            [USDailyPriceRecord(
                 provider="yahoo_chart",
                 symbol="AAPL",
                 trade_date=date(2026, 6, 5),
@@ -1799,10 +1831,13 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 low_price=98.0,
                 close_price=100.0,
                 trade_volume=1000,
+                adjusted_close=None,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url=None,
                 raw_payload_hash="aapl-1",
-            )
+            )],
         )
-        self.db.commit()
 
         with patch(
             "app.us_market.service.expected_us_daily_price_date",
@@ -1833,9 +1868,10 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             self.db,
             USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
         )
-        self.db.add_all(
+        upsert_canonical_us_daily_price_records(
+            self.db,
             [
-                USDailyPrice(
+                USDailyPriceRecord(
                     provider="yahoo_chart",
                     symbol="AAPL",
                     trade_date=date(2026, 6, 5),
@@ -1844,9 +1880,15 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                     low_price=98.0,
                     close_price=100.0,
                     trade_volume=1000,
-                    fetched_at=datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc),
+                    adjusted_close=None,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
                     raw_payload_hash="aapl-finalized",
                 ),
+            ],
+        )
+        self.db.add(
                 USDailyPrice(
                     provider="yahoo_chart",
                     symbol="AAPL",
@@ -1858,8 +1900,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                     trade_volume=50,
                     fetched_at=datetime(2026, 6, 8, 14, 0, tzinfo=timezone.utc),
                     raw_payload_hash="aapl-preclose",
-                ),
-            ]
+                )
         )
         self.db.commit()
 
@@ -1879,27 +1920,41 @@ class USMarketStorageIsolationTests(unittest.TestCase):
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
     def test_us_intraday_trend_uses_latest_daily_close_reference(self, mock_fetch) -> None:
-        self.db.add_all(
+        upsert_canonical_us_daily_price_records(
+            self.db,
             [
-                USDailyPrice(
+                USDailyPriceRecord(
                     provider="yahoo_chart",
                     symbol="IBM",
                     trade_date=date(2026, 5, 29),
+                    open_price=86.0,
+                    high_price=88.0,
+                    low_price=85.0,
                     close_price=87.0,
+                    adjusted_close=None,
                     trade_volume=900,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
                     raw_payload_hash="ibm-older",
                 ),
-                USDailyPrice(
+                USDailyPriceRecord(
                     provider="yahoo_chart",
                     symbol="IBM",
                     trade_date=date(2026, 6, 1),
+                    open_price=87.5,
+                    high_price=89.0,
+                    low_price=87.0,
                     close_price=88.5,
+                    adjusted_close=None,
                     trade_volume=1200,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
                     raw_payload_hash="ibm-reference",
                 ),
-            ]
+            ],
         )
-        self.db.commit()
         mock_fetch.return_value = (
             YAHOO_CHART_INTRADAY_PREMARKET_SAMPLE,
             "https://example.test/chart/IBM?includePrePost=true",
@@ -1965,27 +2020,36 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self,
         mock_fetch,
     ) -> None:
-        self.db.add_all(
+        upsert_canonical_us_daily_price_records(
+            self.db,
             [
-                USDailyPrice(
+                USDailyPriceRecord(
                     provider="yahoo_chart",
                     symbol="IBM",
                     trade_date=date(2026, 5, 29),
+                    open_price=86.0,
+                    high_price=88.0,
+                    low_price=85.0,
                     close_price=87.0,
+                    adjusted_close=None,
                     trade_volume=900,
-                    fetched_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
                     raw_payload_hash="ibm-finalized",
-                ),
-                USDailyPrice(
-                    provider="yahoo_chart",
-                    symbol="IBM",
-                    trade_date=date(2026, 6, 1),
-                    close_price=85.0,
-                    trade_volume=200,
-                    fetched_at=datetime(2026, 6, 1, 14, 0, tzinfo=timezone.utc),
-                    raw_payload_hash="ibm-preclose",
-                ),
-            ]
+                )
+            ],
+        )
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="IBM",
+                trade_date=date(2026, 6, 1),
+                close_price=85.0,
+                trade_volume=200,
+                fetched_at=datetime(2026, 6, 1, 14, 0, tzinfo=timezone.utc),
+                raw_payload_hash="ibm-preclose",
+            )
         )
         self.db.commit()
         mock_fetch.side_effect = [
@@ -2075,9 +2139,10 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             self.db,
             USWatchlistItemCreate(group_id=group.id, symbol="IBM"),
         )
-        self.db.add_all(
+        upsert_canonical_us_daily_price_records(
+            self.db,
             [
-                USDailyPrice(
+                USDailyPriceRecord(
                     provider="yahoo_chart",
                     symbol="AAPL",
                     trade_date=date(2026, 5, 29),
@@ -2086,9 +2151,13 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                     low_price=98.0,
                     close_price=100.0,
                     trade_volume=1000,
+                    adjusted_close=None,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
                     raw_payload_hash="aapl-1",
                 ),
-                USDailyPrice(
+                USDailyPriceRecord(
                     provider="yahoo_chart",
                     symbol="IBM",
                     trade_date=date(2026, 5, 29),
@@ -2097,11 +2166,14 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                     low_price=188.0,
                     close_price=190.0,
                     trade_volume=4000,
+                    adjusted_close=None,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
                     raw_payload_hash="ibm-1",
                 ),
             ],
         )
-        self.db.commit()
 
         with patch(
             "app.us_market.service.expected_us_daily_price_date",
@@ -2245,7 +2317,10 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             }
 
         with (
-            patch("app.us_market.service.refresh_us_daily_prices", side_effect=daily_result) as daily_mock,
+            patch(
+                "app.us_market.service._refresh_us_watchlist_daily_through_platform",
+                side_effect=daily_result,
+            ) as daily_mock,
             patch(
                 "app.us_market.service.refresh_us_company_profile_from_alphavantage",
                 side_effect=profile_result,
@@ -3217,10 +3292,10 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             ],
         )
 
-        with patch("app.us_market.service.refresh_us_daily_prices") as refresh_mock:
+        with patch("app.us_market.service.refresh_us_daily_ohlcv") as refresh_mock:
             refresh_mock.side_effect = lambda **kwargs: {
                 "status": "success",
-                "provider": kwargs["provider"],
+                "provider": "canonical",
                 "symbol": kwargs["symbol"],
                 "fetched_count": 1,
                 "inserted_count": 1,
@@ -3244,7 +3319,6 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             ["AAPL", "MU"],
         )
         for call in refresh_mock.call_args_list:
-            self.assertEqual(call.kwargs["provider"], "yahoo_chart")
             self.assertEqual(call.kwargs["outputsize"], "compact")
 
     @patch("app.us_market.service.parse_yahoo_daily_prices")

@@ -173,12 +173,6 @@ const barsByTimeframe: Record<USHistoricalTimeframe, number> = {
   monthly: 72,
 };
 
-function shouldIncludeUsOhlcIntraday() {
-  const marketState = getUsMarketRefreshState();
-
-  return marketState.isPollingWindow || marketState.isAfterClose;
-}
-
 function defaultUsIntradaySessionScope(): USIntradaySessionScope {
   const marketState = getUsMarketRefreshState();
 
@@ -896,6 +890,8 @@ export default function USStockDetailPanel({
     useState<USSec13FInstitutionalHoldingsRead | null>(null);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
+  const [todayPreviousCloseStatus, setTodayPreviousCloseStatus] =
+    useState<string>("unknown");
   const [todaySource, setTodaySource] = useState("unavailable");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
   const [todayIntradayMeta, setTodayIntradayMeta] = useState<USIntradayMeta>(emptyUsIntradayMeta);
@@ -918,6 +914,7 @@ export default function USStockDetailPanel({
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
   const intradaySourceEventStateRef = useRef<Map<string, string>>(new Map());
+  const ohlcCoverageEventStateRef = useRef<Map<string, string>>(new Map());
   const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
   const chartDrawingLocalRevisionRef = useRef(0);
@@ -974,6 +971,9 @@ export default function USStockDetailPanel({
     [chartMatchesSelection, todayTrend]
   );
   const visibleTodayPreviousClose = chartMatchesSelection ? todayPreviousClose : null;
+  const visibleTodayPreviousCloseStatus = chartMatchesSelection
+    ? todayPreviousCloseStatus
+    : "unknown";
   const visibleTodaySource = chartMatchesSelection ? todaySource : "unavailable";
   const visibleTodayUpdatedAt = chartMatchesSelection ? todayUpdatedAt : null;
   const visibleTodayIntradayMeta = chartMatchesSelection
@@ -1008,8 +1008,16 @@ export default function USStockDetailPanel({
     timeframe === "today" ? latestToday?.price ?? latestPoint?.close ?? null : latestPoint?.close ?? null;
   const previousClose =
     timeframe === "today"
-      ? visibleTodayPreviousClose ?? previousPoint?.close ?? null
-      : previousPoint?.close ?? null;
+      ? visibleTodayPreviousCloseStatus === "current"
+        ? visibleTodayPreviousClose
+        : null
+      : timeframe === "daily"
+        ? chartMatchesSelection && chart?.previous_close_status === "current"
+          ? chart.previous_close
+          : null
+        : chartMatchesSelection && chart?.continuity_status === "complete"
+          ? previousPoint?.close ?? null
+          : null;
   const change =
     latestClose !== null && previousClose !== null
       ? latestClose - previousClose
@@ -1490,7 +1498,6 @@ export default function USStockDetailPanel({
                   bars: 90,
                   ensure_history: false,
                   outputsize: "compact",
-                  provider: "yahoo_chart",
                 }
               ),
             ]);
@@ -1509,6 +1516,7 @@ export default function USStockDetailPanel({
             setChart(dailyChartData);
             setTodayTrend(todayData.points);
             setTodayPreviousClose(todayData.previous_close);
+            setTodayPreviousCloseStatus(todayData.previous_close_status ?? "unknown");
             setTodaySource(todayData.source);
             setTodayIntradayMeta(intradayMetaFromResponse(todayData));
             publishIntradaySourceStatus(symbol, todayData);
@@ -1536,9 +1544,7 @@ export default function USStockDetailPanel({
               timeframe: nextTimeframe,
               bars: barsByTimeframe[nextTimeframe],
               ensure_history: false,
-              ...(shouldIncludeUsOhlcIntraday() ? { include_intraday: true } : {}),
               outputsize: "full",
-              provider: "yahoo_chart",
             }
           );
 
@@ -1549,6 +1555,7 @@ export default function USStockDetailPanel({
           setChart(chartDataResponse);
           setTodayTrend([]);
           setTodayPreviousClose(null);
+          setTodayPreviousCloseStatus("unknown");
           setTodaySource("unavailable");
           setTodayUpdatedAt(null);
           setTodayIntradayMeta(emptyUsIntradayMeta);
@@ -1602,6 +1609,7 @@ export default function USStockDetailPanel({
           setChart(dailyChartData);
           setTodayTrend(todayData.points);
           setTodayPreviousClose(todayData.previous_close);
+          setTodayPreviousCloseStatus(todayData.previous_close_status ?? "unknown");
           setTodaySource(todayData.source);
           setTodayIntradayMeta(intradayMetaFromResponse(todayData));
           publishIntradaySourceStatus(symbol, todayData);
@@ -1675,7 +1683,6 @@ export default function USStockDetailPanel({
               timeframe: nextTimeframe,
               bars: barsByTimeframe[nextTimeframe],
               ensure_history: false,
-              ...(shouldIncludeUsOhlcIntraday() ? { include_intraday: true } : {}),
               outputsize: nextTimeframe === "monthly" ? "full" : "compact",
             }
           ),
@@ -1688,6 +1695,7 @@ export default function USStockDetailPanel({
         setChart(chartDataResponse);
         setTodayTrend([]);
         setTodayPreviousClose(null);
+        setTodayPreviousCloseStatus("unknown");
         setTodaySource("unavailable");
         setTodayUpdatedAt(null);
         setTodayIntradayMeta(emptyUsIntradayMeta);
@@ -1749,6 +1757,7 @@ export default function USStockDetailPanel({
         setChart(null);
         setTodayTrend([]);
         setTodayPreviousClose(null);
+        setTodayPreviousCloseStatus("unknown");
         setTodaySource("unavailable");
         setTodayUpdatedAt(null);
         setTodayIntradayMeta(emptyUsIntradayMeta);
@@ -1789,6 +1798,7 @@ export default function USStockDetailPanel({
         setInstitutionalHoldings(null);
         setTodayTrend([]);
         setTodayPreviousClose(null);
+        setTodayPreviousCloseStatus("unknown");
         setTodaySource("unavailable");
         setTodayUpdatedAt(null);
         setTodayIntradayMeta(emptyUsIntradayMeta);
@@ -1805,6 +1815,94 @@ export default function USStockDetailPanel({
 
     return () => window.clearTimeout(timer);
   }, [loadSymbolData, onCompanyProfileChange, selectedSymbol, timeframe]);
+
+  useEffect(() => {
+    if (!selectedSymbol || !chartMatchesSelection || !chart) return;
+
+    const coverageDedupeKey = `${dataStatusContextKey}:ohlc:${chart.timeframe}`;
+    const coverageSignature = [
+      chart.coverage_status,
+      chart.continuity_status,
+      chart.history_status,
+      chart.expected_data_date,
+      chart.latest_finalized_data_date,
+      chart.missing_trade_date_count,
+      chart.previous_close_status,
+    ].join(":");
+    const previousSignature = ohlcCoverageEventStateRef.current.get(coverageDedupeKey);
+
+    if (previousSignature !== coverageSignature) {
+      ohlcCoverageEventStateRef.current.set(coverageDedupeKey, coverageSignature);
+      if (chart.coverage_status === "best_available") {
+        emitDataStatusEvent({
+          market: "us",
+          level: "info",
+          title: t("usStockDetail.ohlcCoverage.bestAvailableTitle"),
+          message: t("usStockDetail.ohlcCoverage.bestAvailableMessage", {
+            available: chart.available_bar_count,
+            requested: chart.requested_bar_count,
+          }),
+          source: dataStatusSource,
+          contextKey: dataStatusContextKey,
+          contextLabel: dataStatusContextLabel,
+          dedupeKey: coverageDedupeKey,
+        });
+      } else if (
+        chart.continuity_status !== "complete" ||
+        (chart.timeframe === "daily" && chart.previous_close_status !== "current")
+      ) {
+        emitDataStatusEvent({
+          market: "us",
+          level: "warning",
+          title: t("usStockDetail.ohlcCoverage.incompleteTitle"),
+          message: t("usStockDetail.ohlcCoverage.incompleteMessage", {
+            expected: chart.expected_data_date ?? "-",
+            latest: chart.latest_finalized_data_date ?? "-",
+            count: chart.missing_trade_date_count,
+            dates: (chart.missing_trade_dates ?? []).join(", ") || "-",
+          }),
+          source: dataStatusSource,
+          contextKey: dataStatusContextKey,
+          contextLabel: dataStatusContextLabel,
+          dedupeKey: coverageDedupeKey,
+        });
+      } else if (chart.history_status !== "complete") {
+        emitDataStatusEvent({
+          market: "us",
+          level: "warning",
+          title: t("usStockDetail.ohlcCoverage.historyIncompleteTitle"),
+          message: t("usStockDetail.ohlcCoverage.historyIncompleteMessage", {
+            available: chart.available_bar_count,
+            requested: chart.requested_bar_count,
+          }),
+          source: dataStatusSource,
+          contextKey: dataStatusContextKey,
+          contextLabel: dataStatusContextLabel,
+          dedupeKey: coverageDedupeKey,
+        });
+      } else if (previousSignature && !previousSignature.startsWith("complete:")) {
+        emitDataStatusEvent({
+          market: "us",
+          level: "success",
+          title: t("usStockDetail.ohlcCoverage.repairedTitle"),
+          message: t("usStockDetail.ohlcCoverage.repairedMessage"),
+          source: dataStatusSource,
+          contextKey: dataStatusContextKey,
+          contextLabel: dataStatusContextLabel,
+          dedupeKey: coverageDedupeKey,
+        });
+      }
+    }
+
+  }, [
+    chart,
+    chartMatchesSelection,
+    dataStatusContextKey,
+    dataStatusContextLabel,
+    dataStatusSource,
+    selectedSymbol,
+    t,
+  ]);
 
   useEffect(() => {
     if (!selectedSymbol || timeframe !== "today" || loadState !== "success") return;
@@ -1835,6 +1933,7 @@ export default function USStockDetailPanel({
         if (today.points.length > 0 || today.source_status?.has_usable_data) {
           setTodayTrend(today.points);
           setTodayPreviousClose(today.previous_close);
+          setTodayPreviousCloseStatus(today.previous_close_status ?? "unknown");
           setTodaySource(today.source);
           setTodayUpdatedAt(
             latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null

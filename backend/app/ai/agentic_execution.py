@@ -20,6 +20,7 @@ from app.kr_market.sources import normalize_kr_index_id, normalize_kr_symbol
 from app.market import stock_selection_refresh
 from app.market.cross_market import refresh as cross_market_refresh
 from app.us_market import service as us_market_service
+from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
 from app.us_market.sources import normalize_us_symbol
 from app.watchlists import backfill_service as watchlist_backfill_service
 
@@ -633,10 +634,9 @@ def _execute_tool(
         )
 
     if tool_name == "us.refresh_daily_price":
-        return us_market_service.refresh_us_daily_prices(
+        return refresh_us_daily_ohlcv(
             db=db,
             symbol=symbol,
-            provider=str(args.get("provider") or "auto"),
             outputsize=str(args.get("outputsize") or "compact"),
             adjusted=bool(args.get("adjusted", False)),
         )

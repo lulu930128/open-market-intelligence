@@ -36,6 +36,7 @@ from app.observability.provider_http import (
 from app.pipelines.parse_pipeline import _guard_market_daily_replacement
 from app.parsers.twse_daily import parse_twse_daily_raw
 from app.us_market.errors import USMarketDataFetchError
+from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
 
 
 EXPECTED = date(2026, 8, 21)
@@ -67,6 +68,58 @@ def _source_and_raw(db: Session) -> tuple[SourceRegistry, RawFetchResult]:
     db.add(raw)
     db.flush()
     return source, raw
+
+
+def _us_daily_row(
+    db: Session,
+    *,
+    symbol: str,
+    trade_date: date,
+    close_price: float | None,
+) -> USDailyPrice:
+    source = (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.source_name == "us-eod-fixture")
+        .first()
+    )
+    if source is None:
+        source = SourceRegistry(
+            source_name="us-eod-fixture",
+            source_type="fixture",
+            category="market_data",
+            enabled=True,
+        )
+        db.add(source)
+        db.flush()
+    content_hash = f"{symbol}:{trade_date.isoformat()}".encode().hex().ljust(64, "0")[:64]
+    raw = RawFetchResult(
+        source_id=source.id,
+        content_hash=content_hash,
+        raw_text="fixture",
+        fetched_at=datetime(2026, 8, 22, tzinfo=timezone.utc),
+    )
+    db.add(raw)
+    db.flush()
+    return USDailyPrice(
+        provider="yahoo_chart",
+        symbol=symbol,
+        trade_date=trade_date,
+        open_price=close_price,
+        high_price=close_price,
+        low_price=close_price,
+        close_price=close_price,
+        source_id=source.id,
+        raw_result_id=raw.id,
+        authority="vendor",
+        raw_contract_version="yahoo.chart.v8",
+        event_at=datetime.combine(trade_date, datetime.min.time(), tzinfo=timezone.utc),
+        finalization="final",
+        price_basis="raw",
+        volume_status="observed",
+        volume_unit="shares",
+        trade_volume=100,
+        raw_payload_hash=content_hash,
+    )
 
 
 def test_tw_coverage_partitions_current_partial_stale_and_missing(db: Session) -> None:
@@ -166,14 +219,19 @@ def test_us_coverage_uses_official_active_non_etf_non_test_stock_universe(db: Se
     )
     db.add_all(
         [
-            USDailyPrice(provider="yahoo_chart", symbol="A", trade_date=EXPECTED, close_price=10),
-            USDailyPrice(provider="yahoo_chart", symbol="B", trade_date=EXPECTED),
-            USDailyPrice(provider="yahoo_chart", symbol="C", trade_date=STALE, close_price=9),
+            _us_daily_row(db, symbol="A", trade_date=EXPECTED, close_price=10),
+            _us_daily_row(db, symbol="B", trade_date=EXPECTED, close_price=None),
+            _us_daily_row(db, symbol="C", trade_date=STALE, close_price=9),
         ]
     )
     db.commit()
 
-    coverage = compute_eod_coverage(db, market="US", expected_trade_date=EXPECTED)
+    coverage = compute_eod_coverage(
+        db,
+        market="US",
+        expected_trade_date=EXPECTED,
+        us_port=US_FULL_MARKET_EOD_LIFECYCLE,
+    )
 
     assert coverage.universe_count == 4
     assert coverage.current_symbols == {"A"}
@@ -207,19 +265,24 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
             USStockMaster(symbol="C", exchange="NYSE", asset_type="stock", is_active=True),
         ]
     )
-    db.add(USDailyPrice(provider="yahoo_chart", symbol="A", trade_date=EXPECTED, close_price=10))
+    db.add(_us_daily_row(db, symbol="A", trade_date=EXPECTED, close_price=10))
     db.commit()
-    initial = compute_eod_coverage(db, market="US", expected_trade_date=EXPECTED)
+    initial = compute_eod_coverage(
+        db,
+        market="US",
+        expected_trade_date=EXPECTED,
+        us_port=US_FULL_MARKET_EOD_LIFECYCLE,
+    )
     row = persist_eod_coverage(db, initial)
     row.cursor_symbol = "B"
     db.commit()
     calls: list[str] = []
 
-    def fake_refresh(*, db: Session, symbol: str, **_kwargs):
+    def fake_refresh(db: Session, *, symbol: str, **_kwargs):
         calls.append(symbol)
         db.add(
-            USDailyPrice(
-                provider="yahoo_chart",
+            _us_daily_row(
+                db,
                 symbol=symbol,
                 trade_date=EXPECTED,
                 close_price=20,
@@ -228,7 +291,11 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
         db.commit()
         return {"status": "success", "fetched_count": 1, "inserted_count": 1, "updated_count": 0}
 
-    with patch("app.market_data.eod_coverage.refresh_us_daily_prices", side_effect=fake_refresh):
+    with patch.object(
+        US_FULL_MARKET_EOD_LIFECYCLE,
+        "refresh_symbol",
+        side_effect=fake_refresh,
+    ):
         first = reconcile_eod_coverage(
             db,
             market="US",
@@ -236,6 +303,7 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
             max_symbols=1,
             max_runtime_seconds=30,
             sleep_seconds=0,
+            us_port=US_FULL_MARKET_EOD_LIFECYCLE,
         )
         second = reconcile_eod_coverage(
             db,
@@ -244,6 +312,7 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
             max_symbols=1,
             max_runtime_seconds=30,
             sleep_seconds=0,
+            us_port=US_FULL_MARKET_EOD_LIFECYCLE,
         )
 
     assert calls == ["C", "B"]
@@ -358,11 +427,15 @@ def test_us_rate_limit_stops_shard_and_persists_retry_boundary(db: Session) -> N
         error_message="HTTP 429",
     )
 
-    def fail_refresh(**_kwargs):
+    def fail_refresh(_db: Session, **_kwargs):
         provider_error = ProviderHttpError("HTTP 429", failure=failure)
         raise USMarketDataFetchError("HTTP 429") from provider_error
 
-    with patch("app.market_data.eod_coverage.refresh_us_daily_prices", side_effect=fail_refresh) as refresh:
+    with patch.object(
+        US_FULL_MARKET_EOD_LIFECYCLE,
+        "refresh_symbol",
+        side_effect=fail_refresh,
+    ) as refresh:
         result = reconcile_eod_coverage(
             db,
             market="US",
@@ -371,6 +444,7 @@ def test_us_rate_limit_stops_shard_and_persists_retry_boundary(db: Session) -> N
             max_runtime_seconds=30,
             sleep_seconds=0,
             error_backoff_seconds=300,
+            us_port=US_FULL_MARKET_EOD_LIFECYCLE,
         )
 
     assert refresh.call_count == 1

@@ -1,5 +1,10 @@
 # Open Market Intelligence Architecture Review
 
+> **HISTORICAL SNAPSHOT — 2026-07-14**
+> 本文件不是 current architecture truth。請改讀
+> [`docs/architecture/index.md`](../../architecture/index.md) 與
+> [`BackendArchitecture.md`](../../architecture/BackendArchitecture.md)。
+
 日期：2026-07-14
 
 這份文件集中目前專案掃描後看到的不足與架構風險，供後續開發時對照。它不是一次性 TODO，而是後續拆 issue、排優先順序、驗證改善是否完成的基準。

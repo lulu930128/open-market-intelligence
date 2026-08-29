@@ -20,6 +20,7 @@ from app.db.models import (
     SourceRegistry,
     StockMaster,
     USDailyPrice,
+    USStockMaster,
 )
 from app.market.adr_parity import (
     ADR_MAPPINGS,
@@ -32,12 +33,92 @@ from app.market.overnight_impact import (
 )
 from app.market.schemas import AdrParityRead, OvernightImpactRead
 from app.sources.defaults import TWSE_RWD_DAILY_TRADING_SOURCE_NAME
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE, us_session_close_time
 
 
 def make_session() -> Session:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     return Session(engine)
+
+
+def add_us_daily(
+    db: Session,
+    *,
+    symbol: str,
+    trade_date: date,
+    close_price: float,
+    adjusted_close: float | None = None,
+    fetched_at: datetime | None = None,
+) -> USDailyPrice:
+    if db.query(USStockMaster).filter(USStockMaster.symbol == symbol).first() is None:
+        db.add(
+            USStockMaster(
+                symbol=symbol,
+                exchange="NYSE",
+                asset_type="stock",
+                is_active=True,
+            )
+        )
+    source_name = f"test.canonical.{symbol}"
+    source = (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.source_name == source_name)
+        .first()
+    )
+    if source is None:
+        source = SourceRegistry(
+            source_name=source_name,
+            source_type="test",
+            category="market_data",
+        )
+        db.add(source)
+        db.flush()
+    receipt_time = fetched_at or datetime.combine(
+        trade_date,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    ).replace(hour=22)
+    content_hash = f"{symbol}-{trade_date.isoformat()}-{close_price}"
+    raw = RawFetchResult(
+        source_id=source.id,
+        fetched_at=receipt_time,
+        method="GET",
+        url=f"https://example.test/us/{symbol}",
+        content_hash=content_hash,
+        parser_version="test.canonical.v1",
+    )
+    db.add(raw)
+    db.flush()
+    row = USDailyPrice(
+        provider="yahoo_chart",
+        symbol=symbol,
+        trade_date=trade_date,
+        open_price=close_price,
+        high_price=close_price,
+        low_price=close_price,
+        close_price=close_price,
+        adjusted_close=adjusted_close,
+        trade_volume=1000,
+        fetched_at=receipt_time,
+        source_id=source.id,
+        raw_result_id=raw.id,
+        authority="vendor",
+        raw_contract_version="test.canonical.v1",
+        event_at=datetime.combine(
+            trade_date,
+            us_session_close_time(trade_date),
+            tzinfo=US_MARKET_TIMEZONE,
+        ),
+        finalization="final",
+        price_basis="raw",
+        volume_unit="shares",
+        volume_status="observed",
+        raw_payload_hash=content_hash,
+    )
+    db.add(row)
+    db.commit()
+    return row
 
 
 def add_tw_daily(
@@ -233,16 +314,13 @@ class AdrParityTests(unittest.TestCase):
             )
 
     def test_report_uses_raw_adr_close_and_aligned_tw_reference(self) -> None:
-        self.db.add(
-            USDailyPrice(
-                provider="yahoo_chart",
-                symbol="TSM",
-                trade_date=date(2026, 6, 5),
-                close_price=200.0,
-                adjusted_close=150.0,
-            )
+        add_us_daily(
+            self.db,
+            symbol="TSM",
+            trade_date=date(2026, 6, 5),
+            close_price=200.0,
+            adjusted_close=150.0,
         )
-        self.db.commit()
         add_tw_daily(
             self.db,
             stock_id="2330",
@@ -286,15 +364,12 @@ class AdrParityTests(unittest.TestCase):
         self.assertEqual(AdrParityRead.model_validate(report).mapping.adr_symbol, "TSM")
 
     def test_exact_trade_date_fx_remains_usable_after_wall_clock_exceeds_72h(self) -> None:
-        self.db.add(
-            USDailyPrice(
-                provider="yahoo_chart",
-                symbol="ASX",
-                trade_date=date(2026, 8, 7),
-                close_price=12.0,
-            )
+        add_us_daily(
+            self.db,
+            symbol="ASX",
+            trade_date=date(2026, 8, 7),
+            close_price=12.0,
         )
-        self.db.commit()
         add_tw_daily(
             self.db,
             stock_id="3711",
@@ -320,13 +395,11 @@ class AdrParityTests(unittest.TestCase):
         self.assertGreater(report["fx_age_seconds"], 72 * 60 * 60)
 
     def test_adr_parity_prefers_trade_date_daily_fx_over_later_spot(self) -> None:
-        self.db.add(
-            USDailyPrice(
-                provider="yahoo_chart",
-                symbol="ASX",
-                trade_date=date(2026, 8, 7),
-                close_price=12.0,
-            )
+        add_us_daily(
+            self.db,
+            symbol="ASX",
+            trade_date=date(2026, 8, 7),
+            close_price=12.0,
         )
         self.db.add(
             ResourceOhlcvBar(
@@ -381,15 +454,12 @@ class AdrParityTests(unittest.TestCase):
 
     def test_matching_registry_mapping_becomes_primary_with_relation_lineage(self) -> None:
         relation = add_approved_adr_relation(self.db)
-        self.db.add(
-            USDailyPrice(
-                provider="yahoo_chart",
-                symbol="TSM",
-                trade_date=date(2026, 8, 7),
-                close_price=200.0,
-            )
+        add_us_daily(
+            self.db,
+            symbol="TSM",
+            trade_date=date(2026, 8, 7),
+            close_price=200.0,
         )
-        self.db.commit()
         add_tw_daily(
             self.db,
             stock_id="2330",
@@ -476,15 +546,12 @@ class AdrParityTests(unittest.TestCase):
         )
 
     def test_report_can_invert_twd_usd_but_keeps_warning(self) -> None:
-        self.db.add(
-            USDailyPrice(
-                provider="yahoo_chart",
-                symbol="UMC",
-                trade_date=date(2026, 6, 5),
-                close_price=10.0,
-            )
+        add_us_daily(
+            self.db,
+            symbol="UMC",
+            trade_date=date(2026, 6, 5),
+            close_price=10.0,
         )
-        self.db.commit()
         add_tw_daily(
             self.db,
             stock_id="2303",
@@ -508,15 +575,12 @@ class AdrParityTests(unittest.TestCase):
         self.assertTrue(any("反向換算" in item for item in report["warnings"]))
 
     def test_missing_fx_is_partial_and_does_not_emit_implied_price(self) -> None:
-        self.db.add(
-            USDailyPrice(
-                provider="yahoo_chart",
-                symbol="ASX",
-                trade_date=date(2026, 6, 5),
-                close_price=12.0,
-            )
+        add_us_daily(
+            self.db,
+            symbol="ASX",
+            trade_date=date(2026, 6, 5),
+            close_price=12.0,
         )
-        self.db.commit()
         add_tw_daily(
             self.db,
             stock_id="3711",
@@ -549,23 +613,18 @@ class AdrParityTests(unittest.TestCase):
                 industry="24",
             )
         )
-        self.db.add_all(
-            [
-                USDailyPrice(
-                    provider="yahoo_chart",
-                    symbol="TSM",
-                    trade_date=date(2026, 6, 4),
-                    close_price=195.0,
-                ),
-                USDailyPrice(
-                    provider="yahoo_chart",
-                    symbol="TSM",
-                    trade_date=date(2026, 6, 5),
-                    close_price=200.0,
-                ),
-            ]
+        add_us_daily(
+            self.db,
+            symbol="TSM",
+            trade_date=date(2026, 6, 4),
+            close_price=195.0,
         )
-        self.db.commit()
+        add_us_daily(
+            self.db,
+            symbol="TSM",
+            trade_date=date(2026, 6, 5),
+            close_price=200.0,
+        )
         add_tw_daily(
             self.db,
             stock_id="2330",

@@ -5,7 +5,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, USDailyPrice, USStockMaster
+from app.db.models import (
+    Base,
+    RawFetchResult,
+    SourceRegistry,
+    USDailyPrice,
+    USStockMaster,
+)
 from app.us_market.research_service import build_us_market_research
 
 
@@ -33,6 +39,22 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
                     is_active=True,
                 )
             )
+            source = SourceRegistry(
+                source_name="yahoo_chart.daily",
+                source_type="fixture",
+                category="market_data",
+                enabled=True,
+            )
+            db.add(source)
+            db.flush()
+            raw = RawFetchResult(
+                source_id=source.id,
+                fetched_at=datetime(2026, 8, 22, 2, 0, tzinfo=timezone.utc),
+                content_hash="a" * 64,
+                raw_text="fixture",
+            )
+            db.add(raw)
+            db.flush()
             for index, trade_date in enumerate(
                 _trading_dates(220, latest=date(2026, 8, 21))
             ):
@@ -52,6 +74,20 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
                             time(2, 0),
                             tzinfo=timezone.utc,
                         ),
+                        source_id=source.id,
+                        raw_result_id=raw.id,
+                        authority="vendor",
+                        raw_contract_version="yahoo.chart.v8",
+                        event_at=datetime.combine(
+                            trade_date,
+                            time(20, 0),
+                            tzinfo=timezone.utc,
+                        ),
+                        finalization="final",
+                        price_basis="raw",
+                        volume_unit="shares",
+                        volume_status="observed",
+                        raw_payload_hash=raw.content_hash,
                     )
                 )
             db.commit()
@@ -107,7 +143,7 @@ def test_research_service_fails_closed_when_venue_is_unknown() -> None:
 
             assert result["status"] == "missing"
             assert result["daily_ohlcv"] == {}
-            assert "instrument_venue" in result["missing"]
+            assert "instrument_identity" in result["missing"]
             assert result["technical_indicators"]["current"] == {}
     finally:
         engine.dispose()

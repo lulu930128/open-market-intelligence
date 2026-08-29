@@ -22,7 +22,9 @@ from app.market_data.contracts import (
     SourceLineage,
 )
 from app.market_data.integration_contracts import (
+    BarCapabilityRequest,
     DataRequirementV2,
+    FreshnessBasis,
     SnapshotCapabilityRequest,
 )
 from app.market_data.policies import RealtimePolicy
@@ -62,6 +64,8 @@ class QualityReasonCode(str, Enum):
     LIVE_REQUIRED = "QUALITY_LIVE_REQUIRED"
     STALE_EVIDENCE = "QUALITY_STALE_EVIDENCE"
     INDICATIVE_EVIDENCE = "QUALITY_INDICATIVE_EVIDENCE"
+    PRICE_BASIS_MISMATCH = "QUALITY_PRICE_BASIS_MISMATCH"
+    BAR_COVERAGE_INSUFFICIENT = "QUALITY_BAR_COVERAGE_INSUFFICIENT"
 
 
 class QualityEvaluation(CanonicalModel):
@@ -196,6 +200,18 @@ def evaluate_candidate_quality(
         limitations.append("The candidate is missing fields required by the request.")
         hard_rejection = True
 
+    if isinstance(requirement.request, BarCapabilityRequest):
+        actual_price_basis = getattr(observation, "price_basis", None)
+        if (
+            actual_price_basis is not None
+            and actual_price_basis != requirement.request.price_basis
+        ):
+            reasons.append(QualityReasonCode.PRICE_BASIS_MISMATCH)
+            limitations.append(
+                "The candidate price basis does not match the requested bar price basis."
+            )
+            hard_rejection = True
+
     lineage = getattr(observation, "lineage", None)
     missing_lineage_fields: tuple[str, ...] = ()
     if not isinstance(lineage, SourceLineage):
@@ -262,6 +278,7 @@ def evaluate_candidate_quality(
         observed_at = _observed_at(lineage)
         if (
             observed_at is not None
+            and requirement.freshness.basis is FreshnessBasis.WALL_CLOCK
             and requirement.realtime_policy is not RealtimePolicy.COMPLETED_SESSION
             and evaluation_time - observed_at
             > timedelta(seconds=requirement.freshness.max_age_seconds)

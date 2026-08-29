@@ -3594,8 +3594,8 @@ export const enUS = {
       disclaimerBody:
         "OMI is not an automated trading system, broker, investment adviser, or securities analyst. Prices, flows, fundamentals, technical levels, AI summaries, and dispatches are only for research and review. They do not replace exchange notices, broker data, filings, professional advice, or your own risk judgment.",
       catalogEyebrow: "Source Catalog",
-      catalogTitle: "Current and Reserved Data Sources",
-      documentSource: "Based on README.md trust notes plus recent quote-depth / crypto docs",
+      catalogTitle: "Integrated, Enabled, and Reserved Data Sources",
+      documentSource: "Audited against executable dataset registries, market-owned provider contracts, and source-health contracts",
       table: {
         area: "Area",
         source: "Source",
@@ -3608,9 +3608,14 @@ export const enUS = {
           reliability: "Official sources are preferred; trade date, row count, symbol mapping, and parser quality still need checks.",
         },
         twIntraday: {
-          area: "Taiwan intraday and quote depth",
-          source: "nStock minute data, TWSE MIS snapshot / quote depth",
-          reliability: "Useful for local monitoring and selected-stock detail; intraday sources may lag, return empty rows, pause, or only be short-cached for one symbol.",
+          area: "Taiwan intraday bars",
+          source: "nStock minute data, Yahoo chart intraday",
+          reliability: "Useful for local monitoring and selected-stock detail. Sources may lag, return empty rows, pause, or only be short-cached for one symbol, and active-session data may not be repairable later.",
+        },
+        twRealtimeBroker: {
+          area: "Taiwan realtime quote / depth / auction",
+          source: "KGI SuperPy, TWSE MIS",
+          reliability: "KGI is a broker stream requiring credentials, entitlement, and an active viewer lease; TWSE MIS is public best-effort. Session, round-lot, depth-limit, and indicative-auction constraints remain visible.",
         },
         twMarketIndex: {
           area: "Taiwan market / indices",
@@ -3637,10 +3642,25 @@ export const enUS = {
           source: "MOPS / MOPSOV",
           reliability: "Official disclosure source family; table and field formats can change, so parsers need quality checks.",
         },
+        twEtf: {
+          area: "Taiwan ETF profile / NAV / PCF / iNAV",
+          source: "TWSE OpenAPI, MOPS, and official Yuanta / Fubon / UPAMC / Capital / Fuh Hwa / Nomura / Cathay pages or APIs",
+          reliability: "Issuer support differs by resource; PCF, daily NAV, and intraday iNAV are not interchangeable. External updates are bounded refreshes, while read views use persisted data.",
+        },
+        twCorporateEvents: {
+          area: "Taiwan corporate events / dispositions",
+          source: "TWSE / TPEx ex-rights, ex-dividend, and disposition data; MOPS investor conferences",
+          reliability: "Current and historical sources are acquired separately. Coverage, release windows, partial success, and file-cache lineage gaps must remain visible.",
+        },
         twBrokerBranch: {
           area: "Broker branch flow",
           source: "nStock branch Top15",
           reliability: "Convenience-oriented unofficial source; multi-day mode aggregates stored Top15 snapshots, not a complete branch ledger.",
+        },
+        usReferenceData: {
+          area: "US reference data / market calendar",
+          source: "Nasdaq Trader symbol directories, SEC company tickers / exchange, OpenFIGI, NYSE calendar",
+          reliability: "Exchange and SEC reference data is preferred. OpenFIGI mappings require a key, are quota-bound, and must not be guessed when unapproved. Calendar results retain market-timezone and fallback provenance.",
         },
         usOhlcIntraday: {
           area: "US OHLC / intraday",
@@ -3651,6 +3671,16 @@ export const enUS = {
           area: "US fundamentals",
           source: "SEC EDGAR company facts",
           reliability: "Official company filing source; ETFs, funds, ADRs, and non-company assets may not have complete facts.",
+        },
+        usCorporateEvents: {
+          area: "US corporate events",
+          source: "Alpha Vantage earnings calendar, dividends, splits",
+          reliability: "Earnings depend on API-key and plan access. Dividend and split coverage currently only includes locally refreshed watchlist symbols and must not be presented as whole-market coverage.",
+        },
+        usOwnership: {
+          area: "US institutional ownership / insider filings",
+          source: "SEC EDGAR submissions, Form 13F data sets, Form 4 filings",
+          reliability: "13F is delayed quarterly reporting and requires approved symbol mappings; Form 4 is a transaction ledger, not a complete current-position record. Omissions, amendments, and parser issues remain visible.",
         },
         usProfileActions: {
           area: "US profile / actions",
@@ -3664,8 +3694,23 @@ export const enUS = {
         },
         jpOhlcFundamentals: {
           area: "Japan OHLC / fundamentals",
-          source: "Yahoo chart, J-Quants provider slot",
-          reliability: "External context layer; J-Quants requires a key and supported plan, and missing data must remain visible.",
+          source: "JPX listed issues / calendar, Yahoo chart / quote summary, J-Quants statements / summary",
+          reliability: "JPX supplies reference and calendar data; Yahoo is best-effort, while J-Quants requires a key and supported plan. Missing, rate-limited, or unauthorized data remains visible.",
+        },
+        jpMarketFlows: {
+          area: "Japan margin interest / investor types",
+          source: "J-Quants margin interest, investor types",
+          reliability: "Frequency and entitlement differ by endpoint. Missing credentials, plan restrictions, and rate limits must not be displayed as zero.",
+        },
+        krOhlcFundamentals: {
+          area: "Korea OHLC / fundamentals",
+          source: "KRX Data, OpenDART, Yahoo chart fallback",
+          reliability: "KRX and OpenDART are the primary direction, while Yahoo chart is a visible fallback. Missing keys, corp codes, stale data, and partial results remain visible.",
+        },
+        krIndexFlows: {
+          area: "Korea indices / investor flow / calendar",
+          source: "Naver index APIs, KRX investor trading / market calendar",
+          reliability: "Naver indices are unofficial intraday context; KRX supplies official investor flow and calendar data. Whole-market breadth limits, fallbacks, and verified-year scope remain visible.",
         },
         cryptoTwdSpot: {
           area: "Crypto TWD spot",
@@ -3676,6 +3721,11 @@ export const enUS = {
           area: "Crypto USDT spot / perpetual",
           source: "Binance, OKX",
           reliability: "Binance is the main verified realtime/reference provider; OKX is secondary. Stale, disabled, or failed sources must appear in source health.",
+        },
+        cryptoDerivativesMetrics: {
+          area: "Crypto advanced derivatives metrics",
+          source: "Binance, OKX, Bybit, CoinGlass, OMI local aggregation",
+          reliability: "Provider coverage differs for funding, open interest, long/short ratios, and CVD. Local aggregation may only derive from observed events and cannot invent missing exchange truth.",
         },
         cryptoLiquidation: {
           area: "Crypto liquidation / heatmap",
@@ -3688,9 +3738,9 @@ export const enUS = {
           reliability: "Ranking, market cap, and supply context; not an execution-price source.",
         },
         commodityReference: {
-          area: "Commodity futures reference",
-          source: "Resource contract",
-          reliability: "Currently provider_pending and watch-only; no quote or OHLCV should be fabricated before a real provider is integrated.",
+          area: "Commodity futures / FX reference",
+          source: "Yahoo chart resource contract",
+          reliability: "Metals, energy futures, and major FX pairs are delayed, best-effort, watch-only context with no execution capability. GET reads cache; external updates use explicit bounded POST routes.",
         },
         macro: {
           area: "Macro",
@@ -3715,7 +3765,7 @@ export const enUS = {
         noWarranty: "OMI does not guarantee complete, realtime, uninterrupted, or error-free data, and does not guarantee profits from any model, AI output, or indicator.",
         noAutoTrading: "OMI only supports research and scenario judgment. It does not provide automated order placement, account management, or guaranteed returns.",
       },
-      footer: "When a data source is added or replaced, update the source registry, parser, quality behavior, README trust notes, and this disclosure together.",
+      footer: "When a source is added or replaced, update the backend registry or contract, adapter or parser, quality and source-health behavior, and this disclosure together. Runtime status remains the authority for actual availability.",
     },
     dispatch: {
       title: "Mail dispatch",

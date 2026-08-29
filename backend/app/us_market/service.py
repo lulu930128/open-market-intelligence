@@ -26,6 +26,7 @@ from app.db.models import (
     USWatchlistItem,
     utc_now,
 )
+from app.db.session import SessionLocal
 from app.observability.provider_http import translate_provider_http_errors
 from app.us_market.chart_projection import (
     aggregate_daily_rows as _aggregate_us_daily_rows,
@@ -89,6 +90,7 @@ from app.us_market.market_data_shadow import (
     compare_cached_daily_legacy_to_resolved,
     compare_yahoo_legacy_to_canonical,
 )
+from app.us_market.ohlc_continuity import build_us_daily_continuity
 from app.us_market.resolved_reads import (
     read_resolved_us_daily_bars_for_symbols,
 )
@@ -129,7 +131,11 @@ from app.us_market.trading_calendar import (
 )
 from app.us_market.volume_semantics import summarize_intraday_volume
 from app.market.calendar_status import build_us_calendar_status, expected_us_trade_date
-from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
+from app.market.ohlc_overlay import (
+    aggregate_ohlc_points,
+    append_intraday_overlay,
+    point_date,
+)
 from app.market.stock_volume_pace import (
     build_stock_volume_pace,
     intraday_history_needs_bootstrap,
@@ -143,6 +149,8 @@ from app.market.technical_radar import (
 )
 from app.research.technical.aggregation import aggregate_intraday_payload
 from app.us_market.research_service import build_us_market_research
+from app.us_market.daily_ohlcv_chart import read_us_daily_ohlcv_chart
+from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
 
 
 _translate_us_provider_errors = translate_provider_http_errors(USMarketDataFetchError)
@@ -729,12 +737,11 @@ def repair_us_daily_price_quality(
 
         for index, affected_symbol in enumerate(affected_symbols, start=1):
             try:
-                result = refresh_us_daily_prices(
+                result = refresh_us_daily_ohlcv(
                     db=db,
                     symbol=affected_symbol,
                     outputsize=outputsize,
                     adjusted=adjusted,
-                    provider="yahoo_chart",
                 )
                 refresh_results.append(result)
             except Exception as exc:
@@ -1037,22 +1044,20 @@ def list_us_ohlc_chart_data(
         raise ValueError(f"bars must be less than or equal to {MAX_US_CHART_BARS}.")
 
     normalized_symbol = normalize_us_symbol(symbol)
-    end_date = to_date or date.today()
     resolved_expected_data_date = (
-        previous_us_trading_day(end_date, include_value=True)
+        previous_us_trading_day(to_date, include_value=True)
         if to_date is not None
         else expected_us_daily_price_date()
     )
+    end_date = to_date or resolved_expected_data_date
     lookback_days = bars * US_CHART_LOOKBACK_MULTIPLIER[timeframe]
     start_date = end_date - timedelta(days=lookback_days)
     backfill_result = None
 
-    # An ensure-history read can cross a provider boundary. Use a short-lived
-    # cache-read session so the request does not hold a pooled SQLite connection
-    # while waiting on provider HTTP; persistence still uses the caller-owned
-    # session after the provider response arrives.
-    cache_read_db = Session(bind=db.get_bind()) if ensure_history else db
-    owns_cache_read_db = cache_read_db is not db
+    # Chart rows are a committed cache snapshot. Always detach the read from the
+    # request session and close it before provider IO or CPU-heavy projection so
+    # concurrent chart rendering cannot starve readiness/job DB access.
+    cache_read_db = Session(bind=db.get_bind())
     try:
         source_rows = _list_us_ohlc_source_rows(
             db=cache_read_db,
@@ -1060,17 +1065,16 @@ def list_us_ohlc_chart_data(
             from_date=start_date,
             to_date=end_date,
         )
-        rows = _filter_us_ohlc_source_rows(source_rows)
-        daily_points = [_us_ohlc_point(row) for row in rows]
-        latest_data_date = rows[-1].trade_date if rows else None
-        has_newer_untrusted_rows = _has_newer_untrusted_us_daily_rows(
-            rows=source_rows,
-            trusted_rows=rows,
-        )
-        base_points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
     finally:
-        if owns_cache_read_db:
-            cache_read_db.close()
+        cache_read_db.close()
+    rows = _filter_us_ohlc_source_rows(source_rows)
+    daily_points = [_us_ohlc_point(row) for row in rows]
+    latest_data_date = rows[-1].trade_date if rows else None
+    has_newer_untrusted_rows = _has_newer_untrusted_us_daily_rows(
+        rows=source_rows,
+        trusted_rows=rows,
+    )
+    base_points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
     intraday_overlay = None
     points = base_points
     if include_intraday:
@@ -1096,12 +1100,16 @@ def list_us_ohlc_chart_data(
     )
 
     if backfill_result is not None:
-        source_rows = _list_us_ohlc_source_rows(
-            db=db,
-            symbol=normalized_symbol,
-            from_date=start_date,
-            to_date=end_date,
-        )
+        cache_reload_db = Session(bind=db.get_bind())
+        try:
+            source_rows = _list_us_ohlc_source_rows(
+                db=cache_reload_db,
+                symbol=normalized_symbol,
+                from_date=start_date,
+                to_date=end_date,
+            )
+        finally:
+            cache_reload_db.close()
         rows = _filter_us_ohlc_source_rows(source_rows)
         daily_points = [_us_ohlc_point(row) for row in rows]
         latest_data_date = rows[-1].trade_date if rows else None
@@ -1124,6 +1132,66 @@ def list_us_ohlc_chart_data(
         else "future"
         if latest_data_date > resolved_expected_data_date
         else "current"
+    )
+    continuity = build_us_daily_continuity(
+        available_dates=(row.trade_date for row in rows),
+        expected_data_date=resolved_expected_data_date,
+        available_bar_count=len(base_points),
+        requested_bar_count=bars,
+        history_fetch_scope=(
+            "full"
+            if any(
+                row.source_url
+                and (
+                    "range=10y" in row.source_url
+                    or "range=max" in row.source_url
+                    or "outputsize=full" in row.source_url
+                )
+                for row in rows
+            )
+            else "compact"
+            if rows
+            else "unknown"
+        ),
+    )
+    latest_display_trade_date = (
+        point_date(points[-1].get("time"))
+        if timeframe == "daily" and points
+        else None
+    )
+    expected_previous_close_trade_date = (
+        resolved_expected_data_date
+        if include_intraday
+        else previous_us_trading_day(
+            latest_display_trade_date,
+            include_value=False,
+        )
+        if latest_display_trade_date is not None
+        else None
+    )
+    previous_close_row = next(
+        (
+            row
+            for row in reversed(rows)
+            if row.trade_date == expected_previous_close_trade_date
+        ),
+        None,
+    )
+    previous_close_value = (
+        float(previous_close_row.close_price)
+        if previous_close_row is not None
+        and _valid_number(previous_close_row.close_price)
+        else None
+    )
+    previous_close_status = (
+        "current"
+        if previous_close_value is not None
+        else "partial"
+        if previous_close_row is not None
+        else "missing"
+    )
+    previous_close_contract_met = (
+        previous_close_status == "current" if timeframe == "daily" else True
     )
     has_volume = any(point.get("volume") is not None for point in points)
     is_index = normalized_symbol.startswith("^")
@@ -1155,10 +1223,226 @@ def list_us_ohlc_chart_data(
         "backfill": backfill_result,
         "intraday_overlay": intraday_overlay,
         "latest_data_date": latest_data_date,
+        **continuity,
         "expected_data_date": resolved_expected_data_date,
+        "expected_previous_close_trade_date": expected_previous_close_trade_date,
+        "previous_close": previous_close_value,
+        "previous_close_trade_date": (
+            previous_close_row.trade_date
+            if previous_close_value is not None and previous_close_row is not None
+            else None
+        ),
+        "previous_close_provider": (
+            previous_close_row.provider
+            if previous_close_value is not None and previous_close_row is not None
+            else None
+        ),
+        "previous_close_fetched_at": (
+            previous_close_row.fetched_at
+            if previous_close_value is not None and previous_close_row is not None
+            else None
+        ),
+        "previous_close_status": previous_close_status,
         "freshness_status": freshness_status,
-        "is_current": freshness_status in {"current", "future"},
-        "refresh_recommended": freshness_status in {"missing", "stale"},
+        "is_current": (
+            freshness_status in {"current", "future"}
+            and continuity["coverage_status"] in {"complete", "best_available"}
+            and previous_close_contract_met
+        ),
+        "refresh_recommended": (
+            freshness_status in {"missing", "stale"}
+            or continuity["coverage_status"] not in {"complete", "best_available"}
+            or not previous_close_contract_met
+        ),
+    }
+
+
+def _us_ohlc_repair_snapshot(chart: dict) -> dict:
+    return {
+        "symbol": chart.get("symbol"),
+        "timeframe": chart.get("timeframe"),
+        "requested_bar_count": chart.get("requested_bar_count"),
+        "available_bar_count": chart.get("available_bar_count"),
+        "expected_data_date": chart.get("expected_data_date"),
+        "latest_finalized_data_date": chart.get("latest_finalized_data_date"),
+        "latest_expected_date_present": bool(
+            chart.get("latest_expected_date_present")
+        ),
+        "coverage_status": chart.get("coverage_status"),
+        "continuity_status": chart.get("continuity_status"),
+        "history_status": chart.get("history_status"),
+        "history_fetch_scope": chart.get("history_fetch_scope"),
+        "missing_trade_date_count": chart.get("missing_trade_date_count"),
+        "missing_trade_dates": chart.get("missing_trade_dates") or [],
+        "missing_trade_dates_truncated": bool(
+            chart.get("missing_trade_dates_truncated")
+        ),
+        "expected_previous_close_trade_date": chart.get(
+            "expected_previous_close_trade_date"
+        ),
+        "previous_close_trade_date": chart.get("previous_close_trade_date"),
+        "previous_close_status": chart.get("previous_close_status"),
+    }
+
+
+def _us_ohlc_repair_postcondition_met(snapshot: dict) -> bool:
+    return (
+        snapshot.get("coverage_status") in {"complete", "best_available"}
+        and (
+            snapshot.get("timeframe") != "daily"
+            or snapshot.get("previous_close_status") == "current"
+        )
+    )
+
+
+def _read_us_ohlc_repair_chart(
+    session_factory: Callable[[], Session],
+    *,
+    symbol: str,
+    timeframe: str,
+    bars: int,
+    to_date: date | None,
+) -> dict:
+    db = session_factory()
+    try:
+        return list_us_ohlc_chart_data(
+            db=db,
+            symbol=symbol,
+            timeframe=timeframe,
+            bars=bars,
+            ensure_history=False,
+            include_intraday=False,
+            to_date=to_date,
+        )
+    finally:
+        db.close()
+
+
+def repair_us_ohlc_history(
+    *,
+    symbol: str,
+    timeframe: str = "daily",
+    bars: int = 180,
+    provider: str = "yahoo_chart",
+    adjusted: bool = False,
+    max_provider_calls: int = 2,
+    force_full: bool = False,
+    to_date: date | None = None,
+    session_factory: Callable[[], Session] | None = None,
+) -> dict:
+    if max_provider_calls <= 0 or max_provider_calls > 2:
+        raise ValueError("max_provider_calls must be between 1 and 2.")
+
+    normalized_symbol = normalize_us_symbol(symbol)
+    resolved_session_factory = session_factory or SessionLocal
+    before = _read_us_ohlc_repair_chart(
+        resolved_session_factory,
+        symbol=normalized_symbol,
+        timeframe=timeframe,
+        bars=bars,
+        to_date=to_date,
+    )
+    before_snapshot = _us_ohlc_repair_snapshot(before)
+    if _us_ohlc_repair_postcondition_met(before_snapshot):
+        return {
+            "status": "noop",
+            "symbol": normalized_symbol,
+            "timeframe": timeframe,
+            "bars": bars,
+            "provider": provider,
+            "provider_call_budget": max_provider_calls,
+            "provider_call_count": 0,
+            "repair_reasons": [],
+            "before": before_snapshot,
+            "after": before_snapshot,
+            "refreshes": [],
+            "postcondition_met": True,
+            "message": "US OHLC continuity and history contracts were already satisfied.",
+        }
+
+    repair_reasons = [
+        reason
+        for reason, is_missing in (
+            (
+                "missing_expected_session",
+                not bool(before_snapshot.get("latest_expected_date_present")),
+            ),
+            (
+                "internal_trade_date_gap",
+                int(before_snapshot.get("missing_trade_date_count") or 0) > 0,
+            ),
+            (
+                "insufficient_history",
+                before_snapshot.get("history_status") != "complete",
+            ),
+        )
+        if is_missing
+    ]
+    outputsize = (
+        "full"
+        if force_full
+        or timeframe in {"weekly", "monthly"}
+        or before_snapshot.get("history_status") != "complete"
+        else "compact"
+    )
+    refreshes: list[dict] = []
+    after = before
+
+    for call_index in range(max_provider_calls):
+        refresh_db = resolved_session_factory()
+        try:
+            # This session has not checked out a connection before provider IO.
+            # The refresh owns its write transaction only after the payload is
+            # available, then the session is closed before the postcondition read.
+            refresh_result = refresh_us_daily_prices(
+                db=refresh_db,
+                symbol=normalized_symbol,
+                outputsize=outputsize,
+                adjusted=adjusted,
+                provider=provider,
+            )
+        finally:
+            refresh_db.close()
+        refreshes.append(
+            {
+                **refresh_result,
+                "call_index": call_index + 1,
+                "requested_outputsize": outputsize,
+            }
+        )
+        after = _read_us_ohlc_repair_chart(
+            resolved_session_factory,
+            symbol=normalized_symbol,
+            timeframe=timeframe,
+            bars=bars,
+            to_date=to_date,
+        )
+        if _us_ohlc_repair_postcondition_met(_us_ohlc_repair_snapshot(after)):
+            break
+        if outputsize == "full":
+            break
+        outputsize = "full"
+
+    after_snapshot = _us_ohlc_repair_snapshot(after)
+    postcondition_met = _us_ohlc_repair_postcondition_met(after_snapshot)
+    return {
+        "status": "success" if postcondition_met else "partial_success",
+        "symbol": normalized_symbol,
+        "timeframe": timeframe,
+        "bars": bars,
+        "provider": provider,
+        "provider_call_budget": max_provider_calls,
+        "provider_call_count": len(refreshes),
+        "repair_reasons": repair_reasons,
+        "before": before_snapshot,
+        "after": after_snapshot,
+        "refreshes": refreshes,
+        "postcondition_met": postcondition_met,
+        "message": (
+            "US OHLC continuity and history repair completed."
+            if postcondition_met
+            else "US OHLC refresh completed without satisfying the continuity contract."
+        ),
     }
 
 
@@ -2117,6 +2401,9 @@ def _apply_us_intraday_previous_close_reference(
     )
     result.setdefault("previous_close_trade_date", None)
     result.setdefault("previous_close_provider", None)
+    result.setdefault("expected_previous_close_trade_date", None)
+    result.setdefault("previous_close_status", "unknown")
+    result.setdefault("rejected_previous_close_trade_date", None)
 
     if db is None:
         return result
@@ -2150,8 +2437,10 @@ def _apply_us_intraday_previous_close_reference(
                 include_value=False,
             )
         )
+        result["expected_previous_close_trade_date"] = expected_reference_date.isoformat()
 
         if _us_reference_trade_date(reference) != expected_reference_date:
+            rejected_reference_date = _us_reference_trade_date(reference)
             intraday_reference = _us_previous_regular_intraday_close_reference(
                 symbol=symbol,
                 expected_trade_date=expected_reference_date,
@@ -2159,11 +2448,34 @@ def _apply_us_intraday_previous_close_reference(
 
             if intraday_reference is not None:
                 reference = intraday_reference
+            else:
+                reference = None
+                result.update(
+                    {
+                        "previous_close": None,
+                        "previous_close_source": None,
+                        "previous_close_trade_date": None,
+                        "previous_close_provider": None,
+                        "previous_close_status": "missing",
+                        "rejected_previous_close_trade_date": (
+                            rejected_reference_date.isoformat()
+                            if rejected_reference_date is not None
+                            else None
+                        ),
+                    }
+                )
+                warnings = list(result.get("warnings") or [])
+                warnings.append(
+                    "Previous close is unavailable for expected completed US session "
+                    f"{expected_reference_date.isoformat()}; an older cached reference was rejected."
+                )
+                result["warnings"] = warnings
 
     if reference is None:
         return result
 
     result.update(reference)
+    result["previous_close_status"] = "current"
     return result
 
 
@@ -2187,12 +2499,27 @@ def _read_us_watchlist_resolved_daily_batch(
         now=datetime.now(timezone.utc),
     )
 
+
+def _refresh_us_watchlist_daily_through_platform(
+    db: Session,
+    *,
+    symbol: str,
+    outputsize: str = "compact",
+    adjusted: bool = False,
+) -> dict:
+    return refresh_us_daily_ohlcv(
+        db=db,
+        symbol=symbol,
+        outputsize=outputsize,
+        adjusted=adjusted,
+    )
+
 def _us_watchlist_workflow_dependencies() -> watchlist_workflows.USWatchlistWorkflowDependencies:
     return watchlist_workflows.USWatchlistWorkflowDependencies(
         expected_daily_price_date=expected_us_daily_price_date,
         resolved_daily_batch_loader=_read_us_watchlist_resolved_daily_batch,
         intraday_overlay_loader=_get_us_intraday_overlay,
-        refresh_daily_prices=refresh_us_daily_prices,
+        refresh_daily_prices=_refresh_us_watchlist_daily_through_platform,
         ensure_stock=_ensure_us_stock_exists,
         refresh_sec_facts=refresh_us_sec_companyfacts,
         refresh_company_profile=refresh_us_company_profile_from_alphavantage,

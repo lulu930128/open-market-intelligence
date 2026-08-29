@@ -21,7 +21,6 @@ from app.db.models import (
     RawFetchResult,
     SourceRegistry,
     StockMaster,
-    USDailyPrice,
 )
 
 
@@ -206,38 +205,32 @@ class AiP1FreshnessContractTests(unittest.TestCase):
 
 
 class AiP1ProviderAndTimeoutTests(unittest.TestCase):
-    def test_latest_daily_uses_existing_canonical_provider_rule(self) -> None:
-        trade_date = date(2026, 7, 17)
+    def test_daily_context_projects_resolver_selected_provider(self) -> None:
         fetched_at = datetime(2026, 7, 18, tzinfo=timezone.utc)
-        alpha = USDailyPrice(
-            id=1,
-            provider="alphavantage",
+        rows = us_context._resolved_daily_context_rows(
+            {
+                "bars": [
+                    {
+                        "end_at": datetime(2026, 7, 17, 20, tzinfo=timezone.utc),
+                        "provider": "yahoo_chart",
+                        "source": "us.yahoo_chart.daily_ohlcv",
+                        "open_price": 170.0,
+                        "high_price": 172.0,
+                        "low_price": 169.0,
+                        "close_price": 171.0,
+                        "volume": 1_000,
+                        "fetched_at": fetched_at,
+                    }
+                ]
+            },
             symbol="NVDA",
-            trade_date=trade_date,
-            open_price=170.0,
-            high_price=172.0,
-            low_price=169.0,
-            close_price=171.0,
-            trade_volume=1_000,
-            fetched_at=fetched_at,
-        )
-        yahoo = USDailyPrice(
-            id=2,
-            provider="yahoo_chart",
-            symbol="NVDA",
-            trade_date=trade_date,
-            open_price=170.0,
-            high_price=172.0,
-            low_price=169.0,
-            close_price=171.0,
-            trade_volume=1_000,
-            fetched_at=fetched_at,
+            limit=1,
         )
 
-        selected = us_context._select_latest_daily([alpha, yahoo])
-
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected.provider, "yahoo_chart")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].provider, "yahoo_chart")
+        self.assertEqual(rows[0].source, "us.yahoo_chart.daily_ohlcv")
+        self.assertEqual(rows[0].close_price, 171.0)
 
     def test_selected_current_provider_is_separate_from_stale_fallback(self) -> None:
         source_health = {

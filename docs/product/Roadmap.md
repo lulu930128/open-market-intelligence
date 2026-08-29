@@ -1,6 +1,6 @@
 ﻿# Roadmap
 
-本 Roadmap 描述 OMI 的長期技術收斂順序，不是日期承諾表。
+本 Roadmap 描述 OMI 的 planned／target／future 技術收斂順序，不是日期承諾表，也不是 current implementation truth。任何項目不得因列在本頁就推定為已支援、已上線或已通過 Runtime／Live／Product acceptance。
 
 若任務與本文件衝突，先回到 `ProductVision.md`、`OperatingModel.md`、`QualityBar.md` 與 repo `AGENTS.md` 判斷。
 
@@ -50,7 +50,7 @@ AI decision 必須建立在可信 evidence 之上，而不是靠 provider-specif
 - preopen / opening handoff / regular / close acceptance。
 - depth / auction / quote semantics。
 
-2026-08-25 Data Core production adoption checkpoint：official daily OHLCV、full-market EOD lifecycle、official index/breadth與single-symbol public last-trade已接入共同Gateway/Resolver/result contract；28個production dataset與18個bounded operations已由running production runtime公開。Production DB採用0067/0068，named launcher、TPEX actual official index persistence/cold read、API、visible UI、frontend proxy與MCP `omi.decision.v4`已驗收。Active-session public quote F-07、TAIEX expected-date source gap、current public quote lineage gap與official breadth completeness仍如實pending/partial；完成F-07前不得標記common platform operational。KGI、depth/auction及既有M5依使用者決策留待共同平台完成後另案onboard。
+本 milestone 的最後已記錄 checkpoint、尚未完成 gate 與 evidence 由 [`CurrentImplementationState.md`](../architecture/CurrentImplementationState.md) 統一導航；Roadmap 不固定保存 dataset 數量、migration revision、runtime PID／port 或單次 session 戰況。
 
 ### United States
 
@@ -61,10 +61,7 @@ AI decision 必須建立在可信 evidence 之上，而不是靠 provider-specif
 - US provider policy / fallback。
 - 美股正式 first-class research outward support。
 
-2026-08-23 source checkpoint：US capability truth gate、Yahoo／Alpha Vantage
-canonical adapters、market-owned provider descriptors、bounded shadow／compare 與
-neutral resolved projection seam 已完成；production canary／on、KGI US live 與
-consumer cutover仍未驗收。
+美股完成度必須分 Source、Runtime、Live 與 Product gate 判讀；實際 capability readiness 由 executable registry、projection 與 runtime schema 提供，不在 Roadmap 複製 current inventory。
 
 ## M3 — Data Reliability / Trading Status / Repair
 
