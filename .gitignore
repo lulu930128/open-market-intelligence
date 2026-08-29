@@ -40,11 +40,16 @@ reports/*
 Thumbs.db
 .vscode/
 .idea/
-.codex/*
-!.codex/agents/
-!.codex/agents/*.toml
+.codex/
+.agents/
+**/AGENTS.md
 .codex-remote-attachments/
 /source-checkpoint.json
+
+# Local agent runs and one-off implementation plans
+docs/agent-runs/
+docs/exec-plans/
+docs/archive/
 
 # Node / Next.js future frontend
 node_modules/

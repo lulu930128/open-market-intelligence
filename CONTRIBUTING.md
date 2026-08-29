@@ -11,7 +11,7 @@
 
 ## 本機設定
 
-主要開發環境是 Windows PowerShell。請依 [README.md](README.md) 完成 backend 與 frontend 設定，並從 repository root 執行安全驗證：
+主要開發環境是 Windows PowerShell。請依[開發指南](docs/guides/development.md)完成 backend 與 frontend 設定，並從 repository root 執行安全驗證：
 
 ```powershell
 .\scripts\run-safe-validation.ps1 -Profile quick
