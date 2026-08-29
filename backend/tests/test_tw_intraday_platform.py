@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import inspect
 import json
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -304,13 +304,30 @@ def test_cache_only_history_and_trend_do_not_call_provider_or_commit(monkeypatch
             forbidden,
         )
         monkeypatch.setattr(db, "commit", forbidden)
-        shared = read_taiwan_intraday_bars(
-            db,
-            stock_id="2330",
-            interval="1m",
-            range_value="1d",
-            requested_at=now,
-        )
+        statements: list[str] = []
+
+        def capture_select(
+            _connection,
+            _cursor,
+            statement: str,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture_select)
+        try:
+            shared = read_taiwan_intraday_bars(
+                db,
+                stock_id="2330",
+                interval="1m",
+                range_value="1d",
+                requested_at=now,
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", capture_select)
         history = intraday.get_market_intraday_history(
             db,
             stock_id="2330",
@@ -321,6 +338,21 @@ def test_cache_only_history_and_trend_do_not_call_provider_or_commit(monkeypatch
         )
 
         assert shared.acquisition.attempted is False
+        raw_receipt_selects = [
+            statement
+            for statement in statements
+            if "raw_fetch_result" in statement.lower()
+        ]
+        assert raw_receipt_selects
+        assert all(
+            "raw_text" not in statement.lower()
+            for statement in raw_receipt_selects
+        )
+        assert all(
+            "content_hash" in statement.lower()
+            and "parser_version" in statement.lower()
+            for statement in raw_receipt_selects
+        )
         assert history["read_policy"] == "cache_only"
         assert history["point_count"] == 2
         assert history["refreshed_count"] == 0

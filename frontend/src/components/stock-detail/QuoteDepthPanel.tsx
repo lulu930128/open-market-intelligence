@@ -7,7 +7,6 @@ import {
   formatPrice,
   valueTone,
 } from "@/components/stock-detail/StockDetailDataViews";
-import { StateSurface } from "@/components/LoadingPlaceholders";
 import type {
   TaiwanQuoteContractReplayRead,
   TaiwanQuoteContractReplaySnapshotRead,
@@ -291,6 +290,12 @@ function isFiniteNumber(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function hasDepthValues(levels: TaiwanStockQuoteDepthLevel[]) {
+  return levels.some(
+    (level) => isFiniteNumber(level.price) || isFiniteNumber(level.size_lots)
+  );
+}
+
 function formatEventClock(value: string | null | undefined) {
   if (!value) return "--:--:--";
   const parsed = new Date(value);
@@ -341,6 +346,7 @@ function streamProviderLabel(
   quoteStream: TaiwanRealtimeMarketStreamRead | null
 ) {
   const provider = quoteStream?.provider?.trim();
+  if (provider?.toLowerCase() === "kgi_superpy") return "KGI SUPER PY";
   return provider ? provider.replaceAll("_", " ").toUpperCase() : "REALTIME PROVIDER";
 }
 
@@ -676,12 +682,20 @@ function DepthSideRow({
   side: "ask" | "bid";
 }) {
   const size = level.size_lots ?? 0;
-  const width = `${Math.max(4, Math.min(100, Math.round((size / maxSize) * 100)))}%`;
+  const hasLevelValue = isFiniteNumber(level.price) || isFiniteNumber(level.size_lots);
+  const width = hasLevelValue
+    ? `${Math.max(4, Math.min(100, Math.round((size / maxSize) * 100)))}%`
+    : "0%";
   const tone = depthPriceTone(level.price, previousClose);
   const barAnchor = side === "ask" ? "left-2" : "right-2";
 
   return (
-    <div className="relative grid min-h-7 flex-1 grid-cols-2 items-center gap-3 overflow-hidden border-t border-omi-border-subtle px-2 text-xs tabular-nums">
+    <div
+      className="relative grid min-h-7 flex-1 grid-cols-2 items-center gap-3 overflow-hidden border-t border-omi-border-subtle px-2 text-xs tabular-nums"
+      data-depth-level={level.level}
+      data-empty={!hasLevelValue}
+      data-testid={`quote-depth-${side}-row`}
+    >
       <div
         aria-hidden="true"
         className={`absolute inset-y-1 ${barAnchor} ${tone.barClass}`}
@@ -711,12 +725,23 @@ function DepthSide({
   maxSize,
   previousClose,
   side,
+  emptyLabel,
 }: {
   levels: TaiwanStockQuoteDepthLevel[];
   maxSize: number;
   previousClose: number | null | undefined;
   side: "ask" | "bid";
+  emptyLabel: string;
 }) {
+  const levelsByRank = new Map(levels.map((level) => [level.level, level]));
+  const visibleLevels = Array.from({ length: 5 }, (_, index) =>
+    levelsByRank.get(index + 1) ?? {
+      level: index + 1,
+      price: null,
+      size_lots: null,
+    }
+  );
+  const hasLevels = hasDepthValues(levels);
   const total = sideTotal(levels);
 
   return (
@@ -735,34 +760,25 @@ function DepthSide({
         )}
       </div>
       <div className="flex min-h-0 flex-1 flex-col">
-        {levels.length > 0 ? (
-          levels.map((level) => (
-            <DepthSideRow
-              key={`${side}-${level.level}`}
-              level={level}
-              maxSize={maxSize}
-              previousClose={previousClose}
-              side={side}
-            />
-          ))
-        ) : (
-          <div
-            className="flex h-full min-h-[140px] items-center justify-center border-t border-omi-border-subtle px-3 text-center"
-            data-testid={`quote-depth-${side}-empty`}
-          >
-            <div>
-              <div className="text-xs font-semibold text-omi-text-strong">
-                {side === "bid" ? "目前無有效買價" : "目前無有效賣價"}
-              </div>
-              <div className="mt-1 text-[10px] leading-4 text-omi-text-muted">
-                來源未提供此側五檔
-              </div>
-            </div>
-          </div>
-        )}
+        {visibleLevels.map((level) => (
+          <DepthSideRow
+            key={`${side}-${level.level}`}
+            level={level}
+            maxSize={maxSize}
+            previousClose={previousClose}
+            side={side}
+          />
+        ))}
       </div>
       <div className="grid min-h-8 grid-cols-2 items-center gap-3 border-t border-omi-border-subtle bg-black/10 px-2 text-sm font-bold tabular-nums text-omi-text-strong">
-        {side === "bid" ? (
+        {!hasLevels ? (
+          <div
+            className="col-span-2 text-center text-[10px] font-semibold text-omi-text-muted"
+            data-testid={`quote-depth-${side}-empty`}
+          >
+            {emptyLabel}
+          </div>
+        ) : side === "bid" ? (
           <>
             <div className="text-left">{formatLotUnits(total)}</div>
             <div />
@@ -773,27 +789,6 @@ function DepthSide({
             <div className="text-right">{formatLotUnits(total)}</div>
           </>
         )}
-      </div>
-    </div>
-  );
-}
-
-function QuoteMetric({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: string;
-}) {
-  return (
-    <div className="min-w-0 border border-omi-border-subtle bg-omi-surface-muted px-2 py-1.5">
-      <div className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-omi-text-muted">
-        {label}
-      </div>
-      <div className={`mt-0.5 truncate text-xs font-bold tabular-nums ${tone ?? "text-omi-text-strong"}`}>
-        {value}
       </div>
     </div>
   );
@@ -885,7 +880,7 @@ export default function QuoteDepthPanel({
         size_lots,
       }))
     : displayQuoteDepth?.ask_levels ?? [];
-  const showDepth = bidLevels.length > 0 || askLevels.length > 0;
+  const showDepth = hasDepthValues(bidLevels) || hasDepthValues(askLevels);
   const maxSize = depthMaxSize(bidLevels, askLevels);
   const indicativePrice =
     displayQuoteDepth?.indicative_match_available &&
@@ -913,8 +908,13 @@ export default function QuoteDepthPanel({
       : loadState === "error"
         ? "五檔資料讀取失敗。"
         : "尚無五檔資料。");
-  const isError = loadState === "error" && !displayQuoteDepth;
-  const footerStatus = displayQuoteDepth?.freshness.is_stale || showDepth ? message : phaseLabel;
+  const emptyDepthLabel =
+    loadState === "loading"
+      ? "五檔載入中"
+      : loadState === "error" && !showDepth
+        ? "五檔讀取失敗"
+        : "來源未提供此側五檔";
+  const footerStatus = message;
   const observationTimeLabel = streamDepth?.event_time
     ? formatDateTime(streamDepth.event_time)
     : displayQuoteDepth?.quote_time
@@ -1010,39 +1010,22 @@ export default function QuoteDepthPanel({
         data-testid="quote-depth-content"
       >
         <div className="h-[18rem] min-w-0" data-testid="quote-depth-book-column">
-          {showDepth ? (
-            <div className="grid h-full grid-cols-2 gap-2" data-testid="quote-depth-book">
-              <DepthSide
-                levels={bidLevels}
-                maxSize={maxSize}
-                previousClose={displayQuoteDepth?.previous_close}
-                side="bid"
-              />
-              <DepthSide
-                levels={askLevels}
-                maxSize={maxSize}
-                previousClose={displayQuoteDepth?.previous_close}
-                side="ask"
-              />
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-2">
-              <QuoteMetric label="Open" value={formatPrice(displayQuoteDepth?.open_price)} />
-              <QuoteMetric label="High" value={formatPrice(displayQuoteDepth?.high_price)} tone="text-omi-market-up" />
-              <QuoteMetric label="Low" value={formatPrice(displayQuoteDepth?.low_price)} tone="text-omi-market-down" />
-              <QuoteMetric label="Volume" value={formatLotUnits(displayQuoteDepth?.total_volume_lots)} />
-            </div>
-          )}
-
-          {!showDepth ? (
-            <StateSurface
-              title={message}
-              tone={isError ? "danger" : loadState === "loading" ? "loading" : "empty"}
-              busy={loadState === "loading"}
-              compact
-              className="mt-3"
+          <div className="grid h-full grid-cols-2 gap-2" data-testid="quote-depth-book">
+            <DepthSide
+              levels={bidLevels}
+              maxSize={maxSize}
+              previousClose={displayQuoteDepth?.previous_close}
+              side="bid"
+              emptyLabel={emptyDepthLabel}
             />
-          ) : null}
+            <DepthSide
+              levels={askLevels}
+              maxSize={maxSize}
+              previousClose={displayQuoteDepth?.previous_close}
+              side="ask"
+              emptyLabel={emptyDepthLabel}
+            />
+          </div>
         </div>
 
         <div className="h-[18rem] min-w-0" data-testid="quote-depth-summary-column">

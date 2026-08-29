@@ -826,6 +826,14 @@ class MarketIntradayBar(Base):
     __tablename__ = "market_intraday_bar"
 
     __table_args__ = (
+        Index(
+            "ix_market_intraday_bar_stock_market_interval_time",
+            "stock_id",
+            "market",
+            "interval",
+            "bar_time",
+            "id",
+        ),
         UniqueConstraint(
             "provider",
             "stock_id",

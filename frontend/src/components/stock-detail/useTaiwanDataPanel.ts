@@ -1024,8 +1024,7 @@ export function useTaiwanDataPanel({
 
     const timer = window.setTimeout(() => {
       void refreshDataTab(activeDataTab, {
-        allowProviderRefresh: true,
-        skipProviderWhenCurrent: true,
+        allowProviderRefresh: false,
       });
     }, 0);
     return () => window.clearTimeout(timer);
@@ -1047,7 +1046,6 @@ export function useTaiwanDataPanel({
         refreshDataTab(tab, { allowProviderRefresh: true }),
       selectDataTab: setActiveDataTab,
       setBranchDays,
-      setStockInfo,
     },
     state: {
       activeDataTab,

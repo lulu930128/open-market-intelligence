@@ -51,9 +51,28 @@ def test_intraday_lineage_migration_is_additive_and_scoped_on_downgrade() -> Non
                 "component_raw_result_ids_json",
             } <= columns
             assert "payload_json" not in columns
+            indexes = {
+                item["name"]
+                for item in inspector.get_indexes("market_intraday_bar")
+            }
+            assert "ix_market_intraday_bar_stock_market_interval_time" in indexes
         finally:
             engine.dispose()
 
+        command.downgrade(config, "20260826_0072")
+        engine = create_engine(database_url)
+        try:
+            inspector = inspect(engine)
+            indexes = {
+                item["name"]
+                for item in inspector.get_indexes("market_intraday_bar")
+            }
+            assert "ix_market_intraday_bar_stock_market_interval_time" not in indexes
+            assert "market_intraday_bar_lineage" in inspector.get_table_names()
+        finally:
+            engine.dispose()
+
+        command.upgrade(config, "head")
         command.downgrade(config, "20260826_0069")
         engine = create_engine(database_url)
         try:

@@ -22,7 +22,7 @@ import type { ChartDrawingTool } from "@/components/LightweightKLineChart";
 import NextSessionPlanPanel from "@/components/stock-detail/NextSessionPlanPanel";
 import StockDetailDataPanel from "@/components/stock-detail/StockDetailDataPanel";
 import TaiwanETFDataPanel from "@/components/stock-detail/TaiwanETFDataPanel";
-import QuoteDepthPanel from "@/components/stock-detail/QuoteDepthPanel";
+import TaiwanQuoteDepthSurface from "@/components/stock-detail/TaiwanQuoteDepthSurface";
 import {
   dataPanelTabs,
   etfDataPanelTabs,
@@ -138,6 +138,7 @@ type Props = {
   instrumentType?: string | null;
   initialChartData?: ChartPoint[];
   initialChartIntradayOverlay?: OhlcIntradayOverlay | null;
+  initialChartStockId?: string | null;
   initialChartVolumeUnit?: string | null;
   initialIndicatorData?: StockIndicatorPoint[];
   watchlistRankingPanel?: ReactNode;
@@ -146,6 +147,9 @@ type Props = {
   onDailyPricesChanged?: () => void;
   quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
 };
+
+const emptyChartPoints: ChartPoint[] = [];
+const emptyIndicatorPoints: StockIndicatorPoint[] = [];
 
 function normalizeIsoDate(value: string | null | undefined) {
   return value ? value.slice(0, 10) : null;
@@ -307,6 +311,7 @@ export default function StockDetailPanel({
   instrumentType = null,
   initialChartData = [],
   initialChartIntradayOverlay = null,
+  initialChartStockId = null,
   initialChartVolumeUnit = "shares",
   initialIndicatorData = [],
   watchlistRankingPanel,
@@ -368,13 +373,12 @@ export default function StockDetailPanel({
   const {
     quoteDepth,
     quoteReplay,
-    quoteStream,
     loadState: quoteDepthLoadState,
     replayLoadState: quoteReplayLoadState,
-    quoteStreamLoadState,
   } = useTaiwanQuoteDepth({
     enabled: !isIndexProduct,
     stockId,
+    streamEnabled: false,
   });
   const {
     state: {
@@ -401,7 +405,6 @@ export default function StockDetailPanel({
       refreshDataTab,
       selectDataTab,
       setBranchDays,
-      setStockInfo,
     },
   } = useTaiwanDataPanel({
     autoRefreshEnabled: requestedInstrumentTypeResolved
@@ -641,27 +644,25 @@ export default function StockDetailPanel({
       todayPreviousClose,
       todayPriceDiagnostics,
       todaySource,
+      todayStockId,
       todayTradeDate,
       todayTrend,
       todayUpdatedAt,
     },
   } = useTaiwanStockChartData({
     chartFocusMode,
-    currentStockInfoId,
     currentStockInfoMarket,
     effectiveTimeframe,
     initialChartData,
     initialChartIntradayOverlay,
+    initialChartStockId,
     initialChartVolumeUnit,
     initialIndicatorData,
     isIndexProduct,
-    onDailyPricesChanged,
-    onStockInfoResolved: setStockInfo,
     professionalTimeframe,
     publishDataStatus: publishDetailDataStatus,
     reloadNonce: chartReloadNonce,
     stockId,
-    subresourceRefreshSeconds: taiwanSubresourceRefreshSeconds,
     t,
   });
   const backendTechnicalReport = useTaiwanTechnicalReport({
@@ -689,6 +690,22 @@ export default function StockDetailPanel({
 
     return () => window.clearTimeout(timer);
   }, [isIndexProduct, stockId]);
+
+  const chartMatchesSelection = stockId !== null && chartStockId === stockId;
+  const currentChartReady =
+    effectiveTimeframe !== "today" &&
+    chartMatchesSelection &&
+    chartTimeframe === effectiveTimeframe;
+  const chartDataForTimeframe = currentChartReady ? chartData : emptyChartPoints;
+  const indicatorDataForTimeframe = currentChartReady
+    ? indicatorData
+    : emptyIndicatorPoints;
+  const dailyReferenceChartData =
+    chartMatchesSelection && chartTimeframe === "daily" ? chartData : emptyChartPoints;
+  const dailyReferenceIndicatorData =
+    chartMatchesSelection && chartTimeframe === "daily"
+      ? indicatorData
+      : emptyIndicatorPoints;
 
   function toggleChartIndicator(key: IndicatorKey) {
     setActiveIndicatorTemplate(null);
@@ -752,7 +769,7 @@ export default function StockDetailPanel({
   const indicatorForTimeframe = useMemo(() => {
     if (effectiveTimeframe === "daily") {
       const pointsByDate = new Map(
-        indicatorData.map((point) => [normalizeIsoDate(point.time), point])
+        indicatorDataForTimeframe.map((point) => [normalizeIsoDate(point.time), point])
       );
       const currentPartial = backendCurrentPartialIndicator(
         backendTechnicalReport?.data.current_partial_indicator
@@ -765,11 +782,12 @@ export default function StockDetailPanel({
         .slice(-180);
     }
     return [];
-  }, [backendTechnicalReport, effectiveTimeframe, indicatorData]);
+  }, [backendTechnicalReport, effectiveTimeframe, indicatorDataForTimeframe]);
 
-  const latestIndicator = indicatorData[indicatorData.length - 1] ?? null;
-  const latestChart = chartData[chartData.length - 1] ?? null;
-  const previousChart = chartData[chartData.length - 2] ?? null;
+  const latestIndicator =
+    indicatorDataForTimeframe[indicatorDataForTimeframe.length - 1] ?? null;
+  const latestChart = chartDataForTimeframe[chartDataForTimeframe.length - 1] ?? null;
+  const previousChart = chartDataForTimeframe[chartDataForTimeframe.length - 2] ?? null;
   const latestChartDate = normalizeIsoDate(latestChart?.time);
   const latestIndicatorDate = normalizeIsoDate(latestIndicator?.time);
   const latestCurrentIndicator =
@@ -784,11 +802,7 @@ export default function StockDetailPanel({
       ? chartIntradayOverlay.previous_close
       : null;
   const chartPreviousClose = chartOverlayPreviousClose ?? previousChart?.close ?? null;
-  const currentChartReady =
-    effectiveTimeframe !== "today" &&
-    chartStockId === stockId &&
-    chartTimeframe === effectiveTimeframe;
-  const canUseFocusedKLine = currentChartReady && chartData.length > 0;
+  const canUseFocusedKLine = currentChartReady && chartDataForTimeframe.length > 0;
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
   const latestTodayDisplayPrice = finiteNumber(todayCurrentObservation?.value)
     ? todayCurrentObservation.value
@@ -915,12 +929,25 @@ export default function StockDetailPanel({
     (professionalIsIntraday || currentChartReady);
   const professionalTimeframeLabel = t(`timeframes.${professionalTimeframe}`);
   const latestProfessionalChart = professionalChartData[professionalChartData.length - 1] ?? null;
+  const latestDailyReferenceChart =
+    dailyReferenceChartData[dailyReferenceChartData.length - 1] ?? null;
+  const latestDailyReferenceIndicator =
+    dailyReferenceIndicatorData[dailyReferenceIndicatorData.length - 1] ?? null;
+  const latestDailyReferenceIndicatorDate = normalizeIsoDate(
+    latestDailyReferenceIndicator?.time
+  );
+  const latestDailyCurrentIndicator =
+    latestDailyReferenceIndicator !== null &&
+    normalizeIsoDate(latestDailyReferenceChart?.time) !== null &&
+    latestDailyReferenceIndicatorDate === normalizeIsoDate(latestDailyReferenceChart?.time)
+      ? latestDailyReferenceIndicator
+      : null;
   const dailyPreviousClose =
-    latestCurrentIndicator?.close !== null &&
-    latestCurrentIndicator?.close !== undefined &&
-    latestCurrentIndicator?.change !== null &&
-    latestCurrentIndicator?.change !== undefined
-      ? latestCurrentIndicator.close - latestCurrentIndicator.change
+    latestDailyCurrentIndicator?.close !== null &&
+    latestDailyCurrentIndicator?.close !== undefined &&
+    latestDailyCurrentIndicator?.change !== null &&
+    latestDailyCurrentIndicator?.change !== undefined
+      ? latestDailyCurrentIndicator.close - latestDailyCurrentIndicator.change
       : null;
   const todayReferenceClose = todayPreviousClose ?? dailyPreviousClose;
   const chartChangePct =
@@ -989,12 +1016,22 @@ export default function StockDetailPanel({
     ? null
     : estimatedPriceLimitStatus(professionalLatestChangePct);
   const headerLimitStatus = isIndexProduct ? null : estimatedPriceLimitStatus(latestChangePct);
-  const ma5 = latestCurrentIndicator?.ma?.ma5 ?? averageRecentChartValue(chartData, "close", 5);
-  const ma20 = latestCurrentIndicator?.ma?.ma20 ?? averageRecentChartValue(chartData, "close", 20);
-  const ma60 = latestCurrentIndicator?.ma?.ma60 ?? averageRecentChartValue(chartData, "close", 60);
+  const technicalReferenceChartData =
+    effectiveTimeframe === "today" ? dailyReferenceChartData : chartDataForTimeframe;
+  const technicalReferenceIndicator =
+    effectiveTimeframe === "today" ? latestDailyCurrentIndicator : latestCurrentIndicator;
+  const ma5 =
+    technicalReferenceIndicator?.ma?.ma5 ??
+    averageRecentChartValue(technicalReferenceChartData, "close", 5);
+  const ma20 =
+    technicalReferenceIndicator?.ma?.ma20 ??
+    averageRecentChartValue(technicalReferenceChartData, "close", 20);
+  const ma60 =
+    technicalReferenceIndicator?.ma?.ma60 ??
+    averageRecentChartValue(technicalReferenceChartData, "close", 60);
   const volumeMa20 =
-    latestCurrentIndicator?.volume_ma?.volume_ma20 ??
-    averageRecentChartValue(chartData, "volume", 20);
+    technicalReferenceIndicator?.volume_ma?.volume_ma20 ??
+    averageRecentChartValue(technicalReferenceChartData, "volume", 20);
   const priceVsMa20 =
     latestClose !== null && ma20 !== null && ma20 !== 0
       ? ((latestClose - ma20) / ma20) * 100
@@ -1036,7 +1073,7 @@ export default function StockDetailPanel({
       : null;
 
   const fallbackTechnicalReport = buildFallbackTechnicalReport({
-    chartData,
+    chartData: technicalReferenceChartData,
     currentChartReady,
     effectiveTimeframe,
     financialMetric,
@@ -1272,6 +1309,8 @@ export default function StockDetailPanel({
       data-chart-stock-id={chartStockId ?? ""}
       data-chart-timeframe={chartTimeframe}
       data-chart-load-state={loadState}
+      data-current-price={latestClose ?? ""}
+      data-today-stock-id={todayStockId ?? ""}
       className={[
         "grid w-full grid-cols-1 items-start justify-start gap-4",
         chartFocusMode ? "" : "xl:grid-cols-[minmax(0,7fr)_minmax(360px,5fr)]",
@@ -1792,13 +1831,12 @@ export default function StockDetailPanel({
 
         {!chartFocusMode && !isIndexProduct && !showTechnicalLoading ? (
           <div className="min-w-0 border-x border-t border-omi-border-subtle bg-omi-surface">
-            <QuoteDepthPanel
+            <TaiwanQuoteDepthSurface
+              stockId={stockId}
               quoteDepth={quoteDepth}
               quoteReplay={quoteReplay}
-              quoteStream={quoteStream}
               loadState={quoteDepthLoadState}
               replayLoadState={quoteReplayLoadState}
-              quoteStreamLoadState={quoteStreamLoadState}
               quoteDepthPreviewMode={quoteDepthPreviewMode}
             />
           </div>

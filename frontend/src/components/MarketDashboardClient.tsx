@@ -208,6 +208,7 @@ type Props = {
   initialSelectedKrSymbol: string | null;
   initialChartData: ChartPoint[];
   initialChartIntradayOverlay: OhlcIntradayOverlay | null;
+  initialChartStockId: string | null;
   initialChartVolumeUnit: string | null;
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
@@ -256,6 +257,7 @@ export default function MarketDashboardClient({
   initialSelectedKrSymbol,
   initialChartData,
   initialChartIntradayOverlay,
+  initialChartStockId,
   initialChartVolumeUnit,
   initialIndicatorData,
   initialRankingData,
@@ -1889,6 +1891,7 @@ export default function MarketDashboardClient({
                     instrumentType={selectedInstrumentType}
                     initialChartData={initialChartData}
                     initialChartIntradayOverlay={initialChartIntradayOverlay}
+                    initialChartStockId={initialChartStockId}
                     initialChartVolumeUnit={initialChartVolumeUnit}
                     initialIndicatorData={initialIndicatorData}
                     watchlistRankingPanel={rankingPanel}

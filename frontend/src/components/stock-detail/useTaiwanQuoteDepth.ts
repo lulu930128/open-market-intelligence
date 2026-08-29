@@ -19,6 +19,7 @@ const quoteDepthLivePhases = new Set([
   "regular_live",
   "closing_auction",
 ]);
+const quoteStreamReconnectDelaysMs = [5_000, 15_000, 30_000] as const;
 
 function isPresentationTelemetry(
   snapshot: TaiwanRealtimeMarketStreamRead
@@ -51,9 +52,15 @@ export function quoteDepthRefreshDelayMs(
 export function useTaiwanQuoteDepth({
   enabled,
   stockId,
+  leaseEnabled = enabled,
+  streamEnabled = enabled,
+  depthEnabled = enabled,
 }: {
   enabled: boolean;
   stockId: string | null;
+  leaseEnabled?: boolean;
+  streamEnabled?: boolean;
+  depthEnabled?: boolean;
 }) {
   const [quoteDepth, setQuoteDepth] = useState<TaiwanStockQuoteDepthRead | null>(null);
   const [loadState, setLoadState] = useState<QuoteDepthLoadState>("idle");
@@ -72,7 +79,7 @@ export function useTaiwanQuoteDepth({
   }, [stockId]);
 
   useEffect(() => {
-    if (!enabled || !stockId) return;
+    if (!enabled || !leaseEnabled || !stockId) return;
 
     let cancelled = false;
     let pageActive = true;
@@ -234,10 +241,10 @@ export function useTaiwanQuoteDepth({
       window.removeEventListener("pageshow", handlePageShow);
       void enqueueLifecycle(true);
     };
-  }, [enabled, stockId]);
+  }, [enabled, leaseEnabled, stockId]);
 
   useEffect(() => {
-    if (!enabled || !stockId) {
+    if (!enabled || !streamEnabled || !stockId) {
       const timer = window.setTimeout(() => {
         setQuoteStream(null);
         setQuoteStreamLoadState("idle");
@@ -246,9 +253,13 @@ export function useTaiwanQuoteDepth({
     }
 
     let cancelled = false;
+    let pageActive = true;
     let eventSource: EventSource | null = null;
     let fallbackTimer: number | undefined;
+    let reconnectTimer: number | undefined;
     let fallbackRequestInFlight = false;
+    let fallbackActive = false;
+    let reconnectAttempt = 0;
     const requestedStockId = stockId;
     const initialStateTimer = window.setTimeout(() => {
       if (cancelled) return;
@@ -256,30 +267,56 @@ export function useTaiwanQuoteDepth({
       setQuoteStreamLoadState("loading");
     }, 0);
 
+    function shouldRunTransport() {
+      return !cancelled && pageActive && document.visibilityState === "visible";
+    }
+
     function applySnapshot(snapshot: TaiwanRealtimeMarketStreamRead) {
-      if (cancelled || activeStockIdRef.current !== requestedStockId) return;
-      if (snapshot.stock_id !== requestedStockId) return;
+      if (cancelled || activeStockIdRef.current !== requestedStockId) return false;
+      if (snapshot.stock_id !== requestedStockId) return false;
       if (!isPresentationTelemetry(snapshot)) {
         setQuoteStreamLoadState("error");
-        return;
+        return false;
       }
       setQuoteStream(snapshot);
       setQuoteStreamLoadState("success");
+      return true;
+    }
+
+    function clearFallbackTimer() {
+      if (fallbackTimer !== undefined) {
+        window.clearTimeout(fallbackTimer);
+        fallbackTimer = undefined;
+      }
+    }
+
+    function clearReconnectTimer() {
+      if (reconnectTimer !== undefined) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+    }
+
+    function closeEventSource() {
+      eventSource?.close();
+      eventSource = null;
+    }
+
+    function stopFallbackPolling() {
+      fallbackActive = false;
+      clearFallbackTimer();
     }
 
     function scheduleFallback(delayMs = 1_000) {
-      if (cancelled) return;
+      clearFallbackTimer();
+      if (!fallbackActive || !shouldRunTransport()) return;
       fallbackTimer = window.setTimeout(() => {
         void pollSnapshot();
       }, delayMs);
     }
 
     async function pollSnapshot() {
-      if (cancelled || fallbackRequestInFlight) return;
-      if (document.visibilityState !== "visible") {
-        scheduleFallback(2_000);
-        return;
-      }
+      if (!fallbackActive || !shouldRunTransport() || fallbackRequestInFlight) return;
       fallbackRequestInFlight = true;
       try {
         const snapshot = await fetchJson<TaiwanRealtimeMarketStreamRead>(
@@ -295,43 +332,96 @@ export function useTaiwanQuoteDepth({
     }
 
     function startFallbackPolling() {
-      eventSource?.close();
-      eventSource = null;
-      if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
-      fallbackTimer = undefined;
+      if (!shouldRunTransport()) return;
+      fallbackActive = true;
       scheduleFallback(0);
     }
 
-    if (typeof EventSource !== "undefined") {
-      eventSource = new EventSource(
+    function scheduleEventSourceReconnect() {
+      clearReconnectTimer();
+      if (!shouldRunTransport() || typeof EventSource === "undefined") return;
+      const delay = quoteStreamReconnectDelaysMs[
+        Math.min(reconnectAttempt, quoteStreamReconnectDelaysMs.length - 1)
+      ];
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(startEventSource, delay);
+    }
+
+    function startEventSource() {
+      clearReconnectTimer();
+      closeEventSource();
+      if (!shouldRunTransport()) return;
+      if (typeof EventSource === "undefined") {
+        startFallbackPolling();
+        return;
+      }
+
+      const source = new EventSource(
         buildApiUrl(`/api/market/realtime-quotes/${requestedStockId}/stream`, {
           interval_ms: 500,
         })
       );
-      eventSource.addEventListener("snapshot", (event) => {
+      eventSource = source;
+      source.addEventListener("snapshot", (event) => {
+        if (source !== eventSource) return;
         try {
-          applySnapshot(JSON.parse(event.data) as TaiwanRealtimeMarketStreamRead);
+          const accepted = applySnapshot(
+            JSON.parse(event.data) as TaiwanRealtimeMarketStreamRead
+          );
+          if (accepted) {
+            reconnectAttempt = 0;
+            stopFallbackPolling();
+          }
         } catch {
           if (!cancelled) setQuoteStreamLoadState("error");
         }
       });
-      eventSource.onerror = () => {
-        if (!cancelled) startFallbackPolling();
+      source.onerror = () => {
+        if (!shouldRunTransport() || source !== eventSource) return;
+        closeEventSource();
+        startFallbackPolling();
+        scheduleEventSourceReconnect();
       };
-    } else {
-      startFallbackPolling();
     }
+
+    function pauseTransport() {
+      clearReconnectTimer();
+      closeEventSource();
+      stopFallbackPolling();
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") startEventSource();
+      else pauseTransport();
+    }
+
+    function handlePageHide() {
+      pageActive = false;
+      pauseTransport();
+    }
+
+    function handlePageShow() {
+      pageActive = true;
+      if (document.visibilityState === "visible") startEventSource();
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("pageshow", handlePageShow);
+    startEventSource();
 
     return () => {
       cancelled = true;
       window.clearTimeout(initialStateTimer);
-      eventSource?.close();
-      if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
+      pauseTransport();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("pageshow", handlePageShow);
     };
-  }, [enabled, stockId]);
+  }, [enabled, stockId, streamEnabled]);
 
   useEffect(() => {
-    if (!enabled || !stockId) {
+    if (!enabled || !depthEnabled || !stockId) {
       const timer = window.setTimeout(() => {
         setQuoteDepth(null);
         setLoadState("idle");
@@ -371,7 +461,7 @@ export function useTaiwanQuoteDepth({
       }
     }
 
-    async function load(showLoading: boolean, acquire: boolean) {
+    async function load(showLoading: boolean) {
       if (requestInFlight) return latestQuoteDepth;
       requestInFlight = true;
 
@@ -381,26 +471,10 @@ export function useTaiwanQuoteDepth({
       }
 
       try {
-        let depth: TaiwanStockQuoteDepthRead;
-        if (acquire) {
-          try {
-            depth = await requestJson<TaiwanStockQuoteDepthRead>(
-              `/api/market/quote-depth/${requestedStockId}/refresh`,
-              { method: "POST" },
-              { policy: "prefer_live" }
-            );
-          } catch {
-            depth = await fetchJson<TaiwanStockQuoteDepthRead>(
-              `/api/market/quote-depth/${requestedStockId}`,
-              { refresh: false }
-            );
-          }
-        } else {
-          depth = await fetchJson<TaiwanStockQuoteDepthRead>(
-            `/api/market/quote-depth/${requestedStockId}`,
-            { refresh: false }
-          );
-        }
+        const depth = await fetchJson<TaiwanStockQuoteDepthRead>(
+          `/api/market/quote-depth/${requestedStockId}`,
+          { refresh: false }
+        );
 
         if (cancelled || activeStockIdRef.current !== requestedStockId) {
           return latestQuoteDepth;
@@ -426,20 +500,18 @@ export function useTaiwanQuoteDepth({
     function scheduleRefresh(depth: TaiwanStockQuoteDepthRead | null) {
       if (cancelled) return;
       refreshTimer = window.setTimeout(() => {
-        void load(false, depth?.session_phase === "close_resolution").then(
-          scheduleRefresh
-        );
+        void load(false).then(scheduleRefresh);
       }, quoteDepthRefreshDelayMs(depth));
     }
 
-    void load(true, true).then(scheduleRefresh);
+    void load(true).then(scheduleRefresh);
     void loadReplay();
 
     return () => {
       cancelled = true;
       clearRefreshTimer();
     };
-  }, [enabled, stockId]);
+  }, [depthEnabled, enabled, stockId]);
 
   const currentQuoteDepth =
     stockId !== null && quoteDepth?.stock_id === stockId ? quoteDepth : null;
@@ -448,7 +520,7 @@ export function useTaiwanQuoteDepth({
   const currentQuoteStream =
     stockId !== null && quoteStream?.stock_id === stockId ? quoteStream : null;
   const scopedLoadState: QuoteDepthLoadState =
-    !enabled || !stockId
+    !enabled || !depthEnabled || !stockId
       ? "idle"
       : currentQuoteDepth
         ? loadState
@@ -456,7 +528,7 @@ export function useTaiwanQuoteDepth({
           ? "error"
           : "loading";
   const scopedReplayLoadState: QuoteReplayLoadState =
-    !enabled || !stockId
+    !enabled || !depthEnabled || !stockId
       ? "idle"
       : currentQuoteReplay
         ? replayLoadState
@@ -464,7 +536,7 @@ export function useTaiwanQuoteDepth({
           ? "error"
           : "loading";
   const scopedQuoteStreamLoadState: QuoteDepthLoadState =
-    !enabled || !stockId
+    !enabled || !streamEnabled || !stockId
       ? "idle"
       : currentQuoteStream
         ? quoteStreamLoadState

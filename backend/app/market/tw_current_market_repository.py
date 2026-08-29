@@ -8,7 +8,7 @@ import json
 
 from pydantic import ValidationError
 from sqlalchemy import inspect
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.db.models import (
     RawFetchResult,
@@ -52,6 +52,13 @@ from app.market_data.resolution import ResolutionCandidate
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
+
+_RAW_FETCH_LINEAGE_COLUMNS = (
+    RawFetchResult.id,
+    RawFetchResult.source_id,
+    RawFetchResult.content_hash,
+    RawFetchResult.parser_version,
+)
 
 
 def _aware(value: datetime, *, tz=timezone.utc) -> datetime:
@@ -150,6 +157,7 @@ class TaiwanCurrentMarketRepository:
                 RawFetchResult,
                 SourceRegistry,
             )
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
             .join(RawFetchResult, RawFetchResult.id == TaiwanCurrentIndexSnapshot.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == TaiwanCurrentIndexSnapshot.source_id)
             .filter(TaiwanCurrentIndexSnapshot.index_id == target.scope_key)
@@ -308,6 +316,7 @@ class TaiwanCurrentMarketRepository:
                 RawFetchResult,
                 SourceRegistry,
             )
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
             .join(RawFetchResult, RawFetchResult.id == TaiwanCurrentBreadthSnapshot.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == TaiwanCurrentBreadthSnapshot.source_id)
             .filter(TaiwanCurrentBreadthSnapshot.venue == target.scope_key)
