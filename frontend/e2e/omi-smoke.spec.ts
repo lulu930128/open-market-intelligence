@@ -5215,6 +5215,106 @@ test.describe("OMI dashboard smoke", () => {
     await expect(panel).not.toContainText("五檔資料讀取失敗");
   });
 
+  test("Taiwan quote depth keeps five placeholder levels in live and auction views", async ({
+    page,
+  }) => {
+    const quoteWithoutDepth = {
+      ...quoteDepthResponse("2330"),
+      bid_levels: [],
+      ask_levels: [],
+      best_bid_price: null,
+      best_bid_size_lots: null,
+      best_ask_price: null,
+      best_ask_size_lots: null,
+      bid_total_size_lots: null,
+      ask_total_size_lots: null,
+      depth_available: false,
+    };
+    const streamWithoutDepth = {
+      ...realtimeQuoteStreamResponse("2330"),
+      capability_status: {
+        ...realtimeQuoteStreamResponse("2330").capability_status,
+        depth: "empty",
+      },
+      depth: null,
+    };
+    const replayWithoutDepth = {
+      ...emptyQuoteReplayResponse("2330"),
+      trade_date: "2026-06-15",
+      captured_count: 1,
+      coverage_ratio: 0.2,
+      missing_slots: ["08:30", "08:50", "08:55", "08:58"],
+      snapshots: [
+        {
+          capture_slot: "08:59",
+          status: "captured",
+          scheduled_at: "2026-06-15T08:59:00+08:00",
+          captured_at: "2026-06-15T08:59:56+08:00",
+          quote_time: "2026-06-15T08:59:55+08:00",
+          freshness_status: "snapshot",
+          refresh_outcome: "updated",
+          error: null,
+          quote: {
+            ...quoteWithoutDepth,
+            session_phase: "preopen_auction",
+            instrument_phase: "preopen_auction",
+            phase_label: "試撮",
+            quote_time: "2026-06-15T08:59:55+08:00",
+          },
+        },
+      ],
+    };
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) => {
+        if (path.includes("/market/quote-depth/2330/replay")) {
+          return { body: replayWithoutDepth };
+        }
+        if (path.endsWith("/market/quote-depth/2330")) {
+          return { body: quoteWithoutDepth };
+        }
+        if (path.endsWith("/market/realtime-quotes/2330")) {
+          return { body: streamWithoutDepth };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const book = page.getByTestId("quote-depth-book-column");
+    await expect(page.getByTestId("quote-depth-bid-row")).toHaveCount(5);
+    await expect(page.getByTestId("quote-depth-ask-row")).toHaveCount(5);
+    await expect(book.getByText("Open", { exact: true })).toHaveCount(0);
+    await expect(book.getByText("High", { exact: true })).toHaveCount(0);
+    await expect(book.getByText("Low", { exact: true })).toHaveCount(0);
+    await expect(book.getByText("Volume", { exact: true })).toHaveCount(0);
+
+    for (const side of ["bid", "ask"] as const) {
+      for (let level = 1; level <= 5; level += 1) {
+        await expect(
+          page.getByTestId(`quote-depth-${side}-level-${level}-price`)
+        ).toHaveText("-");
+        await expect(
+          page.getByTestId(`quote-depth-${side}-level-${level}-size`)
+        ).toHaveText("-");
+      }
+    }
+
+    await expect(page.getByTestId("quote-depth-replay-coverage")).toContainText(
+      "1 筆試撮快照"
+    );
+    await page.getByTestId("quote-depth-mode-replay").click();
+    await expect(page.getByTestId("quote-depth-mode-replay")).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    await expect(page.getByTestId("quote-depth-bid-row")).toHaveCount(5);
+    await expect(page.getByTestId("quote-depth-ask-row")).toHaveCount(5);
+    await expect(page.getByTestId("quote-depth-bid-level-1-price")).toHaveText("-");
+    await expect(page.getByTestId("quote-depth-ask-level-5-size")).toHaveText("-");
+  });
+
   test("Taiwan quote depth isolates stream and GET state across rapid symbol switches", async ({
     page,
   }) => {
