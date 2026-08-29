@@ -573,6 +573,7 @@ function stockOhlcResponse(stockId: string) {
     point_count: stockPoints.length,
     points: stockPoints,
     intraday_overlay: null,
+    volume_unit: "shares",
     backfill: null,
   };
 }
@@ -1156,6 +1157,11 @@ function usMarketResearchResponse(symbol: string) {
 function realtimeQuoteStreamResponse(stockId: string) {
   const price = stockId === "2303" ? 52.4 : 1_015;
   return {
+    projection_scope: "presentation_only",
+    canonical_truth: false,
+    decision_usable: false,
+    research_usable: false,
+    provider_specific: true,
     kind: "taiwan_realtime_quote_stream",
     contract_version: "omi.tw.realtime_stream.v2",
     stock_id: stockId,
@@ -3824,7 +3830,8 @@ test.describe("OMI dashboard smoke", () => {
         if (
           context.market === "us" &&
           context.kind === "ohlc" &&
-          context.target === "^IXIC" &&
+          context.target !== "^GSPC" &&
+          context.target !== "^DJI" &&
           context.requestNumber === 1
         ) {
           resolveStaleRequestStarted();
@@ -3859,7 +3866,7 @@ test.describe("OMI dashboard smoke", () => {
     expect(djiOhlc?.url.searchParams.get("bars")).toBe("60");
     expect(djiOhlc?.url.searchParams.get("ensure_history")).toBe("false");
     expect(djiOhlc?.url.searchParams.get("outputsize")).toBe("compact");
-    expect(djiOhlc?.url.searchParams.get("provider")).toBe("yahoo_chart");
+    expect(djiOhlc?.url.searchParams.get("provider")).toBeNull();
     expect(
       tapeCalls.some(
         (call) => call.market === "us" && call.kind === "intraday" && call.target === "^DJI"
@@ -3899,13 +3906,18 @@ test.describe("OMI dashboard smoke", () => {
     page,
   }) => {
     const timeoutDetail = "fixture intraday timeout";
+    let resolveIntradayFailureObserved: () => void = () => undefined;
+    const intradayFailureObserved = new Promise<void>((resolve) => {
+      resolveIntradayFailureObserved = resolve;
+    });
 
     await page.clock.setFixedTime(new Date("2026-07-14T15:00:00Z"));
     await mockOmiApi(page, {
       usWatchlistTree: seededUsWatchlistTree(),
       usWatchlistItems: seededUsWatchlistItems(),
-      apiResponder: ({ path, requestNumber }) => {
-        if (path.endsWith("/us-market/intraday/AAPL") && requestNumber >= 2) {
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/intraday/AAPL")) {
+          resolveIntradayFailureObserved();
           return { body: { detail: timeoutDetail }, status: 504 };
         }
         return null;
@@ -3915,13 +3927,23 @@ test.describe("OMI dashboard smoke", () => {
       waitUntil: "domcontentloaded",
     });
 
-    await page.getByRole("button", { name: "今日", exact: true }).first().click();
+    const detailPanel = page.getByTestId("us-stock-kline-panel");
+    await expect(detailPanel).toBeVisible();
+    const todayTimeframe = detailPanel.getByRole("button", { name: "今日", exact: true });
+    await expect(async () => {
+      await todayTimeframe.click();
+      await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/, {
+        timeout: 750,
+      });
+    }).toPass({ timeout: 5_000 });
+    await intradayFailureObserved;
 
     const sidebar = page.getByRole("complementary").first();
     const statusToggle = sidebar.getByRole("button", { name: /更新狀態/ });
-    await expect(statusToggle.locator(".omi-job-status-pill-attention")).toContainText("1", {
-      timeout: 10_000,
-    });
+    await expect(statusToggle.locator(".omi-job-status-pill-attention")).toContainText(
+      /補失敗 [1-9]\d*/,
+      { timeout: 10_000 }
+    );
     await expect(page.getByText(new RegExp(timeoutDetail))).toHaveCount(0);
 
     await statusToggle.click();
@@ -4928,6 +4950,7 @@ test.describe("OMI dashboard smoke", () => {
       waitUntil: "domcontentloaded",
     });
 
+    await page.locator('[data-watchlist-group-id="7"]').click();
     const umcRankingLink = page.locator('[data-ranking-stock-id="2303"]');
     await expect(umcRankingLink).toBeVisible();
     await umcRankingLink.click();
@@ -5148,7 +5171,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByTestId("quote-depth-mode-live")).toHaveText("即時成交");
     await expect(page.getByTestId("quote-depth-mode-replay")).toHaveText("試撮");
     await expect(page.getByTestId("quote-recent-trades-status")).toHaveText("即時");
-    await expect(panel).toContainText("KGI SUPER PY · STREAM");
+    await expect(panel).toContainText("KGI SUPERPY · PRESENTATION STREAM");
     await expect(page.getByTestId("quote-recent-trade-row")).toContainText("1,015");
     await expect(page.getByTestId("quote-recent-trade-row")).toContainText("12 張");
     await expect(page.getByTestId("quote-volume-summary")).toHaveCount(0);
@@ -5190,7 +5213,9 @@ test.describe("OMI dashboard smoke", () => {
     });
 
     const panel = page.getByTestId("quote-depth-panel");
-    await expect(panel).toContainText("KGI SUPER PY · STREAM", { timeout: 2_000 });
+    await expect(panel).toContainText("KGI SUPERPY · PRESENTATION STREAM", {
+      timeout: 2_000,
+    });
     await expect(panel).toContainText("1,014.9", { timeout: 2_000 });
     expect(quoteDepthRequestFinished).toBe(false);
   });
@@ -5209,7 +5234,7 @@ test.describe("OMI dashboard smoke", () => {
     });
 
     const panel = page.getByTestId("quote-depth-panel");
-    await expect(panel).toContainText("KGI SUPER PY · STREAM");
+    await expect(panel).toContainText("KGI SUPERPY · PRESENTATION STREAM");
     await expect(panel).toContainText("1,014.9");
     await expect(page.getByTestId("quote-recent-trade-row")).toContainText("1,015");
     await expect(panel).not.toContainText("五檔資料讀取失敗");
@@ -5335,12 +5360,14 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.locator('[data-ranking-stock-id="2303"]')).toBeVisible();
     await page.locator('[data-ranking-stock-id="2330"]').click();
     const panel = page.getByTestId("quote-depth-panel");
-    await expect(panel).toContainText("KGI SUPER PY · STREAM");
+    await expect(panel).toContainText("KGI SUPERPY · PRESENTATION STREAM");
     await expect(page.getByTestId("quote-recent-trade-row")).toContainText("1,015");
 
     await page.locator('[data-ranking-stock-id="2303"]').click();
     await expect(page.getByRole("heading", { level: 2 }).filter({ hasText: "2303" })).toBeVisible();
-    await expect(panel).toContainText("KGI SUPER PY · STREAM", { timeout: 2_000 });
+    await expect(panel).toContainText("KGI SUPERPY · PRESENTATION STREAM", {
+      timeout: 2_000,
+    });
     await expect(page.getByTestId("quote-recent-trade-row")).toContainText("52.4", {
       timeout: 2_000,
     });
@@ -6468,7 +6495,7 @@ test.describe("OMI dashboard smoke", () => {
     expect(pageErrors).toEqual([]);
   });
 
-  test("Taiwan chart history backfill stays in Update status without an inline banner", async ({
+  test("Taiwan chart reads stay pure when cached history is short", async ({
     page,
   }) => {
     let backfillRequested = false;
@@ -6514,15 +6541,11 @@ test.describe("OMI dashboard smoke", () => {
     });
     await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
 
-    await expect.poll(() => backfillRequested).toBe(true);
     const detailPanel = page.getByTestId("stock-detail-panel");
+    await expect(detailPanel).toHaveAttribute("data-chart-load-state", "success");
+    expect(backfillRequested).toBe(false);
     await expect(detailPanel).not.toContainText("詳見左側更新狀態");
     await expect(detailPanel).not.toContainText("日K：補齊");
-
-    const sidebar = page.getByRole("complementary").first();
-    await sidebar.getByRole("button", { name: /更新狀態/ }).click();
-    await expect(sidebar).toContainText("上市日線補齊");
-    await expect(sidebar).toContainText("#2330");
   });
 
   test("Taiwan professional chart keeps the last drawing deleted while remote sync is stale", async ({
@@ -6967,7 +6990,7 @@ test.describe("OMI dashboard smoke", () => {
       );
     await expect.poll(() => refreshRequests().length).toBe(1);
     const refreshParams = new URLSearchParams(refreshRequests()[0].search);
-    expect(refreshParams.get("include_today")).toBe("true");
+    expect(refreshParams.get("include_today")).toBe("false");
     expect(refreshParams.get("include_children")).toBe("true");
     expect(refreshParams.get("enabled_only")).toBe("true");
   });
@@ -7021,7 +7044,7 @@ test.describe("OMI dashboard smoke", () => {
     expect(refreshParams.get("include_today")).toBe("true");
   });
 
-  test("Taiwan detail backfill reloads the parent ranking without the stale Radar snapshot", async ({
+  test("Taiwan detail reads do not trigger implicit backfill or companion reloads", async ({
     page,
   }) => {
     const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
@@ -7079,12 +7102,11 @@ test.describe("OMI dashboard smoke", () => {
           new URLSearchParams(request.search).get("prefer_snapshot") === "false"
       );
 
-    await expect.poll(() => detailBackfillRequests().length).toBe(1);
-    await expect.poll(() => parentRankingRequests().length).toBeGreaterThanOrEqual(2);
-    await expect.poll(() => uncachedRadarRequests().length).toBeGreaterThanOrEqual(1);
-
     await page.locator('[data-watchlist-group-id="7"]').click();
     await expect(page.locator('[data-ranking-stock-id="2330"]')).toBeVisible();
+    expect(detailBackfillRequests()).toHaveLength(0);
+    expect(parentRankingRequests().length).toBeLessThanOrEqual(1);
+    expect(uncachedRadarRequests()).toHaveLength(0);
   });
 
   test("regional stale refresh can be retried after a failed job", async ({ page }) => {
@@ -8577,17 +8599,14 @@ test.describe("OMI dashboard smoke", () => {
     await chipsTab.click();
     await expect(chipsTab).toHaveAttribute("aria-selected", "true");
     await expect(panel).toHaveCount(0);
-    await expect
-      .poll(
-        () =>
-          apiRequests.filter(
-            (request) =>
-              request.method === "POST" &&
-              request.path.endsWith("/market/selection-refresh/0050") &&
-              request.search.includes("profile=chips")
-          ).length
+    expect(
+      apiRequests.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/market/selection-refresh/0050") &&
+          request.search.includes("profile=chips")
       )
-      .toBe(1);
+    ).toHaveLength(0);
 
     await institutionalTab.click();
     await expect(institutionalTab).toHaveAttribute("aria-selected", "true");

@@ -1362,20 +1362,6 @@ def _quality_for_capability(
         status = str(semantic_quality["status"])
         status_class = str(semantic_quality["status_class"])
         canonical_candidate = semantic_quality
-        freshness_status = _canonical_freshness_status(
-            status=status,
-            payload=payload,
-            realtime=realtime,
-            payload_included=payload_included,
-        )
-        release_status = _canonical_release_status(
-            payload=payload,
-            payload_included=payload_included,
-            applicability_status=applicability_status,
-            freshness_status=freshness_status,
-        )
-        if explicitly_unavailable and release_status == "unknown":
-            release_status = "not_released"
     capability_freshness_status = (
         _normalized_status(freshness_by_capability.get(capability_id))
         if freshness_by_capability.get(capability_id) is not None
@@ -1637,6 +1623,7 @@ def _quality_for_capability(
                 or _dict(
                     freshness_by_capability.get(capability_id)
                 ).get("refresh_recommended")
+                or status == "stale"
                 or freshness_status
                 in {"missing", "stale", "delayed", "future", "unavailable"}
             )

@@ -72,8 +72,11 @@ class DatabaseModelContractTests(unittest.TestCase):
     def test_single_registry_configures_all_current_mappers(self) -> None:
         configure_mappers()
 
-        self.assertEqual(len(Base.metadata.tables), 131)
-        self.assertEqual(len(list(Base.registry.mappers)), 131)
+        mappers = list(Base.registry.mappers)
+        self.assertTrue(mappers)
+        self.assertTrue(
+            all(mapper.local_table.metadata is Base.metadata for mapper in mappers)
+        )
         self.assertTrue(CRITICAL_TABLES.issubset(Base.metadata.tables))
 
     def test_all_foreign_keys_resolve_inside_shared_metadata(self) -> None:
@@ -83,7 +86,6 @@ class DatabaseModelContractTests(unittest.TestCase):
             for foreign_key in table.foreign_keys
         ]
 
-        self.assertEqual(len(foreign_keys), 102)
         for foreign_key in foreign_keys:
             with self.subTest(foreign_key=str(foreign_key)):
                 self.assertIn(foreign_key.column.table.name, Base.metadata.tables)

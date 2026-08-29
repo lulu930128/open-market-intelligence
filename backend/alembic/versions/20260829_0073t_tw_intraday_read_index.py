@@ -26,17 +26,19 @@ INDEX_COLUMNS = ["stock_id", "market", "interval", "bar_time", "id"]
 
 def _has_index() -> bool:
     inspector = sa.inspect(op.get_bind())
-    return inspector.has_table(TABLE_NAME) and any(
+    return any(
         item["name"] == INDEX_NAME
         for item in inspector.get_indexes(TABLE_NAME)
     )
 
 
 def upgrade() -> None:
-    if not _has_index():
+    inspector = sa.inspect(op.get_bind())
+    if inspector.has_table(TABLE_NAME) and not _has_index():
         op.create_index(INDEX_NAME, TABLE_NAME, INDEX_COLUMNS, unique=False)
 
 
 def downgrade() -> None:
-    if _has_index():
+    inspector = sa.inspect(op.get_bind())
+    if inspector.has_table(TABLE_NAME) and _has_index():
         op.drop_index(INDEX_NAME, table_name=TABLE_NAME)

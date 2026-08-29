@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
+import tomllib
 
 
 REPO_ROOT = Path(__file__).parents[2]
 BACKEND_APP = REPO_ROOT / "backend" / "app"
 AGENTS_ROOT = REPO_ROOT / "agents"
-TASK_ROOT = REPO_ROOT / "docs" / "agent-runs" / "tw-market-data-platform-convergence-20260825"
-DEBT_PATH = TASK_ROOT / "artifacts" / "cp0-boundary-debt.json"
+DEBT_PATH = REPO_ROOT / "architecture" / "debt.toml"
 
 
 def _relative(path: Path) -> str:
@@ -81,20 +80,12 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_no_new_router_or_ai_provider_imports_beyond_recorded_debt() -> None:
-    debt = json.loads(DEBT_PATH.read_text(encoding="utf-8"))
-    allowed = {
-        (item["file"], item["module"])
-        for item in debt["consumer_provider_imports"]
-    }
     actual: set[tuple[str, str]] = set()
     for root in (BACKEND_APP / "routers", BACKEND_APP / "ai"):
         for path in root.rglob("*.py"):
             actual.update(_provider_imports(path))
 
-    assert actual == allowed, (
-        f"consumer/provider debt drift: added={sorted(actual - allowed)}, "
-        f"stale_allowlist={sorted(allowed - actual)}"
-    )
+    assert actual == set()
 
 
 def test_ai_mcp_and_decision_code_cannot_consume_presentation_stream() -> None:
@@ -149,11 +140,14 @@ def test_ai_freshness_does_not_query_platform_owned_taiwan_price_storage() -> No
 
 
 def test_no_new_shared_market_data_transaction_owners_beyond_recorded_debt() -> None:
-    debt = json.loads(DEBT_PATH.read_text(encoding="utf-8"))
-    allowed = {
-        (item["file"], item["function"], item["method"])
-        for item in debt["market_data_transaction_calls"]
-    }
+    manifest = tomllib.loads(DEBT_PATH.read_text(encoding="utf-8"))
+    allowed: set[tuple[str, str, str]] = set()
+    for item in manifest.get("debt", []):
+        if item.get("rule") != "shared_market_data_transaction":
+            continue
+        function, call_kind, call_name = str(item["occurrence"]).split(":", 2)
+        assert call_kind == "call"
+        allowed.add((str(item["path"]), function, call_name.rsplit(".", 1)[-1]))
     actual: set[tuple[str, str, str]] = set()
     for path in (BACKEND_APP / "market_data").rglob("*.py"):
         actual.update(_transaction_calls(path))

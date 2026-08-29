@@ -244,7 +244,7 @@ TW_DATASET_OPERATIONS = (
         callable_path="app.market.daily_ohlcv_platform.refresh_taiwan_official_daily",
         external_io=True,
         writes_storage=True,
-        bounds=_bounds(1, 30, 1, 3650),
+        bounds=_bounds(2, 30, 1, 3650),
     ),
     TaiwanDatasetOperationSpec(
         operation_id="tw.reconcile_full_market_eod",
@@ -555,7 +555,7 @@ TW_DATASET_CONTRACTS = (
         expected=TaiwanExpectedStatePolicy.REQUESTED_OR_LATEST_COMPLETED,
         eligibility="listed_instrument_market_day_and_instrument_eligible",
         refresh_operation="tw.refresh_daily_price",
-        refresh_bounds=_bounds(1, 30, 1, 3650),
+        refresh_bounds=_bounds(2, 30, 1, 3650),
         repairable=True,
         postcondition="Official receipt and canonical row commit, reread, and resolve through the shared Gateway.",
         lineage=TaiwanDatasetLineageStatus.CANONICAL_RAW_RECEIPT,

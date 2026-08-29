@@ -61,7 +61,14 @@ class TaiwanSourceHealthTests(unittest.TestCase):
                 category="market_daily_price",
             )
         )
-        self.db.add(RawFetchResult(id=1, source_id=1, method="GET"))
+        self.db.add(
+            RawFetchResult(
+                id=1,
+                source_id=1,
+                method="GET",
+                fetched_at=updated_at,
+            )
+        )
         self.db.add(
             MarketDailyPrice(
                 source_id=1,

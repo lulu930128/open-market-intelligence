@@ -24,6 +24,7 @@ from app.market.providers.kgi_superpy_bridge import (
     _us_portfolio_records,
 )
 from app.market.kgi_market_data import backfill_taiwan_kgi_market_data
+from app.market.providers.kgi_canonical import KGI_PROVIDER
 from app.market.schemas import (
     TaiwanRealtimeMarketStreamRead,
     TaiwanRealtimeQuoteLeaseCreate,
@@ -31,6 +32,8 @@ from app.market.schemas import (
 )
 from app.market.schemas import TaiwanKgiDataBackfillRequest, TaiwanKgiDataBackfillRead
 from app.market.trading_calendar import TAIWAN_TZ
+from app.market.tw_realtime_capabilities import KGI_QUOTE_SNAPSHOT_DESCRIPTOR
+from app.market.tw_realtime_stream_platform import read_taiwan_realtime_market_stream
 
 
 class _NoProcessManager(KgiSuperPyQuoteManager):
@@ -56,6 +59,21 @@ def _config(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _read_market_stream(
+    manager: KgiSuperPyQuoteManager,
+    symbol: str,
+    *,
+    diagnostic_limit: int = 0,
+) -> TaiwanRealtimeMarketStreamRead:
+    payload = read_taiwan_realtime_market_stream(
+        symbol,
+        diagnostic_limit=diagnostic_limit,
+        descriptors=(KGI_QUOTE_SNAPSHOT_DESCRIPTOR,),
+        ports={KGI_PROVIDER: manager},
+    )
+    return TaiwanRealtimeMarketStreamRead.model_validate(payload)
 
 
 class KgiSuperPyQuoteTests(unittest.TestCase):
@@ -457,8 +475,7 @@ class KgiSuperPyQuoteTests(unittest.TestCase):
                 }
             )
 
-            payload = manager.market_stream_snapshot("2330", diagnostic_limit=10)
-            parsed = TaiwanRealtimeMarketStreamRead.model_validate(payload)
+            parsed = _read_market_stream(manager, "2330", diagnostic_limit=10)
         finally:
             manager.close()
 
@@ -494,8 +511,7 @@ class KgiSuperPyQuoteTests(unittest.TestCase):
                     "account_id": "must-not-leak",
                 }
             )
-            payload = manager.market_stream_snapshot("2330", diagnostic_limit=10)
-            parsed = TaiwanRealtimeMarketStreamRead.model_validate(payload)
+            parsed = _read_market_stream(manager, "2330", diagnostic_limit=10)
         finally:
             manager.close()
 
@@ -573,7 +589,7 @@ class KgiSuperPyQuoteTests(unittest.TestCase):
 
     def test_market_stream_zero_cumulative_quote_is_auction_not_trade(self) -> None:
         manager = _NoProcessManager(_config())
-        event_time = datetime.now(TAIWAN_TZ)
+        event_time = datetime(2026, 8, 21, 10, 0, 0, tzinfo=TAIWAN_TZ)
         try:
             manager._accept_quote(
                 {
@@ -668,8 +684,7 @@ class KgiSuperPyQuoteTests(unittest.TestCase):
                     "simtrade": 0,
                 }
             )
-            payload = manager.market_stream_snapshot("2330")
-            parsed = TaiwanRealtimeMarketStreamRead.model_validate(payload)
+            parsed = _read_market_stream(manager, "2330")
         finally:
             manager.close()
 
@@ -858,7 +873,7 @@ class KgiSuperPyQuoteTests(unittest.TestCase):
             expires_at=10**12,
         )
         manager._symbol_leases["2330"] = {lease_id}
-        event_time = datetime.now(TAIWAN_TZ)
+        event_time = datetime(2026, 8, 21, 10, 0, 0, tzinfo=TAIWAN_TZ)
         quote = {
             "symbol": "2330",
             "datetime": event_time.strftime("%Y%m%d%H%M%S"),

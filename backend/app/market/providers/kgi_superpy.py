@@ -646,6 +646,9 @@ class KgiSuperPyQuoteManager:
             volume_lots = self._integer(normalized_quote.get("volume"))
             total_volume_lots = self._integer(normalized_quote.get("total_volume"))
             simtrade = self._integer(normalized_quote.get("simtrade")) == 1
+            provider_trade_evidence = kgi_quote_has_actual_trade_evidence(
+                normalized_quote
+            )
             indicative = kgi_quote_is_indicative(
                 normalized_quote,
                 session=session_phase,
@@ -672,11 +675,20 @@ class KgiSuperPyQuoteManager:
                 else "decreased"
             )
             cumulative_volume_advanced = cumulative_relation == "advanced"
+            closing_match = (
+                session_phase == "closing_auction"
+                and provider_trade_evidence
+                and cumulative_volume_advanced
+            )
+            if closing_match:
+                actual_trade = True
+                actual_trade_evidence = True
+                indicative = False
             baseline_only = actual_trade and cumulative_relation == "baseline"
             if baseline_only:
                 actual_trade = False
             paired_trial_callback = (
-                kgi_quote_has_actual_trade_evidence(normalized_quote)
+                provider_trade_evidence
                 and previous_cumulative_volume_lots is not None
                 and total_volume_lots == previous_cumulative_volume_lots
                 and bool(
