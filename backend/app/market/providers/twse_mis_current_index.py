@@ -7,6 +7,11 @@ from datetime import date, datetime, time, timedelta, timezone
 from app.market.index_parsers import as_float, as_int, parse_trade_date
 from app.market.providers import http_get, twse_mis
 from app.market.providers.tw_current_market import CurrentMarketProviderPayload
+from app.market.providers.twse_mis_guard import (
+    TWSE_MIS_PROVIDER_GUARD,
+    response_failure_metadata,
+)
+from app.market_data.contracts import OperationalStatus
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -52,6 +57,27 @@ def read_twse_mis_current_index(
             status="failed",
             url=twse_mis.STOCK_INFO_URL,
             error=f"unsupported Taiwan current index: {normalized}",
+            operational_status=OperationalStatus.UNAVAILABLE,
+            detail_code="UNSUPPORTED_CURRENT_INDEX",
+            external_calls=0,
+        )
+    decision = TWSE_MIS_PROVIDER_GUARD.before_request()
+    if not decision.allowed:
+        return CurrentMarketProviderPayload(
+            payload=None,
+            status="rate_limited" if decision.status == "rate_limited" else "cooldown",
+            url=twse_mis.STOCK_INFO_URL,
+            status_code=429 if decision.status == "rate_limited" else None,
+            error=decision.detail_code,
+            operational_status=(
+                OperationalStatus.RATE_LIMITED
+                if decision.status == "rate_limited"
+                else OperationalStatus.UNAVAILABLE
+            ),
+            detail_code=decision.detail_code,
+            retry_after_seconds=decision.retry_after_seconds,
+            cooldown_until=decision.cooldown_until,
+            external_calls=0,
         )
     try:
         message = twse_mis.fetch_index_message(
@@ -94,17 +120,40 @@ def read_twse_mis_current_index(
             "point_count": len(points),
             "points": points,
         }
+        TWSE_MIS_PROVIDER_GUARD.record_success()
         return CurrentMarketProviderPayload(
             payload=payload,
             status="available" if points else "missing",
             url=twse_mis.STOCK_INFO_URL,
+            operational_status=OperationalStatus.HEALTHY,
+            detail_code="TWSE_MIS_INDEX_AVAILABLE",
         )
     except Exception as exc:
+        status_code, headers = response_failure_metadata(exc)
+        guard = (
+            TWSE_MIS_PROVIDER_GUARD.record_http_failure(
+                status_code,
+                headers=headers,
+            )
+            if status_code is not None
+            else TWSE_MIS_PROVIDER_GUARD.record_failure(
+                detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
+            )
+        )
         return CurrentMarketProviderPayload(
             payload=None,
-            status="failed",
+            status="rate_limited" if status_code == 429 else "failed",
             url=twse_mis.STOCK_INFO_URL,
+            status_code=status_code,
             error=f"{type(exc).__name__}: {exc}",
+            operational_status=(
+                OperationalStatus.RATE_LIMITED
+                if status_code == 429
+                else OperationalStatus.FAILED
+            ),
+            detail_code=guard.detail_code,
+            retry_after_seconds=guard.retry_after_seconds,
+            cooldown_until=guard.cooldown_until,
         )
 
 

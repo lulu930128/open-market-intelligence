@@ -14,6 +14,11 @@ from app.market_data.provider_catalog import (
 
 TW_INTRADAY_BARS_CAPABILITY_ID = "intraday.bars"
 
+FUGLE_INTRADAY_PROVIDER = "fugle_marketdata"
+FUGLE_INTRADAY_SOURCE = "fugle_candles_stream"
+FUGLE_INTRADAY_RESOURCE_ID = "tw.fugle.candles.stream"
+FUGLE_INTRADAY_PARSER_VERSION = "fugle.websocket.candles.v1"
+
 NSTOCK_INTRADAY_PROVIDER = "nstock"
 NSTOCK_INTRADAY_SOURCE = "nstock_minute_stock_data"
 NSTOCK_INTRADAY_RESOURCE_ID = "tw.nstock.minute.bars"
@@ -48,6 +53,37 @@ NSTOCK_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     limitations=("CURRENT_SESSION_ONLY", "VENDOR_BEST_EFFORT"),
 )
 
+FUGLE_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key=FUGLE_INTRADAY_PROVIDER,
+    market=Market.TW,
+    capability_id=TW_INTRADAY_BARS_CAPABILITY_ID,
+    resource_id=FUGLE_INTRADAY_RESOURCE_ID,
+    authority=AuthorityClass.VENDOR,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+    venue_scope=("TWSE",),
+    instrument_types=(InstrumentType.STOCK, InstrumentType.ETF),
+    intervals=("1m",),
+    acquisition_modes=(AcquisitionMode.SUBSCRIPTION,),
+    priority=5,
+    can_produce_live=True,
+    can_produce_final=False,
+    max_timeout_seconds=20,
+    max_external_calls_per_attempt=0,
+    max_subscriptions_per_attempt=1,
+    max_symbols_per_call=1,
+    max_range_days=1,
+    health_ttl_seconds=30,
+    allow_unknown_health=True,
+    allow_disconnected_connect=True,
+    limitations=(
+        "API_KEY_REQUIRED",
+        "ACTIVE_STOCK_ONLY",
+        "BASIC_PLAN_ONE_CONNECTION_FIVE_SUBSCRIPTIONS",
+        "BOARD_LOTS_CONVERTED_TO_SHARES",
+        "BACKGROUND_MATERIALIZATION_REQUIRED",
+    ),
+)
+
 YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     provider_key=YAHOO_INTRADAY_PROVIDER,
     market=Market.TW,
@@ -72,6 +108,7 @@ YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
 )
 
 TW_INTRADAY_DESCRIPTORS = (
+    FUGLE_INTRADAY_DESCRIPTOR,
     NSTOCK_INTRADAY_DESCRIPTOR,
     YAHOO_INTRADAY_DESCRIPTOR,
 )
@@ -88,6 +125,14 @@ class TaiwanIntradaySourceBinding:
 
 
 _BINDINGS = (
+    TaiwanIntradaySourceBinding(
+        descriptor=FUGLE_INTRADAY_DESCRIPTOR,
+        source=FUGLE_INTRADAY_SOURCE,
+        parser_version=FUGLE_INTRADAY_PARSER_VERSION,
+        source_type="stream",
+        auth_type="api_key",
+        reliability_level="vendor",
+    ),
     TaiwanIntradaySourceBinding(
         descriptor=NSTOCK_INTRADAY_DESCRIPTOR,
         source=NSTOCK_INTRADAY_SOURCE,
@@ -121,6 +166,11 @@ def intraday_source_binding(
 
 
 __all__ = [
+    "FUGLE_INTRADAY_DESCRIPTOR",
+    "FUGLE_INTRADAY_PARSER_VERSION",
+    "FUGLE_INTRADAY_PROVIDER",
+    "FUGLE_INTRADAY_RESOURCE_ID",
+    "FUGLE_INTRADAY_SOURCE",
     "NSTOCK_INTRADAY_DESCRIPTOR",
     "NSTOCK_INTRADAY_PARSER_VERSION",
     "NSTOCK_INTRADAY_PROVIDER",

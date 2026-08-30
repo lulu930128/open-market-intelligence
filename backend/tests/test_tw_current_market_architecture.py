@@ -10,6 +10,7 @@ from app.market import indices
 from app.market import tw_current_market_platform
 from app.market import tw_current_market_operations
 from app.market.providers import twse_mis_current_breadth
+from app.jobs import scheduler
 from app.market_data import gateway
 
 
@@ -71,13 +72,15 @@ def test_shared_gateway_is_provider_neutral_for_current_capabilities() -> None:
 
 def test_current_refresh_uses_market_owned_provider_operations() -> None:
     refresh_source = inspect.getsource(indices.refresh_market_index_summary)
+    refresh_core_source = inspect.getsource(indices._refresh_current_market_summary)
     indices_source = inspect.getsource(indices)
     operation_source = inspect.getsource(tw_current_market_operations)
     breadth_provider_source = inspect.getsource(twse_mis_current_breadth)
 
-    assert "tw_current_market_operations" in refresh_source
-    assert "tw_current_market_legacy_bridge" not in refresh_source
-    assert "build_current_market_executors" in refresh_source
+    assert "_refresh_current_market_summary" in refresh_source
+    assert "tw_current_market_operations" in refresh_core_source
+    assert "tw_current_market_legacy_bridge" not in refresh_core_source
+    assert "build_current_market_executors" in refresh_core_source
     assert "app.market import indices" not in operation_source
     assert "app.market.indices" not in operation_source
     assert "def _fetch_mis_index_intraday" not in indices_source
@@ -87,3 +90,17 @@ def test_current_refresh_uses_market_owned_provider_operations() -> None:
     assert "from app.db.models import StockMaster" not in breadth_provider_source
     assert "sqlalchemy" not in breadth_provider_source
     assert "Session" not in breadth_provider_source
+
+
+def test_index_and_breadth_scheduler_lanes_are_independent() -> None:
+    index_job_source = inspect.getsource(
+        scheduler.collect_taiwan_market_index_summary
+    )
+    breadth_job_source = inspect.getsource(
+        scheduler.collect_taiwan_market_breadth_summary
+    )
+
+    assert "refresh_current_market_index_snapshots" in index_job_source
+    assert "refresh_current_market_breadth_snapshots" not in index_job_source
+    assert "refresh_current_market_breadth_snapshots" in breadth_job_source
+    assert "refresh_current_market_index_snapshots" not in breadth_job_source

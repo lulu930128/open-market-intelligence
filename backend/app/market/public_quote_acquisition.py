@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from app.market.providers import twse_mis
+from app.market.providers.twse_mis_guard import (
+    TWSE_MIS_PROVIDER_GUARD,
+    TwseMisProviderGuard,
+    response_failure_metadata,
+)
 from app.market.providers.tw_public_quote import (
     TWSE_MIS_QUOTE_PARSER_VERSION,
     endpoint_for_instrument,
@@ -66,6 +71,7 @@ class _QuoteRouteOutcome:
     observation: QuoteObservation | None
     health: ProviderResourceHealth
     limitations: tuple[str, ...]
+    external_calls: int = 1
 
 
 def _header(response: HttpResponseLike, name: str) -> str | None:
@@ -101,6 +107,8 @@ def _health(
     operational: OperationalStatus,
     freshness: EvidenceFreshness,
     detail_code: str,
+    retry_after_seconds: int | None = None,
+    cooldown_until: datetime | None = None,
 ) -> ProviderResourceHealth:
     return ProviderResourceHealth(
         provider=route.provider_key,
@@ -113,6 +121,8 @@ def _health(
         freshness=freshness,
         checked_at=checked_at,
         detail_code=detail_code,
+        retry_after_seconds=retry_after_seconds,
+        cooldown_until=cooldown_until,
     )
 
 
@@ -125,10 +135,14 @@ class TaiwanPublicQuoteAcquisitionExecutor:
         fetchers: Mapping[str, RouteFetcher] | None = None,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        provider_guard: TwseMisProviderGuard | None = None,
     ) -> None:
         self._fetchers = dict(fetchers or {})
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
+        self._provider_guard = provider_guard or (
+            TwseMisProviderGuard() if fetchers else TWSE_MIS_PROVIDER_GUARD
+        )
 
     def _fetch(
         self,
@@ -170,10 +184,50 @@ class TaiwanPublicQuoteAcquisitionExecutor:
         instrument: InstrumentKey,
         session: MarketSession,
     ) -> _QuoteRouteOutcome:
+        guard = self._provider_guard.before_request()
+        if not guard.allowed:
+            sampled_at = self._clock()
+            error = RuntimeError(guard.detail_code)
+            return _QuoteRouteOutcome(
+                receipt=self._failure_receipt(
+                    route,
+                    instrument,
+                    fetched_at=sampled_at,
+                    error=error,
+                ),
+                observation=None,
+                health=_health(
+                    route,
+                    checked_at=sampled_at,
+                    connection=ConnectionStatus.DISCONNECTED,
+                    operational=(
+                        OperationalStatus.RATE_LIMITED
+                        if guard.status == "rate_limited"
+                        else OperationalStatus.UNAVAILABLE
+                    ),
+                    freshness=EvidenceFreshness.MISSING,
+                    detail_code=guard.detail_code,
+                    retry_after_seconds=guard.retry_after_seconds,
+                    cooldown_until=guard.cooldown_until,
+                ),
+                limitations=(guard.detail_code,),
+                external_calls=0,
+            )
         try:
             response = self._fetch(route, instrument)
         except Exception as exc:
             failed_at = self._clock()
+            status_code, headers = response_failure_metadata(exc)
+            guard = (
+                self._provider_guard.record_http_failure(
+                    status_code,
+                    headers=headers,
+                )
+                if status_code is not None
+                else self._provider_guard.record_failure(
+                    detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
+                )
+            )
             return _QuoteRouteOutcome(
                 receipt=self._failure_receipt(
                     route,
@@ -186,9 +240,15 @@ class TaiwanPublicQuoteAcquisitionExecutor:
                     route,
                     checked_at=failed_at,
                     connection=ConnectionStatus.DISCONNECTED,
-                    operational=OperationalStatus.FAILED,
+                    operational=(
+                        OperationalStatus.RATE_LIMITED
+                        if status_code == 429
+                        else OperationalStatus.FAILED
+                    ),
                     freshness=EvidenceFreshness.MISSING,
-                    detail_code="PROVIDER_REQUEST_FAILED",
+                    detail_code=guard.detail_code,
+                    retry_after_seconds=guard.retry_after_seconds,
+                    cooldown_until=guard.cooldown_until,
                 ),
                 limitations=(
                     "PROVIDER_REQUEST_FAILED",
@@ -217,6 +277,10 @@ class TaiwanPublicQuoteAcquisitionExecutor:
             ),
         )
         if not 200 <= status_code < 300:
+            guard = self._provider_guard.record_http_failure(
+                status_code,
+                headers=response.headers,
+            )
             entitlement = (
                 EntitlementStatus.AUTH_FAILED
                 if status_code == 401
@@ -239,7 +303,9 @@ class TaiwanPublicQuoteAcquisitionExecutor:
                     entitlement=entitlement,
                     operational=operational,
                     freshness=EvidenceFreshness.MISSING,
-                    detail_code=f"HTTP_{status_code}",
+                    detail_code=guard.detail_code,
+                    retry_after_seconds=guard.retry_after_seconds,
+                    cooldown_until=guard.cooldown_until,
                 ),
                 limitations=(f"HTTP_{status_code}",),
             )
@@ -258,6 +324,9 @@ class TaiwanPublicQuoteAcquisitionExecutor:
                 content_hash=receipt.content_hash,
             )
         except Exception as exc:
+            self._provider_guard.record_failure(
+                detail_code="TWSE_MIS_PAYLOAD_PARSE_FAILED"
+            )
             error_receipt = receipt.model_copy(
                 update={"error_message": str(exc)[:2048]}
             )
@@ -278,6 +347,7 @@ class TaiwanPublicQuoteAcquisitionExecutor:
                 ),
             )
 
+        self._provider_guard.record_success()
         has_actual_trade = observation.last_trade_price is not None
         completed_session_observation = session in {
             MarketSession.CLOSE_RESOLUTION,
@@ -371,7 +441,7 @@ class TaiwanPublicQuoteAcquisitionExecutor:
                     )
                     for route in plan.routes
                 ),
-                external_calls=len(outcomes),
+                external_calls=sum(outcome.external_calls for outcome in outcomes),
                 subscriptions_created=0,
                 elapsed_ms=max(
                     int((self._monotonic() - started_at) * 1000),

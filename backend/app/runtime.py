@@ -13,6 +13,10 @@ from app.crypto_market.ws_runtime import (
 )
 from app.db.migrations import run_database_migrations
 from app.db.session import SessionLocal
+from app.market.providers.fugle_realtime_runtime import (
+    start_fugle_realtime,
+    stop_fugle_realtime,
+)
 from app.jobs import scheduler as job_scheduler, service as job_service
 from app.config import settings
 from app.runtime_lock import ProcessFileLock
@@ -81,6 +85,7 @@ class RuntimeCoordinator:
             self.scheduler = job_scheduler.start_scheduler()
             await start_crypto_auto_refresh()
             await start_crypto_realtime_collectors()
+            await start_fugle_realtime()
             self._enqueue_stock_master_bootstrap()
             self.started = True
         except Exception:
@@ -96,6 +101,7 @@ class RuntimeCoordinator:
 
         if self.background_leader:
             for name, stop_step in (
+                ("Fugle realtime", stop_fugle_realtime),
                 ("crypto realtime collectors", stop_crypto_realtime_collectors),
                 ("crypto auto refresh", stop_crypto_auto_refresh),
             ):

@@ -1194,17 +1194,24 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         scheduler = Mock()
         with (
             patch.object(job_scheduler.settings, "enable_taiwan_market_index_scheduler", True),
+            patch.object(job_scheduler.settings, "enable_taiwan_market_breadth_scheduler", True),
             patch.object(job_scheduler.settings, "scheduler_taiwan_market_index_interval_seconds", 5),
+            patch.object(job_scheduler.settings, "scheduler_taiwan_market_breadth_interval_seconds", 60),
         ):
             enabled = job_scheduler._add_taiwan_market_index_collector_job(scheduler)
 
         self.assertTrue(enabled)
-        self.assertEqual(scheduler.add_job.call_count, 3)
-        collector_call, reconciliation_call, startup_call = scheduler.add_job.call_args_list
+        self.assertEqual(scheduler.add_job.call_count, 4)
+        collector_call, breadth_call, reconciliation_call, startup_call = scheduler.add_job.call_args_list
         self.assertEqual(collector_call.kwargs["seconds"], 5)
         self.assertEqual(
             collector_call.kwargs["id"],
             "taiwan_market_index_summary_collector",
+        )
+        self.assertEqual(breadth_call.kwargs["seconds"], 60)
+        self.assertEqual(
+            breadth_call.kwargs["id"],
+            "taiwan_market_breadth_summary_collector",
         )
         self.assertEqual(reconciliation_call.kwargs["minutes"], 5)
         self.assertEqual(

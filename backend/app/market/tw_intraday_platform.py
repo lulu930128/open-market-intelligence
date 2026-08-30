@@ -128,7 +128,7 @@ def build_taiwan_intraday_requirement(
         max_external_calls=2 if acquiring else 0,
         max_subscriptions=0,
         timeout_seconds=40 if acquiring else 30,
-        max_candidates=2,
+        max_candidates=3,
         max_rows=5000,
     )
     return DataRequirementV2(

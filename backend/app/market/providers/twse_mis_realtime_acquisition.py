@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
 
 from app.market.providers import twse_mis
+from app.market.providers.twse_mis_guard import (
+    TWSE_MIS_PROVIDER_GUARD,
+    TwseMisProviderGuard,
+    response_failure_metadata,
+)
 from app.market.providers.tw_public_quote import (
     TWSE_MIS_QUOTE_PARSER_VERSION,
     endpoint_for_instrument,
@@ -60,6 +65,11 @@ class TwseMisProviderSnapshot:
     status_code: int | None = None
     content_type: str | None = None
     error: str | None = None
+    operational_status: OperationalStatus | None = None
+    detail_code: str | None = None
+    retry_after_seconds: int | None = None
+    cooldown_until: datetime | None = None
+    external_calls: int = 1
 
 
 TwseMisSnapshotReader = Callable[[str, str | None, int], TwseMisProviderSnapshot]
@@ -106,9 +116,13 @@ class TwseMisRealtimeAcquisitionAdapter:
         reader: TwseMisSnapshotReader = _default_reader,
         *,
         clock: Clock,
+        provider_guard: TwseMisProviderGuard | None = None,
     ) -> None:
         self._reader = reader
         self._clock = clock
+        self._provider_guard = provider_guard or (
+            TwseMisProviderGuard() if reader is not _default_reader else TWSE_MIS_PROVIDER_GUARD
+        )
         self._cache: dict[str, tuple[TwseMisProviderSnapshot, datetime]] = {}
 
     def _health(
@@ -118,6 +132,9 @@ class TwseMisRealtimeAcquisitionAdapter:
         checked_at: datetime,
         healthy: bool,
         detail_code: str,
+        operational: OperationalStatus | None = None,
+        retry_after_seconds: int | None = None,
+        cooldown_until: datetime | None = None,
     ) -> ProviderResourceHealth:
         return ProviderResourceHealth(
             provider=MIS_PROVIDER,
@@ -130,10 +147,8 @@ class TwseMisRealtimeAcquisitionAdapter:
                 else ConnectionStatus.DISCONNECTED
             ),
             entitlement=EntitlementStatus.ENTITLED,
-            operational=(
-                OperationalStatus.HEALTHY
-                if healthy
-                else OperationalStatus.FAILED
+            operational=operational or (
+                OperationalStatus.HEALTHY if healthy else OperationalStatus.FAILED
             ),
             freshness=(
                 EvidenceFreshness.FRESH
@@ -146,6 +161,8 @@ class TwseMisRealtimeAcquisitionAdapter:
             ),
             checked_at=checked_at,
             detail_code=detail_code,
+            retry_after_seconds=retry_after_seconds,
+            cooldown_until=cooldown_until,
         )
 
     def _acquire(
@@ -185,21 +202,78 @@ class TwseMisRealtimeAcquisitionAdapter:
             sampled_at = self._clock()
             if sampled_at.tzinfo is None or sampled_at.utcoffset() is None:
                 raise ValueError("MIS acquisition clock must return timezone-aware time")
-            try:
-                provider_snapshot = self._reader(
-                    instrument.symbol,
-                    instrument.venue,
-                    route.timeout_seconds,
-                )
-            except Exception as exc:
+            decision = self._provider_guard.before_request()
+            if not decision.allowed:
                 provider_snapshot = TwseMisProviderSnapshot(
                     raw_text=None,
-                    status="failed",
+                    status="rate_limited" if decision.status == "rate_limited" else "cooldown",
                     url=endpoint_for_instrument(instrument),
-                    error=f"{type(exc).__name__}: {exc}"[:1000],
+                    status_code=429 if decision.status == "rate_limited" else None,
+                    error=decision.detail_code,
+                    operational_status=(
+                        OperationalStatus.RATE_LIMITED
+                        if decision.status == "rate_limited"
+                        else OperationalStatus.UNAVAILABLE
+                    ),
+                    detail_code=decision.detail_code,
+                    retry_after_seconds=decision.retry_after_seconds,
+                    cooldown_until=decision.cooldown_until,
+                    external_calls=0,
                 )
+            else:
+                try:
+                    provider_snapshot = self._reader(
+                        instrument.symbol,
+                        instrument.venue,
+                        route.timeout_seconds,
+                    )
+                except Exception as exc:
+                    status_code, headers = response_failure_metadata(exc)
+                    guard = (
+                        self._provider_guard.record_http_failure(
+                            status_code,
+                            headers=headers,
+                        )
+                        if status_code is not None
+                        else self._provider_guard.record_failure(
+                            detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
+                        )
+                    )
+                    provider_snapshot = TwseMisProviderSnapshot(
+                        raw_text=None,
+                        status="failed",
+                        url=endpoint_for_instrument(instrument),
+                        status_code=status_code,
+                        error=f"{type(exc).__name__}: {exc}"[:1000],
+                        operational_status=(
+                            OperationalStatus.RATE_LIMITED
+                            if status_code == 429
+                            else OperationalStatus.FAILED
+                        ),
+                        detail_code=guard.detail_code,
+                        retry_after_seconds=guard.retry_after_seconds,
+                        cooldown_until=guard.cooldown_until,
+                    )
+                else:
+                    if provider_snapshot.status_code is not None and not (
+                        200 <= provider_snapshot.status_code < 300
+                    ):
+                        guard = self._provider_guard.record_http_failure(
+                            provider_snapshot.status_code
+                        )
+                        provider_snapshot = replace(
+                            provider_snapshot,
+                            operational_status=(
+                                OperationalStatus.RATE_LIMITED
+                                if provider_snapshot.status_code == 429
+                                else OperationalStatus.FAILED
+                            ),
+                            detail_code=guard.detail_code,
+                            retry_after_seconds=guard.retry_after_seconds,
+                            cooldown_until=guard.cooldown_until,
+                        )
             self._cache[instrument.symbol] = (provider_snapshot, sampled_at)
-            external_calls = 1
+            external_calls = provider_snapshot.external_calls
         else:
             provider_snapshot, sampled_at = cached
 
@@ -228,7 +302,10 @@ class TwseMisRealtimeAcquisitionAdapter:
                 requirement,
                 checked_at=sampled_at,
                 healthy=False,
-                detail_code="PROVIDER_REQUEST_FAILED",
+                detail_code=provider_snapshot.detail_code or "PROVIDER_REQUEST_FAILED",
+                operational=provider_snapshot.operational_status,
+                retry_after_seconds=provider_snapshot.retry_after_seconds,
+                cooldown_until=provider_snapshot.cooldown_until,
             )
             return _AcquiredSnapshot(
                 snapshot=None,
@@ -289,6 +366,9 @@ class TwseMisRealtimeAcquisitionAdapter:
                 }
             )
         except Exception as exc:
+            self._provider_guard.record_failure(
+                detail_code="TWSE_MIS_PAYLOAD_PARSE_FAILED"
+            )
             failed_receipt = receipt.model_copy(
                 update={"error_message": f"{type(exc).__name__}: {exc}"[:1000]}
             )
@@ -311,6 +391,7 @@ class TwseMisRealtimeAcquisitionAdapter:
                 receipts=(failed_receipt,),
                 provider_health=(health,),
             )
+        self._provider_guard.record_success()
         health = self._health(
             requirement,
             checked_at=sampled_at,

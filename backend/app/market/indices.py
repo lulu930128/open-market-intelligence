@@ -4741,6 +4741,43 @@ def refresh_market_index_summary(
     *,
     refresh_daily_stats: bool = False,
 ) -> dict:
+    return _refresh_current_market_summary(
+        db,
+        refresh_indices=True,
+        refresh_breadth=True,
+        refresh_daily_stats=refresh_daily_stats,
+    )
+
+
+def refresh_current_market_index_snapshots(db: Session) -> dict:
+    """Refresh current indices without triggering full-universe breadth I/O."""
+
+    return _refresh_current_market_summary(
+        db,
+        refresh_indices=True,
+        refresh_breadth=False,
+        refresh_daily_stats=False,
+    )
+
+
+def refresh_current_market_breadth_snapshots(db: Session) -> dict:
+    """Refresh full-universe breadth on its independent bounded cadence."""
+
+    return _refresh_current_market_summary(
+        db,
+        refresh_indices=False,
+        refresh_breadth=True,
+        refresh_daily_stats=False,
+    )
+
+
+def _refresh_current_market_summary(
+    db: Session,
+    *,
+    refresh_indices: bool,
+    refresh_breadth: bool,
+    refresh_daily_stats: bool,
+) -> dict:
     with _SUMMARY_REFRESH_LOCK:
         from app.market.tw_current_market_operations import (
             build_current_market_executors,
@@ -4759,26 +4796,34 @@ def refresh_market_index_summary(
         )
         refresh_limitations: list[str] = []
         for config in INDEX_CONFIGS:
-            index_result = refresh_taiwan_current_index(
-                db,
-                index_id=str(config["index_id"]),
-                requested_at=now,
-                acquisition=index_acquisition,
-            )
-            breadth_result = refresh_taiwan_current_breadth(
-                db,
-                venue=str(config["market"]),
-                requested_at=now,
-                acquisition=breadth_acquisition,
-            )
-            refresh_limitations.extend(index_result.limitations)
-            refresh_limitations.extend(breadth_result.limitations)
+            if refresh_indices:
+                index_result = refresh_taiwan_current_index(
+                    db,
+                    index_id=str(config["index_id"]),
+                    requested_at=now,
+                    acquisition=index_acquisition,
+                )
+                refresh_limitations.extend(index_result.limitations)
+            if refresh_breadth:
+                breadth_result = refresh_taiwan_current_breadth(
+                    db,
+                    venue=str(config["market"]),
+                    requested_at=now,
+                    acquisition=breadth_acquisition,
+                )
+                refresh_limitations.extend(breadth_result.limitations)
         payload = _attach_completed_data_core_evidence(
             db,
             _shared_current_market_summary(db, requested_at=now),
         )
         payload["acquisition_policy"] = "prefer_live"
-        payload["cache_status"] = "canonical_refresh"
+        payload["cache_status"] = (
+            "canonical_refresh"
+            if refresh_indices and refresh_breadth
+            else "canonical_index_refresh"
+            if refresh_indices
+            else "canonical_breadth_refresh"
+        )
         payload["warnings"] = list(
             dict.fromkeys(
                 [

@@ -51,7 +51,7 @@ TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR = ProviderCapabilityDescriptorV2(
         MarketSession.CLOSING_AUCTION,
     ),
     acquisition_modes=(AcquisitionMode.FETCH,),
-    priority=10,
+    priority=20,
     can_produce_live=True,
     can_produce_final=False,
     max_timeout_seconds=10,

@@ -520,13 +520,14 @@ def resolve_market_index(
     now: datetime,
     max_age: timedelta,
     requirement: DataRequirementV2 | None = None,
+    official_first: bool = True,
 ) -> ResolvedMarketIndex:
     selected, health, summaries = _resolve(
         candidates,
         policy=policy,
         now=now,
         max_age=max_age,
-        official_first=True,
+        official_first=official_first,
         requirement=requirement,
     )
     return ResolvedMarketIndex(

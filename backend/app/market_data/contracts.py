@@ -564,12 +564,24 @@ class ProviderResourceHealth(CanonicalModel):
     freshness: EvidenceFreshness
     checked_at: datetime
     detail_code: str | None = Field(default=None, max_length=64)
+    retry_after_seconds: int | None = Field(default=None, ge=0)
+    cooldown_until: datetime | None = None
 
     @field_validator("checked_at")
     @classmethod
     def _require_aware_checked_at(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("checked_at must be timezone-aware")
+        return value
+
+    @field_validator("cooldown_until")
+    @classmethod
+    def _require_aware_cooldown_until(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("cooldown_until must be timezone-aware")
         return value
 
 

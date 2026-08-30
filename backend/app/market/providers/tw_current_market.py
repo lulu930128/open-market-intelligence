@@ -53,6 +53,12 @@ class CurrentMarketProviderPayload:
     status_code: int | None = 200
     content_type: str | None = "application/json"
     error: str | None = None
+    operational_status: OperationalStatus | None = None
+    detail_code: str | None = None
+    retry_after_seconds: int | None = None
+    cooldown_until: datetime | None = None
+    external_calls: int = 1
+    method: str = "GET"
 
 
 PayloadReader = Callable[[str, int], CurrentMarketProviderPayload]
@@ -164,27 +170,42 @@ def _health(
     *,
     provider: str,
     checked_at: datetime,
+    payload: CurrentMarketProviderPayload,
     healthy: bool,
 ) -> ProviderResourceHealth:
+    operational = payload.operational_status or (
+        OperationalStatus.HEALTHY if healthy else OperationalStatus.FAILED
+    )
+    provider_is_live = healthy and operational == OperationalStatus.HEALTHY
     return ProviderResourceHealth(
         provider=provider,
         market=Market.TW,
         capability=requirement.request.capability_id,
         enablement=EnablementStatus.ENABLED,
         connection=(
-            ConnectionStatus.CONNECTED if healthy else ConnectionStatus.DISCONNECTED
+            ConnectionStatus.CONNECTED
+            if provider_is_live
+            else ConnectionStatus.DEGRADED
+            if healthy
+            else ConnectionStatus.DISCONNECTED
         ),
         entitlement=EntitlementStatus.ENTITLED,
-        operational=(
-            OperationalStatus.HEALTHY if healthy else OperationalStatus.FAILED
+        operational=operational,
+        freshness=(
+            EvidenceFreshness.LIVE
+            if provider_is_live
+            else EvidenceFreshness.STALE
+            if healthy
+            else EvidenceFreshness.MISSING
         ),
-        freshness=(EvidenceFreshness.LIVE if healthy else EvidenceFreshness.MISSING),
         checked_at=checked_at,
-        detail_code=(
+        detail_code=payload.detail_code or (
             "CURRENT_MARKET_PROVIDER_AVAILABLE"
             if healthy
             else "CURRENT_MARKET_PROVIDER_FAILED"
         ),
+        retry_after_seconds=payload.retry_after_seconds,
+        cooldown_until=payload.cooldown_until,
     )
 
 
@@ -202,7 +223,7 @@ def _receipt(
         source=binding.source,
         resource_id=route.resource_id,
         fetched_at=fetched_at,
-        method="GET",
+        method=payload.method,
         url=payload.url,
         status_code=payload.status_code,
         content_type=payload.content_type,
@@ -219,6 +240,7 @@ def _summary(
     route: ProviderResourceRouteV2,
     observation_count: int,
     error: str | None,
+    payload: CurrentMarketProviderPayload,
 ) -> AcquisitionSummary:
     completed = error is None and observation_count > 0
     return AcquisitionSummary(
@@ -231,7 +253,7 @@ def _summary(
                 resource_id=route.resource_id,
             ),
         ),
-        external_calls=1,
+        external_calls=payload.external_calls,
         limitations=(
             () if completed else ("PROVIDER_REQUEST_OR_PARSE_FAILED",)
         ),
@@ -330,6 +352,7 @@ class CurrentIndexAdapter:
                 route=route,
                 observation_count=len(observations),
                 error=error,
+                payload=payload,
             ),
             observations=observations,
             receipts=(receipt,),
@@ -338,6 +361,7 @@ class CurrentIndexAdapter:
                     requirement,
                     provider=self.binding.descriptor.provider_key,
                     checked_at=fetched_at,
+                    payload=payload,
                     healthy=observation is not None,
                 ),
             ),
@@ -449,6 +473,7 @@ class CurrentBreadthAdapter:
                 route=route,
                 observation_count=len(observations),
                 error=error,
+                payload=payload,
             ),
             observations=observations,
             receipts=(receipt,),
@@ -457,6 +482,7 @@ class CurrentBreadthAdapter:
                     requirement,
                     provider=self.binding.descriptor.provider_key,
                     checked_at=fetched_at,
+                    payload=payload,
                     healthy=observation is not None,
                 ),
             ),

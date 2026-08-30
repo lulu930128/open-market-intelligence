@@ -13,6 +13,7 @@ from app.market.providers.kgi_realtime_acquisition import (
     KgiRealtimeProviderSnapshot,
 )
 from app.market.tw_realtime_capabilities import (
+    FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR,
     KGI_AUCTION_DESCRIPTOR,
     KGI_ORDER_BOOK_DESCRIPTOR,
     KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
@@ -152,17 +153,23 @@ def _adapter(quote: dict[str, object]) -> KgiRealtimeAcquisitionAdapter:
 
 
 def test_tw_realtime_descriptors_separate_capability_and_resource_contracts() -> None:
-    assert len(TW_REALTIME_PROVIDER_DESCRIPTORS) == 6
+    assert len(TW_REALTIME_PROVIDER_DESCRIPTORS) == 7
     keys = {
         (item.provider_key, item.capability_id, item.resource_id)
         for item in TW_REALTIME_PROVIDER_DESCRIPTORS
     }
-    assert len(keys) == 6
+    assert len(keys) == 7
 
     assert KGI_QUOTE_SNAPSHOT_DESCRIPTOR.capability_id == TW_QUOTE_SNAPSHOT_CAPABILITY_ID
     assert KGI_ORDER_BOOK_DESCRIPTOR.capability_id == TW_ORDER_BOOK_CAPABILITY_ID
     assert TW_AUCTION_CAPABILITY_ID == "quote.auction"
     assert KGI_AUCTION_DESCRIPTOR.capability_id == TW_AUCTION_CAPABILITY_ID
+    assert FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.capability_id == TW_QUOTE_SNAPSHOT_CAPABILITY_ID
+    assert FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.acquisition_modes == (
+        AcquisitionMode.SUBSCRIPTION,
+    )
+    assert FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.venue_scope == ("TWSE",)
+    assert FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.priority == 10
     for descriptor in (
         KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
         KGI_ORDER_BOOK_DESCRIPTOR,

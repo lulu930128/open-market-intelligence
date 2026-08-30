@@ -97,7 +97,7 @@ def build_taiwan_current_requirement(
             max_external_calls=2 if acquiring else 0,
             max_subscriptions=0,
             timeout_seconds=40 if acquiring else 30,
-            max_candidates=2,
+            max_candidates=3,
             max_rows=10,
         ),
     )
@@ -121,6 +121,10 @@ def read_taiwan_current_index(
     return MarketDataGateway().resolve_market_index(
         requirement,
         reader=TaiwanCurrentMarketRepository(db),
+        # Current-session resilience may prefer a fresher, higher-priority
+        # vendor stream. Completed official index readers retain the Gateway
+        # default (official-first) selection contract.
+        official_first=False,
     )
 
 
@@ -152,6 +156,7 @@ def refresh_taiwan_current_index(
         descriptors=tuple(descriptors),
         acquisition_port=acquisition,
         transaction_port=TaiwanCurrentMarketTransaction(db),
+        official_first=False,
     )
 
 

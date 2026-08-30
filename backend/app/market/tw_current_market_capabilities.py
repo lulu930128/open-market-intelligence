@@ -39,6 +39,10 @@ def _descriptor(
     live: bool,
     sessions: tuple[MarketSession, ...],
     limitations: tuple[str, ...],
+    acquisition_modes: tuple[AcquisitionMode, ...] = (AcquisitionMode.FETCH,),
+    venue_scope: tuple[str, ...] = ("TWSE", "TPEX"),
+    max_external_calls: int = 1,
+    max_subscriptions: int = 0,
 ) -> ProviderCapabilityDescriptorV2:
     return ProviderCapabilityDescriptorV2(
         provider_key=provider,
@@ -49,14 +53,15 @@ def _descriptor(
         target_kinds=(DescriptorTargetKind.DATASET,),
         dataset_ids=(dataset,),
         dataset_scope_keys=scopes,
-        venue_scope=("TWSE", "TPEX"),
+        venue_scope=venue_scope,
         supported_sessions=sessions,
-        acquisition_modes=(AcquisitionMode.FETCH,),
+        acquisition_modes=acquisition_modes,
         priority=priority,
         can_produce_live=live,
         can_produce_final=False,
         max_timeout_seconds=20,
-        max_external_calls_per_attempt=1,
+        max_external_calls_per_attempt=max_external_calls,
+        max_subscriptions_per_attempt=max_subscriptions,
         max_symbols_per_call=1,
         max_range_days=1,
         health_ttl_seconds=60,
@@ -73,6 +78,28 @@ _LIVE_SESSIONS = (
     MarketSession.CLOSE_RESOLUTION,
     MarketSession.POST_CLOSE,
     MarketSession.UNKNOWN,
+)
+
+FUGLE_CURRENT_INDEX_DESCRIPTOR = _descriptor(
+    provider="fugle_marketdata",
+    capability=TW_CURRENT_INDEX_CAPABILITY_ID,
+    dataset=TW_CURRENT_INDEX_DATASET_ID,
+    resource="tw.fugle.indices.stream",
+    authority=AuthorityClass.VENDOR,
+    scopes=("TAIEX",),
+    priority=5,
+    live=True,
+    sessions=_LIVE_SESSIONS,
+    acquisition_modes=(AcquisitionMode.SUBSCRIPTION,),
+    venue_scope=("TWSE",),
+    max_external_calls=0,
+    max_subscriptions=1,
+    limitations=(
+        "API_KEY_REQUIRED",
+        "BASIC_PLAN_ONE_CONNECTION_FIVE_SUBSCRIPTIONS",
+        "TAIEX_ONLY",
+        "BACKGROUND_MATERIALIZATION_REQUIRED",
+    ),
 )
 
 TWSE_MIS_CURRENT_INDEX_DESCRIPTOR = _descriptor(
@@ -115,12 +142,20 @@ TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR = _descriptor(
 )
 
 TW_CURRENT_INDEX_DESCRIPTORS = (
+    FUGLE_CURRENT_INDEX_DESCRIPTOR,
     TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,
     YAHOO_CURRENT_INDEX_DESCRIPTOR,
 )
 TW_CURRENT_BREADTH_DESCRIPTORS = (TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR,)
 
 TW_CURRENT_SOURCE_BINDINGS = (
+    TaiwanCurrentSourceBinding(
+        descriptor=FUGLE_CURRENT_INDEX_DESCRIPTOR,
+        source="fugle_indices_stream",
+        parser_version="fugle.websocket.indices.v1",
+        source_type="stream",
+        auth_type="api_key",
+    ),
     TaiwanCurrentSourceBinding(
         descriptor=TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,
         source="twse_mis_index_snapshot",
@@ -159,6 +194,7 @@ def current_source_binding(
 
 
 __all__ = [
+    "FUGLE_CURRENT_INDEX_DESCRIPTOR",
     "TW_CURRENT_BREADTH_CAPABILITY_ID",
     "TW_CURRENT_BREADTH_DATASET_ID",
     "TW_CURRENT_BREADTH_DESCRIPTORS",

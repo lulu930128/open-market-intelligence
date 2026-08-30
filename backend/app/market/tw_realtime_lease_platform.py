@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.db.models import StockMaster
 from app.market.providers.kgi_canonical import KGI_PROVIDER
 from app.market.providers.kgi_realtime_lease import KgiRealtimeQuoteLeasePort
+from app.market.providers.fugle_realtime_lease import FugleRealtimeQuoteLeasePort
+from app.market.providers.fugle_realtime_runtime import get_fugle_realtime_runtime
 from app.market.providers.twse_mis_canonical import MIS_SOURCE
 from app.market.public_quote_platform import build_taiwan_public_quote_requirement
 from app.market.public_quote_platform import acquire_taiwan_public_last_trade_quote
@@ -18,6 +20,8 @@ from app.market.taiwan_realtime_platform import (
 )
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_realtime_capabilities import (
+    FUGLE_PROVIDER,
+    FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR,
     KGI_AUCTION_DESCRIPTOR,
     KGI_ORDER_BOOK_DESCRIPTOR,
     KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
@@ -60,12 +64,19 @@ def _instrument(db: Session, stock_id: str) -> InstrumentKey:
 
 
 _KGI_REALTIME_PORT = KgiRealtimeQuoteLeasePort()
+_FUGLE_REALTIME_PORT = FugleRealtimeQuoteLeasePort()
 
 
 def _coordinator() -> ViewerLeaseCoordinator:
     return ViewerLeaseCoordinator(
-        descriptors=(KGI_QUOTE_SNAPSHOT_DESCRIPTOR,),
-        ports={KGI_PROVIDER: _KGI_REALTIME_PORT},
+        descriptors=(
+            KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
+            FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR,
+        ),
+        ports={
+            KGI_PROVIDER: _KGI_REALTIME_PORT,
+            FUGLE_PROVIDER: _FUGLE_REALTIME_PORT,
+        },
     )
 
 
@@ -112,6 +123,13 @@ def _sync_canonical_snapshot(
     )
 
 
+def _sync_fugle_snapshot(db: Session, *, stock_id: str) -> None:
+    runtime = get_fugle_realtime_runtime()
+    if runtime is None:
+        raise RuntimeError("FUGLE_RUNTIME_UNAVAILABLE")
+    runtime.materializer.materialize(db, active_stock=stock_id)
+
+
 def _sync_if_live(
     db: Session,
     state: ViewerLeaseState,
@@ -121,11 +139,14 @@ def _sync_if_live(
     if state.status != "live" or state.lease_id is None:
         return state
     try:
-        _sync_canonical_snapshot(
-            db,
-            stock_id=state.stock_id,
-            requested_at=requested_at,
-        )
+        if state.provider == FUGLE_PROVIDER:
+            _sync_fugle_snapshot(db, stock_id=state.stock_id)
+        else:
+            _sync_canonical_snapshot(
+                db,
+                stock_id=state.stock_id,
+                requested_at=requested_at,
+            )
     except Exception as exc:
         return state.model_copy(
             update={
@@ -152,11 +173,14 @@ def acquire_taiwan_realtime_quote_lease(
         policy=RealtimePolicy.REQUIRE_LIVE,
         requested_at=effective_requested_at,
         bounds=RequestBounds(
-            max_provider_attempts=1,
+            max_provider_attempts=2,
             max_external_calls=0,
             max_subscriptions=1,
-            timeout_seconds=KGI_QUOTE_SNAPSHOT_DESCRIPTOR.max_timeout_seconds,
-            max_candidates=1,
+            timeout_seconds=max(
+                KGI_QUOTE_SNAPSHOT_DESCRIPTOR.max_timeout_seconds,
+                FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.max_timeout_seconds,
+            ),
+            max_candidates=2,
             max_rows=1,
         ),
     )

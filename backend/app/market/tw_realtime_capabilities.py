@@ -44,6 +44,10 @@ KGI_ORDER_BOOK_RESOURCE_ID = "kgi_superpy.quote.order_book"
 KGI_AUCTION_RESOURCE_ID = "kgi_superpy.auction"
 MIS_ORDER_BOOK_RESOURCE_ID = "twse_mis.order_book"
 MIS_AUCTION_RESOURCE_ID = "twse_mis.auction"
+FUGLE_QUOTE_RESOURCE_ID = "tw.fugle.aggregates.stream"
+FUGLE_PROVIDER = "fugle_marketdata"
+FUGLE_QUOTE_SOURCE = "fugle_aggregates_stream"
+FUGLE_QUOTE_PARSER_VERSION = "fugle.websocket.aggregates.v1"
 
 _TW_INSTRUMENT_TYPES = (InstrumentType.STOCK, InstrumentType.ETF)
 _TW_VENUES = ("TWSE", "TPEX")
@@ -135,6 +139,36 @@ KGI_QUOTE_SNAPSHOT_DESCRIPTOR = _kgi_descriptor(
         "ROUND_LOT_ONLY",
     ),
 )
+FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key=FUGLE_PROVIDER,
+    market=Market.TW,
+    capability_id=TW_QUOTE_SNAPSHOT_CAPABILITY_ID,
+    resource_id=FUGLE_QUOTE_RESOURCE_ID,
+    authority=AuthorityClass.VENDOR,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+    venue_scope=("TWSE",),
+    instrument_types=_TW_INSTRUMENT_TYPES,
+    supported_sessions=_ACTIVE_QUOTE_SESSIONS,
+    acquisition_modes=(AcquisitionMode.SUBSCRIPTION,),
+    priority=10,
+    can_produce_live=True,
+    can_produce_final=False,
+    max_timeout_seconds=30,
+    max_external_calls_per_attempt=0,
+    max_subscriptions_per_attempt=1,
+    max_symbols_per_call=1,
+    max_range_days=1,
+    health_ttl_seconds=30,
+    allow_unknown_health=True,
+    allow_disconnected_connect=True,
+    limitations=(
+        "API_KEY_REQUIRED",
+        "ACTIVE_STOCK_ONLY",
+        "BASIC_PLAN_ONE_CONNECTION_FIVE_SUBSCRIPTIONS",
+        "ROUND_LOT_ONLY",
+        "BACKGROUND_MATERIALIZATION_REQUIRED",
+    ),
+)
 KGI_ORDER_BOOK_DESCRIPTOR = _kgi_descriptor(
     capability_id=TW_ORDER_BOOK_CAPABILITY_ID,
     resource_id=KGI_ORDER_BOOK_RESOURCE_ID,
@@ -181,6 +215,7 @@ TW_REALTIME_PROVIDER_DESCRIPTORS = (
     KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
     KGI_ORDER_BOOK_DESCRIPTOR,
     KGI_AUCTION_DESCRIPTOR,
+    FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR,
     TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,
     MIS_ORDER_BOOK_DESCRIPTOR,
     MIS_AUCTION_DESCRIPTOR,
@@ -198,6 +233,14 @@ class TaiwanRealtimeSourceBinding:
 
 
 TW_REALTIME_SOURCE_BINDINGS = (
+    TaiwanRealtimeSourceBinding(
+        descriptor=FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR,
+        source=FUGLE_QUOTE_SOURCE,
+        parser_version=FUGLE_QUOTE_PARSER_VERSION,
+        source_type="stream",
+        auth_type="api_key",
+        reliability_level="vendor",
+    ),
     TaiwanRealtimeSourceBinding(
         descriptor=KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
         source=KGI_SOURCE,
@@ -303,6 +346,11 @@ def capability_source_binding(
 
 
 __all__ = [
+    "FUGLE_PROVIDER",
+    "FUGLE_QUOTE_PARSER_VERSION",
+    "FUGLE_QUOTE_RESOURCE_ID",
+    "FUGLE_QUOTE_SOURCE",
+    "FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR",
     "KGI_AUCTION_DESCRIPTOR",
     "KGI_AUCTION_RESOURCE_ID",
     "KGI_ORDER_BOOK_DESCRIPTOR",

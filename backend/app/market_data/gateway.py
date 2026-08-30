@@ -1006,6 +1006,7 @@ class MarketDataGateway:
         descriptors: Iterable[ProviderCapabilityDescriptorV2] = (),
         acquisition_port: MarketIndexAcquisitionPort | None = None,
         transaction_port: MarketIndexTransactionPort | None = None,
+        official_first: bool = True,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, DatasetTarget):
             raise ValueError("market index resolution requires a dataset target")
@@ -1025,6 +1026,7 @@ class MarketDataGateway:
             now=requirement.requested_at,
             max_age=timedelta(seconds=requirement.freshness.max_age_seconds),
             requirement=requirement,
+            official_first=official_first,
         )
         final_batch = initial_batch
         acquisition_health: tuple[ProviderResourceHealth, ...] = ()
@@ -1078,6 +1080,7 @@ class MarketDataGateway:
                             seconds=requirement.freshness.max_age_seconds
                         ),
                         requirement=requirement,
+                        official_first=official_first,
                     )
                 elif acquisition.attempted:
                     persistence = _not_persisted(

@@ -11,11 +11,16 @@ from time import monotonic
 from app.market.index_parsers import as_float, as_int, parse_trade_date, regular_stock_code
 from app.market.providers import http_get, twse_mis
 from app.market.providers.tw_current_market import CurrentMarketProviderPayload
+from app.market.providers.twse_mis_guard import (
+    TWSE_MIS_PROVIDER_GUARD,
+    response_failure_metadata,
+)
 from app.market.tw_market_breadth_contract import (
     TW_MARKET_BREADTH_STOCK_STATE_VERSION,
     TW_MARKET_BREADTH_VERSION,
     resolve_twse_mis_breadth_price_state,
 )
+from app.market_data.contracts import OperationalStatus
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -23,8 +28,6 @@ _CACHE_TTL_SECONDS = 30
 _BATCH_SIZE = 100
 _MAX_CODES = 2_000
 _MAX_WORKERS = 2
-_CIRCUIT_FAILURE_THRESHOLD = 3
-_CIRCUIT_COOLDOWN_SECONDS = 90
 
 UniverseReader = Callable[[str], list[str]]
 
@@ -33,8 +36,6 @@ _LAST_GOOD: dict[str, dict[str, object]] = {}
 _STOCK_ROWS: dict[str, list[dict[str, object]]] = {}
 _STOCK_STATE: dict[str, dict[str, object]] = {}
 _REFRESH_LOCK = Lock()
-_CIRCUIT_FAILURES = 0
-_CIRCUIT_OPEN_UNTIL = 0.0
 
 
 def _chunks(values: list[str], size: int) -> Iterable[list[str]]:
@@ -157,7 +158,17 @@ def _fetch_messages(
         for future in as_completed(futures):
             try:
                 messages.extend(future.result())
-            except Exception:
+            except Exception as exc:
+                status_code, headers = response_failure_metadata(exc)
+                if status_code is not None:
+                    TWSE_MIS_PROVIDER_GUARD.record_http_failure(
+                        status_code,
+                        headers=headers,
+                    )
+                else:
+                    TWSE_MIS_PROVIDER_GUARD.record_failure(
+                        detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
+                    )
                 failed += 1
     return messages, failed
 
@@ -195,6 +206,7 @@ def _stale(market: str, *, circuit_open: bool) -> dict[str, object] | None:
     payload = _LAST_GOOD.get(market)
     if payload is None:
         return None
+    guard = TWSE_MIS_PROVIDER_GUARD.snapshot()
     return {
         **payload,
         "source": "twse_mis_live_breadth_stale",
@@ -209,9 +221,7 @@ def _stale(market: str, *, circuit_open: bool) -> dict[str, object] | None:
         "provider_guard": {
             "status": "circuit_open" if circuit_open else "degraded",
             "retry_after_seconds": (
-                max(int(_CIRCUIT_OPEN_UNTIL - monotonic()), 0)
-                if circuit_open
-                else None
+                guard.retry_after_seconds if circuit_open else None
             ),
         },
     }
@@ -383,8 +393,6 @@ def read_twse_mis_current_breadth(
     *,
     universe_reader: UniverseReader,
 ) -> CurrentMarketProviderPayload:
-    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_UNTIL
-
     market = str(scope or "").strip().upper()
     if market not in {"TWSE", "TPEX"}:
         return CurrentMarketProviderPayload(
@@ -392,6 +400,7 @@ def read_twse_mis_current_breadth(
             status="failed",
             url=twse_mis.STOCK_INFO_URL,
             error=f"unsupported Taiwan breadth venue: {market}",
+            external_calls=0,
         )
     cached = _CACHE.get(market)
     if cached and monotonic() < float(cached["expires_at"]):
@@ -410,13 +419,24 @@ def read_twse_mis_current_breadth(
                 status="cached" if isinstance(payload, dict) else "missing",
                 url=twse_mis.STOCK_INFO_URL,
             )
-        if monotonic() < _CIRCUIT_OPEN_UNTIL:
+        decision = TWSE_MIS_PROVIDER_GUARD.before_request()
+        if not decision.allowed:
             stale = _stale(market, circuit_open=True)
             return CurrentMarketProviderPayload(
                 payload=stale,
                 status="stale" if stale else "failed",
                 url=twse_mis.STOCK_INFO_URL,
-                error=None if stale else "TWSE MIS breadth circuit is open",
+                status_code=429 if decision.status == "rate_limited" else None,
+                error=None if stale else decision.detail_code,
+                operational_status=(
+                    OperationalStatus.RATE_LIMITED
+                    if decision.status == "rate_limited"
+                    else OperationalStatus.UNAVAILABLE
+                ),
+                detail_code=decision.detail_code,
+                retry_after_seconds=decision.retry_after_seconds,
+                cooldown_until=decision.cooldown_until,
+                external_calls=0,
             )
         try:
             codes = list(dict.fromkeys(universe_reader(market)))
@@ -438,31 +458,53 @@ def read_twse_mis_current_breadth(
             if payload is None:
                 raise ValueError("TWSE MIS breadth returned no canonical candidate")
             _cache(market, payload)
-            if failed_batches > 0:
-                _CIRCUIT_FAILURES += 1
-            else:
-                _CIRCUIT_FAILURES = 0
-                _CIRCUIT_OPEN_UNTIL = 0.0
-            if _CIRCUIT_FAILURES >= _CIRCUIT_FAILURE_THRESHOLD:
-                _CIRCUIT_OPEN_UNTIL = monotonic() + _CIRCUIT_COOLDOWN_SECONDS
+            if failed_batches == 0:
+                TWSE_MIS_PROVIDER_GUARD.record_success()
             return CurrentMarketProviderPayload(
                 payload=payload,
                 status="available" if failed_batches == 0 else "partial",
                 url=twse_mis.STOCK_INFO_URL,
+                operational_status=(
+                    OperationalStatus.HEALTHY
+                    if failed_batches == 0
+                    else OperationalStatus.DEGRADED
+                ),
+                detail_code=(
+                    "TWSE_MIS_BREADTH_AVAILABLE"
+                    if failed_batches == 0
+                    else "TWSE_MIS_BREADTH_PARTIAL"
+                ),
             )
         except Exception as exc:
-            _CIRCUIT_FAILURES += 1
-            if _CIRCUIT_FAILURES >= _CIRCUIT_FAILURE_THRESHOLD:
-                _CIRCUIT_OPEN_UNTIL = monotonic() + _CIRCUIT_COOLDOWN_SECONDS
+            status_code, headers = response_failure_metadata(exc)
+            guard = (
+                TWSE_MIS_PROVIDER_GUARD.record_http_failure(
+                    status_code,
+                    headers=headers,
+                )
+                if status_code is not None
+                else TWSE_MIS_PROVIDER_GUARD.record_failure(
+                    detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
+                )
+            )
             stale = _stale(
                 market,
-                circuit_open=monotonic() < _CIRCUIT_OPEN_UNTIL,
+                circuit_open=not TWSE_MIS_PROVIDER_GUARD.snapshot().allowed,
             )
             return CurrentMarketProviderPayload(
                 payload=stale,
                 status="stale" if stale else "failed",
                 url=twse_mis.STOCK_INFO_URL,
+                status_code=status_code,
                 error=None if stale else f"{type(exc).__name__}: {exc}",
+                operational_status=(
+                    OperationalStatus.RATE_LIMITED
+                    if status_code == 429
+                    else OperationalStatus.FAILED
+                ),
+                detail_code=guard.detail_code,
+                retry_after_seconds=guard.retry_after_seconds,
+                cooldown_until=guard.cooldown_until,
             )
 
 
@@ -478,13 +520,11 @@ def get_cached_current_breadth_stock_rows(
 
 
 def reset_twse_mis_current_breadth_provider() -> None:
-    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_UNTIL
     _CACHE.clear()
     _LAST_GOOD.clear()
     _STOCK_ROWS.clear()
     _STOCK_STATE.clear()
-    _CIRCUIT_FAILURES = 0
-    _CIRCUIT_OPEN_UNTIL = 0.0
+    TWSE_MIS_PROVIDER_GUARD.reset()
 
 
 __all__ = [

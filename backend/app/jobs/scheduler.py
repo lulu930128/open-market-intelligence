@@ -69,6 +69,8 @@ from app.market.indices import (
     is_taiwan_index_live_refresh_window,
     market_index_summary_needs_reconciliation,
     refresh_market_index_summary,
+    refresh_current_market_breadth_snapshots,
+    refresh_current_market_index_snapshots,
 )
 from app.market.official_index_platform import (
     read_taiwan_official_index,
@@ -1337,10 +1339,7 @@ def collect_taiwan_market_index_summary() -> None:
         return
     db = SessionLocal()
     try:
-        payload = refresh_market_index_summary(
-            db=db,
-            refresh_daily_stats=False,
-        )
+        payload = refresh_current_market_index_snapshots(db=db)
         persistence = persist_taiwan_market_minute_state(
             db,
             payload=payload,
@@ -1352,6 +1351,35 @@ def collect_taiwan_market_index_summary() -> None:
             payload=payload,
             now=now,
         )
+        logger.debug(
+            "Taiwan market index summary cache refreshed as_of=%s indices=%s "
+            "minute_rows=%s index_minute_rows=%s.",
+            payload.get("as_of"),
+            len(payload.get("indices") or []),
+            persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
+            index_minute_persistence.get("inserted_count", 0)
+            + index_minute_persistence.get("updated_count", 0),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Taiwan market index summary cache refresh failed.")
+    finally:
+        db.close()
+
+
+def collect_taiwan_market_breadth_summary() -> None:
+    now = datetime.now(_timezone())
+    if not is_taiwan_index_live_refresh_window(now):
+        return
+    db = SessionLocal()
+    try:
+        payload = refresh_current_market_breadth_snapshots(db=db)
+        persistence = persist_taiwan_market_minute_state(
+            db,
+            payload=payload,
+            finalized=False,
+            now=now,
+        )
         stock_state_persistence = persist_taiwan_intraday_stock_states(
             db,
             rows=attach_current_market_lineage_to_stock_rows(
@@ -1361,19 +1389,17 @@ def collect_taiwan_market_index_summary() -> None:
             now=now,
         )
         logger.debug(
-            "Taiwan market index summary cache refreshed as_of=%s indices=%s "
-            "minute_rows=%s index_minute_rows=%s stock_state_rows=%s.",
+            "Taiwan market breadth cache refreshed as_of=%s minute_rows=%s "
+            "stock_state_rows=%s.",
             payload.get("as_of"),
-            len(payload.get("indices") or []),
-            persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
-            index_minute_persistence.get("inserted_count", 0)
-            + index_minute_persistence.get("updated_count", 0),
+            persistence.get("inserted_count", 0)
+            + persistence.get("updated_count", 0),
             stock_state_persistence.get("inserted_count", 0)
             + stock_state_persistence.get("updated_count", 0),
         )
     except Exception:
         db.rollback()
-        logger.exception("Taiwan market index summary cache refresh failed.")
+        logger.exception("Taiwan market breadth cache refresh failed.")
     finally:
         db.close()
 
@@ -1533,22 +1559,40 @@ def _add_taiwan_source_health_sync_job(scheduler: Any) -> bool:
 
 
 def _add_taiwan_market_index_collector_job(scheduler: Any) -> bool:
-    if not settings.enable_taiwan_market_index_scheduler:
+    if not (
+        settings.enable_taiwan_market_index_scheduler
+        or settings.enable_taiwan_market_breadth_scheduler
+    ):
         return False
     interval_seconds = max(
         int(settings.scheduler_taiwan_market_index_interval_seconds),
         5,
     )
-    scheduler.add_job(
-        collect_taiwan_market_index_summary,
-        trigger="interval",
-        seconds=interval_seconds,
-        id="taiwan_market_index_summary_collector",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-        next_run_time=datetime.now(_timezone()),
-    )
+    if settings.enable_taiwan_market_index_scheduler:
+        scheduler.add_job(
+            collect_taiwan_market_index_summary,
+            trigger="interval",
+            seconds=interval_seconds,
+            id="taiwan_market_index_summary_collector",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            next_run_time=datetime.now(_timezone()),
+        )
+    if settings.enable_taiwan_market_breadth_scheduler:
+        scheduler.add_job(
+            collect_taiwan_market_breadth_summary,
+            trigger="interval",
+            seconds=max(
+                int(settings.scheduler_taiwan_market_breadth_interval_seconds),
+                30,
+            ),
+            id="taiwan_market_breadth_summary_collector",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            next_run_time=datetime.now(_timezone()) + timedelta(seconds=3),
+        )
     reconciliation_minutes = max(
         TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS // 60,
         5,

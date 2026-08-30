@@ -190,6 +190,8 @@ class Settings(BaseSettings):
     scheduler_market_chip_refresh_force: bool = False
     enable_taiwan_market_index_scheduler: bool = True
     scheduler_taiwan_market_index_interval_seconds: int = 5
+    enable_taiwan_market_breadth_scheduler: bool = True
+    scheduler_taiwan_market_breadth_interval_seconds: int = 60
     enable_taiwan_source_health_scheduler: bool = True
     scheduler_taiwan_source_health_interval_seconds: int = 120
     enable_taiwan_quote_contract_scheduler: bool = True
@@ -292,6 +294,15 @@ class Settings(BaseSettings):
     alpaca_api_secret_key: str | None = None
     fred_api_key: str | None = None
     enable_kgi_superpy_quote: bool = False
+    enable_fugle_realtime: bool = False
+    fugle_api_key: str | None = None
+    fugle_websocket_url: str = (
+        "wss://api.fugle.tw/marketdata/v1.0/stock/streaming"
+    )
+    fugle_active_stock: str = ""
+    fugle_stream_stale_seconds: int = 75
+    fugle_materialize_interval_seconds: int = 5
+    fugle_reconnect_max_seconds: int = 30
     canonical_market_data_mode: Literal["off", "shadow", "compare"] = "off"
     us_canonical_market_data_mode: Literal[
         "off", "shadow", "compare", "canary", "on"

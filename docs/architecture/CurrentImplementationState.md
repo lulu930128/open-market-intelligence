@@ -29,7 +29,7 @@
 | Instruction／truth navigation | accepted | not_applicable | not_applicable | accepted | 2026-08-27 | `AGENTS.md`; `docs/architecture/index.md`; nested `AGENTS.md` | Source-only governance；不代表 mechanical enforcement |
 | Mechanical architecture guard | accepted | not_applicable | not_applicable | not_applicable | 2026-08-29 | `architecture/constraints.toml`; `architecture/debt.toml`; `scripts/check-architecture.py`; `backend/tests/architecture/`; US/TW consumer convergence validation | Guard v2封住TW與US outward/research protected storage models；仍有22個既有exact debt，accepted不代表debt已清零 |
 | Shared Market Data Foundation | partial | not_reverified | not_reverified | partial | 2026-08-27 | `backend/app/market_data/contracts.py`; `backend/app/market_data/registry.py`; architecture debt | Canonical／Resolver seams 存在；仍有精確 legacy debt |
-| Taiwan market | accepted | partial | partial | partial | 2026-08-29 | `docs/exec-plans/active/tw-backend-outward-contract-convergence-20260828/`; `docs/exec-plans/active/tw-us-shared-core-4-4-0-consolidation-20260829/`; current source／targeted tests；read-only port 8400 probe | Completed daily/index/breadth consumer與final-cleanup source已收斂；4.4.0 source已保護finalized Daily不被同日provisional overlay取代，但running Backend尚未adopt本輪source，MCP host與正式交易時窗未reverify |
+| Taiwan market | accepted | partial | partial | partial | 2026-08-30 | `docs/exec-plans/active/tw-backend-outward-contract-convergence-20260828/`; `docs/exec-plans/active/tw-us-shared-core-4-4-0-consolidation-20260829/`; `docs/exec-plans/active/tw-fugle-realtime-resilience-20260830/`; current source／targeted tests；read-only port 8400 probe | Completed daily/index/breadth consumer與final-cleanup source已收斂；Fugle realtime resilience為feature-off source capability，running Backend尚未adopt，credential／entitlement／正式交易時窗與outward parity未reverify |
 | United States market | accepted | partial | partial | partial | 2026-08-29 | `docs/exec-plans/active/us-backend-shared-core-convergence-20260829/`; `docs/exec-plans/active/tw-us-shared-core-4-4-0-consolidation-20260829/`; executable registry／manifest；AAPL／TSM Alpaca receipts、260-bar readback；architecture guard | AAPL／TSM已由Alpaca補至2026-08-28且history coverage accepted；`^SOX`仍為Yahoo 8/27 truthful stale。4.4.0 source已修正INDEX zero-volume與US selection reader bound，但running Backend尚未adopt，index第二provider與publication仍pending |
 | Secondary markets | partial | not_reverified | not_reverified | partial | 2026-08-27 | current market modules／outward contracts | JP／KR／Crypto／Resource 不得推定與 TW／US 同等 acceptance |
 | `omi.decision.v4` | accepted | partial | not_applicable | partial | 2026-08-29 | `docs/architecture/OmiDecisionContract.md`; source capability／projection registries；4.4.0 selection-bound regression；既有running direct/proxy/MCP AAPL evidence | 4.4.0 source已把`daily.ohlcv` effective limit傳入US canonical／chart reader；runtime與MCP host尚未adopt本輪source，不能用先前AAPL readback宣稱新selection path已Product accepted |
@@ -61,6 +61,15 @@ Registry／debt manifest 是 executable truth；parity test 只驗證 invariant�
 - Outward quality：sector covered count欄位已對正；`market.sample_ranking`固定投影`sample_only`，Backend registry與repo MCP offline schema digest同步。
 - Source validation：受影響regression `300 passed / 122 subtests`；architecture `18 passed`；guard `26 actual / 26 declared`；changed modules compileall通過。
 - Runtime／Live／Product：本 checkpoint 未restart、未provider IO、未DB mutation，也未重新採用MCP host schema；維持partial／pending，不由Source測試推定accepted。
+
+## 2026-08-30 Taiwan Fugle realtime resilience source checkpoint
+
+- Fugle新增為TAIEX current index、單一active-stock quote與1m bar的`SUBSCRIPTION` capability；單一runtime／allocator固定一條physical connection，訂閱組合為indices加active-stock aggregates／candles，總上限5。
+- Stream event先進bounded latest-state buffer，duplicate／out-of-order／malformed event fail closed；materializer重用既有raw receipt與current-index／public-quote／intraday-bar transaction，使用`WEBSOCKET` lineage並mandatory reread，沒有新增migration或平行outward type。
+- TWSE MIS index、quote、depth／auction與breadth共用provider-wide guard；429與`Retry-After`投影為`rate_limited`／cooldown，cooldown內不再發request，過期只允許單一recovery probe。
+- Current index與breadth scheduler已拆成獨立lane；index job只刷新index，breadth使用獨立60秒設定。Viewer lease可在KGI不可用時將單一active stock交給Fugle，其他股票維持truthful fallback。
+- Source validation：final affected matrix `227 passed`；architecture checker `22 actual / 22 declared`、architecture pytest `18 passed`、compileall通過。完整backend suite跑到100%且log未出現test failure，但pytest session cleanup遭既有`.tmp` Windows ACL `WinError 5`，因此safe profile未clean exit。
+- Runtime／Live／Product：source default仍為off；本機ignored `.env`已在commit後設為on，但running Backend尚未採用本輪source。兩次bounded provider probe均使用一條連線：TAIEX單一subscription，以及TAIEX加2330 aggregates／candles共3/5 subscriptions，credential、auth、entitlement與全部subscription ACK成功；未啟動materializer且DB零變更。週日無data event，因此payload、正式交易時段重連、production runtime與REST／MCP／Frontend outward parity仍pending。
 
 ## 2026-08-29 United States daily Shared Core source checkpoint
 
