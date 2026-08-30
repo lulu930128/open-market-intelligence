@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from threading import Lock
 from time import monotonic
@@ -13,6 +13,7 @@ from app.market.providers import http_get, twse_mis
 from app.market.providers.tw_current_market import CurrentMarketProviderPayload
 from app.market.providers.twse_mis_guard import (
     TWSE_MIS_PROVIDER_GUARD,
+    TwseMisGuardDecision,
     response_failure_metadata,
 )
 from app.market.tw_market_breadth_contract import (
@@ -27,7 +28,6 @@ TAIPEI_TZ = timezone(timedelta(hours=8))
 _CACHE_TTL_SECONDS = 30
 _BATCH_SIZE = 100
 _MAX_CODES = 2_000
-_MAX_WORKERS = 2
 
 UniverseReader = Callable[[str], list[str]]
 
@@ -140,37 +140,60 @@ def _fetch_messages(
     codes: list[str],
     market: str,
     timeout_seconds: int,
-) -> tuple[list[dict[str, object]], int]:
+    *,
+    initial_decision: TwseMisGuardDecision | None = None,
+) -> tuple[list[dict[str, object]], int, int]:
     batches = list(_chunks(codes, _BATCH_SIZE))
     messages: list[dict[str, object]] = []
     failed = 0
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
-        futures = [
-            executor.submit(
-                twse_mis.fetch_stock_messages,
+    external_calls = 0
+    started_at = monotonic()
+    for index, batch in enumerate(batches):
+        decision = (
+            initial_decision
+            if index == 0 and initial_decision is not None
+            else TWSE_MIS_PROVIDER_GUARD.before_request()
+        )
+        if not decision.allowed:
+            failed += len(batches) - index
+            break
+        attempt = decision.attempt
+        if attempt is None:
+            raise RuntimeError("TWSE MIS guard allowed a request without an attempt token")
+        remaining_seconds = timeout_seconds - (monotonic() - started_at)
+        if remaining_seconds <= 0:
+            TWSE_MIS_PROVIDER_GUARD.cancel_attempt(attempt)
+            failed += len(batches) - index
+            break
+        external_calls += 1
+        try:
+            batch_messages = twse_mis.fetch_stock_messages(
                 batch,
                 exchange="otc" if market == "TPEX" else "tse",
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=max(1, math.ceil(remaining_seconds)),
                 request=http_get,
             )
-            for batch in batches
-        ]
-        for future in as_completed(futures):
-            try:
-                messages.extend(future.result())
-            except Exception as exc:
-                status_code, headers = response_failure_metadata(exc)
-                if status_code is not None:
-                    TWSE_MIS_PROVIDER_GUARD.record_http_failure(
-                        status_code,
-                        headers=headers,
-                    )
-                else:
-                    TWSE_MIS_PROVIDER_GUARD.record_failure(
-                        detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
-                    )
-                failed += 1
-    return messages, failed
+        except Exception as exc:
+            status_code, headers = response_failure_metadata(exc)
+            if status_code is not None:
+                TWSE_MIS_PROVIDER_GUARD.record_http_failure(
+                    attempt,
+                    status_code,
+                    headers=headers,
+                )
+            else:
+                TWSE_MIS_PROVIDER_GUARD.record_failure(
+                    attempt,
+                    detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
+                )
+            failed += 1
+            if status_code == 429 or not TWSE_MIS_PROVIDER_GUARD.snapshot().allowed:
+                failed += len(batches) - index - 1
+                break
+        else:
+            messages.extend(batch_messages)
+            TWSE_MIS_PROVIDER_GUARD.record_success(attempt)
+    return messages, failed, external_calls
 
 
 def _universe_definition(market: str) -> dict[str, object]:
@@ -409,6 +432,7 @@ def read_twse_mis_current_breadth(
             payload=payload if isinstance(payload, dict) else None,
             status="cached" if isinstance(payload, dict) else "missing",
             url=twse_mis.STOCK_INFO_URL,
+            external_calls=0,
         )
     with _REFRESH_LOCK:
         cached = _CACHE.get(market)
@@ -418,6 +442,7 @@ def read_twse_mis_current_breadth(
                 payload=payload if isinstance(payload, dict) else None,
                 status="cached" if isinstance(payload, dict) else "missing",
                 url=twse_mis.STOCK_INFO_URL,
+                external_calls=0,
             )
         decision = TWSE_MIS_PROVIDER_GUARD.before_request()
         if not decision.allowed:
@@ -438,6 +463,11 @@ def read_twse_mis_current_breadth(
                 cooldown_until=decision.cooldown_until,
                 external_calls=0,
             )
+        initial_attempt = decision.attempt
+        if initial_attempt is None:
+            raise RuntimeError("TWSE MIS guard allowed a request without an attempt token")
+        external_calls = 0
+        provider_io_started = False
         try:
             codes = list(dict.fromkeys(universe_reader(market)))
             minimum = 500 if market == "TWSE" else 250
@@ -449,43 +479,49 @@ def read_twse_mis_current_breadth(
                 raise ValueError(
                     f"registered {market} stock universe exceeds {_MAX_CODES} codes"
                 )
-            messages, failed_batches = _fetch_messages(
+            messages, failed_batches, external_calls = _fetch_messages(
                 codes,
                 market,
                 timeout_seconds,
+                initial_decision=decision,
             )
+            provider_io_started = True
             payload = _build_payload(market, codes, messages, failed_batches)
             if payload is None:
                 raise ValueError("TWSE MIS breadth returned no canonical candidate")
             _cache(market, payload)
-            if failed_batches == 0:
-                TWSE_MIS_PROVIDER_GUARD.record_success()
+            guard = TWSE_MIS_PROVIDER_GUARD.snapshot()
             return CurrentMarketProviderPayload(
                 payload=payload,
                 status="available" if failed_batches == 0 else "partial",
                 url=twse_mis.STOCK_INFO_URL,
+                status_code=429 if guard.status == "rate_limited" else 200,
                 operational_status=(
-                    OperationalStatus.HEALTHY
-                    if failed_batches == 0
+                    OperationalStatus.RATE_LIMITED
+                    if guard.status == "rate_limited"
+                    else OperationalStatus.HEALTHY
+                    if failed_batches == 0 and guard.allowed
                     else OperationalStatus.DEGRADED
                 ),
                 detail_code=(
-                    "TWSE_MIS_BREADTH_AVAILABLE"
+                    guard.detail_code
+                    if not guard.allowed
+                    else "TWSE_MIS_BREADTH_AVAILABLE"
                     if failed_batches == 0
                     else "TWSE_MIS_BREADTH_PARTIAL"
                 ),
+                retry_after_seconds=(
+                    guard.retry_after_seconds if not guard.allowed else None
+                ),
+                cooldown_until=(guard.cooldown_until if not guard.allowed else None),
+                external_calls=external_calls,
             )
         except Exception as exc:
             status_code, headers = response_failure_metadata(exc)
             guard = (
-                TWSE_MIS_PROVIDER_GUARD.record_http_failure(
-                    status_code,
-                    headers=headers,
-                )
-                if status_code is not None
-                else TWSE_MIS_PROVIDER_GUARD.record_failure(
-                    detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
-                )
+                TWSE_MIS_PROVIDER_GUARD.snapshot()
+                if provider_io_started
+                else TWSE_MIS_PROVIDER_GUARD.cancel_attempt(initial_attempt)
             )
             stale = _stale(
                 market,
@@ -505,6 +541,7 @@ def read_twse_mis_current_breadth(
                 detail_code=guard.detail_code,
                 retry_after_seconds=guard.retry_after_seconds,
                 cooldown_until=guard.cooldown_until,
+                external_calls=external_calls,
             )
 
 

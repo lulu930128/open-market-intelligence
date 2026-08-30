@@ -117,9 +117,25 @@ def project_resolved_us_bars(
                 "high_price": str(bar.high_price),
                 "low_price": str(bar.low_price),
                 "close_price": str(bar.close_price),
-                "volume": str(bar.volume.value) if bar.volume else None,
-                "volume_unit": bar.volume.unit.value if bar.volume else None,
-                "volume_status": bar.volume_status,
+                "volume": (
+                    None
+                    if bar.instrument.instrument_type.value == "index"
+                    else str(bar.volume.value)
+                    if bar.volume
+                    else None
+                ),
+                "volume_unit": (
+                    None
+                    if bar.instrument.instrument_type.value == "index"
+                    else bar.volume.unit.value
+                    if bar.volume
+                    else None
+                ),
+                "volume_status": (
+                    "not_applicable"
+                    if bar.instrument.instrument_type.value == "index"
+                    else bar.volume_status
+                ),
                 "price_basis": bar.price_basis,
                 "finalization": bar.finalization.value,
                 "provider": bar.lineage.provider,

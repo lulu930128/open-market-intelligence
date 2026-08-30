@@ -35,7 +35,13 @@ def test_rate_limit_opens_provider_wide_cooldown_and_allows_one_probe() -> None:
         clock=current.clock,
     )
 
-    opened = guard.record_http_failure(429, headers={"Retry-After": "30"})
+    request = guard.before_request()
+    assert request.attempt is not None
+    opened = guard.record_http_failure(
+        request.attempt,
+        429,
+        headers={"Retry-After": "30"},
+    )
     assert opened.status == "rate_limited"
     assert opened.retry_after_seconds == 30
     assert not guard.before_request().allowed
@@ -47,7 +53,8 @@ def test_rate_limit_opens_provider_wide_cooldown_and_allows_one_probe() -> None:
     assert not guard.before_request().allowed
     assert guard.before_request().detail_code == "TWSE_MIS_RECOVERY_PROBE_IN_FLIGHT"
 
-    guard.record_success()
+    assert probe.attempt is not None
+    guard.record_success(probe.attempt)
     assert guard.before_request().allowed
     assert guard.snapshot().status == "healthy"
 
@@ -61,14 +68,92 @@ def test_transport_failures_open_only_after_threshold() -> None:
         clock=current.clock,
     )
 
-    first = guard.record_failure(detail_code="NETWORK_TIMEOUT")
+    first_request = guard.before_request()
+    assert first_request.attempt is not None
+    first = guard.record_failure(
+        first_request.attempt,
+        detail_code="NETWORK_TIMEOUT",
+    )
     assert first.allowed
-    assert guard.before_request().allowed
+    second_request = guard.before_request()
+    assert second_request.allowed
+    assert second_request.attempt is not None
 
-    second = guard.record_failure(detail_code="NETWORK_TIMEOUT")
+    second = guard.record_failure(
+        second_request.attempt,
+        detail_code="NETWORK_TIMEOUT",
+    )
     assert not second.allowed
     assert second.retry_after_seconds == 9
     assert not guard.before_request().allowed
+
+
+def test_older_success_cannot_clear_newer_rate_limit_cooldown() -> None:
+    current = MutableTime()
+    guard = TwseMisProviderGuard(
+        rate_limit_cooldown_seconds=20,
+        monotonic=current.monotonic,
+        clock=current.clock,
+    )
+
+    older = guard.before_request()
+    newer = guard.before_request()
+    assert older.attempt is not None
+    assert newer.attempt is not None
+
+    opened = guard.record_http_failure(newer.attempt, 429)
+    stale_success = guard.record_success(older.attempt)
+
+    assert opened.status == "rate_limited"
+    assert stale_success.status == "rate_limited"
+    assert not stale_success.allowed
+    assert not guard.before_request().allowed
+
+
+def test_only_current_recovery_probe_can_clear_cooldown() -> None:
+    current = MutableTime()
+    guard = TwseMisProviderGuard(
+        rate_limit_cooldown_seconds=5,
+        monotonic=current.monotonic,
+        clock=current.clock,
+    )
+
+    stale = guard.before_request()
+    limiter = guard.before_request()
+    assert stale.attempt is not None
+    assert limiter.attempt is not None
+    guard.record_http_failure(limiter.attempt, 429)
+
+    current.advance(5)
+    probe = guard.before_request()
+    assert probe.probe
+    assert probe.attempt is not None
+    assert not guard.record_success(stale.attempt).allowed
+    assert guard.record_success(probe.attempt).allowed
+    assert guard.snapshot().status == "healthy"
+
+
+def test_cancelled_probe_releases_probe_slot_without_clearing_cooldown() -> None:
+    current = MutableTime()
+    guard = TwseMisProviderGuard(
+        rate_limit_cooldown_seconds=5,
+        monotonic=current.monotonic,
+        clock=current.clock,
+    )
+
+    limiter = guard.before_request()
+    assert limiter.attempt is not None
+    guard.record_http_failure(limiter.attempt, 429)
+    current.advance(5)
+
+    probe = guard.before_request()
+    assert probe.attempt is not None
+    cancelled = guard.cancel_attempt(probe.attempt)
+    next_probe = guard.before_request()
+
+    assert cancelled.status == "rate_limited"
+    assert next_probe.allowed
+    assert next_probe.probe
 
 
 def test_retry_after_parser_accepts_delta_and_rejects_malformed() -> None:

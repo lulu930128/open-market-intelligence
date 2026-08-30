@@ -59,9 +59,13 @@ def test_integration_manifest_exposes_capability_keyed_us_production_bindings() 
     ]
     assert manifest.production_binding_available is True
     assert manifest.shared_core_contract_version == "omi.market.data_requirement.v2"
-    assert manifest.handoff_gate == "US_INTRADAY_QUOTE_SOURCE_CLOSEOUT_ACCEPTED"
+    assert manifest.handoff_gate == "US_MARKET_CORE_SOURCE_CHECKPOINT_READY"
     assert not hasattr(manifest, "candidate_reader")
-    assert "US_QUOTE_RETENTION_CLEANUP_NOT_SCHEDULED" in manifest.limitations
+    assert "US_INTRADAY_MATERIALIZER_FEATURE_OFF_BOUNDED_CANARY_ONLY" in manifest.limitations
+    assert (
+        "US_MATERIALIZER_SCHEDULER_CONTENTION_RUNTIME_ACCEPTANCE_PENDING"
+        in manifest.limitations
+    )
     assert {
         (item.capability_id, item.dataset_id, item.refresh_operation)
         for item in manifest.capability_bindings

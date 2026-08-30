@@ -284,7 +284,9 @@ Registry 目前涵蓋：
   technical structure、source health、data freshness。
 - 台股：三大法人、融資券、券商分點、股權分散、營收、財報、跨市場 context、
   market breadth。
-- 美股：quote/intraday、daily price、technical indicators／structure、SEC company facts；technical quality會保留raw price basis、corporate-action coverage、warm-up與decision-usability限制。
+- 美股：quote/intraday、daily price、technical indicators／structure、SEC company facts；technical quality會保留raw price basis、corporate-action coverage、warm-up與decision-usability限制。US Index Daily沿用同一Canonical OHLCV與Shared Technical Engine，但volume與company corporate actions明示`not_applicable`；不得套用equity shares／corporate-action completeness規則，也不得以`0`取代不適用值。
+
+美股current-market projection中的`previous_close`、`change`與`change_pct`必須以exact expected completed-session的resolved Daily作為唯一reference。Quote provider payload內的previous close只能保留在diagnostic evidence；Daily缺失時outward值維持`null`並揭露`CANONICAL_US_DAILY_PREVIOUS_CLOSE_MISSING`，HTTP、AI、MCP與Frontend不得改用Quote或Intraday history自行補值。
 - Crypto：ticker/quote、OHLCV、order book、derivatives。
 
 Generic 台股 quote intent 只預設要求 `quote.snapshot`；`quote.session_close` 只有

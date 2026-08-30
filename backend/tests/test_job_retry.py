@@ -13,6 +13,10 @@ from sqlalchemy.orm import Session
 from app.db.models import JobRun, utc_now
 from app.jobs import backfill_tasks
 from app.jobs import service as job_service
+from app.jobs.job_types import US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE
+from app.jobs.us_current_market_bootstrap import (
+    run_us_current_market_bootstrap_job,
+)
 from app.market import monthly_revenue_history_backfill, stock_selection_refresh
 from app.routers.jobs import _parse_date, _retry_config
 from app.stocks.bootstrap import BOOTSTRAP_JOB_TYPE, run_stock_master_bootstrap_job
@@ -691,6 +695,42 @@ class JobRetryTests(unittest.TestCase):
 
         self.assertIs(task, backfill_tasks.run_us_priority_ohlc_reconcile_job)
         self.assertEqual(task_args, (600, "UMC"))
+        self.assertEqual(retried_request, request)
+
+    def test_retry_config_recreates_bounded_us_current_market_bootstrap(self) -> None:
+        request = {
+            "equity_symbols": ["AAPL", "TSM"],
+            "index_symbols": ["^GSPC", "^DJI", "^IXIC", "^SOX", "^NDX", "^VIX"],
+            "max_external_calls": 12,
+        }
+        job = SimpleNamespace(
+            id=203,
+            job_type=US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE,
+            status="error",
+            target="us_current:fixture",
+            progress_current=1,
+            progress_total=3,
+            message="Job failed.",
+            error_message="provider unavailable",
+            request_json=json.dumps(request),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, retried_request = _retry_config(job)
+
+        self.assertIs(task, run_us_current_market_bootstrap_job)
+        self.assertEqual(
+            task_args,
+            (
+                "AAPL,TSM",
+                "^GSPC,^DJI,^IXIC,^SOX,^NDX,^VIX",
+                12,
+            ),
+        )
         self.assertEqual(retried_request, request)
 
 

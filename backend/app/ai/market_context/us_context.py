@@ -345,6 +345,13 @@ def _us_intraday_quote(
         volume_status = "provider_unavailable"
 
     regular_session_close_time = intraday_summary.get("regular_session_close_time")
+    bar_source_status = (
+        intraday_summary.get("bar_source_status")
+        if isinstance(intraday_summary.get("bar_source_status"), dict)
+        else intraday_summary.get("source_status")
+        if isinstance(intraday_summary.get("source_status"), dict)
+        else {}
+    )
     return {
         "source": intraday_summary.get("source") or "yahoo_finance_chart",
         "price": price,
@@ -373,7 +380,7 @@ def _us_intraday_quote(
         "quote_age_seconds": quote_age_seconds,
         "latency_ms": None,
         "session_phase": intraday_summary.get("session_phase") or latest.get("session"),
-        "provider": "yahoo_chart",
+        "provider": bar_source_status.get("provider") or intraday_summary.get("provider"),
         "previous_close": previous_close,
         "previous_close_source": intraday_summary.get("previous_close_source"),
         "previous_close_trade_date": intraday_summary.get("previous_close_trade_date"),
@@ -384,6 +391,112 @@ def _us_intraday_quote(
             regular_session_close_time
         ),
         "point_count": intraday_summary.get("point_count"),
+    }
+
+
+def _us_resolved_quote(
+    quote_snapshot: dict[str, Any] | None,
+    *,
+    calendar_status: dict[str, Any] | None = None,
+    instrument_type: str = "stock",
+    previous_close_reference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project canonical persisted Quote evidence into the AI quote contract."""
+
+    if not isinstance(quote_snapshot, dict) or quote_snapshot.get("facts_usable") is not True:
+        return {}
+    value = quote_snapshot.get("quote")
+    if not isinstance(value, dict):
+        return {}
+    price = _optional_float(value.get("last_trade_price"))
+    if price is None:
+        return {}
+
+    previous_close = _optional_float(
+        (previous_close_reference or {}).get("previous_close")
+    )
+    change = price - previous_close if previous_close not in {None, 0} else None
+    change_pct = (
+        change / previous_close * 100
+        if change is not None and previous_close not in {None, 0}
+        else None
+    )
+    market_calendar = calendar_status or build_us_calendar_status()
+    current_phase = str(market_calendar.get("phase") or "closed")
+    checked_at = _parse_market_datetime(market_calendar.get("checked_at"))
+    quote_time = _parse_market_datetime(value.get("event_at"))
+    quote_trade_date = str(value.get("trade_date") or "") or _market_trade_date(quote_time)
+    latest_session_date = str(market_calendar.get("previous_trading_day") or "") or None
+    is_latest_session_quote = bool(
+        quote_trade_date and latest_session_date and quote_trade_date == latest_session_date
+    )
+    selected_session = str(quote_snapshot.get("selected_session") or "") or None
+    session_phase = {
+        "pre_open": "pre_market",
+        "continuous": "regular",
+        "closing_auction": "regular",
+        "post_close": "after_hours",
+    }.get(selected_session, selected_session)
+    quote_age_seconds = None
+    if checked_at is not None and quote_time is not None:
+        quote_age_seconds = max(0.0, (checked_at - quote_time).total_seconds())
+    limitations = {
+        str(item) for item in quote_snapshot.get("limitations") or [] if str(item)
+    }
+    if previous_close is None:
+        limitations.add("CANONICAL_US_DAILY_PREVIOUS_CLOSE_MISSING")
+    delayed_vendor = "DELAYED_VENDOR_EVIDENCE" in limitations
+    open_phases = {"pre_market", "regular", "after_hours"}
+    is_live = bool(
+        not delayed_vendor
+        and is_latest_session_quote
+        and current_phase in open_phases
+        and session_phase == current_phase
+        and quote_age_seconds is not None
+        and quote_age_seconds <= 300
+    )
+    return {
+        "source": quote_snapshot.get("selected_source") or "canonical_quote_cache",
+        "price": price,
+        "change": change,
+        "change_pct": change_pct,
+        "currency": value.get("currency") or "USD",
+        "volume": None,
+        "volume_unit": None,
+        "volume_semantics": None,
+        "volume_status": "provider_unavailable" if instrument_type == "index" else "not_provided",
+        "instrument_type": instrument_type,
+        "trade_date": quote_trade_date,
+        "quote_time": value.get("event_at"),
+        "timezone": str(US_MARKET_TIMEZONE),
+        "quote_semantics": _intraday_quote_semantics(session_phase),
+        "is_historical": False,
+        "is_realtime": is_live,
+        "is_live": is_live,
+        "is_latest_session_quote": is_latest_session_quote,
+        "market_status": "open" if current_phase in open_phases else "closed",
+        "current_session_phase": current_phase,
+        "last_quote_session": session_phase,
+        "source_is_intraday": True,
+        "quote_age_seconds": quote_age_seconds,
+        "latency_ms": None,
+        "session_phase": session_phase,
+        "provider": quote_snapshot.get("selected_provider"),
+        "previous_close": previous_close,
+        "previous_close_source": (previous_close_reference or {}).get(
+            "previous_close_source"
+        ),
+        "previous_close_trade_date": (previous_close_reference or {}).get(
+            "previous_close_trade_date"
+        ),
+        "previous_close_provider": (previous_close_reference or {}).get(
+            "previous_close_provider"
+        ),
+        "regular_session_close": None,
+        "regular_session_close_time": None,
+        "regular_session_close_trade_date": None,
+        "point_count": 1,
+        "limitations": sorted(limitations),
     }
 
 
@@ -626,6 +739,26 @@ def read_us_stock_context(
         .first()
     )
     context_now = dependencies.now()
+    quote_snapshot = (
+        None
+        if requested_trade_date is not None
+        else _latest_tool_result(tool_runs, "us.refresh_quote")
+    )
+    if not isinstance(quote_snapshot, dict) and isinstance(intraday_summary, dict):
+        nested_quote = intraday_summary.get("quote_snapshot")
+        quote_snapshot = nested_quote if isinstance(nested_quote, dict) else None
+    quote_reader = getattr(dependencies.us_market_service, "get_us_quote_snapshot", None)
+    if (
+        quote_snapshot is None
+        and requested_trade_date is None
+        and wants("quote.snapshot")
+        and callable(quote_reader)
+    ):
+        try:
+            candidate = quote_reader(db, symbol=normalized_symbol, now=context_now)
+            quote_snapshot = candidate if isinstance(candidate, dict) else None
+        except (LookupError, ValueError):
+            quote_snapshot = None
     daily_rows: list[_ResolvedDailyContextRow] = []
     daily_platform_result = None
     daily_projection: dict[str, Any] = {}
@@ -844,6 +977,8 @@ def read_us_stock_context(
 
     if daily_projection:
         resolved_market_data["daily_ohlcv"] = daily_projection
+    if isinstance(quote_snapshot, dict):
+        resolved_market_data["quote_snapshot"] = quote_snapshot
 
     resolved_research: dict[str, Any] = {}
     research_builder = getattr(
@@ -945,15 +1080,47 @@ def read_us_stock_context(
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_short_volume_daily"})
     _append_source_ref_once(source_refs, {"type": "derived", "name": "app.us_market.source_health"})
     if intraday_summary:
-        _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "yahoo_finance_chart"})
+        _append_source_ref_once(source_refs, {"type": "table", "name": "market_intraday_bar"})
+    if isinstance(quote_snapshot, dict):
+        _append_source_ref_once(source_refs, {"type": "table", "name": "us_quote_snapshot"})
 
     us_calendar_status = build_us_calendar_status(now=context_now)
+    daily_previous_close_reference = (
+        {
+            "previous_close": latest_daily.close_price,
+            "previous_close_source": latest_daily.source or "us_daily_price",
+            "previous_close_trade_date": latest_daily.trade_date.isoformat(),
+            "previous_close_provider": latest_daily.provider,
+        }
+        if latest_daily is not None and latest_daily.close_price is not None
+        else None
+    )
+    resolved_quote = _us_resolved_quote(
+        quote_snapshot,
+        calendar_status=us_calendar_status,
+        instrument_type=instrument_type,
+        previous_close_reference=daily_previous_close_reference,
+    )
     intraday_quote = _us_intraday_quote(
         intraday_summary,
         calendar_status=us_calendar_status,
         instrument_type=instrument_type,
     )
-    quote = intraday_quote or _us_daily_quote(
+    current_price_semantics = (
+        (intraday_summary.get("current_observation") or {}).get("price_semantics")
+        if isinstance(intraday_summary, dict)
+        else None
+    )
+    selected_resolved_quote = (
+        resolved_quote
+        if resolved_quote
+        and (
+            not intraday_quote
+            or current_price_semantics == "resolved_quote_last_trade"
+        )
+        else {}
+    )
+    quote = selected_resolved_quote or intraday_quote or _us_daily_quote(
         latest_daily,
         intraday_requested=intraday_requested,
         calendar_status=us_calendar_status,
@@ -1139,7 +1306,8 @@ def read_us_stock_context(
             "requested_trade_date": requested_trade_date,
             "intraday": intraday_summary or {},
             "include_intraday": intraday_requested,
-            "intraday_available": bool(intraday_quote),
+            "intraday_available": bool(selected_resolved_quote or intraday_quote),
+            "quote_snapshot_available": bool(selected_resolved_quote),
         },
         freshness={
             "price": (
@@ -1152,6 +1320,7 @@ def read_us_stock_context(
                     daily_platform_result is not None
                     and daily_platform_result.postcondition_satisfied
                 )
+                or selected_resolved_quote
                 or intraday_quote
                 else "missing"
             ),
@@ -1169,7 +1338,7 @@ def read_us_stock_context(
             ),
             "intraday": (
                 "current"
-                if intraday_quote
+                if selected_resolved_quote or intraday_quote
                 else "missing"
                 if intraday_requested
                 else "not_requested"

@@ -16,6 +16,13 @@ def evaluate_technical_usability(
     corporate_action_coverage: str,
 ) -> dict[str, Any]:
     reasons: list[str] = []
+    corporate_action_satisfied = (
+        corporate_action_coverage == "complete"
+        or (
+            profile.corporate_action_policy == "not_applicable"
+            and corporate_action_coverage == "not_applicable"
+        )
+    )
     if not facts_usable:
         reasons.append("RESOLVED_BARS_NOT_FACTS_USABLE")
     if bar_count < profile.facts_minimum_bars:
@@ -24,7 +31,7 @@ def evaluate_technical_usability(
         reasons.append("DAILY_BARS_NOT_CURRENT")
     if bar_count < profile.decision_minimum_bars:
         reasons.append("INSUFFICIENT_DECISION_BARS")
-    if corporate_action_coverage != "complete":
+    if not corporate_action_satisfied:
         reasons.append("CORPORATE_ACTION_COVERAGE_INCOMPLETE")
 
     facts_ready = (
@@ -35,7 +42,7 @@ def evaluate_technical_usability(
     decision_ready = (
         facts_ready
         and bar_count >= profile.decision_minimum_bars
-        and corporate_action_coverage == "complete"
+        and corporate_action_satisfied
     )
     status = "available" if decision_ready else "partial" if facts_ready else "missing"
     return {

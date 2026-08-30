@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -111,10 +112,18 @@ class FakeViewerPort:
         *,
         enabled: bool = True,
         returned_provider: str | None = None,
+        acquire_status: str = "live",
+        create_lease: bool = True,
+        acquire_error: Exception | None = None,
+        heartbeat_statuses: list[str | None] | None = None,
     ) -> None:
         self._provider_key = provider_key
         self.enabled = enabled
         self.returned_provider = returned_provider or provider_key
+        self.acquire_status = acquire_status
+        self.create_lease = create_lease
+        self.acquire_error = acquire_error
+        self.heartbeat_statuses = list(heartbeat_statuses or [])
         self.active: dict[str, tuple[str, ViewerLeaseOwnerKind]] = {}
         self.acquired_routes: list[ProviderResourceRouteV2] = []
         self.heartbeat_ids: list[str] = []
@@ -153,10 +162,19 @@ class FakeViewerPort:
         owner_kind: ViewerLeaseOwnerKind,
     ) -> ViewerLeaseState:
         self.acquired_routes.append(route)
-        inner_id = f"inner-{len(self.active) + 1}"
+        if self.acquire_error is not None:
+            raise self.acquire_error
+        inner_id = f"inner-{len(self.active) + 1}" if self.create_lease else None
         symbol = requirement.target.instrument.symbol
-        self.active[inner_id] = (symbol, owner_kind)
-        return self._state(inner_id, symbol, owner_kind, provider=self.returned_provider)
+        if inner_id is not None:
+            self.active[inner_id] = (symbol, owner_kind)
+        return self._state(
+            inner_id,
+            symbol,
+            owner_kind,
+            provider=self.returned_provider,
+            status=self.acquire_status,
+        )
 
     def _state(
         self,
@@ -181,7 +199,18 @@ class FakeViewerPort:
     def heartbeat(self, lease_id: str) -> ViewerLeaseState | None:
         self.heartbeat_ids.append(lease_id)
         active = self.active.get(lease_id)
-        return self._state(lease_id, *active) if active is not None else None
+        if active is None:
+            return None
+        status = (
+            self.heartbeat_statuses.pop(0)
+            if self.heartbeat_statuses
+            else "live"
+        )
+        return (
+            self._state(lease_id, *active, status=status)
+            if status is not None
+            else None
+        )
 
     def release(self, lease_id: str) -> ViewerLeaseState | None:
         self.release_ids.append(lease_id)
@@ -220,6 +249,12 @@ def test_coordinator_selects_by_shared_plan_and_hides_provider_handle() -> None:
 
     assert acquired.detail_code == "VIEWER_LEASE_CREATED"
     assert acquired.selected_provider == "alpha"
+    assert acquired.providers_attempted == ("alpha",)
+    assert acquired.plan.subscription_execution == "sequential_fallback"
+    assert tuple(route.provider_key for route in acquired.plan.routes) == (
+        "alpha",
+        "beta",
+    )
     assert acquired.lease is not None
     assert acquired.lease.lease_id == "public-owner-token"
     assert acquired.lease.lease_id not in primary.active
@@ -236,6 +271,179 @@ def test_coordinator_selects_by_shared_plan_and_hides_provider_handle() -> None:
     assert primary.release_ids == ["inner-1"]
     assert coordinator.summary().total_active_leases == 0
     assert coordinator.summary().tracked_owner_tokens == 0
+
+
+def test_viewer_lease_falls_back_when_primary_acquire_is_unavailable() -> None:
+    primary = FakeViewerPort("alpha", acquire_status="unavailable")
+    secondary = FakeViewerPort("beta")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5), _descriptor("beta", 20)),
+        ports={"alpha": primary, "beta": secondary},
+        id_factory=lambda: "public-fallback-token",
+    )
+
+    acquired = coordinator.acquire(_requirement(), owner_kind="frontend_viewer")
+
+    assert acquired.detail_code == "VIEWER_LEASE_CREATED"
+    assert acquired.selected_provider == "beta"
+    assert acquired.providers_attempted == ("alpha", "beta")
+    assert acquired.lease is not None
+    assert acquired.lease.provider == "beta"
+    assert primary.active == {}
+    assert primary.release_ids == ["inner-1"]
+    assert len(secondary.active) == 1
+    assert coordinator.summary().total_active_leases == 1
+
+
+def test_viewer_lease_does_not_start_secondary_when_primary_succeeds() -> None:
+    primary = FakeViewerPort("alpha")
+    secondary = FakeViewerPort("beta")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5), _descriptor("beta", 20)),
+        ports={"alpha": primary, "beta": secondary},
+    )
+
+    acquired = coordinator.acquire(_requirement(), owner_kind="frontend_viewer")
+
+    assert acquired.selected_provider == "alpha"
+    assert acquired.providers_attempted == ("alpha",)
+    assert secondary.acquired_routes == []
+
+
+def test_viewer_lease_falls_back_after_primary_timeout() -> None:
+    primary = FakeViewerPort("alpha", acquire_error=TimeoutError("timed out"))
+    secondary = FakeViewerPort("beta")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5), _descriptor("beta", 20)),
+        ports={"alpha": primary, "beta": secondary},
+    )
+
+    acquired = coordinator.acquire(_requirement(), owner_kind="frontend_viewer")
+
+    assert acquired.selected_provider == "beta"
+    assert acquired.providers_attempted == ("alpha", "beta")
+    assert any("TimeoutError" in item for item in acquired.limitations)
+
+
+class MutableMonotonic:
+    def __init__(self) -> None:
+        self.value = 100.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+def test_viewer_lease_heartbeat_falls_back_after_starting_unavailable() -> None:
+    current = MutableMonotonic()
+    primary = FakeViewerPort(
+        "alpha",
+        acquire_status="starting",
+        heartbeat_statuses=["unavailable"],
+    )
+    secondary = FakeViewerPort("beta")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5), _descriptor("beta", 20)),
+        ports={"alpha": primary, "beta": secondary},
+        id_factory=lambda: "public-heartbeat-fallback",
+        monotonic=current,
+        transitional_grace_seconds=9,
+    )
+
+    acquired = coordinator.acquire(_requirement(), owner_kind="frontend_viewer")
+    heartbeat = coordinator.heartbeat("public-heartbeat-fallback")
+    repeated = coordinator.heartbeat("public-heartbeat-fallback")
+
+    assert acquired.lease is not None and acquired.lease.status == "starting"
+    assert acquired.lease.expires_in_seconds == 9
+    assert heartbeat is not None
+    assert heartbeat.lease_id == "public-heartbeat-fallback"
+    assert heartbeat.provider == "beta"
+    assert primary.release_ids == ["inner-1"]
+    assert len(secondary.active) == 1
+    assert repeated is not None and repeated.provider == "beta"
+    assert len(secondary.acquired_routes) == 1
+
+
+def test_concurrent_heartbeats_share_one_atomic_failover() -> None:
+    primary = FakeViewerPort(
+        "alpha",
+        acquire_status="starting",
+        heartbeat_statuses=["unavailable"],
+    )
+    secondary = FakeViewerPort("beta")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5), _descriptor("beta", 20)),
+        ports={"alpha": primary, "beta": secondary},
+        id_factory=lambda: "public-concurrent-fallback",
+    )
+    coordinator.acquire(_requirement(), owner_kind="frontend_viewer")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        states = tuple(
+            pool.map(
+                coordinator.heartbeat,
+                ("public-concurrent-fallback", "public-concurrent-fallback"),
+            )
+        )
+
+    assert all(state is not None and state.provider == "beta" for state in states)
+    assert primary.release_ids == ["inner-1"]
+    assert len(secondary.acquired_routes) == 1
+    assert len(secondary.active) == 1
+
+
+def test_viewer_lease_starting_can_become_live_without_secondary() -> None:
+    current = MutableMonotonic()
+    primary = FakeViewerPort(
+        "alpha",
+        acquire_status="starting",
+        heartbeat_statuses=["live"],
+    )
+    secondary = FakeViewerPort("beta")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5), _descriptor("beta", 20)),
+        ports={"alpha": primary, "beta": secondary},
+        monotonic=current,
+    )
+
+    acquired = coordinator.acquire(_requirement(), owner_kind="frontend_viewer")
+    heartbeat = coordinator.heartbeat(acquired.lease.lease_id)  # type: ignore[union-attr]
+
+    assert heartbeat is not None and heartbeat.status == "live"
+    assert heartbeat.provider == "alpha"
+    assert secondary.acquired_routes == []
+
+
+def test_viewer_lease_transitional_state_has_bounded_timeout() -> None:
+    current = MutableMonotonic()
+    primary = FakeViewerPort(
+        "alpha",
+        acquire_status="starting",
+        heartbeat_statuses=["starting", "starting"],
+    )
+    secondary = FakeViewerPort("beta")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5), _descriptor("beta", 20)),
+        ports={"alpha": primary, "beta": secondary},
+        id_factory=lambda: "public-grace-fallback",
+        monotonic=current,
+        transitional_grace_seconds=5,
+    )
+
+    acquired = coordinator.acquire(_requirement(), owner_kind="frontend_viewer")
+    within_grace = coordinator.heartbeat("public-grace-fallback")
+    current.advance(6)
+    after_grace = coordinator.heartbeat("public-grace-fallback")
+
+    assert acquired.lease is not None
+    assert acquired.lease.expires_in_seconds == 5
+    assert within_grace is not None and within_grace.provider == "alpha"
+    assert after_grace is not None and after_grace.provider == "beta"
+    assert primary.release_ids == ["inner-1"]
+    assert len(secondary.active) == 1
 
 
 def test_coordinator_fail_closes_and_cleans_provider_identity_mismatch() -> None:

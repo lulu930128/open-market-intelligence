@@ -36,6 +36,9 @@ from app.jobs.taiwan_quote_contract_scheduler import (
 from app.jobs.taiwan_intraday_bar_scheduler import (
     add_taiwan_intraday_bar_jobs,
 )
+from app.jobs.us_intraday_materializer_scheduler import (
+    add_us_intraday_materializer_jobs,
+)
 from app.market.calendar_status import (
     build_jp_calendar_status,
     build_taiwan_calendar_status,
@@ -2511,6 +2514,7 @@ def start_scheduler() -> Any | None:
             coalesce=True,
             max_instances=1,
         )
+    us_intraday_materializer_enabled = add_us_intraday_materializer_jobs(scheduler)
     jp_market_refresh_enabled = _add_jp_market_refresh_job(scheduler)
     kr_market_refresh_enabled = _add_kr_market_refresh_job(scheduler)
     market_calendar_refresh_enabled = _add_market_calendar_refresh_job(scheduler)
@@ -2710,6 +2714,14 @@ def start_scheduler() -> Any | None:
         max(int(settings.scheduler_dispatch_tick_interval_seconds), 10),
         max(int(settings.scheduler_dispatch_reconcile_interval_seconds), 30),
         dispatch_schedule_reconcile_enabled,
+    )
+    logger.info(
+        "US Quote/Intraday materializer enabled=%s quote_interval=%ss "
+        "intraday_interval=%ss max_symbols=%s.",
+        us_intraday_materializer_enabled,
+        settings.scheduler_us_quote_materializer_interval_seconds,
+        settings.scheduler_us_intraday_materializer_interval_seconds,
+        settings.scheduler_us_intraday_materializer_max_symbols,
     )
     logger.info(
         "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays enabled=%s; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; taiwan_derivatives_refresh=%s %s %s enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",

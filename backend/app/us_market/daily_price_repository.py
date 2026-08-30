@@ -7,6 +7,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice
@@ -28,6 +29,7 @@ from app.market_data.contracts import (
     SourceLineage,
 )
 from app.us_market.market_data.descriptors import US_DAILY_CANDIDATE_DESCRIPTORS
+from app.us_market.daily_price_eligibility import us_daily_candidate_issue
 from app.us_market.symbols import us_symbol_storage_candidates
 from app.us_market.trading_calendar import us_session_close_time
 
@@ -45,18 +47,94 @@ def _aware_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _missing_lineage(row: USDailyPrice) -> tuple[str, ...]:
-    fields = (
-        "source_id",
-        "raw_result_id",
-        "authority",
-        "raw_contract_version",
-        "event_at",
-        "finalization",
-        "price_basis",
-        "volume_status",
+def _fair_budgets(total_rows: int, lane_count: int) -> tuple[int, ...]:
+    if lane_count < 1:
+        return ()
+    quotient, remainder = divmod(total_rows, lane_count)
+    return tuple(
+        quotient + (1 if index < remainder else 0)
+        for index in range(lane_count)
     )
-    return tuple(name for name in fields if getattr(row, name) in (None, ""))
+
+
+def _load_bounded_candidate_rows(rows_query, *, max_rows: int):
+    """Read fairly across registered providers plus one rejection lane."""
+
+    registered = tuple(_PRIORITY)
+    lanes = tuple((provider, USDailyPrice.provider == provider) for provider in registered)
+    lanes += (
+        (
+            "__unregistered__",
+            or_(
+                USDailyPrice.provider.is_(None),
+                ~USDailyPrice.provider.in_(registered),
+            ),
+        ),
+    )
+
+    def fetch(predicate, *, offset: int, limit: int):
+        if limit <= 0:
+            return []
+        return (
+            rows_query.filter(predicate)
+            .order_by(
+                USDailyPrice.provider.asc(),
+                USDailyPrice.trade_date.asc(),
+                USDailyPrice.id.asc(),
+            )
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+    rows_by_lane: dict[str, list] = {}
+    overflow: list[tuple[str, object]] = []
+    spare = 0
+    for (lane, predicate), budget in zip(lanes, _fair_budgets(max_rows, len(lanes))):
+        fetched = fetch(predicate, offset=0, limit=budget + 1)
+        rows_by_lane[lane] = fetched[:budget]
+        if len(fetched) > budget:
+            overflow.append((lane, predicate))
+        else:
+            spare += budget - len(fetched)
+
+    while spare > 0 and overflow:
+        next_overflow: list[tuple[str, object]] = []
+        appended = 0
+        for (lane, predicate), extra_budget in zip(
+            overflow,
+            _fair_budgets(spare, len(overflow)),
+        ):
+            already_read = len(rows_by_lane[lane])
+            fetched = fetch(
+                predicate,
+                offset=already_read,
+                limit=extra_budget + 1,
+            )
+            accepted = fetched[:extra_budget]
+            rows_by_lane[lane].extend(accepted)
+            appended += len(accepted)
+            if len(fetched) > extra_budget:
+                next_overflow.append((lane, predicate))
+        spare -= appended
+        if appended == 0:
+            overflow = next_overflow
+            break
+        overflow = next_overflow
+
+    if overflow:
+        raise CandidateReadLimitExceeded(
+            "US daily candidate read exceeded max_rows; narrow the requested range"
+        )
+    rows = [row for lane_rows in rows_by_lane.values() for row in lane_rows]
+    rows.sort(
+        key=lambda item: (
+            str(item[0].provider or ""),
+            item[0].trade_date,
+            item[0].id,
+        )
+    )
+    return rows
 
 
 class USDailyBarRepository:
@@ -88,19 +166,7 @@ class USDailyBarRepository:
             rows_query = rows_query.filter(
                 RawFetchResult.fetched_at <= _aware_utc(query.available_at)
             )
-        rows = (
-            rows_query.order_by(
-                USDailyPrice.provider.asc(),
-                USDailyPrice.trade_date.asc(),
-                USDailyPrice.id.asc(),
-            )
-            .limit(query.max_rows * max(len(_PRIORITY), 1) + 1)
-            .all()
-        )
-        if len(rows) > query.max_rows * max(len(_PRIORITY), 1):
-            raise CandidateReadLimitExceeded(
-                "US daily candidate read exceeded max_rows; narrow the requested range"
-            )
+        rows = _load_bounded_candidate_rows(rows_query, max_rows=query.max_rows)
 
         bars_by_source: dict[tuple[str, str], list[BarObservation]] = {}
         storage_ids: dict[tuple[str, str], list[int]] = {}
@@ -110,16 +176,14 @@ class USDailyBarRepository:
         for row, raw, source in rows:
             provider = str(row.provider or "").strip().lower()
             source_name = str(source.source_name if source is not None else "").strip()
-            missing = list(_missing_lineage(row))
-            if raw is None:
-                missing.append("raw_receipt")
-            if source is None:
-                missing.append("source")
-            for name in ("open_price", "high_price", "low_price", "close_price"):
-                if getattr(row, name) is None:
-                    missing.append(name)
             raw_id = int(row.raw_result_id or 0)
-            if missing:
+            issue = us_daily_candidate_issue(
+                row,
+                raw,
+                source,
+                instrument_type=instrument.instrument_type,
+            )
+            if issue is not None:
                 rejections.append(
                     CandidateRowRejection(
                         provider=provider or "unknown",
@@ -127,49 +191,8 @@ class USDailyBarRepository:
                         storage_row_id=row.id,
                         raw_result_id=max(raw_id, 1),
                         event_date=row.trade_date,
-                        reason_code="US_DAILY_LINEAGE_INCOMPLETE",
-                        missing_fields=tuple(dict.fromkeys(missing)),
-                    )
-                )
-                continue
-            if (
-                str(source.source_type or "").strip().lower()
-                == "compatibility_adapter"
-                or source_name.lower().startswith("legacy_compat.")
-                or "legacy_compat" in str(row.raw_contract_version or "").lower()
-            ):
-                rejections.append(
-                    CandidateRowRejection(
-                        provider=provider or "unknown",
-                        source=source_name or "unknown",
-                        storage_row_id=row.id,
-                        raw_result_id=raw_id,
-                        event_date=row.trade_date,
-                        reason_code="US_DAILY_LEGACY_COMPAT_LINEAGE_REJECTED",
-                    )
-                )
-                continue
-            if provider not in _PRIORITY:
-                rejections.append(
-                    CandidateRowRejection(
-                        provider=provider,
-                        source=source_name,
-                        storage_row_id=row.id,
-                        raw_result_id=raw_id,
-                        event_date=row.trade_date,
-                        reason_code="US_DAILY_PROVIDER_UNREGISTERED",
-                    )
-                )
-                continue
-            if raw.content_hash != row.raw_payload_hash:
-                rejections.append(
-                    CandidateRowRejection(
-                        provider=provider,
-                        source=source_name,
-                        storage_row_id=row.id,
-                        raw_result_id=raw_id,
-                        event_date=row.trade_date,
-                        reason_code="US_DAILY_CONTENT_HASH_MISMATCH",
+                        reason_code=issue.reason_code,
+                        missing_fields=issue.missing_fields,
                     )
                 )
                 continue
@@ -195,15 +218,11 @@ class USDailyBarRepository:
             )
             try:
                 volume = None
-                if row.volume_status == "observed":
-                    if row.trade_volume is None or row.volume_unit != "shares":
-                        raise ValueError("observed volume requires shares")
+                if instrument.instrument_type is not InstrumentType.INDEX:
                     volume = Quantity(
                         value=Decimal(row.trade_volume),
                         unit=QuantityUnit.SHARE,
                     )
-                elif row.volume_status != "not_applicable":
-                    raise ValueError("unsupported volume_status")
                 bar = BarObservation(
                     instrument=instrument,
                     lineage=SourceLineage(

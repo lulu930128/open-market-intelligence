@@ -6,7 +6,12 @@ from collections.abc import Callable
 from datetime import date, datetime
 from enum import Enum
 
-from app.market_data.contracts import CanonicalModel, DatasetHealth, Market
+from app.market_data.contracts import (
+    CanonicalModel,
+    DatasetHealth,
+    InstrumentType,
+    Market,
+)
 from app.market_data.integration_contracts import RefreshRequirementV1
 from app.market_data.registry import (
     AdditionalRefreshOperation,
@@ -31,6 +36,7 @@ class DatasetLifecycleContract(CanonicalModel):
     capability_ids: tuple[str, ...]
     expected_state_policy: ExpectedStatePolicy
     eligibility_policy: EligibilityPolicy
+    eligible_instrument_types: tuple[InstrumentType, ...] = ()
     storage_reference: str | None = None
     refreshable: bool
     refresh_operation: str | None = None
@@ -171,6 +177,7 @@ def dataset_lifecycle_contract(
         capability_ids=spec.capability_ids,
         expected_state_policy=spec.expected_state_policy,
         eligibility_policy=spec.eligibility_policy,
+        eligible_instrument_types=spec.eligible_instrument_types,
         storage_reference=spec.storage_reference,
         refreshable=spec.refreshable,
         refresh_operation=spec.refresh_operation,

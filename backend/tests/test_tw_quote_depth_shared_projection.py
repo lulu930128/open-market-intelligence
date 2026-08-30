@@ -179,7 +179,22 @@ def test_quote_depth_get_projects_shared_quote_and_typed_depth_without_io() -> N
         assert len(public.bid_levels) == 2
         assert len(public.ask_levels) == 2
         assert public.bid_levels[0].size_lots == 4
+        assert public.primary_provider == "kgi_superpy"
+        assert public.provider_attempts == []
+        assert public.data_core_result_kinds == [
+            "quote",
+            "depth",
+            "auction",
+            "bar_series",
+        ]
+        assert public.data_core_components["quote.snapshot"]["provider"] == (
+            "kgi_superpy"
+        )
+        assert public.acquisition_scope is None
+        assert public.read_policy == "cache_only"
         assert result["read_policy"] == "cache_only"
+        assert result["primary_provider"] == "kgi_superpy"
+        assert result["provider_attempts"] == []
         assert result["data_core_result_kinds"] == [
             "quote",
             "depth",

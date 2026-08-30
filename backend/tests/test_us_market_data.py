@@ -721,7 +721,12 @@ class USMarketSourceParsingTests(unittest.TestCase):
 
         mock_fetch.assert_not_called()
         self.assertEqual(fallback["points"], initial["points"])
-        self.assertEqual(fallback["source_status"]["status"], "degraded")
+        self.assertEqual(fallback["source_status"]["status"], "unavailable")
+        self.assertEqual(fallback["source_status"]["freshness_status"], "missing")
+        self.assertIn(
+            "US_INTRADAY_CANONICAL_CACHE_MISSING",
+            fallback["source_status"]["limitations"],
+        )
         self.assertEqual(fallback["source_status"]["freshness_status"], "missing")
         self.assertFalse(fallback["source_status"]["is_fallback"])
         self.assertFalse(fallback["source_status"]["has_usable_data"])

@@ -1184,7 +1184,7 @@ class AiSupplementalContextTests(unittest.TestCase):
                     ),
                     finalization="final",
                     price_basis="raw",
-                    volume_unit="not_applicable",
+                    volume_unit=None,
                     volume_status="not_applicable",
                     raw_payload_hash=content_hash,
                 )

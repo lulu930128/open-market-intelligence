@@ -176,6 +176,10 @@ class DataAcquisitionPlanV2(CanonicalModel):
     skipped_resources: tuple[ProviderResourceSkipV2, ...] = Field(default=(), max_length=32)
     acquisition_required: bool
     unfillable: bool
+    subscription_execution: Literal[
+        "aggregate_budget",
+        "sequential_fallback",
+    ] = "aggregate_budget"
     limitations: tuple[ReasonCode, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")
@@ -184,8 +188,20 @@ class DataAcquisitionPlanV2(CanonicalModel):
             raise ValueError("routes exceed requirement provider-attempt bound")
         if sum(route.max_external_calls for route in self.routes) > self.requirement.bounds.max_external_calls:
             raise ValueError("routes exceed requirement external-call bound")
-        if sum(route.max_subscriptions for route in self.routes) > self.requirement.bounds.max_subscriptions:
+        planned_subscriptions = (
+            max((route.max_subscriptions for route in self.routes), default=0)
+            if self.subscription_execution == "sequential_fallback"
+            else sum(route.max_subscriptions for route in self.routes)
+        )
+        if planned_subscriptions > self.requirement.bounds.max_subscriptions:
             raise ValueError("routes exceed requirement subscription bound")
+        if self.subscription_execution == "sequential_fallback" and any(
+            route.fetch_allowed or not route.subscription_allowed
+            for route in self.routes
+        ):
+            raise ValueError(
+                "sequential fallback plans require subscription-only routes"
+            )
         if not self.acquisition_required and self.routes:
             raise ValueError("non-acquiring plan cannot contain routes")
         if self.unfillable and self.routes:
@@ -431,6 +447,11 @@ def plan_data_acquisition_v2(
     requirement: DataRequirementV2,
     descriptors: Iterable[ProviderCapabilityDescriptorV2],
     provider_health: Iterable[ProviderResourceHealth] = (),
+    *,
+    subscription_execution: Literal[
+        "aggregate_budget",
+        "sequential_fallback",
+    ] = "aggregate_budget",
 ) -> DataAcquisitionPlanV2:
     """Build a deterministic provider-resource plan without performing I/O."""
 
@@ -439,6 +460,7 @@ def plan_data_acquisition_v2(
             requirement=requirement,
             acquisition_required=False,
             unfillable=False,
+            subscription_execution=subscription_execution,
             limitations=("POLICY_NO_EXTERNAL_ACQUISITION",),
         )
     if (
@@ -452,6 +474,7 @@ def plan_data_acquisition_v2(
             requirement=requirement,
             acquisition_required=True,
             unfillable=True,
+            subscription_execution=subscription_execution,
             limitations=("ACQUISITION_BUDGET_ZERO",),
         )
 
@@ -499,10 +522,17 @@ def plan_data_acquisition_v2(
             fetch = AcquisitionMode.FETCH in descriptor.acquisition_modes
             subscribe = (
                 AcquisitionMode.SUBSCRIPTION in descriptor.acquisition_modes
-                and requirement.bounds.max_subscriptions > used_subscriptions
+                and (
+                    subscription_execution == "sequential_fallback"
+                    or requirement.bounds.max_subscriptions > used_subscriptions
+                )
             )
             remaining_calls = requirement.bounds.max_external_calls - used_calls
-            remaining_subscriptions = requirement.bounds.max_subscriptions - used_subscriptions
+            remaining_subscriptions = (
+                requirement.bounds.max_subscriptions
+                if subscription_execution == "sequential_fallback"
+                else requirement.bounds.max_subscriptions - used_subscriptions
+            )
             route_calls = min(descriptor.max_external_calls_per_attempt, remaining_calls) if fetch else 0
             route_subscriptions = (
                 min(descriptor.max_subscriptions_per_attempt, remaining_subscriptions)
@@ -528,7 +558,8 @@ def plan_data_acquisition_v2(
                     )
                 )
                 used_calls += route_calls
-                used_subscriptions += route_subscriptions
+                if subscription_execution != "sequential_fallback":
+                    used_subscriptions += route_subscriptions
                 continue
         skipped.append(
             ProviderResourceSkipV2(
@@ -549,6 +580,7 @@ def plan_data_acquisition_v2(
         skipped_resources=tuple(skipped),
         acquisition_required=True,
         unfillable=not routes,
+        subscription_execution=subscription_execution,
         limitations=tuple(limitations),
     )
 

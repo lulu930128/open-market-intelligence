@@ -371,14 +371,14 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         )
         self.db.add(
             TaiwanStockQuoteSnapshot(
-                provider="twse_mis",
+                provider="kgi_superpy",
                 market="TWSE",
                 stock_id="2330",
                 stock_name="TSMC",
                 session_phase="regular_live",
                 trade_date=date(2026, 7, 22),
                 quote_time=datetime(2026, 7, 22, 9, 9, 40, tzinfo=ZoneInfo("Asia/Taipei")),
-                source="twse_mis_stock_info",
+                source="kgi_quote_stream",
                 fetched_at=datetime(2026, 7, 22, 1, 9, 45, tzinfo=timezone.utc),
             )
         )
@@ -438,11 +438,19 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         ]
         self.assertEqual(quote_dimensions["request_live"]["status"], "current")
         self.assertEqual(
-            quote_dimensions["provider_availability"]["status"],
+            entries["taiwan_stock_quote_snapshot"]["provider"],
+            "kgi_superpy",
+        )
+        self.assertEqual(
+            quote_dimensions["request_live"]["provider"],
+            "kgi_superpy",
+        )
+        self.assertEqual(
+            quote_dimensions["public_quote_provider_availability"]["status"],
             "unavailable",
         )
         self.assertFalse(
-            quote_dimensions["provider_availability"][
+            quote_dimensions["public_quote_provider_availability"][
                 "inferred_from_quote_row"
             ]
         )
@@ -538,6 +546,7 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         scheduler = dimensions["scheduler_contract"]
 
         self.assertNotEqual(quote["target"], "all")
+        self.assertIsNone(quote["provider"])
         self.assertEqual(dimensions["request_live"]["status"], "not_requested")
         self.assertEqual(scheduler["target_scope"], "bounded_universe")
         self.assertEqual(scheduler["requested_symbol_count"], 2)
@@ -547,7 +556,7 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         self.assertEqual(scheduler["status"], "partial")
         self.assertEqual(scheduler["missing_symbols"], ["2317"])
         self.assertEqual(
-            dimensions["provider_availability"]["status"],
+            dimensions["public_quote_provider_availability"]["status"],
             "unknown",
         )
 

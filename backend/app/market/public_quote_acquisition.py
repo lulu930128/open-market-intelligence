@@ -213,6 +213,9 @@ class TaiwanPublicQuoteAcquisitionExecutor:
                 limitations=(guard.detail_code,),
                 external_calls=0,
             )
+        attempt = guard.attempt
+        if attempt is None:
+            raise RuntimeError("TWSE MIS guard allowed a request without an attempt token")
         try:
             response = self._fetch(route, instrument)
         except Exception as exc:
@@ -220,11 +223,13 @@ class TaiwanPublicQuoteAcquisitionExecutor:
             status_code, headers = response_failure_metadata(exc)
             guard = (
                 self._provider_guard.record_http_failure(
+                    attempt,
                     status_code,
                     headers=headers,
                 )
                 if status_code is not None
                 else self._provider_guard.record_failure(
+                    attempt,
                     detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
                 )
             )
@@ -278,6 +283,7 @@ class TaiwanPublicQuoteAcquisitionExecutor:
         )
         if not 200 <= status_code < 300:
             guard = self._provider_guard.record_http_failure(
+                attempt,
                 status_code,
                 headers=response.headers,
             )
@@ -325,6 +331,7 @@ class TaiwanPublicQuoteAcquisitionExecutor:
             )
         except Exception as exc:
             self._provider_guard.record_failure(
+                attempt,
                 detail_code="TWSE_MIS_PAYLOAD_PARSE_FAILED"
             )
             error_receipt = receipt.model_copy(
@@ -347,7 +354,7 @@ class TaiwanPublicQuoteAcquisitionExecutor:
                 ),
             )
 
-        self._provider_guard.record_success()
+        self._provider_guard.record_success(attempt)
         has_actual_trade = observation.last_trade_price is not None
         completed_session_observation = session in {
             MarketSession.CLOSE_RESOLUTION,

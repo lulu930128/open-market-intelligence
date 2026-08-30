@@ -7,6 +7,7 @@ from app.market.providers import (
     twse_mis_current_index,
     yahoo_current_index,
 )
+from app.market_data.contracts import OperationalStatus
 
 
 TAIPEI = timezone(timedelta(hours=8))
@@ -107,7 +108,7 @@ def test_twse_mis_current_breadth_keeps_partition_disjoint(monkeypatch) -> None:
     monkeypatch.setattr(
         twse_mis_current_breadth,
         "_fetch_messages",
-        lambda *_args: (messages, 0),
+        lambda *_args, **_kwargs: (messages, 0, 6),
     )
 
     result = twse_mis_current_breadth.read_twse_mis_current_breadth(
@@ -117,6 +118,7 @@ def test_twse_mis_current_breadth_keeps_partition_disjoint(monkeypatch) -> None:
     )
 
     assert result.status == "available"
+    assert result.external_calls == 6
     assert result.payload is not None
     payload = result.payload
     assert payload["classified_count"] == 450
@@ -131,4 +133,109 @@ def test_twse_mis_current_breadth_keeps_partition_disjoint(monkeypatch) -> None:
     )
     assert payload["decision_usable"] is False
     assert payload["scope"] == "full_market_registered_stock_universe"
+    twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
+
+
+def _mis_messages(codes: list[str]) -> list[dict[str, str]]:
+    return [
+        {
+            "c": code,
+            "d": "20260826",
+            "t": "10:15:00",
+            "y": "100",
+            "z": "101",
+            "v": "1",
+        }
+        for code in codes
+    ]
+
+
+def test_breadth_reports_actual_external_call_count(monkeypatch) -> None:
+    twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
+    codes = [f"{1000 + index:04d}" for index in range(500)]
+    calls: list[tuple[str, ...]] = []
+
+    def fetch(batch, **_kwargs):
+        calls.append(tuple(batch))
+        return _mis_messages(batch)
+
+    monkeypatch.setattr(
+        twse_mis_current_breadth.twse_mis,
+        "fetch_stock_messages",
+        fetch,
+    )
+    result = twse_mis_current_breadth.read_twse_mis_current_breadth(
+        "TWSE",
+        20,
+        universe_reader=lambda _market: codes,
+    )
+
+    assert len(calls) == 5
+    assert result.external_calls == 5
+    assert result.status == "available"
+    twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
+
+
+def test_breadth_stops_new_batches_after_429(monkeypatch) -> None:
+    class RateLimited(Exception):
+        status_code = 429
+        headers = {"Retry-After": "30"}
+
+    twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
+    codes = [f"{1000 + index:04d}" for index in range(500)]
+    calls: list[tuple[str, ...]] = []
+
+    def fetch(batch, **_kwargs):
+        calls.append(tuple(batch))
+        if len(calls) == 2:
+            raise RateLimited("rate limited")
+        return _mis_messages(batch)
+
+    monkeypatch.setattr(
+        twse_mis_current_breadth.twse_mis,
+        "fetch_stock_messages",
+        fetch,
+    )
+    result = twse_mis_current_breadth.read_twse_mis_current_breadth(
+        "TWSE",
+        20,
+        universe_reader=lambda _market: codes,
+    )
+
+    assert len(calls) == 2
+    assert result.external_calls == 2
+    assert result.status == "partial"
+    assert result.operational_status is OperationalStatus.RATE_LIMITED
+    assert result.retry_after_seconds is not None
+    twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
+
+
+def test_breadth_cooldown_refresh_performs_zero_http_calls(monkeypatch) -> None:
+    twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
+    request = twse_mis_current_breadth.TWSE_MIS_PROVIDER_GUARD.before_request()
+    assert request.attempt is not None
+    twse_mis_current_breadth.TWSE_MIS_PROVIDER_GUARD.record_http_failure(
+        request.attempt,
+        429,
+        headers={"Retry-After": "30"},
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("cooldown attempted TWSE MIS HTTP")
+
+    monkeypatch.setattr(
+        twse_mis_current_breadth.twse_mis,
+        "fetch_stock_messages",
+        forbidden,
+    )
+    result = twse_mis_current_breadth.read_twse_mis_current_breadth(
+        "TWSE",
+        20,
+        universe_reader=lambda _market: [
+            f"{1000 + index:04d}" for index in range(500)
+        ],
+    )
+
+    assert result.external_calls == 0
+    assert result.operational_status is OperationalStatus.RATE_LIMITED
     twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()

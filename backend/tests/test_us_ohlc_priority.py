@@ -14,6 +14,7 @@ from app.db.models import (
     USWatchlistItem,
 )
 from app.us_market.ohlc_priority import (
+    PRIORITY_DAILY_RESEARCH_CONTRACT,
     PRIORITY_US_INDEX_SYMBOLS,
     list_us_priority_ohlc_symbols,
     reconcile_us_priority_ohlc,
@@ -89,6 +90,22 @@ def test_priority_universe_orders_indices_holdings_then_enabled_watchlist() -> N
         db.close()
 
 
+def test_priority_research_contract_is_daily_with_technical_history_depth() -> None:
+    assert PRIORITY_US_INDEX_SYMBOLS == (
+        "^GSPC",
+        "^DJI",
+        "^IXIC",
+        "^SOX",
+        "^NDX",
+        "^VIX",
+    )
+    assert PRIORITY_DAILY_RESEARCH_CONTRACT.dataset_id == (
+        "us.daily.ohlcv.priority_research"
+    )
+    assert PRIORITY_DAILY_RESEARCH_CONTRACT.timeframe == "daily"
+    assert PRIORITY_DAILY_RESEARCH_CONTRACT.minimum_bar_count == 260
+
+
 def test_priority_reconcile_can_audit_without_provider_io_or_false_completion() -> None:
     db = _session()
     try:
@@ -115,6 +132,16 @@ def test_priority_reconcile_can_audit_without_provider_io_or_false_completion() 
         assert result["satisfied_count"] == 0
         assert result["unresolved_count"] == 2
         assert result["stopped_reason"] == "shared_core_postcondition_unsatisfied"
+        assert result["contract"] == {
+            "timeframe": "daily",
+            "bars": 260,
+            "minimum_observation_count": 260,
+            "continuity": "all completed US sessions from first available row",
+            "history": (
+                "provider-coherent completed-session Daily bars; requests below the "
+                "minimum remain partial with explicit coverage limitations"
+            ),
+        }
         assert {
             item["reason"] for item in result["unresolved_sample"]
         } == {"repair_not_requested"}
@@ -175,8 +202,85 @@ def test_priority_reconcile_repairs_through_same_platform_with_bounded_calls() -
         assert result["provider_call_count"] == 2
         platform.ensure_history_coverage.assert_called_once_with(
             symbol="^GSPC",
-            bars=72,
+            bars=260,
+            to_date=None,
+            now=None,
+            max_provider_calls=2,
         )
+        platform.read.assert_called_once_with(
+            symbol="^GSPC",
+            bars=260,
+            to_date=None,
+            now=None,
+        )
+    finally:
+        db.close()
+
+
+def test_priority_reconcile_enforces_symbol_and_external_call_budgets() -> None:
+    db = _session()
+    try:
+        platform = Mock()
+        platform.read.return_value = _platform_result(satisfied=False)
+        platform.ensure_history_coverage.return_value = _platform_result(
+            satisfied=False,
+            attempts=1,
+        )
+        with patch(
+            "app.us_market.ohlc_priority.list_us_priority_ohlc_symbols",
+            return_value=("^GSPC", "^DJI", "AAPL"),
+        ):
+            result = reconcile_us_priority_ohlc(
+                max_runtime_seconds=30,
+                max_symbols=2,
+                max_external_calls=1,
+                max_provider_attempts=2,
+                session_factory=lambda: Session(db.get_bind()),
+                platform_factory=lambda _db: platform,
+            )
+
+        assert result["status"] == "partial"
+        assert result["universe_count"] == 3
+        assert result["run_target_count"] == 2
+        assert result["checked_count"] == 2
+        assert result["external_call_count"] == 1
+        assert result["unscanned_count"] == 1
+        platform.ensure_history_coverage.assert_called_once_with(
+            symbol="^GSPC",
+            bars=260,
+            to_date=None,
+            now=None,
+            max_provider_calls=1,
+        )
+    finally:
+        db.close()
+
+
+def test_priority_reconcile_isolates_one_symbol_failure() -> None:
+    db = _session()
+    try:
+        failed = Mock()
+        failed.read.side_effect = RuntimeError("provider contract failed")
+        healthy = Mock()
+        healthy.read.return_value = _platform_result(satisfied=True)
+        platforms = iter((failed, healthy))
+        with patch(
+            "app.us_market.ohlc_priority.list_us_priority_ohlc_symbols",
+            return_value=("^GSPC", "AAPL"),
+        ):
+            result = reconcile_us_priority_ohlc(
+                max_runtime_seconds=30,
+                session_factory=lambda: Session(db.get_bind()),
+                platform_factory=lambda _db: next(platforms),
+            )
+
+        assert result["status"] == "partial"
+        assert result["checked_count"] == 2
+        assert result["satisfied_count"] == 1
+        assert result["error_count"] == 1
+        assert result["errors"][0]["symbol"] == "^GSPC"
+        assert result["errors"][0]["error_type"] == "RuntimeError"
+        healthy.read.assert_called_once()
     finally:
         db.close()
 

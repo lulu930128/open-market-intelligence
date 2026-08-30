@@ -114,6 +114,22 @@ class AIMarketContextProjectionTests(unittest.TestCase):
                 "top5_imbalance": 1 / 9,
                 "depth_volume_unit": "lots",
                 "depth_order_count_status": "not_provided",
+                "data_core_components": {
+                    "quote.snapshot": {
+                        "lineage": {"authority": "exchange"},
+                    }
+                },
+                "primary_provider": "twse_mis",
+                "provider_attempts": [
+                    {
+                        "provider": "twse_mis",
+                        "status": "selected",
+                        "error": None,
+                    }
+                ],
+                "acquisition_scope": {
+                    "providers_attempted": ["twse_mis"],
+                },
                 "auction_book_available": True,
                 "auction_book_status": "depth_and_indicative_match",
                 "auction_indicative_available": True,
@@ -190,11 +206,129 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             [
                 {
                     "provider": "twse_mis",
-                    "status": "success",
+                    "status": "selected",
                     "error": None,
                 }
             ],
         )
+        self.assertEqual(quote["source_grade"], "official")
+
+    def test_taiwan_cached_fugle_quote_ignores_bundle_level_mis_attempt(
+        self,
+    ) -> None:
+        quote = taiwan_projection._compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth={
+                "source": "fugle_aggregates_stream",
+                "provider": "fugle_marketdata",
+                "freshness": {
+                    "status": "live",
+                    "is_live": True,
+                    "is_stale": False,
+                },
+                "data_core_components": {
+                    "quote.snapshot": {
+                        "lineage": {"authority": "vendor"},
+                    }
+                },
+                "primary_provider": "fugle_marketdata",
+                "provider_attempts": [],
+                "acquisition_scope": {
+                    "providers_attempted": ["twse_mis"],
+                },
+            },
+            quote_error=None,
+            session_phase="regular_live",
+            current_session_date="2026-07-27",
+            is_trading_day=True,
+        )
+
+        self.assertEqual(quote["primary_provider"], "fugle_marketdata")
+        self.assertEqual(quote["selected_provider"], "fugle_marketdata")
+        self.assertEqual(quote["provider_attempts"], [])
+        self.assertNotIn("twse_mis", str(quote["provider_attempts"]))
+        self.assertEqual(quote["source_grade"], "third_party")
+
+    def test_taiwan_cached_kgi_quote_does_not_fabricate_provider_attempts(self) -> None:
+        quote = taiwan_projection._compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth={
+                "source": "kgi_quote_stream",
+                "provider": "kgi_superpy",
+                "freshness": {
+                    "status": "live",
+                    "is_live": True,
+                    "is_stale": False,
+                },
+                "data_core_components": {
+                    "quote.snapshot": {
+                        "lineage": {"authority": "broker"},
+                    }
+                },
+                "primary_provider": "kgi_superpy",
+                "provider_attempts": [],
+                "acquisition_scope": {
+                    "providers_attempted": ["twse_mis"],
+                },
+            },
+            quote_error=None,
+            session_phase="regular_live",
+            current_session_date="2026-07-27",
+            is_trading_day=True,
+        )
+
+        self.assertEqual(quote["primary_provider"], "kgi_superpy")
+        self.assertEqual(quote["provider_attempts"], [])
+        self.assertEqual(quote["source_grade"], "third_party")
+
+    def test_taiwan_quote_preserves_backend_owned_fallback_path(self) -> None:
+        provider_attempts = [
+            {
+                "provider": "fugle_marketdata",
+                "status": "attempted",
+                "error": "upstream_timeout",
+            },
+            {
+                "provider": "kgi_superpy",
+                "status": "selected",
+                "error": None,
+            },
+        ]
+        quote = taiwan_projection._compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth={
+                "source": "kgi_quote_stream",
+                "provider": "kgi_superpy",
+                "primary_provider": "fugle_marketdata",
+                "provider_attempts": provider_attempts,
+                "fallback_used": True,
+                "fallback_reason": "upstream_timeout",
+                "freshness": {
+                    "status": "live",
+                    "is_live": True,
+                    "is_stale": False,
+                },
+                "data_core_components": {
+                    "quote.snapshot": {
+                        "lineage": {"authority": "broker"},
+                    }
+                },
+                "acquisition_scope": {
+                    "providers_attempted": ["twse_mis"],
+                },
+            },
+            quote_error=None,
+            session_phase="regular_live",
+            current_session_date="2026-07-27",
+            is_trading_day=True,
+        )
+
+        self.assertEqual(quote["primary_provider"], "fugle_marketdata")
+        self.assertEqual(quote["selected_provider"], "kgi_superpy")
+        self.assertEqual(quote["provider_attempts"], provider_attempts)
+        self.assertTrue(quote["fallback_used"])
+        self.assertEqual(quote["fallback_provider"], "kgi_superpy")
+        self.assertEqual(quote["fallback_reason"], "upstream_timeout")
 
     def test_taiwan_intraday_compact_declares_price_and_volume_units(self) -> None:
         projected = taiwan_projection._compact_intraday_history(
@@ -847,6 +981,69 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(quote["last_quote_session"], "regular")
         self.assertEqual(quote["volume_unit"], "shares")
         self.assertEqual(quote["volume_semantics"], "interval_shares")
+
+    def test_us_resolved_quote_preserves_provider_and_delayed_truth(self) -> None:
+        quote = us_context._us_resolved_quote(
+            {
+                "facts_usable": True,
+                "selected_provider": "yahoo_chart",
+                "selected_source": "yahoo.chart.quote",
+                "selected_session": "continuous",
+                "limitations": ["DELAYED_VENDOR_EVIDENCE"],
+                "quote": {
+                    "trade_date": "2026-07-17",
+                    "currency": "USD",
+                    "last_trade_price": "101.25",
+                    "previous_close": "100.00",
+                    "event_at": "2026-07-17T10:00:00-04:00",
+                },
+            },
+            calendar_status={
+                "checked_at": "2026-07-17T10:01:00-04:00",
+                "phase": "regular",
+                "previous_trading_day": "2026-07-17",
+            },
+            previous_close_reference={
+                "previous_close": 99.5,
+                "previous_close_source": "yahoo.chart.1d",
+                "previous_close_trade_date": "2026-07-16",
+                "previous_close_provider": "yahoo_chart",
+            },
+        )
+
+        self.assertEqual(quote["price"], 101.25)
+        self.assertEqual(quote["provider"], "yahoo_chart")
+        self.assertEqual(quote["source"], "yahoo.chart.quote")
+        self.assertFalse(quote["is_live"])
+        self.assertFalse(quote["is_realtime"])
+        self.assertEqual(quote["volume_status"], "not_provided")
+        self.assertEqual(quote["previous_close"], 99.5)
+        self.assertEqual(quote["previous_close_source"], "yahoo.chart.1d")
+        self.assertEqual(quote["previous_close_trade_date"], "2026-07-16")
+        self.assertIn("DELAYED_VENDOR_EVIDENCE", quote["limitations"])
+
+    def test_us_intraday_quote_uses_resolved_source_status_provider(self) -> None:
+        quote = us_context._us_intraday_quote(
+            {
+                "source": "twelve_data.time_series",
+                "source_status": {"provider": "quote-provider-must-not-leak"},
+                "bar_source_status": {"provider": "twelve_data"},
+                "previous_close": 100.0,
+                "latest_point": {
+                    "time": "2026-07-17T10:00:00-04:00",
+                    "session": "regular",
+                    "price": 101.0,
+                    "volume": 10,
+                },
+            },
+            calendar_status={
+                "checked_at": "2026-07-17T10:01:00-04:00",
+                "phase": "regular",
+                "previous_trading_day": "2026-07-17",
+            },
+        )
+
+        self.assertEqual(quote["provider"], "twelve_data")
 
     def test_us_intraday_compact_declares_share_volume_unit(self) -> None:
         compact = us_context._us_intraday_compact(

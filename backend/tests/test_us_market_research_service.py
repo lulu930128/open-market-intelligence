@@ -52,6 +52,7 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
                 fetched_at=datetime(2026, 8, 22, 2, 0, tzinfo=timezone.utc),
                 content_hash="a" * 64,
                 raw_text="fixture",
+                parser_version="yahoo.chart.v8",
             )
             db.add(raw)
             db.flush()
@@ -108,6 +109,7 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
             assert result["technical_indicators"]["quality"]["facts_usable"] is True
             assert result["technical_indicators"]["quality"]["decision_usable"] is False
             assert result["technical_structure"]["trend_state"] == "bullish_stack"
+            assert result["corporate_action_coverage"]["applicability"] == "required"
             assert result["corporate_action_coverage"]["status"] == "unknown"
             assert result["market_coverage"]["full_market_ready"] is False
             classification = result["market_coverage"]["classification_coverage"]
@@ -145,5 +147,91 @@ def test_research_service_fails_closed_when_venue_is_unknown() -> None:
             assert result["daily_ohlcv"] == {}
             assert "instrument_identity" in result["missing"]
             assert result["technical_indicators"]["current"] == {}
+    finally:
+        engine.dispose()
+
+
+def test_index_research_uses_not_applicable_volume_and_corporate_actions() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    try:
+        with Session(engine) as db:
+            source = SourceRegistry(
+                source_name="yahoo_chart.daily",
+                source_type="fixture",
+                category="market_data",
+                enabled=True,
+            )
+            db.add(source)
+            db.flush()
+            raw = RawFetchResult(
+                source_id=source.id,
+                fetched_at=datetime(2026, 8, 22, 2, 0, tzinfo=timezone.utc),
+                content_hash="i" * 64,
+                raw_text="fixture",
+                parser_version="yahoo.chart.v8",
+            )
+            db.add(raw)
+            db.flush()
+            for index, trade_date in enumerate(
+                _trading_dates(220, latest=date(2026, 8, 21))
+            ):
+                close = 5_000 + index * 2
+                db.add(
+                    USDailyPrice(
+                        provider="yahoo_chart",
+                        symbol="^GSPC",
+                        trade_date=trade_date,
+                        open_price=close - 5,
+                        high_price=close + 10,
+                        low_price=close - 10,
+                        close_price=close,
+                        trade_volume=None,
+                        fetched_at=datetime.combine(
+                            trade_date + timedelta(days=1),
+                            time(2, 0),
+                            tzinfo=timezone.utc,
+                        ),
+                        source_id=source.id,
+                        raw_result_id=raw.id,
+                        authority="vendor",
+                        raw_contract_version="yahoo.chart.v8",
+                        event_at=datetime.combine(
+                            trade_date,
+                            time(20, 0),
+                            tzinfo=timezone.utc,
+                        ),
+                        finalization="final",
+                        price_basis="raw",
+                        volume_unit=None,
+                        volume_status="not_applicable",
+                        raw_payload_hash=raw.content_hash,
+                    )
+                )
+            db.commit()
+            before_count = db.query(USDailyPrice).count()
+
+            result = build_us_market_research(
+                db,
+                symbol="^GSPC",
+                bars=260,
+                now=datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc),
+            )
+
+            assert db.query(USDailyPrice).count() == before_count
+            assert result["technical_indicators"]["bar_count"] == 220
+            assert result["technical_indicators"]["profile"]["profile_id"] == (
+                "us.index.daily"
+            )
+            assert result["technical_indicators"]["profile"]["volume_unit"] is None
+            assert result["technical_indicators"]["current"]["volume"] is None
+            assert result["technical_indicators"]["quality"]["decision_usable"] is True
+            assert result["corporate_action_coverage"]["applicability"] == (
+                "not_applicable"
+            )
+            assert result["corporate_action_coverage"]["status"] == "not_applicable"
+            assert "CORPORATE_ACTION_COVERAGE_INCOMPLETE" not in result[
+                "technical_indicators"
+            ]["quality"]["reason_codes"]
     finally:
         engine.dispose()

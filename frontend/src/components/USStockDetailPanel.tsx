@@ -371,7 +371,11 @@ type USIntradayMeta = {
   hasExtendedHours: boolean;
   warnings: string[];
   volumePace: StockVolumePace | null;
-  sourceStatus: USIntradaySourceStatus | null;
+  currentSourceStatus: USIntradaySourceStatus | null;
+  barSourceStatus: USIntradaySourceStatus | null;
+  currentPrice: number | null;
+  currentPreviousClose: number | null;
+  currentObservedAt: string | null;
 };
 
 const emptyUsIntradayMeta: USIntradayMeta = {
@@ -381,7 +385,11 @@ const emptyUsIntradayMeta: USIntradayMeta = {
   hasExtendedHours: false,
   warnings: [],
   volumePace: null,
-  sourceStatus: null,
+  currentSourceStatus: null,
+  barSourceStatus: null,
+  currentPrice: null,
+  currentPreviousClose: null,
+  currentObservedAt: null,
 };
 
 function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMeta {
@@ -392,7 +400,11 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     hasExtendedHours: Boolean(response.has_extended_hours),
     warnings: response.warnings ?? [],
     volumePace: response.volume_pace ?? null,
-    sourceStatus: response.source_status ?? null,
+    currentSourceStatus: response.current_source_status ?? null,
+    barSourceStatus: response.bar_source_status ?? response.source_status ?? null,
+    currentPrice: response.current_observation?.value ?? null,
+    currentPreviousClose: response.current_observation?.previous_close ?? null,
+    currentObservedAt: response.current_observation?.observed_at ?? null,
   };
 }
 
@@ -403,55 +415,85 @@ type IntradaySourcePresentation = {
   message: string;
 };
 
+function intradayProviderLabel(status: USIntradaySourceStatus): string {
+  const value = status.provider || status.source || "US intraday";
+  return value
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
 function intradaySourcePresentation(
   t: TranslationFunction,
   status: USIntradaySourceStatus | null
 ): IntradaySourcePresentation | null {
-  if (!status || status.status === "ok") return null;
+  if (!status) return null;
+  const provider = intradayProviderLabel(status);
+
+  if (status.is_fallback && status.has_usable_data) {
+    return {
+      level: "warning",
+      title: t("usStockDetail.sourceStatus.providerErrorTitle", { provider }),
+      badge: t("usStockDetail.sourceStatus.fallbackBadge", { provider }),
+      message: t("usStockDetail.sourceStatus.fallbackMessage", { provider }),
+    };
+  }
+
+  if (status.resolved_status === "partial") {
+    return {
+      level: "warning",
+      title: t("usStockDetail.sourceStatus.partialTitle", { provider }),
+      badge: t("usStockDetail.sourceStatus.partialBadge", { provider }),
+      message: t("usStockDetail.sourceStatus.partialMessage", { provider }),
+    };
+  }
+
+  if (status.status === "ok") return null;
 
   const minutes = Math.max(1, Math.ceil((status.lag_seconds ?? 0) / 60));
 
   if (status.freshness_status === "provider_error" && status.is_fallback) {
     return {
       level: "warning",
-      title: t("usStockDetail.sourceStatus.providerErrorTitle"),
-      badge: t("usStockDetail.sourceStatus.fallbackBadge"),
-      message: t("usStockDetail.sourceStatus.fallbackMessage"),
+      title: t("usStockDetail.sourceStatus.providerErrorTitle", { provider }),
+      badge: t("usStockDetail.sourceStatus.fallbackBadge", { provider }),
+      message: t("usStockDetail.sourceStatus.fallbackMessage", { provider }),
     };
   }
 
   if (status.freshness_status === "provider_error") {
     return {
       level: "error",
-      title: t("usStockDetail.sourceStatus.providerErrorTitle"),
-      badge: t("usStockDetail.sourceStatus.unavailableBadge"),
-      message: t("usStockDetail.sourceStatus.unavailableMessage"),
+      title: t("usStockDetail.sourceStatus.providerErrorTitle", { provider }),
+      badge: t("usStockDetail.sourceStatus.unavailableBadge", { provider }),
+      message: t("usStockDetail.sourceStatus.unavailableMessage", { provider }),
     };
   }
 
   if (status.freshness_status === "stale") {
     return {
       level: "warning",
-      title: t("usStockDetail.sourceStatus.staleTitle"),
-      badge: t("usStockDetail.sourceStatus.staleBadge", { minutes }),
-      message: t("usStockDetail.sourceStatus.staleMessage", { minutes }),
+      title: t("usStockDetail.sourceStatus.staleTitle", { provider }),
+      badge: t("usStockDetail.sourceStatus.staleBadge", { provider, minutes }),
+      message: t("usStockDetail.sourceStatus.staleMessage", { provider, minutes }),
     };
   }
 
   if (status.freshness_status === "delayed") {
     return {
       level: "warning",
-      title: t("usStockDetail.sourceStatus.delayedTitle"),
-      badge: t("usStockDetail.sourceStatus.delayedBadge", { minutes }),
-      message: t("usStockDetail.sourceStatus.delayedMessage", { minutes }),
+      title: t("usStockDetail.sourceStatus.delayedTitle", { provider }),
+      badge: t("usStockDetail.sourceStatus.delayedBadge", { provider, minutes }),
+      message: t("usStockDetail.sourceStatus.delayedMessage", { provider, minutes }),
     };
   }
 
   return {
     level: "error",
-    title: t("usStockDetail.sourceStatus.providerErrorTitle"),
-    badge: t("usStockDetail.sourceStatus.unavailableBadge"),
-    message: t("usStockDetail.sourceStatus.unavailableMessage"),
+    title: t("usStockDetail.sourceStatus.providerErrorTitle", { provider }),
+    badge: t("usStockDetail.sourceStatus.unavailableBadge", { provider }),
+    message: t("usStockDetail.sourceStatus.unavailableMessage", { provider }),
   };
 }
 
@@ -1003,14 +1045,19 @@ export default function USStockDetailPanel({
   const previousPoint = chartData[chartData.length - 2] ?? null;
   const latestProfessionalPoint = professionalChartData[professionalChartData.length - 1] ?? null;
   const displayDate =
-    timeframe === "today" ? latestToday?.time ?? latestPoint?.time ?? null : latestPoint?.time ?? null;
+    timeframe === "today"
+      ? visibleTodayIntradayMeta.currentObservedAt ?? latestToday?.time ?? latestPoint?.time ?? null
+      : latestPoint?.time ?? null;
   const latestClose =
-    timeframe === "today" ? latestToday?.price ?? latestPoint?.close ?? null : latestPoint?.close ?? null;
+    timeframe === "today"
+      ? visibleTodayIntradayMeta.currentPrice ?? latestToday?.price ?? latestPoint?.close ?? null
+      : latestPoint?.close ?? null;
   const previousClose =
     timeframe === "today"
-      ? visibleTodayPreviousCloseStatus === "current"
+      ? visibleTodayIntradayMeta.currentPreviousClose ??
+        (visibleTodayPreviousCloseStatus === "current"
         ? visibleTodayPreviousClose
-        : null
+        : null)
       : timeframe === "daily"
         ? chartMatchesSelection && chart?.previous_close_status === "current"
           ? chart.previous_close
@@ -1168,13 +1215,24 @@ export default function USStockDetailPanel({
   );
   const publishIntradaySourceStatus = useCallback(
     (symbol: string, response: IntradayTrendResponse) => {
-      const sourceStatus = response.source_status;
+      const sourceStatus =
+        response.current_source_status ??
+        response.bar_source_status ??
+        response.source_status;
       if (!sourceStatus) return;
 
       const normalizedSymbol = symbol.toUpperCase();
       const contextKey = `us:${normalizedSymbol}`;
       const dedupeKey = `${contextKey}:intraday-source`;
-      const signature = `${sourceStatus.status}:${sourceStatus.freshness_status}:${sourceStatus.is_fallback}`;
+      const signature = [
+        sourceStatus.provider,
+        sourceStatus.source,
+        sourceStatus.status,
+        sourceStatus.resolved_status,
+        sourceStatus.freshness_status,
+        sourceStatus.is_fallback,
+      ].join(":");
+      const sourceLabel = intradayProviderLabel(sourceStatus);
       const previousSignature = intradaySourceEventStateRef.current.get(dedupeKey);
       if (previousSignature === signature) return;
 
@@ -1196,7 +1254,7 @@ export default function USStockDetailPanel({
                 ? "usStockDetail.sourceStatus.recoveredMessage"
                 : "usStockDetail.sourceStatus.monitoringEndedMessage"
             ),
-            source: "Yahoo chart",
+            source: sourceLabel,
             contextKey,
             contextLabel:
               normalizedSymbol === selectedSymbol?.toUpperCase()
@@ -1213,7 +1271,7 @@ export default function USStockDetailPanel({
         level: presentation.level,
         title: presentation.title,
         message: presentation.message,
-        source: "Yahoo chart",
+        source: sourceLabel,
         contextKey,
         contextLabel:
           normalizedSymbol === selectedSymbol?.toUpperCase()
@@ -1243,9 +1301,13 @@ export default function USStockDetailPanel({
     !visibleTodayIntradayMeta.hasExtendedHours
       ? t("usStockDetail.extendedHours.noExtendedData")
       : visibleTodayIntradayMeta.warnings[0] ?? null;
-  const visibleIntradaySourcePresentation = intradaySourcePresentation(
+  const visibleCurrentSourcePresentation = intradaySourcePresentation(
     t,
-    visibleTodayIntradayMeta.sourceStatus
+    visibleTodayIntradayMeta.currentSourceStatus
+  );
+  const visibleBarSourcePresentation = intradaySourcePresentation(
+    t,
+    visibleTodayIntradayMeta.barSourceStatus
   );
   const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
   const professionalChartReady =
@@ -3375,23 +3437,23 @@ export default function USStockDetailPanel({
             }}
             message={
               successMessage ||
-              (professionalIsIntraday && visibleIntradaySourcePresentation) ? (
+              (professionalIsIntraday && visibleBarSourcePresentation) ? (
                 <>
                   {successMessage ? (
                     <div className="border-b border-omi-success-border bg-omi-success-soft px-5 py-3 text-sm text-omi-success">
                       {successMessage.text}
                     </div>
                   ) : null}
-                  {professionalIsIntraday && visibleIntradaySourcePresentation ? (
+                  {professionalIsIntraday && visibleBarSourcePresentation ? (
                     <div
                       className={[
                         "border-b px-5 py-3 text-sm",
-                        visibleIntradaySourcePresentation.level === "error"
+                        visibleBarSourcePresentation.level === "error"
                           ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
                           : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
                       ].join(" ")}
                     >
-                      {visibleIntradaySourcePresentation.message}
+                      {visibleBarSourcePresentation.message}
                     </div>
                   ) : null}
                 </>
@@ -3451,22 +3513,23 @@ export default function USStockDetailPanel({
               <div className="mt-1 text-sm text-omi-text-muted">
                 {selectedSubtitle}
               </div>
-              {((timeframe === "today" && visibleIntradaySourcePresentation) ||
+              {((timeframe === "today" && visibleCurrentSourcePresentation) ||
                 upcomingCorporateEvents.length > 0 ||
                 corporateEventSourceUncertain) ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  {timeframe === "today" && visibleIntradaySourcePresentation ? (
+                  {timeframe === "today" && visibleCurrentSourcePresentation ? (
                     <div
                       data-testid="us-intraday-source-status"
+                      data-source-role="current_observation"
                       className={[
                         "inline-flex border px-2 py-1 text-xs font-semibold",
-                        visibleIntradaySourcePresentation.level === "error"
+                        visibleCurrentSourcePresentation.level === "error"
                           ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
                           : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
                       ].join(" ")}
-                      title={visibleIntradaySourcePresentation.message}
+                      title={visibleCurrentSourcePresentation.message}
                     >
-                      {visibleIntradaySourcePresentation.badge}
+                      {visibleCurrentSourcePresentation.badge}
                     </div>
                   ) : null}
                   {upcomingCorporateEvents.map((event) => (

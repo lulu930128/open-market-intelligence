@@ -1506,7 +1506,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         with patch.object(
             twse_mis_current_breadth,
             "_fetch_messages",
-            return_value=(messages, 0),
+            return_value=(messages, 0, 6),
         ):
             result = twse_mis_current_breadth.read_twse_mis_current_breadth(
                 "TWSE",
@@ -1531,6 +1531,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["limit_down_count"], 1)
         self.assertEqual(payload["coverage_count"], 3)
         self.assertEqual(payload["message_count"], 5)
+        self.assertEqual(result.external_calls, 6)
         self.assertEqual(payload["missing_count"], 496)
         self.assertEqual(payload["unknown_count"], 498)
         self.assertEqual(

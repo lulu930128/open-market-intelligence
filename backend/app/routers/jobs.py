@@ -7,6 +7,11 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service
 from app.jobs.eod_coverage import run_eod_coverage_reconcile_job
+from app.jobs.us_current_market_bootstrap import (
+    enqueue_us_current_market_bootstrap as enqueue_us_current_market_bootstrap_job,
+    normalize_us_current_market_bootstrap_targets,
+    run_us_current_market_bootstrap_job,
+)
 from app.jobs.job_types import (
     CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE,
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
@@ -18,14 +23,18 @@ from app.jobs.job_types import (
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
     WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
     US_OHLC_HISTORY_REPAIR_JOB_TYPE,
+    US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE,
     US_PRIORITY_OHLC_RECONCILE_JOB_TYPE,
     US_SEC_FORM4_SYNC_JOB_TYPE,
     US_SEC_13F_HISTORY_SYNC_JOB_TYPE,
     US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
     US_SEC_13F_QUARTER_SYNC_JOB_TYPE,
 )
-from app.jobs.schemas import JobRunRead
+from app.jobs.schemas import JobRunRead, USCurrentMarketBootstrapJobRequest
 from app.stocks.bootstrap import BOOTSTRAP_JOB_TYPE, run_stock_master_bootstrap_job
+from app.us_market.intraday_profiles import (
+    US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS,
+)
 
 
 router = APIRouter()
@@ -444,6 +453,32 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
             request,
         )
 
+    if job_type == US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE:
+        max_external_calls = int(
+            request.get(
+                "max_external_calls",
+                US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS,
+            )
+        )
+        if max_external_calls < 1 or max_external_calls > 20:
+            raise ValueError(
+                "bootstrap max_external_calls must be between 1 and 20"
+            )
+        equity, indexes = normalize_us_current_market_bootstrap_targets(
+            equity_symbols=_parse_string_list(request.get("equity_symbols")),
+            index_symbols=_parse_string_list(request.get("index_symbols")),
+        )
+        normalized_request = {
+            "equity_symbols": equity,
+            "index_symbols": indexes,
+            "max_external_calls": max_external_calls,
+        }
+        return (
+            run_us_current_market_bootstrap_job,
+            (",".join(equity), ",".join(indexes), max_external_calls),
+            normalized_request,
+        )
+
     if job_type == "us_market.watchlist_resource_refresh":
         group_id = request.get("group_id")
         return (
@@ -576,6 +611,32 @@ def list_jobs(
         include_payload=include_payload,
     )
     return [service.serialize_job(job, include_payload=include_payload) for job in jobs]
+
+
+@router.post(
+    "/us-market/bootstrap-current-cache",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_us_current_market_bootstrap_operator(
+    request: USCurrentMarketBootstrapJobRequest,
+    db: Session = Depends(get_db),
+):
+    """Explicit operator-owned enqueue; never runs from GET or startup."""
+
+    try:
+        job, _created = enqueue_us_current_market_bootstrap_job(
+            db,
+            equity_symbols=",".join(request.equity_symbols),
+            index_symbols=",".join(request.index_symbols),
+            max_external_calls=request.max_external_calls,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    return service.serialize_job(job)
 
 
 @router.get("/{job_id}", response_model=JobRunRead)

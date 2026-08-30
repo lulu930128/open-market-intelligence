@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Iterable
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Iterable, Literal
 
+from pydantic import Field
 from sqlalchemy.orm import Session
 
+from app.market.official_index_platform import read_taiwan_official_index
 from app.market.trading_calendar import (
     TAIWAN_TZ,
+    previous_taiwan_trading_day,
     taiwan_market_session,
     taiwan_presentation_session,
 )
@@ -17,6 +21,7 @@ from app.market.tw_current_market_acquisition import (
     TaiwanCurrentIndexAcquisitionExecutor,
 )
 from app.market.tw_current_market_capabilities import (
+    FUGLE_CURRENT_INDEX_DESCRIPTOR,
     TW_CURRENT_BREADTH_CAPABILITY_ID,
     TW_CURRENT_BREADTH_DATASET_ID,
     TW_CURRENT_BREADTH_DESCRIPTORS,
@@ -26,7 +31,12 @@ from app.market.tw_current_market_capabilities import (
 )
 from app.market.tw_current_market_repository import TaiwanCurrentMarketRepository
 from app.market.tw_current_market_transaction import TaiwanCurrentMarketTransaction
-from app.market_data.contracts import AuthorityClass, Market, MarketSession
+from app.market_data.contracts import (
+    AuthorityClass,
+    CanonicalModel,
+    Market,
+    MarketSession,
+)
 from app.market_data.gateway import MarketDataGateway
 from app.market_data.integration_contracts import (
     DataRequirementV2,
@@ -39,6 +49,22 @@ from app.market_data.integration_contracts import (
 )
 from app.market_data.policies import DataPurpose, RealtimePolicy
 from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2
+
+
+class TaiwanIndexPreviousCloseSeed(CanonicalModel):
+    """Market-owned lineage for deriving one current-session index change."""
+
+    contract_version: str = "omi.market.tw_index_previous_close_seed.v1"
+    index_id: str = Field(min_length=1, max_length=32)
+    event_trade_date: date
+    reference_trade_date: date
+    previous_close: Decimal = Field(gt=0)
+    provider: str = Field(min_length=1, max_length=64)
+    source: str = Field(min_length=1, max_length=128)
+    basis: Literal[
+        "official_completed_session",
+        "same_session_non_fugle",
+    ]
 
 
 def current_taiwan_market_session(requested_at: datetime) -> MarketSession:
@@ -70,6 +96,19 @@ def build_taiwan_current_requirement(
         raise ValueError("unsupported Taiwan current dataset")
     presentation = taiwan_presentation_session(requested_at)
     trade_date = presentation["trade_date"]
+    required_fields = (
+        (
+            "close_value",
+            "price_change",
+            "trade_date",
+            "lineage.event_at",
+        )
+        if dataset_id == TW_CURRENT_INDEX_DATASET_ID
+        else ()
+    )
+    max_external_calls = (
+        20 if dataset_id == TW_CURRENT_BREADTH_DATASET_ID else 2
+    )
     return DataRequirementV2(
         target=DatasetTarget(
             market=Market.TW,
@@ -91,10 +130,11 @@ def build_taiwan_current_requirement(
             minimum_authority=AuthorityClass.VENDOR,
             allow_partial=True,
             require_canonical_lineage=True,
+            required_fields=required_fields,
         ),
         bounds=RequestBounds(
             max_provider_attempts=2 if acquiring else 0,
-            max_external_calls=2 if acquiring else 0,
+            max_external_calls=max_external_calls if acquiring else 0,
             max_subscriptions=0,
             timeout_seconds=40 if acquiring else 30,
             max_candidates=3,
@@ -126,6 +166,91 @@ def read_taiwan_current_index(
         # default (official-first) selection contract.
         official_first=False,
     )
+
+
+def read_taiwan_index_previous_close_seed(
+    db: Session,
+    *,
+    index_id: str,
+    event_at: datetime,
+    requested_at: datetime,
+) -> TaiwanIndexPreviousCloseSeed | None:
+    """Resolve an exact-date, non-circular previous close for a live index tick."""
+
+    if event_at.tzinfo is None or event_at.utcoffset() is None:
+        raise ValueError("event_at must be timezone-aware")
+    if requested_at.tzinfo is None or requested_at.utcoffset() is None:
+        raise ValueError("requested_at must be timezone-aware")
+    normalized_index_id = str(index_id or "").strip().upper()
+    event_trade_date = event_at.astimezone(TAIWAN_TZ).date()
+    reference_trade_date = previous_taiwan_trading_day(
+        event_trade_date,
+        include_value=False,
+    )
+    official = read_taiwan_official_index(
+        db,
+        index_id=normalized_index_id,
+        trade_date=reference_trade_date,
+        requested_at=requested_at,
+    ).resolved.market_index
+    if (
+        official is not None
+        and official.trade_date == reference_trade_date
+        and official.official
+        and not official.provisional
+        and official.close_value > 0
+    ):
+        return TaiwanIndexPreviousCloseSeed(
+            index_id=normalized_index_id,
+            event_trade_date=event_trade_date,
+            reference_trade_date=reference_trade_date,
+            previous_close=official.close_value,
+            provider=official.lineage.provider,
+            source=official.lineage.source,
+            basis="official_completed_session",
+        )
+
+    requirement = build_taiwan_current_requirement(
+        dataset_id=TW_CURRENT_INDEX_DATASET_ID,
+        capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+        scope_key=normalized_index_id,
+        requested_at=requested_at,
+        policy=RealtimePolicy.CACHE_ONLY,
+        acquiring=False,
+    )
+    batch = TaiwanCurrentMarketRepository(db).read_market_index_candidates(
+        requirement
+    )
+    fugle_provider = FUGLE_CURRENT_INDEX_DESCRIPTOR.provider_key
+    for candidate in batch.candidates:
+        observation = candidate.observation
+        observed_at = observation.lineage.event_at
+        previous_close = observation.close_value - observation.price_change
+        if (
+            observation.trade_date != event_trade_date
+            or observation.lineage.provider == fugle_provider
+            or observed_at is None
+            or any(
+                lineage_at is not None and lineage_at > requested_at
+                for lineage_at in (
+                    observed_at,
+                    observation.lineage.received_at,
+                    observation.lineage.fetched_at,
+                )
+            )
+            or previous_close <= 0
+        ):
+            continue
+        return TaiwanIndexPreviousCloseSeed(
+            index_id=normalized_index_id,
+            event_trade_date=event_trade_date,
+            reference_trade_date=event_trade_date,
+            previous_close=previous_close,
+            provider=observation.lineage.provider,
+            source=observation.lineage.source,
+            basis="same_session_non_fugle",
+        )
+    return None
 
 
 def refresh_taiwan_current_index(
@@ -213,6 +338,9 @@ def refresh_taiwan_current_breadth(
 
 
 def project_taiwan_current_index(result: MarketDataResultV1) -> dict[str, object]:
+    limitations = list(
+        dict.fromkeys((*result.limitations, *result.resolved.health.limitations))
+    )
     observation = result.resolved.market_index
     if observation is None:
         return {
@@ -228,7 +356,7 @@ def project_taiwan_current_index(result: MarketDataResultV1) -> dict[str, object
             "provisional": True,
             "decision_usable": False,
             "resolved_health": result.resolved.health.model_dump(mode="json"),
-            "limitations": list(result.limitations),
+            "limitations": limitations,
         }
     previous_close = observation.close_value - observation.price_change
     return {
@@ -250,7 +378,7 @@ def project_taiwan_current_index(result: MarketDataResultV1) -> dict[str, object
         "candidate_rejections": [
             item.model_dump(mode="json") for item in result.candidate_rejections
         ],
-        "limitations": list(result.limitations),
+        "limitations": limitations,
     }
 
 
@@ -314,12 +442,14 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
 
 
 __all__ = [
+    "TaiwanIndexPreviousCloseSeed",
     "build_taiwan_current_requirement",
     "current_taiwan_market_session",
     "project_taiwan_current_breadth",
     "project_taiwan_current_index",
     "read_taiwan_current_breadth",
     "read_taiwan_current_index",
+    "read_taiwan_index_previous_close_seed",
     "refresh_taiwan_current_breadth",
     "refresh_taiwan_current_index",
 ]

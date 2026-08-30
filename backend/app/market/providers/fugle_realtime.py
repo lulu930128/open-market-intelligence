@@ -169,6 +169,11 @@ class FugleSubscriptionAllocator:
                 if channel_id not in removed
             }
 
+    def is_bound(self, channel: str, symbol: str) -> bool:
+        subscription = FugleSubscription(channel, symbol)
+        with self._lock:
+            return subscription in self._server_ids
+
     def commands(self) -> FugleSubscriptionCommands:
         desired = set(self.desired())
         with self._lock:
@@ -399,6 +404,17 @@ def _lots(value: object) -> Quantity | None:
     )
 
 
+def _validate_stock_payload_identity(
+    payload: dict[str, Any],
+    instrument: InstrumentKey,
+) -> None:
+    expected_market = "TSE" if instrument.venue == "TWSE" else "OTC"
+    exchange = str(payload.get("exchange") or "").strip().upper()
+    market = str(payload.get("market") or "").strip().upper()
+    if exchange != instrument.venue or market != expected_market:
+        raise ValueError("Fugle stock payload crossed canonical venue identity")
+
+
 def _lineage(record: FugleStreamRecord, *, source: str, parser: str) -> SourceLineage:
     return SourceLineage(
         provider=FUGLE_PROVIDER,
@@ -547,18 +563,19 @@ def fugle_quote_acquisition(
     if not isinstance(requirement.target, InstrumentTarget):
         raise ValueError("Fugle quote materialization requires instrument target")
     instrument = requirement.target.instrument
-    if instrument.venue != "TWSE" or instrument.symbol != record.symbol:
-        raise ValueError("Fugle quote crossed active TWSE instrument")
+    if instrument.venue not in {"TWSE", "TPEX"} or instrument.symbol != record.symbol:
+        raise ValueError("Fugle quote crossed active Taiwan instrument")
     data = record.payload
+    _validate_stock_payload_identity(data, instrument)
     last_trade = data.get("lastTrade") if isinstance(data.get("lastTrade"), dict) else None
-    last_trial = data.get("lastTrial") if isinstance(data.get("lastTrial"), dict) else None
     total = data.get("total") if isinstance(data.get("total"), dict) else {}
     last_price = _decimal(last_trade.get("price"), positive=True) if last_trade else None
+    is_trial = data.get("isTrial") is True
     trade_state = (
         TradeObservationState.TRADE_OBSERVED
         if last_price is not None
         else TradeObservationState.INDICATIVE_OBSERVED
-        if last_trial is not None
+        if is_trial
         else TradeObservationState.AWAITING_FIRST_TRADE
     )
     observation = QuoteObservation(
@@ -575,10 +592,10 @@ def fugle_quote_acquisition(
         ),
         currency="TWD",
         state=(
-            ObservationState.AVAILABLE
+            ObservationState.INDICATIVE
+            if is_trial
+            else ObservationState.AVAILABLE
             if last_price is not None
-            else ObservationState.INDICATIVE
-            if last_trial is not None
             else ObservationState.PARTIAL
         ),
         trade_state=trade_state,
@@ -620,11 +637,12 @@ def fugle_bar_acquisition(
     ):
         raise ValueError("Fugle bar materialization requires instrument bar target")
     instrument = requirement.target.instrument
-    if instrument.venue != "TWSE" or instrument.symbol != record.symbol:
-        raise ValueError("Fugle bar crossed active TWSE instrument")
+    if instrument.venue not in {"TWSE", "TPEX"} or instrument.symbol != record.symbol:
+        raise ValueError("Fugle bar crossed active Taiwan instrument")
     if requirement.request.interval != "1m":
         raise ValueError("Fugle stream materializer supports 1m only")
     data = record.payload
+    _validate_stock_payload_identity(data, instrument)
     prices = {
         key: _decimal(data.get(key), positive=True)
         for key in ("open", "high", "low", "close")

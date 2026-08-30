@@ -308,9 +308,9 @@ function USMarketTapeCard({
           <div className="mt-1 text-xs text-omi-text-muted">
             {snapshot
               ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${
-                  snapshot.source === "intraday"
-                    ? t("statusLabels.intraday")
-                    : t("dashboard.marketIndex.daily")
+                  snapshot.source === "daily"
+                    ? t("dashboard.marketIndex.daily")
+                    : t("statusLabels.intraday")
                 }`
               : t("dashboard.marketIndex.waitingData")}
           </div>

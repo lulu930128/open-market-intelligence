@@ -2070,23 +2070,27 @@ export const jaJP = {
   usStockDetail: {
     ...zhTW.usStockDetail,
     sourceStatus: {
-      providerErrorTitle: "Yahoo 上流データ障害",
-      delayedTitle: "Yahoo 上流データ遅延",
-      staleTitle: "Yahoo 上流データ更新停止",
-      delayedBadge: "Yahoo 約{minutes}分遅延",
-      staleBadge: "Yahoo 上流異常 · {minutes}分遅延",
-      fallbackBadge: "Yahoo 上流異常 · 最終データを表示",
-      unavailableBadge: "Yahoo 上流に接続できません",
+      providerErrorTitle: "{provider} 上流データ障害",
+      delayedTitle: "{provider} 上流データ遅延",
+      staleTitle: "{provider} 上流データ更新停止",
+      partialTitle: "{provider} の日中データは一部のみです",
+      delayedBadge: "{provider} 約{minutes}分遅延",
+      staleBadge: "{provider} 上流異常 · {minutes}分遅延",
+      partialBadge: "{provider} 一部データ",
+      fallbackBadge: "{provider} 上流異常 · 最終データを表示",
+      unavailableBadge: "{provider} 上流に接続できません",
       delayedMessage:
-        "Yahoo の日中データは約{minutes}分遅れています。最後に利用できたデータを表示し続けます。",
+        "{provider} の日中データは約{minutes}分遅れています。最後に利用できたデータを表示し続けます。",
       staleMessage:
-        "Yahoo の日中データは約{minutes}分更新されていません。最後に利用できたデータを表示し続けます。",
+        "{provider} の日中データは約{minutes}分更新されていません。最後に利用できたデータを表示し続けます。",
+      partialMessage:
+        "{provider} は現在、一部の日中項目のみを提供しています。利用可能な価格は表示し、欠けている項目は推測で補いません。",
       fallbackMessage:
-        "Yahoo 上流への接続に失敗しました。最後に利用できたデータを表示しています。",
+        "{provider} 上流への接続に失敗しました。最後に利用できたデータを表示しています。",
       unavailableMessage:
-        "Yahoo 上流への接続に失敗し、利用可能な日中データもありません。",
-      recoveredTitle: "Yahoo 上流が復旧しました",
-      recoveredMessage: "Yahoo の日中データ更新が再開しました。",
+        "{provider} 上流への接続に失敗し、利用可能な日中データもありません。",
+      recoveredTitle: "米国株の日中データソースが復旧しました",
+      recoveredMessage: "米国株の日中データ更新が再開しました。",
       monitoringEndedTitle: "米国株の日中監視時間が終了しました",
       monitoringEndedMessage:
         "現在はリアルタイム更新時間外です。最後に利用できたデータを表示しています。",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -13,7 +13,7 @@ class MarketAnalysisProfile:
     timeframe: str
     price_basis: str
     currency: str
-    volume_unit: str
+    volume_unit: str | None
     calendar_id: str
     timezone: str
     session_profile_id: str
@@ -74,6 +74,16 @@ US_DAILY_PROFILE = MarketAnalysisProfile(
 )
 
 
+US_INDEX_DAILY_PROFILE = replace(
+    US_DAILY_PROFILE,
+    profile_id="us.index.daily",
+    profile_version="us.index.daily.v1",
+    volume_unit=None,
+    session_profile_id="us.index.regular.v1",
+    corporate_action_policy="not_applicable",
+)
+
+
 TW_DAILY_PROFILE = MarketAnalysisProfile(
     profile_id="tw.equity.daily",
     profile_version="tw.equity.daily.v1",
@@ -104,4 +114,9 @@ TW_DAILY_PROFILE = MarketAnalysisProfile(
 )
 
 
-__all__ = ["MarketAnalysisProfile", "TW_DAILY_PROFILE", "US_DAILY_PROFILE"]
+__all__ = [
+    "MarketAnalysisProfile",
+    "TW_DAILY_PROFILE",
+    "US_DAILY_PROFILE",
+    "US_INDEX_DAILY_PROFILE",
+]

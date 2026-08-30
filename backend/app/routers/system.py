@@ -14,6 +14,9 @@ from app.observability.provider_health import (
 from app.observability.schemas import ProviderEventRead, SourceHealthSnapshotRead
 from app.market.tw_realtime_lease_platform import summarize_fugle_realtime_runtime
 from app.us_market.daily_rollout import us_daily_rollout_snapshot
+from app.us_market.intraday_materializer import (
+    us_intraday_materializer_runtime_summary,
+)
 
 router = APIRouter()
 
@@ -79,6 +82,52 @@ def health_check():
                 "configuration_status"
             ],
             "us_daily_acquisition_limitations": us_daily_rollout["limitations"],
+            "us_intraday_materializer": {
+                "enabled": (
+                    settings.enable_scheduler
+                    and settings.enable_us_intraday_materializer
+                ),
+                "configured_symbols": [
+                    item.strip().upper()
+                    for item in settings.scheduler_us_intraday_materializer_symbols.split(",")
+                    if item.strip()
+                ][: settings.scheduler_us_intraday_materializer_max_symbols],
+                "max_symbols": settings.scheduler_us_intraday_materializer_max_symbols,
+                "quote_interval_seconds": settings.scheduler_us_quote_materializer_interval_seconds,
+                "intraday_interval_seconds": settings.scheduler_us_intraday_materializer_interval_seconds,
+                "intraday_bars": settings.scheduler_us_intraday_materializer_bars,
+                "max_provider_calls": settings.scheduler_us_intraday_materializer_max_provider_calls,
+                "max_external_calls": settings.scheduler_us_intraday_materializer_max_external_calls,
+                "equity_lane": {
+                    "enabled": (
+                        settings.enable_scheduler
+                        and settings.enable_us_intraday_materializer
+                    ),
+                    "instrument_type": "stock",
+                    "max_symbols": settings.scheduler_us_intraday_materializer_max_symbols,
+                },
+                "index_lane": {
+                    "enabled": (
+                        settings.enable_scheduler
+                        and settings.enable_us_index_quote_materializer
+                    ),
+                    "instrument_type": "index",
+                    "capabilities": ["quote.snapshot"],
+                    "configured_symbols": [
+                        item.strip().upper()
+                        for item in settings.scheduler_us_index_quote_symbols.split(",")
+                        if item.strip()
+                    ][: settings.scheduler_us_index_quote_max_symbols],
+                    "max_symbols": settings.scheduler_us_index_quote_max_symbols,
+                    "max_external_calls": settings.scheduler_us_index_quote_max_external_calls,
+                },
+                "retention_enabled": (
+                    settings.enable_scheduler
+                    and settings.enable_us_quote_retention_scheduler
+                ),
+                "retention_days": settings.us_quote_snapshot_retention_days,
+                **us_intraday_materializer_runtime_summary(),
+            },
             "fugle_realtime": fugle_health,
         },
     }

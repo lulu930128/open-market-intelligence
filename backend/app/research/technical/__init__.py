@@ -8,12 +8,14 @@ from app.research.technical.profiles import (
     MarketAnalysisProfile,
     TW_DAILY_PROFILE,
     US_DAILY_PROFILE,
+    US_INDEX_DAILY_PROFILE,
 )
 
 __all__ = [
     "MarketAnalysisProfile",
     "TW_DAILY_PROFILE",
     "US_DAILY_PROFILE",
+    "US_INDEX_DAILY_PROFILE",
     "build_technical_indicators",
     "build_technical_structure",
 ]

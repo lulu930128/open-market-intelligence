@@ -155,12 +155,13 @@ def add_price_pair(
     previous_close: float,
     latest_close: float,
 ) -> None:
+    is_index = symbol.startswith("^")
     if db.query(USStockMaster).filter(USStockMaster.symbol == symbol).first() is None:
         db.add(
             USStockMaster(
                 symbol=symbol,
-                exchange="INDEX" if symbol.startswith("^") else "NASDAQ",
-                asset_type="index" if symbol.startswith("^") else "stock",
+                exchange="INDEX" if is_index else "NASDAQ",
+                asset_type="index" if is_index else "stock",
                 is_active=True,
             )
         )
@@ -197,7 +198,7 @@ def add_price_pair(
                 low_price=close,
                 close_price=close,
                 adjusted_close=close,
-                trade_volume=1_000,
+                trade_volume=None if is_index else 1_000,
                 fetched_at=DECISION_AT,
                 created_at=DECISION_AT,
                 updated_at=DECISION_AT,
@@ -212,8 +213,8 @@ def add_price_pair(
                 ),
                 finalization="final",
                 price_basis="raw",
-                volume_unit="shares",
-                volume_status="observed",
+                volume_unit=None if is_index else "shares",
+                volume_status="not_applicable" if is_index else "observed",
                 raw_payload_hash=content_hash,
             )
         )

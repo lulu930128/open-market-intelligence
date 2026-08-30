@@ -13,13 +13,16 @@ from app.db.models import (
     USCorporateAction,
     USStockMaster,
 )
-from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
+from app.market_data.contracts import InstrumentType
 from app.research.coverage import build_market_coverage_gate
 from app.research.technical import (
     US_DAILY_PROFILE,
+    US_INDEX_DAILY_PROFILE,
     build_technical_indicators,
     build_technical_structure,
 )
+from app.us_market.daily_market_state import resolve_us_instrument_identity
+from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
 from app.us_market.resolved_reads import (
     US_RESOLVED_DAILY_MAX_BARS,
     read_resolved_us_daily_bars_for_symbol,
@@ -124,7 +127,9 @@ def build_us_market_research(
     missing: list[str] = []
     warnings: list[str] = []
     daily_ohlcv: dict[str, Any] = {}
+    identity = None
     try:
+        identity = resolve_us_instrument_identity(db, normalized_symbol)
         daily_ohlcv = read_resolved_us_daily_bars_for_symbol(
             db=db,
             symbol=normalized_symbol,
@@ -138,15 +143,24 @@ def build_us_market_research(
         missing.append("instrument_identity")
         warnings.append(str(exc))
 
-    corporate_action_count = int(
-        db.query(func.count(USCorporateAction.id))
-        .filter(USCorporateAction.symbol == normalized_symbol)
-        .scalar()
-        or 0
+    is_index = bool(
+        identity is not None
+        and identity.instrument.instrument_type is InstrumentType.INDEX
     )
-    # Event rows prove observations, not complete historical coverage. Until a
-    # provider-owned checkpoint exists this must remain unknown.
-    corporate_action_coverage = "unknown"
+    corporate_action_count = (
+        0
+        if is_index
+        else int(
+            db.query(func.count(USCorporateAction.id))
+            .filter(USCorporateAction.symbol == normalized_symbol)
+            .scalar()
+            or 0
+        )
+    )
+    # Company corporate actions are not applicable to index observations. For
+    # stocks/ETFs, event rows prove observations but not complete coverage.
+    corporate_action_coverage = "not_applicable" if is_index else "unknown"
+    technical_profile = US_INDEX_DAILY_PROFILE if is_index else US_DAILY_PROFILE
     resolved_bars = (
         daily_ohlcv.get("bars") if isinstance(daily_ohlcv.get("bars"), list) else []
     )
@@ -161,7 +175,7 @@ def build_us_market_research(
         market="US",
         symbol=normalized_symbol,
         bars=resolved_bars,
-        profile=US_DAILY_PROFILE,
+        profile=technical_profile,
         freshness_status=(
             "fresh"
             if daily_ohlcv.get("research_usable") is True
@@ -175,7 +189,7 @@ def build_us_market_research(
     structure = build_technical_structure(
         indicators=indicators,
         bars=resolved_bars,
-        profile=US_DAILY_PROFILE,
+        profile=technical_profile,
     )
     if indicators["quality"]["decision_usable"] is not True:
         warnings.append(
@@ -192,6 +206,7 @@ def build_us_market_research(
         "technical_indicators": indicators,
         "technical_structure": structure,
         "corporate_action_coverage": {
+            "applicability": "not_applicable" if is_index else "required",
             "status": corporate_action_coverage,
             "observed_event_count": corporate_action_count,
             "completeness_checkpoint": None,

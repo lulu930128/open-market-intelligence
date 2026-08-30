@@ -357,8 +357,10 @@ def build_technical_structure(
         counter_evidence.append("RSI_OVERHEATED")
     if trend_state == "below_ma20" and macd_histogram is not None and macd_histogram > 0:
         counter_evidence.append("POSITIVE_MACD_HISTOGRAM")
-    if breakout_state == "upside_breakout" and (
-        volume_vs_ma20 is None or volume_vs_ma20 <= 0
+    if (
+        profile.volume_unit is not None
+        and breakout_state == "upside_breakout"
+        and (volume_vs_ma20 is None or volume_vs_ma20 <= 0)
     ):
         counter_evidence.append("BREAKOUT_WITHOUT_VOLUME_CONFIRMATION")
     limitations = list(quality.get("reason_codes") or [])

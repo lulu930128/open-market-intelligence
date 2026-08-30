@@ -51,6 +51,7 @@ class TaiwanQuoteEvidenceAcquisitionScope:
     requested_capabilities: tuple[str, ...]
     acquired_resources: tuple[str, ...]
     materialized_capabilities: tuple[str, ...]
+    providers_attempted: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
 
     def projection(self) -> dict[str, object]:
@@ -59,6 +60,7 @@ class TaiwanQuoteEvidenceAcquisitionScope:
             "requested_capabilities": list(self.requested_capabilities),
             "acquired_resources": list(self.acquired_resources),
             "materialized_capabilities": list(self.materialized_capabilities),
+            "providers_attempted": list(self.providers_attempted),
             "limitations": list(self.limitations),
         }
 
@@ -132,6 +134,13 @@ def _acquisition_scope(
             for attempt in result.acquisition.resource_attempts
         )
     )
+    providers_attempted = tuple(
+        dict.fromkeys(
+            provider
+            for result in results.values()
+            for provider in result.acquisition.providers_attempted
+        )
+    )
     resolved_fields = {
         "quote.snapshot": "quote",
         "quote.session_close": "quote",
@@ -161,6 +170,7 @@ def _acquisition_scope(
         requested_capabilities=requested_capabilities,
         acquired_resources=acquired_resources,
         materialized_capabilities=materialized,
+        providers_attempted=providers_attempted,
         limitations=limitations,
     )
 

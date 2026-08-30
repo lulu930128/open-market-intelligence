@@ -219,6 +219,8 @@ class ViewerLeaseAcquisition(CanonicalModel):
     lease: ViewerLeaseState | None = None
     plan: DataAcquisitionPlanV2
     selected_provider: str | None = Field(default=None, max_length=64)
+    providers_attempted: tuple[str, ...] = Field(default=(), max_length=8)
+    limitations: tuple[str, ...] = Field(default=(), max_length=16)
     detail_code: str = Field(min_length=1, max_length=64)
 
 
@@ -232,6 +234,12 @@ class _ViewerLeaseBinding(CanonicalModel):
     provider_lease_id: str = Field(min_length=1, max_length=128)
     stock_id: str = Field(min_length=1, max_length=64)
     owner_kind: ViewerLeaseOwnerKind
+    requirement: DataRequirementV2
+    failed_providers: tuple[str, ...] = Field(default=(), max_length=8)
+    last_status: str = Field(min_length=1, max_length=64)
+    status_since_monotonic: float = Field(ge=0)
+    provider_started_at_monotonic: float = Field(ge=0)
+    generation: int = Field(default=0, ge=0)
 
 
 ViewerLeaseIdFactory = Callable[[], str]
@@ -239,6 +247,24 @@ ViewerLeaseIdFactory = Callable[[], str]
 
 def _viewer_lease_id() -> str:
     return uuid.uuid4().hex
+
+
+_VIEWER_LEASE_TERMINAL_STATUSES = {
+    "disabled",
+    "failed",
+    "reconnect_failed",
+    "released",
+    "unavailable",
+}
+_VIEWER_LEASE_TRANSITIONAL_STATUSES = {
+    "connecting",
+    "degraded",
+    "reconnecting",
+    "resubscribe_requested",
+    "stale",
+    "starting",
+    "subscribing",
+}
 
 
 class ViewerLeaseCoordinator:
@@ -251,11 +277,18 @@ class ViewerLeaseCoordinator:
         ports: Mapping[str, ViewerLeasePort],
         id_factory: ViewerLeaseIdFactory = _viewer_lease_id,
         max_tracked_leases: int = 512,
+        monotonic: Callable[[], float] = time.monotonic,
+        transitional_grace_seconds: float = 9.0,
     ) -> None:
         self._descriptors = tuple(descriptors)
         self._ports = dict(ports)
         if not 1 <= max_tracked_leases <= 10_000:
             raise ValueError("max_tracked_leases must be between 1 and 10000")
+        if (
+            not math.isfinite(transitional_grace_seconds)
+            or not 1 <= transitional_grace_seconds <= 60
+        ):
+            raise ValueError("transitional grace must be between 1 and 60 seconds")
         if set(self._ports) != {port.provider_key for port in self._ports.values()}:
             raise ValueError("viewer lease port registry keys must match provider keys")
         descriptor_keys = {
@@ -267,8 +300,71 @@ class ViewerLeaseCoordinator:
             raise ValueError("viewer lease ports require subscription descriptors")
         self._id_factory = id_factory
         self._max_tracked_leases = max_tracked_leases
+        self._monotonic = monotonic
+        self._transitional_grace_seconds = transitional_grace_seconds
         self._bindings: dict[str, _ViewerLeaseBinding] = {}
         self._lock = RLock()
+
+    def _descriptors_excluding(
+        self,
+        excluded: Iterable[str] = (),
+    ) -> tuple[ProviderCapabilityDescriptorV2, ...]:
+        excluded_keys = set(excluded)
+        return tuple(
+            descriptor
+            for descriptor in self._descriptors
+            if descriptor.provider_key in self._ports
+            and descriptor.provider_key not in excluded_keys
+            and AcquisitionMode.SUBSCRIPTION in descriptor.acquisition_modes
+        )
+
+    def _plan(
+        self,
+        requirement: DataRequirementV2,
+        *,
+        excluded: Iterable[str] = (),
+    ) -> DataAcquisitionPlanV2:
+        descriptors = self._descriptors_excluding(excluded)
+        health = tuple(
+            self._ports[provider_key].health(requirement)
+            for provider_key in sorted(
+                {descriptor.provider_key for descriptor in descriptors}
+            )
+        )
+        return plan_data_acquisition_v2(
+            requirement,
+            descriptors,
+            health,
+            subscription_execution="sequential_fallback",
+        )
+
+    def _transitional_state(
+        self,
+        state: ViewerLeaseState,
+        *,
+        remaining_seconds: float | None = None,
+    ) -> ViewerLeaseState:
+        if state.status not in _VIEWER_LEASE_TRANSITIONAL_STATUSES:
+            return state
+        bounded = max(
+            1,
+            math.ceil(
+                min(
+                    remaining_seconds
+                    if remaining_seconds is not None
+                    else self._transitional_grace_seconds,
+                    self._transitional_grace_seconds,
+                )
+            ),
+        )
+        return state.model_copy(
+            update={
+                "expires_in_seconds": min(
+                    state.expires_in_seconds or bounded,
+                    bounded,
+                )
+            }
+        )
 
     def acquire(
         self,
@@ -285,102 +381,229 @@ class ViewerLeaseCoordinator:
                     plan=plan,
                     detail_code="VIEWER_LEASE_BOUND_EXCEEDED",
                 )
-        descriptors = tuple(
-            descriptor
-            for descriptor in self._descriptors
-            if descriptor.provider_key in self._ports
-            and AcquisitionMode.SUBSCRIPTION in descriptor.acquisition_modes
-        )
-        health = tuple(
-            self._ports[provider_key].health(requirement)
-            for provider_key in sorted(self._ports)
-        )
-        plan = plan_data_acquisition_v2(requirement, descriptors, health)
-        route = next(
-            (item for item in plan.routes if item.subscription_allowed),
-            None,
-        )
-        if route is None:
+        plan = self._plan(requirement)
+        if not plan.routes:
             return ViewerLeaseAcquisition(
                 plan=plan,
                 detail_code="VIEWER_LEASE_PLAN_UNFILLABLE",
             )
-        port = self._ports.get(route.provider_key)
-        if port is None:
+        attempted: list[str] = []
+        limitations: list[str] = []
+        selected_provider: str | None = None
+        for route in plan.routes:
+            selected_provider = route.provider_key
+            port = self._ports.get(route.provider_key)
+            if port is None:
+                limitations.append(f"VIEWER_LEASE_PORT_UNAVAILABLE:{route.provider_key}")
+                continue
+            attempted.append(route.provider_key)
+            try:
+                provider_state = port.acquire(
+                    requirement,
+                    route,
+                    owner_kind=owner_kind,
+                )
+            except (ConnectionError, RuntimeError, TimeoutError) as exc:
+                limitations.append(
+                    "VIEWER_LEASE_ROUTE_ERROR:"
+                    f"{route.provider_key}:{type(exc).__name__}"
+                )
+                continue
+            provider_lease_id = provider_state.lease_id
+            if provider_state.provider != route.provider_key:
+                if provider_lease_id:
+                    port.release(provider_lease_id)
+                raise ValueError("viewer lease port returned a different provider")
+            if provider_state.stock_id != requirement.target.instrument.symbol:
+                if provider_lease_id:
+                    port.release(provider_lease_id)
+                raise ValueError("viewer lease port crossed requested instrument")
+            if provider_state.owner_kind != owner_kind:
+                if provider_lease_id:
+                    port.release(provider_lease_id)
+                raise ValueError("viewer lease port changed owner_kind")
+            if (
+                provider_lease_id is None
+                or provider_state.status in _VIEWER_LEASE_TERMINAL_STATUSES
+            ):
+                if provider_lease_id:
+                    port.release(provider_lease_id)
+                limitations.append(
+                    f"VIEWER_LEASE_ROUTE_FAILED:{route.provider_key}:{provider_state.status}"
+                )
+                continue
+            try:
+                public_lease_id = self._id_factory()
+                started_at = self._monotonic()
+                binding = _ViewerLeaseBinding(
+                    public_lease_id=public_lease_id,
+                    provider_key=route.provider_key,
+                    provider_lease_id=provider_lease_id,
+                    stock_id=provider_state.stock_id,
+                    owner_kind=owner_kind,
+                    requirement=requirement,
+                    failed_providers=tuple(
+                        item for item in attempted if item != route.provider_key
+                    ),
+                    last_status=provider_state.status,
+                    status_since_monotonic=started_at,
+                    provider_started_at_monotonic=started_at,
+                )
+            except Exception:
+                port.release(provider_lease_id)
+                raise
+            with self._lock:
+                if public_lease_id in self._bindings:
+                    port.release(provider_lease_id)
+                    raise ValueError("viewer lease owner token collision")
+                self._bindings[public_lease_id] = binding
             return ViewerLeaseAcquisition(
+                lease=self._transitional_state(
+                    provider_state.model_copy(update={"lease_id": public_lease_id})
+                ),
                 plan=plan,
                 selected_provider=route.provider_key,
-                detail_code="VIEWER_LEASE_PORT_UNAVAILABLE",
+                providers_attempted=tuple(attempted),
+                limitations=tuple(limitations),
+                detail_code="VIEWER_LEASE_CREATED",
             )
-        provider_state = port.acquire(
-            requirement,
-            route,
-            owner_kind=owner_kind,
-        )
-        provider_lease_id = provider_state.lease_id
-        if provider_state.provider != route.provider_key:
-            if provider_lease_id:
-                port.release(provider_lease_id)
-            raise ValueError("viewer lease port returned a different provider")
-        if provider_state.stock_id != requirement.target.instrument.symbol:
-            if provider_lease_id:
-                port.release(provider_lease_id)
-            raise ValueError("viewer lease port crossed requested instrument")
-        if provider_state.owner_kind != owner_kind:
-            if provider_lease_id:
-                port.release(provider_lease_id)
-            raise ValueError("viewer lease port changed owner_kind")
-        if provider_lease_id is None:
-            return ViewerLeaseAcquisition(
-                lease=provider_state,
-                plan=plan,
-                selected_provider=route.provider_key,
-                detail_code="VIEWER_LEASE_NOT_CREATED",
-            )
-        try:
-            public_lease_id = self._id_factory()
-            binding = _ViewerLeaseBinding(
-                public_lease_id=public_lease_id,
-                provider_key=route.provider_key,
-                provider_lease_id=provider_lease_id,
-                stock_id=provider_state.stock_id,
-                owner_kind=owner_kind,
-            )
-        except Exception:
-            port.release(provider_lease_id)
-            raise
-        with self._lock:
-            if public_lease_id in self._bindings:
-                port.release(provider_lease_id)
-                raise ValueError("viewer lease owner token collision")
-            self._bindings[public_lease_id] = binding
         return ViewerLeaseAcquisition(
-            lease=provider_state.model_copy(update={"lease_id": public_lease_id}),
             plan=plan,
-            selected_provider=route.provider_key,
-            detail_code="VIEWER_LEASE_CREATED",
+            selected_provider=selected_provider,
+            providers_attempted=tuple(attempted),
+            limitations=tuple(limitations),
+            detail_code="VIEWER_LEASE_NOT_CREATED",
         )
 
     def heartbeat(self, public_lease_id: str) -> ViewerLeaseState | None:
         with self._lock:
             binding = self._bindings.get(public_lease_id)
-        if binding is None:
-            return None
-        state = self._ports[binding.provider_key].heartbeat(binding.provider_lease_id)
-        if state is None:
-            with self._lock:
+            if binding is None:
+                return None
+            port = self._ports[binding.provider_key]
+            state = port.heartbeat(binding.provider_lease_id)
+            if state is not None and (
+                state.provider != binding.provider_key
+                or state.stock_id != binding.stock_id
+                or state.owner_kind != binding.owner_kind
+            ):
+                port.release(binding.provider_lease_id)
                 self._bindings.pop(public_lease_id, None)
-            return None
-        if (
-            state.provider != binding.provider_key
-            or state.stock_id != binding.stock_id
-            or state.owner_kind != binding.owner_kind
-        ):
-            self._ports[binding.provider_key].release(binding.provider_lease_id)
-            with self._lock:
+                raise ValueError("viewer lease heartbeat identity mismatch")
+
+            now = self._monotonic()
+            status = state.status if state is not None else "unavailable"
+            status_since = (
+                binding.status_since_monotonic
+                if status == binding.last_status
+                else now
+            )
+            elapsed = max(0.0, now - binding.provider_started_at_monotonic)
+            terminal = state is None or status in _VIEWER_LEASE_TERMINAL_STATUSES
+            transitional_timeout = (
+                status in _VIEWER_LEASE_TRANSITIONAL_STATUSES
+                and elapsed >= self._transitional_grace_seconds
+            )
+            if not terminal and not transitional_timeout:
+                updated = binding.model_copy(
+                    update={
+                        "last_status": status,
+                        "status_since_monotonic": status_since,
+                    }
+                )
+                self._bindings[public_lease_id] = updated
+                assert state is not None
+                remaining = (
+                    self._transitional_grace_seconds - elapsed
+                    if status in _VIEWER_LEASE_TRANSITIONAL_STATUSES
+                    else None
+                )
+                return self._transitional_state(
+                    state.model_copy(update={"lease_id": public_lease_id}),
+                    remaining_seconds=remaining,
+                )
+
+            released = port.release(binding.provider_lease_id)
+            if released is not None and (
+                released.provider != binding.provider_key
+                or released.stock_id != binding.stock_id
+                or released.owner_kind != binding.owner_kind
+            ):
                 self._bindings.pop(public_lease_id, None)
-            raise ValueError("viewer lease heartbeat identity mismatch")
-        return state.model_copy(update={"lease_id": public_lease_id})
+                raise ValueError("viewer lease failover release identity mismatch")
+
+            failed_providers = tuple(
+                dict.fromkeys((*binding.failed_providers, binding.provider_key))
+            )
+            plan = self._plan(
+                binding.requirement,
+                excluded=failed_providers,
+            )
+            for route in plan.routes:
+                next_port = self._ports[route.provider_key]
+                try:
+                    next_state = next_port.acquire(
+                        binding.requirement,
+                        route,
+                        owner_kind=binding.owner_kind,
+                    )
+                except (ConnectionError, RuntimeError, TimeoutError):
+                    failed_providers = tuple(
+                        dict.fromkeys((*failed_providers, route.provider_key))
+                    )
+                    continue
+                next_lease_id = next_state.lease_id
+                if (
+                    next_state.provider != route.provider_key
+                    or next_state.stock_id != binding.stock_id
+                    or next_state.owner_kind != binding.owner_kind
+                ):
+                    if next_lease_id:
+                        next_port.release(next_lease_id)
+                    self._bindings.pop(public_lease_id, None)
+                    raise ValueError("viewer lease failover identity mismatch")
+                if (
+                    next_lease_id is None
+                    or next_state.status in _VIEWER_LEASE_TERMINAL_STATUSES
+                ):
+                    if next_lease_id:
+                        next_port.release(next_lease_id)
+                    failed_providers = tuple(
+                        dict.fromkeys((*failed_providers, route.provider_key))
+                    )
+                    continue
+                replacement_started_at = self._monotonic()
+                self._bindings[public_lease_id] = _ViewerLeaseBinding(
+                    public_lease_id=public_lease_id,
+                    provider_key=route.provider_key,
+                    provider_lease_id=next_lease_id,
+                    stock_id=binding.stock_id,
+                    owner_kind=binding.owner_kind,
+                    requirement=binding.requirement,
+                    failed_providers=failed_providers,
+                    last_status=next_state.status,
+                    status_since_monotonic=replacement_started_at,
+                    provider_started_at_monotonic=replacement_started_at,
+                    generation=binding.generation + 1,
+                )
+                return self._transitional_state(
+                    next_state.model_copy(update={"lease_id": public_lease_id})
+                )
+
+            self._bindings.pop(public_lease_id, None)
+            if state is None:
+                return None
+            return state.model_copy(
+                update={
+                    "lease_id": public_lease_id,
+                    "status": "unavailable",
+                    "expires_in_seconds": None,
+                    "message": (
+                        "即時行情來源已失效，且沒有可接手的live provider；"
+                        "讀取面維持既有resolved fallback。"
+                    ),
+                }
+            )
 
     def release(self, public_lease_id: str) -> ViewerLeaseState | None:
         with self._lock:

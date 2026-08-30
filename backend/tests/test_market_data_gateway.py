@@ -41,6 +41,7 @@ from app.market_data.gateway import (
     DepthAcquisitionResult,
     DepthCandidateBatch,
     MarketDataGateway,
+    PostAcquisitionError,
 )
 from app.market_data.integration_contracts import (
     AcquisitionResourceAttempt,
@@ -521,7 +522,10 @@ def test_transaction_failure_propagates_after_rollback_without_reread() -> None:
     )
     transaction = FakeTransaction(events=events, fail=True)
 
-    with pytest.raises(RuntimeError, match="transaction rolled back"):
+    with pytest.raises(
+        PostAcquisitionError,
+        match="transaction rolled back",
+    ) as exc_info:
         MarketDataGateway().resolve_bars(
             _requirement(RealtimePolicy.PREFER_LIVE, max_calls=1),
             reader=reader,
@@ -530,6 +534,7 @@ def test_transaction_failure_propagates_after_rollback_without_reread() -> None:
             transaction_port=transaction,
         )
 
+    assert exc_info.value.acquisition.external_calls == 1
     assert events == ["read", "acquire", "persist"]
     assert reader.calls == 1
     assert transaction.rolled_back is True

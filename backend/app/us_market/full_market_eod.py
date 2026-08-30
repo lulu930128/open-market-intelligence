@@ -10,10 +10,11 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import USDailyPrice, USStockMaster
+from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice, USStockMaster
+from app.market_data.contracts import InstrumentType
 from app.market_data.eod_coverage import (
     CoverageComputation,
     US_DATASET_ID,
@@ -24,6 +25,7 @@ from app.market_data.eod_coverage import (
 )
 from app.us_market.daily_market_state import expected_us_completed_daily_state
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.daily_price_eligibility import us_daily_sql_eligibility_filters
 
 
 class USFullMarketEodLifecycle:
@@ -56,26 +58,24 @@ class USFullMarketEodLifecycle:
         latest_by_symbol: dict[str, date] = {}
         usable_expected_symbols: set[str] = set()
         if symbols:
-            lineage_filters = (
-                USDailyPrice.source_id.isnot(None),
-                USDailyPrice.raw_result_id.isnot(None),
-                USDailyPrice.authority.isnot(None),
-                USDailyPrice.raw_contract_version.isnot(None),
-                USDailyPrice.event_at.isnot(None),
-                USDailyPrice.finalization.in_(("final", "corrected")),
-                USDailyPrice.price_basis.isnot(None),
-                USDailyPrice.volume_status.isnot(None),
+            eligibility_filters = us_daily_sql_eligibility_filters(
+                instrument_type=InstrumentType.STOCK,
+            )
+            canonical_rows = (
+                db.query(USDailyPrice)
+                .join(RawFetchResult, RawFetchResult.id == USDailyPrice.raw_result_id)
+                .join(SourceRegistry, SourceRegistry.id == USDailyPrice.source_id)
+                .filter(USDailyPrice.symbol.in_(symbols))
+                .filter(*eligibility_filters)
             )
             latest_by_symbol = {
                 str(symbol): latest
                 for symbol, latest in (
-                    db.query(
+                    canonical_rows.with_entities(
                         USDailyPrice.symbol,
                         func.max(USDailyPrice.trade_date),
                     )
-                    .filter(USDailyPrice.symbol.in_(symbols))
                     .filter(USDailyPrice.trade_date <= expected_trade_date)
-                    .filter(*lineage_filters)
                     .group_by(USDailyPrice.symbol)
                     .all()
                 )
@@ -84,20 +84,24 @@ class USFullMarketEodLifecycle:
             usable_expected_symbols = {
                 str(symbol)
                 for (symbol,) in (
-                    db.query(USDailyPrice.symbol)
-                    .filter(USDailyPrice.symbol.in_(symbols))
+                    canonical_rows.with_entities(USDailyPrice.symbol)
                     .filter(USDailyPrice.trade_date == expected_trade_date)
-                    .filter(*lineage_filters)
-                    .filter(
-                        or_(
-                            USDailyPrice.close_price.isnot(None),
-                            USDailyPrice.adjusted_close.isnot(None),
-                        )
-                    )
                     .distinct()
                     .all()
                 )
             }
+            observed_expected_symbols = {
+                str(symbol)
+                for (symbol,) in (
+                    db.query(USDailyPrice.symbol)
+                    .filter(USDailyPrice.symbol.in_(symbols))
+                    .filter(USDailyPrice.trade_date == expected_trade_date)
+                    .distinct()
+                    .all()
+                )
+            }
+            for symbol in observed_expected_symbols - usable_expected_symbols:
+                latest_by_symbol[symbol] = expected_trade_date
         current, partial, stale, missing = _classify_symbols(
             members=members,
             latest_by_symbol=latest_by_symbol,

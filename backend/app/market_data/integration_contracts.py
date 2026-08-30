@@ -157,9 +157,15 @@ class FreshnessBasis(str, Enum):
     COMPLETED_SESSION_DATE = "completed_session_date"
 
 
+class EvidenceTarget(str, Enum):
+    CURRENT = "current"
+    LATEST_AVAILABLE = "latest_available"
+
+
 class FreshnessRequirement(CanonicalModel):
     max_age_seconds: int = Field(ge=1, le=2_678_400)
     basis: FreshnessBasis = FreshnessBasis.WALL_CLOCK
+    evidence_target: EvidenceTarget = EvidenceTarget.CURRENT
 
 
 class QualityRequirement(CanonicalModel):

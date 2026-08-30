@@ -1817,10 +1817,37 @@ def project_taiwan_quote_evidence_bundle(
         )
         if observation is not None
     ]
+    acquisition_scope = (
+        bundle.acquisition_scope.projection()
+        if bundle.acquisition_scope is not None
+        else None
+    )
+    attempted_providers = tuple(
+        dict.fromkeys(
+            str(provider).strip()
+            for provider in quote_result.acquisition.providers_attempted
+            if str(provider).strip()
+        )
+    )
+    provider_attempts = [
+        {
+            "provider": provider,
+            "status": (
+                "selected" if provider == response.get("provider") else "attempted"
+            ),
+            "error": None,
+        }
+        for provider in attempted_providers
+    ]
     response.update(
         {
             "source_chain": list(dict.fromkeys(selected_sources)),
-            "primary_provider": response.get("provider"),
+            "primary_provider": (
+                attempted_providers[0]
+                if attempted_providers
+                else response.get("provider")
+            ),
+            "provider_attempts": provider_attempts,
             "primary_source_status": quote_result.resolved.health.status.value,
             "primary_source_error": None,
             "fallback_used": (
@@ -1857,11 +1884,7 @@ def project_taiwan_quote_evidence_bundle(
                     official_close_result
                 ),
             },
-            "acquisition_scope": (
-                bundle.acquisition_scope.projection()
-                if bundle.acquisition_scope is not None
-                else None
-            ),
+            "acquisition_scope": acquisition_scope,
             "read_policy": "cache_only",
         }
     )

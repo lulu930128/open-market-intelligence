@@ -107,6 +107,86 @@ def test_intraday_only_context_skips_unselected_research_resources() -> None:
     ] == "5m"
 
 
+def test_quote_only_context_uses_cache_only_resolved_quote_projection() -> None:
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    service = MagicMock()
+    service.get_us_quote_snapshot.return_value = {
+        "kind": "us_quote_snapshot",
+        "schema_version": "omi.market.quote.snapshot.v1",
+        "status": "selected",
+        "selected_provider": "twelve_data",
+        "selected_source": "twelve_data.quote",
+        "selected_session": "continuous",
+        "selected_event_at": "2026-08-28T10:00:00-04:00",
+        "facts_usable": True,
+        "research_usable": True,
+        "limitations": ["PARTIAL_US_MARKET_VOLUME"],
+        "quote": {
+            "trade_date": "2026-08-28",
+            "currency": "USD",
+            "last_trade_price": "202.50",
+            "previous_close": "200.00",
+            "event_at": "2026-08-28T10:00:00-04:00",
+        },
+    }
+    service.build_us_source_health.return_value = {"entries": [], "summary": {}}
+    dependencies = USContextDependencies(
+        us_market_service=service,
+        latest_profile=MagicMock(),
+        scan_us_stock_gaps=MagicMock(return_value={"missing": [], "warnings": []}),
+        now=lambda: datetime(2026, 8, 28, 14, 1, tzinfo=timezone.utc),
+    )
+    platform_result = MagicMock(
+        projection={
+            "bars": [],
+            "selected_provider": None,
+            "latest_trade_date": None,
+            "limitations": [],
+        },
+        postcondition_satisfied=False,
+    )
+
+    with (
+        patch("app.ai.market_context.us_context.USDailyOhlcvPlatform") as platform,
+        patch(
+            "app.ai.market_context.us_context.build_us_calendar_status",
+            return_value={
+                "checked_at": "2026-08-28T10:01:00-04:00",
+                "phase": "regular",
+                "previous_trading_day": "2026-08-28",
+            },
+        ),
+    ):
+        platform.return_value.read.return_value = platform_result
+        context = read_us_stock_context(
+            db,
+            symbol="AAPL",
+            market_data_params={"requested_capabilities": ["quote.snapshot"]},
+            dependencies=dependencies,
+        )
+
+    quote = context["data"]["compact"]["quote"]
+    assert quote["price"] == 202.5
+    assert quote["provider"] == "twelve_data"
+    assert quote["source"] == "twelve_data.quote"
+    assert quote["is_live"] is True
+    assert quote["volume_status"] == "not_provided"
+    assert quote["previous_close"] is None
+    assert "CANONICAL_US_DAILY_PREVIOUS_CLOSE_MISSING" in quote["limitations"]
+    assert context["data"]["resolved_market_data"]["quote_snapshot"][
+        "limitations"
+    ] == ["PARTIAL_US_MARKET_VOLUME"]
+    assert {ref.get("name") for ref in context["source_refs"]} >= {
+        "us_quote_snapshot"
+    }
+    service.get_us_quote_snapshot.assert_called_once_with(
+        db,
+        symbol="AAPL",
+        now=datetime(2026, 8, 28, 14, 1, tzinfo=timezone.utc),
+    )
+
+
 def test_intraday_gap_scan_does_not_query_unselected_datasets() -> None:
     db = MagicMock()
     with (

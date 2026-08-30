@@ -190,14 +190,32 @@ def read_tw_index_context(
             intraday_latest_time,
         ]
     )
-    source_refs = [
-        {"type": "table", "name": "market_index_daily_stat"},
-        {"type": "table", "name": "market_chip_daily"},
-        {"type": "derived", "name": "app.market.indices"},
-        {"type": "external_or_cache", "name": "yahoo_finance_chart"},
-    ]
-    if include_intraday or intraday is not None:
-        _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "market_index_intraday"})
+    source_refs: list[dict[str, str]] = []
+    if charts:
+        _append_source_ref_once(
+            source_refs,
+            {"type": "resolved_market_data", "name": "tw.market_index.daily"},
+        )
+    if index_snapshot is not None:
+        _append_source_ref_once(
+            source_refs,
+            {"type": "resolved_market_data", "name": "tw.market_index.current"},
+        )
+    if market_chip is not None:
+        _append_source_ref_once(
+            source_refs,
+            {"type": "table", "name": "market_chip_daily"},
+        )
+    if contributions is not None:
+        _append_source_ref_once(
+            source_refs,
+            {"type": "derived", "name": "app.market.indices"},
+        )
+    if intraday is not None:
+        _append_source_ref_once(
+            source_refs,
+            {"type": "external_or_cache", "name": "market_index_intraday"},
+        )
 
     envelope = {
         "kind": "tw_index_context",

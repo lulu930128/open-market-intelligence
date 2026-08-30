@@ -1236,6 +1236,12 @@ export type IntradayCurrentObservation = {
   confirmed_at: string | null;
   price_semantics: string;
   provider: string | null;
+  source?: string | null;
+  status?: string;
+  is_fallback?: boolean;
+  limitations?: string[];
+  previous_close?: number | null;
+  previous_close_provider?: string | null;
   freshness_status: string;
   decision_usable: boolean;
 };
@@ -1267,7 +1273,9 @@ export type StockVolumePace = {
 
 export type USIntradaySourceStatus = {
   provider: string;
+  source?: string | null;
   status: "ok" | "degraded" | "unavailable";
+  resolved_status?: string | null;
   freshness_status:
     | "current"
     | "delayed"
@@ -1281,7 +1289,47 @@ export type USIntradaySourceStatus = {
   lag_seconds: number | null;
   is_fallback: boolean;
   has_usable_data: boolean;
+  decision_usable?: boolean;
+  selection_reason?: string | null;
+  limitations?: string[];
   message: string | null;
+};
+
+export type USResolvedQuoteValue = {
+  market: string;
+  symbol: string;
+  venue: string | null;
+  instrument_type: string;
+  trade_date: string | null;
+  currency: string | null;
+  state: string;
+  trade_state: string;
+  last_trade_price: string | null;
+  open_price: string | null;
+  high_price: string | null;
+  low_price: string | null;
+  previous_close: string | null;
+  event_at: string | null;
+  received_at: string | null;
+  fetched_at: string | null;
+};
+
+export type USResolvedQuoteSnapshot = {
+  kind: string;
+  schema_version: string;
+  compatibility_schema_versions: string[];
+  status: string;
+  selected_provider: string | null;
+  selected_source: string | null;
+  selected_session: string | null;
+  selected_event_at: string | null;
+  fallback_used: boolean;
+  selection_reason: string | null;
+  facts_usable: boolean;
+  research_usable: boolean;
+  limitations: string[];
+  candidates: Array<Record<string, unknown>>;
+  quote: USResolvedQuoteValue | null;
 };
 
 export type IntradayTrendResponse = {
@@ -1316,6 +1364,9 @@ export type IntradayTrendResponse = {
   point_count: number;
   points: IntradayTrendPoint[];
   volume_pace?: StockVolumePace | null;
+  quote_snapshot?: USResolvedQuoteSnapshot | null;
+  current_source_status?: USIntradaySourceStatus | null;
+  bar_source_status?: USIntradaySourceStatus | null;
   source_status?: USIntradaySourceStatus | null;
   as_of?: string | null;
   total_volume?: number | null;
@@ -1384,6 +1435,21 @@ export type TaiwanStockQuoteVolumeReconciliationRead = {
   decision_usable: boolean;
 };
 
+export type TaiwanQuoteProviderAttemptRead = {
+  provider: string;
+  status: string;
+  error: string | null;
+};
+
+export type TaiwanQuoteEvidenceAcquisitionScopeRead = {
+  contract_version: string;
+  requested_capabilities: string[];
+  acquired_resources: string[];
+  materialized_capabilities: string[];
+  providers_attempted: string[];
+  limitations: string[];
+};
+
 export type TaiwanStockQuoteDepthRead = {
   stock_id: string;
   stock_name: string | null;
@@ -1393,10 +1459,15 @@ export type TaiwanStockQuoteDepthRead = {
   source_url: string | null;
   source_chain?: string[];
   primary_provider?: string | null;
+  provider_attempts?: TaiwanQuoteProviderAttemptRead[];
   primary_source_status?: string | null;
   primary_source_error?: string | null;
   fallback_reason?: string | null;
   fallback_used?: boolean;
+  data_core_result_kinds?: string[];
+  data_core_components?: Record<string, Record<string, unknown>>;
+  acquisition_scope?: TaiwanQuoteEvidenceAcquisitionScopeRead | null;
+  read_policy?: string | null;
   exchange_channel: string | null;
   session_phase: string;
   presentation_trade_date?: string | null;

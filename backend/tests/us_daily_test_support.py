@@ -67,13 +67,14 @@ def upsert_canonical_us_daily_price_records(
         db.add(raw)
         db.flush()
         is_index = symbol.startswith("^")
+        canonical_volume = None if is_index else record.trade_volume
         fields = {
             "open_price": record.open_price,
             "high_price": record.high_price,
             "low_price": record.low_price,
             "close_price": record.close_price,
             "adjusted_close": record.adjusted_close,
-            "trade_volume": record.trade_volume,
+            "trade_volume": canonical_volume,
             "dividend_amount": record.dividend_amount,
             "split_coefficient": record.split_coefficient,
             "source_url": record.source_url,
@@ -90,10 +91,10 @@ def upsert_canonical_us_daily_price_records(
             ),
             "finalization": "final",
             "price_basis": "raw",
-            "volume_unit": "shares" if record.trade_volume is not None else None,
+            "volume_unit": "shares" if canonical_volume is not None else None,
             "volume_status": (
                 "observed"
-                if record.trade_volume is not None
+                if canonical_volume is not None
                 else "not_applicable"
                 if is_index
                 else "missing"

@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice
-from app.market_data.contracts import BarFinalization, InstrumentType, Market
+from app.market_data.contracts import (
+    BarFinalization,
+    InstrumentType,
+    Market,
+    QuantityUnit,
+)
 from app.market_data.gateway import BarAcquisitionResult
 from app.market_data.integration_contracts import (
     BarCapabilityRequest,
@@ -161,13 +166,17 @@ class USDailyPriceTransaction:
                 volume_status = observation.volume_status
                 if volume_status is None:
                     raise ValueError("US daily canonical bar requires volume_status")
-                if volume_status == "missing":
-                    raise ValueError("stock/ETF daily volume cannot be silently missing")
-                if (
-                    volume_status == "not_applicable"
-                    and observation.instrument.instrument_type is not InstrumentType.INDEX
+                if observation.instrument.instrument_type is InstrumentType.INDEX:
+                    if volume_status != "not_applicable" or observation.volume is not None:
+                        raise ValueError(
+                            "US index daily volume must be null and not_applicable"
+                        )
+                elif (
+                    volume_status != "observed"
+                    or observation.volume is None
+                    or observation.volume.unit is not QuantityUnit.SHARE
                 ):
-                    raise ValueError("volume not_applicable is only valid for US indexes")
+                    raise ValueError("stock/ETF daily volume must be observed shares")
                 if observation.price_basis != "raw":
                     raise ValueError("US daily canonical bar requires explicit raw price basis")
                 volume = int(observation.volume.value) if observation.volume else None

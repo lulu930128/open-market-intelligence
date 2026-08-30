@@ -12,7 +12,7 @@ from app.ai.capability_projection_registry import (
     CAPABILITY_PROJECTION_SPECS,
     validate_capability_projection_registry,
 )
-from app.market_data.contracts import DatasetHealthStatus
+from app.market_data.contracts import DatasetHealthStatus, InstrumentType
 from app.market_data.registry import (
     DATASET_REGISTRY,
     DatasetFrequency,
@@ -101,6 +101,16 @@ def test_priority_us_ohlc_advertises_only_its_executable_shared_platform_repair(
     assert spec.refresh_operation == "us.reconcile_priority_daily_ohlcv"
     assert spec.refresh_bounds is not None
     assert spec.refresh_bounds.max_symbols == 20
+
+
+def test_us_daily_dataset_declares_stock_etf_and_index_identity_scope() -> None:
+    spec = DATASET_REGISTRY.get("us.daily.ohlcv")
+
+    assert spec.eligible_instrument_types == (
+        InstrumentType.STOCK,
+        InstrumentType.ETF,
+        InstrumentType.INDEX,
+    )
 
 
 def test_non_refreshable_dataset_cannot_advertise_operation_or_repairability() -> None:

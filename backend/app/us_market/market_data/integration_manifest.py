@@ -96,11 +96,12 @@ US_MARKET_DATA_INTEGRATION_MANIFEST = USMarketDataIntegrationManifest(
     ),
     production_binding_available=True,
     shared_core_contract_version="omi.market.data_requirement.v2",
-    handoff_gate="US_INTRADAY_QUOTE_SOURCE_CLOSEOUT_ACCEPTED",
+    handoff_gate="US_MARKET_CORE_SOURCE_CHECKPOINT_READY",
     limitations=(
         "ALPACA_DAILY_SUPPORTS_STOCK_AND_ETF_ONLY",
         "US_INDEX_DAILY_FALLBACK_REMAINS_YAHOO_ONLY",
-        "US_QUOTE_RETENTION_CLEANUP_NOT_SCHEDULED",
+        "US_INTRADAY_MATERIALIZER_FEATURE_OFF_BOUNDED_CANARY_ONLY",
+        "US_MATERIALIZER_SCHEDULER_CONTENTION_RUNTIME_ACCEPTANCE_PENDING",
         "RUNTIME_ADOPTION_AND_LIVE_PROVIDER_ACCEPTANCE_REMAIN_SEPARATE",
     ),
     capability_bindings=(

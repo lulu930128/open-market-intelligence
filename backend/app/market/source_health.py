@@ -23,7 +23,7 @@ from app.market.public_quote_platform import (
     read_taiwan_session_close,
 )
 from app.market.quote_contract_health import (
-    build_taiwan_quote_provider_availability,
+    build_taiwan_public_quote_provider_availability,
     build_taiwan_quote_scheduler_contract,
 )
 from app.market.taiwan_market_state import SUPPORTED_MARKETS
@@ -358,6 +358,8 @@ def _stock_quote_entry(
         "axis": "request_live",
         "status": status_value if stock_id else "not_requested",
         "target": stock_id,
+        "provider": getattr(latest, "provider", None) if latest else None,
+        "source": getattr(latest, "source", None) if latest else None,
         "row_count": row_count,
         "latest_data_date": (
             latest_data_date.isoformat() if latest_data_date else None
@@ -386,7 +388,7 @@ def _stock_quote_entry(
         current_time=current_time,
         stock_id=stock_id,
     )
-    provider_availability = build_taiwan_quote_provider_availability(
+    public_quote_provider_availability = build_taiwan_public_quote_provider_availability(
         db,
         stock_id=stock_id,
     )
@@ -501,7 +503,7 @@ def _stock_quote_entry(
         freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
         data_quality=data_quality,
         reason=reason,
-        provider=getattr(latest, "provider", None) if latest else "twse_mis",
+        provider=getattr(latest, "provider", None) if latest else None,
         source=getattr(latest, "source", None) if latest else None,
         latest_observed_at=observed_at,
         age_seconds=age_seconds,
@@ -510,7 +512,9 @@ def _stock_quote_entry(
             "version": "tw.quote.health.v1",
             "request_live": request_live,
             "scheduler_contract": scheduler_contract,
-            "provider_availability": provider_availability,
+            "public_quote_provider_availability": (
+                public_quote_provider_availability
+            ),
             "session_close": session_close_health,
         },
     )

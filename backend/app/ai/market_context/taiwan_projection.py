@@ -620,62 +620,47 @@ def _compact_row(row: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:
 def _quote_provider_path(
     *,
     selected_provider: str | None,
-    live_quote_requested: bool,
+    selected_authority: str | None,
+    primary_provider: str | None,
+    provider_attempts: list[dict[str, Any]],
     fallback_used: bool,
     quote_error: str | None,
     refresh_outcome: str | None,
 ) -> dict[str, Any]:
-    primary_provider = (
-        "twse_mis"
-        if live_quote_requested
-        else selected_provider
-    )
     attempts: list[dict[str, Any]] = []
-    if live_quote_requested:
+    for attempt in provider_attempts:
+        provider = str(attempt.get("provider") or "").strip()
+        if not provider:
+            continue
         attempts.append(
             {
-                "provider": "twse_mis",
-                "status": (
-                    "success"
-                    if selected_provider == "twse_mis"
-                    and not fallback_used
-                    else "failed"
-                ),
-                "error": quote_error,
+                "provider": provider,
+                "status": str(attempt.get("status") or "attempted"),
+                "error": attempt.get("error"),
             }
         )
-    if selected_provider and (
-        not attempts
-        or fallback_used
-        or selected_provider != attempts[-1].get("provider")
-    ):
-        attempts.append(
-            {
-                "provider": selected_provider,
-                "status": "success",
-                "error": None,
-            }
-        )
+    normalized_primary = str(primary_provider or "").strip() or selected_provider
+    source_grade = {
+        "exchange": "official",
+        "broker": "third_party",
+        "vendor": "third_party",
+        "derived": "derived",
+        "cache": "local_database",
+    }.get(str(selected_authority or "").strip().lower(), "unknown")
     return {
-        "primary_provider": primary_provider,
+        "primary_provider": normalized_primary,
         "selected_provider": selected_provider,
         "fallback_used": fallback_used,
         "fallback_provider": (
             selected_provider if fallback_used else None
         ),
         "fallback_reason": (
-            quote_error or "live_quote_unavailable"
+            quote_error or "resolved_evidence_fallback"
             if fallback_used
             else None
         ),
         "provider_attempts": attempts,
-        "source_grade": (
-            "official_realtime"
-            if selected_provider == "twse_mis" and not fallback_used
-            else "official_cache"
-            if selected_provider == "local_daily_close"
-            else "unavailable"
-        ),
+        "source_grade": source_grade,
         "cache_hit": refresh_outcome == "cache_hit",
         "cache_written": refresh_outcome == "updated",
     }
@@ -745,7 +730,9 @@ def _compact_latest_daily_quote(
         quote.update(
             _quote_provider_path(
                 selected_provider=None,
-                live_quote_requested=live_quote_requested,
+                selected_authority=None,
+                primary_provider=None,
+                provider_attempts=[],
                 fallback_used=False,
                 quote_error=quote_error,
                 refresh_outcome=None,
@@ -1004,7 +991,9 @@ def _compact_latest_daily_quote(
     quote.update(
         _quote_provider_path(
             selected_provider="local_daily_close",
-            live_quote_requested=live_quote_requested,
+            selected_authority="cache",
+            primary_provider=None,
+            provider_attempts=[],
             fallback_used=bool(live_quote_requested),
             quote_error=quote_error,
             refresh_outcome=None,
@@ -1570,6 +1559,31 @@ def _compact_quote_snapshot(
     for field in tuple(volume_contract):
         if field in quote_depth:
             volume_contract[field] = quote_depth[field]
+    data_core_components = (
+        quote_depth.get("data_core_components")
+        if isinstance(quote_depth.get("data_core_components"), dict)
+        else {}
+    )
+    quote_component = (
+        data_core_components.get("quote.snapshot")
+        if isinstance(data_core_components.get("quote.snapshot"), dict)
+        else {}
+    )
+    quote_lineage = (
+        quote_component.get("lineage")
+        if isinstance(quote_component.get("lineage"), dict)
+        else {}
+    )
+    acquisition_scope = (
+        quote_depth.get("acquisition_scope")
+        if isinstance(quote_depth.get("acquisition_scope"), dict)
+        else {}
+    )
+    provider_attempts = (
+        quote_depth.get("provider_attempts")
+        if isinstance(quote_depth.get("provider_attempts"), list)
+        else []
+    )
     quote = {
         "kind": "quote_snapshot",
         "source": quote_depth.get("source"),
@@ -1577,11 +1591,8 @@ def _compact_quote_snapshot(
         "data_core_result_kinds": list(
             quote_depth.get("data_core_result_kinds") or []
         ),
-        "data_core_components": (
-            dict(quote_depth.get("data_core_components"))
-            if isinstance(quote_depth.get("data_core_components"), dict)
-            else {}
-        ),
+        "data_core_components": dict(data_core_components),
+        "acquisition_scope": dict(acquisition_scope) if acquisition_scope else None,
         "status": freshness.get("status") or quote_depth.get("session_phase") or "quote",
         "session_phase": quote_depth.get("session_phase"),
         "presentation_trade_date": _json_value(
@@ -1824,9 +1835,22 @@ def _compact_quote_snapshot(
                 quote_depth.get("provider") or ""
             ).strip()
             or None,
-            live_quote_requested=live_quote_requested,
+            selected_authority=str(quote_lineage.get("authority") or "").strip()
+            or None,
+            primary_provider=str(
+                quote_depth.get("primary_provider") or ""
+            ).strip()
+            or None,
+            provider_attempts=[
+                dict(attempt)
+                for attempt in provider_attempts
+                if isinstance(attempt, dict)
+            ],
             fallback_used=bool(quote_depth.get("fallback_used")),
-            quote_error=quote_error,
+            quote_error=(
+                str(quote_depth.get("fallback_reason") or "").strip()
+                or quote_error
+            ),
             refresh_outcome=str(
                 quote_depth.get("refresh_outcome") or ""
             ).strip()

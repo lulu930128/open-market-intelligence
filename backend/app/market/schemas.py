@@ -1217,6 +1217,21 @@ class TaiwanStockQuoteVolumeReconciliationRead(BaseModel):
     decision_usable: bool = False
 
 
+class TaiwanQuoteProviderAttemptRead(BaseModel):
+    provider: str
+    status: str
+    error: str | None = None
+
+
+class TaiwanQuoteEvidenceAcquisitionScopeRead(BaseModel):
+    contract_version: str
+    requested_capabilities: list[str] = Field(default_factory=list)
+    acquired_resources: list[str] = Field(default_factory=list)
+    materialized_capabilities: list[str] = Field(default_factory=list)
+    providers_attempted: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class TaiwanStockQuoteDepthRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
@@ -1226,6 +1241,9 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     source_url: str | None = None
     source_chain: list[str] = Field(default_factory=list)
     primary_provider: str | None = None
+    provider_attempts: list[TaiwanQuoteProviderAttemptRead] = Field(
+        default_factory=list
+    )
     primary_source_status: str | None = None
     primary_source_error: str | None = None
     fallback_reason: str | None = None
@@ -1365,6 +1383,10 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     session_close_confirmed_at: datetime | None = None
     refresh_outcome: str = "not_attempted"
     freshness: TaiwanStockQuoteDepthFreshnessRead
+    data_core_result_kinds: list[str] = Field(default_factory=list)
+    data_core_components: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    acquisition_scope: TaiwanQuoteEvidenceAcquisitionScopeRead | None = None
+    read_policy: str | None = None
 
 
 class TaiwanQuoteContractReplaySnapshotRead(BaseModel):

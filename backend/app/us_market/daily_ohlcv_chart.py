@@ -63,6 +63,7 @@ def read_us_daily_ohlcv_chart(
         to_date=to_date,
     )
     resolved_bars = list(platform_result.result.resolved.bars)
+    is_index = platform_result.identity.instrument.instrument_type.value == "index"
     daily_points = [
         {
             "time": bar.end_at.astimezone(US_EASTERN).date(),
@@ -70,7 +71,13 @@ def read_us_daily_ohlcv_chart(
             "high": _number(bar.high_price),
             "low": _number(bar.low_price),
             "close": _number(bar.close_price),
-            "volume": _volume(bar.volume.value) if bar.volume is not None else None,
+            "volume": (
+                None
+                if is_index
+                else _volume(bar.volume.value)
+                if bar.volume is not None
+                else None
+            ),
         }
         for bar in resolved_bars
     ]
@@ -108,7 +115,6 @@ def read_us_daily_ohlcv_chart(
     previous_status = "current" if previous_close is not None else "missing"
     has_volume = any(point.get("volume") is not None for point in points)
     normalized_symbol = normalize_us_symbol(symbol)
-    is_index = platform_result.identity.instrument.instrument_type.value == "index"
     is_current = bool(platform_result.projection.get("is_current"))
     facts_usable = bool(platform_result.projection.get("facts_usable"))
     decision_usable = bool(platform_result.projection.get("decision_usable"))

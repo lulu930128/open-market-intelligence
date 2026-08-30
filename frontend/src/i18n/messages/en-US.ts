@@ -2771,23 +2771,27 @@ export const enUS = {
   },
   usStockDetail: {
     sourceStatus: {
-      providerErrorTitle: "Yahoo upstream issue",
-      delayedTitle: "Yahoo upstream delay",
-      staleTitle: "Yahoo upstream stopped updating",
-      delayedBadge: "Yahoo delayed about {minutes}m",
-      staleBadge: "Yahoo upstream issue · {minutes}m delay",
-      fallbackBadge: "Yahoo upstream issue · last data shown",
-      unavailableBadge: "Yahoo upstream unavailable",
+      providerErrorTitle: "{provider} upstream issue",
+      delayedTitle: "{provider} upstream delay",
+      staleTitle: "{provider} upstream stopped updating",
+      partialTitle: "{provider} intraday data is partial",
+      delayedBadge: "{provider} delayed about {minutes}m",
+      staleBadge: "{provider} upstream issue · {minutes}m delay",
+      partialBadge: "{provider} partial data",
+      fallbackBadge: "{provider} upstream issue · last data shown",
+      unavailableBadge: "{provider} upstream unavailable",
       delayedMessage:
-        "Yahoo intraday data is about {minutes} minutes behind; the last usable data remains visible.",
+        "{provider} intraday data is about {minutes} minutes behind; the last usable data remains visible.",
       staleMessage:
-        "Yahoo intraday data has not advanced for about {minutes} minutes; the last usable data remains visible.",
+        "{provider} intraday data has not advanced for about {minutes} minutes; the last usable data remains visible.",
+      partialMessage:
+        "{provider} currently provides only part of the intraday fields. Usable prices remain visible, and missing fields are not inferred.",
       fallbackMessage:
-        "The Yahoo upstream request failed; the last usable data remains visible.",
+        "The {provider} upstream request failed; the last usable data remains visible.",
       unavailableMessage:
-        "The Yahoo upstream request failed and no usable intraday data is available.",
-      recoveredTitle: "Yahoo upstream recovered",
-      recoveredMessage: "Yahoo intraday updates have resumed.",
+        "The {provider} upstream request failed and no usable intraday data is available.",
+      recoveredTitle: "US intraday source recovered",
+      recoveredMessage: "US intraday updates have resumed.",
       monitoringEndedTitle: "US live monitoring window ended",
       monitoringEndedMessage:
         "This is no longer a live update window; the last usable data remains visible.",

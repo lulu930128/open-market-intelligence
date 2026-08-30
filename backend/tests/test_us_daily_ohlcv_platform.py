@@ -317,6 +317,10 @@ def test_sox_vertical_slice_preserves_not_applicable_volume() -> None:
         assert result.projection["volume_applicability"] == "not_applicable"
         assert result.projection["bars"][0]["volume"] is None
         assert result.projection["bars"][0]["volume_status"] == "not_applicable"
+        chart = read_us_daily_ohlcv_chart(db, symbol="^SOX", bars=1, now=NOW)
+        assert chart["points"][0]["volume"] is None
+        assert chart["volume_unit"] is None
+        assert chart["volume_status"] == "not_applicable"
     finally:
         db.close()
 

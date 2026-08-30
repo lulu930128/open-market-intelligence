@@ -21,6 +21,7 @@ from app.market_data.dataset_lifecycle import (
     require_refresh_contract,
 )
 from app.market_data.integration_contracts import (
+    DatasetTarget,
     InstrumentTarget,
     RefreshCoverageScopeV1,
     RefreshRequirementV1,
@@ -99,6 +100,58 @@ def test_us_daily_dataset_owns_bounded_history_coverage_operation() -> None:
     assert lifecycle.refresh_operation == "us.refresh_daily_ohlcv"
     assert bounds.max_calls == 2
     assert bounds.max_symbols == 1
+    assert lifecycle.eligible_instrument_types == (
+        InstrumentType.STOCK,
+        InstrumentType.ETF,
+        InstrumentType.INDEX,
+    )
+
+
+def test_current_breadth_operation_accepts_its_declared_twenty_call_budget() -> None:
+    lifecycle = dataset_lifecycle_contract("tw.market_breadth.current")
+    operations = DatasetOperationRegistry()
+    operations.register(
+        dataset_id="tw.market_breadth.current",
+        operation="tw.refresh_current_breadth",
+        handler=lambda requirement: DatasetOperationResult(
+            dataset_id=requirement.dataset_id,
+            operation="tw.refresh_current_breadth",
+            status=DatasetOperationStatus.COMPLETED,
+            expected_date=date(2026, 8, 28),
+            latest_date=date(2026, 8, 28),
+            target_count=1,
+            completed_count=1,
+            postcondition_met=True,
+        ),
+    )
+    requirement = RefreshRequirementV1(
+        dataset_id="tw.market_breadth.current",
+        target=DatasetTarget(
+            market=Market.TW,
+            dataset_id="tw.market_breadth.current",
+            scope_key="TWSE",
+        ),
+        from_date=date(2026, 8, 28),
+        to_date=date(2026, 8, 28),
+        requested_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+        purpose=DataPurpose.REPAIR,
+        reason_code="CURRENT_BREADTH_MISSING",
+        max_provider_attempts=1,
+        max_external_calls=20,
+        timeout_seconds=40,
+        max_symbols=1,
+        max_range_days=1,
+        postcondition="Canonical current breadth is reread after bounded acquisition.",
+    )
+
+    bounds = require_refresh_contract(
+        lifecycle,
+        operation="tw.refresh_current_breadth",
+    )
+    result = operations.execute(requirement)
+
+    assert bounds.max_calls == 20
+    assert result.status is DatasetOperationStatus.COMPLETED
 
 
 def test_shared_lifecycle_contract_has_no_db_job_scheduler_or_provider_imports() -> None:

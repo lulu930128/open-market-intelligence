@@ -42,6 +42,7 @@ from app.us_market.schemas import (
     USIntradayTrendRead,
     USMarketResearchRead,
     USOhlcChartRead,
+    USResolvedQuoteSnapshotRead,
     USResourceRefreshResultRead,
     USSecCompanyFactRead,
     USSecFactRefreshResultRead,
@@ -85,6 +86,7 @@ from app.us_market.service import (
     build_us_source_health,
     get_us_company_profile,
     get_us_intraday_trend,
+    get_us_quote_snapshot,
     build_us_market_research,
     get_us_sec_fundamental_summary,
     get_us_sec_financial_contract,
@@ -1066,6 +1068,19 @@ def get_us_intraday_trend_api(
         interval=interval,
         db=db,
     )
+
+
+@router.get("/quote/{symbol}", response_model=USResolvedQuoteSnapshotRead)
+def get_us_quote_snapshot_api(
+    symbol: str,
+    db: Session = Depends(get_db),
+):
+    """Read persisted resolved Quote evidence without provider acquisition."""
+
+    try:
+        return get_us_quote_snapshot(db, symbol=symbol)
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post("/quote/{symbol}/refresh", response_model=dict)

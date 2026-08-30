@@ -24,6 +24,7 @@ from app.market_data.integration_contracts import (
     DataRequirementV2,
     DatasetCapabilityRequest,
     DatasetTarget,
+    EvidenceTarget,
     FreshnessRequirement,
     InstrumentTarget,
     MarketDataResultV1,
@@ -95,6 +96,17 @@ def test_requirement_v2_serializes_typed_target_request_and_bounds() -> None:
     assert payload["request"]["capability_id"] == "daily.ohlcv"
     assert payload["bounds"]["max_external_calls"] == 0
     assert payload["request"]["series_resolution"] == "single_candidate"
+    assert payload["freshness"]["evidence_target"] == "current"
+
+
+def test_freshness_requirement_has_typed_evidence_target() -> None:
+    latest = FreshnessRequirement(
+        max_age_seconds=300,
+        evidence_target=EvidenceTarget.LATEST_AVAILABLE,
+    )
+
+    assert latest.evidence_target is EvidenceTarget.LATEST_AVAILABLE
+    assert latest.model_dump(mode="json")["evidence_target"] == "latest_available"
 
 
 def test_bar_coverage_is_explicit_and_does_not_repurpose_max_bars() -> None:

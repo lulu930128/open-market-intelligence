@@ -236,7 +236,7 @@ TW_DATASET_OPERATIONS = (
         callable_path="app.market.tw_current_market_operations.refresh_taiwan_current_breadth_operation",
         external_io=True,
         writes_storage=True,
-        bounds=_bounds(1, 40, 1, 1),
+        bounds=_bounds(20, 40, 1, 1),
         limitations=("CURRENT_SESSION_ONLY", "COVERAGE_MAY_BE_PARTIAL"),
     ),
     TaiwanDatasetOperationSpec(
@@ -452,7 +452,6 @@ TW_DATASET_CONTRACTS = (
         lineage=TaiwanDatasetLineageStatus.CANONICAL_RAW_RECEIPT,
         lineage_fields=_CANONICAL_LINEAGE,
         convergence=TaiwanDatasetConvergenceStatus.PLATFORM_OWNED,
-        limitations=("PUBLIC_BEST_EFFORT_NO_SLA",),
     ),
     _dataset(
         dataset_id="tw.quote.order_book.snapshot",
@@ -604,13 +603,17 @@ TW_DATASET_CONTRACTS = (
         expected=TaiwanExpectedStatePolicy.CURRENT_SESSION,
         eligibility="current_taiwan_session_and_supported_venue",
         refresh_operation="tw.refresh_current_breadth",
-        refresh_bounds=_bounds(1, 40, 1, 1),
-        repairable=False,
+        refresh_bounds=_bounds(20, 40, 1, 1),
+        repairable=True,
         postcondition="Current breadth preserves classified, received-unclassified, and not-received partitions through canonical reread and resolution.",
         lineage=TaiwanDatasetLineageStatus.CANONICAL_RAW_RECEIPT,
         lineage_fields=_CANONICAL_LINEAGE,
         convergence=TaiwanDatasetConvergenceStatus.PLATFORM_OWNED,
-        limitations=("CURRENT_SESSION_PROVISIONAL", "COVERAGE_MAY_BE_PARTIAL"),
+        limitations=(
+            "CURRENT_SESSION_PROVISIONAL",
+            "COVERAGE_MAY_BE_PARTIAL",
+            "HISTORICAL_GAPS_NOT_REPAIRABLE",
+        ),
     ),
     _dataset(
         dataset_id="tw.technical.daily",

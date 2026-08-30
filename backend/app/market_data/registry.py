@@ -11,6 +11,7 @@ from app.market_data.contracts import (
     CanonicalModel,
     DatasetHealth,
     DatasetHealthStatus,
+    InstrumentType,
     Market,
 )
 
@@ -64,6 +65,7 @@ class DatasetSpec(CanonicalModel):
     frequency: DatasetFrequency
     expected_state_policy: ExpectedStatePolicy
     eligibility_policy: EligibilityPolicy
+    eligible_instrument_types: tuple[InstrumentType, ...] = ()
     storage_reference: str | None = Field(default=None, max_length=192)
     refreshable: bool = False
     refresh_operation: str | None = Field(default=None, max_length=128)
@@ -352,13 +354,13 @@ DATASET_REGISTRY = DatasetRegistry(
             refreshable=True,
             refresh_operation="tw.refresh_current_breadth",
             refresh_bounds=RefreshBounds(
-                max_calls=1,
+                max_calls=20,
                 timeout_seconds=40,
                 max_symbols=1,
                 max_range_days=1,
             ),
             postcondition="Persist and reread canonical current breadth with unknown and missing partitions preserved.",
-            repairable=False,
+            repairable=True,
         ),
         DatasetSpec(
             dataset_id="tw.technical.daily",
@@ -433,6 +435,11 @@ DATASET_REGISTRY = DatasetRegistry(
             frequency=DatasetFrequency.DAILY,
             expected_state_policy=ExpectedStatePolicy.REQUESTED_OR_LATEST_COMPLETED,
             eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT,
+            eligible_instrument_types=(
+                InstrumentType.STOCK,
+                InstrumentType.ETF,
+                InstrumentType.INDEX,
+            ),
             storage_reference="source_registry+raw_fetch_result+us_daily_price",
             refreshable=True,
             refresh_operation="us.refresh_daily_ohlcv",
@@ -585,7 +592,7 @@ DATASET_REGISTRY = DatasetRegistry(
                 max_symbols=20,
                 max_range_days=3650,
             ),
-            postcondition="A bounded priority-universe shard rereads the same Gateway-first platform and reports unresolved expected-session coverage truthfully.",
+            postcondition="A bounded priority-universe shard rereads the same Gateway-first platform and requires provider-coherent Daily research coverage; unresolved expected-session or minimum-history coverage remains partial.",
             repairable=True,
         ),
     )

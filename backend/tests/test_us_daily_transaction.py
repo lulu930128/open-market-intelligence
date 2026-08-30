@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
@@ -7,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.models import Base, RawFetchResult, SourceRegistry, USDailyPrice
+from app.market_data.contracts import InstrumentType, Quantity, QuantityUnit
 from app.market_data.provider_catalog import plan_data_acquisition_v2
 from app.us_market.daily_ohlcv_acquisition import (
     USDailyOhlcvAcquisitionExecutor,
@@ -91,6 +94,58 @@ def test_retry_is_observation_idempotent_and_reuses_raw_receipt() -> None:
         assert second.observations_inserted == 0
         assert second.observations_updated == 0
         assert second.observations_unchanged == 1
+    finally:
+        db.close()
+
+
+def test_index_transaction_requires_null_not_applicable_volume() -> None:
+    db = _session()
+    try:
+        requirement = _requirement(instrument_type=InstrumentType.INDEX)
+        acquisition = _acquisition(requirement)
+        observation = acquisition.observations[0].model_copy(
+            update={
+                "volume": Quantity(value=Decimal("0"), unit=QuantityUnit.SHARE),
+                "volume_status": "observed",
+            }
+        )
+        invalid = replace(acquisition, observations=(observation,))
+
+        with pytest.raises(
+            ValueError,
+            match="US index daily volume must be null and not_applicable",
+        ):
+            USDailyPriceTransaction(db).persist_bar_acquisition(
+                requirement,
+                invalid,
+            )
+
+        assert db.query(USDailyPrice).count() == 0
+        assert db.query(RawFetchResult).count() == 0
+    finally:
+        db.close()
+
+
+def test_index_canonical_reacquisition_repairs_legacy_observed_zero_volume() -> None:
+    db = _session()
+    try:
+        requirement = _requirement(instrument_type=InstrumentType.INDEX)
+        acquisition = _acquisition(requirement)
+        transaction = USDailyPriceTransaction(db)
+        transaction.persist_bar_acquisition(requirement, acquisition)
+        row = db.query(USDailyPrice).one()
+        row.trade_volume = 0
+        row.volume_unit = "shares"
+        row.volume_status = "observed"
+        db.commit()
+
+        repaired = transaction.persist_bar_acquisition(requirement, acquisition)
+
+        db.refresh(row)
+        assert repaired.observations_updated == 1
+        assert row.trade_volume is None
+        assert row.volume_unit is None
+        assert row.volume_status == "not_applicable"
     finally:
         db.close()
 

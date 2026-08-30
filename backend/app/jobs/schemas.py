@@ -1,7 +1,11 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.us_market.intraday_profiles import (
+    US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS,
+)
 
 
 class JobRunRead(BaseModel):
@@ -24,3 +28,28 @@ class JobRunRead(BaseModel):
     started_at: datetime | None = None
     ended_at: datetime | None = None
     updated_at: datetime
+
+
+class USCurrentMarketBootstrapJobRequest(BaseModel):
+    equity_symbols: list[str] = Field(
+        default_factory=lambda: ["AAPL", "TSM"],
+        min_length=1,
+        max_length=2,
+    )
+    index_symbols: list[str] = Field(
+        default_factory=lambda: [
+            "^GSPC",
+            "^DJI",
+            "^IXIC",
+            "^SOX",
+            "^NDX",
+            "^VIX",
+        ],
+        min_length=1,
+        max_length=6,
+    )
+    max_external_calls: int = Field(
+        default=US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS,
+        ge=1,
+        le=20,
+    )

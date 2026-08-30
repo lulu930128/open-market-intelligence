@@ -140,6 +140,8 @@ function formatPrice(value: number | null | undefined) {
 }
 
 function formatSource(t: TranslationFunction, value: string) {
+  // Persisted historical rows still contain these pre-canonical composite IDs.
+  // Keep this presentation-only mapping until retention or migration removes them.
   if (value === "nstock_minute_stock_data_twse_mis_volume") {
     return t("stockDetail.intraday.sources.nstockMinuteWithVolume");
   }

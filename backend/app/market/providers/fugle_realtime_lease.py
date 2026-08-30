@@ -70,6 +70,11 @@ class FugleRealtimeQuoteLeasePort:
         configured = bool(str(settings.fugle_api_key or "").strip())
         connected = runtime is not None and runtime.connection_status == "connected"
         entitlement = runtime.entitlement_status if runtime is not None else "unknown"
+        readiness = (
+            runtime.quote_readiness(requirement.target.instrument.symbol)
+            if runtime is not None
+            else None
+        )
         return ProviderResourceHealth(
             provider=self.provider_key,
             market=requirement.target.instrument.market,
@@ -99,7 +104,9 @@ class FugleRealtimeQuoteLeasePort:
                 else OperationalStatus.UNAVAILABLE
             ),
             freshness=(
-                EvidenceFreshness.LIVE if connected else EvidenceFreshness.MISSING
+                EvidenceFreshness.LIVE
+                if readiness is not None and readiness["ready"]
+                else EvidenceFreshness.MISSING
             ),
             checked_at=requirement.requested_at,
             detail_code=(
@@ -156,7 +163,8 @@ class FugleRealtimeQuoteLeasePort:
                 expires_at=self._monotonic() + self._ttl_seconds,
             )
         runtime.set_active_stock(symbol)
-        live = runtime.connection_status == "connected"
+        readiness = runtime.quote_readiness(symbol)
+        live = bool(readiness["ready"])
         return ViewerLeaseState(
             lease_id=lease_id,
             stock_id=symbol,
@@ -170,6 +178,7 @@ class FugleRealtimeQuoteLeasePort:
                 if live
                 else "Fugle active-stock槽位已保留，等待連線／訂閱確認。"
             ),
+            error=None if live else str(readiness["detail_code"]),
         )
 
     def heartbeat(self, lease_id: str) -> ViewerLeaseState | None:
@@ -185,7 +194,8 @@ class FugleRealtimeQuoteLeasePort:
             )
             self._leases[lease_id] = renewed
         runtime = get_fugle_realtime_runtime()
-        live = runtime is not None and runtime.connection_status == "connected"
+        readiness = runtime.quote_readiness(lease.symbol) if runtime is not None else None
+        live = readiness is not None and bool(readiness["ready"])
         return ViewerLeaseState(
             lease_id=lease_id,
             stock_id=lease.symbol,
@@ -197,7 +207,14 @@ class FugleRealtimeQuoteLeasePort:
             message=(
                 "Fugle active-stock租約已續期。"
                 if live
-                else "Fugle租約仍有效，但stream目前未連線。"
+                else "Fugle租約仍有效，但requested-symbol即時證據尚未就緒。"
+            ),
+            error=(
+                None
+                if live
+                else str(readiness["detail_code"])
+                if readiness is not None
+                else "FUGLE_RUNTIME_UNAVAILABLE"
             ),
         )
 

@@ -44,6 +44,28 @@ class StatusTaxonomyTests(unittest.TestCase):
         self.assertEqual(result["decision_readiness"], "blocked")
         self.assertEqual(result["provider_status"], "unavailable")
 
+    def test_selected_evidence_is_not_poisoned_by_public_provider_failure(self) -> None:
+        result = build_status_dimensions(
+            {
+                "status": "current",
+                "data_quality": "ok",
+                "required": True,
+                "health_dimensions": {
+                    "request_live": {
+                        "status": "current",
+                        "provider": "kgi_superpy",
+                    },
+                    "public_quote_provider_availability": {
+                        "status": "unavailable",
+                        "provider": "twse_mis",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(result["provider_status"], "available")
+        self.assertEqual(result["decision_readiness"], "ready")
+
     def test_repair_exhaustion_is_visible_in_decision_readiness(self) -> None:
         result = build_status_dimensions(
             {

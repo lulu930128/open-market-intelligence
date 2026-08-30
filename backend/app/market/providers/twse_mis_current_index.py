@@ -79,6 +79,9 @@ def read_twse_mis_current_index(
             cooldown_until=decision.cooldown_until,
             external_calls=0,
         )
+    attempt = decision.attempt
+    if attempt is None:
+        raise RuntimeError("TWSE MIS guard allowed a request without an attempt token")
     try:
         message = twse_mis.fetch_index_message(
             config["channel"],
@@ -120,7 +123,7 @@ def read_twse_mis_current_index(
             "point_count": len(points),
             "points": points,
         }
-        TWSE_MIS_PROVIDER_GUARD.record_success()
+        TWSE_MIS_PROVIDER_GUARD.record_success(attempt)
         return CurrentMarketProviderPayload(
             payload=payload,
             status="available" if points else "missing",
@@ -132,11 +135,13 @@ def read_twse_mis_current_index(
         status_code, headers = response_failure_metadata(exc)
         guard = (
             TWSE_MIS_PROVIDER_GUARD.record_http_failure(
+                attempt,
                 status_code,
                 headers=headers,
             )
             if status_code is not None
             else TWSE_MIS_PROVIDER_GUARD.record_failure(
+                attempt,
                 detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
             )
         )

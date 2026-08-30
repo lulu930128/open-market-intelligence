@@ -64,7 +64,13 @@ def _provider_status(entry: dict[str, Any]) -> str:
         if isinstance(entry.get("health_dimensions"), dict)
         else {}
     )
-    provider = (
+    selected_evidence = (
+        dimensions.get("request_live")
+        if isinstance(dimensions.get("request_live"), dict)
+        and dimensions.get("request_live", {}).get("provider")
+        else None
+    )
+    provider = selected_evidence or (
         dimensions.get("provider_availability")
         if isinstance(dimensions.get("provider_availability"), dict)
         else {}

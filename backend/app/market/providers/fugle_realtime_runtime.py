@@ -39,6 +39,7 @@ from app.market.tw_current_market_capabilities import (
 from app.market.tw_current_market_platform import (
     build_taiwan_current_requirement,
     read_taiwan_current_index,
+    read_taiwan_index_previous_close_seed,
 )
 from app.market.tw_current_market_transaction import TaiwanCurrentMarketTransaction
 from app.market.tw_intraday_platform import (
@@ -68,8 +69,8 @@ def _instrument(db: Session, symbol: str) -> InstrumentKey:
     if stock is None:
         raise ValueError(f"Fugle active stock is missing from StockMaster: {symbol}")
     venue = str(stock.market or "").strip().upper()
-    if venue != "TWSE":
-        raise ValueError("Fugle phase-one active stock is bounded to TWSE")
+    if venue not in {"TWSE", "TPEX"}:
+        raise ValueError("Fugle active stock requires TWSE or TPEX")
     return InstrumentKey(
         market=Market.TW,
         symbol=symbol,
@@ -113,12 +114,13 @@ class FugleCanonicalMaterializer:
             index_record.content_hash,
         ):
             try:
-                current = read_taiwan_current_index(
+                seed = read_taiwan_index_previous_close_seed(
                     db,
                     index_id="TAIEX",
+                    event_at=index_record.event_at,
                     requested_at=index_record.received_at,
-                ).resolved.market_index
-                if current is None:
+                )
+                if seed is None:
                     results["index"] = {
                         "status": "pending",
                         "limitation": "FUGLE_INDEX_PREVIOUS_CLOSE_SEED_MISSING",
@@ -131,14 +133,11 @@ class FugleCanonicalMaterializer:
                         FUGLE_TAIEX_SYMBOL,
                         index_record.content_hash,
                     )
-                    current = None
-                if current is None:
                     return self._materialize_stock(
                         db,
                         active_stock=active_stock,
                         results=results,
                     )
-                previous_close = current.close_value - current.price_change
                 requirement = build_taiwan_current_requirement(
                     dataset_id=TW_CURRENT_INDEX_DATASET_ID,
                     capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
@@ -150,7 +149,7 @@ class FugleCanonicalMaterializer:
                 acquisition = fugle_index_acquisition(
                     index_record,
                     requirement,
-                    previous_close=Decimal(previous_close),
+                    previous_close=Decimal(seed.previous_close),
                 )
                 persistence = TaiwanCurrentMarketTransaction(
                     db
@@ -342,6 +341,63 @@ class FugleRealtimeRuntime:
             self.buffer.clear_symbol(previous)
         return changed
 
+    def quote_readiness(self, symbol: str) -> dict[str, object]:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or not normalized.isdigit():
+            raise ValueError("Fugle quote readiness requires a numeric Taiwan symbol")
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Fugle runtime clock must be timezone-aware")
+        record = self.buffer.latest("aggregates", normalized)
+        age_seconds = (
+            (now - record.received_at).total_seconds()
+            if record is not None
+            else None
+        )
+        allocated = self.allocator.active_stock == normalized
+        connected = self.connection_status == "connected"
+        authenticated = self.entitlement_status == "entitled"
+        subscribed = self.allocator.is_bound("aggregates", normalized)
+        fresh_record = (
+            record is not None
+            and age_seconds is not None
+            and age_seconds >= 0
+            and age_seconds <= self.stale_seconds
+        )
+        ready = (
+            allocated
+            and connected
+            and authenticated
+            and subscribed
+            and fresh_record
+        )
+        detail_code = (
+            "FUGLE_QUOTE_READY"
+            if ready
+            else "FUGLE_QUOTE_SLOT_NOT_ALLOCATED"
+            if not allocated
+            else "FUGLE_STREAM_NOT_CONNECTED"
+            if not connected
+            else "FUGLE_AUTH_NOT_READY"
+            if not authenticated
+            else "FUGLE_QUOTE_SUBSCRIPTION_PENDING"
+            if not subscribed
+            else "FUGLE_QUOTE_RECORD_MISSING"
+            if record is None
+            else "FUGLE_QUOTE_RECORD_STALE"
+        )
+        return {
+            "symbol": normalized,
+            "connection": self.connection_status,
+            "authenticated": authenticated,
+            "subscribed": subscribed,
+            "fresh_record": fresh_record,
+            "record_age_seconds": age_seconds,
+            "record_event_at": record.event_at if record is not None else None,
+            "ready": ready,
+            "detail_code": detail_code,
+        }
+
     async def _send_commands(self, socket: FugleSocket) -> None:
         commands = self.allocator.commands()
         unsubscribe_ids = tuple(
@@ -519,6 +575,7 @@ class FugleRealtimeRuntime:
                 pass
 
     def health(self) -> dict[str, object]:
+        active_stock = self.allocator.active_stock
         return {
             "provider": "fugle_marketdata",
             "connection": self.connection_status,
@@ -528,6 +585,9 @@ class FugleRealtimeRuntime:
             "reconnect_count": self.reconnect_count,
             "subscriptions": self.allocator.snapshot(),
             "buffer": self.buffer.metrics(),
+            "active_quote_readiness": (
+                self.quote_readiness(active_stock) if active_stock else None
+            ),
         }
 
 

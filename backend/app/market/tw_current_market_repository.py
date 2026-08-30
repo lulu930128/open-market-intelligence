@@ -267,6 +267,7 @@ class TaiwanCurrentMarketRepository:
                     freshness=freshness,
                     provider_priority=binding.descriptor.priority,
                     session=observation.session,
+                    limitations=binding.persistent_limitations,
                 )
             )
         candidates.sort(key=lambda item: item.provider_priority)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import importlib
 
 import pytest
@@ -14,11 +15,18 @@ from app.market.tw_dataset_catalog import (
     TaiwanDatasetLineageStatus,
     TaiwanExpectedStatePolicy,
 )
+from app.market.tw_current_market_capabilities import (
+    TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR,
+    TW_CURRENT_BREADTH_CAPABILITY_ID,
+    TW_CURRENT_BREADTH_DATASET_ID,
+)
+from app.market.tw_current_market_platform import build_taiwan_current_requirement
 from app.market.tw_intraday_capabilities import (
     TW_INTRADAY_BARS_CAPABILITY_ID,
     TW_INTRADAY_DESCRIPTORS,
 )
 from app.market_data.contracts import Market
+from app.market_data.policies import RealtimePolicy
 from app.market_data.registry import DATASET_REGISTRY, RefreshBounds
 
 
@@ -124,6 +132,16 @@ def test_refreshable_datasets_reference_bounded_market_owned_operations() -> Non
     }
 
 
+def test_public_best_effort_limitation_belongs_to_operation_not_quote_dataset() -> None:
+    operation = TW_DATASET_CATALOG.operation(
+        "tw.acquire_public_last_trade_quote"
+    )
+    dataset = TW_DATASET_CATALOG.get("tw.quote.snapshot")
+
+    assert "PUBLIC_BEST_EFFORT_NO_SLA" in operation.limitations
+    assert "PUBLIC_BEST_EFFORT_NO_SLA" not in dataset.limitations
+
+
 def test_lineage_gaps_are_never_advertised_as_repairable() -> None:
     gaps = [
         dataset
@@ -193,7 +211,6 @@ def test_platform_owned_datasets_have_canonical_lineage_and_repair_paths() -> No
             "tw.quote.order_book.snapshot",
             "tw.quote.auction.snapshot",
             "tw.market_index.current",
-            "tw.market_breadth.current",
             "tw.technical.daily",
         }
     )
@@ -246,6 +263,28 @@ def test_current_breadth_scope_does_not_claim_official_full_market() -> None:
         breadth.scope_kind
         == "TWSE_or_TPEX_full_market_registered_stock_universe"
     )
+
+
+def test_current_breadth_external_call_budget_matches_every_contract_owner() -> None:
+    shared = DATASET_REGISTRY.get(TW_CURRENT_BREADTH_DATASET_ID)
+    market_owned = TW_DATASET_CATALOG.get(TW_CURRENT_BREADTH_DATASET_ID)
+    operation = TW_DATASET_CATALOG.operation("tw.refresh_current_breadth")
+    requirement = build_taiwan_current_requirement(
+        dataset_id=TW_CURRENT_BREADTH_DATASET_ID,
+        capability_id=TW_CURRENT_BREADTH_CAPABILITY_ID,
+        scope_key="TWSE",
+        requested_at=datetime(2026, 8, 28, 9, 0, tzinfo=timezone(timedelta(hours=8))),
+        policy=RealtimePolicy.PREFER_LIVE,
+        acquiring=True,
+    )
+
+    assert TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR.max_external_calls_per_attempt == 20
+    assert requirement.bounds.max_external_calls == 20
+    assert operation.bounds.max_calls == 20
+    assert market_owned.refresh_bounds is not None
+    assert market_owned.refresh_bounds.max_calls == 20
+    assert shared.refresh_bounds is not None
+    assert shared.refresh_bounds.max_calls == 20
 
 
 def test_contract_rejects_lineage_gap_repairability() -> None:

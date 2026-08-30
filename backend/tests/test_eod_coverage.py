@@ -97,6 +97,7 @@ def _us_daily_row(
         content_hash=content_hash,
         raw_text="fixture",
         fetched_at=datetime(2026, 8, 22, tzinfo=timezone.utc),
+        parser_version="yahoo.chart.v8",
     )
     db.add(raw)
     db.flush()
@@ -238,6 +239,52 @@ def test_us_coverage_uses_official_active_non_etf_non_test_stock_universe(db: Se
     assert coverage.partial_symbols == {"B"}
     assert coverage.stale_symbols == {"C"}
     assert coverage.missing_symbols == {"D"}
+
+
+def test_us_coverage_excludes_incompatible_daily_parser_lineage(db: Session) -> None:
+    db.add(USStockMaster(symbol="A", exchange="NYSE", asset_type="stock", is_active=True))
+    db.add(_us_daily_row(db, symbol="A", trade_date=EXPECTED, close_price=10))
+    db.flush()
+    db.query(RawFetchResult).filter(
+        RawFetchResult.parser_version == "yahoo.chart.v8"
+    ).one().parser_version = "yahoo.chart.v9"
+    db.commit()
+
+    coverage = compute_eod_coverage(
+        db,
+        market="US",
+        expected_trade_date=EXPECTED,
+        us_port=US_FULL_MARKET_EOD_LIFECYCLE,
+    )
+
+    assert coverage.current_symbols == set()
+    assert coverage.partial_symbols == {"A"}
+
+
+def test_us_coverage_rejects_rows_the_canonical_repository_would_reject(db: Session) -> None:
+    db.add_all(
+        [
+            USStockMaster(symbol="HASH", exchange="NYSE", asset_type="stock", is_active=True),
+            USStockMaster(symbol="LEGACY", exchange="NASDAQ", asset_type="stock", is_active=True),
+        ]
+    )
+    hash_row = _us_daily_row(db, symbol="HASH", trade_date=EXPECTED, close_price=10)
+    legacy_row = _us_daily_row(db, symbol="LEGACY", trade_date=EXPECTED, close_price=11)
+    db.add_all((hash_row, legacy_row))
+    db.flush()
+    hash_row.raw_payload_hash = "mismatch".ljust(64, "x")
+    legacy_row.raw_contract_version = "legacy_compat.v1"
+    db.commit()
+
+    coverage = compute_eod_coverage(
+        db,
+        market="US",
+        expected_trade_date=EXPECTED,
+        us_port=US_FULL_MARKET_EOD_LIFECYCLE,
+    )
+
+    assert coverage.current_symbols == set()
+    assert coverage.partial_symbols == {"HASH", "LEGACY"}
 
 
 def test_persisted_checkpoint_is_idempotent_and_cache_projection_is_read_only(db: Session) -> None:

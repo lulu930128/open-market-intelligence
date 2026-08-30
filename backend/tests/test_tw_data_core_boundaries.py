@@ -459,10 +459,14 @@ def test_official_index_transaction_has_no_provider_io_or_resolution() -> None:
 def test_ai_taiwan_quote_context_depends_on_data_core_projection() -> None:
     tools_path = BACKEND_APP / "ai" / "tools.py"
     context_path = BACKEND_APP / "ai" / "market_context" / "taiwan_stock.py"
+    ai_projection_path = (
+        BACKEND_APP / "ai" / "market_context" / "taiwan_projection.py"
+    )
     bundle_path = BACKEND_APP / "market" / "taiwan_quote_evidence.py"
     projection_path = BACKEND_APP / "market" / "quote_depth.py"
     tools_source = tools_path.read_text(encoding="utf-8")
     context_source = context_path.read_text(encoding="utf-8")
+    ai_projection_source = ai_projection_path.read_text(encoding="utf-8")
     bundle_source = bundle_path.read_text(encoding="utf-8")
     projection_source = projection_path.read_text(encoding="utf-8")
 
@@ -476,6 +480,11 @@ def test_ai_taiwan_quote_context_depends_on_data_core_projection() -> None:
     assert 'canonical_requested_provider = "auto"' in context_source
     assert '"provider_control_status": (' in context_source
     assert 'quote_depth.get("provider_attempts")' in context_source
+    assert 'quote_depth.get("provider_attempts")' in ai_projection_source
+    assert (
+        'acquisition_scope.get("providers_attempted")'
+        not in ai_projection_source
+    )
     assert '"quote.snapshot": self.quote' in bundle_source
     assert '"quote.order_book": self.depth' in bundle_source
     assert '"quote.auction": self.auction' in bundle_source
@@ -483,6 +492,7 @@ def test_ai_taiwan_quote_context_depends_on_data_core_projection() -> None:
     assert "read_taiwan_official_daily" in bundle_source
     assert "MarketDailyPrice" not in projection_source
     assert "SourceRegistry" not in projection_source
+    assert "quote_result.acquisition.providers_attempted" in projection_source
 
 
 def test_ai_intraday_compatibility_reader_cannot_trigger_provider_refresh() -> None:
@@ -632,6 +642,18 @@ def test_frontend_does_not_use_refreshing_futures_get_requests() -> None:
     assert "refresh: true" not in sidebar
     assert "`${intradayPath}/refresh`" in detail
     assert '{ method: "POST" }' in detail
+
+
+def test_taiwan_intraday_backend_no_longer_emits_legacy_composite_source_ids() -> None:
+    forbidden = {
+        "nstock_minute_stock_data_twse_mis_volume",
+        "yahoo_finance_chart_twse_mis_volume",
+    }
+
+    for path in BACKEND_APP.rglob("*.py"):
+        source = path.read_text(encoding="utf-8-sig")
+        for source_id in forbidden:
+            assert source_id not in source, _relative(path)
 
 
 def test_taiwan_indicator_api_uses_versioned_backend_gateway() -> None:

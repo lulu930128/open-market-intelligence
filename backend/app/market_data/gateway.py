@@ -23,6 +23,7 @@ from app.market_data.contracts import (
     ProviderResourceHealth,
     QuoteObservation,
     ResolvedEvidenceStatus,
+    ResolvedMarketIndex,
 )
 from app.market_data.integration_contracts import (
     AcquisitionStatus,
@@ -312,6 +313,14 @@ class AcquisitionBudgetExceeded(RuntimeError):
     """Raised when a provider port reports work beyond the request budget."""
 
 
+class PostAcquisitionError(RuntimeError):
+    """Preserve known external-work accounting when later processing fails."""
+
+    def __init__(self, message: str, *, acquisition: AcquisitionSummary) -> None:
+        super().__init__(message)
+        self.acquisition = acquisition
+
+
 def _not_attempted(reason: str) -> AcquisitionSummary:
     return AcquisitionSummary(
         attempted=False,
@@ -338,6 +347,23 @@ def _is_satisfied(status: ResolvedEvidenceStatus) -> bool:
         ResolvedEvidenceStatus.SELECTED,
         ResolvedEvidenceStatus.FALLBACK,
     }
+
+
+def _market_index_requirement_satisfied(
+    requirement: DataRequirementV2,
+    resolved: ResolvedMarketIndex,
+) -> bool:
+    """Allow explicitly bounded partial index facts to avoid redundant acquisition."""
+
+    if _is_satisfied(resolved.health.status):
+        return True
+    return (
+        resolved.health.status is ResolvedEvidenceStatus.PARTIAL
+        and requirement.quality.allow_partial
+        and resolved.market_index is not None
+        and resolved.health.facts_usable
+        and not resolved.health.missing_fields
+    )
 
 
 def _bar_requirement_satisfied(
@@ -557,22 +583,32 @@ class MarketDataGateway:
                 )
                 acquisition = acquired.summary
                 acquisition_health = acquired.provider_health
-                if acquisition.attempted and (acquired.receipts or acquired.observations):
-                    persistence = transaction_port.persist_bar_acquisition(
-                        acquire_requirement,
-                        acquired,
-                    )
-                    self._validate_persistence_result(acquired, persistence)
-                    reread_requirement = _post_acquisition_reread_requirement(
-                        requirement,
-                        acquired.receipts,
-                    )
-                    final_batch = self._read(reread_requirement, reader)
-                    resolved = self._resolve(reread_requirement, final_batch)
-                elif acquisition.attempted:
-                    persistence = _not_persisted("NO_PERSISTABLE_ACQUISITION_EVIDENCE")
-                else:
-                    persistence = _not_persisted("ACQUISITION_NOT_ATTEMPTED")
+                try:
+                    if acquisition.attempted and (
+                        acquired.receipts or acquired.observations
+                    ):
+                        persistence = transaction_port.persist_bar_acquisition(
+                            acquire_requirement,
+                            acquired,
+                        )
+                        self._validate_persistence_result(acquired, persistence)
+                        reread_requirement = _post_acquisition_reread_requirement(
+                            requirement,
+                            acquired.receipts,
+                        )
+                        final_batch = self._read(reread_requirement, reader)
+                        resolved = self._resolve(reread_requirement, final_batch)
+                    elif acquisition.attempted:
+                        persistence = _not_persisted(
+                            "NO_PERSISTABLE_ACQUISITION_EVIDENCE"
+                        )
+                    else:
+                        persistence = _not_persisted("ACQUISITION_NOT_ATTEMPTED")
+                except Exception as exc:
+                    raise PostAcquisitionError(
+                        f"bar post-acquisition processing failed: {exc}",
+                        acquisition=acquired.summary,
+                    ) from exc
 
         return MarketDataResultV1(
             requirement=requirement,
@@ -656,34 +692,43 @@ class MarketDataGateway:
                 self._validate_acquisition_budget(requirement, plan, acquired)
                 acquisition = acquired.summary
                 acquisition_health = acquired.provider_health
-                if acquisition.attempted and (
-                    acquired.receipts or acquired.observations
-                ):
-                    persistence = transaction_port.persist_quote_acquisition(
-                        requirement,
-                        acquired,
-                    )
-                    self._validate_persistence_result(acquired, persistence)
-                    final_batch = reader.read_quote_candidates(requirement)
-                    if len(final_batch.candidates) > requirement.bounds.max_candidates:
-                        raise ValueError(
-                            "candidate reader exceeded bounds.max_candidates"
+                try:
+                    if acquisition.attempted and (
+                        acquired.receipts or acquired.observations
+                    ):
+                        persistence = transaction_port.persist_quote_acquisition(
+                            requirement,
+                            acquired,
                         )
-                    resolved = resolve_quote(
-                        final_batch.candidates,
-                        policy=requirement.realtime_policy,
-                        now=requirement.requested_at,
-                        max_age=timedelta(
-                            seconds=requirement.freshness.max_age_seconds
-                        ),
-                        requirement=requirement,
-                    )
-                elif acquisition.attempted:
-                    persistence = _not_persisted(
-                        "NO_PERSISTABLE_ACQUISITION_EVIDENCE"
-                    )
-                else:
-                    persistence = _not_persisted("ACQUISITION_NOT_ATTEMPTED")
+                        self._validate_persistence_result(acquired, persistence)
+                        final_batch = reader.read_quote_candidates(requirement)
+                        if (
+                            len(final_batch.candidates)
+                            > requirement.bounds.max_candidates
+                        ):
+                            raise ValueError(
+                                "candidate reader exceeded bounds.max_candidates"
+                            )
+                        resolved = resolve_quote(
+                            final_batch.candidates,
+                            policy=requirement.realtime_policy,
+                            now=requirement.requested_at,
+                            max_age=timedelta(
+                                seconds=requirement.freshness.max_age_seconds
+                            ),
+                            requirement=requirement,
+                        )
+                    elif acquisition.attempted:
+                        persistence = _not_persisted(
+                            "NO_PERSISTABLE_ACQUISITION_EVIDENCE"
+                        )
+                    else:
+                        persistence = _not_persisted("ACQUISITION_NOT_ATTEMPTED")
+                except Exception as exc:
+                    raise PostAcquisitionError(
+                        f"quote post-acquisition processing failed: {exc}",
+                        acquisition=acquired.summary,
+                    ) from exc
 
         return MarketDataResultV1(
             requirement=requirement,
@@ -1062,7 +1107,7 @@ class MarketDataGateway:
         final_batch = initial_batch
         acquisition_health: tuple[ProviderResourceHealth, ...] = ()
         persistence = _not_persisted("PERSISTENCE_NOT_REQUIRED")
-        if _is_satisfied(resolved.health.status):
+        if _market_index_requirement_satisfied(requirement, resolved):
             acquisition = _not_attempted("PRE_RESOLUTION_SATISFIED")
         elif not allows_external_acquisition(requirement.realtime_policy):
             acquisition = _not_attempted("READ_POLICY_FORBIDS_ACQUISITION")

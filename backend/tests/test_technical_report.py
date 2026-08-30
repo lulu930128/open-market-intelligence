@@ -901,7 +901,7 @@ class TechnicalReportTests(unittest.TestCase):
                             "index_id": "TAIEX",
                             "label": "加權指數",
                             "market": "TWSE",
-                            "source": "test",
+                            "source": "fugle_indices_stream",
                             "time": date(2026, 3, 20),
                             "close": 18111.0,
                         }
@@ -943,6 +943,23 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(compact["slots"]["intraday"]["payload_level"], "summary")
         self.assertEqual(compact["slots"]["chips_flows"]["status"], "missing")
         self.assertEqual(len(context["data"]["intraday"]["points"]), 12)
+        source_refs = context["source_refs"]
+        self.assertIn(
+            {"type": "resolved_market_data", "name": "tw.market_index.daily"},
+            source_refs,
+        )
+        self.assertIn(
+            {"type": "resolved_market_data", "name": "tw.market_index.current"},
+            source_refs,
+        )
+        self.assertIn(
+            {"type": "external_or_cache", "name": "market_index_intraday"},
+            source_refs,
+        )
+        self.assertNotIn(
+            {"type": "external_or_cache", "name": "yahoo_finance_chart"},
+            source_refs,
+        )
 
     def test_stock_brief_summary_exposes_selected_analysis_score(self) -> None:
         brief = ai_reports.build_stock_brief(

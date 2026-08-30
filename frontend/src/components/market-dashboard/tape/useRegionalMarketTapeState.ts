@@ -57,7 +57,7 @@ export type USMarketTapeSnapshot = {
   volume: number | null;
   pointCount: number;
   asOf: string | null;
-  source: "intraday" | "daily";
+  source: "quote" | "intraday" | "daily";
 };
 
 export type JPMarketTapeSnapshot = {
@@ -163,9 +163,12 @@ async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
   const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
   const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
   const latestIntraday = intraday?.points[intraday.points.length - 1] ?? null;
-  const close = latestIntraday?.price ?? latestDaily?.close ?? null;
-  const previousClose =
-    latestIntraday && intraday?.previous_close !== null && intraday?.previous_close !== undefined
+  const currentObservation = intraday?.current_observation ?? null;
+  const currentPrice = currentObservation?.value ?? null;
+  const close = currentPrice ?? latestIntraday?.price ?? latestDaily?.close ?? null;
+  const previousClose = currentObservation
+    ? currentObservation.previous_close ?? null
+    : latestIntraday && intraday?.previous_close !== null && intraday?.previous_close !== undefined
       ? intraday.previous_close
       : previousDaily?.close ?? null;
   const change = close !== null && previousClose !== null ? close - previousClose : null;
@@ -196,8 +199,13 @@ async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
       ? sumUsIntradayVolume(intraday?.points ?? []) ?? latestDaily?.volume ?? null
       : latestDaily?.volume ?? null,
     pointCount: chart.point_count,
-    asOf: latestIntraday?.time ?? latestDaily?.time ?? null,
-    source: latestIntraday ? "intraday" : "daily",
+    asOf: currentObservation?.observed_at ?? latestIntraday?.time ?? latestDaily?.time ?? null,
+    source:
+      currentObservation?.price_semantics === "resolved_quote_last_trade"
+        ? "quote"
+        : currentObservation?.price_semantics === "resolved_intraday_bar_close" || latestIntraday
+          ? "intraday"
+          : "daily",
   } satisfies USMarketTapeSnapshot;
 }
 

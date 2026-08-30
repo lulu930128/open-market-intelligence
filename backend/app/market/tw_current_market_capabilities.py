@@ -16,6 +16,9 @@ TW_CURRENT_INDEX_DATASET_ID = "tw.market_index.current"
 TW_CURRENT_BREADTH_DATASET_ID = "tw.market_breadth.current"
 TW_CURRENT_INDEX_CAPABILITY_ID = "market.index.snapshot"
 TW_CURRENT_BREADTH_CAPABILITY_ID = "market.breadth.current"
+FUGLE_INDEX_PREVIOUS_CLOSE_LINEAGE_LIMITATION = (
+    "FUGLE_INDEX_PREVIOUS_CLOSE_INPUT_LINEAGE_NOT_PERSISTED"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +28,7 @@ class TaiwanCurrentSourceBinding:
     parser_version: str
     source_type: str = "api"
     auth_type: str = "none"
+    persistent_limitations: tuple[str, ...] = ()
 
 
 def _descriptor(
@@ -138,6 +142,7 @@ TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR = _descriptor(
     priority=10,
     live=True,
     sessions=_LIVE_SESSIONS,
+    max_external_calls=20,
     limitations=("PUBLIC_BEST_EFFORT_NO_SLA", "COVERAGE_MAY_BE_PARTIAL"),
 )
 
@@ -155,6 +160,7 @@ TW_CURRENT_SOURCE_BINDINGS = (
         parser_version="fugle.websocket.indices.v1",
         source_type="stream",
         auth_type="api_key",
+        persistent_limitations=(FUGLE_INDEX_PREVIOUS_CLOSE_LINEAGE_LIMITATION,),
     ),
     TaiwanCurrentSourceBinding(
         descriptor=TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,
@@ -194,6 +200,7 @@ def current_source_binding(
 
 
 __all__ = [
+    "FUGLE_INDEX_PREVIOUS_CLOSE_LINEAGE_LIMITATION",
     "FUGLE_CURRENT_INDEX_DESCRIPTOR",
     "TW_CURRENT_BREADTH_CAPABILITY_ID",
     "TW_CURRENT_BREADTH_DATASET_ID",

@@ -217,6 +217,33 @@ class Settings(BaseSettings):
     scheduler_us_market_refresh_outputsize: str = "compact"
     scheduler_us_market_refresh_adjusted: bool = False
     scheduler_us_market_refresh_sleep_seconds: float = 12.0
+    enable_us_intraday_materializer: bool = False
+    scheduler_us_intraday_materializer_symbols: str = "AAPL,TSM"
+    scheduler_us_intraday_materializer_max_symbols: int = Field(default=2, ge=1, le=2)
+    scheduler_us_quote_materializer_interval_seconds: int = Field(
+        default=300, ge=60, le=3600
+    )
+    scheduler_us_intraday_materializer_interval_seconds: int = Field(
+        default=60, ge=60, le=3600
+    )
+    scheduler_us_intraday_materializer_bars: int = Field(
+        default=600, ge=60, le=1000
+    )
+    scheduler_us_intraday_materializer_max_provider_calls: int = Field(
+        default=2, ge=1, le=2
+    )
+    scheduler_us_intraday_materializer_max_external_calls: int = Field(
+        default=4, ge=1, le=4
+    )
+    enable_us_index_quote_materializer: bool = False
+    scheduler_us_index_quote_symbols: str = "^GSPC,^DJI,^IXIC,^SOX,^NDX,^VIX"
+    scheduler_us_index_quote_max_symbols: int = Field(default=6, ge=1, le=6)
+    scheduler_us_index_quote_max_external_calls: int = Field(default=6, ge=1, le=12)
+    enable_us_quote_retention_scheduler: bool = False
+    us_quote_snapshot_retention_days: int = Field(default=30, ge=1, le=365)
+    scheduler_us_quote_cleanup_max_rows: int = Field(
+        default=10_000, ge=1, le=50_000
+    )
     enable_us_priority_ohlc_scheduler: bool = False
     scheduler_us_priority_ohlc_interval_minutes: int = 30
     scheduler_us_priority_ohlc_startup_delay_seconds: int = 0

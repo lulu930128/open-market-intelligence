@@ -98,7 +98,7 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         with patch.object(
             twse_mis_current_breadth,
             "_fetch_messages",
-            return_value=(messages, 0),
+            return_value=(messages, 0, 3),
         ) as fetch_messages:
             result = twse_mis_current_breadth.read_twse_mis_current_breadth(
                 "TPEX",
@@ -109,7 +109,10 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
 
         self.assertIsNotNone(payload)
         assert payload is not None
-        fetch_messages.assert_called_once_with(codes, "TPEX", 10)
+        call = fetch_messages.call_args
+        self.assertEqual(call.args, (codes, "TPEX", 10))
+        self.assertTrue(call.kwargs["initial_decision"].allowed)
+        self.assertEqual(result.external_calls, 3)
         self.assertEqual(payload["market"], "TPEX")
         self.assertEqual(
             payload["scope"],

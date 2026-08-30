@@ -10,13 +10,11 @@ import hashlib
 import json
 import time
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.config import Settings
 from app.market_data.contracts import (
     ConnectionStatus,
-    EnablementStatus,
-    EntitlementStatus,
     EvidenceFreshness,
     OperationalStatus,
     ProviderResourceHealth,
@@ -28,11 +26,13 @@ from app.market_data.integration_contracts import (
     AcquisitionSummary,
     BarCapabilityRequest,
     DataRequirementV2,
+    EvidenceTarget,
     InstrumentTarget,
     RawFetchReceiptV1,
     SnapshotCapabilityRequest,
 )
 from app.market_data.provider_catalog import DataAcquisitionPlanV2, ProviderResourceRouteV2
+from app.market_data.policies import DataPurpose
 from app.us_market.daily_ohlcv_acquisition import _failure_health, _health, _unique
 from app.us_market.market_data.descriptors import (
     TWELVE_INTRADAY_RESOURCE_ID,
@@ -50,6 +50,7 @@ from app.us_market.providers.twelve_data import (
     fetch_twelve_data_quote_payload,
     fetch_twelve_data_time_series_payload,
 )
+from app.us_market.providers.yahoo import fetch_yahoo_chart_payload
 
 
 _TWELVE_PROVIDER_INTERVALS = {
@@ -60,7 +61,30 @@ _TWELVE_PROVIDER_INTERVALS = {
     "45m": "45min",
     "1h": "1h",
 }
-from app.us_market.providers.yahoo import fetch_yahoo_chart_payload
+
+
+def _field_path_present(value: object, field_path: str) -> bool:
+    current = value
+    for part in field_path.split("."):
+        if isinstance(current, Mapping):
+            current = current.get(part)
+        else:
+            current = getattr(current, part, None)
+        if current is None:
+            return False
+    return True
+
+
+def _required_fields_present(
+    observations: tuple[object, ...],
+    requirement: DataRequirementV2,
+) -> bool:
+    required_fields = requirement.quality.required_fields
+    return bool(observations) and all(
+        _field_path_present(observation, field_path)
+        for observation in observations
+        for field_path in required_fields
+    )
 
 
 class USIntradayAcquisitionExecutor:
@@ -89,9 +113,18 @@ class USIntradayAcquisitionExecutor:
             raise ValueError("US intraday acquisition requires instrument target")
         symbol = requirement.target.instrument.symbol
         if route.resource_id in {YAHOO_QUOTE_RESOURCE_ID, YAHOO_INTRADAY_RESOURCE_ID}:
+            range_value = "1d"
+            if isinstance(requirement.request, BarCapabilityRequest):
+                if (
+                    requirement.request.end_at - requirement.request.start_at
+                    > timedelta(days=1, minutes=5)
+                ):
+                    range_value = "5d"
+            elif requirement.purpose is DataPurpose.REPAIR:
+                range_value = "5d"
             return fetch_yahoo_chart_payload(
                 symbol=symbol,
-                range_value="5d",
+                range_value=range_value,
                 interval="1m",
                 timeout_seconds=route.timeout_seconds,
                 include_prepost=True,
@@ -200,6 +233,9 @@ class USIntradayAcquisitionExecutor:
         limitations: list[str] = []
         failures = 0
         for route in plan.routes:
+            if not quote and len(observations) >= requirement.bounds.max_rows:
+                limitations.append("ACQUISITION_ROW_BOUND_REACHED")
+                break
             attempts.append(AcquisitionResourceAttempt(provider=route.provider_key, resource_id=route.resource_id))
             checked_at = self._clock()
             try:
@@ -213,10 +249,26 @@ class USIntradayAcquisitionExecutor:
                     current = (canonical,) if canonical is not None else ()
                 else:
                     assert isinstance(requirement.request, BarCapabilityRequest)
-                    current = tuple(
-                        bar for bar in batch.bars
-                        if requirement.request.start_at <= bar.start_at <= requirement.request.end_at
+                    bounded = sorted(
+                        (
+                            bar for bar in batch.bars
+                            if requirement.request.start_at <= bar.start_at <= requirement.request.end_at
+                        ),
+                        key=lambda bar: bar.start_at,
                     )
+                    remaining_rows = max(
+                        0,
+                        requirement.bounds.max_rows - len(observations),
+                    )
+                    route_limit = min(
+                        requirement.request.max_bars,
+                        remaining_rows,
+                    )
+                    if len(bounded) > route_limit:
+                        limitations.append(
+                            "PROVIDER_RESPONSE_TRUNCATED_TO_REQUEST_BOUND"
+                        )
+                    current = tuple(bounded[-route_limit:]) if route_limit else ()
                 source = (
                     current[0].lineage.source if current else
                     "yahoo.chart.1m" if route.provider_key == "yahoo_chart" else
@@ -247,23 +299,61 @@ class USIntradayAcquisitionExecutor:
                     if latest_event is not None
                     else float("inf")
                 )
-                satisfied = bool(current) and -300 <= age_seconds <= requirement.freshness.max_age_seconds
-                if not satisfied:
+                is_fresh = (
+                    bool(current)
+                    and -300
+                    <= age_seconds
+                    <= requirement.freshness.max_age_seconds
+                )
+                required_fields_present = _required_fields_present(
+                    current,
+                    requirement,
+                )
+                target_satisfied = required_fields_present and (
+                    is_fresh
+                    or requirement.freshness.evidence_target
+                    is EvidenceTarget.LATEST_AVAILABLE
+                )
+                if current and not is_fresh:
+                    limitations.append("REQUESTED_EVIDENCE_STALE")
+                if not target_satisfied:
                     failures += 1
-                    limitations.append(
-                        "REQUESTED_EVIDENCE_STALE"
-                        if current
-                        else "REQUESTED_EVIDENCE_NOT_OBSERVED"
-                    )
+                    if not current:
+                        limitations.append("REQUESTED_EVIDENCE_NOT_OBSERVED")
+                    elif not required_fields_present:
+                        limitations.append("REQUESTED_EVIDENCE_UNUSABLE")
+                detail_code = (
+                    "US_QUOTE_OBSERVED"
+                    if quote and is_fresh
+                    else "US_INTRADAY_OBSERVED"
+                    if is_fresh
+                    else "LATEST_AVAILABLE_EVIDENCE_OBSERVED"
+                    if target_satisfied
+                    else "REQUESTED_EVIDENCE_UNUSABLE"
+                    if current and not required_fields_present
+                    else "REQUESTED_EVIDENCE_STALE"
+                    if current
+                    else "REQUESTED_EVIDENCE_NOT_OBSERVED"
+                )
                 health.append(_health(
                     route,
                     checked_at=fetched_at,
                     connection=ConnectionStatus.CONNECTED,
-                    operational=OperationalStatus.HEALTHY if satisfied else OperationalStatus.DEGRADED,
-                    freshness=EvidenceFreshness.FRESH if satisfied else EvidenceFreshness.STALE if current else EvidenceFreshness.MISSING,
-                    detail_code="US_QUOTE_OBSERVED" if quote and satisfied else "US_INTRADAY_OBSERVED" if satisfied else "REQUESTED_EVIDENCE_STALE" if current else "REQUESTED_EVIDENCE_NOT_OBSERVED",
+                    operational=(
+                        OperationalStatus.HEALTHY
+                        if target_satisfied
+                        else OperationalStatus.DEGRADED
+                    ),
+                    freshness=(
+                        EvidenceFreshness.FRESH
+                        if is_fresh
+                        else EvidenceFreshness.STALE
+                        if current
+                        else EvidenceFreshness.MISSING
+                    ),
+                    detail_code=detail_code,
                 ))
-                if satisfied:
+                if target_satisfied:
                     break
             except Exception as exc:
                 failures += 1

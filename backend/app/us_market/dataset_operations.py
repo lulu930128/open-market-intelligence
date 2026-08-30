@@ -163,11 +163,16 @@ def build_us_dataset_operation_registry(
     def priority(requirement: RefreshRequirementV1) -> DatasetOperationResult:
         result = reconcile_us_priority_ohlc(
             max_runtime_seconds=requirement.timeout_seconds,
+            max_symbols=requirement.max_symbols,
+            max_external_calls=requirement.max_external_calls,
+            max_provider_attempts=requirement.max_provider_attempts,
             cursor_symbol=(
                 requirement.continuation.cursor
                 if requirement.continuation is not None
                 else None
             ),
+            to_date=requirement.to_date,
+            requested_at=requirement.requested_at,
             session_factory=session_factory,
             repair=True,
         )

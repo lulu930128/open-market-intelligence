@@ -258,7 +258,7 @@ def build_taiwan_quote_scheduler_contract(
     }
 
 
-def build_taiwan_quote_provider_availability(
+def build_taiwan_public_quote_provider_availability(
     db: Session,
     *,
     stock_id: str | None = None,
@@ -287,7 +287,7 @@ def build_taiwan_quote_provider_availability(
     )
     return {
         "version": QUOTE_CONTRACT_HEALTH_VERSION,
-        "axis": "provider_availability",
+        "axis": "public_quote_provider_availability",
         "status": status,
         "provider": "twse_mis",
         "target": stock_id or "bounded_quote_operations",
@@ -307,7 +307,7 @@ def build_taiwan_quote_provider_availability(
 
 __all__ = [
     "QUOTE_CONTRACT_HEALTH_VERSION",
-    "build_taiwan_quote_provider_availability",
+    "build_taiwan_public_quote_provider_availability",
     "build_taiwan_quote_scheduler_contract",
     "required_quote_contract_slots",
     "resolve_taiwan_quote_contract_universe",

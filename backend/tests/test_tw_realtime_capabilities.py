@@ -168,7 +168,7 @@ def test_tw_realtime_descriptors_separate_capability_and_resource_contracts() ->
     assert FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.acquisition_modes == (
         AcquisitionMode.SUBSCRIPTION,
     )
-    assert FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.venue_scope == ("TWSE",)
+    assert FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.venue_scope == ("TWSE", "TPEX")
     assert FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.priority == 10
     for descriptor in (
         KGI_QUOTE_SNAPSHOT_DESCRIPTOR,

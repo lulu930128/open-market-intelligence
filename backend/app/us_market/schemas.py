@@ -198,8 +198,10 @@ class USIntradayTrendPointRead(BaseModel):
 
 
 class USIntradaySourceStatusRead(BaseModel):
-    provider: str = "yahoo_chart"
+    provider: str = "unresolved"
+    source: str | None = None
     status: str = "unavailable"
+    resolved_status: str | None = None
     freshness_status: str = "missing"
     market_phase: str | None = None
     is_live_window: bool = False
@@ -207,7 +209,63 @@ class USIntradaySourceStatusRead(BaseModel):
     lag_seconds: float | None = None
     is_fallback: bool = False
     has_usable_data: bool = False
+    decision_usable: bool = False
+    selection_reason: str | None = None
+    limitations: list[str] = Field(default_factory=list)
     message: str | None = None
+
+
+class USResolvedQuoteValueRead(BaseModel):
+    market: str
+    symbol: str
+    venue: str | None = None
+    instrument_type: str
+    trade_date: str | None = None
+    currency: str | None = None
+    state: str
+    trade_state: str
+    last_trade_price: str | None = None
+    open_price: str | None = None
+    high_price: str | None = None
+    low_price: str | None = None
+    previous_close: str | None = None
+    event_at: str | None = None
+    received_at: str | None = None
+    fetched_at: str | None = None
+
+
+class USResolvedQuoteSnapshotRead(BaseModel):
+    kind: str
+    schema_version: str
+    compatibility_schema_versions: list[str] = Field(default_factory=list)
+    status: str
+    selected_provider: str | None = None
+    selected_source: str | None = None
+    selected_session: str | None = None
+    selected_event_at: str | None = None
+    fallback_used: bool = False
+    selection_reason: str | None = None
+    facts_usable: bool = False
+    research_usable: bool = False
+    limitations: list[str] = Field(default_factory=list)
+    candidates: list[dict] = Field(default_factory=list)
+    quote: USResolvedQuoteValueRead | None = None
+
+
+class USIntradayCurrentObservationRead(BaseModel):
+    value: float | None = None
+    observed_at: str | None = None
+    confirmed_at: str | None = None
+    price_semantics: str
+    provider: str | None = None
+    source: str | None = None
+    status: str = "unknown"
+    is_fallback: bool = False
+    limitations: list[str] = Field(default_factory=list)
+    previous_close: float | None = None
+    previous_close_provider: str | None = None
+    freshness_status: str
+    decision_usable: bool = False
 
 
 class USIntradayTrendRead(BaseModel):
@@ -243,6 +301,10 @@ class USIntradayTrendRead(BaseModel):
     volume_status: str = "not_provided"
     volume_coverage: dict = Field(default_factory=dict)
     volume_pace: dict | None = None
+    quote_snapshot: USResolvedQuoteSnapshotRead | None = None
+    current_observation: USIntradayCurrentObservationRead | None = None
+    current_source_status: USIntradaySourceStatusRead | None = None
+    bar_source_status: USIntradaySourceStatusRead | None = None
     source_status: USIntradaySourceStatusRead
     source_url: str | None = None
     warnings: list[str] = Field(default_factory=list)

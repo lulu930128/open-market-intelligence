@@ -7,6 +7,7 @@ import pytest
 from app.research.technical import (
     TW_DAILY_PROFILE,
     US_DAILY_PROFILE,
+    US_INDEX_DAILY_PROFILE,
     build_technical_indicators,
     build_technical_structure,
 )
@@ -35,6 +36,9 @@ def test_market_profiles_are_versioned_and_market_specific() -> None:
     assert US_DAILY_PROFILE.timezone == "America/New_York"
     assert US_DAILY_PROFILE.benchmark_symbol is None
     assert US_DAILY_PROFILE.benchmark_status == "not_configured"
+    assert US_INDEX_DAILY_PROFILE.profile_version == "us.index.daily.v1"
+    assert US_INDEX_DAILY_PROFILE.volume_unit is None
+    assert US_INDEX_DAILY_PROFILE.corporate_action_policy == "not_applicable"
     assert TW_DAILY_PROFILE.market == "TW"
     assert TW_DAILY_PROFILE.decision_minimum_bars == 60
 
@@ -81,6 +85,35 @@ def test_unknown_corporate_action_coverage_blocks_decision_not_facts() -> None:
     assert result["quality"]["facts_usable"] is True
     assert result["quality"]["decision_usable"] is False
     assert "CORPORATE_ACTION_COVERAGE_INCOMPLETE" in result["quality"]["reason_codes"]
+
+
+def test_index_not_applicable_volume_and_corporate_actions_do_not_block_decision() -> None:
+    bars = [{**bar, "volume": None} for bar in _bars(220)]
+    indicators = build_technical_indicators(
+        market="US",
+        symbol="^GSPC",
+        bars=bars,
+        profile=US_INDEX_DAILY_PROFILE,
+        freshness_status="current",
+        resolved_facts_usable=True,
+        corporate_action_coverage="not_applicable",
+    )
+    structure = build_technical_structure(
+        indicators=indicators,
+        bars=bars,
+        profile=US_INDEX_DAILY_PROFILE,
+    )
+
+    assert indicators["status"] == "available"
+    assert indicators["quality"]["decision_usable"] is True
+    assert indicators["current"]["volume"] is None
+    assert indicators["current"]["volume_vs_ma20_pct"] is None
+    assert "CORPORATE_ACTION_COVERAGE_INCOMPLETE" not in indicators["quality"][
+        "reason_codes"
+    ]
+    assert "BREAKOUT_WITHOUT_VOLUME_CONFIRMATION" not in structure[
+        "counter_evidence"
+    ]
 
 
 def test_structure_uses_shared_indicators_and_preserves_quality() -> None:
