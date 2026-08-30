@@ -130,10 +130,13 @@ def reconcile_us_priority_ohlc(
         else None
     )
     if platform_factory is None:
-        resolved_platform_factory = lambda db: USDailyOhlcvPlatform(
-            db,
-            rollout_state=operation_rollout,
-        )
+        def _rollout_platform_factory(db: Session) -> USDailyOhlcvPlatform:
+            return USDailyOhlcvPlatform(
+                db,
+                rollout_state=operation_rollout,
+            )
+
+        resolved_platform_factory = _rollout_platform_factory
     started = monotonic()
     checked_count = 0
     satisfied_count = 0
@@ -180,10 +183,10 @@ def reconcile_us_priority_ohlc(
                         remaining_external_calls,
                     ),
                 )
-                provider_call_count += len(
-                    platform_result.result.acquisition.attempts
+                provider_call_count += int(
+                    platform_result.result.acquisition.external_calls
                     if platform_result.result.acquisition is not None
-                    else ()
+                    else 0
                 )
                 history_satisfied = bool(
                     platform_result.temporal_postcondition_satisfied

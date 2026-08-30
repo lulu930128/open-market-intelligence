@@ -248,6 +248,28 @@ class Settings(BaseSettings):
     scheduler_us_priority_ohlc_interval_minutes: int = 30
     scheduler_us_priority_ohlc_startup_delay_seconds: int = 0
     scheduler_us_priority_ohlc_max_runtime_seconds: int = 600
+    enable_us_index_data_repair_gate: bool = True
+    scheduler_us_index_data_repair_interval_minutes: int = Field(
+        default=30, ge=5, le=1440
+    )
+    scheduler_us_index_data_repair_startup_delay_seconds: int = Field(
+        default=30, ge=0, le=3600
+    )
+    scheduler_us_index_data_repair_cooldown_seconds: int = Field(
+        default=1800, ge=60, le=86400
+    )
+    scheduler_us_index_data_repair_max_attempts: int = Field(
+        default=2, ge=1, le=5
+    )
+    scheduler_us_index_data_repair_max_runtime_seconds: int = Field(
+        default=600, ge=30, le=3600
+    )
+    scheduler_us_index_data_repair_daily_max_external_calls: int = Field(
+        default=12, ge=1, le=12
+    )
+    scheduler_us_index_data_repair_quote_max_external_calls: int = Field(
+        default=12, ge=1, le=12
+    )
     enable_eod_coverage_scheduler: bool = True
     scheduler_eod_coverage_markets: str = "TW,US"
     scheduler_eod_coverage_interval_minutes: int = 30

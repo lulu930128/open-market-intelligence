@@ -17,6 +17,10 @@ from app.us_market.daily_rollout import us_daily_rollout_snapshot
 from app.us_market.intraday_materializer import (
     us_intraday_materializer_runtime_summary,
 )
+from app.us_market.ohlc_priority import PRIORITY_US_INDEX_SYMBOLS
+from app.jobs.us_index_data_repair_gate import (
+    us_index_data_repair_runtime_summary,
+)
 
 router = APIRouter()
 
@@ -127,6 +131,33 @@ def health_check():
                 ),
                 "retention_days": settings.us_quote_snapshot_retention_days,
                 **us_intraday_materializer_runtime_summary(),
+            },
+            "us_index_data_repair_gate": {
+                "enabled": settings.enable_us_index_data_repair_gate,
+                "owner": "scheduler_control_plane",
+                "symbols": list(PRIORITY_US_INDEX_SYMBOLS),
+                "interval_minutes": (
+                    settings.scheduler_us_index_data_repair_interval_minutes
+                ),
+                "startup_delay_seconds": (
+                    settings.scheduler_us_index_data_repair_startup_delay_seconds
+                ),
+                "cooldown_seconds": (
+                    settings.scheduler_us_index_data_repair_cooldown_seconds
+                ),
+                "max_attempts": (
+                    settings.scheduler_us_index_data_repair_max_attempts
+                ),
+                "max_runtime_seconds": (
+                    settings.scheduler_us_index_data_repair_max_runtime_seconds
+                ),
+                "daily_max_external_calls": (
+                    settings.scheduler_us_index_data_repair_daily_max_external_calls
+                ),
+                "quote_max_external_calls": (
+                    settings.scheduler_us_index_data_repair_quote_max_external_calls
+                ),
+                **us_index_data_repair_runtime_summary(),
             },
             "fugle_realtime": fugle_health,
         },

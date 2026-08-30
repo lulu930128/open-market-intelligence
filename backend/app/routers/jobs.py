@@ -12,6 +12,7 @@ from app.jobs.us_current_market_bootstrap import (
     normalize_us_current_market_bootstrap_targets,
     run_us_current_market_bootstrap_job,
 )
+from app.jobs.us_index_data_repair_gate import run_us_index_data_repair_job
 from app.jobs.job_types import (
     CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE,
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
@@ -23,6 +24,7 @@ from app.jobs.job_types import (
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
     WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
     US_OHLC_HISTORY_REPAIR_JOB_TYPE,
+    US_INDEX_DATA_REPAIR_JOB_TYPE,
     US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE,
     US_PRIORITY_OHLC_RECONCILE_JOB_TYPE,
     US_SEC_FORM4_SYNC_JOB_TYPE,
@@ -449,6 +451,23 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
             (
                 int(request.get("max_runtime_seconds", 600)),
                 request.get("cursor_symbol"),
+            ),
+            request,
+        )
+
+    if job_type == US_INDEX_DATA_REPAIR_JOB_TYPE:
+        requested_at = str(request.get("requested_at") or "").strip()
+        if not requested_at:
+            raise ValueError("US index repair retry requires requested_at")
+        return (
+            run_us_index_data_repair_job,
+            (
+                requested_at,
+                _parse_string_list(request.get("missing_daily_symbols")),
+                _parse_string_list(request.get("missing_quote_symbols")),
+                int(request.get("daily_max_external_calls", 12)),
+                int(request.get("quote_max_external_calls", 12)),
+                int(request.get("max_runtime_seconds", 600)),
             ),
             request,
         )

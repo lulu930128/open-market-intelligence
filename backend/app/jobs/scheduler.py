@@ -39,6 +39,9 @@ from app.jobs.taiwan_intraday_bar_scheduler import (
 from app.jobs.us_intraday_materializer_scheduler import (
     add_us_intraday_materializer_jobs,
 )
+from app.jobs.us_index_data_repair_gate import (
+    enqueue_us_index_data_repair_gate,
+)
 from app.market.calendar_status import (
     build_jp_calendar_status,
     build_taiwan_calendar_status,
@@ -2438,6 +2441,29 @@ def _add_us_priority_ohlc_reconcile_job(scheduler: Any) -> bool:
     return True
 
 
+def _add_us_index_data_repair_gate(scheduler: Any) -> bool:
+    if not settings.enable_us_index_data_repair_gate:
+        return False
+    scheduler.add_job(
+        enqueue_us_index_data_repair_gate,
+        trigger="interval",
+        minutes=int(settings.scheduler_us_index_data_repair_interval_minutes),
+        id="us_index_data_repair_gate",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=(
+            datetime.now(_timezone())
+            + timedelta(
+                seconds=int(
+                    settings.scheduler_us_index_data_repair_startup_delay_seconds
+                )
+            )
+        ),
+    )
+    return True
+
+
 def start_scheduler() -> Any | None:
     if (
         not settings.enable_scheduler
@@ -2457,6 +2483,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_dispatch_scheduler
         and not settings.enable_watchlist_radar_scheduler
         and not settings.enable_us_priority_ohlc_scheduler
+        and not settings.enable_us_index_data_repair_gate
         and not settings.enable_eod_coverage_scheduler
     ):
         logger.info("Job scheduler disabled.")
@@ -2562,6 +2589,7 @@ def start_scheduler() -> Any | None:
     us_priority_ohlc_reconcile_enabled = _add_us_priority_ohlc_reconcile_job(
         scheduler
     )
+    us_index_data_repair_gate_enabled = _add_us_index_data_repair_gate(scheduler)
     market_eod_coverage_reconcile_enabled = _add_market_eod_coverage_reconcile_job(
         scheduler
     )
@@ -2591,6 +2619,14 @@ def start_scheduler() -> Any | None:
         "Priority US OHLC cache-only audit scheduler enabled=%s interval=%sm.",
         us_priority_ohlc_reconcile_enabled,
         max(int(settings.scheduler_us_priority_ohlc_interval_minutes), 5),
+    )
+    logger.info(
+        "US index missing-data repair gate enabled=%s interval=%sm cooldown=%ss "
+        "max_attempts=%s.",
+        us_index_data_repair_gate_enabled,
+        settings.scheduler_us_index_data_repair_interval_minutes,
+        settings.scheduler_us_index_data_repair_cooldown_seconds,
+        settings.scheduler_us_index_data_repair_max_attempts,
     )
     logger.info(
         "Full-market EOD coverage scheduler enabled=%s markets=%s interval=%sm.",

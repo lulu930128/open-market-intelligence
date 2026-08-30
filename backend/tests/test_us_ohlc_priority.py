@@ -7,6 +7,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.jobs import backfill_tasks
+from app.market_data.integration_contracts import (
+    AcquisitionStatus,
+    AcquisitionSummary,
+)
 from app.db.models import (
     Base,
     PortfolioHolding,
@@ -38,7 +42,15 @@ def _platform_result(*, satisfied: bool, attempts: int = 0):
             "expected_trade_date": "2026-08-28",
         },
         result=SimpleNamespace(
-            acquisition=SimpleNamespace(attempts=tuple(range(attempts)))
+            acquisition=AcquisitionSummary(
+                attempted=attempts > 0,
+                status=(
+                    AcquisitionStatus.COMPLETED
+                    if attempts > 0
+                    else AcquisitionStatus.NOT_ATTEMPTED
+                ),
+                external_calls=attempts,
+            )
         ),
     )
 
