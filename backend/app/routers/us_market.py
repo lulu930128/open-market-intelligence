@@ -106,6 +106,8 @@ from app.us_market.service import (
     refresh_us_corporate_actions_from_alphavantage,
     refresh_us_sec_companyfacts,
     refresh_us_short_volume_from_finra,
+    refresh_us_intraday_bars,
+    refresh_us_quote_snapshot,
     repair_us_daily_price_quality,
     search_us_stocks,
     sync_us_sec_company_data,
@@ -1064,6 +1066,46 @@ def get_us_intraday_trend_api(
         interval=interval,
         db=db,
     )
+
+
+@router.post("/quote/{symbol}/refresh", response_model=dict)
+def refresh_us_quote_snapshot_api(
+    symbol: str,
+    require_live: bool = False,
+    max_provider_calls: int = Query(default=2, ge=1, le=2),
+    db: Session = Depends(get_db),
+):
+    """Explicit bounded provider acquisition; persists then rereads canonical quote evidence."""
+
+    try:
+        return refresh_us_quote_snapshot(
+            db,
+            symbol=symbol,
+            require_live=require_live,
+            max_provider_calls=max_provider_calls,
+        )
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/intraday/{symbol}/refresh", response_model=dict)
+def refresh_us_intraday_bars_api(
+    symbol: str,
+    require_live: bool = False,
+    max_provider_calls: int = Query(default=2, ge=1, le=2),
+    db: Session = Depends(get_db),
+):
+    """Explicit bounded provider acquisition; persists then rereads canonical bars."""
+
+    try:
+        return refresh_us_intraday_bars(
+            db,
+            symbol=symbol,
+            require_live=require_live,
+            max_provider_calls=max_provider_calls,
+        )
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/research/{symbol}", response_model=USMarketResearchRead)

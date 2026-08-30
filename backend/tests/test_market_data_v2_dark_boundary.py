@@ -37,6 +37,9 @@ AUTHORIZED_INTEGRATION_IMPORTS = {
     "backend/app/market/providers/kgi_realtime_lease.py": [
         "app.market_data.research_lease"
     ],
+    "backend/app/market/providers/fugle_realtime_lease.py": [
+        "app.market_data.research_lease"
+    ],
     "backend/app/market/tw_realtime_lease_platform.py": [
         "app.market_data.research_lease"
     ],

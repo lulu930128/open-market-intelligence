@@ -615,7 +615,10 @@ def read_us_stock_context(
     intraday_summary = (
         None
         if requested_trade_date is not None
-        else _latest_tool_result(tool_runs, "us.read_intraday_trend")
+        else (
+            _latest_tool_result(tool_runs, "us.refresh_intraday_bars")
+            or _latest_tool_result(tool_runs, "us.read_intraday_trend")
+        )
     )
     stock = (
         db.query(USStockMaster)

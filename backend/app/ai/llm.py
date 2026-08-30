@@ -83,7 +83,8 @@ LLM_TOOL_PLAN_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "enum": [
                             "tw.refresh_stock_evidence",
-                            "us.read_intraday_trend",
+                            "us.refresh_quote",
+                            "us.refresh_intraday_bars",
                             "us.refresh_daily_price",
                             "us.refresh_company_profile",
                             "us.refresh_sec_facts",

@@ -66,6 +66,14 @@ class SystemHealthTests(unittest.TestCase):
             runtime["us_daily_acquisition_configuration_status"],
             {"valid", "invalid"},
         )
+        self.assertEqual(
+            runtime["fugle_realtime"]["provider"],
+            "fugle_marketdata",
+        )
+        self.assertIn(
+            runtime["fugle_realtime"]["connection"],
+            {"disabled", "not_started", "connecting", "connected", "error"},
+        )
 
     def test_health_check_keeps_invalid_canary_configuration_visible(self) -> None:
         with (

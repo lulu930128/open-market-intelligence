@@ -6,6 +6,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import StockMaster
 from app.market.providers.kgi_canonical import KGI_PROVIDER
 from app.market.providers.kgi_realtime_lease import KgiRealtimeQuoteLeasePort
@@ -238,9 +239,30 @@ def summarize_taiwan_realtime_quote_leases(
     return (coordinator or _TAIWAN_REALTIME_VIEWER_LEASES).summary()
 
 
+def summarize_fugle_realtime_runtime() -> dict[str, object]:
+    """Project provider runtime health through the market-owned boundary."""
+
+    runtime = get_fugle_realtime_runtime()
+    if runtime is not None:
+        return runtime.health()
+    return {
+        "provider": FUGLE_PROVIDER,
+        "connection": (
+            "disabled" if not settings.enable_fugle_realtime else "not_started"
+        ),
+        "entitlement": "unknown",
+        "subscriptions": {
+            "maximum": 5,
+            "desired_count": 0,
+            "bound_count": 0,
+        },
+    }
+
+
 __all__ = [
     "acquire_taiwan_realtime_quote_lease",
     "heartbeat_taiwan_realtime_quote_lease",
     "release_taiwan_realtime_quote_lease",
+    "summarize_fugle_realtime_runtime",
     "summarize_taiwan_realtime_quote_leases",
 ]

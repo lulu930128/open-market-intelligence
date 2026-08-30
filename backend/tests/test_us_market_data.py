@@ -592,7 +592,7 @@ class USMarketSourceParsingTests(unittest.TestCase):
         self.assertTrue(any("zero-filled" in warning for warning in trend["warnings"]))
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
-    def test_get_us_intraday_trend_uses_yahoo_chart_payload(self, mock_fetch) -> None:
+    def test_get_us_intraday_trend_without_db_is_truthful_cache_miss(self, mock_fetch) -> None:
         mock_fetch.return_value = (
             YAHOO_CHART_INTRADAY_SAMPLE,
             "https://example.test/chart/MU",
@@ -600,13 +600,11 @@ class USMarketSourceParsingTests(unittest.TestCase):
 
         trend = get_us_intraday_trend(symbol="mu")
 
-        mock_fetch.assert_called_once()
-        self.assertFalse(mock_fetch.call_args.kwargs["include_prepost"])
-        self.assertEqual(mock_fetch.call_args.kwargs["resource"], "intraday_price")
+        mock_fetch.assert_not_called()
         self.assertEqual(trend["stock_id"], "MU")
-        self.assertEqual(trend["point_count"], 2)
-        self.assertEqual(trend["points"][-1]["price"], 91.35)
-        self.assertIn(trend["source_status"]["status"], {"ok", "degraded"})
+        self.assertEqual(trend["point_count"], 0)
+        self.assertEqual(trend["source_status"]["freshness_status"], "missing")
+        self.assertFalse(trend["source_status"]["has_usable_data"])
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
     def test_get_us_intraday_trend_can_read_with_db_without_persisting_history(
@@ -635,8 +633,9 @@ class USMarketSourceParsingTests(unittest.TestCase):
             engine.dispose()
 
         persist_history.assert_not_called()
-        self.assertEqual(trend["point_count"], 2)
-        self.assertIsNotNone(trend["volume_pace"])
+        mock_fetch.assert_not_called()
+        self.assertEqual(trend["point_count"], 0)
+        self.assertIsNone(trend["volume_pace"])
 
     def test_us_intraday_source_status_detects_stopped_live_data(self) -> None:
         payload = {
@@ -706,7 +705,7 @@ class USMarketSourceParsingTests(unittest.TestCase):
         )
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
-    def test_us_intraday_provider_failure_preserves_last_usable_payload(
+    def test_us_intraday_read_does_not_use_provider_or_legacy_last_good_memory(
         self,
         mock_fetch,
     ) -> None:
@@ -720,18 +719,15 @@ class USMarketSourceParsingTests(unittest.TestCase):
 
         fallback = get_us_intraday_trend(symbol="mu")
 
+        mock_fetch.assert_not_called()
         self.assertEqual(fallback["points"], initial["points"])
         self.assertEqual(fallback["source_status"]["status"], "degraded")
-        self.assertEqual(
-            fallback["source_status"]["freshness_status"],
-            "provider_error",
-        )
-        self.assertTrue(fallback["source_status"]["is_fallback"])
-        self.assertTrue(fallback["source_status"]["has_usable_data"])
-        self.assertNotIn("_upstream_error", fallback)
+        self.assertEqual(fallback["source_status"]["freshness_status"], "missing")
+        self.assertFalse(fallback["source_status"]["is_fallback"])
+        self.assertFalse(fallback["source_status"]["has_usable_data"])
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
-    def test_get_us_intraday_trend_enables_include_prepost_for_all_scope(self, mock_fetch) -> None:
+    def test_get_us_intraday_trend_preserves_all_scope_on_cache_miss(self, mock_fetch) -> None:
         mock_fetch.return_value = (
             YAHOO_CHART_INTRADAY_EXTENDED_SAMPLE,
             "https://example.test/chart/MU?includePrePost=true",
@@ -739,13 +735,12 @@ class USMarketSourceParsingTests(unittest.TestCase):
 
         trend = get_us_intraday_trend(symbol="mu", session_scope="all")
 
-        mock_fetch.assert_called_once()
-        self.assertTrue(mock_fetch.call_args.kwargs["include_prepost"])
+        mock_fetch.assert_not_called()
         self.assertEqual(trend["session_scope"], "all")
-        self.assertEqual(trend["point_count"], 3)
+        self.assertEqual(trend["point_count"], 0)
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
-    def test_us_stock_intraday_bootstraps_bounded_history_and_exposes_volume_pace(
+    def test_us_stock_intraday_read_does_not_bootstrap_or_derive_volume_pace(
         self,
         mock_fetch,
     ) -> None:
@@ -763,10 +758,9 @@ class USMarketSourceParsingTests(unittest.TestCase):
             db.close()
             engine.dispose()
 
-        self.assertEqual(mock_fetch.call_args.kwargs["range_value"], "5d")
-        self.assertEqual(trend["point_count"], 2)
-        self.assertEqual(trend["volume_pace"]["market"], "US")
-        self.assertEqual(trend["volume_pace"]["status"], "partial")
+        mock_fetch.assert_not_called()
+        self.assertEqual(trend["point_count"], 0)
+        self.assertIsNone(trend["volume_pace"])
 
     def test_parse_sec_companyfacts(self) -> None:
         records = parse_sec_companyfacts(
@@ -1919,7 +1913,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["stale_symbol_count"], 1)
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
-    def test_us_intraday_trend_uses_latest_daily_close_reference(self, mock_fetch) -> None:
+    def test_us_intraday_cache_miss_does_not_select_raw_daily_close(self, mock_fetch) -> None:
         upsert_canonical_us_daily_price_records(
             self.db,
             [
@@ -1966,14 +1960,12 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             db=self.db,
         )
 
-        mock_fetch.assert_called_once()
-        self.assertEqual(trend["previous_close"], 88.5)
-        self.assertEqual(trend["previous_close_source"], "us_daily_price")
-        self.assertEqual(trend["previous_close_trade_date"], "2026-06-01")
-        self.assertEqual(trend["previous_close_provider"], "yahoo_chart")
+        mock_fetch.assert_not_called()
+        self.assertEqual(trend["point_count"], 0)
+        self.assertIsNone(trend["previous_close"])
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
-    def test_us_intraday_trend_uses_previous_regular_intraday_when_daily_is_stale(
+    def test_us_intraday_cache_miss_does_not_fetch_previous_regular_session(
         self,
         mock_fetch,
     ) -> None:
@@ -2005,18 +1997,12 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             db=self.db,
         )
 
-        self.assertEqual(mock_fetch.call_count, 2)
-        self.assertTrue(mock_fetch.call_args_list[0].kwargs["include_prepost"])
-        self.assertFalse(mock_fetch.call_args_list[1].kwargs["include_prepost"])
-        self.assertEqual(trend["previous_close"], 88.5)
-        self.assertEqual(
-            trend["previous_close_source"],
-            "yahoo_finance_chart_regular_session_close",
-        )
-        self.assertEqual(trend["previous_close_trade_date"], "2026-06-01")
+        mock_fetch.assert_not_called()
+        self.assertEqual(trend["point_count"], 0)
+        self.assertIsNone(trend["previous_close"])
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
-    def test_us_intraday_trend_rejects_preclose_daily_reference(
+    def test_us_intraday_cache_miss_does_not_use_preclose_raw_daily_reference(
         self,
         mock_fetch,
     ) -> None:
@@ -2069,16 +2055,12 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             db=self.db,
         )
 
-        self.assertEqual(mock_fetch.call_count, 2)
-        self.assertEqual(trend["previous_close"], 88.5)
-        self.assertEqual(
-            trend["previous_close_source"],
-            "yahoo_finance_chart_regular_session_close",
-        )
-        self.assertEqual(trend["previous_close_trade_date"], "2026-06-01")
+        mock_fetch.assert_not_called()
+        self.assertEqual(trend["point_count"], 0)
+        self.assertIsNone(trend["previous_close"])
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
-    def test_us_intraday_trend_skips_same_day_daily_close_for_regular_session(
+    def test_us_intraday_cache_miss_does_not_read_unresolved_daily_rows(
         self,
         mock_fetch,
     ) -> None:
@@ -2114,11 +2096,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             db=self.db,
         )
 
-        mock_fetch.assert_called_once()
-        self.assertEqual(trend["session_phase"], "regular")
-        self.assertEqual(trend["previous_close"], 88.5)
-        self.assertEqual(trend["previous_close_source"], "us_daily_price")
-        self.assertEqual(trend["previous_close_trade_date"], "2026-06-01")
+        mock_fetch.assert_not_called()
+        self.assertEqual(trend["point_count"], 0)
+        self.assertIsNone(trend["previous_close"])
 
     def test_us_watchlist_ranking_limits_intraday_overlay_attempts(self) -> None:
         symbol_records = parse_symbol_directories(

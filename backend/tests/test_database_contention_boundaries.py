@@ -143,7 +143,7 @@ def test_us_ohlc_projection_does_not_hold_sqlite_pool_connection_after_read() ->
         engine.dispose()
 
 
-def test_us_intraday_provider_wait_does_not_hold_sqlite_pool_connection() -> None:
+def test_us_intraday_read_is_cache_only_and_releases_sqlite_pool_connection() -> None:
     database_name = f"omi_intraday_pool_boundary_{uuid4().hex}"
     engine = create_engine(
         f"sqlite:///file:{database_name}?mode=memory&cache=shared&uri=true",
@@ -154,44 +154,20 @@ def test_us_intraday_provider_wait_does_not_hold_sqlite_pool_connection() -> Non
         pool_timeout=0.2,
     )
     Base.metadata.create_all(bind=engine)
-    provider_entered = Event()
-    release_provider = Event()
-    worker_errors: list[BaseException] = []
     symbol = f"POOL{uuid4().hex[:8].upper()}"
-
-    def blocked_fetch(**_kwargs):
-        provider_entered.set()
-        if not release_provider.wait(timeout=3):
-            raise TimeoutError("test provider release was not signaled")
-        raise RuntimeError("test provider failure after connection-boundary probe")
-
-    def load_intraday() -> None:
-        try:
-            with Session(engine) as db:
-                us_market_service.get_us_intraday_trend(symbol=symbol, db=db)
-        except BaseException as exc:  # pragma: no cover - surfaced below
-            worker_errors.append(exc)
 
     try:
         with patch.object(
             us_market_service,
             "fetch_yahoo_chart_payload",
-            side_effect=blocked_fetch,
-        ):
-            worker = Thread(target=load_intraday, daemon=True)
-            worker.start()
-            assert provider_entered.wait(timeout=2)
-            try:
-                with Session(engine) as probe_db:
-                    assert probe_db.execute(text("SELECT 1")).scalar_one() == 1
-            finally:
-                release_provider.set()
-            worker.join(timeout=3)
-
-        assert not worker.is_alive()
-        assert worker_errors == []
+        ) as provider_fetch:
+            with Session(engine) as db:
+                result = us_market_service.get_us_intraday_trend(symbol=symbol, db=db)
+            provider_fetch.assert_not_called()
+            assert result["point_count"] == 0
+        with Session(engine) as probe_db:
+            assert probe_db.execute(text("SELECT 1")).scalar_one() == 1
     finally:
-        release_provider.set()
         engine.dispose()
 
 

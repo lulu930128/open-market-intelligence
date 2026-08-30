@@ -9,9 +9,6 @@ from app.us_market.market_data.descriptors import (
     US_DAILY_CANDIDATE_DESCRIPTORS,
     US_DAILY_PROVIDER_DESCRIPTORS,
 )
-from app.us_market.daily_price_candidates import (
-    build_us_completed_daily_candidate_reader,
-)
 from app.us_market.market_data.adapters import (
     adapt_alpaca_stock_bars_payload,
     adapt_alphavantage_daily_payload,
@@ -39,22 +36,40 @@ def test_legacy_candidate_store_is_removed_after_canonical_repository_cutover() 
     assert "app.us_market.market_data.candidate_store" not in imports
 
 
-def test_integration_manifest_exposes_alpaca_daily_production_binding() -> None:
+def test_integration_manifest_exposes_capability_keyed_us_production_bindings() -> None:
     manifest = US_MARKET_DATA_INTEGRATION_MANIFEST
 
     assert manifest.market is Market.US
-    assert [item.provider_key for item in manifest.provider_descriptors] == [
-        "yahoo_chart",
-        "alpaca",
-    ]
+    assert {
+        (item.provider_key, item.capability_id)
+        for item in manifest.provider_descriptors
+    } == {
+        ("yahoo_chart", "daily.ohlcv"),
+        ("alpaca", "daily.ohlcv"),
+        ("yahoo_chart", "quote.snapshot"),
+        ("twelve_data", "quote.snapshot"),
+        ("yahoo_chart", "intraday.bars"),
+        ("twelve_data", "intraday.bars"),
+    }
     assert [item.provider_key for item in manifest.canonical_adapters] == [
         "yahoo_chart",
         "alpaca",
+        "twelve_data",
+        "twelve_data",
     ]
-    assert manifest.candidate_reader is build_us_completed_daily_candidate_reader
     assert manifest.production_binding_available is True
     assert manifest.shared_core_contract_version == "omi.market.data_requirement.v2"
-    assert manifest.handoff_gate == "US_DAILY_BACKEND_V1_SOURCE_ACCEPTED"
+    assert manifest.handoff_gate == "US_INTRADAY_QUOTE_SOURCE_CLOSEOUT_ACCEPTED"
+    assert not hasattr(manifest, "candidate_reader")
+    assert "US_QUOTE_RETENTION_CLEANUP_NOT_SCHEDULED" in manifest.limitations
+    assert {
+        (item.capability_id, item.dataset_id, item.refresh_operation)
+        for item in manifest.capability_bindings
+    } == {
+        ("daily.ohlcv", "us.daily.ohlcv", "us.refresh_daily_ohlcv"),
+        ("quote.snapshot", "us.quote.snapshot", "us.refresh_quote"),
+        ("intraday.bars", "us.intraday.bars", "us.refresh_intraday_bars"),
+    }
     assert "ALPACA_DAILY_SUPPORTS_STOCK_AND_ETF_ONLY" in manifest.limitations
     assert "US_INDEX_DAILY_FALLBACK_REMAINS_YAHOO_ONLY" in manifest.limitations
     assert "alphavantage" not in {
@@ -181,7 +196,7 @@ def test_alpaca_and_twelve_provider_modules_own_no_database_or_transaction() -> 
     assert violations == []
 
 
-def test_twelve_descriptors_are_source_ready_but_not_production_advertised() -> None:
+def test_twelve_descriptors_are_source_ready_and_capability_advertised() -> None:
     from app.us_market.market_data.descriptors import (
         US_SOURCE_READY_PROVIDER_DESCRIPTORS,
     )
@@ -193,7 +208,8 @@ def test_twelve_descriptors_are_source_ready_but_not_production_advertised() -> 
         ("twelve_data", "quote.snapshot", "twelve_data.quote"),
         ("twelve_data", "intraday.bars", "twelve_data.intraday"),
     ]
-    assert "twelve_data" not in {
-        item.provider_key
+    assert {
+        item.capability_id
         for item in US_MARKET_DATA_INTEGRATION_MANIFEST.provider_descriptors
-    }
+        if item.provider_key == "twelve_data"
+    } == {"quote.snapshot", "intraday.bars"}

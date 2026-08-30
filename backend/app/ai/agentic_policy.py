@@ -101,8 +101,19 @@ ALLOWED_TOOLS: dict[str, ToolDefinition] = {
     ),
     "us.read_intraday_trend": ToolDefinition(
         name="us.read_intraday_trend",
-        description="Fetch same-day Yahoo chart intraday trend for one US symbol.",
+        description="Read persisted resolved intraday trend for one US symbol without provider I/O.",
+    ),
+    "us.refresh_quote": ToolDefinition(
+        name="us.refresh_quote",
+        description="Refresh and persist a resolved canonical quote for one US symbol.",
         external_fetch=True,
+        writes_cache=True,
+    ),
+    "us.refresh_intraday_bars": ToolDefinition(
+        name="us.refresh_intraday_bars",
+        description="Refresh and persist resolved canonical intraday bars for one US symbol.",
+        external_fetch=True,
+        writes_cache=True,
     ),
     "us.refresh_daily_price": ToolDefinition(
         name="us.refresh_daily_price",

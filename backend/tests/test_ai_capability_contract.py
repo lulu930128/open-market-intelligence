@@ -2710,7 +2710,7 @@ class AiCapabilityContractTests(unittest.TestCase):
             ["fundamentals.financials"],
         )
 
-    def test_us_capability_plan_merges_capabilities_for_shared_tool(self) -> None:
+    def test_us_capability_plan_keeps_quote_and_intraday_fill_owners_separate(self) -> None:
         plan, warnings = agentic_planning.plan_us_stock_tools(
             question="AAPL quote and intraday",
             symbol="AAPL",
@@ -2726,14 +2726,14 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
 
         self.assertEqual(warnings, [])
-        self.assertEqual(len(plan["tool_plan"]), 1)
+        self.assertEqual(len(plan["tool_plan"]), 2)
         self.assertEqual(
-            plan["tool_plan"][0]["tool"],
-            "us.read_intraday_trend",
+            [step["tool"] for step in plan["tool_plan"]],
+            ["us.refresh_quote", "us.refresh_intraday_bars"],
         )
         self.assertEqual(
-            plan["tool_plan"][0]["args"]["requested_capabilities"],
-            ["quote.snapshot", "intraday.bars"],
+            [step["args"]["requested_capabilities"] for step in plan["tool_plan"]],
+            [["quote.snapshot"], ["intraday.bars"]],
         )
 
     def test_legacy_intraday_limit_maps_to_canonical_selection_limit(

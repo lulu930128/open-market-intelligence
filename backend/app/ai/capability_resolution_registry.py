@@ -123,6 +123,10 @@ INTERNAL_ONLY_OPERATIONS: dict[str, str] = {
         "Local-cache compatibility reader; us.refresh_sec_facts is the canonical "
         "public owner for fundamentals.financials."
     ),
+    "us.read_intraday_trend": (
+        "Cache-only compatibility reader; us.refresh_quote and "
+        "us.refresh_intraday_bars are the canonical fill owners."
+    ),
 }
 
 

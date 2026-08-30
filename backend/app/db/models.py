@@ -4402,6 +4402,61 @@ class USDailyPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class USQuoteSnapshot(Base):
+    __tablename__ = "us_quote_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "event_at",
+            name="uq_us_quote_snapshot_provider_symbol_event",
+        ),
+        Index(
+            "ix_us_quote_snapshot_symbol_event",
+            "symbol",
+            "event_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"), nullable=False, index=True
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"), nullable=False, index=True
+    )
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    source: Mapped[str] = mapped_column(String(128), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    venue: Mapped[str] = mapped_column(String(40), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(24))
+    trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    observation_state: Mapped[str] = mapped_column(String(32))
+    trade_state: Mapped[str] = mapped_column(String(32))
+    last_trade_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_trade_quantity: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cumulative_quantity: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    previous_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    authority: Mapped[str] = mapped_column(String(32))
+    raw_contract_version: Mapped[str] = mapped_column(String(96))
+    raw_payload_hash: Mapped[str] = mapped_column(String(128), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class JPStockMaster(Base):
     __tablename__ = "jp_stock_master"
 

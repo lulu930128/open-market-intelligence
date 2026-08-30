@@ -1,4 +1,4 @@
-"""Market-owned provider descriptors for bounded US acquisition planning.
+"""Compatibility projection of the market-owned US V2 provider catalog.
 
 This module declares provider capabilities only. It performs no provider I/O,
 health probing, fallback, persistence, or final evidence selection.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from app.market_data.contracts import Market, MarketSession, ProviderResourceHealth
+from app.market_data.contracts import Market, ProviderResourceHealth
 from app.market_data.policies import DataRequirement
 from app.market_data.provider_policy import (
     AcquisitionPlan,
@@ -19,27 +19,40 @@ from app.market_data.provider_catalog import AcquisitionMode
 from app.us_market.market_data.descriptors import (
     US_DAILY_CANDIDATE_DESCRIPTORS,
     US_DAILY_PROVIDER_DESCRIPTORS,
+    US_INTRADAY_PROVIDER_DESCRIPTORS,
+    US_QUOTE_PROVIDER_DESCRIPTORS,
 )
 
 
-US_PROVIDER_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
-    ProviderDescriptor(
-        provider_key="yahoo_chart",
-        market=Market.US,
-        capabilities=("quote.snapshot", "intraday.bars"),
-        priority=100,
-        supported_sessions=(
-            MarketSession.PRE_OPEN,
-            MarketSession.CONTINUOUS,
-            MarketSession.CLOSING_AUCTION,
-            MarketSession.POST_CLOSE,
-            MarketSession.CLOSED,
-        ),
-        supports_external_fetch=True,
-        can_produce_live=False,
-        max_timeout_seconds=25,
-    ),
-)
+def _compatibility_provider_descriptors() -> tuple[ProviderDescriptor, ...]:
+    projected: list[ProviderDescriptor] = []
+    inventory = (*US_QUOTE_PROVIDER_DESCRIPTORS, *US_INTRADAY_PROVIDER_DESCRIPTORS)
+    for provider_key in dict.fromkeys(item.provider_key for item in inventory):
+        items = [item for item in inventory if item.provider_key == provider_key]
+        projected.append(
+            ProviderDescriptor(
+                provider_key=provider_key,
+                market=Market.US,
+                capabilities=tuple(dict.fromkeys(item.capability_id for item in items)),
+                priority=min(item.priority for item in items),
+                supported_sessions=tuple(
+                    dict.fromkeys(
+                        session
+                        for item in items
+                        for session in item.supported_sessions
+                    )
+                ),
+                supports_external_fetch=any(
+                    AcquisitionMode.FETCH in item.acquisition_modes for item in items
+                ),
+                can_produce_live=all(item.can_produce_live for item in items),
+                max_timeout_seconds=max(item.max_timeout_seconds for item in items),
+            )
+        )
+    return tuple(projected)
+
+
+US_PROVIDER_DESCRIPTORS = _compatibility_provider_descriptors()
 
 
 def _provider_descriptors(
@@ -47,11 +60,7 @@ def _provider_descriptors(
     *,
     include_daily_candidates: bool = True,
 ) -> tuple[ProviderDescriptor, ...]:
-    """Project the canonical V2 Daily catalog into the legacy policy shape.
-
-    Quote/intraday callers still use the legacy policy contract. Daily priority
-    and eligibility are owned only by ``US_DAILY_PROVIDER_DESCRIPTORS``.
-    """
+    """Project the canonical V2 catalog into the deprecated V1 policy shape."""
 
     if capability_id != "daily.ohlcv":
         return tuple(
@@ -113,7 +122,7 @@ def build_us_acquisition_plan(
     max_external_calls: int = 2,
     fallback_allowed: bool = True,
 ) -> AcquisitionPlan:
-    """Return a pure, bounded plan for one US requirement."""
+    """Compatibility-only V1 planner; production paths use the V2 Gateway plan."""
 
     if requirement.instrument.market is not Market.US:
         raise ValueError("US acquisition planning requires a US instrument")

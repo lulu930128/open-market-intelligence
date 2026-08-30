@@ -81,17 +81,27 @@ def _fallback_plan(
     steps: list[dict[str, Any]] = []
 
     if "us_intraday_trend" in missing and requested_trade_date is None:
-        steps.append(
-            {
-                "tool": "us.read_intraday_trend",
-                "args": {
-                    "symbol": symbol,
-                    "session_scope": session_scope,
-                    "interval": intraday_interval,
-                },
-                "reason": "The question asks for ADR/latest trading context.",
-            }
-        )
+        if "quote.snapshot" in required:
+            steps.append(
+                {
+                    "tool": "us.refresh_quote",
+                    "args": {"symbol": symbol, "max_provider_calls": 2},
+                    "reason": "Canonical US quote evidence is missing or stale.",
+                }
+            )
+        if "intraday.bars" in required or "quote.snapshot" not in required:
+            steps.append(
+                {
+                    "tool": "us.refresh_intraday_bars",
+                    "args": {
+                        "symbol": symbol,
+                        "max_provider_calls": 2,
+                        "session_scope": session_scope,
+                        "interval": intraday_interval,
+                    },
+                    "reason": "Canonical US intraday bars are missing or stale.",
+                }
+            )
 
     if "us_daily_price" in missing:
         steps.append(
@@ -188,11 +198,22 @@ def _selected_us_plan(
             if requirement not in missing and not force_selected_capabilities:
                 continue
             if requirement == "us_intraday_trend":
-                tool_name = "us.read_intraday_trend"
+                tool_name = (
+                    "us.refresh_quote"
+                    if capability == "quote.snapshot"
+                    else "us.refresh_intraday_bars"
+                )
                 args = {
                     "symbol": symbol,
-                    "session_scope": session_scope,
-                    "interval": intraday_interval,
+                    "max_provider_calls": 2,
+                    **(
+                        {
+                            "session_scope": session_scope,
+                            "interval": intraday_interval,
+                        }
+                        if tool_name == "us.refresh_intraday_bars"
+                        else {}
+                    ),
                 }
             elif requirement == "us_daily_price":
                 tool_name = "us.refresh_daily_price"
@@ -685,8 +706,11 @@ def plan_us_stock_tools(
             )
             for step in normalized_plan.get("tool_plan") or []:
                 if step.get("tool") == "us.read_intraday_trend":
-                    step.setdefault("args", {})["session_scope"] = session_scope
-                    step["args"]["interval"] = normalized_intraday_interval
+                    step["tool"] = "us.refresh_intraday_bars"
+                    step["args"] = {
+                        "symbol": normalized_symbol,
+                        "max_provider_calls": 2,
+                    }
             return normalized_plan, warnings
         except llm.OpenAILLMError as exc:
             warnings.append(f"OMI LLM tool planner failed; used deterministic fallback. Error: {exc}")

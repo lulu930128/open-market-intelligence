@@ -14,10 +14,65 @@ from app.market_data.provider_catalog import (
 
 
 YAHOO_DAILY_RESOURCE_ID = "yahoo_chart.daily"
+YAHOO_QUOTE_RESOURCE_ID = "yahoo_chart.quote"
+YAHOO_INTRADAY_RESOURCE_ID = "yahoo_chart.intraday"
 ALPACA_SIP_DAILY_RESOURCE_ID = "alpaca.sip.historical.daily"
 ALPHAVANTAGE_DAILY_RESOURCE_ID = "alphavantage.daily"
 TWELVE_QUOTE_RESOURCE_ID = "twelve_data.quote"
 TWELVE_INTRADAY_RESOURCE_ID = "twelve_data.intraday"
+
+YAHOO_QUOTE_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key="yahoo_chart",
+    market=Market.US,
+    capability_id="quote.snapshot",
+    resource_id=YAHOO_QUOTE_RESOURCE_ID,
+    authority=AuthorityClass.VENDOR,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+    instrument_types=(InstrumentType.STOCK, InstrumentType.ETF, InstrumentType.INDEX),
+    supported_sessions=(
+        MarketSession.PRE_OPEN,
+        MarketSession.CONTINUOUS,
+        MarketSession.CLOSING_AUCTION,
+        MarketSession.POST_CLOSE,
+        MarketSession.CLOSED,
+    ),
+    acquisition_modes=(AcquisitionMode.FETCH,),
+    priority=100,
+    can_produce_live=False,
+    max_timeout_seconds=25,
+    max_external_calls_per_attempt=1,
+    max_symbols_per_call=1,
+    max_range_days=5,
+    allow_unknown_health=True,
+    limitations=("DELAYED_VENDOR_EVIDENCE",),
+)
+
+YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key="yahoo_chart",
+    market=Market.US,
+    capability_id="intraday.bars",
+    resource_id=YAHOO_INTRADAY_RESOURCE_ID,
+    authority=AuthorityClass.VENDOR,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+    instrument_types=(InstrumentType.STOCK, InstrumentType.ETF, InstrumentType.INDEX),
+    intervals=("1m",),
+    supported_sessions=(
+        MarketSession.PRE_OPEN,
+        MarketSession.CONTINUOUS,
+        MarketSession.CLOSING_AUCTION,
+        MarketSession.POST_CLOSE,
+        MarketSession.CLOSED,
+    ),
+    acquisition_modes=(AcquisitionMode.FETCH,),
+    priority=100,
+    can_produce_live=False,
+    max_timeout_seconds=25,
+    max_external_calls_per_attempt=1,
+    max_symbols_per_call=1,
+    max_range_days=5,
+    allow_unknown_health=True,
+    limitations=("DELAYED_VENDOR_EVIDENCE",),
+)
 
 YAHOO_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     provider_key="yahoo_chart",
@@ -122,6 +177,7 @@ TWELVE_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
         MarketSession.CONTINUOUS,
         MarketSession.CLOSING_AUCTION,
         MarketSession.POST_CLOSE,
+        MarketSession.CLOSED,
     ),
     acquisition_modes=(AcquisitionMode.FETCH,),
     priority=110,
@@ -183,6 +239,30 @@ US_SOURCE_READY_PROVIDER_DESCRIPTORS = (
     TWELVE_INTRADAY_DESCRIPTOR,
 )
 
+US_QUOTE_PROVIDER_DESCRIPTORS = (
+    YAHOO_QUOTE_DESCRIPTOR,
+    TWELVE_QUOTE_DESCRIPTOR,
+)
+
+US_INTRADAY_PROVIDER_DESCRIPTORS = (
+    YAHOO_INTRADAY_DESCRIPTOR,
+    TWELVE_INTRADAY_DESCRIPTOR,
+)
+
+
+def us_quote_descriptor_for_resource(resource_id: str) -> ProviderCapabilityDescriptorV2:
+    for descriptor in US_QUOTE_PROVIDER_DESCRIPTORS:
+        if descriptor.resource_id == resource_id:
+            return descriptor
+    raise ValueError(f"unregistered US quote resource: {resource_id}")
+
+
+def us_intraday_descriptor_for_resource(resource_id: str) -> ProviderCapabilityDescriptorV2:
+    for descriptor in US_INTRADAY_PROVIDER_DESCRIPTORS:
+        if descriptor.resource_id == resource_id:
+            return descriptor
+    raise ValueError(f"unregistered US intraday resource: {resource_id}")
+
 
 def us_daily_descriptor_for_resource(
     resource_id: str,
@@ -210,13 +290,21 @@ __all__ = [
     "TWELVE_INTRADAY_RESOURCE_ID",
     "TWELVE_QUOTE_DESCRIPTOR",
     "TWELVE_QUOTE_RESOURCE_ID",
+    "US_INTRADAY_PROVIDER_DESCRIPTORS",
+    "US_QUOTE_PROVIDER_DESCRIPTORS",
     "US_DAILY_ALPACA_ROLLOUT_DESCRIPTORS",
     "US_DAILY_CANDIDATE_DESCRIPTORS",
     "US_DAILY_PROVIDER_DESCRIPTORS",
     "US_SOURCE_READY_PROVIDER_DESCRIPTORS",
     "YAHOO_DAILY_DESCRIPTOR",
     "YAHOO_DAILY_RESOURCE_ID",
+    "YAHOO_INTRADAY_DESCRIPTOR",
+    "YAHOO_INTRADAY_RESOURCE_ID",
+    "YAHOO_QUOTE_DESCRIPTOR",
+    "YAHOO_QUOTE_RESOURCE_ID",
     "us_daily_descriptor_for_resource",
     "us_daily_history_descriptors",
+    "us_intraday_descriptor_for_resource",
     "us_provider_auth_type",
+    "us_quote_descriptor_for_resource",
 ]

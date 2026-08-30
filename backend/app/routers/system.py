@@ -12,7 +12,7 @@ from app.observability.provider_health import (
     list_source_health_snapshots,
 )
 from app.observability.schemas import ProviderEventRead, SourceHealthSnapshotRead
-from app.market.providers.fugle_realtime_runtime import get_fugle_realtime_runtime
+from app.market.tw_realtime_lease_platform import summarize_fugle_realtime_runtime
 from app.us_market.daily_rollout import us_daily_rollout_snapshot
 
 router = APIRouter()
@@ -36,23 +36,7 @@ def health_check():
         or settings.canonical_market_data_mode
     )
     us_daily_rollout = us_daily_rollout_snapshot()
-    fugle_runtime = get_fugle_realtime_runtime()
-    fugle_health = (
-        fugle_runtime.health()
-        if fugle_runtime is not None
-        else {
-            "provider": "fugle_marketdata",
-            "connection": "disabled"
-            if not settings.enable_fugle_realtime
-            else "not_started",
-            "entitlement": "unknown",
-            "subscriptions": {
-                "maximum": 5,
-                "desired_count": 0,
-                "bound_count": 0,
-            },
-        }
-    )
+    fugle_health = summarize_fugle_realtime_runtime()
     return {
         "status": "ok",
         "app_name": settings.app_name,

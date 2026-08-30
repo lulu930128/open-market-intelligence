@@ -74,6 +74,7 @@ class ResolutionCandidate(Generic[ObservationT]):
     provider_priority: int = 100
     session: MarketSession = MarketSession.UNKNOWN
     quality: QualityEvaluation | None = None
+    limitations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.provider_priority < 0:
@@ -86,6 +87,7 @@ class BarSeriesCandidate:
     freshness: EvidenceFreshness
     provider_priority: int = 100
     session: MarketSession = MarketSession.UNKNOWN
+    limitations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.bars:
@@ -169,6 +171,14 @@ def _evaluate(
             requirement=requirement,
             freshness=candidate.freshness,
             now=now,
+        )
+    if quality is not None and candidate.limitations:
+        quality = quality.model_copy(
+            update={
+                "limitations": tuple(
+                    dict.fromkeys((*quality.limitations, *candidate.limitations))
+                )
+            }
         )
     if quality is not None and not quality.eligible:
         return _EvaluatedCandidate(
@@ -1003,6 +1013,7 @@ def resolve_bar_series(
             provider_priority=candidate.provider_priority,
             session=candidate.session,
             quality=quality,
+            limitations=candidate.limitations,
         )
         projected.append(projected_candidate)
         series_by_identity[id(latest)] = candidate.bars

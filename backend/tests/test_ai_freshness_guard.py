@@ -3180,7 +3180,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 "provider": "openai",
                 "reason": "ADR question needs US intraday and daily evidence.",
                 "tool_plan": [
-                    {"tool": "us.read_intraday_trend", "args": {"symbol": "TSM"}, "reason": "latest ADR trading"},
+                    {"tool": "us.refresh_intraday_bars", "args": {"symbol": "TSM"}, "reason": "latest ADR trading"},
                     {
                         "tool": "us.refresh_daily_price",
                         "args": {"symbol": "TSM", "provider": "auto", "outputsize": "compact", "adjusted": False},
@@ -3191,6 +3191,11 @@ class AiFreshnessGuardTests(unittest.TestCase):
 
             with (
                 patch.object(ai_ask.agentic_tools.llm, "generate_tool_plan", return_value=planner_result) as planner,
+                patch.object(
+                    ai_ask.agentic_tools.us_market_service,
+                    "refresh_us_intraday_bars",
+                    return_value={"status": "selected", "symbol": "TSM"},
+                ) as refresh_intraday,
                 patch.object(
                     ai_ask.agentic_tools.us_market_service,
                     "get_us_intraday_trend",
@@ -3218,6 +3223,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
 
             planner.assert_called_once()
+            refresh_intraday.assert_called_once()
             intraday.assert_called_once_with(
                 symbol="TSM",
                 session_scope="regular",
@@ -3229,7 +3235,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["target"]["type"], "us_stock")
             self.assertEqual(response["tool_plan"]["provider"], "openai")
             self.assertEqual([run["status"] for run in response["tool_runs"]], ["success", "success"])
-            self.assertEqual(response["tool_runs"][0]["tool"], "us.read_intraday_trend")
+            self.assertEqual(response["tool_runs"][0]["tool"], "us.refresh_intraday_bars")
             self.assertEqual(response["result"]["summary"]["intraday"]["point_count"], 3)
         finally:
             db.close()

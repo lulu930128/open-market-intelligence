@@ -65,6 +65,7 @@ def _health(provider: str, capability: str) -> ProviderResourceHealth:
 def test_us_descriptors_are_market_owned_and_capability_specific() -> None:
     assert [item.provider_key for item in US_PROVIDER_DESCRIPTORS] == [
         "yahoo_chart",
+        "twelve_data",
     ]
     assert "intraday.bars" in US_PROVIDER_DESCRIPTORS[0].capabilities
     assert "daily.ohlcv" not in US_PROVIDER_DESCRIPTORS[0].capabilities
@@ -72,7 +73,8 @@ def test_us_descriptors_are_market_owned_and_capability_specific() -> None:
         "yahoo_chart",
         "alpaca",
     )
-    assert not any(item.can_produce_live for item in US_PROVIDER_DESCRIPTORS)
+    assert US_PROVIDER_DESCRIPTORS[0].can_produce_live is False
+    assert US_PROVIDER_DESCRIPTORS[1].can_produce_live is True
 
 
 def test_prefer_live_quote_has_bounded_delayed_vendor_route() -> None:
@@ -88,13 +90,16 @@ def test_prefer_live_quote_has_bounded_delayed_vendor_route() -> None:
     assert plan.routes[0].subscription_allowed is False
 
 
-def test_require_live_is_truthfully_unfillable_without_live_provider() -> None:
+def test_require_live_routes_only_the_live_capable_twelve_provider() -> None:
     plan = build_us_acquisition_plan(
         _requirement("quote.snapshot", RealtimePolicy.REQUIRE_LIVE),
-        {"yahoo_chart": _health("yahoo_chart", "quote.snapshot")},
+        {
+            "yahoo_chart": _health("yahoo_chart", "quote.snapshot"),
+            "twelve_data": _health("twelve_data", "quote.snapshot"),
+        },
     )
-    assert plan.routes == ()
-    assert plan.unfillable is True
+    assert [route.provider_key for route in plan.routes] == ["twelve_data"]
+    assert plan.unfillable is False
     assert {
         item.reason_code for item in plan.skipped_providers
     } == {

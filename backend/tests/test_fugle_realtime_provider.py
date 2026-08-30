@@ -372,7 +372,7 @@ def test_runtime_reconciliation_does_not_duplicate_pending_subscriptions() -> No
 
     async def scenario() -> None:
         runtime = FugleRealtimeRuntime(
-            api_key="fixture-secret",
+            api_key="test",
             active_stock="2330",
         )
         socket = Socket()

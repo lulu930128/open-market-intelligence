@@ -21,6 +21,8 @@ TOOL_LABELS = {
     "tw.refresh_stock_evidence": "台股資料刷新",
     "tw.refresh_watchlist_evidence": "自選群組刷新",
     "us.read_intraday_trend": "美股盤中趨勢讀取",
+    "us.refresh_quote": "美股即時報價更新",
+    "us.refresh_intraday_bars": "美股盤中走勢更新",
     "us.refresh_daily_price": "美股日線刷新",
     "us.refresh_company_profile": "美股公司資料刷新",
     "us.refresh_sec_facts": "SEC 財報資料刷新",

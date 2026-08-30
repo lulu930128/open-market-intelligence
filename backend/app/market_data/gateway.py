@@ -480,11 +480,35 @@ class MarketDataGateway:
         descriptors: Iterable[ProviderCapabilityDescriptorV2] = (),
         acquisition_port: BarAcquisitionPort | None = None,
         transaction_port: BarTransactionPort | None = None,
+        acquisition_requirement: DataRequirementV2 | None = None,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, InstrumentTarget):
             raise ValueError("bar resolution requires an instrument target")
         if not isinstance(requirement.request, BarCapabilityRequest):
             raise ValueError("bar resolution requires a bars capability request")
+        acquire_requirement = acquisition_requirement or requirement
+        if not isinstance(acquire_requirement.target, InstrumentTarget):
+            raise ValueError("bar acquisition requires an instrument target")
+        if not isinstance(acquire_requirement.request, BarCapabilityRequest):
+            raise ValueError("bar acquisition requires a bars capability request")
+        if acquire_requirement.target != requirement.target:
+            raise ValueError("bar read and acquisition targets must match")
+        if (
+            acquire_requirement.request.capability_id
+            != requirement.request.capability_id
+            or acquire_requirement.request.interval != requirement.request.interval
+            or acquire_requirement.request.price_basis != requirement.request.price_basis
+        ):
+            raise ValueError("bar read and acquisition capability semantics must match")
+        if acquire_requirement.requested_at != requirement.requested_at:
+            raise ValueError("bar read and acquisition requested_at must match")
+        if acquire_requirement.realtime_policy is not requirement.realtime_policy:
+            raise ValueError("bar read and acquisition realtime policy must match")
+        if (
+            acquire_requirement.request.start_at < requirement.request.start_at
+            or acquire_requirement.request.end_at > requirement.request.end_at
+        ):
+            raise ValueError("bar acquisition range must stay within the cache read range")
 
         initial_batch = self._read(requirement, reader)
         resolved = self._resolve(requirement, initial_batch)
@@ -510,7 +534,7 @@ class MarketDataGateway:
             acquisition = _not_attempted("ACQUISITION_BUDGET_ZERO")
         else:
             plan = plan_data_acquisition_v2(
-                requirement,
+                acquire_requirement,
                 descriptors,
                 initial_batch.provider_health,
             )
@@ -522,13 +546,20 @@ class MarketDataGateway:
                 acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
                 persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
             else:
-                acquired = acquisition_port.acquire_bar_observations(requirement, plan)
-                self._validate_acquisition_budget(requirement, plan, acquired)
+                acquired = acquisition_port.acquire_bar_observations(
+                    acquire_requirement,
+                    plan,
+                )
+                self._validate_acquisition_budget(
+                    acquire_requirement,
+                    plan,
+                    acquired,
+                )
                 acquisition = acquired.summary
                 acquisition_health = acquired.provider_health
                 if acquisition.attempted and (acquired.receipts or acquired.observations):
                     persistence = transaction_port.persist_bar_acquisition(
-                        requirement,
+                        acquire_requirement,
                         acquired,
                     )
                     self._validate_persistence_result(acquired, persistence)

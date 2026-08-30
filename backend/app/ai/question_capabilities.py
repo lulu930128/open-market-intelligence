@@ -55,6 +55,8 @@ US_CORPORATE_ACTION_HINTS = (
 
 US_TOOL_CAPABILITIES = {
     "us.read_intraday_trend": "us_intraday_trend",
+    "us.refresh_quote": "us_intraday_trend",
+    "us.refresh_intraday_bars": "us_intraday_trend",
     "us.refresh_daily_price": "us_daily_price",
     "us.refresh_company_profile": "us_company_profile",
     "us.refresh_sec_facts": "us_sec_company_fact",

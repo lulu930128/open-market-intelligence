@@ -150,7 +150,12 @@ from app.market.technical_radar import (
 from app.research.technical.aggregation import aggregate_intraday_payload
 from app.us_market.research_service import build_us_market_research
 from app.us_market.daily_ohlcv_chart import read_us_daily_ohlcv_chart
-from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform, refresh_us_daily_ohlcv
+from app.us_market.intraday_platform import (
+    USIntradayMarketPlatform,
+    build_us_resolved_volume_pace,
+)
+from app.us_market.providers.canonical import us_session_for_timestamp
 
 
 _translate_us_provider_errors = translate_provider_http_errors(USMarketDataFetchError)
@@ -1817,102 +1822,261 @@ def get_us_intraday_trend(
     db: Session | None = None,
     persist_history: bool = True,
 ) -> dict:
+    """Read the persisted canonical US intraday cache without provider I/O.
+
+    ``persist_history`` remains as a compatibility parameter only. Persistence
+    is owned exclusively by the explicit refresh transaction path.
+    """
+
     if session_scope not in {"regular", "extended", "all"}:
         raise ValueError("session_scope must be one of: regular, extended, all.")
-
+    if interval not in {"1m", "5m", "15m", "30m", "1h", "4h"}:
+        raise ValueError("unsupported US intraday interval")
     normalized_symbol = normalize_us_symbol(symbol)
-    cache_key = f"US:{normalized_symbol}:{session_scope}"
-    cached = _get_us_intraday_cache(cache_key)
 
-    if cached is not None:
+    def missing_payload(reason: str) -> dict:
         return aggregate_intraday_payload(
-            _finalize_us_intraday_payload(
-                cached,
-                db=db,
-                symbol=normalized_symbol,
-                session_scope=session_scope,
-            ),
+            {
+                "stock_id": normalized_symbol,
+                "symbol": normalized_symbol,
+                "source": "canonical_cache",
+                "session_scope": session_scope,
+                "points": [],
+                "point_count": 0,
+                "previous_close": None,
+                "previous_close_source": None,
+                "previous_close_trade_date": None,
+                "previous_close_provider": None,
+                "previous_close_status": "missing",
+                "volume_pace": None,
+                "source_url": None,
+                "warnings": [reason],
+                "source_status": {
+                    "provider": "unresolved",
+                    "status": "degraded",
+                    "freshness_status": "missing",
+                    "market_phase": None,
+                    "is_live_window": False,
+                    "as_of": None,
+                    "lag_seconds": None,
+                    "is_fallback": False,
+                    "has_usable_data": False,
+                    "message": reason,
+                },
+            },
             interval=interval,
             session_scope=session_scope,
         )
 
+    if db is None:
+        return missing_payload("Canonical US intraday cache requires a database session.")
+    now = datetime.now(timezone.utc)
+    platform = USIntradayMarketPlatform(db)
     try:
-        if normalized_symbol.startswith("^") or db is None:
-            range_value = "1d"
-        else:
-            with Session(bind=db.get_bind()) as bootstrap_read_db:
-                needs_bootstrap = intraday_history_needs_bootstrap(
-                    bootstrap_read_db,
-                    stock_id=normalized_symbol,
-                    market="US",
-                    market_timezone=US_MARKET_TIMEZONE,
-                )
-            range_value = "5d" if needs_bootstrap else "1d"
-        yahoo_payload, source_url = fetch_yahoo_chart_payload(
-            symbol=normalized_symbol,
-            range_value=range_value,
-            interval="1m",
-            timeout_seconds=settings.us_market_http_timeout_seconds,
-            include_prepost=session_scope != "regular",
-            resource="intraday_price",
+        read = platform.read_intraday_bars(symbol=normalized_symbol, bars=5000, now=now)
+    except LookupError as exc:
+        return missing_payload(str(exc))
+    resolved = read.result.resolved
+    history_points: list[dict] = []
+    for bar in resolved.bars:
+        session = us_session_for_timestamp(bar.start_at)
+        point_session = (
+            "pre_market"
+            if session.value == "pre_open"
+            else "after_hours"
+            if session.value == "post_close"
+            else "regular"
+            if session.value in {"continuous", "closing_auction"}
+            else None
         )
-        canonical_fetched_at = datetime.now(timezone.utc)
-        parsed_payload = parse_yahoo_intraday_prices(
-            yahoo_payload,
-            symbol=normalized_symbol,
-            source_url=source_url,
-            session_scope=session_scope,
+        if point_session is None:
+            continue
+        if session_scope == "regular" and point_session != "regular":
+            continue
+        if session_scope == "extended" and point_session == "regular":
+            continue
+        history_points.append(
+            {
+                "time": bar.start_at.isoformat(),
+                "price": float(bar.close_price),
+                "open": float(bar.open_price),
+                "high": float(bar.high_price),
+                "low": float(bar.low_price),
+                "volume": int(bar.volume.value) if bar.volume is not None else None,
+                "volume_status": bar.volume_status,
+                "session": point_session,
+                "finalized": bar.finalization.value != "provisional",
+                "is_partial": bar.finalization.value == "provisional",
+            }
         )
-        resolved_market_data = _observe_us_intraday_canonical_shadow(
-            payload=yahoo_payload,
-            parsed_payload=parsed_payload,
-            symbol=normalized_symbol,
-            session_scope=session_scope,
-            fetched_at=canonical_fetched_at,
-        )
-        if resolved_market_data:
-            parsed_payload["_resolved_market_data"] = resolved_market_data
-        if db is not None and persist_history:
-            parsed_payload = _persist_us_intraday_history(
-                db,
-                symbol=normalized_symbol,
-                payload=parsed_payload,
-            )
-        if parsed_payload.get("points"):
-            _remember_us_intraday_last_good(cache_key, parsed_payload)
-            payload = parsed_payload
-        else:
-            payload = _us_intraday_fallback_payload(
-                cache_key=cache_key,
-                symbol=normalized_symbol,
-                session_scope=session_scope,
-                error_message=(
-                    (parsed_payload.get("warnings") or [None])[0]
-                    or "Yahoo intraday source returned no usable points."
-                ),
-            )
-        payload = _set_us_intraday_cache(cache_key, payload)
-    except Exception as exc:
-        payload = _set_us_intraday_cache(
-            cache_key,
-            _us_intraday_fallback_payload(
-                cache_key=cache_key,
-                symbol=normalized_symbol,
-                session_scope=session_scope,
-                error_message=f"Yahoo intraday request failed: {type(exc).__name__}: {str(exc)[:180]}",
-            ),
-        )
-
-    return aggregate_intraday_payload(
-        _finalize_us_intraday_payload(
-            payload,
-            db=db,
-            symbol=normalized_symbol,
-            session_scope=session_scope,
-        ),
-        interval=interval,
-        session_scope=session_scope,
+    current_points = latest_market_trade_date_points(
+        history_points,
+        market_timezone=US_MARKET_TIMEZONE,
     )
+    selected_event_at = resolved.health.selected_event_at
+    lag_seconds = (
+        max(0.0, (now - selected_event_at.astimezone(timezone.utc)).total_seconds())
+        if selected_event_at is not None
+        else None
+    )
+    facts_usable = bool(resolved.health.facts_usable)
+    payload: dict = {
+        "stock_id": normalized_symbol,
+        "symbol": normalized_symbol,
+        "source": resolved.health.selected_source or resolved.health.selected_provider or "canonical_cache",
+        "interval": "1m",
+        "source_interval": "1m",
+        "effective_interval": "1m",
+        "session_scope": session_scope,
+        "points": current_points,
+        "point_count": len(current_points),
+        "volume_pace": None,
+        "source_url": None,
+        "warnings": list(
+            dict.fromkeys(
+                (*read.result.limitations, *resolved.health.limitations)
+            )
+        ),
+        "source_status": {
+            "provider": resolved.health.selected_provider or "unresolved",
+            "status": "ok" if facts_usable and lag_seconds is not None and lag_seconds <= 300 else "degraded",
+            "freshness_status": "missing" if selected_event_at is None else "live" if lag_seconds is not None and lag_seconds <= 300 else "stale",
+            "market_phase": read.result.requirement.session.value,
+            "is_live_window": read.result.requirement.session.value in {"continuous", "closing_auction"},
+            "as_of": selected_event_at.isoformat() if selected_event_at is not None else None,
+            "lag_seconds": lag_seconds,
+            "is_fallback": resolved.health.fallback_used,
+            "has_usable_data": facts_usable,
+            "message": resolved.health.selection_reason,
+        },
+    }
+    if current_points:
+        regular_bars = tuple(
+            bar
+            for bar in resolved.bars
+            if bar.volume is not None
+            and us_session_for_timestamp(bar.start_at).value
+            in {"continuous", "closing_auction"}
+        )
+        latest_regular = max(
+            regular_bars,
+            key=lambda bar: bar.start_at,
+            default=None,
+        )
+        current_date = (
+            latest_regular.start_at.astimezone(US_MARKET_TIMEZONE).date()
+            if latest_regular is not None
+            else datetime.fromisoformat(str(current_points[-1]["time"]))
+            .astimezone(US_MARKET_TIMEZONE)
+            .date()
+        )
+        historical_sessions = None
+        if (
+            latest_regular is not None
+            and resolved.health.selected_provider
+            and resolved.health.selected_source
+        ):
+            try:
+                historical_sessions = platform.read_volume_sessions(
+                    symbol=normalized_symbol,
+                    provider=resolved.health.selected_provider,
+                    source=resolved.health.selected_source,
+                    current_trade_date=current_date,
+                    comparison_time=latest_regular.start_at.astimezone(
+                        US_MARKET_TIMEZONE
+                    ).time(),
+                    max_sessions=20,
+                )
+            except ValueError:
+                payload.setdefault("warnings", []).append(
+                    "Canonical US historical volume aggregates are unavailable."
+                )
+        try:
+            daily = USDailyOhlcvPlatform(db).read(
+                symbol=normalized_symbol,
+                bars=30,
+                now=now,
+            )
+            payload["volume_pace"] = build_us_resolved_volume_pace(
+                symbol=normalized_symbol,
+                intraday_bars=resolved.bars,
+                daily_bars=daily.result.resolved.bars,
+                historical_sessions=historical_sessions,
+            )
+            prior = [
+                bar
+                for bar in daily.result.resolved.bars
+                if bar.end_at.astimezone(US_MARKET_TIMEZONE).date() < current_date
+            ]
+            if prior:
+                previous = prior[-1]
+                payload.update(
+                    {
+                        "previous_close": float(previous.close_price),
+                        "previous_close_source": previous.lineage.source,
+                        "previous_close_trade_date": previous.end_at.astimezone(US_MARKET_TIMEZONE).date().isoformat(),
+                        "previous_close_provider": previous.lineage.provider,
+                        "previous_close_status": "resolved_daily",
+                    }
+                )
+            else:
+                payload.setdefault("warnings", []).append("Canonical US Daily previous close is unavailable.")
+        except (LookupError, ValueError):
+            payload.setdefault("warnings", []).append("Canonical US Daily previous close is unavailable.")
+    if payload.get("volume_pace") is None:
+        payload.setdefault("warnings", []).append(
+            "US intraday volume pace is unavailable until resolved Daily evidence is available."
+        )
+    return aggregate_intraday_payload(payload, interval=interval, session_scope=session_scope)
+
+
+def refresh_us_quote_snapshot(
+    db: Session,
+    *,
+    symbol: str,
+    require_live: bool = False,
+    max_provider_calls: int = 2,
+) -> dict:
+    refreshed = USIntradayMarketPlatform(db).refresh_quote(
+        symbol=symbol,
+        require_live=require_live,
+        max_provider_calls=max_provider_calls,
+    )
+    return {
+        **refreshed.projection,
+        "acquisition": refreshed.result.acquisition.model_dump(mode="json"),
+        "persistence": refreshed.result.persistence.model_dump(mode="json"),
+        "dataset_health": (
+            refreshed.result.dataset_health.model_dump(mode="json")
+            if refreshed.result.dataset_health is not None
+            else None
+        ),
+    }
+
+
+def refresh_us_intraday_bars(
+    db: Session,
+    *,
+    symbol: str,
+    require_live: bool = False,
+    max_provider_calls: int = 2,
+) -> dict:
+    refreshed = USIntradayMarketPlatform(db).refresh_intraday_bars(
+        symbol=symbol,
+        bars=5000,
+        require_live=require_live,
+        max_provider_calls=max_provider_calls,
+    )
+    return {
+        **refreshed.projection,
+        "acquisition": refreshed.result.acquisition.model_dump(mode="json"),
+        "persistence": refreshed.result.persistence.model_dump(mode="json"),
+        "dataset_health": (
+            refreshed.result.dataset_health.model_dump(mode="json")
+            if refreshed.result.dataset_health is not None
+            else None
+        ),
+    }
 
 
 def _resolve_cik_for_symbol(db: Session, symbol: str) -> str:

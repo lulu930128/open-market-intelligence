@@ -633,6 +633,36 @@ def _execute_tool(
             persist_history=False,
         )
 
+    if tool_name == "us.refresh_quote":
+        return us_market_service.refresh_us_quote_snapshot(
+            db,
+            symbol=symbol,
+            require_live=bool(args.get("require_live", False)),
+            max_provider_calls=agentic_common._safe_int(
+                args.get("max_provider_calls"), default=2, minimum=1, maximum=2
+            ),
+        )
+
+    if tool_name == "us.refresh_intraday_bars":
+        refresh_result = us_market_service.refresh_us_intraday_bars(
+            db,
+            symbol=symbol,
+            require_live=bool(args.get("require_live", False)),
+            max_provider_calls=agentic_common._safe_int(
+                args.get("max_provider_calls"), default=2, minimum=1, maximum=2
+            ),
+        )
+        return {
+            **us_market_service.get_us_intraday_trend(
+                symbol=symbol,
+                session_scope=str(args.get("session_scope") or "regular"),
+                interval=str(args.get("interval") or "1m"),
+                db=db,
+                persist_history=False,
+            ),
+            "refresh": refresh_result,
+        }
+
     if tool_name == "us.refresh_daily_price":
         return refresh_us_daily_ohlcv(
             db=db,

@@ -99,7 +99,7 @@ class CapabilityResolutionRegistryTest(unittest.TestCase):
                 scope_type="us_stock",
                 capability_id="quote.snapshot",
             ).operation,
-            "us.read_intraday_trend",
+            "us.refresh_quote",
         )
         self.assertEqual(
             resolution(
