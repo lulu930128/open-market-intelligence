@@ -119,3 +119,12 @@ def test_launcher_uses_stable_frontend_bundling_and_bounded_health_recovery() ->
     )[0]
     assert "$frontendProc -and (-not $script:IsPackagedRelease)" in timer_body
     assert "Invoke-FrontendHealthRecovery" in timer_body
+
+
+def test_launcher_compiles_taskbar_listener_against_runtime_winforms_assemblies() -> None:
+    launcher_text = LAUNCHER.read_text(encoding="utf-8-sig")
+
+    assert "[System.Windows.Forms.Application].Assembly.Location" in launcher_text
+    assert "[System.Windows.Forms.Message].Assembly.Location" in launcher_text
+    assert "Add-Type -ReferencedAssemblies $winFormsReferences" in launcher_text
+    assert 'Add-Type -ReferencedAssemblies @("System.Windows.Forms")' not in launcher_text

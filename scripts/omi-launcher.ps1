@@ -9,7 +9,11 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 if ($null -eq ("OmiTaskbarCreatedListener" -as [type])) {
-    Add-Type -ReferencedAssemblies @("System.Windows.Forms") -TypeDefinition @"
+    $winFormsReferences = @(
+        [System.Windows.Forms.Application].Assembly.Location
+        [System.Windows.Forms.Message].Assembly.Location
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    Add-Type -ReferencedAssemblies $winFormsReferences -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
