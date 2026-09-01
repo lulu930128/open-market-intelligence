@@ -111,3 +111,19 @@ test("Today empty state keeps quote and canonical history as separate states", (
   expect(source).toContain("historyStatus");
   expect(source).toContain("stockDetail.intraday.historyWarming");
 });
+
+test("Taiwan technical report retries after the quote timestamp stops advancing", () => {
+  const source = readFileSync(
+    join(
+      process.cwd(),
+      "src/components/stock-detail/useTaiwanTechnicalReport.ts"
+    ),
+    "utf8"
+  );
+
+  expect(source).toContain("TAIWAN_TECHNICAL_REPORT_REFRESH_MS = 60_000");
+  expect(source).toContain("void loadTechnicalReport().finally(scheduleRefresh)");
+  expect(source).toContain("window.setTimeout");
+  expect(source).toContain("window.clearTimeout");
+  expect(source).not.toContain("setReport(null)");
+});

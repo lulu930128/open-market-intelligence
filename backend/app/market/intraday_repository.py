@@ -144,6 +144,7 @@ class TaiwanIntradayBarRepository:
                 SourceRegistry.id == MarketIntradayBarLineage.source_id,
             )
             .filter(MarketIntradayBar.stock_id == target.instrument.symbol)
+            .filter(MarketIntradayBar.market == target.instrument.venue)
             .filter(MarketIntradayBar.canonical_market == Market.TW.value)
             .filter(MarketIntradayBar.venue == target.instrument.venue)
             .filter(
