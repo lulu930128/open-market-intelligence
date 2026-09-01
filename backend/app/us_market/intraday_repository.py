@@ -52,7 +52,7 @@ from app.us_market.market_data.descriptors import (
     YAHOO_INTRADAY_DESCRIPTOR,
     YAHOO_QUOTE_DESCRIPTOR,
 )
-from app.us_market.providers.canonical import us_session_for_timestamp
+from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.trading_calendar import is_us_trading_day, us_session_close_time
 
 

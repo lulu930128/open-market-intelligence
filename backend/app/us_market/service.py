@@ -100,6 +100,7 @@ from app.market_data.contracts import (
     InstrumentKey,
     InstrumentType,
     Market,
+    MarketSession,
     TradeObservationState,
 )
 from app.us_market.sources import (
@@ -164,7 +165,7 @@ from app.us_market.intraday_platform import (
     USIntradayMarketPlatform,
     build_us_resolved_volume_pace,
 )
-from app.us_market.providers.canonical import us_session_for_timestamp
+from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.temporal_expectedness import (
     USCapabilityAvailability,
     USCapabilitySessionScope,
@@ -2308,10 +2309,9 @@ def _build_us_change_reference(
         bar
         for bar in bars
         if bar.start_at.astimezone(US_MARKET_TIMEZONE).date() == local_date
-        and us_session_for_timestamp(bar.start_at).value
-        in {"continuous", "closing_auction"}
+        and us_session_for_timestamp(bar.start_at) is MarketSession.CONTINUOUS
         and bar.finalization is not BarFinalization.PROVISIONAL
-        and bar.end_at.astimezone(US_MARKET_TIMEZONE) >= session_close_at
+        and bar.end_at.astimezone(US_MARKET_TIMEZONE) == session_close_at
     )
     current_day_bar = max(
         final_regular_bars,
@@ -2696,7 +2696,7 @@ def get_us_intraday_trend(
             else "after_hours"
             if session.value == "post_close"
             else "regular"
-            if session.value in {"continuous", "closing_auction"}
+            if session.value == "continuous"
             else None
         )
         if point_session is None:
@@ -2824,8 +2824,7 @@ def get_us_intraday_trend(
             bar
             for bar in resolved.bars
             if bar.volume is not None
-            and us_session_for_timestamp(bar.start_at).value
-            in {"continuous", "closing_auction"}
+            and us_session_for_timestamp(bar.start_at) is MarketSession.CONTINUOUS
         )
         latest_regular = max(
             regular_bars,

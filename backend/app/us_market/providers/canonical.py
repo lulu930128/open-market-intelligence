@@ -26,9 +26,9 @@ from app.market_data.contracts import (
     TradeObservationState,
 )
 from app.us_market.trading_calendar import (
-    us_post_market_close_time,
     us_session_close_time,
 )
+from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.volume_semantics import normalize_yahoo_intraday_volume
 
 
@@ -105,28 +105,6 @@ def _positive_ohlc(
     if low_price > min(open_price, high_price, close_price):
         return None
     return open_price, high_price, low_price, close_price
-
-
-def us_session_for_timestamp(value: datetime) -> MarketSession:
-    """Map a US timestamp to the shared cross-market session vocabulary."""
-
-    _require_aware(value, "session timestamp")
-    local = value.astimezone(US_EASTERN)
-    wall = local.timetz().replace(tzinfo=None)
-    session_close = us_session_close_time(local.date())
-    post_market_close = us_post_market_close_time(local.date())
-    closing_auction_end = (
-        datetime.combine(local.date(), session_close) + timedelta(minutes=1)
-    ).time()
-    if time(4, 0) <= wall < time(9, 30):
-        return MarketSession.PRE_OPEN
-    if time(9, 30) <= wall < session_close:
-        return MarketSession.CONTINUOUS
-    if session_close <= wall < closing_auction_end:
-        return MarketSession.CLOSING_AUCTION
-    if closing_auction_end <= wall < post_market_close:
-        return MarketSession.POST_CLOSE
-    return MarketSession.CLOSED
 
 
 def _session_in_scope(session: MarketSession, session_scope: str) -> bool:

@@ -1696,6 +1696,25 @@ def test_volume_pace_is_truthfully_partial_without_twenty_sessions() -> None:
     assert any("20 resolved" in warning for warning in pace["warnings"])
 
 
+def test_volume_pace_excludes_close_boundary_volume() -> None:
+    close_boundary = datetime(2026, 8, 28, 16, 0, tzinfo=US_EASTERN)
+
+    pace = build_us_resolved_volume_pace(
+        symbol="AAPL",
+        intraday_bars=(
+            _canonical_bar(
+                start_at=close_boundary,
+                interval="1m",
+                volume=5000,
+            ),
+        ),
+        daily_bars=(),
+    )
+
+    assert pace["status"] == "empty"
+    assert pace["current_cumulative_volume"] is None
+
+
 def test_persisted_identity_mismatches_fail_closed() -> None:
     db = _db()
     now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)

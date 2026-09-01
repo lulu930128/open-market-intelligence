@@ -18,7 +18,7 @@ from app.us_market.intraday_profiles import (
     US_RECURRING_INTRADAY_PROFILE,
     USIntradayOperationProfile,
 )
-from app.us_market.providers.canonical import us_session_for_timestamp
+from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.symbols import US_INDEX_SYMBOLS, normalize_us_symbol
 from app.us_market.trading_calendar import US_MARKET_TIMEZONE, is_us_trading_day
 

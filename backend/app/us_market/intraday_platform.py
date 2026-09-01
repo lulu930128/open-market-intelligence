@@ -44,7 +44,7 @@ from app.us_market.intraday_repository import (
 from app.us_market.intraday_transaction import USIntradayBarTransaction, USQuoteTransaction
 from app.us_market.market_data.descriptors import US_INTRADAY_PROVIDER_DESCRIPTORS, US_QUOTE_PROVIDER_DESCRIPTORS
 from app.us_market.market_data_projection import project_resolved_us_bars, project_resolved_us_quote
-from app.us_market.providers.canonical import us_session_for_timestamp
+from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.trading_calendar import is_us_trading_day
 
 
@@ -137,8 +137,7 @@ def build_us_resolved_volume_pace(
         bar
         for bar in intraday_bars
         if bar.volume is not None
-        and us_session_for_timestamp(bar.start_at)
-        in {MarketSession.CONTINUOUS, MarketSession.CLOSING_AUCTION}
+        and us_session_for_timestamp(bar.start_at) is MarketSession.CONTINUOUS
     ]
     if not regular:
         return {

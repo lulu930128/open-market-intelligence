@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
@@ -33,6 +33,14 @@ from app.us_market.daily_ohlcv_chart import (
     read_us_daily_ohlcv_history,
 )
 from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
+from app.us_market.market_truth import (
+    read_us_intraday_series_projection,
+    read_us_market_truth_snapshot,
+)
+from app.us_market.market_truth_contracts import (
+    USIntradaySeriesProjection,
+    USMarketTruthSnapshot,
+)
 from app.us_market.schemas import (
     MacroSeriesObservationRead,
     USDailyPriceRead,
@@ -1106,6 +1114,67 @@ def repair_us_ohlc_history_api(
         max_provider_calls=max_provider_calls,
         force_full=force_full,
     )
+
+
+@router.get("/truth/{symbol}", response_model=USMarketTruthSnapshot)
+def get_us_market_truth_api(
+    symbol: str,
+    db: Session = Depends(get_db),
+):
+    """Read one cache-only cross-capability US Market Truth snapshot."""
+
+    evaluated_at = datetime.now(timezone.utc)
+    try:
+        return read_us_market_truth_snapshot(
+            db,
+            symbol=symbol,
+            evaluated_at=evaluated_at,
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        if str(exc).startswith("symbol"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        raise
+
+
+@router.get(
+    "/truth/{symbol}/intraday",
+    response_model=USIntradaySeriesProjection,
+)
+def get_us_market_truth_intraday_api(
+    symbol: str,
+    session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
+    db: Session = Depends(get_db),
+):
+    """Read the revision-linked US intraday series as a separate payload."""
+
+    evaluated_at = datetime.now(timezone.utc)
+    try:
+        return read_us_intraday_series_projection(
+            db,
+            symbol=symbol,
+            evaluated_at=evaluated_at,
+            requested_scope=session_scope,
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        if str(exc).startswith(("symbol", "requested_scope")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        raise
 
 
 @router.get("/intraday/{symbol}", response_model=USIntradayTrendRead)
