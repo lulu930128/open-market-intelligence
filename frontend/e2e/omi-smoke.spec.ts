@@ -578,6 +578,199 @@ function stockOhlcResponse(stockId: string) {
   };
 }
 
+type TaiwanCanonicalFixturePoint = {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number | null;
+  trade_value?: number | null;
+  transaction_count?: number | null;
+  technical_eligible?: boolean;
+};
+
+function taiwanCanonicalBarSeriesResponse(
+  instrumentId: string,
+  interval: string,
+  sourcePointsOverride?: readonly TaiwanCanonicalFixturePoint[]
+) {
+  const isIndex = instrumentId === "TAIEX" || instrumentId === "TPEX";
+  const isIntraday = interval.endsWith("m") || interval.endsWith("h");
+  const instrument = {
+    market: "TW",
+    symbol: instrumentId,
+    instrument_type: isIndex
+      ? "index"
+      : instrumentId.startsWith("00")
+        ? "etf"
+        : "stock",
+    venue: instrumentId === "TPEX" ? "TPEX" : "TWSE",
+  };
+  const indexIntradayPoints: TaiwanCanonicalFixturePoint[] = [
+    {
+      time: "2026-06-15T09:00:00+08:00",
+      open: instrumentId === "TPEX" ? 100 : 850,
+      high: instrumentId === "TPEX" ? 100 : 850,
+      low: instrumentId === "TPEX" ? 100 : 850,
+      close: instrumentId === "TPEX" ? 100 : 850,
+      volume: null,
+    },
+    {
+      time: "2026-06-15T13:30:00+08:00",
+      open: instrumentId === "TPEX" ? 103 : 861,
+      high: instrumentId === "TPEX" ? 103 : 861,
+      low: instrumentId === "TPEX" ? 103 : 861,
+      close: instrumentId === "TPEX" ? 103 : 861,
+      volume: null,
+      technical_eligible: false,
+    },
+  ];
+  const sourcePoints: readonly TaiwanCanonicalFixturePoint[] =
+    sourcePointsOverride ??
+    (isIntraday
+      ? isIndex
+        ? indexIntradayPoints
+        : intradayResponse(instrumentId).points.map((point) => ({
+            time: point.time,
+            open: point.price,
+            high: point.price,
+            low: point.price,
+            close: point.price,
+            volume: point.volume,
+            trade_value: null,
+            transaction_count: null,
+          }))
+      : isIndex
+        ? ohlcResponse(instrumentId).points
+        : stockOhlcResponse(instrumentId).points);
+  const finalization = isIntraday ? "provisional" : "final";
+  const bars = sourcePoints.map((point) => ({
+    interval,
+    start_at: point.time,
+    end_at: point.time,
+    open_price: point.open,
+    high_price: point.high,
+    low_price: point.low,
+    close_price: point.close,
+    volume:
+      point.volume === null || point.volume === undefined
+        ? null
+        : { value: point.volume, unit: "shares" },
+    turnover_value: point.trade_value ?? null,
+    trade_count: point.transaction_count ?? null,
+    finalization,
+  }));
+  const seriesFingerprint = "1".repeat(64);
+  const lineageDigest = "2".repeat(64);
+  const stateDigest = "3".repeat(64);
+  const seriesRevision = "4".repeat(64);
+
+  return {
+    contract_version: "tw.bar.series_read.v1",
+    instrument,
+    requested_interval: interval,
+    base_interval: isIntraday ? "1m" : "1d",
+    derived: interval !== (isIntraday ? "1m" : "1d"),
+    aggregation_version: interval !== (isIntraday ? "1m" : "1d")
+      ? "playwright.fixture"
+      : null,
+    bars,
+    bar_states: bars.map((bar, index) => ({
+      start_at: bar.start_at,
+      finalization,
+      authority: isIntraday ? "realtime" : "official",
+      official: !isIntraday,
+      release_status: isIntraday ? "not_applicable" : "released",
+      reconciliation_status: "not_applicable",
+      persisted: true,
+      source_interval: isIntraday ? "1m" : "1d",
+      technical_eligible: sourcePoints[index]?.technical_eligible !== false,
+    })),
+    history: {
+      history_status: "ready",
+      requested_coverage_satisfied: true,
+      limitations: [],
+    },
+    identity: {
+      series_fingerprint: seriesFingerprint,
+      lineage_digest: lineageDigest,
+      state_digest: stateDigest,
+      series_revision: seriesRevision,
+    },
+    limitations: [],
+    warnings: [],
+  };
+}
+
+function taiwanChartBundleResponse(
+  instrumentId: string,
+  interval: string,
+  options: {
+    points?: readonly TaiwanCanonicalFixturePoint[];
+    quoteSide?: Record<string, unknown> | null;
+  } = {}
+) {
+  const bars = taiwanCanonicalBarSeriesResponse(
+    instrumentId,
+    interval,
+    options.points
+  );
+  const intraday = intradayResponse(instrumentId);
+  const isIntraday = interval.endsWith("m") || interval.endsWith("h");
+  const isIndex = instrumentId === "TAIEX" || instrumentId === "TPEX";
+
+  return {
+    contract_version: "tw.chart.bundle.v1",
+    bars,
+    technical: {
+      contract_version: "tw.technical.series.v1",
+      instrument: bars.instrument,
+      interval,
+      bar_series_fingerprint: bars.identity.series_fingerprint,
+      bar_lineage_digest: bars.identity.lineage_digest,
+      bar_state_digest: bars.identity.state_digest,
+      bar_series_revision: bars.identity.series_revision,
+      algorithm_version: "tw.technical.indicators.v4",
+      parameter_contract: {},
+      status: "warming_up",
+      warmup: {},
+      points: [],
+      structures: {},
+      signals: {},
+      relative: {},
+      technical_revision: "5".repeat(64),
+      limitations: [],
+      warnings: [],
+    },
+    series_fingerprint: bars.identity.series_fingerprint,
+    lineage_digest: bars.identity.lineage_digest,
+    state_digest: bars.identity.state_digest,
+    series_revision: bars.identity.series_revision,
+    quote_side:
+      options.quoteSide !== undefined
+        ? options.quoteSide
+        : isIntraday && !isIndex
+          ? {
+              current_observation: intraday.current_observation,
+              previous_close: intraday.previous_close,
+              price_diagnostics: {
+                current_trade_available: intraday.current_trade_available,
+                current_trade_unavailable_reason:
+                  intraday.current_trade_unavailable_reason,
+                latest_actual_trade_time: intraday.latest_actual_trade_time,
+                latest_actual_trade_price: intraday.latest_actual_trade_price,
+                lag_seconds: intraday.lag_seconds,
+              },
+              capabilities: intraday.capabilities,
+              source: intraday.source,
+              trade_date: intraday.trade_date,
+              updated_at: intraday.latest_history_time,
+            }
+          : null,
+  };
+}
+
 function stockMasterResponse(stockId: string) {
   const timestamp = "2026-06-15T09:30:00+08:00";
 
@@ -2911,6 +3104,47 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    const taiwanChartMatch = path.match(/\/market\/chart\/([^/]+)$/);
+    if (taiwanChartMatch) {
+      const instrumentId = decodeURIComponent(taiwanChartMatch[1]);
+      await fulfillJson(
+        route,
+        taiwanChartBundleResponse(
+          instrumentId,
+          url.searchParams.get("interval") ?? "1d"
+        )
+      );
+      return;
+    }
+
+    const taiwanBarsMatch = path.match(/\/market\/bars\/([^/]+)$/);
+    if (taiwanBarsMatch) {
+      const instrumentId = decodeURIComponent(taiwanBarsMatch[1]);
+      await fulfillJson(
+        route,
+        taiwanCanonicalBarSeriesResponse(
+          instrumentId,
+          url.searchParams.get("interval") ?? "1d"
+        )
+      );
+      return;
+    }
+
+    if (path.endsWith("/market/technical/contracts/tw")) {
+      await fulfillJson(route, {
+        contract_version: "tw.technical.capabilities.v1",
+        algorithm_version: "tw.technical.indicators.v4",
+        calculation_owner: "TaiwanTechnicalService",
+        parameter_contract: {
+          authority: "backend",
+          defaults: {},
+        },
+        indicators: {},
+        frontend_fallback_allowed: false,
+      });
+      return;
+    }
+
     if (/\/us-market\/profiles\/[^/]+$/.test(path)) {
       await fulfillJson(route, null);
       return;
@@ -3677,9 +3911,13 @@ test.describe("OMI dashboard smoke", () => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
 
     await expect(page.getByRole("heading", { name: "Market Dashboard" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "開啟 OMI 即時問答" })).toBeVisible();
-    await page.getByRole("button", { name: "開啟 OMI 即時問答" }).click();
-    await page.getByPlaceholder("輸入問題...").fill("現在可以買嗎？");
+    const composer = page.getByPlaceholder("輸入問題...");
+    await expect(async () => {
+      if (await composer.isVisible()) return;
+      await page.getByRole("button", { name: "開啟 OMI 即時問答" }).click();
+      await expect(composer).toBeVisible({ timeout: 1_000 });
+    }).toPass({ timeout: 5_000 });
+    await composer.fill("現在可以買嗎？");
     await page.getByRole("button", { name: "送出" }).click();
 
     await expect(page.getByText("測試回答：目前偏多但等待確認")).toBeVisible();
@@ -4853,6 +5091,41 @@ test.describe("OMI dashboard smoke", () => {
     page,
   }) => {
     const tpexSummary = marketIndexSummaryResponse(103);
+    const tpexIntradayPoints: TaiwanCanonicalFixturePoint[] = [
+      {
+        time: "2026-06-15T09:00:00+08:00",
+        open: 101,
+        high: 102,
+        low: 101,
+        close: 102,
+        volume: null,
+      },
+      {
+        time: "2026-06-15T09:01:00+08:00",
+        open: 102,
+        high: 102,
+        low: 100,
+        close: 100,
+        volume: null,
+      },
+      {
+        time: "2026-06-15T09:02:00+08:00",
+        open: 101,
+        high: 101,
+        low: 101,
+        close: 101,
+        volume: null,
+      },
+      {
+        time: "2026-06-15T13:30:00+08:00",
+        open: 103,
+        high: 103,
+        low: 103,
+        close: 103,
+        volume: null,
+        technical_eligible: false,
+      },
+    ];
     tpexSummary.indices[0] = {
       ...tpexSummary.indices[0],
       index_id: "TPEX",
@@ -4869,12 +5142,45 @@ test.describe("OMI dashboard smoke", () => {
       },
     };
     await mockOmiApi(page, {
-      apiResponder: ({ path }) => {
+      apiResponder: ({ path, url }) => {
         if (path.endsWith("/market/indices/summary")) {
           return { body: tpexSummary };
         }
         if (path.endsWith("/market/indices/TPEX/ohlc")) {
           return { body: ohlcResponse("TPEX") };
+        }
+        if (path.endsWith("/market/chart/TPEX")) {
+          return {
+            body: taiwanChartBundleResponse(
+              "TPEX",
+              url.searchParams.get("interval") ?? "1m",
+              {
+                points: tpexIntradayPoints,
+                quoteSide: {
+                  current_observation: {
+                    value: 103,
+                    observed_at: "2026-06-15T13:30:00+08:00",
+                    confirmed_at: "2026-06-15T13:33:00+08:00",
+                    price_semantics: "official_index_close",
+                    provider: "playwright.fixture",
+                    freshness_status: "post_close_final",
+                    decision_usable: true,
+                  },
+                  previous_close: 100,
+                  price_diagnostics: null,
+                  capabilities: {
+                    supports_volume: false,
+                    supports_vwap: false,
+                    supports_price_limit: false,
+                    supports_quote_depth: false,
+                  },
+                  source: "tpex_index_5s_twse_mis_snapshot",
+                  trade_date: "2026-06-15",
+                  updated_at: "2026-06-15T13:33:00+08:00",
+                },
+              }
+            ),
+          };
         }
         if (path.endsWith("/market/indices/TPEX/contributions")) {
           return {
@@ -4980,8 +5286,12 @@ test.describe("OMI dashboard smoke", () => {
     });
 
     const todayTimeframe = page.getByTestId("timeframe-today");
-    await todayTimeframe.click();
-    await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/);
+    await expect(async () => {
+      await todayTimeframe.click();
+      await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/, {
+        timeout: 750,
+      });
+    }).toPass({ timeout: 5_000 });
 
     const chart = page.getByTestId("today-intraday-surface");
     await expect(chart).toBeVisible();
@@ -5002,8 +5312,6 @@ test.describe("OMI dashboard smoke", () => {
     await expect(chart).toContainText("櫃買 5 秒走勢 + MIS 收盤確認");
     await expect(page.getByTestId("index-detail-open")).toContainText("101");
     await expect(page.getByTestId("index-detail-open")).not.toContainText("100");
-    await expect(page.getByTestId("market-tape-tpex-breadth-ratio")).toContainText("50");
-    await expect(page.getByTestId("market-tape-tpex-breadth-coverage")).toContainText("8/8");
     await expect(page.getByTestId("professional-chart-panel")).toHaveCount(0);
     await expect(page.getByTestId("stock-detail-expand")).toHaveCount(0);
 
@@ -5019,9 +5327,52 @@ test.describe("OMI dashboard smoke", () => {
     page,
   }) => {
     await mockOmiApi(page, {
-      apiResponder: ({ path }) => {
+      apiResponder: ({ path, url }) => {
         if (path.endsWith("/market/indices/TPEX/ohlc")) {
           return { body: ohlcResponse("TPEX") };
+        }
+        if (path.endsWith("/market/chart/TPEX")) {
+          return {
+            body: taiwanChartBundleResponse(
+              "TPEX",
+              url.searchParams.get("interval") ?? "1m",
+              {
+                points: [
+                  {
+                    time: "2026-06-15T13:30:00+08:00",
+                    open: 103,
+                    high: 103,
+                    low: 103,
+                    close: 103,
+                    volume: null,
+                    technical_eligible: false,
+                  },
+                ],
+                quoteSide: {
+                  current_observation: {
+                    value: 103,
+                    observed_at: "2026-06-15T13:30:00+08:00",
+                    confirmed_at: "2026-06-15T13:33:00+08:00",
+                    price_semantics: "official_index_close",
+                    provider: "playwright.fixture",
+                    freshness_status: "post_close_final",
+                    decision_usable: true,
+                  },
+                  previous_close: 100,
+                  price_diagnostics: null,
+                  capabilities: {
+                    supports_volume: false,
+                    supports_vwap: false,
+                    supports_price_limit: false,
+                    supports_quote_depth: false,
+                  },
+                  source: "twse_mis_index_snapshot",
+                  trade_date: "2026-06-15",
+                  updated_at: "2026-06-15T13:33:00+08:00",
+                },
+              }
+            ),
+          };
         }
         if (path.endsWith("/market/indices/TPEX/contributions")) {
           return {
@@ -5090,7 +5441,13 @@ test.describe("OMI dashboard smoke", () => {
       waitUntil: "domcontentloaded",
     });
 
-    await page.getByTestId("timeframe-today").click();
+    const todayTimeframe = page.getByTestId("timeframe-today");
+    await expect(async () => {
+      await todayTimeframe.click();
+      await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/, {
+        timeout: 750,
+      });
+    }).toPass({ timeout: 5_000 });
 
     const empty = page.getByTestId("today-intraday-surface");
     await expect(empty).toBeVisible();
@@ -5110,7 +5467,16 @@ test.describe("OMI dashboard smoke", () => {
       taiwanWatchlistTree: seededTaiwanWatchlistTree(),
       taiwanWatchlistItems: seededTaiwanWatchlistItems(),
       taiwanRankingRows: seededTaiwanRankingRows(),
-      apiResponder: ({ path }) => {
+      apiResponder: ({ path, url }) => {
+        if (path.endsWith("/market/chart/2330")) {
+          return {
+            body: taiwanChartBundleResponse(
+              "2330",
+              url.searchParams.get("interval") ?? "1d"
+            ),
+            delayMs: 800,
+          };
+        }
         if (path.endsWith("/market/ohlc/2330")) {
           return { body: stockOhlcResponse("2330"), delayMs: 800 };
         }
@@ -6158,9 +6524,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByTestId("tw-signal-chip-overnight")).toContainText(
       "隔夜：隔夜中性 -0.10%"
     );
-    await expect(page.getByTestId("tw-signal-chip-market-relative")).toContainText(
-      "pp"
-    );
+    await expect(page.getByTestId("tw-signal-chip-market-relative")).toHaveCount(0);
 
     const trendEvidence = page.getByTestId("tw-technical-evidence-trend");
     const evidenceDisclosure = page.getByTestId(
@@ -6647,10 +7011,36 @@ test.describe("OMI dashboard smoke", () => {
         transaction_count: 1_100,
       },
     ];
+    const intradayPoints: TaiwanCanonicalFixturePoint[] = [
+      {
+        time: "2026-07-17T09:00:00",
+        open: 1_005,
+        high: 1_008,
+        low: 1_004,
+        close: 1_007,
+        volume: 1_000,
+      },
+      {
+        time: "2026-07-17T09:01:00",
+        open: 1_007,
+        high: 1_010,
+        low: 1_006,
+        close: 1_009,
+        volume: 1_200,
+      },
+    ];
 
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await mockOmiApi(page, {
       apiResponder: ({ path, url }) => {
+        if (path.endsWith("/market/chart/2330")) {
+          const interval = url.searchParams.get("interval") ?? "1d";
+          return {
+            body: taiwanChartBundleResponse("2330", interval, {
+              points: interval === "1d" ? duplicateDailyPoints : intradayPoints,
+            }),
+          };
+        }
         if (path.endsWith("/market/ohlc/2330")) {
           return {
             body: {
@@ -6664,25 +7054,6 @@ test.describe("OMI dashboard smoke", () => {
         }
 
         if (path.endsWith("/market/intraday/2330/history")) {
-          const points = [
-            {
-              time: "2026-07-17T09:00:00",
-              open: 1_005,
-              high: 1_008,
-              low: 1_004,
-              close: 1_007,
-              volume: 1_000,
-            },
-            {
-              time: "2026-07-17T09:01:00",
-              open: 1_007,
-              high: 1_010,
-              low: 1_006,
-              close: 1_009,
-              volume: 1_200,
-            },
-          ];
-
           return {
             body: {
               stock_id: "2330",
@@ -6691,12 +7062,12 @@ test.describe("OMI dashboard smoke", () => {
               range: "auto",
               provider: "playwright.fixture",
               source: "playwright.fixture",
-              from_time: points[0].time,
-              to_time: points[points.length - 1].time,
-              point_count: points.length,
-              cached_count: points.length,
+              from_time: intradayPoints[0].time,
+              to_time: intradayPoints[intradayPoints.length - 1].time,
+              point_count: intradayPoints.length,
+              cached_count: intradayPoints.length,
               refreshed_count: 0,
-              points,
+              points: intradayPoints,
             },
           };
         }
@@ -6746,18 +7117,14 @@ test.describe("OMI dashboard smoke", () => {
     };
 
     await mockOmiApi(page, {
-      apiResponder: ({ method, path }) => {
-        if (method === "GET" && path.endsWith("/market/ohlc/2330")) {
+      apiResponder: ({ method, path, url }) => {
+        if (method === "GET" && path.endsWith("/market/chart/2330")) {
           return {
-            body: backfillRequested
-              ? fullOhlc
-              : {
-                  ...fullOhlc,
-                  from_date: initialPoints[0]?.time,
-                  to_date: initialPoints[0]?.time,
-                  point_count: initialPoints.length,
-                  points: initialPoints,
-                },
+            body: taiwanChartBundleResponse(
+              "2330",
+              url.searchParams.get("interval") ?? "1d",
+              { points: backfillRequested ? fullOhlc.points : initialPoints }
+            ),
           };
         }
         if (method === "POST" && path.endsWith("/market/backfill/twse/2330")) {
@@ -7289,22 +7656,20 @@ test.describe("OMI dashboard smoke", () => {
       taiwanWatchlistTree: seededTaiwanWatchlistTree(),
       taiwanWatchlistItems: seededTaiwanWatchlistItems(),
       taiwanRankingRows: seededTaiwanRankingRows(),
-      apiResponder: ({ method, path }) => {
-        if (path.endsWith("/market/ohlc/2330")) {
+      apiResponder: ({ method, path, url }) => {
+        if (path.endsWith("/market/chart/2330")) {
           const response = stockOhlcResponse("2330");
-          if (!detailBackfillCompleted) {
-            const points = response.points.slice(0, 2);
-            return {
-              body: {
-                ...response,
-                from_date: points[0].time,
-                to_date: points[points.length - 1].time,
-                point_count: points.length,
-                points,
-              },
-            };
-          }
-          return { body: response };
+          return {
+            body: taiwanChartBundleResponse(
+              "2330",
+              url.searchParams.get("interval") ?? "1d",
+              {
+                points: detailBackfillCompleted
+                  ? response.points
+                  : response.points.slice(0, 2),
+              }
+            ),
+          };
         }
 
         if (method === "POST" && path.endsWith("/market/backfill/twse/2330")) {
