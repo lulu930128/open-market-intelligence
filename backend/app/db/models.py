@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     Time,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -786,6 +787,18 @@ class MarketDailyPrice(Base):
             "trade_date",
             name="uq_market_daily_source_stock_date",
         ),
+        Index(
+            "uq_market_daily_tw_canonical_candidate",
+            "source_id",
+            "canonical_market",
+            "venue",
+            "instrument_type",
+            "stock_id",
+            "trade_date",
+            unique=True,
+            sqlite_where=text("canonical_market IS NOT NULL"),
+            postgresql_where=text("canonical_market IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -796,9 +809,9 @@ class MarketDailyPrice(Base):
         index=True,
     )
 
-    raw_result_id: Mapped[int] = mapped_column(
+    raw_result_id: Mapped[int | None] = mapped_column(
         ForeignKey("raw_fetch_result.id"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
 
@@ -806,6 +819,13 @@ class MarketDailyPrice(Base):
 
     stock_id: Mapped[str] = mapped_column(String(20), index=True)
     stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    canonical_market: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, index=True
+    )
+    venue: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    instrument_type: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
 
     trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -818,8 +838,102 @@ class MarketDailyPrice(Base):
     price_change: Mapped[float | None] = mapped_column(Float, nullable=True)
     transaction_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    authority: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    finalization: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    official: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
+    release_status: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    reconciliation_status: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    derivation_kind: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    aggregation_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class MarketDailyPriceLineage(Base):
+    __tablename__ = "market_daily_price_lineage"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "daily_price_id",
+            name="uq_market_daily_price_lineage_daily_price_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    daily_price_id: Mapped[int] = mapped_column(
+        ForeignKey("market_daily_price.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    raw_result_id: Mapped[int | None] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=True,
+        index=True,
+    )
+    evidence_kind: Mapped[str] = mapped_column(String(48), index=True)
+    source_interval: Mapped[str] = mapped_column(String(16))
+    materialization_version: Mapped[str | None] = mapped_column(
+        String(96), nullable=True
+    )
+    component_raw_result_ids_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    component_content_hashes_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    lineage_digest: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class MarketDailyPriceReconciliation(Base):
+    __tablename__ = "market_daily_price_reconciliation"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "daily_price_id",
+            "source_id",
+            "raw_result_id",
+            name="uq_market_daily_reconciliation_evidence",
+        ),
+        Index(
+            "ix_market_daily_reconciliation_evidence_status",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    daily_price_id: Mapped[int] = mapped_column(
+        ForeignKey("market_daily_price.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"), nullable=False, index=True
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(32))
+    candidate_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    official_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class MarketIntradayBar(Base):
@@ -841,13 +955,40 @@ class MarketIntradayBar(Base):
             "bar_time",
             name="uq_market_intraday_provider_stock_interval_time",
         ),
+        Index(
+            "uq_market_intraday_tw_canonical_candidate",
+            "source_id",
+            "canonical_market",
+            "venue",
+            "instrument_type",
+            "stock_id",
+            "interval",
+            "bar_time",
+            unique=True,
+            sqlite_where=text(
+                "canonical_market IS NOT NULL AND source_id IS NOT NULL"
+            ),
+            postgresql_where=text(
+                "canonical_market IS NOT NULL AND source_id IS NOT NULL"
+            ),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
+    source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_registry.id"), nullable=True, index=True
+    )
     provider: Mapped[str] = mapped_column(String(60), index=True)
     stock_id: Mapped[str] = mapped_column(String(20), index=True)
     market: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    canonical_market: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, index=True
+    )
+    venue: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    instrument_type: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
     symbol: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     interval: Mapped[str] = mapped_column(String(10), index=True)
     bar_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -887,9 +1028,9 @@ class MarketIntradayBarLineage(Base):
         nullable=False,
         index=True,
     )
-    raw_result_id: Mapped[int] = mapped_column(
+    raw_result_id: Mapped[int | None] = mapped_column(
         ForeignKey("raw_fetch_result.id"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     provider: Mapped[str] = mapped_column(String(60), index=True)

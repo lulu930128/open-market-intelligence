@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 import json
-from typing import Iterable
+from typing import Any, Callable, Iterable, Literal
+
+from pydantic import Field
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,10 @@ from app.db.models import StockMaster
 from app.market.intraday_repository import TaiwanIntradayBarRepository
 from app.market.intraday_transaction import TaiwanIntradayBarTransaction
 from app.market.trading_calendar import taiwan_presentation_session
+from app.market.tw_instrument import (
+    normalize_taiwan_instrument_id,
+    resolve_taiwan_instrument,
+)
 from app.market.tw_intraday_acquisition import TaiwanIntradayAcquisitionExecutor
 from app.market.tw_intraday_capabilities import (
     TW_INTRADAY_BARS_CAPABILITY_ID,
@@ -19,9 +25,9 @@ from app.market.tw_intraday_capabilities import (
 )
 from app.market_data.contracts import (
     BarObservation,
+    CanonicalModel,
     InstrumentKey,
     InstrumentType,
-    Market,
     MarketSession,
     QuantityUnit,
 )
@@ -40,7 +46,9 @@ from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
-INTRADAY_HISTORY_FIVE_TRADING_DAY_QUERY_DAYS = 21
+# RequestBounds count both endpoints, so a four-day delta is the bounded
+# five-calendar-day Yahoo ``range=5d`` window.
+INTRADAY_HISTORY_FIVE_TRADING_DAY_QUERY_DAYS = 4
 INTRADAY_HISTORY_INTERVAL_CONFIGS = {
     "1m": {"range": "5d", "days": INTRADAY_HISTORY_FIVE_TRADING_DAY_QUERY_DAYS},
     "5m": {"range": "1mo", "days": 31},
@@ -57,6 +65,178 @@ INTRADAY_HISTORY_RANGE_DAYS = {
 }
 
 
+class TaiwanIntradayBootstrapSymbolResult(CanonicalModel):
+    symbol: str
+    status: Literal["success", "partial", "failed", "skipped"]
+    requested_from: datetime | None = None
+    requested_to: datetime | None = None
+    bar_count: int = Field(default=0, ge=0)
+    receipts_written: int = Field(default=0, ge=0)
+    bars_written: int = Field(default=0, ge=0)
+    bars_unchanged: int = Field(default=0, ge=0)
+    raw_result_ids: tuple[int, ...] = ()
+    warnings: tuple[str, ...] = ()
+    failure_reason: str | None = None
+
+
+class TaiwanIntradayBootstrapResult(CanonicalModel):
+    contract_version: str = "tw.intraday.bootstrap.v1"
+    status: Literal["success", "partial", "failed", "skipped"]
+    requested_symbols: tuple[str, ...]
+    planned_symbols: tuple[str, ...]
+    processed_symbols: tuple[str, ...]
+    skipped_symbols: tuple[str, ...]
+    failed_symbols: tuple[str, ...]
+    requested_trade_dates: tuple[date, ...]
+    provider: str = "canonical_planner"
+    source: str = "tw_intraday_base_1m_bootstrap"
+    receipts_written: int = Field(default=0, ge=0)
+    bars_written: int = Field(default=0, ge=0)
+    bars_unchanged: int = Field(default=0, ge=0)
+    rejected_bar_count: int = Field(default=0, ge=0)
+    earliest_bar: datetime | None = None
+    latest_bar: datetime | None = None
+    per_symbol: tuple[TaiwanIntradayBootstrapSymbolResult, ...] = ()
+    target_plan: dict[str, Any]
+
+
+IntradayBootstrapRefresher = Callable[..., MarketDataResultV1]
+
+
+def bootstrap_taiwan_intraday_bars(
+    db: Session,
+    *,
+    symbols: Iterable[object] | None = None,
+    max_symbols: int = 10,
+    requested_at: datetime | None = None,
+    refresher: IntradayBootstrapRefresher | None = None,
+) -> TaiwanIntradayBootstrapResult:
+    """Explicit bounded Base-1m bootstrap over the canonical Tier-A planner."""
+
+    if max_symbols < 1 or max_symbols > 10:
+        raise ValueError("Taiwan intraday bootstrap max_symbols must be between 1 and 10")
+    # Lazy import avoids the realtime-runtime -> intraday-platform cycle while
+    # keeping the canonical Tier-A planner as the only universe owner.
+    from app.market.tw_intraday_universe import resolve_taiwan_tier_a_target_plan
+
+    now = requested_at or datetime.now(TAIPEI_TZ)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("requested_at must be timezone-aware")
+    requested_symbols = tuple(
+        dict.fromkeys(
+            str(value or "").strip().upper()
+            for value in symbols or ()
+            if str(value or "").strip()
+        )
+    )
+    plan = resolve_taiwan_tier_a_target_plan(
+        db,
+        operation_profile="production_intraday",
+        max_symbols=max_symbols,
+        configured_symbols=(requested_symbols if requested_symbols else None),
+    )
+    planned_symbols = tuple(str(value) for value in plan.get("symbols") or ())
+    effective_refresher = refresher or refresh_taiwan_intraday_bars
+    results: list[TaiwanIntradayBootstrapSymbolResult] = []
+    rejected_count = 0
+    observed_dates: set[date] = set()
+    observed_times: list[datetime] = []
+    for symbol in planned_symbols:
+        try:
+            result = effective_refresher(
+                db,
+                stock_id=symbol,
+                interval="1m",
+                range_value="5d",
+                requested_at=now,
+            )
+            persistence = result.persistence
+            rejected_count += len(result.candidate_rejections)
+            bars = tuple(result.resolved.bars)
+            observed_times.extend(bar.start_at for bar in bars)
+            observed_dates.update(
+                bar.start_at.astimezone(TAIPEI_TZ).date() for bar in bars
+            )
+            warnings = tuple(
+                dict.fromkeys(
+                    (
+                        *result.limitations,
+                        *persistence.limitations,
+                        *(
+                            rejection.reason_code
+                            for rejection in result.candidate_rejections
+                        ),
+                    )
+                )
+            )
+            status: Literal["success", "partial", "failed", "skipped"] = (
+                "success"
+                if bars and not result.candidate_rejections
+                else "partial"
+                if bars or persistence.committed
+                else "failed"
+            )
+            results.append(
+                TaiwanIntradayBootstrapSymbolResult(
+                    symbol=symbol,
+                    status=status,
+                    requested_from=result.requirement.request.start_at,
+                    requested_to=result.requirement.request.end_at,
+                    bar_count=len(bars),
+                    receipts_written=persistence.receipts_written,
+                    bars_written=persistence.observations_written,
+                    bars_unchanged=persistence.observations_unchanged,
+                    raw_result_ids=persistence.raw_result_ids,
+                    warnings=warnings,
+                    failure_reason=(
+                        None if status != "failed" else "no_canonical_bar_persisted"
+                    ),
+                )
+            )
+        except Exception as exc:
+            db.rollback()
+            results.append(
+                TaiwanIntradayBootstrapSymbolResult(
+                    symbol=symbol,
+                    status="failed",
+                    failure_reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+    failed = tuple(item.symbol for item in results if item.status == "failed")
+    skipped = tuple(
+        str(item.get("stock_id") or "")
+        for item in plan.get("skipped_targets") or ()
+        if item.get("stock_id")
+    )
+    processed = tuple(item.symbol for item in results if item.status != "failed")
+    overall: Literal["success", "partial", "failed", "skipped"] = (
+        "skipped"
+        if not results
+        else "success"
+        if not failed and all(item.status == "success" for item in results)
+        else "failed"
+        if len(failed) == len(results)
+        else "partial"
+    )
+    return TaiwanIntradayBootstrapResult(
+        status=overall,
+        requested_symbols=requested_symbols,
+        planned_symbols=planned_symbols,
+        processed_symbols=processed,
+        skipped_symbols=skipped,
+        failed_symbols=failed,
+        requested_trade_dates=tuple(sorted(observed_dates)),
+        receipts_written=sum(item.receipts_written for item in results),
+        bars_written=sum(item.bars_written for item in results),
+        bars_unchanged=sum(item.bars_unchanged for item in results),
+        rejected_bar_count=rejected_count,
+        earliest_bar=min(observed_times, default=None),
+        latest_bar=max(observed_times, default=None),
+        per_symbol=tuple(results),
+        target_plan=plan,
+    )
+
+
 def intraday_history_config(interval: str, range_value: str) -> dict[str, object]:
     config = INTRADAY_HISTORY_INTERVAL_CONFIGS.get(interval)
     if config is None:
@@ -70,28 +250,20 @@ def intraday_history_config(interval: str, range_value: str) -> dict[str, object
 
 
 def _instrument(db: Session, stock_id: str) -> tuple[StockMaster, InstrumentKey]:
-    normalized = str(stock_id or "").strip().upper()
+    normalized = normalize_taiwan_instrument_id(stock_id)
+    instrument = resolve_taiwan_instrument(db, normalized)
+    if instrument.instrument_type is InstrumentType.INDEX:
+        raise ValueError(
+            "Stock/ETF intraday acquisition does not materialize index events"
+        )
     stock = (
         db.query(StockMaster)
         .filter(StockMaster.stock_id == normalized)
         .first()
     )
     if stock is None:
-        raise ValueError(f"Unknown Taiwan stock id: {normalized}")
-    venue = str(stock.market or "").strip().upper()
-    if venue not in {"TWSE", "TPEX"}:
-        raise ValueError("Taiwan intraday bars require TWSE/TPEX venue")
-    instrument_type = (
-        InstrumentType.ETF
-        if "etf" in str(stock.instrument_type or "").strip().lower()
-        else InstrumentType.STOCK
-    )
-    return stock, InstrumentKey(
-        market=Market.TW,
-        symbol=normalized,
-        instrument_type=instrument_type,
-        venue=venue,
-    )
+        raise RuntimeError("Resolved StockMaster row disappeared during request")
+    return stock, instrument
 
 
 def build_taiwan_intraday_requirement(
@@ -448,6 +620,9 @@ __all__ = [
     "INTRADAY_HISTORY_FIVE_TRADING_DAY_QUERY_DAYS",
     "INTRADAY_HISTORY_INTERVAL_CONFIGS",
     "INTRADAY_HISTORY_RANGE_DAYS",
+    "TaiwanIntradayBootstrapResult",
+    "TaiwanIntradayBootstrapSymbolResult",
+    "bootstrap_taiwan_intraday_bars",
     "build_taiwan_intraday_requirement",
     "intraday_history_config",
     "project_taiwan_intraday_bars",

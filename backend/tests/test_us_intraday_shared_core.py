@@ -507,6 +507,79 @@ def test_lineage_free_legacy_intraday_rows_are_not_resolution_candidates() -> No
     assert "US_INTRADAY_LEGACY_ROWS_WITHOUT_CANONICAL_LINEAGE_IGNORED" in read.result.limitations
 
 
+def test_noncanonical_duplicate_minute_is_rejected_and_marks_dataset_partial() -> None:
+    db = _db()
+    now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
+
+    def yahoo_bars(_route, _requirement):
+        return _yahoo_payload(now), "https://query1.finance.yahoo.com/v8/finance/chart/AAPL"
+
+    platform = USIntradayMarketPlatform(
+        db,
+        acquisition=USIntradayAcquisitionExecutor(
+            fetchers={YAHOO_INTRADAY_RESOURCE_ID: yahoo_bars},
+            clock=lambda: now,
+        ),
+        bar_descriptors=(YAHOO_INTRADAY_DESCRIPTOR,),
+    )
+    platform.refresh_intraday_bars(
+        symbol="AAPL",
+        bars=100,
+        now=now,
+        max_provider_calls=1,
+    )
+    canonical = db.query(MarketIntradayBar).one()
+    lineage = db.query(MarketIntradayBarLineage).one()
+    legacy = MarketIntradayBar(
+        source_id=canonical.source_id,
+        provider=canonical.provider,
+        stock_id=canonical.stock_id,
+        market=canonical.market,
+        canonical_market=canonical.canonical_market,
+        venue=canonical.venue,
+        instrument_type=canonical.instrument_type,
+        symbol=canonical.symbol,
+        interval=canonical.interval,
+        bar_time=canonical.bar_time + timedelta(seconds=20),
+        open_price=canonical.close_price,
+        high_price=canonical.close_price,
+        low_price=canonical.close_price,
+        close_price=canonical.close_price,
+        trade_volume=0,
+        source=canonical.source,
+    )
+    db.add(legacy)
+    db.flush()
+    db.add(
+        MarketIntradayBarLineage(
+            bar_id=legacy.id,
+            source_id=lineage.source_id,
+            raw_result_id=lineage.raw_result_id,
+            provider=lineage.provider,
+            source=lineage.source,
+            authority=lineage.authority,
+            raw_contract_version=lineage.raw_contract_version,
+            event_at=lineage.event_at + timedelta(seconds=20),
+            received_at=lineage.received_at + timedelta(seconds=20),
+            fetched_at=lineage.fetched_at + timedelta(seconds=20),
+            finalization=lineage.finalization,
+            source_interval=lineage.source_interval,
+        )
+    )
+    db.commit()
+
+    read = platform.read_intraday_bars(symbol="AAPL", bars=100, now=now)
+
+    assert len(read.result.resolved.bars) == 1
+    assert {
+        rejection.reason_code
+        for rejection in read.result.candidate_rejections
+    } == {"NON_CANONICAL_MINUTE_IDENTITY"}
+    assert "NON_CANONICAL_MINUTE_IDENTITY" in read.result.limitations
+    assert "DUPLICATE_MINUTE_BUCKET" in read.result.limitations
+    assert read.result.dataset_health.status.value == "partial"
+
+
 def test_fresh_yahoo_snapshot_with_old_trade_does_not_fall_through() -> None:
     db = _db()
     now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)

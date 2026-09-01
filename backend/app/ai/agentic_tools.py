@@ -183,6 +183,7 @@ def scan_us_stock_gaps(
     missing: list[str] = []
     warnings: list[str] = []
     expected_dates: dict[str, Any] = {}
+    canonical_capabilities: dict[str, Any] = {}
 
     daily_projection = (
         daily_platform_result.projection if daily_platform_result is not None else {}
@@ -305,11 +306,63 @@ def scan_us_stock_gaps(
     ):
         missing.append("us_corporate_action")
 
-    if (
-        "us_intraday_trend" in required_capabilities
-        and "us_intraday_trend" not in satisfied_capabilities
-    ):
-        missing.append("us_intraday_trend")
+    if "us_intraday_trend" in required_capabilities:
+        try:
+            intraday_contract = us_market_service.get_us_intraday_trend(
+                symbol=normalized_symbol,
+                session_scope="all",
+                interval="1m",
+                db=db,
+                persist_history=False,
+            )
+            expectations = (
+                intraday_contract.get("capability_expectation")
+                if isinstance(
+                    intraday_contract.get("capability_expectation"),
+                    dict,
+                )
+                else {}
+            )
+            canonical_capabilities = {
+                capability_id: dict(projection)
+                for capability_id, projection in expectations.items()
+                if isinstance(projection, dict)
+            }
+
+            def canonical_satisfied(capability_id: str) -> bool:
+                projection = canonical_capabilities.get(capability_id) or {}
+                if projection.get("requirement_satisfied") is True:
+                    return True
+                return (
+                    projection.get("outcome") == "historical"
+                    and projection.get("availability")
+                    in {"available", "valid_empty"}
+                )
+
+            requested_intraday_capabilities = tuple(
+                capability_id
+                for capability_id in ("quote.snapshot", "intraday.bars")
+                if requested_capabilities is not None
+                and capability_id in requested_capabilities
+            )
+            intraday_satisfied = (
+                all(
+                    canonical_satisfied(capability_id)
+                    for capability_id in requested_intraday_capabilities
+                )
+                if requested_intraday_capabilities
+                else any(
+                    canonical_satisfied(capability_id)
+                    for capability_id in ("quote.snapshot", "intraday.bars")
+                )
+            )
+            if not intraday_satisfied:
+                missing.append("us_intraday_trend")
+        except Exception as exc:
+            missing.append("us_intraday_trend")
+            warnings.append(
+                f"US canonical intraday capability check failed: {exc}"
+            )
 
     is_current = not missing
     return {
@@ -324,6 +377,8 @@ def scan_us_stock_gaps(
         },
         "instrument_type": instrument_type,
         "required_capabilities": sorted(required_capabilities),
+        "canonical_capabilities": canonical_capabilities,
+        "tool_session_satisfied_capabilities": sorted(satisfied_capabilities),
         "not_applicable": (
             [
                 "us_company_profile",

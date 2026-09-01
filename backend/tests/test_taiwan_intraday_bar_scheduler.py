@@ -227,6 +227,48 @@ def test_intraday_target_universe_reports_unknown_and_inactive_targets() -> None
         engine.dispose()
 
 
+def test_viewer_selected_symbol_enters_and_leaves_plan_only_via_active_lease() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    db = Session(engine)
+    try:
+        db.add(
+            StockMaster(
+                stock_id="3711",
+                market="TWSE",
+                instrument_type="stock",
+            )
+        )
+        db.commit()
+
+        before = resolve_taiwan_intraday_target_universe(
+            db,
+            max_symbols=3,
+            configured_symbols=[],
+            lease_symbols=[],
+        )
+        active = resolve_taiwan_intraday_target_universe(
+            db,
+            max_symbols=3,
+            configured_symbols=[],
+            lease_symbols=["3711"],
+        )
+        expired = resolve_taiwan_intraday_target_universe(
+            db,
+            max_symbols=3,
+            configured_symbols=[],
+            lease_symbols=[],
+        )
+
+        assert before["symbols"] == []
+        assert active["symbols"] == ["3711"]
+        assert active["targets"][0]["origins"] == ["active_lease"]
+        assert expired["symbols"] == []
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_acceptance_canary_is_an_explicit_subset_of_the_shared_plan() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)

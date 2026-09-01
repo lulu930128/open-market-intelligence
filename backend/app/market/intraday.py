@@ -13,6 +13,8 @@ from app.market.public_quote_platform import (
     read_taiwan_session_close,
 )
 from app.market.tw_disposition import get_taiwan_disposition_status
+from app.market.tw_bar_service import TaiwanBarService
+from app.market.trading_calendar import taiwan_presentation_session
 from app.market.tw_instrument_trading_policy import (
     TaiwanInstrumentTradingMode,
     resolve_taiwan_instrument_trading_policy,
@@ -1547,35 +1549,73 @@ def get_market_intraday_history(
     symbol = _yahoo_symbol(stock_id=stock_id, market=market)
     config = intraday_history_config(interval=interval, range_value=range_value)
     fetch_range = str(config["range"])
-    resolved = read_taiwan_intraday_bars(
-        db,
-        stock_id=stock_id,
+    now = (requested_at or datetime.now(TAIPEI_TZ)).astimezone(TAIPEI_TZ)
+    from_time = None
+    if range_value != "auto":
+        days = int(config["days"])
+        from_time = (
+            datetime.combine(
+                taiwan_presentation_session(now)["trade_date"],
+                time.min,
+                tzinfo=TAIPEI_TZ,
+            )
+            if days == 1
+            else now - timedelta(days=days)
+        )
+    series = TaiwanBarService(db).read_bars(
+        instrument_id=stock_id,
         interval=interval,
-        range_value=range_value,
-        requested_at=requested_at,
+        from_time=from_time,
+        to_time=now,
+        requested_at=now,
     )
-    points, resolution_metadata = project_taiwan_intraday_bars(db, resolved)
-    persisted_point_count = len(points)
+    points = [
+        {
+            "time": bar.start_at,
+            "price": float(bar.close_price),
+            "open": float(bar.open_price),
+            "high": float(bar.high_price),
+            "low": float(bar.low_price),
+            "close": float(bar.close_price),
+            "volume": int(bar.volume.value) if bar.volume is not None else None,
+            "trade_value": (
+                int(bar.turnover_value)
+                if bar.turnover_value is not None
+                else None
+            ),
+            "provider": bar.lineage.provider,
+            "source": bar.lineage.source,
+            "source_interval": series.base_interval,
+            "calculation_version": series.aggregation_version,
+            "component_raw_result_ids": [],
+            "finalization": bar.finalization.value,
+        }
+        for bar in series.bars
+    ]
+    persisted_point_count = len(points) if not series.derived else 0
     persisted_latest_time = _point_datetime(points[-1]) if points else None
-    source = str(resolution_metadata.get("source") or "unavailable")
-    provider = str(resolution_metadata.get("provider") or "unavailable")
+    latest_bar = series.bars[-1] if series.bars else None
+    source = latest_bar.lineage.source if latest_bar is not None else "unavailable"
+    provider = latest_bar.lineage.provider if latest_bar is not None else "unavailable"
+    series_coverage = {
+        "history_status": series.history.history_status.value,
+        "requested_coverage_satisfied": (
+            series.history.requested_coverage_satisfied
+        ),
+        "requested_session_count": series.history.requested_session_count,
+        "covered_session_count": series.history.covered_session_count,
+        "current_cumulative_volume_complete": False,
+    }
     is_disposition_batch = (
         trading_policy.trading_mode
         is TaiwanInstrumentTradingMode.DISPOSITION_BATCH_AUCTION
-    )
-    if is_disposition_batch:
-        points = _dedupe_disposition_points(points)
-    points = _append_completed_session_close_marker(
-        db,
-        stock_id=stock_id,
-        points=points,
-        requested_at=requested_at,
     )
     points, contract_metadata = _enrich_intraday_contract(
         points,
         interval=interval,
         source=source,
-        series_coverage=resolution_metadata.get("series_coverage"),
+        now=now,
+        series_coverage=series_coverage,
     )
 
     return {
@@ -1583,9 +1623,9 @@ def get_market_intraday_history(
         "symbol": symbol,
         "interval": interval,
         "requested_interval": interval,
-        "source_interval": resolution_metadata.get("source_interval") or interval,
+        "source_interval": series.base_interval,
         "effective_interval": interval,
-        "interval_status": "ready",
+        "interval_status": series.history.history_status.value,
         "range": fetch_range if range_value == "auto" else range_value,
         "provider": provider,
         "source": source,
@@ -1608,7 +1648,7 @@ def get_market_intraday_history(
             if persisted_latest_time is not None
             else None
         ),
-        "fallback_used": resolved.resolved.health.fallback_used,
+        "fallback_used": False,
         **trading_policy.projection(),
         "effective_match_count": len(points)
         if is_disposition_batch
@@ -1623,15 +1663,28 @@ def get_market_intraday_history(
         if is_disposition_batch
         else None,
         **contract_metadata,
-        "series_coverage": resolution_metadata.get("series_coverage"),
+        "series_coverage": series_coverage,
         "read_policy": "cache_only",
-        "acquisition_status": resolved.acquisition.status.value,
-        "resolved_health": resolution_metadata.get("resolved_health"),
-        "candidate_rejections": resolution_metadata.get("candidate_rejections"),
-        "limitations": resolution_metadata.get("limitations"),
-        "component_raw_result_ids": resolution_metadata.get(
-            "component_raw_result_ids"
+        "acquisition_status": "not_attempted",
+        "resolved_health": {
+            "status": series.history.history_status.value,
+            "series_revision": series.identity.series_revision,
+            "series_fingerprint": series.identity.series_fingerprint,
+            "lineage_digest": series.identity.lineage_digest,
+            "state_digest": series.identity.state_digest,
+        },
+        "candidate_rejections": [
+            {
+                "trade_date": item.trade_date,
+                "rejections": item.rejected_candidate_reasons,
+            }
+            for item in series.session_resolution
+            if item.rejected_candidate_reasons
+        ],
+        "limitations": list(series.limitations),
+        "component_raw_result_ids": [],
+        "calculation_versions": (
+            [series.aggregation_version] if series.aggregation_version else []
         ),
-        "calculation_versions": resolution_metadata.get("calculation_versions"),
         "points": points,
     }

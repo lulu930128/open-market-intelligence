@@ -11,7 +11,6 @@ from app.ai import evidence_builder, technical_analysis
 from app.ai.market_context import taiwan_events
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
 from app.ai.market_context.taiwan_projection import (
-    COMPACT_INTRADAY_INTERVALS,
     _add_missing,
     _broker_branch_metadata,
     _broker_branch_row,
@@ -27,6 +26,7 @@ from app.ai.market_context.taiwan_projection import (
     _stock_dict,
     _with_evidence_passport,
 )
+from app.ai.market_context.taiwan_bar_projection import project_taiwan_bar_series
 from app.ai.market_payload_contract import (
     intraday_point_limit as _intraday_point_limit,
     payload_level as _payload_level,
@@ -38,7 +38,7 @@ from app.ai.taiwan_intraday_contract import (
     resolve_effective_source_health,
     resolve_taiwan_current_price,
 )
-from app.market.live_snapshot import classify_market_snapshot, market_status_from_session
+from app.market.live_snapshot import market_status_from_session
 from app.market.financial_contract import (
     FINANCIAL_CONTRACT_VERSION,
     build_database_financial_contract,
@@ -132,7 +132,7 @@ class TaiwanStockDependencies:
     build_taiwan_source_health: Callable[..., dict[str, Any]]
     build_us_overnight_impact_report: Callable[..., dict[str, Any]]
     get_broker_branch_trade_summary: Callable[..., dict[str, Any]]
-    get_market_intraday_history: Callable[..., dict[str, Any]]
+    read_taiwan_bars: Callable[..., Any]
     read_taiwan_quote_evidence: Callable[..., dict[str, Any]]
     acquire_taiwan_quote_evidence: Callable[..., dict[str, Any]]
     read_taiwan_latest_daily_evidence: Callable[..., Any]
@@ -321,15 +321,10 @@ def _compact_intraday_bars(
         else {}
     )
     cached_fallback_allowed = params.get("fallback_to_cached") is not False
-    # Intraday bars have not passed the common-platform lineage gate. AI reads
-    # their persisted compatibility cache only; it never triggers Yahoo/NStock
-    # acquisition or chooses a provider.
+    # The Taiwan Bar owner reads resolved canonical cache only. AI never
+    # triggers acquisition or chooses a provider.
     refresh_allowed = False
-    intervals = (
-        (requested_interval,)
-        if requested_interval is not None
-        else COMPACT_INTRADAY_INTERVALS
-    )
+    intervals = (requested_interval or "1m",)
     if not include_intraday:
         return {
             "kind": "intraday_bars",
@@ -349,13 +344,14 @@ def _compact_intraday_bars(
     warnings: list[str] = []
     for interval in intervals:
         try:
-            history = dependencies.get_market_intraday_history(
+            bar_series = dependencies.read_taiwan_bars(
                 db=db,
-                stock_id=stock_id,
+                instrument_id=stock_id,
                 interval=interval,
-                range_value="1d",
-                refresh=False,
+                limit=point_limit,
+                include_partial=True,
             )
+            history = project_taiwan_bar_series(bar_series)
             compact_history = _compact_intraday_history(history, point_limit=point_limit)
             series[interval] = compact_history
             warnings.extend(str(item) for item in compact_history.get("warnings") or [])
@@ -373,43 +369,12 @@ def _compact_intraday_bars(
                 "points": [],
             }
 
-    one_minute_time = (series.get("1m") or {}).get("to_time")
-    try:
-        one_minute_at = datetime.fromisoformat(str(one_minute_time)) if one_minute_time else None
-    except ValueError:
-        one_minute_at = None
-    for interval, item in series.items():
-        if not isinstance(item, dict):
-            continue
-        try:
-            interval_at = (
-                datetime.fromisoformat(str(item.get("to_time")))
-                if item.get("to_time")
-                else None
-            )
-        except ValueError:
-            interval_at = None
-        delta_seconds = (
-            max(int((one_minute_at - interval_at).total_seconds()), 0)
-            if one_minute_at is not None and interval_at is not None
-            else None
-        )
-        item["freshness_delta_seconds"] = delta_seconds
-        snapshot_freshness = classify_market_snapshot(
-            calendar_status=calendar_status or dependencies.build_taiwan_calendar_status(),
-            quote_time=item.get("to_time"),
-        )
-        item["freshness_status"] = snapshot_freshness["status"]
-        item["age_seconds"] = snapshot_freshness["age_seconds"]
-        item["quote_semantics"] = snapshot_freshness["quote_semantics"]
-        item["market_status"] = snapshot_freshness["market_status"]
-
     return {
         "kind": "intraday_bars",
         "enabled": True,
         "provider_refresh_allowed": refresh_allowed,
         "cached_fallback_allowed": cached_fallback_allowed,
-        "read_mode": "persisted_cache",
+        "read_mode": "taiwan_bar_service_cache_only",
         "intervals": list(intervals),
         "requested_interval": requested_interval,
         "range": "1d",
@@ -1088,14 +1053,6 @@ def read_stock_quote_context(
         else None
     )
     company_profile = _company_profile_payload(stock, stock_profile)
-    fundamentals_applicable = not (
-        stock is not None
-        and is_taiwan_etf(
-            getattr(stock, "instrument_type", None),
-            stock_id=normalized_stock_id,
-        )
-    )
-
     latest_daily_evidence = dependencies.read_taiwan_latest_daily_evidence(
         db,
         normalized_stock_id,
@@ -1135,7 +1092,6 @@ def read_stock_quote_context(
         )
     )
     requested_domains = set(requested_domain_values)
-    excluded_domains = set(excluded_domain_values)
     external_fetch_allowed = params.get("external_fetch_allowed") is True
     cached_fallback_allowed = params.get("fallback_to_cached") is not False
     requested_provider_values = (

@@ -10,9 +10,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from datetime import datetime
 from typing import Any, Mapping
 
+from app.market.trading_calendar import (
+    TAIWAN_CLOSING_AUCTION_TIME,
+    TAIWAN_SESSION_OPEN_TIME,
+    TAIWAN_TZ,
+)
 from app.market_data.contracts import AuctionType, MarketSession
+
+
+TAIWAN_TRADING_POLICY_VERSION = "tw.instrument_trading_policy.v2"
 
 
 class TaiwanInstrumentTradingMode(str, Enum):
@@ -52,6 +61,20 @@ class TaiwanAuctionApplicability:
     auction_type: AuctionType | None
     trading_policy: TaiwanInstrumentTradingPolicy
     reason_codes: tuple[str, ...]
+
+
+def is_taiwan_continuous_time_bar_start(value: datetime) -> bool:
+    """Return whether a timestamp can anchor a continuous-matching time bar.
+
+    The 13:25-13:30 closing auction is event evidence, not a regular 1m time
+    bar.  Every provider/materializer calls this owner instead of maintaining a
+    local clock range.
+    """
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Taiwan bar timestamps must be timezone-aware")
+    clock = value.astimezone(TAIWAN_TZ).time().replace(tzinfo=None)
+    return TAIWAN_SESSION_OPEN_TIME <= clock < TAIWAN_CLOSING_AUCTION_TIME
 
 
 def resolve_taiwan_instrument_trading_policy(
@@ -100,6 +123,22 @@ def resolve_taiwan_instrument_trading_policy(
             if active
             else "DISPOSITION_NOT_ACTIVE"
         ),
+    )
+
+
+def continuous_taiwan_trading_policy(
+    *,
+    reason_code: str = "INSTRUMENT_CONTINUOUS_TIME_BARS",
+) -> TaiwanInstrumentTradingPolicy:
+    """Create the explicit policy for instruments not governed by disposition."""
+
+    return TaiwanInstrumentTradingPolicy(
+        market_semantics_usable=True,
+        trading_mode=TaiwanInstrumentTradingMode.CONTINUOUS,
+        analysis_basis=TaiwanAnalysisBasis.TIME_BARS,
+        disposition_active=False,
+        cache_status="not_applicable",
+        reason_codes=(reason_code,),
     )
 
 
@@ -170,10 +209,13 @@ def resolve_taiwan_auction_applicability(
 
 
 __all__ = [
+    "TAIWAN_TRADING_POLICY_VERSION",
     "TaiwanAnalysisBasis",
     "TaiwanAuctionApplicability",
     "TaiwanInstrumentTradingMode",
     "TaiwanInstrumentTradingPolicy",
+    "continuous_taiwan_trading_policy",
+    "is_taiwan_continuous_time_bar_start",
     "resolve_taiwan_auction_applicability",
     "resolve_taiwan_instrument_trading_policy",
 ]

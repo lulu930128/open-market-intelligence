@@ -2,6 +2,7 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import utc_now
 from app.jobs.service import JobExecutionError, ProgressCallback, run_tracked_job
 from app.jp_market import service as jp_market_service
@@ -42,6 +43,9 @@ from app.us_market import service as us_market_service
 from app.us_market import ownership_service as us_ownership_service
 from app.us_market.daily_ohlcv_chart import read_us_daily_ohlcv_chart
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.intraday_maintenance import (
+    repair_us_yahoo_intraday_minute_integrity,
+)
 from app.us_market.ohlc_priority import reconcile_us_priority_ohlc
 from app.us_market import ownership_13f_analytics as us_13f_analytics
 from app.us_market import ownership_13f_mapping as us_13f_mapping
@@ -851,13 +855,49 @@ def run_us_priority_ohlc_reconcile_job(
     job_id: int,
     max_runtime_seconds: int,
     cursor_symbol: str | None,
+    max_symbols: int = 20,
+    max_external_calls: int = 20,
+    max_provider_attempts: int = 2,
 ) -> None:
     def worker(_db: Session, progress: ProgressCallback):
         return reconcile_us_priority_ohlc(
             max_runtime_seconds=max_runtime_seconds,
             cursor_symbol=cursor_symbol,
+            max_symbols=max_symbols,
+            max_external_calls=max_external_calls,
+            max_provider_attempts=max_provider_attempts,
             progress_callback=progress,
         )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_us_intraday_minute_repair_job(
+    job_id: int,
+    apply: bool,
+    max_groups: int,
+    max_candidate_rows: int,
+    after_group_id: int | None,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        operation = "Applying" if apply else "Planning"
+        progress(0, 1, f"{operation} bounded US intraday minute repair.")
+        audit_manifest_path = None
+        if apply:
+            audit_manifest_path = (
+                settings.us_intraday_minute_repair_audit_dir
+                / f"job-{job_id}.json"
+            )
+        result = repair_us_yahoo_intraday_minute_integrity(
+            db,
+            apply=apply,
+            max_groups=max_groups,
+            max_candidate_rows=max_candidate_rows,
+            after_group_id=after_group_id,
+            audit_manifest_path=audit_manifest_path,
+        )
+        progress(1, 1, f"{operation} US intraday minute repair completed.")
+        return result
 
     run_tracked_job(job_id, worker)
 

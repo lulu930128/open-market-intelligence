@@ -11,6 +11,7 @@ import {
   pad2,
   type BuiltSeriesData,
   type ChartDisplayStyle,
+  type ChartDateGranularity,
   type ChartDrawingTool,
   type ChartTimeMode,
   type LineSeriesData,
@@ -60,6 +61,7 @@ type UseLightweightChartEngineArgs = {
   resolvedVolumePanelLabel: string;
   seriesData: BuiltSeriesData;
   timeMode: ChartTimeMode;
+  dateGranularity?: ChartDateGranularity;
 };
 
 export function useLightweightChartEngine({
@@ -76,6 +78,7 @@ export function useLightweightChartEngine({
   resolvedVolumePanelLabel,
   seriesData,
   timeMode,
+  dateGranularity = null,
 }: UseLightweightChartEngineArgs) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -331,7 +334,7 @@ export function useLightweightChartEngine({
             if (parts) return `${pad2(parts.hour)}:${pad2(parts.minute)}`;
           }
 
-          return formatChartDate(time);
+          return formatChartDate(time, dateGranularity);
         },
       },
       crosshair: {
@@ -361,7 +364,8 @@ export function useLightweightChartEngine({
       localization: {
         locale: "zh-TW",
         dateFormat: "yyyy/MM/dd",
-        timeFormatter: (time: Time) => formatChartDateTime(time, timeMode),
+        timeFormatter: (time: Time) =>
+          formatChartDateTime(time, timeMode, dateGranularity),
         priceFormatter: (price: number) => formatPrice(price, pricePrecision),
       },
     });
@@ -891,6 +895,7 @@ export function useLightweightChartEngine({
     benchmarkLabel,
     chartSeriesKey,
     chartStyle,
+    dateGranularity,
     downColor,
     height,
     maColors,

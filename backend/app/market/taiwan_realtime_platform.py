@@ -8,7 +8,6 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from app.db.models import StockMaster
 from app.market.realtime_snapshot_repository import (
     TaiwanAuctionRepository,
     TaiwanDepthRepository,
@@ -29,6 +28,7 @@ from app.market.tw_instrument_trading_policy import (
     TaiwanAuctionApplicability,
     resolve_taiwan_auction_applicability,
 )
+from app.market.tw_instrument import resolve_taiwan_instrument
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
@@ -54,7 +54,6 @@ from app.market_data.contracts import (
     EntitlementStatus,
     EvidenceFreshness,
     InstrumentKey,
-    InstrumentType,
     Market,
     MarketSession,
     OperationalStatus,
@@ -96,25 +95,7 @@ def _market_session(now: datetime) -> MarketSession:
 
 
 def _load_instrument(db: Session, stock_id: str) -> InstrumentKey:
-    normalized = str(stock_id or "").strip().upper()
-    if not normalized:
-        raise ValueError("stock_id must not be empty")
-    stock = db.query(StockMaster).filter(StockMaster.stock_id == normalized).first()
-    if stock is None:
-        raise ValueError(f"Taiwan stock_id is not registered: {normalized}")
-    venue = str(stock.market or "").strip().upper()
-    if venue not in {"TWSE", "TPEX"}:
-        raise ValueError("Taiwan realtime capability requires TWSE or TPEX")
-    return InstrumentKey(
-        market=Market.TW,
-        symbol=normalized,
-        instrument_type=(
-            InstrumentType.ETF
-            if str(stock.instrument_type or "").strip().casefold() == "etf"
-            else InstrumentType.STOCK
-        ),
-        venue=venue,
-    )
+    return resolve_taiwan_instrument(db, stock_id)
 
 
 def _bounds(

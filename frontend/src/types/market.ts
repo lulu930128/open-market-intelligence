@@ -849,6 +849,121 @@ export type ChartPoint = {
   volume_scope?: string | null;
 };
 
+export type TaiwanInstrumentKey = {
+  market: "TW" | string;
+  symbol: string;
+  instrument_type: "stock" | "etf" | "index" | string;
+  venue: "TWSE" | "TPEX" | string;
+};
+
+export type TaiwanCanonicalQuantity = {
+  value: number | string;
+  unit: string;
+};
+
+export type TaiwanCanonicalBarPoint = {
+  interval: string;
+  start_at: string;
+  end_at: string;
+  open_price: number | string;
+  high_price: number | string;
+  low_price: number | string;
+  close_price: number | string;
+  volume: TaiwanCanonicalQuantity | null;
+  turnover_value: number | string | null;
+  trade_count: number | null;
+  finalization: "final" | "provisional" | "corrected" | string;
+};
+
+export type TaiwanBarOutwardState = {
+  start_at: string;
+  finalization: string;
+  authority: string;
+  official: boolean;
+  release_status: string;
+  reconciliation_status: string;
+  persisted: boolean;
+  source_interval: string;
+  technical_eligible: boolean;
+};
+
+export type TaiwanBarSeriesRead = {
+  contract_version: string;
+  instrument: TaiwanInstrumentKey;
+  requested_interval: string;
+  base_interval: "1m" | "1d";
+  derived: boolean;
+  aggregation_version: string | null;
+  bars: TaiwanCanonicalBarPoint[];
+  bar_states: TaiwanBarOutwardState[];
+  history: {
+    history_status: "ready" | "warming_up" | "partial" | "missing" | string;
+    requested_coverage_satisfied: boolean;
+    limitations: string[];
+  };
+  identity: {
+    series_fingerprint: string;
+    lineage_digest: string;
+    state_digest: string;
+    series_revision: string;
+  };
+  limitations: string[];
+  warnings: string[];
+};
+
+export type TaiwanTechnicalSeriesRead = {
+  contract_version: string;
+  instrument: TaiwanInstrumentKey;
+  interval: string;
+  bar_series_fingerprint: string;
+  bar_lineage_digest: string;
+  bar_state_digest: string;
+  bar_series_revision: string;
+  algorithm_version: string;
+  parameter_contract: Record<string, unknown>;
+  status: "available" | "partial" | "warming_up" | "missing" | "unavailable";
+  warmup: Record<string, Record<string, unknown>>;
+  points: StockIndicatorPoint[];
+  structures: Record<string, unknown>;
+  signals: Record<string, unknown>;
+  relative: Record<string, unknown>;
+  technical_revision: string;
+  limitations: string[];
+  warnings: string[];
+};
+
+export type TaiwanChartBundleRead = {
+  contract_version: string;
+  bars: TaiwanBarSeriesRead;
+  technical: TaiwanTechnicalSeriesRead;
+  series_fingerprint: string;
+  lineage_digest: string;
+  state_digest: string;
+  series_revision: string;
+  quote_side?: {
+    current_observation: IntradayCurrentObservation | null;
+    previous_close: number | null;
+    price_diagnostics: IntradayPriceDiagnostics | null;
+    capabilities: IntradayTrendCapabilities | null;
+    source: string | null;
+    trade_date: string | null;
+    updated_at: string | null;
+  } | null;
+};
+
+export type TaiwanTechnicalCapabilityContract = {
+  contract_version: string;
+  algorithm_version: string;
+  calculation_owner: "TaiwanTechnicalService" | string;
+  parameter_contract: {
+    authority: "backend" | string;
+    defaults: Record<string, unknown>;
+    ranges: Record<string, unknown>;
+  };
+  indicators: Record<string, { status: "available" | "pending" | string }>;
+  frontend_fallback_allowed: false;
+};
+
 export type OhlcIntradayOverlay = {
   source: string | null;
   trade_date: string;
@@ -1274,6 +1389,14 @@ export type IntradayTrendPoint = {
   volume_scope?: string | null;
   volume_status?: string | null;
   trade_value_status?: string | null;
+  ema_fast?: number | null;
+  ema_slow?: number | null;
+  rsi_value?: number | null;
+  macd_value?: number | null;
+  macd_signal_value?: number | null;
+  macd_histogram_value?: number | null;
+  vwap_value?: number | null;
+  twap_value?: number | null;
 };
 
 export type IntradayPriceDiagnostics = {
@@ -2553,6 +2676,8 @@ export type StockIndicatorPoint = {
   kd?: Record<string, number | null>;
   pvo?: Record<string, number | null>;
   support_resistance?: Record<string, number | null>;
+  vwap?: number | null;
+  twap?: number | null;
 };
 
 export type TaiwanDispositionStatusRead = {

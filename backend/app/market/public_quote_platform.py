@@ -8,7 +8,6 @@ from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
-from app.db.models import StockMaster
 from app.market.providers.tw_public_quote import (
     TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,
 )
@@ -30,6 +29,7 @@ from app.market.tw_public_quote_contract import (
     TW_PUBLIC_QUOTE_DATASET_ID,
     TWSE_MIS_QUOTE_PROVIDER,
 )
+from app.market.tw_instrument import resolve_taiwan_instrument
 from app.market_data.candidate_repository import CandidateRowRejection
 from app.market_data.contracts import (
     ConnectionStatus,
@@ -37,7 +37,6 @@ from app.market_data.contracts import (
     EntitlementStatus,
     EvidenceFreshness,
     InstrumentKey,
-    InstrumentType,
     Market,
     MarketSession,
     OperationalStatus,
@@ -97,34 +96,8 @@ def _market_session(now: datetime) -> MarketSession:
     return taiwan_market_session(now)
 
 
-def _instrument_type(value: str | None) -> InstrumentType:
-    return (
-        InstrumentType.ETF
-        if str(value or "").strip().casefold() == "etf"
-        else InstrumentType.STOCK
-    )
-
-
 def _load_instrument(db: Session, stock_id: str) -> InstrumentKey:
-    normalized_stock_id = str(stock_id or "").strip().upper()
-    if not normalized_stock_id:
-        raise ValueError("stock_id must not be empty")
-    stock = (
-        db.query(StockMaster)
-        .filter(StockMaster.stock_id == normalized_stock_id)
-        .first()
-    )
-    if stock is None:
-        raise ValueError(f"Taiwan stock_id is not registered: {normalized_stock_id}")
-    venue = str(stock.market or "").strip().upper()
-    if venue not in {"TWSE", "TPEX"}:
-        raise ValueError("public Taiwan quote requires a TWSE or TPEX instrument")
-    return InstrumentKey(
-        market=Market.TW,
-        symbol=normalized_stock_id,
-        instrument_type=_instrument_type(stock.instrument_type),
-        venue=venue,
-    )
+    return resolve_taiwan_instrument(db, stock_id)
 
 
 def build_taiwan_public_quote_requirement(

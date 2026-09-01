@@ -102,3 +102,50 @@ def test_kgi_buffer_materializes_only_closed_minutes_with_canonical_lineage() ->
     finally:
         db.close()
         engine.dispose()
+
+
+def test_kgi_closing_auction_rows_do_not_enter_continuous_minute_bars() -> None:
+    requested_at = datetime(2026, 9, 1, 13, 31, tzinfo=TAIPEI)
+    instrument = InstrumentKey(
+        market=Market.TW,
+        symbol="2330",
+        instrument_type=InstrumentType.STOCK,
+        venue="TWSE",
+    )
+    requirement = build_taiwan_intraday_requirement(
+        instrument=instrument,
+        interval="1m",
+        range_value="1d",
+        policy=RealtimePolicy.PREFER_LIVE,
+        requested_at=requested_at,
+        acquiring=True,
+    )
+    acquisition = kgi_minute_kbar_acquisition(
+        {
+            "stock_id": "2330",
+            "minute_kbars": [
+                {
+                    "event_time": "2026-09-01T13:24:00+08:00",
+                    "received_at": "2026-09-01T13:25:01+08:00",
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume_lots": 1,
+                    "total_amount": 100000,
+                },
+                {
+                    "event_time": "2026-09-01T13:27:00+08:00",
+                    "received_at": "2026-09-01T13:28:01+08:00",
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume_lots": 1,
+                    "total_amount": 100000,
+                },
+            ],
+        },
+        requirement,
+    )
+    assert [item.start_at.minute for item in acquisition.observations] == [24]

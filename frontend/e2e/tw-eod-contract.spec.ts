@@ -69,7 +69,7 @@ test("Taiwan canonical indicators fail closed when backend evidence is absent", 
     canonicalAuthority: "backend",
   });
 
-  expect(scope).toBe("mixed");
+  expect(scope).toBe("backend_unavailable");
 
   const backendOwned = projectStockKLineData({
     chartData: points,

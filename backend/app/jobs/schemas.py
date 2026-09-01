@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -53,3 +53,16 @@ class USCurrentMarketBootstrapJobRequest(BaseModel):
         ge=1,
         le=20,
     )
+
+
+class TaiwanIntradayBarBootstrapJobRequest(BaseModel):
+    symbols: list[str] = Field(default_factory=list, max_length=10)
+    max_symbols: int = Field(default=10, ge=1, le=10)
+
+
+class TaiwanIndexDailyBootstrapJobRequest(BaseModel):
+    index_ids: list[str] = Field(default_factory=lambda: ["TAIEX", "TPEX"], min_length=1, max_length=2)
+    date_from: date
+    date_to: date
+    taiex_max_sessions: int = Field(default=260, ge=1, le=260)
+    tpex_max_sessions: int = Field(default=20, ge=1, le=20)

@@ -12,9 +12,11 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     DataQualityCheck,
     MarketDailyPrice,
+    MarketDailyPriceLineage,
     RawFetchResult,
     SourceRegistry,
 )
+from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_SOURCE
 from app.market_data.contracts import BarFinalization, BarObservation, Market
 from app.market_data.gateway import BarAcquisitionResult
 from app.market_data.integration_contracts import (
@@ -38,6 +40,7 @@ def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
         TWSE_DAILY_TRADING_SOURCE_NAME,
         TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
         TPEX_DAILY_QUOTES_SOURCE_NAME,
+        TAIEX_OFFICIAL_DAILY_SOURCE,
     }:
         raise ValueError(f"unsupported Taiwan official daily source: {receipt.source}")
     return {
@@ -189,6 +192,10 @@ class TaiwanOfficialDailyTransaction:
             BarFinalization.CORRECTED,
         }:
             raise ValueError("Taiwan daily transaction requires final/corrected bars")
+        if not observation.instrument.symbol.strip():
+            raise ValueError("Taiwan daily observation requires instrument symbol")
+        if not observation.instrument.venue:
+            raise ValueError("Taiwan daily observation requires instrument venue")
         trade_date = observation.end_at.astimezone(TAIWAN_TZ).date()
         volume = _integer(observation.volume.value) if observation.volume else None
         trade_value = _integer(observation.turnover_value)
@@ -200,7 +207,14 @@ class TaiwanOfficialDailyTransaction:
             .first()
         )
         incoming = {
+            "source_id": source.id,
+            "raw_result_id": raw.id,
+            "trade_date": trade_date,
+            "stock_id": observation.instrument.symbol,
             "stock_name": observation.instrument_name,
+            "canonical_market": Market.TW.value,
+            "venue": observation.instrument.venue,
+            "instrument_type": observation.instrument.instrument_type.value,
             "trade_volume": volume,
             "trade_value": trade_value,
             "open_price": observation.open_price,
@@ -209,27 +223,29 @@ class TaiwanOfficialDailyTransaction:
             "close_price": observation.close_price,
             "transaction_count": observation.trade_count,
             "price_change": observation.price_change,
+            "authority": observation.lineage.authority.value,
+            "finalization": observation.finalization.value,
+            "official": observation.lineage.authority.value == "exchange",
+            "release_status": "released",
+            "reconciliation_status": "pending",
+            "derivation_kind": None,
+            "aggregation_version": None,
         }
         unchanged = False
         if row is None:
             row = MarketDailyPrice(
-                source_id=source.id,
-                raw_result_id=raw.id,
-                trade_date=trade_date,
-                stock_id=observation.instrument.symbol,
-                stock_name=observation.instrument_name,
-                trade_volume=volume,
-                trade_value=trade_value,
-                open_price=float(observation.open_price),
-                high_price=float(observation.high_price),
-                low_price=float(observation.low_price),
-                close_price=float(observation.close_price),
-                transaction_count=observation.trade_count,
-                price_change=(
-                    float(observation.price_change)
-                    if observation.price_change is not None
-                    else None
-                ),
+                **{
+                    **incoming,
+                    "open_price": float(observation.open_price),
+                    "high_price": float(observation.high_price),
+                    "low_price": float(observation.low_price),
+                    "close_price": float(observation.close_price),
+                    "price_change": (
+                        float(observation.price_change)
+                        if observation.price_change is not None
+                        else None
+                    ),
+                },
             )
             self._db.add(row)
         else:
@@ -244,21 +260,35 @@ class TaiwanOfficialDailyTransaction:
                 and row.transaction_count == observation.trade_count
                 and _decimal_equal(row.price_change, observation.price_change)
             )
-            row.raw_result_id = raw.id
-            if observation.instrument_name is not None:
-                row.stock_name = observation.instrument_name
-            row.trade_volume = volume
-            row.trade_value = trade_value
+            for key, value in incoming.items():
+                if key == "stock_name" and value is None:
+                    continue
+                setattr(row, key, value)
             row.open_price = float(observation.open_price)
             row.high_price = float(observation.high_price)
             row.low_price = float(observation.low_price)
             row.close_price = float(observation.close_price)
-            row.transaction_count = observation.trade_count
             row.price_change = (
                 float(observation.price_change)
                 if observation.price_change is not None
                 else None
             )
+        self._db.flush()
+        lineage = (
+            self._db.query(MarketDailyPriceLineage)
+            .filter(MarketDailyPriceLineage.daily_price_id == row.id)
+            .first()
+        )
+        if lineage is None:
+            lineage = MarketDailyPriceLineage(daily_price_id=row.id)
+            self._db.add(lineage)
+        lineage.raw_result_id = raw.id
+        lineage.evidence_kind = "acquired"
+        lineage.source_interval = "1d"
+        lineage.materialization_version = None
+        lineage.component_raw_result_ids_json = None
+        lineage.component_content_hashes_json = None
+        lineage.lineage_digest = observation.lineage.content_hash
         return unchanged
 
     def persist_bar_acquisition(

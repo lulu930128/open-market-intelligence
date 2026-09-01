@@ -58,6 +58,7 @@ export function formatDrawingUnitCount(
 }
 
 export type ChartTimeMode = "date" | "intraday";
+export type ChartDateGranularity = "daily" | "weekly" | "monthly" | null;
 export type ChartDisplayStyle = "candlestick" | "line";
 export type BusinessDayTime = Extract<Time, { year: number; month: number; day: number }>;
 export type ChartTimeParts = {
@@ -794,20 +795,32 @@ export function chartTimeParts(value: Time): ChartTimeParts | null {
   return null;
 }
 
-export function formatChartDate(value: Time) {
+export function formatChartDate(
+  value: Time,
+  granularity: ChartDateGranularity = null
+) {
   const parts = chartTimeParts(value);
 
   if (!parts) return null;
 
-  return `${parts.year}/${pad2(parts.month)}/${pad2(parts.day)}`;
+  if (granularity === "monthly") {
+    return `${parts.year}/${pad2(parts.month)}`;
+  }
+
+  const dateLabel = `${parts.year}/${pad2(parts.month)}/${pad2(parts.day)}`;
+  return granularity === "weekly" ? `${dateLabel} 週` : dateLabel;
 }
 
-export function formatChartDateTime(value: Time, timeMode: ChartTimeMode) {
+export function formatChartDateTime(
+  value: Time,
+  timeMode: ChartTimeMode,
+  granularity: ChartDateGranularity = null
+) {
   const parts = chartTimeParts(value);
 
   if (!parts) return "";
 
-  const dateLabel = `${parts.year}/${pad2(parts.month)}/${pad2(parts.day)}`;
+  const dateLabel = formatChartDate(value, granularity) ?? "";
 
   if (timeMode === "date") return dateLabel;
 

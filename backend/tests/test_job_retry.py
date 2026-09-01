@@ -13,7 +13,10 @@ from sqlalchemy.orm import Session
 from app.db.models import JobRun, utc_now
 from app.jobs import backfill_tasks
 from app.jobs import service as job_service
-from app.jobs.job_types import US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE
+from app.jobs.job_types import (
+    US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE,
+    US_INTRADAY_MINUTE_REPAIR_JOB_TYPE,
+)
 from app.jobs.us_current_market_bootstrap import (
     run_us_current_market_bootstrap_job,
 )
@@ -694,7 +697,37 @@ class JobRetryTests(unittest.TestCase):
         task, task_args, retried_request = _retry_config(job)
 
         self.assertIs(task, backfill_tasks.run_us_priority_ohlc_reconcile_job)
-        self.assertEqual(task_args, (600, "UMC"))
+        self.assertEqual(task_args, (600, "UMC", 20, 20, 2))
+        self.assertEqual(retried_request, request)
+
+    def test_retry_config_recreates_bounded_us_intraday_minute_repair(self) -> None:
+        request = {
+            "apply": False,
+            "max_groups": 120,
+            "max_candidate_rows": 2_000,
+            "after_group_id": 450,
+        }
+        job = SimpleNamespace(
+            id=204,
+            job_type=US_INTRADAY_MINUTE_REPAIR_JOB_TYPE,
+            status="error",
+            target="dry-run:450",
+            progress_current=0,
+            progress_total=1,
+            message="Job failed.",
+            error_message="read failed",
+            request_json=json.dumps(request),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, retried_request = _retry_config(job)
+
+        self.assertIs(task, backfill_tasks.run_us_intraday_minute_repair_job)
+        self.assertEqual(task_args, (False, 120, 2_000, 450))
         self.assertEqual(retried_request, request)
 
     def test_retry_config_recreates_bounded_us_current_market_bootstrap(self) -> None:

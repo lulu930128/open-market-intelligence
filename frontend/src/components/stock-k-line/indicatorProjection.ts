@@ -758,6 +758,161 @@ type ProjectStockKLineDataInput = {
   allowCanonicalFallback?: boolean;
 };
 
+function projectBackendStockKLineData(
+  chartData: ChartPoint[],
+  indicatorData: StockIndicatorPoint[],
+  params: IndicatorParameters
+): MergedPoint[] {
+  const indicatorByTime = new Map(
+    indicatorData.map((point) => [point.time.slice(0, 10), point])
+  );
+  return chartData.map((point) => {
+    const indicator = indicatorByTime.get(point.time.slice(0, 10));
+    const backend = isBackendAuthoritativeIndicator(indicator);
+    const value = (
+      values: Record<string, number | null> | undefined,
+      key: string,
+      matches = true
+    ) => (backend && matches ? backendIndicatorValue(values, key) : null);
+    const emaMatches = backendIndicatorParametersMatch(indicator, {
+      ema_fast: params.emaFast,
+      ema_slow: params.emaSlow,
+    });
+    const macdMatches = backendIndicatorParametersMatch(indicator, {
+      macd_fast: params.macdFast,
+      macd_slow: params.macdSlow,
+      macd_signal: params.macdSignal,
+    });
+    return {
+      ...point,
+      ma5: value(
+        indicator?.ma,
+        `ma${params.maShort}`,
+        backendIndicatorWindowExists(indicator, "ma_windows", params.maShort)
+      ),
+      ma20: value(
+        indicator?.ma,
+        `ma${params.maMiddle}`,
+        backendIndicatorWindowExists(indicator, "ma_windows", params.maMiddle)
+      ),
+      ma60: value(
+        indicator?.ma,
+        `ma${params.maLong}`,
+        backendIndicatorWindowExists(indicator, "ma_windows", params.maLong)
+      ),
+      ema12: value(indicator?.ema, `ema${params.emaFast}`, emaMatches),
+      ema26: value(indicator?.ema, `ema${params.emaSlow}`, emaMatches),
+      vwap: null,
+      psar: null,
+      donchianUpper: value(
+        indicator?.donchian,
+        `upper${params.donchianPeriod}`,
+        backendIndicatorParametersMatch(indicator, {
+          donchian_period: params.donchianPeriod,
+        })
+      ),
+      donchianLower: value(
+        indicator?.donchian,
+        `lower${params.donchianPeriod}`,
+        backendIndicatorParametersMatch(indicator, {
+          donchian_period: params.donchianPeriod,
+        })
+      ),
+      volumeMa20: value(
+        indicator?.volume_ma,
+        `volume_ma${params.volumeMa}`,
+        backendIndicatorWindowExists(
+          indicator,
+          "volume_ma_windows",
+          params.volumeMa
+        )
+      ),
+      changePct: backend ? indicator?.change_pct ?? null : null,
+      bbMiddle: value(
+        indicator?.bollinger,
+        `middle${params.bollingerPeriod}`,
+        backendIndicatorParametersMatch(indicator, {
+          bollinger_period: params.bollingerPeriod,
+          bollinger_std_dev: params.bollingerStdDev,
+        })
+      ),
+      bbUpper: value(
+        indicator?.bollinger,
+        `upper${params.bollingerPeriod}`,
+        backendIndicatorParametersMatch(indicator, {
+          bollinger_period: params.bollingerPeriod,
+          bollinger_std_dev: params.bollingerStdDev,
+        })
+      ),
+      bbLower: value(
+        indicator?.bollinger,
+        `lower${params.bollingerPeriod}`,
+        backendIndicatorParametersMatch(indicator, {
+          bollinger_period: params.bollingerPeriod,
+          bollinger_std_dev: params.bollingerStdDev,
+        })
+      ),
+      rsi14: value(
+        indicator?.rsi,
+        `rsi${params.rsiPeriod}`,
+        backendIndicatorParametersMatch(indicator, { rsi_period: params.rsiPeriod })
+      ),
+      macd: value(indicator?.macd, "macd", macdMatches),
+      macdSignal: value(indicator?.macd, "signal", macdMatches),
+      macdHistogram: value(indicator?.macd, "histogram", macdMatches),
+      k: value(
+        indicator?.kd,
+        `k${params.kdPeriod}`,
+        backendIndicatorParametersMatch(indicator, { kd_period: params.kdPeriod })
+      ),
+      d: value(
+        indicator?.kd,
+        `d${params.kdPeriod}`,
+        backendIndicatorParametersMatch(indicator, { kd_period: params.kdPeriod })
+      ),
+      atr14: value(
+        indicator?.atr,
+        `atr${params.atrPeriod}`,
+        backendIndicatorParametersMatch(indicator, { atr_period: params.atrPeriod })
+      ),
+      plusDi14: value(
+        indicator?.adx,
+        `plus_di${params.adxPeriod}`,
+        backendIndicatorParametersMatch(indicator, { adx_period: params.adxPeriod })
+      ),
+      minusDi14: value(
+        indicator?.adx,
+        `minus_di${params.adxPeriod}`,
+        backendIndicatorParametersMatch(indicator, { adx_period: params.adxPeriod })
+      ),
+      adx14: value(
+        indicator?.adx,
+        `adx${params.adxPeriod}`,
+        backendIndicatorParametersMatch(indicator, { adx_period: params.adxPeriod })
+      ),
+      obv: null,
+      obvMa10: null,
+      mfi14: value(
+        indicator?.mfi,
+        `mfi${params.mfiPeriod}`,
+        backendIndicatorParametersMatch(indicator, { mfi_period: params.mfiPeriod })
+      ),
+      cci20: null,
+      williamsR14: null,
+      roc12: value(
+        indicator?.roc,
+        `roc${params.rocPeriod}`,
+        backendIndicatorParametersMatch(indicator, { roc_period: params.rocPeriod })
+      ),
+      stochRsiK: null,
+      stochRsiD: null,
+      relativeStrength: null,
+      beta: null,
+      correlation: null,
+    };
+  });
+}
+
 export function projectStockKLineData({
   chartData,
   indicatorData,
@@ -766,6 +921,9 @@ export function projectStockKLineData({
   latestPreviousClose,
   allowCanonicalFallback = true,
 }: ProjectStockKLineDataInput): MergedPoint[] {
+  if (!allowCanonicalFallback) {
+    return projectBackendStockKLineData(chartData, indicatorData, params);
+  }
   const indicatorByTime = new Map<string, StockIndicatorPoint>();
 
   indicatorData.forEach((point) => {

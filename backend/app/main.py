@@ -34,6 +34,8 @@ from app.routers import (
     stocks,
     system,
     tw_market_dashboard,
+    tw_market_bars,
+    tw_market_technical,
     us_market,
     watchlists,
 )
@@ -110,6 +112,16 @@ app.include_router(crypto_market.router, prefix="/api/crypto-market", tags=["cry
 app.include_router(resource_market.router, prefix="/api/resource-market", tags=["resource-market"])
 app.include_router(dispatch.router, prefix="/api/dispatch", tags=["dispatch"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
+app.include_router(
+    tw_market_bars.router,
+    prefix="/api/market",
+    tags=["tw-market-bars"],
+)
+app.include_router(
+    tw_market_technical.router,
+    prefix="/api/market",
+    tags=["tw-market-technical"],
+)
 app.include_router(
     market_data.router,
     prefix="/api/market-data",

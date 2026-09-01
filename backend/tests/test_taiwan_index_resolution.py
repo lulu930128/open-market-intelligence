@@ -239,6 +239,75 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
             "latest_completed_session",
         )
 
+    def test_post_close_prefers_qualified_canonical_daily_bar(self) -> None:
+        checked_at = datetime(2026, 8, 14, 15, 20, tzinfo=TAIWAN_TZ)
+        result = resolve_taiwan_index_quote_state(
+            intraday=None,
+            index_snapshot={
+                "index_id": "TAIEX",
+                "time": "2026-08-14",
+                "as_of": "2026-08-14T13:30:00+08:00",
+                "close": 24_450.0,
+                "source": "fugle_indices_stream",
+                "completed_daily_close": 24_456.78,
+                "completed_daily_trade_date": "2026-08-14",
+                "completed_daily_event_time": "2026-08-14T13:30:00+08:00",
+                "completed_daily_source": "twse_mi_5mins_hist",
+                "completed_daily_provider": "twse",
+                "completed_daily_authority": "exchange",
+                "completed_daily_finalization": "final",
+                "completed_daily_official": True,
+                "completed_daily_release_status": "released",
+                "completed_daily_reconciliation_status": "not_applicable",
+                "completed_daily_qualified": True,
+            },
+            calendar_status=_calendar(
+                phase="post_close",
+                checked_at=checked_at,
+            ),
+            index_id="TAIEX",
+            acquisition_policy="cache_only",
+        )
+
+        self.assertEqual(result["selected_candidate"], "completed_daily_bar")
+        self.assertEqual(result["selected_value"], 24_456.78)
+        self.assertEqual(result["selected_finalization"], "final")
+        self.assertTrue(result["decision_usable"])
+
+    def test_completed_daily_trade_date_mismatch_does_not_handoff(self) -> None:
+        checked_at = datetime(2026, 8, 14, 15, 20, tzinfo=TAIWAN_TZ)
+        result = resolve_taiwan_index_quote_state(
+            intraday=None,
+            index_snapshot={
+                "index_id": "TAIEX",
+                "time": "2026-08-14",
+                "as_of": "2026-08-14T13:30:00+08:00",
+                "close": 24_450.0,
+                "source": "fugle_indices_stream",
+                "completed_daily_close": 24_000.0,
+                "completed_daily_trade_date": "2026-08-13",
+                "completed_daily_event_time": "2026-08-13T13:30:00+08:00",
+                "completed_daily_source": "twse_mi_5mins_hist",
+                "completed_daily_provider": "twse",
+                "completed_daily_authority": "exchange",
+                "completed_daily_finalization": "final",
+                "completed_daily_official": True,
+                "completed_daily_release_status": "released",
+                "completed_daily_reconciliation_status": "not_applicable",
+                "completed_daily_qualified": True,
+            },
+            calendar_status=_calendar(
+                phase="post_close",
+                checked_at=checked_at,
+            ),
+            index_id="TAIEX",
+            acquisition_policy="cache_only",
+        )
+
+        self.assertEqual(result["selected_candidate"], "index_summary")
+        self.assertEqual(result["selected_value"], 24_450.0)
+        self.assertFalse(result["decision_usable"])
+
     def test_post_close_exchange_shaped_source_is_not_confirmed_by_clock(self) -> None:
         checked_at = datetime(2026, 8, 14, 13, 34, tzinfo=TAIWAN_TZ)
         result = resolve_taiwan_index_quote_state(

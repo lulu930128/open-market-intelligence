@@ -126,7 +126,7 @@ YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     target_kinds=(DescriptorTargetKind.INSTRUMENT,),
     venue_scope=("TWSE", "TPEX"),
     instrument_types=(InstrumentType.STOCK, InstrumentType.ETF),
-    intervals=("1m", "5m", "15m", "30m", "1h", "4h"),
+    intervals=("1m",),
     acquisition_modes=(AcquisitionMode.FETCH,),
     priority=20,
     can_produce_live=False,
@@ -134,10 +134,14 @@ YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     max_timeout_seconds=20,
     max_external_calls_per_attempt=1,
     max_symbols_per_call=1,
-    max_range_days=93,
+    max_range_days=5,
     health_ttl_seconds=300,
     allow_unknown_health=True,
-    limitations=("VENDOR_DELAY_POSSIBLE", "PROVIDER_DEFAULT_ADJUSTMENT"),
+    limitations=(
+        "VENDOR_DELAY_POSSIBLE",
+        "PROVIDER_DEFAULT_ADJUSTMENT",
+        "BASE_1M_ONLY",
+    ),
 )
 
 TW_INTRADAY_DESCRIPTORS = (

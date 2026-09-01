@@ -8,7 +8,6 @@ from threading import Lock
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import StockMaster
 from app.market.providers.kgi_canonical import KGI_PROVIDER
 from app.market.providers.kgi_intraday_bars import kgi_minute_kbar_acquisition
 from app.market.providers.kgi_realtime_lease import KgiRealtimeQuoteLeasePort
@@ -23,6 +22,7 @@ from app.market.taiwan_realtime_platform import (
     refresh_taiwan_realtime_snapshot,
 )
 from app.market.intraday_transaction import TaiwanIntradayBarTransaction
+from app.market.tw_instrument import resolve_taiwan_instrument
 from app.market.tw_intraday_platform import build_taiwan_intraday_requirement
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_realtime_capabilities import (
@@ -37,7 +37,6 @@ from app.market.tw_realtime_capabilities import (
 from app.market_data.contracts import (
     InstrumentKey,
     InstrumentType,
-    Market,
     MarketSession,
     ResolvedDepth,
 )
@@ -52,25 +51,10 @@ from app.market_data.research_lease import (
 
 
 def _instrument(db: Session, stock_id: str) -> InstrumentKey:
-    normalized = str(stock_id or "").strip().upper()
-    if not normalized:
-        raise ValueError("stock_id is required")
-    stock = db.query(StockMaster).filter(StockMaster.stock_id == normalized).first()
-    if stock is None:
-        raise ValueError(f"Unknown Taiwan stock id: {normalized}")
-    venue = str(stock.market or "").strip().upper()
-    if venue not in {"TWSE", "TPEX"}:
-        raise ValueError("Taiwan realtime lease requires TWSE or TPEX")
-    return InstrumentKey(
-        market=Market.TW,
-        symbol=normalized,
-        instrument_type=(
-            InstrumentType.ETF
-            if str(stock.instrument_type or "").strip().casefold() == "etf"
-            else InstrumentType.STOCK
-        ),
-        venue=venue,
-    )
+    instrument = resolve_taiwan_instrument(db, stock_id)
+    if instrument.instrument_type is InstrumentType.INDEX:
+        raise ValueError("Viewer stock lease does not acquire Taiwan index events")
+    return instrument
 
 
 _KGI_REALTIME_PORT = KgiRealtimeQuoteLeasePort()

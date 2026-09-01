@@ -56,7 +56,8 @@ def test_current_provider_selection_is_not_owned_by_public_indices_functions() -
     assert "_get_market_index_intraday_prefer_live" not in intraday_source
     assert "_fetch_" not in intraday_source
     assert "read_taiwan_current_index" in intraday_source
-    assert "read_taiwan_index_intraday_series" in intraday_source
+    assert "TaiwanBarService" in intraday_source
+    assert "read_taiwan_index_intraday_series" not in intraday_source
     assert "taiwan_index_minute" not in intraday_source
 
 
@@ -103,6 +104,8 @@ def test_index_and_breadth_scheduler_lanes_are_independent() -> None:
     )
 
     assert "refresh_current_market_index_snapshots" in index_job_source
+    assert "materialize_index_minute_candidates" in index_job_source
+    assert "TaiwanBarMaterializationTransaction" in index_job_source
     assert "refresh_current_market_breadth_snapshots" not in index_job_source
     assert "refresh_current_market_breadth_snapshots" in breadth_job_source
     assert "refresh_current_market_index_snapshots" not in breadth_job_source

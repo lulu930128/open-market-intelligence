@@ -216,15 +216,18 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
         fixture_context={
             "data": {
                 "technical_indicators": {
-                    "schema_version": "tw.technical.indicators.v3",
-                    "algorithm_version": "tw.technical.indicators.v3",
+                    "schema_version": "tw.technical.indicators.v4",
+                    "algorithm_version": "tw.technical.indicators.v4",
                     "price_basis": "raw_unadjusted",
                     "status": "partial",
                 }
             }
         },
         canonical_schema_version="omi.research.technical.indicators.v1",
-        compatibility_schema_versions=("tw.technical.indicators.v3",),
+        compatibility_schema_versions=(
+            "tw.technical.indicators.v4",
+            "tw.technical.indicators.v3",
+        ),
     ),
     CapabilityProjectionSpec(
         capability_id="technical.structure",
@@ -265,7 +268,10 @@ CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
             }
         },
         canonical_schema_version="omi.research.technical.indicators.v1",
-        compatibility_schema_versions=("tw.technical.indicators.v3",),
+        compatibility_schema_versions=(
+            "tw.technical.indicators.v4",
+            "tw.technical.indicators.v3",
+        ),
     ),
     CapabilityProjectionSpec(
         capability_id="technical.structure",

@@ -10,12 +10,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
+import json
 
 from pydantic import ValidationError
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, load_only
 
-from app.db.models import MarketDailyPrice, RawFetchResult, SourceRegistry, StockMaster
+from app.db.models import (
+    MarketDailyPrice,
+    MarketDailyPriceLineage,
+    MarketDailyPriceReconciliation,
+    RawFetchResult,
+    SourceRegistry,
+    StockMaster,
+)
+from app.market.tw_bar_contracts import (
+    TAIEX_OFFICIAL_DAILY_PROVIDER,
+    TAIEX_OFFICIAL_DAILY_SOURCE,
+    TAIWAN_DAILY_MATERIALIZATION_VERSION,
+    TPEX_DERIVED_DAILY_KIND,
+    TPEX_DERIVED_DAILY_PROVIDER,
+    TPEX_DERIVED_DAILY_SOURCE,
+)
 from app.market.taiwan_rules import taiwan_daily_price_release_at
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market_data.candidate_repository import (
@@ -56,6 +72,8 @@ class _OfficialDailySourceBinding:
     venue: str
     provider: str
     source_name: str
+    authority: AuthorityClass = AuthorityClass.EXCHANGE
+    materialized: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,8 +124,28 @@ def _bindings_for_instrument(
 ) -> tuple[_OfficialDailySourceBinding, ...]:
     if instrument.market is not Market.TW:
         raise ValueError("Taiwan daily repository requires market=TW")
+    if instrument.instrument_type is InstrumentType.INDEX:
+        if instrument.symbol == "TAIEX" and instrument.venue == "TWSE":
+            return (
+                _OfficialDailySourceBinding(
+                    venue="TWSE",
+                    provider=TAIEX_OFFICIAL_DAILY_PROVIDER,
+                    source_name=TAIEX_OFFICIAL_DAILY_SOURCE,
+                ),
+            )
+        if instrument.symbol == "TPEX" and instrument.venue == "TPEX":
+            return (
+                _OfficialDailySourceBinding(
+                    venue="TPEX",
+                    provider=TPEX_DERIVED_DAILY_PROVIDER,
+                    source_name=TPEX_DERIVED_DAILY_SOURCE,
+                    authority=AuthorityClass.DERIVED,
+                    materialized=True,
+                ),
+            )
+        raise ValueError("unsupported Taiwan index daily identity")
     if instrument.instrument_type not in {InstrumentType.STOCK, InstrumentType.ETF}:
-        raise ValueError("Taiwan daily repository supports stock and ETF instruments")
+        raise ValueError("unsupported Taiwan daily instrument type")
     venue = str(instrument.venue or "").strip().upper()
     bindings = _SOURCES_BY_VENUE.get(venue)
     if bindings is None:
@@ -189,16 +227,34 @@ class TaiwanOfficialDailyBarRepository:
             raise ValueError("Taiwan daily read max_rows must be between 1 and 5000")
         bindings = _bindings_for_instrument(instrument)
         source_names = tuple(item.source_name for item in bindings)
+        binding_by_source = {item.source_name: item for item in bindings}
         query = (
-            self._db.query(MarketDailyPrice.trade_date, RawFetchResult.fetched_at)
-            .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
+            self._db.query(
+                MarketDailyPrice,
+                RawFetchResult,
+                SourceRegistry,
+                MarketDailyPriceLineage,
+            )
+            .outerjoin(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+            .outerjoin(
+                MarketDailyPriceLineage,
+                MarketDailyPriceLineage.daily_price_id == MarketDailyPrice.id,
+            )
             .filter(MarketDailyPrice.stock_id == instrument.symbol)
             .filter(MarketDailyPrice.trade_date <= end_date)
             .filter(SourceRegistry.source_name.in_(source_names))
         )
         if self._available_at is not None:
-            query = query.filter(RawFetchResult.fetched_at <= self._available_at)
+            query = query.filter(
+                or_(
+                    RawFetchResult.fetched_at <= self._available_at,
+                    and_(
+                        RawFetchResult.id.is_(None),
+                        MarketDailyPrice.updated_at <= self._available_at,
+                    ),
+                )
+            )
         rows = (
             query.order_by(MarketDailyPrice.trade_date.desc(), MarketDailyPrice.id.desc())
             .limit(5000 * len(bindings) + 1)
@@ -206,16 +262,72 @@ class TaiwanOfficialDailyBarRepository:
         )
         eligible_dates: list[date] = []
         seen_dates: set[date] = set()
-        for trade_date, fetched_at in rows:
-            if trade_date in seen_dates:
+        for row, raw, source, lineage in rows:
+            if row.trade_date in seen_dates:
                 continue
-            if not _receipt_is_release_qualified(
-                trade_date=trade_date,
-                fetched_at=fetched_at,
-            ):
+            binding = binding_by_source.get(source.source_name)
+            component_hashes: tuple[str, ...] = ()
+            if lineage is not None and lineage.component_content_hashes_json:
+                try:
+                    component_hashes = tuple(
+                        str(value)
+                        for value in json.loads(
+                            lineage.component_content_hashes_json
+                        )
+                        if str(value)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    component_hashes = ()
+            eligible = bool(
+                binding is not None
+                and (
+                    (
+                        binding.materialized
+                        and raw is None
+                        and row.raw_result_id is None
+                        and row.canonical_market == Market.TW.value
+                        and row.venue == instrument.venue
+                        and row.instrument_type == InstrumentType.INDEX.value
+                        and row.finalization in {"final", "corrected"}
+                        and row.authority == binding.authority.value
+                        and row.official is False
+                        and row.derivation_kind == TPEX_DERIVED_DAILY_KIND
+                        and row.aggregation_version
+                        == TAIWAN_DAILY_MATERIALIZATION_VERSION
+                        and lineage is not None
+                        and lineage.evidence_kind == "materialized"
+                        and lineage.source_interval == "5s"
+                        and lineage.materialization_version
+                        == TAIWAN_DAILY_MATERIALIZATION_VERSION
+                        and component_hashes
+                        and lineage.lineage_digest
+                    )
+                    or (
+                        not binding.materialized
+                        and raw is not None
+                        and (
+                            instrument.instrument_type is not InstrumentType.INDEX
+                            or (
+                                row.canonical_market == Market.TW.value
+                                and row.venue == instrument.venue
+                                and row.instrument_type
+                                == InstrumentType.INDEX.value
+                                and row.authority == binding.authority.value
+                                and row.official is True
+                                and row.release_status == "released"
+                            )
+                        )
+                        and _receipt_is_release_qualified(
+                            trade_date=row.trade_date,
+                            fetched_at=raw.fetched_at,
+                        )
+                    )
+                )
+            )
+            if not eligible:
                 continue
-            seen_dates.add(trade_date)
-            eligible_dates.append(trade_date)
+            seen_dates.add(row.trade_date)
+            eligible_dates.append(row.trade_date)
             if len(eligible_dates) >= max_rows:
                 break
         return eligible_dates[-1] if eligible_dates else None
@@ -226,10 +338,22 @@ class TaiwanOfficialDailyBarRepository:
         binding_by_source = {item.source_name: item for item in bindings}
 
         stored_query = (
-            self._db.query(MarketDailyPrice, RawFetchResult, SourceRegistry)
+            self._db.query(
+                MarketDailyPrice,
+                RawFetchResult,
+                SourceRegistry,
+                MarketDailyPriceLineage,
+            )
             .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
-            .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
+            .outerjoin(
+                RawFetchResult,
+                RawFetchResult.id == MarketDailyPrice.raw_result_id,
+            )
             .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+            .outerjoin(
+                MarketDailyPriceLineage,
+                MarketDailyPriceLineage.daily_price_id == MarketDailyPrice.id,
+            )
             .filter(MarketDailyPrice.stock_id == instrument.symbol)
             .filter(MarketDailyPrice.trade_date >= query.start_date)
             .filter(MarketDailyPrice.trade_date <= query.end_date)
@@ -237,7 +361,13 @@ class TaiwanOfficialDailyBarRepository:
         )
         if self._available_at is not None:
             stored_query = stored_query.filter(
-                RawFetchResult.fetched_at <= self._available_at
+                or_(
+                    RawFetchResult.fetched_at <= self._available_at,
+                    and_(
+                        RawFetchResult.id.is_(None),
+                        MarketDailyPrice.updated_at <= self._available_at,
+                    ),
+                )
             )
         rows = (
             stored_query.order_by(MarketDailyPrice.trade_date.asc(), MarketDailyPrice.id.asc())
@@ -251,15 +381,61 @@ class TaiwanOfficialDailyBarRepository:
 
         bars_by_source: dict[str, list[BarObservation]] = {}
         storage_ids_by_source: dict[str, list[int]] = {}
-        raw_ids_by_source: dict[str, list[int]] = {}
+        raw_ids_by_source: dict[str, list[int | None]] = {}
         priority_by_source: dict[str, int] = {}
         rejections: list[CandidateRowRejection] = []
-        for row, raw_result, source in rows:
+        for row, raw_result, source, materialized_lineage in rows:
             binding = binding_by_source.get(source.source_name)
             if binding is None:
                 continue
             priority_by_source[source.source_name] = max(int(source.priority), 0)
-            if not _receipt_is_release_qualified(
+            component_hashes: tuple[str, ...] = ()
+            if binding.materialized:
+                try:
+                    component_hashes = tuple(
+                        str(value)
+                        for value in json.loads(
+                            materialized_lineage.component_content_hashes_json
+                            if materialized_lineage is not None
+                            else "[]"
+                        )
+                        if str(value)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    component_hashes = ()
+                materialized_valid = bool(
+                    raw_result is None
+                    and row.raw_result_id is None
+                    and row.canonical_market == Market.TW.value
+                    and row.venue == instrument.venue
+                    and row.instrument_type == InstrumentType.INDEX.value
+                    and row.authority == AuthorityClass.DERIVED.value
+                    and row.finalization in {"final", "corrected"}
+                    and row.official is False
+                    and row.derivation_kind == TPEX_DERIVED_DAILY_KIND
+                    and row.aggregation_version
+                    == TAIWAN_DAILY_MATERIALIZATION_VERSION
+                    and materialized_lineage is not None
+                    and materialized_lineage.evidence_kind == "materialized"
+                    and materialized_lineage.source_interval == "5s"
+                    and materialized_lineage.materialization_version
+                    == TAIWAN_DAILY_MATERIALIZATION_VERSION
+                    and component_hashes
+                    and materialized_lineage.lineage_digest
+                )
+                if not materialized_valid:
+                    rejections.append(
+                        CandidateRowRejection(
+                            provider=binding.provider,
+                            source=source.source_name,
+                            storage_row_id=row.id,
+                            raw_result_id=None,
+                            event_date=row.trade_date,
+                            reason_code="DAILY_MATERIALIZED_LINEAGE_INVALID",
+                        )
+                    )
+                    continue
+            elif raw_result is None or not _receipt_is_release_qualified(
                 trade_date=row.trade_date,
                 fetched_at=raw_result.fetched_at,
             ):
@@ -268,9 +444,36 @@ class TaiwanOfficialDailyBarRepository:
                         provider=binding.provider,
                         source=source.source_name,
                         storage_row_id=row.id,
-                        raw_result_id=raw_result.id,
+                        raw_result_id=(
+                            raw_result.id if raw_result is not None else None
+                        ),
                         event_date=row.trade_date,
                         reason_code="DAILY_RECEIPT_PREDATES_RELEASE",
+                    )
+                )
+                continue
+            if (
+                not binding.materialized
+                and instrument.instrument_type is InstrumentType.INDEX
+                and (
+                row.canonical_market != Market.TW.value
+                or row.venue != instrument.venue
+                or row.instrument_type != InstrumentType.INDEX.value
+                or row.authority != binding.authority.value
+                or row.official is not True
+                or row.release_status != "released"
+                )
+            ):
+                rejections.append(
+                    CandidateRowRejection(
+                        provider=binding.provider,
+                        source=source.source_name,
+                        storage_row_id=row.id,
+                        raw_result_id=(
+                            raw_result.id if raw_result is not None else None
+                        ),
+                        event_date=row.trade_date,
+                        reason_code="DAILY_CANONICAL_IDENTITY_INVALID",
                     )
                 )
                 continue
@@ -282,7 +485,9 @@ class TaiwanOfficialDailyBarRepository:
                         provider=binding.provider,
                         source=source.source_name,
                         storage_row_id=row.id,
-                        raw_result_id=raw_result.id,
+                        raw_result_id=(
+                            raw_result.id if raw_result is not None else None
+                        ),
                         event_date=row.trade_date,
                         reason_code="DAILY_SOURCE_RELIABILITY_UNTRUSTED",
                     )
@@ -295,7 +500,9 @@ class TaiwanOfficialDailyBarRepository:
                         provider=binding.provider,
                         source=source.source_name,
                         storage_row_id=row.id,
-                        raw_result_id=raw_result.id,
+                        raw_result_id=(
+                            raw_result.id if raw_result is not None else None
+                        ),
                         event_date=row.trade_date,
                         reason_code="MISSING_REQUIRED_OHLC",
                         missing_fields=missing_fields,
@@ -305,21 +512,46 @@ class TaiwanOfficialDailyBarRepository:
 
             start_at = datetime.combine(row.trade_date, time(9, 0), tzinfo=TAIWAN_TZ)
             end_at = datetime.combine(row.trade_date, time(13, 30), tzinfo=TAIWAN_TZ)
-            raw_contract_version = raw_result.parser_version or source.parser_type
+            raw_contract_version = (
+                materialized_lineage.materialization_version
+                if binding.materialized and materialized_lineage is not None
+                else (raw_result.parser_version or source.parser_type)
+                if raw_result is not None
+                else source.parser_type
+            )
             try:
                 bar = BarObservation(
                     instrument=instrument,
                     lineage=SourceLineage(
                         provider=binding.provider,
                         source=source.source_name,
-                        authority=AuthorityClass.EXCHANGE,
+                        authority=binding.authority,
                         raw_contract_version=raw_contract_version,
                         event_at=end_at,
-                        fetched_at=_as_aware_utc(raw_result.fetched_at),
+                        fetched_at=(
+                            _as_aware_utc(raw_result.fetched_at)
+                            if raw_result is not None
+                            else _as_aware_utc(row.updated_at)
+                        ),
                         cache_hit=True,
                         observation_id=f"market_daily_price:{row.id}",
-                        raw_receipt_id=f"raw_fetch_result:{raw_result.id}",
-                        content_hash=raw_result.content_hash,
+                        raw_receipt_id=(
+                            f"raw_fetch_result:{raw_result.id}"
+                            if raw_result is not None
+                            else None
+                        ),
+                        content_hash=(
+                            raw_result.content_hash
+                            if raw_result is not None
+                            else materialized_lineage.lineage_digest
+                        ),
+                        component_content_hashes=component_hashes,
+                        materialization_version=(
+                            materialized_lineage.materialization_version
+                            if binding.materialized
+                            and materialized_lineage is not None
+                            else None
+                        ),
                     ),
                     interval="1d",
                     start_at=start_at,
@@ -337,7 +569,11 @@ class TaiwanOfficialDailyBarRepository:
                         else None
                     ),
                     volume_status=(
-                        "observed" if row.trade_volume is not None else "missing"
+                        "not_applicable"
+                        if instrument.instrument_type is InstrumentType.INDEX
+                        else "observed"
+                        if row.trade_volume is not None
+                        else "missing"
                     ),
                     price_basis="raw",
                     instrument_name=row.stock_name,
@@ -355,7 +591,11 @@ class TaiwanOfficialDailyBarRepository:
                         if row.price_change is not None
                         else None
                     ),
-                    finalization=BarFinalization.FINAL,
+                    finalization=(
+                        BarFinalization(row.finalization)
+                        if row.finalization
+                        else BarFinalization.FINAL
+                    ),
                 )
             except (TypeError, ValueError, ValidationError):
                 rejections.append(
@@ -363,7 +603,9 @@ class TaiwanOfficialDailyBarRepository:
                         provider=binding.provider,
                         source=source.source_name,
                         storage_row_id=row.id,
-                        raw_result_id=raw_result.id,
+                        raw_result_id=(
+                            raw_result.id if raw_result is not None else None
+                        ),
                         event_date=row.trade_date,
                         reason_code="INVALID_CANONICAL_BAR",
                     )
@@ -372,7 +614,9 @@ class TaiwanOfficialDailyBarRepository:
 
             bars_by_source.setdefault(source.source_name, []).append(bar)
             storage_ids_by_source.setdefault(source.source_name, []).append(row.id)
-            raw_ids_by_source.setdefault(source.source_name, []).append(raw_result.id)
+            raw_ids_by_source.setdefault(source.source_name, []).append(
+                raw_result.id if raw_result is not None else None
+            )
 
         if any(len(values) > query.max_rows for values in bars_by_source.values()):
             raise CandidateReadLimitExceeded(
@@ -383,7 +627,7 @@ class TaiwanOfficialDailyBarRepository:
             PersistedBarSeries(
                 provider=binding_by_source[source_name].provider,
                 source=source_name,
-                authority=AuthorityClass.EXCHANGE,
+                authority=binding_by_source[source_name].authority,
                 provider_priority=priority_by_source.get(source_name, 100),
                 bars=tuple(bars),
                 storage_row_ids=tuple(storage_ids_by_source[source_name]),
@@ -399,6 +643,52 @@ class TaiwanOfficialDailyBarRepository:
             rows_examined=len(rows),
             rows_accepted=sum(len(values) for values in bars_by_source.values()),
         )
+
+    def outward_state_metadata(
+        self,
+        observation_ids: tuple[str, ...],
+    ) -> dict[str, dict[str, object | None]]:
+        row_ids: list[int] = []
+        for observation_id in observation_ids:
+            if not observation_id.startswith("market_daily_price:"):
+                continue
+            try:
+                row_ids.append(int(observation_id.rsplit(":", 1)[1]))
+            except ValueError:
+                continue
+        if not row_ids:
+            return {}
+        rows = (
+            self._db.query(MarketDailyPrice)
+            .filter(MarketDailyPrice.id.in_(row_ids))
+            .all()
+        )
+        reconciliations = (
+            self._db.query(MarketDailyPriceReconciliation)
+            .filter(MarketDailyPriceReconciliation.daily_price_id.in_(row_ids))
+            .order_by(
+                MarketDailyPriceReconciliation.checked_at.desc(),
+                MarketDailyPriceReconciliation.id.desc(),
+            )
+            .all()
+        )
+        latest_by_row: dict[int, MarketDailyPriceReconciliation] = {}
+        for item in reconciliations:
+            latest_by_row.setdefault(item.daily_price_id, item)
+        return {
+            f"market_daily_price:{row.id}": {
+                "official": row.official,
+                "release_status": row.release_status,
+                "reconciliation_status": (
+                    latest_by_row[row.id].status
+                    if row.id in latest_by_row
+                    else row.reconciliation_status
+                ),
+                "persisted": True,
+                "source_interval": "1d",
+            }
+            for row in rows
+        }
 
     def load_market_universe(
         self,

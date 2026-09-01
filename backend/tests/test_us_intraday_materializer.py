@@ -24,8 +24,11 @@ from app.jobs.us_intraday_materializer_scheduler import (
 from app.market_data.gateway import PostAcquisitionError
 from app.market_data.integration_contracts import AcquisitionStatus, AcquisitionSummary
 from app.us_market.intraday_maintenance import (
+    _survivor_after_values,
     inspect_us_yahoo_intraday_minute_integrity,
     prune_expired_us_quote_snapshots,
+    repair_us_yahoo_intraday_minute_integrity,
+    rollback_us_yahoo_intraday_minute_repair,
 )
 from app.us_market.intraday_materializer import (
     US_BOOTSTRAP_MATERIALIZER_PROFILE,
@@ -725,6 +728,202 @@ def test_us_intraday_minute_integrity_inspection_is_bounded_and_read_only() -> N
     finally:
         db.close()
         engine.dispose()
+
+
+def test_us_intraday_minute_repair_is_audited_and_reversible(tmp_path) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    canonical_minute = datetime(2026, 8, 28, 14, 30, tzinfo=timezone.utc)
+    manifest_path = tmp_path / "us-minute-repair.json"
+    try:
+        source = SourceRegistry(
+            source_name="yahoo.chart.1m",
+            source_type="api",
+            category="market_data",
+        )
+        db.add(source)
+        db.flush()
+        raws = []
+        for index, fetched_at in enumerate(
+            (
+                canonical_minute + timedelta(seconds=20),
+                canonical_minute + timedelta(hours=1),
+            ),
+            start=1,
+        ):
+            raw = RawFetchResult(
+                source_id=source.id,
+                method="GET",
+                content_hash=(f"repair-{index}".ljust(64, "a"))[:64],
+                parser_version="yahoo.chart.v8",
+                fetched_at=fetched_at,
+            )
+            db.add(raw)
+            db.flush()
+            raws.append(raw)
+        legacy = MarketIntradayBar(
+            provider="yahoo_chart",
+            stock_id="AAPL",
+            market="NASDAQ",
+            symbol="AAPL",
+            interval="1m",
+            bar_time=canonical_minute.replace(second=20),
+            open_price=200.0,
+            high_price=200.0,
+            low_price=200.0,
+            close_price=200.0,
+            trade_volume=0,
+            source="yahoo.chart.1m",
+        )
+        canonical = MarketIntradayBar(
+            provider="yahoo_chart",
+            stock_id="AAPL",
+            market="NASDAQ",
+            symbol="AAPL",
+            interval="1m",
+            bar_time=canonical_minute,
+            open_price=199.0,
+            high_price=202.0,
+            low_price=198.0,
+            close_price=201.0,
+            trade_volume=1000,
+            source="yahoo.chart.1m",
+        )
+        db.add_all((legacy, canonical))
+        db.flush()
+        for bar, raw in zip((legacy, canonical), raws, strict=True):
+            db.add(
+                MarketIntradayBarLineage(
+                    bar_id=bar.id,
+                    source_id=source.id,
+                    raw_result_id=raw.id,
+                    provider="yahoo_chart",
+                    source="yahoo.chart.1m",
+                    authority="vendor",
+                    raw_contract_version="yahoo.chart.v8",
+                    event_at=bar.bar_time,
+                    received_at=raw.fetched_at,
+                    fetched_at=raw.fetched_at,
+                    finalization="final",
+                    source_interval="1m",
+                )
+            )
+        db.commit()
+        original_times = {
+            row.id: row.bar_time
+            for row in db.query(MarketIntradayBar).order_by(MarketIntradayBar.id)
+        }
+
+        dry_run = repair_us_yahoo_intraday_minute_integrity(
+            db,
+            max_groups=1,
+        )
+
+        assert dry_run["dry_run"] is True
+        assert dry_run["planned_group_count"] == 1
+        assert dry_run["planned_delete_count"] == 1
+        assert dry_run["groups"][0]["survivor_id"] == canonical.id
+        assert dry_run["writes_performed"] == 0
+        assert db.query(MarketIntradayBar).count() == 2
+
+        row_bounded = repair_us_yahoo_intraday_minute_integrity(
+            db,
+            max_groups=1,
+            max_candidate_rows=1,
+        )
+        assert row_bounded["planned_group_count"] == 0
+        assert row_bounded["row_budget_exhausted"] is True
+        assert row_bounded["has_more_groups"] is True
+        assert row_bounded["writes_performed"] == 0
+        assert db.query(MarketIntradayBar).count() == 2
+
+        applied = repair_us_yahoo_intraday_minute_integrity(
+            db,
+            apply=True,
+            max_groups=1,
+            audit_manifest_path=manifest_path,
+        )
+
+        assert applied["status"] == "complete"
+        assert applied["bar_rows_deleted"] == 1
+        assert applied["lineage_rows_deleted"] == 1
+        assert applied["bar_rows_updated"] == 1
+        assert db.query(MarketIntradayBar).count() == 1
+        remaining = db.query(MarketIntradayBar).one()
+        assert remaining.id == canonical.id
+        assert remaining.bar_time.second == 0
+        assert remaining.high_price == 202.0
+        assert manifest_path.is_file()
+
+        rollback_dry_run = rollback_us_yahoo_intraday_minute_repair(
+            db,
+            audit_manifest_path=manifest_path,
+        )
+        assert rollback_dry_run["status"] == "ready"
+        assert rollback_dry_run["writes_performed"] == 0
+
+        rolled_back = rollback_us_yahoo_intraday_minute_repair(
+            db,
+            audit_manifest_path=manifest_path,
+            apply=True,
+        )
+        assert rolled_back["status"] == "completed"
+        assert db.query(MarketIntradayBar).count() == 2
+        restored_times = {
+            row.id: row.bar_time
+            for row in db.query(MarketIntradayBar).order_by(MarketIntradayBar.id)
+        }
+        assert restored_times == original_times
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_us_intraday_minute_repair_aggregates_provisional_ohlc() -> None:
+    canonical_minute = datetime(2026, 8, 28, 14, 30, tzinfo=timezone.utc)
+    candidates = []
+    for row_id, second, price, volume in (
+        (1, 5, 100.0, 0),
+        (2, 30, 103.0, 4),
+        (3, 55, 99.0, 2),
+    ):
+        candidates.append(
+            (
+                MarketIntradayBar(
+                    id=row_id,
+                    provider="yahoo_chart",
+                    stock_id="AAPL",
+                    market="NASDAQ",
+                    symbol="AAPL",
+                    interval="1m",
+                    bar_time=canonical_minute.replace(second=second),
+                    open_price=price,
+                    high_price=price,
+                    low_price=price,
+                    close_price=price,
+                    trade_volume=volume,
+                    source="yahoo.chart.1m",
+                ),
+                None,
+            )
+        )
+
+    policy, survivor_after = _survivor_after_values(
+        candidates,
+        canonical_minute=canonical_minute,
+    )
+
+    assert policy == "aggregate_provisional"
+    assert survivor_after == {
+        "bar_time": canonical_minute.isoformat(),
+        "open_price": 100.0,
+        "high_price": 103.0,
+        "low_price": 99.0,
+        "close_price": 99.0,
+        "trade_volume": 4,
+        "trade_value": None,
+    }
 
 
 def test_us_materializer_scheduler_registers_three_non_overlapping_owner_jobs(

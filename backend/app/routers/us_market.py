@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.jobs import backfill_tasks
 from app.jobs.job_types import (
+    US_INTRADAY_MINUTE_REPAIR_JOB_TYPE,
     US_OHLC_HISTORY_REPAIR_JOB_TYPE,
     US_SEC_13F_HISTORY_SYNC_JOB_TYPE,
     US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
@@ -277,6 +278,34 @@ def _enqueue_us_daily_price_quality_repair(
             adjusted,
             sleep_seconds,
         ),
+    )
+
+
+def _enqueue_us_intraday_minute_repair(
+    *,
+    db: Session,
+    apply: bool,
+    max_groups: int,
+    max_candidate_rows: int,
+    after_group_id: int | None,
+) -> dict:
+    request = {
+        "apply": apply,
+        "max_groups": max_groups,
+        "max_candidate_rows": max_candidate_rows,
+        "after_group_id": after_group_id,
+    }
+    mode = "apply" if apply else "dry-run"
+    cursor = str(after_group_id) if after_group_id is not None else "start"
+    return enqueue_serialized_job(
+        db=db,
+        job_type=US_INTRADAY_MINUTE_REPAIR_JOB_TYPE,
+        target=f"{mode}:{cursor}",
+        request=request,
+        progress_total=1,
+        message="Queued bounded US intraday minute repair.",
+        task=backfill_tasks.run_us_intraday_minute_repair_job,
+        task_args=(apply, max_groups, max_candidate_rows, after_group_id),
     )
 
 
@@ -910,6 +939,29 @@ def repair_us_daily_price_quality_job_api(
         outputsize=outputsize,
         adjusted=adjusted,
         sleep_seconds=sleep_seconds,
+    )
+
+
+@router.post(
+    "/maintenance/intraday-minute-integrity/repair-job",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def repair_us_intraday_minute_integrity_job_api(
+    apply: bool = False,
+    max_groups: int = Query(default=200, ge=1, le=5_000),
+    max_candidate_rows: int = Query(default=10_000, ge=1, le=50_000),
+    after_group_id: int | None = Query(default=None, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Queue one bounded repair batch; dry-run is the default."""
+
+    return _enqueue_us_intraday_minute_repair(
+        db=db,
+        apply=apply,
+        max_groups=max_groups,
+        max_candidate_rows=max_candidate_rows,
+        after_group_id=after_group_id,
     )
 
 

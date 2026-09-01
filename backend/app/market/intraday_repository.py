@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
+import json
 
 from pydantic import ValidationError
+from sqlalchemy import inspect
 from sqlalchemy.orm import Session, load_only
 
 from app.db.models import (
@@ -16,6 +19,14 @@ from app.db.models import (
     SourceRegistry,
 )
 from app.market.trading_calendar import is_taiwan_trading_day
+from app.market.tw_bar_contracts import (
+    TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION,
+    TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
+)
+from app.market.tw_current_market_capabilities import (
+    TW_CURRENT_INDEX_CAPABILITY_ID,
+    current_source_binding,
+)
 from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_health
 from app.market.tw_intraday_capabilities import intraday_source_binding
 from app.market_data.candidate_repository import CandidateRowRejection
@@ -24,6 +35,7 @@ from app.market_data.contracts import (
     BarFinalization,
     BarObservation,
     EvidenceFreshness,
+    InstrumentType,
     Market,
     Quantity,
     QuantityUnit,
@@ -81,13 +93,36 @@ class TaiwanIntradayBarRepository:
             raise ValueError("intraday repository requires instrument bar request")
         if requirement.target.instrument.market is not Market.TW:
             raise ValueError("intraday repository requires market=TW")
+        if requirement.request.interval != "1m":
+            raise ValueError("TW_BASE_BAR_INTERVAL_REQUIRED")
         return requirement.target, requirement.request
 
     def _rows(
         self,
         requirement: DataRequirementV2,
-    ) -> list[tuple[MarketIntradayBar, MarketIntradayBarLineage, RawFetchResult, SourceRegistry]]:
+    ) -> list[
+        tuple[
+            MarketIntradayBar,
+            MarketIntradayBarLineage,
+            RawFetchResult | None,
+            SourceRegistry,
+        ]
+    ]:
         target, request = self._validate(requirement)
+        inspector = inspect(self._db.get_bind())
+        if not inspector.has_table(MarketIntradayBar.__tablename__):
+            return []
+        columns = {
+            item["name"]
+            for item in inspector.get_columns(MarketIntradayBar.__tablename__)
+        }
+        if not {
+            "source_id",
+            "canonical_market",
+            "venue",
+            "instrument_type",
+        }.issubset(columns):
+            return []
         rows = (
             self._db.query(
                 MarketIntradayBar,
@@ -100,7 +135,7 @@ class TaiwanIntradayBarRepository:
                 MarketIntradayBarLineage,
                 MarketIntradayBarLineage.bar_id == MarketIntradayBar.id,
             )
-            .join(
+            .outerjoin(
                 RawFetchResult,
                 RawFetchResult.id == MarketIntradayBarLineage.raw_result_id,
             )
@@ -109,8 +144,13 @@ class TaiwanIntradayBarRepository:
                 SourceRegistry.id == MarketIntradayBarLineage.source_id,
             )
             .filter(MarketIntradayBar.stock_id == target.instrument.symbol)
-            .filter(MarketIntradayBar.market == target.instrument.venue)
-            .filter(MarketIntradayBar.interval == request.interval)
+            .filter(MarketIntradayBar.canonical_market == Market.TW.value)
+            .filter(MarketIntradayBar.venue == target.instrument.venue)
+            .filter(
+                MarketIntradayBar.instrument_type
+                == target.instrument.instrument_type.value
+            )
+            .filter(MarketIntradayBar.interval == "1m")
             .filter(MarketIntradayBar.bar_time >= request.start_at)
             .filter(MarketIntradayBar.bar_time <= request.end_at)
             .order_by(
@@ -125,6 +165,72 @@ class TaiwanIntradayBarRepository:
             raise ValueError("intraday repository read exceeded bounded candidate rows")
         return rows
 
+    def _materialized_index_content_hash(
+        self,
+        *,
+        row: MarketIntradayBar,
+        lineage: MarketIntradayBarLineage,
+        source: SourceRegistry,
+    ) -> tuple[str, tuple[str, ...]] | None:
+        if (
+            row.instrument_type != InstrumentType.INDEX.value
+            or lineage.raw_result_id is not None
+            or lineage.calculation_version
+            != TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION
+            or lineage.raw_contract_version != TAIWAN_INDEX_MINUTE_RAW_CONTRACT
+        ):
+            return None
+        binding = current_source_binding(
+            provider=row.provider,
+            source=row.source,
+            capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+        )
+        if (
+            binding is None
+            or binding.descriptor.authority.value != lineage.authority
+            or source.id != lineage.source_id
+            or source.source_name != row.source
+        ):
+            return None
+        try:
+            component_ids = tuple(
+                int(value)
+                for value in json.loads(
+                    lineage.component_raw_result_ids_json or "[]"
+                )
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not component_ids or len(component_ids) != len(set(component_ids)):
+            return None
+        component_rows = (
+            self._db.query(RawFetchResult)
+            .filter(RawFetchResult.id.in_(component_ids))
+            .all()
+        )
+        by_id = {item.id: item for item in component_rows}
+        if len(by_id) != len(component_ids):
+            return None
+        ordered = tuple(by_id[value] for value in component_ids)
+        if any(
+            item.source_id != source.id
+            or item.parser_version != binding.parser_version
+            or not item.content_hash
+            for item in ordered
+        ):
+            return None
+        payload = [
+            {"source_id": source.id, "content_hash": str(item.content_hash)}
+            for item in ordered
+        ]
+        hashes = tuple(str(item.content_hash) for item in ordered)
+        digest = sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        return digest, hashes
+
     def read_bar_candidates(self, requirement: DataRequirementV2) -> BarCandidateBatch:
         target, request = self._validate(requirement)
         rows = self._rows(requirement)
@@ -136,28 +242,38 @@ class TaiwanIntradayBarRepository:
             identity = (row.provider, row.source)
             if accepted_counts[identity] >= request.max_bars:
                 continue
-            binding = intraday_source_binding(
-                provider=row.provider,
-                source=row.source,
+            materialized_lineage = self._materialized_index_content_hash(
+                row=row,
+                lineage=lineage_row,
+                source=source,
             )
-            invalid_identity = (
-                binding is None
-                or lineage_row.provider != row.provider
-                or lineage_row.source != row.source
-                or source.id != lineage_row.source_id
-                or source.source_name != row.source
-                or raw.id != lineage_row.raw_result_id
-                or raw.source_id != source.id
-                or raw.parser_version != binding.parser_version
-                or raw.content_hash is None
-                or lineage_row.authority != binding.descriptor.authority.value
-                or not (
+            materialized_hash = (
+                materialized_lineage[0]
+                if materialized_lineage is not None
+                else None
+            )
+            binding = intraday_source_binding(provider=row.provider, source=row.source)
+            acquired_identity_valid = bool(
+                binding is not None
+                and raw is not None
+                and lineage_row.provider == row.provider
+                and lineage_row.source == row.source
+                and row.source_id == lineage_row.source_id
+                and source.id == lineage_row.source_id
+                and source.source_name == row.source
+                and raw.id == lineage_row.raw_result_id
+                and raw.source_id == source.id
+                and raw.parser_version == binding.parser_version
+                and raw.content_hash is not None
+                and lineage_row.authority == binding.descriptor.authority.value
+                and (
                     lineage_row.raw_contract_version == binding.parser_version
                     or lineage_row.raw_contract_version.startswith(
                         f"{binding.parser_version}+"
                     )
                 )
             )
+            invalid_identity = not acquired_identity_valid and materialized_hash is None
             if invalid_identity:
                 rejections.append(
                     CandidateRowRejection(
@@ -186,7 +302,7 @@ class TaiwanIntradayBarRepository:
                         provider=row.provider,
                         source=row.source,
                         storage_row_id=row.id,
-                        raw_result_id=raw.id,
+                        raw_result_id=(raw.id if raw is not None else None),
                         event_date=_as_taipei(row.bar_time).date(),
                         reason_code="MISSING_REQUIRED_OHLC",
                         missing_fields=missing,
@@ -207,8 +323,26 @@ class TaiwanIntradayBarRepository:
                         fetched_at=_as_utc(lineage_row.fetched_at),
                         cache_hit=True,
                         observation_id=f"market_intraday_bar:{row.id}",
-                        raw_receipt_id=f"raw_fetch_result:{raw.id}",
-                        content_hash=raw.content_hash,
+                        raw_receipt_id=(
+                            f"raw_fetch_result:{raw.id}"
+                            if raw is not None
+                            else None
+                        ),
+                        content_hash=(
+                            materialized_hash
+                            if materialized_hash is not None
+                            else raw.content_hash if raw is not None else None
+                        ),
+                        component_content_hashes=(
+                            materialized_lineage[1]
+                            if materialized_lineage is not None
+                            else ()
+                        ),
+                        materialization_version=(
+                            TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION
+                            if materialized_lineage is not None
+                            else None
+                        ),
                     ),
                     interval=row.interval,
                     start_at=start_at,
@@ -225,6 +359,18 @@ class TaiwanIntradayBarRepository:
                         if row.trade_volume is not None
                         else None
                     ),
+                    volume_status=(
+                        "not_applicable"
+                        if target.instrument.instrument_type is InstrumentType.INDEX
+                        else "observed"
+                        if row.trade_volume is not None
+                        else "missing"
+                    ),
+                    price_basis=(
+                        "raw"
+                        if materialized_hash is not None
+                        else "provider_default"
+                    ),
                     turnover_value=(
                         Decimal(row.trade_value)
                         if row.trade_value is not None
@@ -239,14 +385,22 @@ class TaiwanIntradayBarRepository:
                         provider=row.provider,
                         source=row.source,
                         storage_row_id=row.id,
-                        raw_result_id=raw.id,
+                        raw_result_id=(raw.id if raw is not None else None),
                         event_date=start_at.date(),
                         reason_code="INVALID_CANONICAL_INTRADAY_BAR",
                     )
                 )
                 continue
             by_provider[identity].append(bar)
-            priorities[identity] = binding.descriptor.priority
+            priorities[identity] = (
+                binding.descriptor.priority
+                if binding is not None
+                else current_source_binding(
+                    provider=row.provider,
+                    source=row.source,
+                    capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+                ).descriptor.priority
+            )
             accepted_counts[identity] += 1
 
         candidates: list[BarSeriesCandidate] = []

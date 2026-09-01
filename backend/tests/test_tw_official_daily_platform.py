@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -559,13 +560,20 @@ def test_future_of_release_row_requires_post_release_receipt(
         date(2026, 8, 28),
     ]
 
-    chart = list_stock_ohlc_chart_data(
-        db,
-        stock_id="3711",
-        timeframe="daily",
-        bars=20,
-        to_date=date(2026, 8, 31),
-    )
+    with patch(
+        "app.market.service.expected_daily_price_date",
+        return_value=date(2026, 8, 28),
+    ), patch(
+        "app.market.daily_ohlcv_platform.expected_daily_price_date",
+        return_value=date(2026, 8, 28),
+    ):
+        chart = list_stock_ohlc_chart_data(
+            db,
+            stock_id="3711",
+            timeframe="daily",
+            bars=20,
+            to_date=date(2026, 8, 31),
+        )
     assert (
         "REQUESTED_TO_DATE_EXCEEDS_LATEST_RELEASED_DAILY_DATE"
         in chart["warnings"]
@@ -625,6 +633,16 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
     trade_date: date,
     close: float,
 ) -> None:
+    db.add(
+        StockMaster(
+            stock_id=symbol,
+            stock_name=symbol,
+            market=venue,
+            instrument_type="stock",
+            is_active=True,
+        )
+    )
+    db.commit()
     response = FakeResponse(text=_raw_payload(fixture_name))
     platform = _platform(db, resource_id=resource_id, response=response)
     requirement = _refresh(symbol=symbol, venue=venue, trade_date=trade_date)
@@ -665,15 +683,6 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
     assert row.trade_value is not None
     assert row.transaction_count is not None
 
-    db.add(
-        StockMaster(
-            stock_id=symbol,
-            stock_name=row.stock_name,
-            market=venue,
-            instrument_type="stock",
-        )
-    )
-    db.commit()
     chart = list_stock_ohlc_chart_data(
         db,
         stock_id=symbol,
@@ -779,6 +788,16 @@ def test_empty_success_payload_is_missing_not_a_fake_zero_bar(db: Session) -> No
 
 
 def test_partially_invalid_target_rows_remain_explicit(db: Session) -> None:
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="TSMC",
+            market="TWSE",
+            instrument_type="stock",
+            is_active=True,
+        )
+    )
+    db.commit()
     fixture = _fixture("twse_stock_day_all_excerpt_20260825.json")
     valid_row = fixture["payload"][1]
     invalid_row = dict(valid_row, ClosingPrice="")
@@ -822,6 +841,16 @@ def test_transaction_failure_rolls_back_receipt_source_and_bar(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="TSMC",
+            market="TWSE",
+            instrument_type="stock",
+            is_active=True,
+        )
+    )
+    db.commit()
     platform = _platform(
         db,
         resource_id=TWSE_DAILY_RESOURCE_ID,

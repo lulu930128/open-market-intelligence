@@ -58,7 +58,7 @@ class PersistedBarSeries(CanonicalModel):
     provider_priority: int = Field(ge=0)
     bars: tuple[BarObservation, ...]
     storage_row_ids: tuple[int, ...]
-    raw_result_ids: tuple[int, ...]
+    raw_result_ids: tuple[int | None, ...]
     limitations: tuple[str, ...] = ()
 
     @model_validator(mode="after")
@@ -94,7 +94,7 @@ class CandidateRowRejection(CanonicalModel):
     provider: str = Field(min_length=1, max_length=64)
     source: str = Field(min_length=1, max_length=128)
     storage_row_id: int = Field(ge=1)
-    raw_result_id: int = Field(ge=1)
+    raw_result_id: int | None = Field(default=None, ge=1)
     event_date: date
     reason_code: str = Field(min_length=1, max_length=64)
     missing_fields: tuple[str, ...] = ()

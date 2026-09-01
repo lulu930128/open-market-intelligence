@@ -226,6 +226,11 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
             for tool in tools
             if tool["name"] == "omi.read_refresh_status"
         )
+        taiwan_data_tools = {
+            tool["name"]: tool
+            for tool in tools
+            if tool["name"].startswith("omi.read_taiwan_")
+        }
         self.assertEqual(ask_tool["title"], "Backend Ask OMI")
         self.assertEqual(
             ask_tool["inputSchema"]["properties"]["selection"]["properties"][
@@ -244,10 +249,66 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
             ],
             1,
         )
+        self.assertEqual(
+            set(taiwan_data_tools),
+            {
+                "omi.read_taiwan_bars",
+                "omi.read_taiwan_technical_series",
+                "omi.read_taiwan_chart",
+            },
+        )
         request.assert_called_once_with(
             "GET",
             "/api/ai/tools",
             timeout_seconds=self.server.SCHEMA_TIMEOUT_SECONDS,
+        )
+
+    def test_taiwan_data_tools_are_thin_backend_route_relays(self) -> None:
+        with patch.object(self.server, "_api_get", return_value={"ok": True}) as read:
+            result = self.server._call_tool(
+                "omi.read_taiwan_technical_series",
+                {
+                    "instrument_id": "TAIEX",
+                    "interval": "15m",
+                    "limit": 120,
+                    "include_partial": False,
+                    "expected_series_revision": "a" * 64,
+                },
+            )
+
+        self.assertEqual(result, {"ok": True})
+        read.assert_called_once_with(
+            "/api/market/technical/TAIEX/series",
+            {
+                "interval": "15m",
+                "from": None,
+                "to": None,
+                "limit": 120,
+                "include_partial": False,
+                "ma_windows": None,
+                "volume_ma_windows": None,
+                "expected_series_revision": "a" * 64,
+            },
+        )
+
+    def test_taiwan_chart_tool_relays_atomic_bundle_route(self) -> None:
+        with patch.object(self.server, "_api_get", return_value={"ok": True}) as read:
+            self.server._call_tool(
+                "omi.read_taiwan_chart",
+                {"instrument_id": "2330", "interval": "1d"},
+            )
+
+        read.assert_called_once_with(
+            "/api/market/chart/2330",
+            {
+                "interval": "1d",
+                "from": None,
+                "to": None,
+                "limit": 500,
+                "include_partial": True,
+                "ma_windows": None,
+                "volume_ma_windows": None,
+            },
         )
 
     def test_tools_list_falls_back_to_static_schema_when_backend_is_unavailable(

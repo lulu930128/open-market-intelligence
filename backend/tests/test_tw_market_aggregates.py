@@ -125,7 +125,7 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
     def _dependencies(**overrides):
         values = {
             "market_service": SimpleNamespace(),
-            "get_market_index_intraday": Mock(),
+            "read_taiwan_bars": Mock(),
             "get_market_index_summary": Mock(),
             "read_cross_market_context": Mock(),
             "read_market_chips_context": Mock(),

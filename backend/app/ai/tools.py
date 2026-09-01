@@ -2,9 +2,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.ai import market_payload_contract as _market_payload_contract
 from app.ai import tool_catalog
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_context import (
+    common as _market_context_common,
     regional_freshness,
     taiwan_freshness,
     taiwan_futures,
@@ -17,15 +19,12 @@ from app.ai.market_context import (
     tw_cross_market,
     tw_market_chips,
 )
-from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
-from app.ai.market_payload_contract import has_payload_value as _has_payload_value
 from app.ai.market_date_request import parse_market_trade_date
 from app.market import service as market_service
 from app.market.broker_branch import get_broker_branch_trade_summary
 from app.market.calendar_status import build_market_calendar_status, build_taiwan_calendar_status
 from app.market.daily_ohlcv_platform import read_taiwan_latest_daily_evidence
 from app.market.live_snapshot import market_status_from_session
-from app.market.intraday import get_market_intraday_history
 from app.market.quote_depth import (
     acquire_taiwan_quote_evidence_projection,
     read_taiwan_quote_evidence_projection,
@@ -39,10 +38,10 @@ from app.market.tw_corporate_events import (
 from app.market.tw_company_profile import read_taiwan_company_profile
 from app.market.technical_report import build_stock_technical_report
 from app.market.technical_evidence import build_tw_stock_technical_evidence
+from app.market.tw_bar_service import TaiwanBarService
+from app.market.tw_chart_service import TaiwanChartService
 from app.market.indices import (
     get_market_index_contributions,
-    get_market_index_intraday,
-    get_market_index_ohlc_chart_data,
     get_market_index_summary,
 )
 from app.market.market_chips import get_latest_market_chip_daily, list_market_chip_daily
@@ -61,6 +60,24 @@ from app.watchlists import service as watchlist_service
 
 
 _now = taiwan_projection._now
+_append_source_ref_once = _market_context_common.append_source_ref_once
+_has_payload_value = _market_payload_contract.has_payload_value
+
+
+def _read_taiwan_bars(*, db: Session, instrument_id: str, interval: str, **kwargs):
+    return TaiwanBarService(db).read_bars(
+        instrument_id=instrument_id,
+        interval=interval,
+        **kwargs,
+    )
+
+
+def _read_taiwan_chart(*, db: Session, instrument_id: str, interval: str, **kwargs):
+    return TaiwanChartService(db).read(
+        instrument_id=instrument_id,
+        interval=interval,
+        **kwargs,
+    )
 
 def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
     return tool_catalog.list_ai_tools(include_internal=include_internal)
@@ -336,7 +353,7 @@ def read_market_overview(
         market_data_params=params,
         dependencies=taiwan_market.TaiwanMarketDependencies(
             market_service=market_service,
-            get_market_index_intraday=get_market_index_intraday,
+            read_taiwan_bars=_read_taiwan_bars,
             get_market_index_summary=get_market_index_summary,
             read_cross_market_context=tw_cross_market.read_tw_cross_market_context,
             read_market_chips_context=tw_market_chips.read_tw_market_chips_context,
@@ -374,8 +391,7 @@ def read_tw_index_context(
         dependencies=taiwan_index.TaiwanIndexDependencies(
             get_latest_market_chip_daily=get_latest_market_chip_daily,
             get_market_index_contributions=get_market_index_contributions,
-            get_market_index_intraday=get_market_index_intraday,
-            get_market_index_ohlc_chart_data=get_market_index_ohlc_chart_data,
+            read_taiwan_chart=_read_taiwan_chart,
             get_market_index_summary=get_market_index_summary,
             now=_now,
         ),
@@ -440,7 +456,7 @@ def read_stock_context(
             build_taiwan_source_health=build_taiwan_source_health,
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
-            get_market_intraday_history=get_market_intraday_history,
+            read_taiwan_bars=_read_taiwan_bars,
             read_taiwan_quote_evidence=read_taiwan_quote_evidence_projection,
             acquire_taiwan_quote_evidence=acquire_taiwan_quote_evidence_projection,
             read_taiwan_latest_daily_evidence=read_taiwan_latest_daily_evidence,
@@ -476,7 +492,7 @@ def read_stock_technical_context(
             build_taiwan_source_health=build_taiwan_source_health,
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
-            get_market_intraday_history=get_market_intraday_history,
+            read_taiwan_bars=_read_taiwan_bars,
             read_taiwan_quote_evidence=read_taiwan_quote_evidence_projection,
             acquire_taiwan_quote_evidence=acquire_taiwan_quote_evidence_projection,
             get_taiwan_stock_event_history=get_taiwan_stock_event_history,
@@ -646,7 +662,7 @@ def read_stock_quote_context(
             build_taiwan_source_health=build_taiwan_source_health,
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
-            get_market_intraday_history=get_market_intraday_history,
+            read_taiwan_bars=_read_taiwan_bars,
             read_taiwan_quote_evidence=read_taiwan_quote_evidence_projection,
             acquire_taiwan_quote_evidence=acquire_taiwan_quote_evidence_projection,
             read_taiwan_latest_daily_evidence=read_taiwan_latest_daily_evidence,
@@ -677,7 +693,7 @@ def read_stock_event_context(
             build_taiwan_source_health=build_taiwan_source_health,
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
-            get_market_intraday_history=get_market_intraday_history,
+            read_taiwan_bars=_read_taiwan_bars,
             read_taiwan_quote_evidence=read_taiwan_quote_evidence_projection,
             acquire_taiwan_quote_evidence=acquire_taiwan_quote_evidence_projection,
             read_taiwan_latest_daily_evidence=read_taiwan_latest_daily_evidence,
@@ -710,7 +726,7 @@ def read_stock_broker_branch_context(
             build_taiwan_source_health=build_taiwan_source_health,
             build_us_overnight_impact_report=build_us_overnight_impact_report,
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
-            get_market_intraday_history=get_market_intraday_history,
+            read_taiwan_bars=_read_taiwan_bars,
             read_taiwan_quote_evidence=read_taiwan_quote_evidence_projection,
             acquire_taiwan_quote_evidence=acquire_taiwan_quote_evidence_projection,
             read_taiwan_latest_daily_evidence=read_taiwan_latest_daily_evidence,

@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Mapping
 
 from sqlalchemy.orm import Session
 
 from app.market import indicator_service
-from app.market.daily_ohlcv_platform import read_taiwan_official_daily
-from app.market.official_index_platform import read_taiwan_official_index_series
-from app.market.ohlc_overlay import aggregate_ohlc_points, point_date
+from app.market.ohlc_overlay import point_date
 from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     get_technical_analysis_parameters,
 )
-from app.market.technical_intraday_projection import build_current_partial_daily_bar
 from app.market.trading_calendar import next_taiwan_trading_day
+from app.market.trading_calendar import TAIWAN_TZ
+from app.market.tw_bar_service import TaiwanBarService
 from app.research.technical.series import (
     ema_sma_seed,
     macd_sma_seed,
@@ -27,7 +25,7 @@ from app.research.technical.series import (
 )
 
 
-INDICATOR_ALGORITHM_VERSION = "tw.technical.indicators.v3"
+INDICATOR_ALGORITHM_VERSION = "tw.technical.indicators.v4"
 ADVANCED_ALGORITHM_VERSION = "tw.technical.advanced.v2"
 PRICE_BASIS = "raw_unadjusted"
 MAX_DAILY_BARS = 1800
@@ -177,6 +175,93 @@ def _pvo(
     )
 
 
+def _vwap(
+    points: list[dict[str, Any]],
+    *,
+    interval: str | None = None,
+) -> list[float | None]:
+    """Calculate session VWAP only for intraday evidence.
+
+    ``interval=None`` preserves the compatibility behavior for older report
+    callers that do not carry an explicit Bar interval. Canonical Taiwan Bar
+    callers always pass their interval and therefore cannot expose a
+    request-window cumulative value as daily/weekly/monthly session VWAP.
+    """
+
+    if interval in {"1d", "1w", "1mo"}:
+        return [None] * len(points)
+
+    dates = [point_date(point.get("time")) for point in points]
+    session_scoped = interval in {"1m", "5m", "15m", "30m", "1h", "4h"} or any(
+        current is not None and current == previous
+        for previous, current in zip(dates, dates[1:])
+    )
+    cumulative_price_volume = 0.0
+    cumulative_volume = 0.0
+    active_date: date | None = None
+    output: list[float | None] = []
+    for index, point in enumerate(points):
+        current_date = dates[index]
+        if session_scoped and active_date is not None and current_date != active_date:
+            cumulative_price_volume = 0.0
+            cumulative_volume = 0.0
+        active_date = current_date
+        high = _number(point.get("high"))
+        low = _number(point.get("low"))
+        close = _number(point.get("close"))
+        volume = _number(point.get("volume"))
+        if high is None or low is None or close is None or volume is None or volume <= 0:
+            cumulative_price_volume = 0.0
+            cumulative_volume = 0.0
+            output.append(None)
+            continue
+        typical_price = (high + low + close) / 3
+        cumulative_price_volume += typical_price * volume
+        cumulative_volume += volume
+        output.append(_round(cumulative_price_volume / cumulative_volume, 8))
+    return output
+
+
+def _twap(points: list[dict[str, Any]]) -> list[float | None]:
+    output: list[float | None] = []
+    total = 0.0
+    count = 0
+    for point in points:
+        close = _number(point.get("close"))
+        if close is None:
+            output.append(None)
+            continue
+        total += close
+        count += 1
+        output.append(total / count)
+    return output
+
+
+def _obv(
+    closes: list[float | None],
+    volumes: list[float | None],
+) -> list[float | None]:
+    """Calculate OBV with an explicit reset after missing-volume evidence."""
+
+    output: list[float | None] = []
+    previous_close: float | None = None
+    current_obv = 0.0
+    for close, volume in zip(closes, volumes):
+        if close is None or volume is None or volume < 0:
+            previous_close = None
+            current_obv = 0.0
+            output.append(None)
+            continue
+        if previous_close is not None:
+            if close > previous_close:
+                current_obv += volume
+            elif close < previous_close:
+                current_obv -= volume
+        output.append(_round(current_obv, 4))
+        previous_close = close
+    return output
+
+
 def indicator_method_catalog(
     parameters: TechnicalAnalysisParameters,
 ) -> dict[str, dict[str, Any]]:
@@ -268,6 +353,19 @@ def indicator_method_catalog(
             },
             "warmup_bars": parameters.pvo_slow_period + parameters.pvo_signal_period - 1,
         },
+        "vwap": {
+            "method": "intraday_session_reset_typical_price_volume",
+            "algorithm_version": INDICATOR_ALGORITHM_VERSION,
+            "parameters": {},
+            "warmup_bars": 1,
+            "applicable_intervals": ["1m", "5m", "15m", "30m", "1h", "4h"],
+        },
+        "obv": {
+            "method": "on_balance_volume_no_missing_carry",
+            "algorithm_version": INDICATOR_ALGORITHM_VERSION,
+            "parameters": {},
+            "warmup_bars": 2,
+        },
     }
 
 
@@ -300,9 +398,10 @@ def calculate_canonical_indicator_points(
     points: list[dict[str, Any]],
     *,
     parameters: TechnicalAnalysisParameters | None = None,
+    interval: str | None = None,
 ) -> list[dict[str, Any]]:
     resolved = parameters or get_technical_analysis_parameters()
-    legacy = indicator_service.calculate_indicator_points_from_ohlc_points(
+    base_points = indicator_service.calculate_indicator_points_from_ohlc_points(
         points,
         max_gap_days=None,
         parameters=resolved,
@@ -331,12 +430,15 @@ def calculate_canonical_indicator_points(
         slow_period=resolved.pvo_slow_period,
         signal_period=resolved.pvo_signal_period,
     )
+    vwap = _vwap(points, interval=interval)
+    twap = _twap(points)
+    obv = _obv(closes, volumes)
     output: list[dict[str, Any]] = []
     parameter_contract = _indicator_parameter_contract(resolved)
-    for index, legacy_point in enumerate(legacy):
+    for index, base_point in enumerate(base_points):
         output.append(
             {
-                **legacy_point,
+                **base_point,
                 "algorithm_version": INDICATOR_ALGORITHM_VERSION,
                 "price_basis": PRICE_BASIS,
                 "calculation_role": "backend_authoritative",
@@ -362,6 +464,9 @@ def calculate_canonical_indicator_points(
                     "signal": pvo_signal[index],
                     "histogram": pvo_histogram[index],
                 },
+                "vwap": vwap[index],
+                "twap": twap[index],
+                "obv": obv[index],
             }
         )
     return output
@@ -401,23 +506,33 @@ def _snapshot_for_timeframe(
     latest_observation_date: date | None = None,
     current_partial_point: Mapping[str, Any] | None = None,
     volume_unit: str = "shares",
+    calculated_points: list[dict[str, Any]] | None = None,
+    current_partial_calculated: dict[str, Any] | None = None,
+    allow_internal_calculation: bool = True,
 ) -> dict[str, Any]:
     period = classify_latest_period(
         points,
         timeframe=timeframe,
         latest_observation_date=latest_observation_date,
     )
-    calculated = calculate_canonical_indicator_points(points, parameters=parameters)
+    calculated = (
+        calculate_canonical_indicator_points(points, parameters=parameters)
+        if allow_internal_calculation
+        else list(calculated_points or [])
+    )
     latest = calculated[-1] if calculated else None
     completed = latest
     partial = None
     completed_bars = len(calculated)
     if timeframe == "daily" and current_partial_point is not None:
-        projected = calculate_canonical_indicator_points(
-            [*points, dict(current_partial_point)],
-            parameters=parameters,
-        )
-        partial = projected[-1] if projected else None
+        if allow_internal_calculation:
+            projected = calculate_canonical_indicator_points(
+                [*points, dict(current_partial_point)],
+                parameters=parameters,
+            )
+            partial = projected[-1] if projected else None
+        else:
+            partial = current_partial_calculated
         if partial is not None:
             partial = {
                 **partial,
@@ -1545,14 +1660,20 @@ def _daily_points(
     stock_id: str,
     *,
     to_date: date | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    result = read_taiwan_official_daily(
-        db,
-        stock_id=stock_id,
-        to_date=to_date,
-        limit=MAX_DAILY_BARS,
+) -> tuple[list[dict[str, Any]], dict[str, Any], Any]:
+    to_time = (
+        datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIWAN_TZ)
+        if to_date is not None
+        else None
     )
-    bars = result.resolved.bars
+    series = TaiwanBarService(db).read_bars(
+        instrument_id=stock_id,
+        interval="1d",
+        to_time=to_time,
+        limit=MAX_DAILY_BARS,
+        include_partial=False,
+    )
+    bars = series.bars
     points = [
         {
             "time": bar.end_at.date(),
@@ -1569,12 +1690,18 @@ def _daily_points(
     lineage = {
         "dataset_id": "tw.daily.ohlcv",
         "component_count": len(bars),
-        "resolved_health": result.resolved.health.model_dump(mode="json"),
-        "dataset_health": (
-            result.dataset_health.model_dump(mode="json")
-            if result.dataset_health is not None
-            else None
-        ),
+        "series_fingerprint": series.identity.series_fingerprint,
+        "lineage_digest": series.identity.lineage_digest,
+        "state_digest": series.identity.state_digest,
+        "series_revision": series.identity.series_revision,
+        "resolved_health": {
+            "status": series.history.history_status.value,
+            "selected_provider": latest.lineage.provider if latest else None,
+            "requested_coverage_satisfied": (
+                series.history.requested_coverage_satisfied
+            ),
+        },
+        "dataset_health": None,
         "latest_component": (
             {
                 "provider": latest.lineage.provider,
@@ -1588,9 +1715,9 @@ def _daily_points(
             if latest is not None
             else None
         ),
-        "limitations": list(result.limitations),
+        "limitations": [*series.limitations, *series.warnings],
     }
-    return points, lineage
+    return points, lineage, series
 
 
 def _benchmark_points(
@@ -1598,20 +1725,52 @@ def _benchmark_points(
     *,
     to_date: date | None = None,
 ) -> list[dict[str, Any]]:
-    results = read_taiwan_official_index_series(
-        db,
-        index_id="TAIEX",
-        to_date=to_date,
+    to_time = (
+        datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIWAN_TZ)
+        if to_date is not None
+        else None
+    )
+    series = TaiwanBarService(db).read_bars(
+        instrument_id="TAIEX",
+        interval="1d",
+        to_time=to_time,
         limit=MAX_DAILY_BARS,
+        include_partial=False,
     )
     return [
         {
-            "time": observation.trade_date,
-            "close": float(observation.close_value),
+            "time": bar.start_at.date(),
+            "close": float(bar.close_price),
         }
-        for result in results
-        if (observation := result.resolved.market_index) is not None
+        for bar in series.bars
     ]
+
+
+def _series_points(series: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "time": bar.start_at.date(),
+            "open": float(bar.open_price),
+            "high": float(bar.high_price),
+            "low": float(bar.low_price),
+            "close": float(bar.close_price),
+            "volume": int(bar.volume.value) if bar.volume is not None else None,
+            "price_change": None,
+        }
+        for bar in series.bars
+    ]
+
+
+def _technical_points(series: Any, parameters: TechnicalAnalysisParameters):
+    from app.market.tw_technical_service import TaiwanTechnicalService
+
+    result = TaiwanTechnicalService().calculate(series, parameters=parameters)
+    points = []
+    for point in result.points:
+        normalized = dict(point)
+        normalized["time"] = point_date(normalized.get("time"))
+        points.append(normalized)
+    return points, result
 
 
 def build_tw_stock_technical_evidence(
@@ -1625,7 +1784,11 @@ def build_tw_stock_technical_evidence(
     to_date: date | None = None,
 ) -> dict[str, Any]:
     parameters = get_technical_analysis_parameters()
-    daily, daily_lineage = _daily_points(db, stock_id, to_date=to_date)
+    daily, daily_lineage, daily_series = _daily_points(
+        db,
+        stock_id,
+        to_date=to_date,
+    )
     if not daily:
         return {
             "kind": "tw_stock_technical_evidence",
@@ -1635,22 +1798,48 @@ def build_tw_stock_technical_evidence(
             "warnings": [],
             "source_refs": [{"type": "resolved_market_data", "name": "tw.daily.ohlcv"}],
         }
-    weekly = aggregate_ohlc_points(points=daily, timeframe="weekly")
-    monthly = aggregate_ohlc_points(points=daily, timeframe="monthly")
-    methods = indicator_method_catalog(parameters)
-    end_date = point_date(daily[-1].get("time"))
-    session_date = point_date((market_calendar_status or {}).get("date"))
-    current_partial_daily = (
-        build_current_partial_daily_bar(
-            completed_daily_points=daily,
-            intraday_points=intraday_points,
-            quote=current_quote,
-            session_date=session_date,
-            session_phase=str((market_calendar_status or {}).get("phase") or "unknown"),
-        )
-        if session_date is not None and to_date is None
+    to_time = (
+        datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIWAN_TZ)
+        if to_date is not None
         else None
     )
+    bar_service = TaiwanBarService(db)
+    weekly_series = bar_service.read_bars(
+        instrument_id=stock_id,
+        interval="1w",
+        to_time=to_time,
+        limit=MAX_DAILY_BARS,
+        include_partial=False,
+    )
+    monthly_series = bar_service.read_bars(
+        instrument_id=stock_id,
+        interval="1mo",
+        to_time=to_time,
+        limit=MAX_DAILY_BARS,
+        include_partial=False,
+    )
+    weekly = _series_points(weekly_series)
+    monthly = _series_points(monthly_series)
+    methods = indicator_method_catalog(parameters)
+    end_date = point_date(daily[-1].get("time"))
+    current_partial_daily = None
+    current_partial_calculated = None
+    if to_date is None:
+        current_series = bar_service.read_bars(
+            instrument_id=stock_id,
+            interval="1d",
+            limit=MAX_DAILY_BARS,
+            include_partial=True,
+        )
+        if len(current_series.bars) > len(daily_series.bars):
+            current_partial_daily = _series_points(current_series)[-1]
+            current_calculated, _ = _technical_points(current_series, parameters)
+            current_partial_calculated = (
+                current_calculated[-1] if current_calculated else None
+            )
+    canonical_daily, daily_technical = _technical_points(daily_series, parameters)
+    canonical_weekly, _ = _technical_points(weekly_series, parameters)
+    canonical_monthly, _ = _technical_points(monthly_series, parameters)
     timeframes = {
         "daily": _snapshot_for_timeframe(
             daily,
@@ -1659,6 +1848,9 @@ def build_tw_stock_technical_evidence(
             method_catalog=methods,
             latest_observation_date=end_date,
             current_partial_point=current_partial_daily,
+            calculated_points=canonical_daily,
+            current_partial_calculated=current_partial_calculated,
+            allow_internal_calculation=False,
         ),
         "weekly": _snapshot_for_timeframe(
             weekly,
@@ -1666,6 +1858,8 @@ def build_tw_stock_technical_evidence(
             parameters=parameters,
             method_catalog=methods,
             latest_observation_date=end_date,
+            calculated_points=canonical_weekly,
+            allow_internal_calculation=False,
         ),
         "monthly": _snapshot_for_timeframe(
             monthly,
@@ -1673,12 +1867,10 @@ def build_tw_stock_technical_evidence(
             parameters=parameters,
             method_catalog=methods,
             latest_observation_date=end_date,
+            calculated_points=canonical_monthly,
+            allow_internal_calculation=False,
         ),
     }
-    canonical_daily = calculate_canonical_indicator_points(
-        daily,
-        parameters=parameters,
-    )
     maximum_indicator_warmup = max(
         int(method.get("warmup_bars") or 1)
         for method in methods.values()
@@ -1713,20 +1905,9 @@ def build_tw_stock_technical_evidence(
         )
 
     swing_daily = daily[-SWING_LOOKBACK:]
-    canonical_swing = canonical_daily[-len(swing_daily):]
     swing_corporate_actions = _corporate_contract_for_points(
         corporate_event_history,
         swing_daily,
-    )
-    swings = build_swing_evidence(
-        swing_daily,
-        affected_dates=swing_corporate_actions["affected_dates"],
-    )
-    fibonacci = build_fibonacci_evidence(swings)
-    divergence = build_divergence_evidence(
-        swings,
-        canonical_swing,
-        parameters=parameters,
     )
     breakout_corporate_actions = _corporate_contract_for_points(
         corporate_event_history,
@@ -1735,18 +1916,23 @@ def build_tw_stock_technical_evidence(
             parameters.support_resistance_period + BREAKOUT_LIFECYCLE_BARS
         ),
     )
-    breakout = build_breakout_evidence(
-        daily,
-        canonical_daily,
-        corporate_action_contract=breakout_corporate_actions,
+    from app.market.tw_technical_service import TaiwanTechnicalService
+
+    advanced = TaiwanTechnicalService().calculate_advanced(
+        points=daily,
+        canonical_points=canonical_daily,
+        benchmark_points=_benchmark_points(db, to_date=to_date),
         parameters=parameters,
+        affected_swing_dates=tuple(swing_corporate_actions["affected_dates"]),
+        breakout_corporate_action_contract=dict(breakout_corporate_actions),
     )
-    volume_profile = build_volume_profile(daily)
-    anchored_vwap = build_anchored_vwap(swing_daily, swings)
-    relative_strength = build_relative_strength(
-        daily,
-        _benchmark_points(db, to_date=to_date),
-    )
+    swings = advanced["swings"]
+    fibonacci = advanced["fibonacci"]
+    divergence = advanced["divergence"]
+    breakout = advanced["breakout"]
+    volume_profile = advanced["volume_profile"]
+    anchored_vwap = advanced["anchored_vwap"]
+    relative_strength = advanced["relative_strength"]
     profile_corporate_actions = _corporate_contract_for_points(
         corporate_event_history,
         daily,
@@ -1828,6 +2014,9 @@ def build_tw_stock_technical_evidence(
         "kind": "tw_technical_indicator_snapshot",
         "schema_version": INDICATOR_ALGORITHM_VERSION,
         "algorithm_version": INDICATOR_ALGORITHM_VERSION,
+        "bar_series_fingerprint": daily_technical.bar_series_fingerprint,
+        "bar_series_revision": daily_technical.bar_series_revision,
+        "technical_revision": daily_technical.technical_revision,
         "calculation_role": "backend_authoritative",
         "parameter_contract": _indicator_parameter_contract(parameters),
         "status": "partial" if daily_corporate_actions["coverage_status"] != "complete" else "ready",

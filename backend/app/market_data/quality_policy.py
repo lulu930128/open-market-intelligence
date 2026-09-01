@@ -152,6 +152,10 @@ def _missing_required_fields(
 def _missing_lineage_fields(lineage: SourceLineage) -> tuple[str, ...]:
     missing: list[str] = []
     for field_name in _CANONICAL_LINEAGE_FIELDS:
+        if field_name == "raw_receipt_id" and (
+            lineage.component_content_hashes and lineage.materialization_version
+        ):
+            continue
         value = getattr(lineage, field_name)
         if _is_missing_value(value):
             missing.append(field_name)

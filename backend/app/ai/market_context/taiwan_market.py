@@ -8,6 +8,7 @@ from typing import Any, Callable, Protocol
 from sqlalchemy.orm import Session
 
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
+from app.ai.market_context.taiwan_bar_projection import project_taiwan_bar_series
 from app.ai.market_context.taiwan_projection import (
     _build_tw_market_slots,
     _compact_index_quote,
@@ -54,7 +55,7 @@ class MarketService(Protocol):
 @dataclass(frozen=True)
 class TaiwanMarketDependencies:
     market_service: MarketService
-    get_market_index_intraday: Callable[[str], dict[str, Any]]
+    read_taiwan_bars: Callable[..., Any]
     get_market_index_summary: Callable[..., dict[str, Any]]
     read_cross_market_context: Callable[..., dict[str, Any]]
     read_market_chips_context: Callable[..., dict[str, Any]]
@@ -256,6 +257,7 @@ def _market_index_ids_from_params(params: dict[str, Any] | None) -> list[str]:
 
 def _market_index_intraday_pack(
     *,
+    db: Session,
     dependencies: TaiwanMarketDependencies,
     include_intraday: bool,
     market_data_params: dict[str, Any] | None,
@@ -282,7 +284,14 @@ def _market_index_intraday_pack(
     _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "market_index_intraday"})
     for index_id in index_ids:
         try:
-            intraday = dependencies.get_market_index_intraday(index_id)
+            bar_series = dependencies.read_taiwan_bars(
+                db=db,
+                instrument_id=index_id,
+                interval="1m",
+                limit=point_limit,
+                include_partial=True,
+            )
+            intraday = project_taiwan_bar_series(bar_series)
         except Exception as exc:
             message = f"{index_id} index intraday unavailable: {exc}"
             warnings.append(message)
@@ -2661,6 +2670,7 @@ def read_market_overview(
         missing.append("market_volume.same_time_baseline_20d")
         warnings.extend(str(item) for item in volume_state.get("warnings") or [] if item)
     index_intraday = _market_index_intraday_pack(
+        db=db,
         dependencies=dependencies,
         include_intraday=include_intraday,
         market_data_params=market_data_params,

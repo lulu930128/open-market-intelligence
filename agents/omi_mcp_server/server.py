@@ -541,6 +541,78 @@ READ_REFRESH_STATUS_TOOL: dict[str, Any] = {
     },
 }
 
+TW_BAR_INTERVAL_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mo"],
+}
+
+TW_SERIES_COMMON_PROPERTIES: dict[str, Any] = {
+    "instrument_id": {
+        "type": "string",
+        "description": "Taiwan STOCK, ETF, TAIEX, or TPEX instrument id.",
+    },
+    "interval": TW_BAR_INTERVAL_SCHEMA,
+    "from": {"type": "string", "format": "date-time"},
+    "to": {"type": "string", "format": "date-time"},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 500},
+    "include_partial": {"type": "boolean", "default": True},
+}
+
+READ_TAIWAN_BARS_TOOL: dict[str, Any] = {
+    "name": "omi.read_taiwan_bars",
+    "title": "Read OMI Taiwan Bars",
+    "description": (
+        "Thin cache-only relay for the canonical Taiwan Bar series. The backend "
+        "owns instrument resolution, provider resolution, aggregation, coverage, "
+        "lineage, and revision identity."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": TW_SERIES_COMMON_PROPERTIES,
+        "required": ["instrument_id", "interval"],
+        "additionalProperties": False,
+    },
+}
+
+READ_TAIWAN_TECHNICAL_TOOL: dict[str, Any] = {
+    "name": "omi.read_taiwan_technical_series",
+    "title": "Read OMI Taiwan Technical Series",
+    "description": (
+        "Thin relay for Backend-authoritative Taiwan technical values. Supply an "
+        "expected_series_revision to reject a Bar/Technical revision race."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            **TW_SERIES_COMMON_PROPERTIES,
+            "expected_series_revision": {"type": "string", "minLength": 64, "maxLength": 64},
+            "ma_windows": {"type": "string"},
+            "volume_ma_windows": {"type": "string"},
+        },
+        "required": ["instrument_id", "interval"],
+        "additionalProperties": False,
+    },
+}
+
+READ_TAIWAN_CHART_TOOL: dict[str, Any] = {
+    "name": "omi.read_taiwan_chart",
+    "title": "Read OMI Taiwan Chart Bundle",
+    "description": (
+        "Thin relay for the atomic Taiwan Bar plus Technical chart bundle. Bars "
+        "and technical values are produced from the same backend series revision."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            **TW_SERIES_COMMON_PROPERTIES,
+            "ma_windows": {"type": "string"},
+            "volume_ma_windows": {"type": "string"},
+        },
+        "required": ["instrument_id", "interval"],
+        "additionalProperties": False,
+    },
+}
+
 
 def _load_public_contract_snapshot() -> dict[str, Any]:
     snapshot_path = Path(__file__).with_name(
@@ -1357,7 +1429,14 @@ def _augment_market_payload_control_schema(tool: dict[str, Any]) -> dict[str, An
 
 PUBLIC_TOOLS = [
     _augment_market_payload_control_schema(tool)
-    for tool in [ASK_TOOL, ASK_STREAM_TOOL, READ_REFRESH_STATUS_TOOL]
+    for tool in [
+        ASK_TOOL,
+        ASK_STREAM_TOOL,
+        READ_REFRESH_STATUS_TOOL,
+        READ_TAIWAN_BARS_TOOL,
+        READ_TAIWAN_TECHNICAL_TOOL,
+        READ_TAIWAN_CHART_TOOL,
+    ]
 ]
 INTERNAL_TOOLS = [_augment_market_payload_control_schema(tool) for tool in INTERNAL_TOOLS]
 TOOLS = [*PUBLIC_TOOLS, *INTERNAL_TOOLS] if EXPOSE_INTERNAL_TOOLS else PUBLIC_TOOLS
@@ -1549,7 +1628,14 @@ def _backend_public_tools() -> list[dict[str, Any]]:
                 json.dumps(refresh_source.get("input_schema") or {})
             ),
         }
-    public_tools = [ask_tool, stream_tool, refresh_tool]
+    public_tools = [
+        ask_tool,
+        stream_tool,
+        refresh_tool,
+        READ_TAIWAN_BARS_TOOL,
+        READ_TAIWAN_TECHNICAL_TOOL,
+        READ_TAIWAN_CHART_TOOL,
+    ]
     return (
         [*public_tools, *INTERNAL_TOOLS]
         if EXPOSE_INTERNAL_TOOLS
@@ -2121,6 +2207,37 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         if job_id <= 0:
             raise ValueError("job_id must be a positive integer.")
         return _api_get(f"/api/ai/refresh-status/{job_id}")
+
+    if name in {
+        "omi.read_taiwan_bars",
+        "omi.read_taiwan_technical_series",
+        "omi.read_taiwan_chart",
+    }:
+        instrument_id = quote(str(_require(arguments, "instrument_id")).strip(), safe="")
+        interval = str(_require(arguments, "interval")).strip()
+        common_params = {
+            "interval": interval,
+            "from": arguments.get("from"),
+            "to": arguments.get("to"),
+            "limit": arguments.get("limit", 500),
+            "include_partial": _bool_arg(arguments, "include_partial", True),
+        }
+        if name == "omi.read_taiwan_bars":
+            return _api_get(f"/api/market/bars/{instrument_id}", common_params)
+        technical_params = {
+            **common_params,
+            "ma_windows": arguments.get("ma_windows"),
+            "volume_ma_windows": arguments.get("volume_ma_windows"),
+        }
+        if name == "omi.read_taiwan_technical_series":
+            technical_params["expected_series_revision"] = arguments.get(
+                "expected_series_revision"
+            )
+            return _api_get(
+                f"/api/market/technical/{instrument_id}/series",
+                technical_params,
+            )
+        return _api_get(f"/api/market/chart/{instrument_id}", technical_params)
 
     if name == "omi.read_market_overview":
         return _api_get(

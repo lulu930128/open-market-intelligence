@@ -8,7 +8,7 @@
 OMI 的 stdio MCP thin adapter：
 
 ```text
-MCP client -> agents/omi_mcp_server/server.py -> OMI backend /api/ai/*
+MCP client -> agents/omi_mcp_server/server.py -> OMI backend /api/ai/* or /api/market/*
 ```
 
 Adapter 不讀 OMI DB、不直接呼叫 market provider，也不重做 target、freshness、
@@ -17,6 +17,14 @@ decision readiness 或 answer。預設公開：
 - `omi.ask`
 - `omi.ask_stream`
 - `omi.read_refresh_status`
+- `omi.read_taiwan_bars`
+- `omi.read_taiwan_technical_series`
+- `omi.read_taiwan_chart`
+
+三個 Taiwan data-plane tools 只轉送 canonical Backend contract；其中 chart
+bundle 保證 Bars 與 Technical 使用同一個 `series_revision`，分開讀 Technical
+時則可用 `expected_series_revision` 讓 revision race 明確失敗。Adapter 不聚合
+Bars、不計算技術指標，也不決定 provider、coverage、freshness 或 fallback。
 
 可選公開：
 

@@ -1175,7 +1175,7 @@ def refresh_stock_intraday_history(
         refresh_taiwan_intraday_bars(
             db,
             stock_id=stock_id,
-            interval=interval,
+            interval="1m",
             range_value=range_value,
             policy=RealtimePolicy(policy),
         )

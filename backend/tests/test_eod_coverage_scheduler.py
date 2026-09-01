@@ -148,7 +148,16 @@ def test_scheduler_enqueues_priority_us_ohlc_with_bounded_request() -> None:
     assert kwargs["job_type"] == "us_market.priority_ohlc_reconcile"
     assert kwargs["target"] == "priority-research"
     assert kwargs["request"]["max_runtime_seconds"] > 0
-    assert set(kwargs["request"]) == {"max_runtime_seconds", "cursor_symbol"}
+    assert kwargs["request"]["max_symbols"] > 0
+    assert kwargs["request"]["max_external_calls"] > 0
+    assert kwargs["request"]["max_provider_attempts"] == 2
+    assert set(kwargs["request"]) == {
+        "max_runtime_seconds",
+        "max_symbols",
+        "max_external_calls",
+        "max_provider_attempts",
+        "cursor_symbol",
+    }
     fake_db.close.assert_called_once()
 
 

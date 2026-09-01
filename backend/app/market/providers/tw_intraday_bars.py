@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
@@ -132,9 +132,11 @@ def _finalization(end_at: datetime, requested_at: datetime) -> BarFinalization:
 
 
 def _is_regular_session(start_at: datetime) -> bool:
-    local = start_at.astimezone(TAIPEI_TZ)
-    clock = local.time().replace(tzinfo=None)
-    return time(9, 0) <= clock <= time(13, 30)
+    from app.market.tw_instrument_trading_policy import (
+        is_taiwan_continuous_time_bar_start,
+    )
+
+    return is_taiwan_continuous_time_bar_start(start_at)
 
 
 def _lineage(
@@ -489,7 +491,9 @@ def _default_yahoo_reader(
 def _provider_query(requirement: DataRequirementV2) -> tuple[str, str, int]:
     assert isinstance(requirement.request, BarCapabilityRequest)
     requested_interval = requirement.request.interval
-    fetch_interval = "60m" if requested_interval in {"1h", "4h"} else requested_interval
+    if requested_interval != "1m":
+        raise ValueError("TW_BASE_BAR_INTERVAL_REQUIRED")
+    fetch_interval = "1m"
     days = max(
         1,
         (
@@ -498,65 +502,8 @@ def _provider_query(requirement: DataRequirementV2) -> tuple[str, str, int]:
         ).days
         + 1,
     )
-    range_value = "1d" if days <= 1 else "5d" if days <= 21 else "1mo" if days <= 31 else "3mo"
+    range_value = "1d" if days <= 1 else "5d"
     return range_value, fetch_interval, days
-
-
-def _aggregate_hourly(
-    bars: list[BarObservation],
-    *,
-    requirement: DataRequirementV2,
-) -> list[BarObservation]:
-    assert isinstance(requirement.request, BarCapabilityRequest)
-    if requirement.request.interval != "4h":
-        return bars
-    buckets: dict[tuple[datetime.date, int], list[BarObservation]] = {}
-    for bar in bars:
-        local = bar.start_at.astimezone(TAIPEI_TZ)
-        minutes = local.hour * 60 + local.minute
-        bucket_minute = 9 * 60 + ((minutes - 9 * 60) // 240) * 240
-        buckets.setdefault((local.date(), bucket_minute), []).append(bar)
-    aggregated: list[BarObservation] = []
-    for (trade_date, minute), items in sorted(buckets.items()):
-        start_at = datetime.combine(
-            trade_date,
-            time(minute // 60, minute % 60),
-            tzinfo=TAIPEI_TZ,
-        )
-        volume_values = [bar.volume.value for bar in items if bar.volume is not None]
-        aggregated.append(
-            BarObservation(
-                instrument=items[0].instrument,
-                lineage=items[-1].lineage.model_copy(
-                    update={
-                        "raw_contract_version": (
-                            f"{YAHOO_INTRADAY_PARSER_VERSION}+omi.aggregate.4h.v1"
-                        )
-                    }
-                ),
-                interval="4h",
-                start_at=start_at,
-                end_at=start_at + timedelta(hours=4),
-                open_price=items[0].open_price,
-                high_price=max(bar.high_price for bar in items),
-                low_price=min(bar.low_price for bar in items),
-                close_price=items[-1].close_price,
-                volume=(
-                    Quantity(
-                        value=sum(volume_values, Decimal(0)),
-                        unit=QuantityUnit.SHARE,
-                    )
-                    if volume_values
-                    else None
-                ),
-                finalization=(
-                    BarFinalization.FINAL
-                    if all(bar.finalization is BarFinalization.FINAL for bar in items)
-                    else BarFinalization.PROVISIONAL
-                ),
-            )
-        )
-    return aggregated
 
 
 class YahooIntradayAdapter:
@@ -638,7 +585,7 @@ class YahooIntradayAdapter:
                         if not _is_regular_session(start_at):
                             continue
                         open_value, high_value, low_value, close_value = prices
-                        seconds = 3600 if fetch_interval == "60m" else int(fetch_interval[:-1]) * 60
+                        seconds = 60
                         volume = _integer(item("volume"))
                         raw_bars.append(
                             BarObservation(
@@ -651,9 +598,7 @@ class YahooIntradayAdapter:
                                     fetched_at=fetched_at,
                                     content_hash=content_hash,
                                 ),
-                                interval=(
-                                    "1h" if requirement.request.interval == "1h" else fetch_interval
-                                ),
+                                interval="1m",
                                 start_at=start_at,
                                 end_at=start_at + timedelta(seconds=seconds),
                                 open_price=open_value,
@@ -674,8 +619,7 @@ class YahooIntradayAdapter:
                                 ),
                             )
                         )
-                    bars = _aggregate_hourly(raw_bars, requirement=requirement)
-                    bars = bars[-requirement.request.max_bars :]
+                    bars = raw_bars[-requirement.request.max_bars :]
             except Exception as exc:
                 parse_error = f"{type(exc).__name__}: {exc}"[:1000]
                 bars = []

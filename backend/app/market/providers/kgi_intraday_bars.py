@@ -145,6 +145,11 @@ def kgi_minute_kbar_acquisition(
             )
         ):
             continue
+        from app.market.tw_instrument_trading_policy import (
+            is_taiwan_continuous_time_bar_start,
+        )
+        if not is_taiwan_continuous_time_bar_start(start_at):
+            continue
         end_at = start_at + timedelta(minutes=1)
         if requirement.requested_at < end_at:
             # The active minute remains provider state only until its interval

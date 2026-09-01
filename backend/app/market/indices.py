@@ -63,6 +63,7 @@ from app.market.tw_market_breadth_contract import (
     TW_MARKET_BREADTH_VERSION,
     taiwan_breadth_market_session,
 )
+from app.market.tw_bar_service import TaiwanBarService
 from app.observability.provider_fallback import observe_provider_fallback
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
@@ -3548,20 +3549,99 @@ def get_market_index_intraday(
 
         db = SessionLocal()
     try:
+        from app.market.tw_bar_service import TaiwanBarService
         from app.market.tw_current_market_platform import (
             project_taiwan_current_index,
-            project_taiwan_index_intraday_series,
             read_taiwan_current_index,
-            read_taiwan_index_intraday_series,
         )
 
-        series = read_taiwan_index_intraday_series(
-            db,
-            index_id=normalized_index_id,
+        now = datetime.now(TAIPEI_TZ)
+        session = taiwan_presentation_session(now)
+        trade_date = session["trade_date"]
+        series = TaiwanBarService(db).read_bars(
+            instrument_id=normalized_index_id,
+            interval="1m",
+            from_time=datetime.combine(
+                trade_date,
+                time(9, 0),
+                tzinfo=TAIPEI_TZ,
+            ),
+            to_time=now,
+            requested_at=now,
         )
-        series_payload = project_taiwan_index_intraday_series(series)
         result = read_taiwan_current_index(db, index_id=normalized_index_id)
         current = project_taiwan_current_index(result)
+        points = [
+            {
+                "time": bar.start_at,
+                "price": float(bar.close_price),
+                "open": float(bar.open_price),
+                "high": float(bar.high_price),
+                "low": float(bar.low_price),
+                "close": float(bar.close_price),
+                "volume": None,
+                "provider": bar.lineage.provider,
+                "source": bar.lineage.source,
+                "event_at": bar.lineage.event_at,
+                "finalization": bar.finalization.value,
+                "official": False,
+                "provisional": bar.finalization.value == "provisional",
+            }
+            for bar in series.bars
+        ]
+        source_components = list(
+            dict.fromkeys(
+                (
+                    bar.lineage.provider,
+                    bar.lineage.source,
+                    bar.lineage.authority.value,
+                )
+                for bar in series.bars
+            )
+        )
+        series_payload = {
+            "stock_id": normalized_index_id,
+            "source": "taiwan_bar_service",
+            "provider": (
+                series.bars[-1].lineage.provider
+                if series.bars
+                else "unavailable"
+            ),
+            "source_components": [
+                {
+                    "provider": provider,
+                    "source": source,
+                    "authority": authority,
+                }
+                for provider, source, authority in source_components
+            ],
+            "source_interval": "1m",
+            "interval": "1m",
+            "trade_date": trade_date,
+            "coverage_status": series.history.history_status.value,
+            "is_partial": any(
+                item.coverage_status.value != "ready"
+                for item in series.session_resolution
+            ),
+            "previous_close": current.get("previous_close"),
+            "source_point_count": len(points),
+            "points": points,
+            "series_coverage": {
+                "status": series.history.history_status.value,
+                "expected_minute_count": sum(
+                    item.expected_by_trading_policy
+                    for item in series.bucket_coverage
+                ),
+                "resolved_minute_count": len(points),
+                "rejected_candidate_count": sum(
+                    len(item.rejected_candidate_reasons)
+                    for item in series.session_resolution
+                ),
+                "limitations": list(series.limitations),
+                "series_revision": series.identity.series_revision,
+            },
+            "warnings": list(series.limitations),
+        }
         payload = _finalize_index_intraday_contract(
             {
                 **series_payload,
@@ -4245,23 +4325,37 @@ def get_market_index_ohlc_chart_data(
     if bars <= 0 or bars > MAX_INDEX_BARS:
         raise ValueError(f"bars must be between 1 and {MAX_INDEX_BARS}.")
 
-    cache_key = f"{normalized_index_id}:{timeframe}:{bars}"
-    cached = _INDEX_OHLC_CACHE.get(cache_key)
-    if cached and monotonic() < float(cached["expires_at"]):
-        payload = cached.get("payload")
-        if isinstance(payload, dict):
-            return payload
-
-    points = (
-        _cached_market_index_close_points(
-            db,
-            index_id=normalized_index_id,
-            timeframe=timeframe,
-            bars=bars,
+    interval = {"daily": "1d", "weekly": "1w", "monthly": "1mo"}[timeframe]
+    bar_result = (
+        TaiwanBarService(db).read_bars(
+            instrument_id=normalized_index_id,
+            interval=interval,
+            limit=bars,
+            include_partial=True,
         )
         if db is not None
-        else []
+        else None
     )
+    points = [
+        {
+            "time": item.start_at.astimezone(TAIPEI_TZ).date(),
+            "open": float(item.open_price),
+            "high": float(item.high_price),
+            "low": float(item.low_price),
+            "close": float(item.close_price),
+            "volume": (
+                int(item.volume.value) if item.volume is not None else None
+            ),
+            "trade_value": (
+                int(item.turnover_value)
+                if item.turnover_value is not None
+                else None
+            ),
+            "transaction_count": item.trade_count,
+            "finalization": item.finalization.value,
+        }
+        for item in (bar_result.bars if bar_result is not None else ())
+    ]
     today = datetime.now(TAIPEI_TZ).date()
     from_date = points[0]["time"] if points else today
     to_date = points[-1]["time"] if points else today
@@ -4282,10 +4376,28 @@ def get_market_index_ohlc_chart_data(
                 f"POST /api/market/indices/{normalized_index_id}/ohlc/refresh"
             ),
         },
-        "data_quality": "partial" if points else "missing",
-        "warnings": [
-            "Canonical official index daily evidence owns close/change and activity; open/high/low remain unknown until an official OHLC capability is available."
-        ],
+        "data_quality": (
+            bar_result.history.history_status.value
+            if bar_result is not None
+            else "missing"
+        ),
+        "warnings": list(
+            dict.fromkeys(
+                (
+                    *(bar_result.limitations if bar_result is not None else ()),
+                    *(bar_result.warnings if bar_result is not None else ()),
+                )
+            )
+        ),
+        "series_fingerprint": (
+            bar_result.identity.series_fingerprint
+            if bar_result is not None
+            else None
+        ),
+        "series_revision": (
+            bar_result.identity.series_revision if bar_result is not None else None
+        ),
+        "compatibility_owner": "TaiwanBarService",
         **freshness,
     }
     return payload
@@ -4298,126 +4410,34 @@ def refresh_market_index_ohlc_chart_data(
     db: Session | None = None,
 ) -> dict:
     normalized_index_id = index_id.upper()
-    config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
-
-    if config is None:
+    if normalized_index_id not in INDEX_CONFIG_BY_ID:
         supported = ", ".join(sorted(INDEX_CONFIG_BY_ID))
         raise ValueError(f"index_id must be one of: {supported}.")
-
     if timeframe not in INDEX_TIMEFRAME_INTERVALS:
         raise ValueError("timeframe must be one of: daily, weekly, monthly.")
+    if bars <= 0 or bars > MAX_INDEX_BARS:
+        raise ValueError(f"bars must be between 1 and {MAX_INDEX_BARS}.")
+    if db is None:
+        raise ValueError("index OHLC refresh requires a database session")
 
-    if bars <= 0:
-        raise ValueError("bars must be greater than 0.")
-
-    if bars > MAX_INDEX_BARS:
-        raise ValueError(f"bars must be less than or equal to {MAX_INDEX_BARS}.")
-
-    if timeframe == "monthly":
-        points = _fetch_yahoo_monthly_index_points(config)
-    else:
-        points, _meta, _tz = _fetch_yahoo_index_points(
-            config=config,
-            range_value=_index_range_for(timeframe=timeframe, bars=bars),
-            interval=INDEX_TIMEFRAME_INTERVALS[timeframe],
-        )
-
-    selected_points = [dict(point) for point in points[-bars:]]
-    fallback_date = date.today()
-    from_date = selected_points[0]["time"] if selected_points else fallback_date
-    to_date = selected_points[-1]["time"] if selected_points else fallback_date
-    stat_from_date, stat_to_date = _index_stat_query_range(
-        timeframe=timeframe,
-        from_date=from_date,
-        to_date=to_date,
-    )
-    coverage_to_date = max(stat_to_date, datetime.now(TAIPEI_TZ).date())
-    backfill_result = None
-    official_ohlc_overlay = None
-
-    if db is not None and selected_points:
-        backfill_result = {
-            "status": "not_requested",
-            "reason": "read_path_is_side_effect_free",
-            "refresh_route": f"POST /api/market/indices/{normalized_index_id}/daily-stats/refresh",
-        }
-
-        values_by_period = _load_market_index_stat_values(
-            db=db,
-            index_id=normalized_index_id,
-            timeframe=timeframe,
-            from_date=stat_from_date,
-            to_date=coverage_to_date,
-        )
-        _apply_market_index_stat_values(
-            selected_points,
-            timeframe=timeframe,
-            values_by_period=values_by_period,
-        )
-        if timeframe == "daily":
-            official_ohlc_overlay = _append_official_market_index_daily_points(
-                db=db,
-                points=selected_points,
-                index_id=normalized_index_id,
-                to_date=coverage_to_date,
-            )
-            selected_points = selected_points[-bars:]
-    else:
-        try:
-            trade_values_by_date = _fetch_recent_index_trade_values(str(config["market"]))
-
-            for point in selected_points:
-                point["trade_value"] = trade_values_by_date.get(point["time"])
-        except Exception as exc:
-            observe_provider_fallback(exc, operation="indices.trade_value_enrichment")
-
-    if selected_points:
-        from_date = selected_points[0]["time"]
-        to_date = selected_points[-1]["time"]
-
-    if backfill_result is not None and official_ohlc_overlay is not None:
-        backfill_result["official_ohlc_overlay"] = official_ohlc_overlay
-
-    warnings: list[str] = []
-    data_quality = "ok"
-    if isinstance(official_ohlc_overlay, dict) and official_ohlc_overlay.get(
-        "status"
-    ) in {"partial", "unavailable"}:
-        data_quality = str(official_ohlc_overlay["status"])
-        missing_dates = [
-            str(value)
-            for value in official_ohlc_overlay.get("missing_dates") or []
-            if value
-        ]
-        if missing_dates:
-            warnings.append(
-                "Official daily index OHLC is unavailable for: "
-                f"{', '.join(missing_dates)}. Missing sessions were omitted rather "
-                "than synthesized from close/change values."
-            )
-
-    freshness = _market_index_chart_freshness(
-        selected_points,
-        timeframe=timeframe,
-    )
-    payload = {
-        "stock_id": normalized_index_id,
-        "timeframe": timeframe,
-        "bars": bars,
-        "lookback_days": max((to_date - from_date).days, 0),
-        "from_date": from_date,
-        "to_date": to_date,
-        "point_count": len(selected_points),
-        "points": selected_points,
-        "backfill": backfill_result,
-        "data_quality": data_quality,
-        "warnings": warnings,
-        **freshness,
+    refresh_status: dict[str, object] = {
+        "status": "not_requested",
+        "base_interval": "1d",
+        "reason": "legacy_index_ohlc_route_is_cache_only",
+        "canonical_refresh_owner": (
+            "refresh_taiex_official_daily_bar"
+            if normalized_index_id == "TAIEX"
+            else "tpex_completed_daily_materializer"
+        ),
+        "limitations": ["LEGACY_INDEX_OHLC_REFRESH_DEPRECATED"],
     }
-    _INDEX_OHLC_CACHE[f"{normalized_index_id}:{timeframe}:{bars}"] = {
-        "expires_at": monotonic() + INDEX_LIST_CACHE_TTL_SECONDS,
-        "payload": payload,
-    }
+    payload = get_market_index_ohlc_chart_data(
+        normalized_index_id,
+        timeframe=timeframe,
+        bars=bars,
+        db=db,
+    )
+    payload["backfill"] = refresh_status
     return payload
 
 
@@ -4756,6 +4776,9 @@ def _shared_current_market_summary(
     )
 
     now = requested_at or datetime.now(TAIPEI_TZ)
+    from app.market.calendar_status import build_taiwan_calendar_status
+
+    calendar_status = build_taiwan_calendar_status(now=now)
     items: list[dict] = []
     warnings: list[str] = []
     for config in INDEX_CONFIGS:
@@ -4785,13 +4808,46 @@ def _shared_current_market_summary(
             if change is not None and previous_close not in {None, 0}
             else None
         )
+        completed_daily: dict[str, object] = {}
+        try:
+            daily_series = TaiwanBarService(db).read_bars(
+                instrument_id=index_id,
+                interval="1d",
+                limit=1,
+                include_partial=False,
+                requested_at=now,
+            )
+            if daily_series.bars:
+                daily_bar = daily_series.bars[-1]
+                daily_state = daily_series.bar_states[-1]
+                completed_daily = {
+                    "completed_daily_close": float(daily_bar.close_price),
+                    "completed_daily_trade_date": daily_bar.start_at.astimezone(
+                        TAIPEI_TZ
+                    ).date(),
+                    "completed_daily_event_time": daily_bar.lineage.event_at,
+                    "completed_daily_source": daily_bar.lineage.source,
+                    "completed_daily_provider": daily_bar.lineage.provider,
+                    "completed_daily_authority": daily_bar.lineage.authority.value,
+                    "completed_daily_finalization": daily_bar.finalization.value,
+                    "completed_daily_official": daily_state.official,
+                    "completed_daily_release_status": daily_state.release_status.value,
+                    "completed_daily_reconciliation_status": (
+                        daily_state.reconciliation_status.value
+                    ),
+                    "completed_daily_qualified": daily_state.technical_eligible,
+                }
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="indices.summary_completed_daily_projection",
+            )
         item_limitations = [
             *current.get("limitations", []),
             *breadth.get("limitations", []),
         ]
         warnings.extend(str(value) for value in item_limitations if value)
-        items.append(
-            {
+        item = {
                 "index_id": index_id,
                 "label": config["label"],
                 "short_label": config["short_label"],
@@ -4825,8 +4881,31 @@ def _shared_current_market_summary(
                     "index": current,
                     "breadth": breadth,
                 },
+                **completed_daily,
             }
+        resolution = resolve_taiwan_index_quote_state(
+            intraday=None,
+            index_snapshot=item,
+            calendar_status=calendar_status,
+            index_id=index_id,
+            acquisition_policy="cache_only",
         )
+        selected = resolution.get("current_observation")
+        if isinstance(selected, dict):
+            item["close"] = selected.get("value")
+            item["time"] = selected.get("trade_date")
+            item["source"] = selected.get("source") or item["source"]
+            item["as_of"] = selected.get("observed_at") or item["as_of"]
+        item["current_observation"] = selected
+        item["official_close"] = {
+            "status": resolution["official_close_status"],
+            "value": resolution["official_close_price"],
+            "trade_date": resolution["official_close_trade_date"],
+            "source": resolution["official_close_source"],
+        }
+        item["decision_usable"] = resolution["decision_usable"]
+        item["resolution"] = resolution
+        items.append(item)
     return _with_breadth_status_contract(
         {
             "as_of": now,

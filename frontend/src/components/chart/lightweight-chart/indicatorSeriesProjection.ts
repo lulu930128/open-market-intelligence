@@ -179,6 +179,152 @@ export function pushSupertrendLine(
   upTarget.push({ time });
 }
 
+function backendIndicatorTimeKey(value: string, timeMode: ChartTimeMode) {
+  return timeMode === "intraday" ? value : value.slice(0, 10);
+}
+
+function buildBackendSeriesData(
+  chartData: ChartPoint[],
+  indicatorData: StockIndicatorPoint[],
+  volumeValueKey: LightweightKLineChartProps["volumeValueKey"],
+  timeMode: ChartTimeMode,
+  params: IndicatorParameters
+): BuiltSeriesData {
+  const indicatorByTime = new Map(
+    indicatorData.map((point) => [backendIndicatorTimeKey(point.time, timeMode), point])
+  );
+  const candles: CandlestickData<Time>[] = [];
+  const line: LineData<Time>[] = [];
+  const volumes: HistogramData<Time>[] = [];
+  const macdHistogram: HistogramData<Time>[] = [];
+  const lines = createLineSeriesData();
+
+  chartData.forEach((point) => {
+    if (
+      !finiteNumber(point.open) ||
+      !finiteNumber(point.high) ||
+      !finiteNumber(point.low) ||
+      !finiteNumber(point.close)
+    ) {
+      return;
+    }
+    const time = chartTime(point.time, timeMode);
+    const color = point.close >= point.open ? upColor : downColor;
+    const indicator = indicatorByTime.get(backendIndicatorTimeKey(point.time, timeMode));
+    candles.push({
+      time,
+      open: point.open,
+      high: point.high,
+      low: point.low,
+      close: point.close,
+      color,
+      borderColor: color,
+      wickColor: color,
+    });
+    line.push({ time, value: point.close, color });
+    const volumeValue = volumeValueKey === "trade_value" ? point.trade_value : point.volume;
+    if (finiteNumber(volumeValue)) {
+      volumes.push({
+        time,
+        value: volumeValue,
+        color:
+          point.close >= point.open
+            ? omiChartColors.marketUpVolume
+            : omiChartColors.marketDownVolume,
+      });
+    }
+
+    if (backendIndicatorWindowExists(indicator, "ma_windows", params.maShort)) {
+      pushLine(lines.maShort, time, backendIndicatorValue(indicator?.ma, `ma${params.maShort}`));
+    }
+    if (backendIndicatorWindowExists(indicator, "ma_windows", params.maMiddle)) {
+      pushLine(lines.maMiddle, time, backendIndicatorValue(indicator?.ma, `ma${params.maMiddle}`));
+    }
+    if (backendIndicatorWindowExists(indicator, "ma_windows", params.maLong)) {
+      pushLine(lines.maLong, time, backendIndicatorValue(indicator?.ma, `ma${params.maLong}`));
+    }
+    if (
+      backendIndicatorParametersMatch(indicator, {
+        ema_fast: params.emaFast,
+        ema_slow: params.emaSlow,
+      })
+    ) {
+      pushLine(lines.emaFast, time, backendIndicatorValue(indicator?.ema, `ema${params.emaFast}`));
+      pushLine(lines.emaSlow, time, backendIndicatorValue(indicator?.ema, `ema${params.emaSlow}`));
+    }
+    if (backendIndicatorParametersMatch(indicator, { rsi_period: params.rsiPeriod })) {
+      pushLine(lines.rsi, time, backendIndicatorValue(indicator?.rsi, `rsi${params.rsiPeriod}`));
+    }
+    if (
+      backendIndicatorParametersMatch(indicator, {
+        macd_fast: params.macdFast,
+        macd_slow: params.macdSlow,
+        macd_signal: params.macdSignal,
+      })
+    ) {
+      pushLine(lines.macd, time, backendIndicatorValue(indicator?.macd, "macd"));
+      pushLine(lines.macdSignal, time, backendIndicatorValue(indicator?.macd, "signal"));
+      const histogram = backendIndicatorValue(indicator?.macd, "histogram");
+      if (finiteNumber(histogram)) {
+        macdHistogram.push({
+          time,
+          value: histogram,
+          color:
+            histogram >= 0
+              ? omiChartColors.marketUpHistogram
+              : omiChartColors.marketDownHistogram,
+        });
+      }
+    }
+    if (backendIndicatorParametersMatch(indicator, { kd_period: params.kdPeriod })) {
+      pushLine(lines.kdK, time, backendIndicatorValue(indicator?.kd, `k${params.kdPeriod}`));
+      pushLine(lines.kdD, time, backendIndicatorValue(indicator?.kd, `d${params.kdPeriod}`));
+    }
+    if (backendIndicatorParametersMatch(indicator, { atr_period: params.atrPeriod })) {
+      pushLine(lines.atr, time, backendIndicatorValue(indicator?.atr, `atr${params.atrPeriod}`));
+    }
+    if (backendIndicatorParametersMatch(indicator, { adx_period: params.adxPeriod })) {
+      pushLine(lines.adx, time, backendIndicatorValue(indicator?.adx, `adx${params.adxPeriod}`));
+      pushLine(lines.plusDi, time, backendIndicatorValue(indicator?.adx, `plus_di${params.adxPeriod}`));
+      pushLine(lines.minusDi, time, backendIndicatorValue(indicator?.adx, `minus_di${params.adxPeriod}`));
+    }
+    if (backendIndicatorParametersMatch(indicator, { mfi_period: params.mfiPeriod })) {
+      pushLine(lines.mfi, time, backendIndicatorValue(indicator?.mfi, `mfi${params.mfiPeriod}`));
+    }
+    if (backendIndicatorParametersMatch(indicator, { roc_period: params.rocPeriod })) {
+      pushLine(lines.roc, time, backendIndicatorValue(indicator?.roc, `roc${params.rocPeriod}`));
+    }
+    if (
+      backendIndicatorParametersMatch(indicator, {
+        donchian_period: params.donchianPeriod,
+      })
+    ) {
+      pushLine(lines.donchianUpper, time, backendIndicatorValue(indicator?.donchian, `upper${params.donchianPeriod}`));
+      pushLine(lines.donchianLower, time, backendIndicatorValue(indicator?.donchian, `lower${params.donchianPeriod}`));
+    }
+    if (
+      backendIndicatorParametersMatch(indicator, {
+        bollinger_period: params.bollingerPeriod,
+        bollinger_std_dev: params.bollingerStdDev,
+      })
+    ) {
+      pushLine(lines.bollingerUpper, time, backendIndicatorValue(indicator?.bollinger, `upper${params.bollingerPeriod}`));
+      pushLine(lines.bollingerMiddle, time, backendIndicatorValue(indicator?.bollinger, `middle${params.bollingerPeriod}`));
+      pushLine(lines.bollingerLower, time, backendIndicatorValue(indicator?.bollinger, `lower${params.bollingerPeriod}`));
+    }
+    if (
+      backendIndicatorParametersMatch(indicator, {
+        support_resistance_period: params.supportResistanceLookback,
+      })
+    ) {
+      pushLine(lines.support, time, backendIndicatorValue(indicator?.support_resistance, `support${params.supportResistanceLookback}`));
+      pushLine(lines.resistance, time, backendIndicatorValue(indicator?.support_resistance, `resistance${params.supportResistanceLookback}`));
+    }
+  });
+
+  return { candles, line, volumes, macdHistogram, lines };
+}
+
 export function buildSeriesData(
   chartData: ChartPoint[],
   indicatorData: StockIndicatorPoint[],
@@ -188,7 +334,18 @@ export function buildSeriesData(
   benchmarkData?: ChartPoint[],
   allowCanonicalFallback = true
 ): BuiltSeriesData {
-  const indicatorByTime = new Map(indicatorData.map((point) => [point.time.slice(0, 10), point]));
+  if (!allowCanonicalFallback) {
+    return buildBackendSeriesData(
+      chartData,
+      indicatorData,
+      volumeValueKey,
+      timeMode,
+      params
+    );
+  }
+  const indicatorByTime = new Map(
+    indicatorData.map((point) => [backendIndicatorTimeKey(point.time, timeMode), point])
+  );
   const closes = chartData.map((point) => point.close);
   const emaFast = calculateEma(closes, params.emaFast);
   const emaSlow = calculateEma(closes, params.emaSlow);
@@ -270,7 +427,7 @@ export function buildSeriesData(
       return;
     }
 
-    const timeKey = point.time.slice(0, 10);
+    const timeKey = backendIndicatorTimeKey(point.time, timeMode);
     const presentationFallback = (value: number | null) =>
       allowCanonicalFallback ? value : null;
     const time = chartTime(point.time, timeMode);

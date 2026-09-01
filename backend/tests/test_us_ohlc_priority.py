@@ -20,6 +20,7 @@ from app.db.models import (
 from app.us_market.ohlc_priority import (
     PRIORITY_DAILY_RESEARCH_CONTRACT,
     PRIORITY_US_INDEX_SYMBOLS,
+    list_us_priority_ohlc_critical_symbols,
     list_us_priority_ohlc_symbols,
     reconcile_us_priority_ohlc,
 )
@@ -98,6 +99,10 @@ def test_priority_universe_orders_indices_holdings_then_enabled_watchlist() -> N
         assert symbols.count("UMC") == 1
         assert symbols.index("UMC") < symbols.index("AAPL")
         assert "DISABLED" not in symbols
+        assert list_us_priority_ohlc_critical_symbols(db) == (
+            *PRIORITY_US_INDEX_SYMBOLS,
+            "UMC",
+        )
     finally:
         db.close()
 
@@ -183,9 +188,43 @@ def test_priority_reconcile_rotates_after_durable_cursor() -> None:
         checked_symbols = [
             call.kwargs["symbol"] for call in platform.read.call_args_list
         ]
-        assert checked_symbols == ["AAPL", "^GSPC", "UMC"]
+        assert checked_symbols == ["^GSPC", "AAPL", "UMC"]
         assert result["status"] == "completed"
         assert result["cursor_symbol"] == "UMC"
+    finally:
+        db.close()
+
+
+def test_priority_reconcile_never_rotates_critical_targets_behind_watchlist() -> None:
+    db = _session()
+    try:
+        platform = Mock()
+        platform.read.return_value = _platform_result(satisfied=True)
+        with (
+            patch(
+                "app.us_market.ohlc_priority.list_us_priority_ohlc_symbols",
+                return_value=("^GSPC", "TSM", "AAPL", "MSFT"),
+            ),
+            patch(
+                "app.us_market.ohlc_priority.list_us_priority_ohlc_critical_symbols",
+                return_value=("^GSPC", "TSM"),
+            ),
+        ):
+            result = reconcile_us_priority_ohlc(
+                max_runtime_seconds=30,
+                max_symbols=3,
+                cursor_symbol="AAPL",
+                session_factory=lambda: Session(db.get_bind()),
+                platform_factory=lambda _db: platform,
+            )
+
+        checked_symbols = [
+            call.kwargs["symbol"] for call in platform.read.call_args_list
+        ]
+        assert checked_symbols == ["^GSPC", "TSM", "MSFT"]
+        assert result["critical_symbol_count"] == 2
+        assert result["rotatable_symbol_count"] == 2
+        assert result["cursor_symbol"] == "MSFT"
     finally:
         db.close()
 

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.ai import technical_analysis
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
+from app.ai.market_context.taiwan_bar_projection import project_taiwan_chart_bundle
 from app.ai.market_context.taiwan_projection import (
     _build_tw_index_compact_evidence,
     _json_value,
@@ -22,8 +23,6 @@ from app.market.market_chips import market_chip_daily_to_dict
 
 normalize_analysis_horizon = technical_analysis.normalize_analysis_horizon
 _technical_analysis_summary = technical_analysis._technical_analysis_summary
-_normalize_technical_points = technical_analysis._normalize_technical_points
-_technical_report_from_points = technical_analysis._technical_report_from_points
 _serialized_chart = technical_analysis._serialized_chart
 
 
@@ -31,8 +30,7 @@ _serialized_chart = technical_analysis._serialized_chart
 class TaiwanIndexDependencies:
     get_latest_market_chip_daily: Callable[..., Any]
     get_market_index_contributions: Callable[..., list[Any]]
-    get_market_index_intraday: Callable[..., dict[str, Any]]
-    get_market_index_ohlc_chart_data: Callable[..., dict[str, Any]]
+    read_taiwan_chart: Callable[..., Any]
     get_market_index_summary: Callable[..., Any]
     now: Callable[[], datetime]
 
@@ -69,13 +67,15 @@ def read_tw_index_context(
         maximum=500,
     )
 
-    for timeframe in ("daily", "weekly", "monthly"):
+    interval_by_timeframe = {"daily": "1d", "weekly": "1w", "monthly": "1mo"}
+    for timeframe, interval in interval_by_timeframe.items():
         try:
-            chart = dependencies.get_market_index_ohlc_chart_data(
-                index_id=normalized_index_id,
-                timeframe=timeframe,
-                bars=max(chart_bars, 1),
+            bundle = dependencies.read_taiwan_chart(
                 db=db,
+                instrument_id=normalized_index_id,
+                interval=interval,
+                limit=max(chart_bars, 1),
+                include_partial=True,
             )
         except ValueError:
             raise
@@ -84,31 +84,54 @@ def read_tw_index_context(
             missing.append(f"market_index_ohlc.{timeframe}")
             continue
 
+        chart = project_taiwan_chart_bundle(bundle)
         serialized = _serialized_chart(chart)
         charts[timeframe] = serialized
-        points = _normalize_technical_points(serialized.get("points", []))
-        technical_reports[timeframe] = _technical_report_from_points(
-            points=points,
-            timeframe=timeframe,
-            asset_label=normalized_index_id,
-        )
+        points = list(bundle.technical.points)
+        technical_reports[timeframe] = {
+            "kind": "tw_index_backend_technical_series",
+            "timeframe": timeframe,
+            "algorithm_version": bundle.technical.algorithm_version,
+            "bar_series_revision": bundle.series_revision,
+            "status": bundle.technical.status.value,
+            "score": None,
+            "confidence": None,
+            "data": {"daily_indicator": points[-1] if points else None},
+            "missing": [] if points else ["technical.series"],
+            "warnings": list(bundle.technical.warnings),
+        }
         if not points:
             missing.append(f"market_index_ohlc.{timeframe}")
-        backfill = chart.get("backfill") if isinstance(chart.get("backfill"), dict) else {}
-        if backfill.get("status") == "error":
-            warnings.append(str(backfill.get("message") or "Index daily stat refresh failed."))
 
     intraday: dict[str, Any] | None = None
     normalized_horizon = normalize_analysis_horizon(analysis_horizon)
     if include_intraday or normalized_horizon == "intraday":
         try:
-            intraday = dependencies.get_market_index_intraday(normalized_index_id)
-            intraday_points = _normalize_technical_points(intraday.get("points", []))
-            technical_reports["today"] = _technical_report_from_points(
-                points=intraday_points,
-                timeframe="today",
-                asset_label=normalized_index_id,
+            bundle = dependencies.read_taiwan_chart(
+                db=db,
+                instrument_id=normalized_index_id,
+                interval="1m",
+                limit=500,
+                include_partial=True,
             )
+            intraday = project_taiwan_chart_bundle(bundle)
+            intraday_points = list(bundle.technical.points)
+            technical_reports["today"] = {
+                "kind": "tw_index_backend_technical_series",
+                "timeframe": "today",
+                "algorithm_version": bundle.technical.algorithm_version,
+                "bar_series_revision": bundle.series_revision,
+                "status": bundle.technical.status.value,
+                "score": None,
+                "confidence": None,
+                "data": {
+                    "daily_indicator": intraday_points[-1]
+                    if intraday_points
+                    else None
+                },
+                "missing": [] if intraday_points else ["technical.series"],
+                "warnings": list(bundle.technical.warnings),
+            }
             if not intraday_points:
                 missing.append("market_index_intraday")
         except Exception as exc:

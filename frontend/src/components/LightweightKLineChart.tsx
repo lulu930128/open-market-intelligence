@@ -356,6 +356,14 @@ export default function LightweightKLineChart({
     resolvedVolumePanelLabel,
     seriesData,
     timeMode,
+    dateGranularity:
+      drawingContext?.timeframe === "weekly"
+        ? "weekly"
+        : drawingContext?.timeframe === "monthly"
+          ? "monthly"
+          : drawingContext?.timeframe === "daily"
+            ? "daily"
+            : null,
   });
 
   const chartDataTimeIndex = useMemo(() => {

@@ -22,7 +22,6 @@ from app.market.tw_current_market_capabilities import (
 )
 from app.market.tw_intraday_capabilities import (
     FUGLE_INTRADAY_PARSER_VERSION,
-    FUGLE_INTRADAY_PROVIDER,
     FUGLE_INTRADAY_RESOURCE_ID,
     FUGLE_INTRADAY_SOURCE,
 )
@@ -670,6 +669,16 @@ def fugle_bar_acquisition(
     if any(value is None for value in prices.values()):
         raise ValueError("Fugle candle lacks valid OHLC")
     start_at = record.event_at
+    from app.market.tw_instrument_trading_policy import (
+        is_taiwan_continuous_time_bar_start,
+    )
+    if not is_taiwan_continuous_time_bar_start(start_at):
+        return BarAcquisitionResult(
+            summary=_summary(
+                FUGLE_INTRADAY_RESOURCE_ID,
+                limitations=("TW_CLOSING_AUCTION_NOT_TIME_BAR",),
+            ),
+        )
     volume = _lots(data.get("volume"))
     observation = BarObservation(
         instrument=instrument,

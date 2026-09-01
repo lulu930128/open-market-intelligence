@@ -15,7 +15,6 @@ import websockets
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import StockMaster
 from app.db.session import SessionLocal
 from app.market.intraday_transaction import TaiwanIntradayBarTransaction
 from app.market.providers.fugle_realtime import (
@@ -48,8 +47,8 @@ from app.market.tw_intraday_platform import (
     build_taiwan_intraday_requirement,
     read_taiwan_intraday_bars,
 )
-from app.market.trading_calendar import TAIWAN_TZ
-from app.market_data.contracts import InstrumentKey, InstrumentType, Market
+from app.market.tw_instrument import resolve_taiwan_instrument
+from app.market_data.contracts import InstrumentKey, InstrumentType
 from app.market_data.integration_contracts import RequestBounds
 from app.market_data.policies import RealtimePolicy
 
@@ -67,22 +66,10 @@ ConnectFactory = Callable[..., Any]
 
 
 def _instrument(db: Session, symbol: str) -> InstrumentKey:
-    stock = db.query(StockMaster).filter(StockMaster.stock_id == symbol).first()
-    if stock is None:
-        raise ValueError(f"Fugle active stock is missing from StockMaster: {symbol}")
-    venue = str(stock.market or "").strip().upper()
-    if venue not in {"TWSE", "TPEX"}:
-        raise ValueError("Fugle active stock requires TWSE or TPEX")
-    return InstrumentKey(
-        market=Market.TW,
-        symbol=symbol,
-        instrument_type=(
-            InstrumentType.ETF
-            if str(stock.instrument_type or "").strip().casefold() == "etf"
-            else InstrumentType.STOCK
-        ),
-        venue=venue,
-    )
+    instrument = resolve_taiwan_instrument(db, symbol)
+    if instrument.instrument_type is InstrumentType.INDEX:
+        raise ValueError("Fugle stock stream does not materialize Taiwan index events")
+    return instrument
 
 
 class FugleCanonicalMaterializer:

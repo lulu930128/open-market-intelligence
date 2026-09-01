@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -347,16 +348,38 @@ class TechnicalEvidenceTests(unittest.TestCase):
         )
         for index, point in enumerate(weekly_points):
             point["time"] = date(2025, 4, 14) + timedelta(weeks=index)
-        chart = {
-            "points": weekly_points,
-            "point_count": len(weekly_points),
-            "latest_data_date": date(2026, 8, 12),
-        }
-
-        with patch.object(
-            technical_report.market_service,
-            "list_stock_ohlc_chart_data",
-            return_value=chart,
+        series = SimpleNamespace(
+            bars=[
+                SimpleNamespace(
+                    start_at=datetime.combine(point["time"], datetime.min.time()),
+                    open_price=point["open"],
+                    high_price=point["high"],
+                    low_price=point["low"],
+                    close_price=point["close"],
+                    volume=SimpleNamespace(value=point["volume"]),
+                )
+                for point in weekly_points
+            ],
+            identity=SimpleNamespace(
+                series_fingerprint="a" * 64,
+                series_revision="b" * 64,
+            ),
+        )
+        with (
+            patch.object(
+                technical_report,
+                "TaiwanBarService",
+                return_value=SimpleNamespace(read_bars=lambda **_kwargs: series),
+            ),
+            patch.object(
+                technical_report,
+                "TaiwanTechnicalService",
+                return_value=SimpleNamespace(
+                    calculate=lambda *_args, **_kwargs: SimpleNamespace(
+                        points=weekly_points
+                    )
+                ),
+            ),
         ):
             completed, resolved_chart = technical_report._aggregated_indicator(
                 db=object(),

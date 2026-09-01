@@ -10,11 +10,6 @@ from app.db.models import StockMaster
 from app.ai.evidence_passport import build_evidence_passport
 from app.market import service as market_service
 from app.market.calendar_status import build_taiwan_calendar_status
-from app.market.intraday import get_intraday_trend
-from app.market.public_quote_platform import (
-    project_taiwan_session_close,
-    read_taiwan_session_close,
-)
 from app.market.stock_volume_pace import build_tw_stock_volume_pace
 from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
@@ -23,15 +18,15 @@ from app.market.technical_parameters import (
 from app.market.technical_evidence import classify_latest_period
 from app.market.technical_indicator_gateway import (
     active_engine_contract,
-    calculate_active_indicator_points,
     calculate_active_latest_daily_indicator,
 )
-from app.market.technical_intraday_projection import build_current_partial_daily_bar
 from app.market.technical_structure import (
     build_moving_average_structure,
     build_price_range_signals,
     build_technical_current_state,
 )
+from app.market.tw_bar_service import TaiwanBarService
+from app.market.tw_technical_service import TaiwanTechnicalService
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -235,6 +230,47 @@ def _daily_indicator(
     )
 
 
+def _canonical_intraday_payload(db: Session, stock_id: str) -> dict[str, Any]:
+    """Project canonical Base-1m Bars into the legacy report input shape."""
+
+    series = TaiwanBarService(db).read_bars(
+        instrument_id=stock_id,
+        interval="1m",
+        limit=500,
+        include_partial=True,
+    )
+    points = [
+        {
+            "time": bar.start_at,
+            "price": float(bar.close_price),
+            "open": float(bar.open_price),
+            "high": float(bar.high_price),
+            "low": float(bar.low_price),
+            "close": float(bar.close_price),
+            "volume": float(bar.volume.value) if bar.volume is not None else None,
+            "finalization": bar.finalization.value,
+        }
+        for bar in series.bars
+    ]
+    latest = series.bars[-1] if series.bars else None
+    return {
+        "source": latest.lineage.source if latest is not None else "tw.bar.series",
+        "point_count": len(points),
+        "previous_close": None,
+        "points": points,
+        "series_coverage": {
+            "status": (
+                "complete_session"
+                if series.history.requested_coverage_satisfied
+                else "partial"
+            ),
+            "history_status": series.history.history_status.value,
+        },
+        "series_fingerprint": series.identity.series_fingerprint,
+        "series_revision": series.identity.series_revision,
+    }
+
+
 def _aggregated_indicator(
     *,
     db: Session,
@@ -244,32 +280,63 @@ def _aggregated_indicator(
     to_date: date | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     technical_parameters = parameters or get_technical_analysis_parameters()
-    chart = market_service.list_stock_ohlc_chart_data(
-        db=db,
-        stock_id=stock_id,
-        timeframe=timeframe,
-        bars=AGGREGATED_REPORT_BARS[timeframe],
-        ensure_history=False,
-        to_date=to_date,
+    interval = {"weekly": "1w", "monthly": "1mo"}[timeframe]
+    to_time = (
+        datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIPEI_TZ)
+        if to_date is not None
+        else None
     )
-    points = chart.get("points") or []
-    indicators = calculate_active_indicator_points(
-        points,
+    series = TaiwanBarService(db).read_bars(
+        instrument_id=stock_id,
+        interval=interval,
+        to_time=to_time,
+        limit=AGGREGATED_REPORT_BARS[timeframe],
+        include_partial=True,
+    )
+    technical = TaiwanTechnicalService().calculate(
+        series,
         parameters=technical_parameters,
     )
+    points = [
+        {
+            "time": bar.start_at.date(),
+            "open": float(bar.open_price),
+            "high": float(bar.high_price),
+            "low": float(bar.low_price),
+            "close": float(bar.close_price),
+            "volume": float(bar.volume.value) if bar.volume is not None else None,
+        }
+        for bar in series.bars
+    ]
+    indicators = [
+        {**point, "time": point["time"].date()}
+        if isinstance(point.get("time"), datetime)
+        else dict(point)
+        for point in technical.points
+    ]
+    latest_data_date = points[-1].get("time") if points else None
     period = classify_latest_period(
         points,
         timeframe=timeframe,
-        latest_observation_date=chart.get("latest_data_date"),
+        latest_observation_date=latest_data_date,
     )
     current_partial = None
     completed = indicators[-1] if indicators else None
     if period["status"] == "current_partial" and indicators:
         current_partial = indicators[-1]
         completed = indicators[-2] if len(indicators) > 1 else None
-    chart["period"] = period
-    chart["current_partial_indicator"] = current_partial
-    chart["decision_snapshot"] = "completed"
+    chart = {
+        "stock_id": stock_id,
+        "timeframe": timeframe,
+        "point_count": len(points),
+        "points": points,
+        "latest_data_date": latest_data_date,
+        "period": period,
+        "current_partial_indicator": current_partial,
+        "decision_snapshot": "completed",
+        "series_fingerprint": series.identity.series_fingerprint,
+        "series_revision": series.identity.series_revision,
+    }
     return completed, chart
 
 
@@ -324,106 +391,50 @@ def _current_partial_daily_indicator(
     market_session: dict[str, Any],
     parameters: TechnicalAnalysisParameters,
 ) -> dict[str, Any] | None:
-    rows = market_service.list_stock_daily_history(
-        db=db,
-        stock_id=stock_id,
-        limit=400,
-        ascending=True,
-    )
-    completed_points = [
-        {
-            "time": row.trade_date,
-            "open": row.open_price,
-            "high": row.high_price,
-            "low": row.low_price,
-            "close": row.close_price,
-            "volume": row.trade_volume,
-            "price_change": row.price_change,
-        }
-        for row in rows
-    ]
     session_date = market_session.get("date")
     if not isinstance(session_date, date):
         return None
-    current_quote: dict[str, Any] | None = None
-    if market_session.get("is_after_close"):
-        session_close_result = read_taiwan_session_close(
-            db,
-            stock_id=stock_id,
-            requested_at=market_session.get("checked_at"),
-        )
-        session_close = project_taiwan_session_close(session_close_result)
-        quote = session_close_result.resolved.quote
-        if session_close.get("available") is True and quote is not None:
-            current_quote = {
-                "trade_date": quote.trade_date,
-                "event_time": quote.lineage.event_at,
-                "last_trade_price": float(quote.last_trade_price),
-                "last_trade_is_current_session": True,
-                "actual_trade_occurred": True,
-                "session_close_available": True,
-                "session_close_status": session_close.get("finalization"),
-                "open_price": (
-                    float(quote.open_price)
-                    if quote.open_price is not None
-                    else None
-                ),
-                "high_price": (
-                    float(quote.high_price)
-                    if quote.high_price is not None
-                    else None
-                ),
-                "low_price": (
-                    float(quote.low_price)
-                    if quote.low_price is not None
-                    else None
-                ),
-                "cumulative_volume_shares": (
-                    float(quote.cumulative_quantity.value)
-                    if quote.cumulative_quantity is not None
-                    else None
-                ),
-                "provider": quote.lineage.provider,
-                "source": quote.lineage.source,
-            }
-    partial_bar = build_current_partial_daily_bar(
-        completed_daily_points=completed_points,
-        intraday_points=intraday_points,
-        quote=current_quote,
-        session_date=session_date,
-        session_phase=str(market_session.get("phase") or "unknown"),
+    series = TaiwanBarService(db).read_bars(
+        instrument_id=stock_id,
+        interval="1d",
+        limit=400,
+        include_partial=True,
+        requested_at=market_session.get("checked_at"),
     )
-    if partial_bar is None:
+    if not series.bars or series.bars[-1].start_at.date() != session_date:
         return None
-    calculated = calculate_active_indicator_points(
-        [*completed_points, partial_bar],
+    latest_bar = series.bars[-1]
+    latest_state = series.bar_states[-1]
+    if latest_state.official and latest_state.persisted:
+        return None
+    technical = TaiwanTechnicalService().calculate(
+        series,
         parameters=parameters,
     )
-    if not calculated:
+    if not technical.points:
         return None
+    calculated = dict(technical.points[-1])
     return {
-        **calculated[-1],
-        "open": partial_bar.get("open"),
-        "high": partial_bar.get("high"),
-        "low": partial_bar.get("low"),
-        "bar_status": partial_bar.get("bar_status"),
-        "session_close_finalization": partial_bar.get(
-            "session_close_finalization"
-        ),
+        **calculated,
+        "open": float(latest_bar.open_price),
+        "high": float(latest_bar.high_price),
+        "low": float(latest_bar.low_price),
+        "bar_status": latest_state.finalization.value,
+        "session_close_finalization": latest_state.finalization.value,
         "official_daily_confirmed": False,
-        "event_time": partial_bar.get("event_time"),
-        "source": partial_bar.get("source"),
-        "volume_semantics": partial_bar.get("volume_semantics"),
+        "event_time": latest_bar.end_at,
+        "source": latest_bar.lineage.source,
+        "volume_semantics": "canonical_bar_interval_quantity",
+        "bar_series_revision": series.identity.series_revision,
         "indicator_semantics": {
-            "price_based": "intraday_partial",
-            "range_based": "intraday_partial",
-            "volume_based": "partial_cumulative_volume",
+            "price_based": "backend_bar_projection",
+            "range_based": "backend_bar_projection",
+            "volume_based": "backend_bar_projection",
         },
         "decision_usable": False,
         "volume_based_decision_usable": False,
         "warnings": [
-            "This is an intraday provisional daily indicator observation; completed daily evidence remains the decision snapshot.",
-            "Volume-based values use cumulative partial-session volume and are not finalized daily indicators.",
+            "This is a Backend-owned current-session daily projection; completed official daily evidence remains a separate state axis.",
         ],
     }
 
@@ -1065,7 +1076,7 @@ def _build_today_report(
     if intraday_override is not None:
         intraday = intraday_override
     elif include_intraday:
-        intraday = get_intraday_trend(db=db, stock_id=stock_id)
+        intraday = _canonical_intraday_payload(db=db, stock_id=stock_id)
     else:
         missing.append("intraday_trend")
         warnings.append("Intraday report was requested without live intraday access.")
@@ -1111,7 +1122,7 @@ def _build_today_report(
             and preloaded_current_partial_indicator.get(
                 "session_close_finalization"
             )
-            == "session_final"
+            in {"session_final", "final", "corrected"}
             and _finite(preloaded_current_partial_indicator.get("close"))
         ):
             latest_point = {
@@ -1248,7 +1259,7 @@ def _build_today_report(
         after_close
         and isinstance(current_partial_indicator, dict)
         and current_partial_indicator.get("session_close_finalization")
-        == "session_final"
+        in {"session_final", "final", "corrected"}
         and _finite(current_partial_indicator.get("close"))
     )
     if session_close_confirmed:
@@ -1747,7 +1758,7 @@ def _build_daily_report(
     )
 
     if should_load_intraday:
-        intraday = get_intraday_trend(db=db, stock_id=stock_id)
+        intraday = _canonical_intraday_payload(db=db, stock_id=stock_id)
         intraday_points = intraday.get("points") or []
         intraday_series_coverage = (
             intraday.get("series_coverage")

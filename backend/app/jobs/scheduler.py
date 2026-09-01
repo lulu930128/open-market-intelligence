@@ -69,6 +69,15 @@ from app.market.broker_branch_behavior import (
 )
 from app.market.market_chips import normalize_market_chip_index_ids
 from app.market.taiwan_market_state import persist_taiwan_market_minute_state
+from app.market.tw_bar_materialization_transaction import (
+    TaiwanBarMaterializationTransaction,
+)
+from app.market.tw_bar_materializer import materialize_index_minute_candidates
+from app.market.tw_daily_reconciliation import TaiwanDailyReconciliationTransaction
+from app.market.tw_index_daily_platform import (
+    refresh_taiex_official_daily_bar,
+    refresh_tpex_completed_derived_daily_bar,
+)
 from app.market.indices import (
     TAIWAN_INDEX_RECONCILIATION_END_TIME,
     TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS,
@@ -106,7 +115,10 @@ from app.market.taiwan_rules import (
     TAIWAN_REFRESH_MARGIN_TRADING,
     expected_daily_price_date,
 )
-from app.market.trading_calendar import is_taiwan_trading_day
+from app.market.trading_calendar import (
+    is_taiwan_trading_day,
+    taiwan_presentation_session,
+)
 from app.market.tw_derivatives import (
     DERIVATIVES_RELEASE_TIME,
     expected_taiwan_derivatives_date,
@@ -1348,6 +1360,23 @@ def collect_taiwan_market_index_summary() -> None:
     db = SessionLocal()
     try:
         payload = refresh_current_market_index_snapshots(db=db)
+        trade_date = taiwan_presentation_session(now)["trade_date"]
+        materialized_count = 0
+        for index_id in ("TAIEX", "TPEX"):
+            batch = materialize_index_minute_candidates(
+                db,
+                index_id=index_id,
+                trade_date=trade_date,
+                as_of=now,
+            )
+            if not batch.candidates:
+                continue
+            summary = TaiwanBarMaterializationTransaction(
+                db
+            ).persist_materialized_bars(batch.candidates)
+            materialized_count += (
+                summary.observations_written + summary.observations_unchanged
+            )
         persistence = persist_taiwan_market_minute_state(
             db,
             payload=payload,
@@ -1356,10 +1385,11 @@ def collect_taiwan_market_index_summary() -> None:
         )
         logger.debug(
             "Taiwan market index summary cache refreshed as_of=%s indices=%s "
-            "minute_rows=%s.",
+            "minute_rows=%s base_1m_candidates=%s.",
             payload.get("as_of"),
             len(payload.get("indices") or []),
             persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
+            materialized_count,
         )
     except Exception:
         db.rollback()
@@ -1506,6 +1536,65 @@ def _reconcile_taiwan_official_index_rows(
     return results
 
 
+def _reconcile_taiwan_index_daily_bars(
+    db: Any,
+    *,
+    requested_at: datetime,
+) -> list[dict[str, Any]]:
+    """Scheduler-owned Base-1d acquisition/materialization after release."""
+
+    from app.market.trading_calendar import latest_completed_taiwan_session_date
+
+    official_trade_date = expected_daily_price_date(now=requested_at)
+    derived_trade_date = latest_completed_taiwan_session_date(requested_at)
+    results: list[dict[str, Any]] = []
+    try:
+        taiex = refresh_taiex_official_daily_bar(
+            db,
+            trade_date=official_trade_date,
+            requested_at=requested_at,
+        )
+        results.append(
+            {
+                "index_id": "TAIEX",
+                "status": (
+                    "refreshed" if taiex.postcondition_satisfied else "partial"
+                ),
+                "raw_result_ids": list(taiex.persistence.raw_result_ids),
+            }
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.exception("TAIEX official Base-1d reconciliation failed.")
+        results.append(
+            {"index_id": "TAIEX", "status": "failed", "error": str(exc)}
+        )
+    try:
+        tpex = refresh_tpex_completed_derived_daily_bar(
+            db,
+            trade_date=derived_trade_date,
+            requested_at=requested_at,
+        )
+        reconciliation = TaiwanDailyReconciliationTransaction(
+            db
+        ).reconcile_tpex_daily_stat(trade_date=derived_trade_date)
+        results.append(
+            {
+                "index_id": "TPEX",
+                "status": "refreshed",
+                "raw_result_ids": list(tpex.raw_result_ids),
+                "reconciliation": reconciliation.status.value,
+            }
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.exception("TPEX derived Base-1d reconciliation failed.")
+        results.append(
+            {"index_id": "TPEX", "status": "failed", "error": str(exc)}
+        )
+    return results
+
+
 def reconcile_taiwan_market_index_summary(
     *,
     allow_late: bool = False,
@@ -1525,6 +1614,10 @@ def reconcile_taiwan_market_index_summary(
             db,
             requested_at=local_now,
         )
+        daily_bar_results = _reconcile_taiwan_index_daily_bars(
+            db,
+            requested_at=local_now,
+        )
         payload = refresh_market_index_summary(
             db=db,
             refresh_daily_stats=True,
@@ -1538,12 +1631,13 @@ def reconcile_taiwan_market_index_summary(
         logger.info(
             "Taiwan market index summary post-close reconciliation completed "
             "as_of=%s indices=%s minute_rows=%s startup_catchup=%s "
-            "official_daily=%s.",
+            "official_daily=%s base_daily=%s.",
             payload.get("as_of"),
             len(payload.get("indices") or []),
             persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
             allow_late,
             official_refresh_results,
+            daily_bar_results,
         )
     except Exception:
         db.rollback()
@@ -2426,6 +2520,13 @@ def enqueue_us_priority_ohlc_reconcile() -> None:
                 cursor_symbol = previous_result.get("cursor_symbol")
         request = {
             "max_runtime_seconds": settings.scheduler_us_priority_ohlc_max_runtime_seconds,
+            "max_symbols": settings.scheduler_us_priority_ohlc_max_symbols,
+            "max_external_calls": (
+                settings.scheduler_us_priority_ohlc_max_external_calls
+            ),
+            "max_provider_attempts": (
+                settings.scheduler_us_priority_ohlc_max_provider_attempts
+            ),
             "cursor_symbol": cursor_symbol,
         }
         job, created = job_service.enqueue_job(
@@ -2439,6 +2540,9 @@ def enqueue_us_priority_ohlc_reconcile() -> None:
             task_args=(
                 request["max_runtime_seconds"],
                 request["cursor_symbol"],
+                request["max_symbols"],
+                request["max_external_calls"],
+                request["max_provider_attempts"],
             ),
         )
         logger.info(

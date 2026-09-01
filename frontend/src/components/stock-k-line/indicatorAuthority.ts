@@ -3,6 +3,7 @@ import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 export type CanonicalIndicatorAuthority = "backend" | "presentation";
 export type IndicatorProjectionScope =
   | "backend_authoritative"
+  | "backend_unavailable"
   | "mixed"
   | "presentation_only";
 
@@ -164,7 +165,7 @@ export function indicatorProjectionScope(
   }
 
   if (options?.canonicalAuthority === "backend") {
-    return "mixed";
+    return "backend_unavailable";
   }
   return authoritativeCount > 0 ? "mixed" : "presentation_only";
 }

@@ -243,6 +243,10 @@ class SourceLineage(CanonicalModel):
     observation_id: str | None = Field(default=None, max_length=128)
     raw_receipt_id: str | None = Field(default=None, max_length=128)
     content_hash: str | None = Field(default=None, max_length=128)
+    component_content_hashes: tuple[str, ...] = Field(
+        default=(), max_length=5000
+    )
+    materialization_version: str | None = Field(default=None, max_length=96)
 
     @field_validator("event_at", "received_at", "fetched_at")
     @classmethod
@@ -255,6 +259,10 @@ class SourceLineage(CanonicalModel):
     def _require_one_timestamp(self) -> SourceLineage:
         if not any((self.event_at, self.received_at, self.fetched_at)):
             raise ValueError("lineage requires event_at, received_at, or fetched_at")
+        if bool(self.component_content_hashes) != bool(self.materialization_version):
+            raise ValueError(
+                "materialized lineage requires component hashes and version together"
+            )
         return self
 
 

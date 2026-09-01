@@ -374,6 +374,18 @@ class USIntradayBarRepository:
         by_source: dict[tuple[str, str], list[BarObservation]] = defaultdict(list)
         priorities: dict[tuple[str, str], int] = {}
         rejections: list[CandidateRowRejection] = []
+        minute_bucket_counts: dict[tuple[str, datetime], int] = defaultdict(int)
+        for row, _lineage, _raw, _source in rows:
+            minute_bucket_counts[
+                (
+                    row.provider,
+                    _utc(row.bar_time).replace(second=0, microsecond=0),
+                )
+            ] += 1
+        duplicate_minute_bucket_exists = any(
+            count > 1 for count in minute_bucket_counts.values()
+        )
+        noncanonical_minute_identity_exists = False
         for row, lineage, raw, source in rows:
             identity = (row.provider, row.source)
             if len(by_source[identity]) >= request.max_bars:
@@ -414,6 +426,22 @@ class USIntradayBarRepository:
                 rejections.append(CandidateRowRejection(provider=row.provider, source=row.source, storage_row_id=row.id, raw_result_id=raw.id, event_date=_utc(row.bar_time).date(), reason_code="MISSING_REQUIRED_OHLC", missing_fields=missing))
                 continue
             start_at = _utc(row.bar_time)
+            if row.interval == "1m" and start_at != start_at.replace(
+                second=0,
+                microsecond=0,
+            ):
+                noncanonical_minute_identity_exists = True
+                rejections.append(
+                    CandidateRowRejection(
+                        provider=row.provider,
+                        source=row.source,
+                        storage_row_id=row.id,
+                        raw_result_id=raw.id,
+                        event_date=start_at.date(),
+                        reason_code="NON_CANONICAL_MINUTE_IDENTITY",
+                    )
+                )
+                continue
             try:
                 bar = BarObservation(
                     instrument=instrument,
@@ -471,6 +499,10 @@ class USIntradayBarRepository:
         limitations: list[str] = []
         if legacy_row_exists:
             limitations.append("US_INTRADAY_LEGACY_ROWS_WITHOUT_CANONICAL_LINEAGE_IGNORED")
+        if noncanonical_minute_identity_exists:
+            limitations.append("NON_CANONICAL_MINUTE_IDENTITY")
+        if duplicate_minute_bucket_exists:
+            limitations.append("DUPLICATE_MINUTE_BUCKET")
         if not eligible_descriptors:
             limitations.append("US_INTRADAY_DESCRIPTOR_APPLICABILITY_MISMATCH")
         if not candidates:

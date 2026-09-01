@@ -54,6 +54,9 @@ class Settings(BaseSettings):
 
     database_url: str = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
     runtime_lock_dir: Path = DEFAULT_DB_PATH.parent / ".runtime"
+    us_intraday_minute_repair_audit_dir: Path = (
+        DEFAULT_DB_PATH.parent / "maintenance" / "us-yahoo-intraday"
+    )
     us_sec_submissions_cache_path: Path = (
         DEFAULT_DB_PATH.parent / "us_sec_submissions.json"
     )
@@ -126,8 +129,6 @@ class Settings(BaseSettings):
     technical_atr_expansion_multiplier: float = 1.2
     technical_atr_expansion_min_pct: float = 2.0
     technical_bollinger_squeeze_bandwidth_pct: float = 8.0
-    technical_canonical_v2_active: bool = True
-
     scheduler_market_refresh_time: str = "15:15"
     scheduler_market_refresh_lookback_days: int = 7
     scheduler_market_refresh_sleep_seconds: float = 0.2
@@ -261,10 +262,21 @@ class Settings(BaseSettings):
     scheduler_us_quote_cleanup_max_rows: int = Field(
         default=10_000, ge=1, le=50_000
     )
-    enable_us_priority_ohlc_scheduler: bool = False
+    enable_us_priority_ohlc_scheduler: bool = True
     scheduler_us_priority_ohlc_interval_minutes: int = 30
     scheduler_us_priority_ohlc_startup_delay_seconds: int = 0
     scheduler_us_priority_ohlc_max_runtime_seconds: int = 600
+    scheduler_us_priority_ohlc_max_symbols: int = Field(default=20, ge=1, le=100)
+    scheduler_us_priority_ohlc_max_external_calls: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+    )
+    scheduler_us_priority_ohlc_max_provider_attempts: int = Field(
+        default=2,
+        ge=1,
+        le=2,
+    )
     enable_us_index_data_repair_gate: bool = True
     scheduler_us_index_data_repair_interval_minutes: int = Field(
         default=30, ge=5, le=1440

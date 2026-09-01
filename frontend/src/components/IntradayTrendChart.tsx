@@ -2,7 +2,11 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { StateSurface } from "@/components/LoadingPlaceholders";
-import type { IntradayPriceDiagnostics, IntradayTrendPoint } from "@/types/market";
+import type {
+  IntradayCurrentObservation,
+  IntradayPriceDiagnostics,
+  IntradayTrendPoint,
+} from "@/types/market";
 import { useT, type TranslationFunction } from "@/i18n";
 import {
   TAIWAN_SESSION_END_MINUTES,
@@ -28,9 +32,14 @@ type Props = {
   volumeLabel?: string;
   priceDiagnostics?: IntradayPriceDiagnostics | null;
   tradeDate?: string | null;
+  currentObservation?: IntradayCurrentObservation | null;
+  historyStatus?: string | null;
+  canonicalIndicatorAuthority?: "backend" | "presentation";
+  interval?: IntradayInterval;
+  onIntervalChange?: (interval: IntradayInterval) => void;
 };
 
-type IntradayInterval = 1 | 5 | 15;
+export type IntradayInterval = 1 | 5 | 15;
 export type IntradayIndicatorKey = "volume" | "vwap" | "twap" | "ema" | "rsi" | "macd";
 export type IntradayIndicatorSettings = Record<IntradayIndicatorKey, boolean>;
 export type IntradaySessionConfig = {
@@ -658,6 +667,22 @@ export function enrichIntradayPoints(points: IntradayTrendPoint[]): IntradayChar
   });
 }
 
+export function projectBackendIntradayPoints(
+  points: IntradayTrendPoint[]
+): IntradayChartPoint[] {
+  return points.map((point) => ({
+    ...point,
+    vwap: point.vwap_value ?? null,
+    twap: point.twap_value ?? null,
+    emaFast: point.ema_fast ?? null,
+    emaSlow: point.ema_slow ?? null,
+    rsi: point.rsi_value ?? null,
+    macd: point.macd_value ?? null,
+    macdSignal: point.macd_signal_value ?? null,
+    macdHistogram: point.macd_histogram_value ?? null,
+  }));
+}
+
 function buildLinePath(
   data: IntradayChartPoint[],
   getX: (point: IntradayChartPoint, index: number) => number,
@@ -727,6 +752,11 @@ export default function IntradayTrendChart({
   volumeLabel,
   priceDiagnostics,
   tradeDate,
+  currentObservation,
+  historyStatus,
+  canonicalIndicatorAuthority = "presentation",
+  interval: controlledInterval,
+  onIntervalChange,
 }: Props) {
   const chartId = useId();
   const t = useT();
@@ -734,15 +764,19 @@ export default function IntradayTrendChart({
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [hoverPriceGuide, setHoverPriceGuide] = useState<HoverPriceGuideState | null>(null);
   const [showLimitRange, setShowLimitRange] = useState(false);
-  const [interval, setInterval] = useState<IntradayInterval>(1);
+  const [localInterval, setLocalInterval] = useState<IntradayInterval>(1);
+  const interval = controlledInterval ?? localInterval;
   const [activeRevealKey, setActiveRevealKey] = useState<string | null>(null);
   const revealCoverRef = useRef<HTMLDivElement | null>(null);
 
   const data = useMemo(() => {
+    if (canonicalIndicatorAuthority === "backend") {
+      return projectBackendIntradayPoints(points);
+    }
     return enrichIntradayPoints(
       aggregateIntradayPoints(points, interval, session, tradeDate)
     );
-  }, [points, interval, session, tradeDate]);
+  }, [canonicalIndicatorAuthority, points, interval, session, tradeDate]);
 
   const safeHoverIndex =
     hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
@@ -799,6 +833,14 @@ export default function IntradayTrendChart({
   }, [activeRevealKey]);
 
   if (data.length < 2) {
+    const quoteAvailable =
+      currentObservation !== null &&
+      currentObservation !== undefined &&
+      typeof currentObservation.value === "number";
+    const quoteLabel =
+      currentObservation?.price_semantics === "latest_completed_session"
+        ? t("stockDetail.intraday.latestCompletedPrice")
+        : t("stockDetail.intraday.currentPrice");
     return (
       <div
         className="border border-omi-border-subtle bg-omi-surface p-4"
@@ -806,8 +848,20 @@ export default function IntradayTrendChart({
         data-rendered-point-count={data.length}
       >
         <StateSurface
-          title={t("stockDetail.intraday.insufficient")}
-          tone="empty"
+          eyebrow={quoteAvailable ? `${quoteLabel} ${formatPrice(currentObservation.value)}` : undefined}
+          title={
+            quoteAvailable
+              ? t("stockDetail.intraday.historyWarming")
+              : t("stockDetail.intraday.insufficient")
+          }
+          description={
+            quoteAvailable
+              ? t("stockDetail.intraday.historyWarmingDescription", {
+                  status: historyStatus ?? "warming_up",
+                })
+              : undefined
+          }
+          tone={quoteAvailable ? "info" : "empty"}
           className="h-[388px]"
         />
       </div>
@@ -1133,7 +1187,10 @@ export default function IntradayTrendChart({
                   onClick={() => {
                     setHoverIndex(null);
                     setHoverPriceGuide(null);
-                    setInterval(option.value);
+                    if (controlledInterval === undefined) {
+                      setLocalInterval(option.value);
+                    }
+                    onIntervalChange?.(option.value);
                   }}
                   className={[
                     "h-7 px-2.5 text-xs font-semibold transition",

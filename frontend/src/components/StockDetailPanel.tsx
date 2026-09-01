@@ -3,6 +3,7 @@
 import IntradayTrendChart, {
   defaultIntradayIndicators,
   intradayIndicatorOptions,
+  type IntradayInterval,
   type IntradayIndicatorKey,
   type IntradayIndicatorSettings,
 } from "@/components/IntradayTrendChart";
@@ -19,6 +20,10 @@ import StockKLineChart, {
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
 import type { ChartDrawingTool } from "@/components/LightweightKLineChart";
+import {
+  formatChartDate,
+  type ChartDateGranularity,
+} from "@/components/chart/lightweight-chart/drawingModel";
 import NextSessionPlanPanel from "@/components/stock-detail/NextSessionPlanPanel";
 import StockDetailDataPanel from "@/components/stock-detail/StockDetailDataPanel";
 import TaiwanETFDataPanel from "@/components/stock-detail/TaiwanETFDataPanel";
@@ -42,7 +47,6 @@ import {
   stockTechnicalText,
   type StockSignalTone,
 } from "@/components/stock-detail/stockDetailSignalProjection";
-import { buildFallbackTechnicalReport } from "@/components/stock-detail/stockDetailTechnicalReportProjection";
 import TechnicalIndicatorMenu, {
   indicatorTemplates,
   type IndicatorTemplateKey,
@@ -73,8 +77,6 @@ import {
   TechnicalCurrentStateOverview,
   TechnicalLoadingPanel,
   TechnicalSignalRow,
-  aggregateProfessionalIntradayBars,
-  averageRecentChartValue,
   estimatedPriceLimitStatus,
   finiteNumber,
   formatDateTime,
@@ -85,14 +87,11 @@ import {
   formatSignedPointChange,
   formatTradeValueYi,
   isProfessionalIntradayTimeframe,
-  localizeTechnicalReport,
   mapBackendTechnicalReport,
   marketRegimeLabel,
   priceLimitBoxClass,
   priceLimitTone,
-  professionalIntradayMinutes,
   resolveTodayHeadlineValues,
-  safeRatio,
   summarizeIntradayPoints,
   valueTone,
 } from "@/components/stock-detail/StockDetailDataViews";
@@ -148,6 +147,15 @@ type Props = {
   quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
 };
 
+function taiwanChartDateGranularity(
+  timeframe: Timeframe
+): ChartDateGranularity {
+  if (timeframe === "weekly") return "weekly";
+  if (timeframe === "monthly") return "monthly";
+  if (timeframe === "daily") return "daily";
+  return null;
+}
+
 const emptyChartPoints: ChartPoint[] = [];
 const emptyIndicatorPoints: StockIndicatorPoint[] = [];
 
@@ -166,6 +174,54 @@ function backendCurrentPartialIndicator(value: unknown): StockIndicatorPoint | n
     return null;
   }
   return candidate as unknown as StockIndicatorPoint;
+}
+
+function backendOwnedIndicatorParameters(
+  current: IndicatorParameters,
+  defaults: Record<string, unknown>
+): IndicatorParameters {
+  const numberValue = (key: string, fallback: number) => {
+    const value = defaults[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  };
+  const maWindows = Array.isArray(defaults.ma_windows)
+    ? defaults.ma_windows.filter(
+        (value): value is number => typeof value === "number" && Number.isFinite(value)
+      )
+    : [];
+  const volumeWindows = Array.isArray(defaults.volume_ma_windows)
+    ? defaults.volume_ma_windows.filter(
+        (value): value is number => typeof value === "number" && Number.isFinite(value)
+      )
+    : [];
+  return {
+    ...current,
+    maShort: maWindows[0] ?? current.maShort,
+    maMiddle: maWindows[1] ?? current.maMiddle,
+    maLong: maWindows[2] ?? current.maLong,
+    volumeMa: volumeWindows[volumeWindows.length - 1] ?? current.volumeMa,
+    emaFast: numberValue("macd_fast_period", current.emaFast),
+    emaSlow: numberValue("macd_slow_period", current.emaSlow),
+    macdFast: numberValue("macd_fast_period", current.macdFast),
+    macdSlow: numberValue("macd_slow_period", current.macdSlow),
+    macdSignal: numberValue("macd_signal_period", current.macdSignal),
+    rsiPeriod: numberValue("rsi_period", current.rsiPeriod),
+    atrPeriod: numberValue("atr_period", current.atrPeriod),
+    adxPeriod: numberValue("adx_period", current.adxPeriod),
+    rocPeriod: numberValue("roc_period", current.rocPeriod),
+    mfiPeriod: numberValue("mfi_period", current.mfiPeriod),
+    donchianPeriod: numberValue("donchian_period", current.donchianPeriod),
+    bollingerPeriod: numberValue("bollinger_period", current.bollingerPeriod),
+    bollingerStdDev: numberValue(
+      "bollinger_std_dev",
+      current.bollingerStdDev
+    ),
+    kdPeriod: numberValue("kd_period", current.kdPeriod),
+    supportResistanceLookback: numberValue(
+      "support_resistance_period",
+      current.supportResistanceLookback
+    ),
+  };
 }
 
 function corporateEventTone(eventType: string) {
@@ -342,6 +398,7 @@ export default function StockDetailPanel({
   const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
   const [intradayIndicators, setIntradayIndicators] =
     useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
+  const [todayBarInterval, setTodayBarInterval] = useState<IntradayInterval>(1);
   const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
     useState<IndicatorTemplateKey | null>("basic");
   const [indicatorParameters, setIndicatorParameters] =
@@ -622,6 +679,12 @@ export default function StockDetailPanel({
     t,
   ]);
   const effectiveTimeframe = timeframe;
+  const chartTimeLabelFormatter = useCallback(
+    (value: string) =>
+      formatChartDate(value, taiwanChartDateGranularity(effectiveTimeframe)) ??
+      value,
+    [effectiveTimeframe]
+  );
   const availableTimeframes = isIndexProduct ? indexTimeframes : allTimeframes;
   const {
     state: {
@@ -636,11 +699,12 @@ export default function StockDetailPanel({
       indicatorData,
       loadState,
       professionalIntradayData,
-      professionalIntradayFallbackActive,
+      professionalIntradayIndicators,
       professionalIntradayInterval,
       professionalIntradayStockId,
       todayCapabilities,
       todayCurrentObservation,
+      todayHistoryStatus,
       todayPreviousClose,
       todayPriceDiagnostics,
       todaySource,
@@ -648,6 +712,7 @@ export default function StockDetailPanel({
       todayTradeDate,
       todayTrend,
       todayUpdatedAt,
+      technicalContract,
     },
   } = useTaiwanStockChartData({
     chartFocusMode,
@@ -664,7 +729,14 @@ export default function StockDetailPanel({
     reloadNonce: chartReloadNonce,
     stockId,
     t,
+    todayInterval: todayBarInterval,
   });
+  const canonicalIndicatorParameters = useMemo(() => {
+    const defaults = technicalContract?.parameter_contract.defaults;
+    return defaults
+      ? backendOwnedIndicatorParameters(indicatorParameters, defaults)
+      : indicatorParameters;
+  }, [indicatorParameters, technicalContract]);
   const backendTechnicalReport = useTaiwanTechnicalReport({
     effectiveTimeframe,
     isIndexProduct,
@@ -836,7 +908,6 @@ export default function StockDetailPanel({
     vwap: intradayIndicators.vwap && todayCapabilities.supports_vwap,
   };
   const professionalIsIntraday = isProfessionalIntradayTimeframe(professionalTimeframe);
-  const emptyProfessionalIndicatorData = useMemo<StockIndicatorPoint[]>(() => [], []);
   const emptyProfessionalBenchmarkData = useMemo<ChartPoint[]>(() => [], []);
   const benchmarkDataForChart = useMemo(
     () =>
@@ -862,27 +933,14 @@ export default function StockDetailPanel({
       professionalIntradayData.length > 0;
 
     if (hasMatchingHistory) return professionalIntradayData;
-
-    const canUseTodayFallback =
-      professionalIntradayFallbackActive &&
-      professionalIntradayStockId === stockId &&
-      professionalIntradayInterval === professionalTimeframe;
-
-    if (!canUseTodayFallback) return [];
-
-    return aggregateProfessionalIntradayBars(
-      todayTrend,
-      professionalIntradayMinutes[professionalTimeframe]
-    );
+    return [];
   }, [
     chartData,
     professionalIntradayData,
-    professionalIntradayFallbackActive,
     professionalIntradayInterval,
     professionalIntradayStockId,
     professionalTimeframe,
     stockId,
-    todayTrend,
   ]);
   const chartCorporateEventMarkers = useMemo(
     () =>
@@ -1019,33 +1077,8 @@ export default function StockDetailPanel({
     ? null
     : estimatedPriceLimitStatus(professionalLatestChangePct);
   const headerLimitStatus = isIndexProduct ? null : estimatedPriceLimitStatus(latestChangePct);
-  const technicalReferenceChartData =
-    effectiveTimeframe === "today" ? dailyReferenceChartData : chartDataForTimeframe;
-  const technicalReferenceIndicator =
-    effectiveTimeframe === "today" ? latestDailyCurrentIndicator : latestCurrentIndicator;
-  const ma5 =
-    technicalReferenceIndicator?.ma?.ma5 ??
-    averageRecentChartValue(technicalReferenceChartData, "close", 5);
-  const ma20 =
-    technicalReferenceIndicator?.ma?.ma20 ??
-    averageRecentChartValue(technicalReferenceChartData, "close", 20);
-  const ma60 =
-    technicalReferenceIndicator?.ma?.ma60 ??
-    averageRecentChartValue(technicalReferenceChartData, "close", 60);
-  const volumeMa20 =
-    technicalReferenceIndicator?.volume_ma?.volume_ma20 ??
-    averageRecentChartValue(technicalReferenceChartData, "volume", 20);
-  const priceVsMa20 =
-    latestClose !== null && ma20 !== null && ma20 !== 0
-      ? ((latestClose - ma20) / ma20) * 100
-      : null;
-  const latestVolume =
-    effectiveTimeframe === "today"
-      ? todayStats.volume ?? latestToday?.volume ?? null
-      : latestCurrentIndicator?.volume ?? latestChart?.volume ?? null;
-  const volumeRatio = safeRatio(latestVolume, volumeMa20);
-  const volumeRatioPct = volumeRatio === null ? null : (volumeRatio - 1) * 100;
-  const totalInstitutionalNet = institutional?.total_institutional_net ?? null;
+  const priceVsMa20: number | null = null;
+  const volumeRatioPct: number | null = null;
   const displayTime =
     effectiveTimeframe === "today" && todayCurrentObservation?.observed_at
       ? formatDateTime(todayCurrentObservation.observed_at)
@@ -1053,7 +1086,9 @@ export default function StockDetailPanel({
         ? formatDateTime(latestToday.time)
       : effectiveTimeframe === "today"
         ? "-"
-        : latestCurrentIndicator?.time ?? latestChart?.time ?? "-";
+        : chartTimeLabelFormatter(
+            latestCurrentIndicator?.time ?? latestChart?.time ?? "-"
+          );
   const marketIndicesById = useMemo(() => {
     return new Map(
       (marketIndexSummary?.indices ?? []).map((index) => [index.index_id, index])
@@ -1067,51 +1102,7 @@ export default function StockDetailPanel({
     indexProduct?.indexId === "TPEX" || stockInfo?.market === "TPEX"
       ? tpexIndex
       : taiexIndex;
-  const relativeToPrimaryIndex =
-    latestChangePct !== null &&
-    latestChangePct !== undefined &&
-    primaryMarketIndex?.change_pct !== null &&
-    primaryMarketIndex?.change_pct !== undefined
-      ? latestChangePct - primaryMarketIndex.change_pct
-      : null;
-
-  const fallbackTechnicalReport = buildFallbackTechnicalReport({
-    chartData: technicalReferenceChartData,
-    currentChartReady,
-    effectiveTimeframe,
-    financialMetric,
-    institutional,
-    institutionalHistory,
-    isIndexProduct,
-    largeHolderLots,
-    latestChangePct,
-    latestChartVolume: latestChart?.volume ?? null,
-    latestClose,
-    latestCurrentIndicator,
-    latestToday,
-    loadState,
-    ma5,
-    ma20,
-    ma60,
-    margin,
-    monthlyRevenue,
-    primaryMarketIndex,
-    priceVsMa20,
-    relativeToPrimaryIndex,
-    shareholding,
-    t,
-    todayStats,
-    todayReferenceClose,
-    todayTrendLength: todayTrend.length,
-    totalInstitutionalNet,
-    volumeMa20,
-    volumeRatio,
-    volumeRatioPct,
-  });
-  const localizedFallbackTechnicalReport = localizeTechnicalReport(
-    fallbackTechnicalReport,
-    t
-  );
+  const relativeToPrimaryIndex: number | null = null;
   const backendTechnicalReportView = useMemo(() => {
     if (
       !backendTechnicalReport ||
@@ -1141,11 +1132,7 @@ export default function StockDetailPanel({
     }),
     [t]
   );
-  const technicalReport =
-    backendTechnicalReportView ??
-    (effectiveTimeframe === "daily"
-      ? unavailableDailyTechnicalReport
-      : localizedFallbackTechnicalReport);
+  const technicalReport = backendTechnicalReportView ?? unavailableDailyTechnicalReport;
   const technicalDecisionState =
     effectiveTimeframe === "daily"
       ? technicalReport.decisionState ??
@@ -1578,8 +1565,8 @@ export default function StockDetailPanel({
                             toggleCorporateEventMarker
                           }
                           showTemplates
-                          includeParameters
-                          parameters={indicatorParameters}
+                          includeParameters={false}
+                          parameters={canonicalIndicatorParameters}
                           onUpdateParameter={updateIndicatorParameter}
                           className="w-[26rem]"
                         />
@@ -1670,8 +1657,8 @@ export default function StockDetailPanel({
                   supplementalMarkerOptions={corporateEventMenuOptions}
                   onToggleSupplementalMarker={toggleCorporateEventMarker}
                   groups={professionalIndicatorCategoryGroups}
-                  includeParameters
-                  parameters={indicatorParameters}
+                  includeParameters={false}
+                  parameters={canonicalIndicatorParameters}
                   onUpdateParameter={updateIndicatorParameter}
                   className="w-[25rem]"
                 />
@@ -1694,13 +1681,15 @@ export default function StockDetailPanel({
               }
               chartData={professionalChartData}
               indicatorData={
-                professionalIsIntraday ? emptyProfessionalIndicatorData : indicatorForTimeframe
+                professionalIsIntraday
+                  ? professionalIntradayIndicators
+                  : indicatorForTimeframe
               }
               label={professionalTimeframeLabel}
               timeMode={professionalIsIntraday ? "intraday" : "date"}
               showMovingAverages={chartIndicators.ma}
               indicators={chartIndicators}
-              indicatorParameters={indicatorParameters}
+              indicatorParameters={canonicalIndicatorParameters}
               benchmarkData={
                 professionalIsIntraday ? emptyProfessionalBenchmarkData : benchmarkDataForChart
               }
@@ -1714,11 +1703,7 @@ export default function StockDetailPanel({
                     : t("chart.kline.volume")
               }
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
-              canonicalIndicatorAuthority={
-                !isIndexProduct && professionalTimeframe === "daily"
-                  ? "backend"
-                  : "presentation"
-              }
+              canonicalIndicatorAuthority="backend"
               drawingTool={chartDrawingTool}
               drawings={chartDrawings}
               selectedDrawingId={activeSelectedChartDrawingId}
@@ -1755,6 +1740,11 @@ export default function StockDetailPanel({
                 priceLimitEnabled={todayCapabilities.supports_price_limit}
                 priceDiagnostics={todayPriceDiagnostics}
                 tradeDate={todayTradeDate}
+                currentObservation={todayCurrentObservation}
+                historyStatus={todayHistoryStatus}
+                canonicalIndicatorAuthority="backend"
+                interval={todayBarInterval}
+                onIntervalChange={setTodayBarInterval}
               />
             </div>
           ) : currentChartReady ? (
@@ -1763,11 +1753,12 @@ export default function StockDetailPanel({
               indicatorData={indicatorForTimeframe}
               label={timeframeLabel(t, effectiveTimeframe)}
               indicators={chartIndicators}
-              indicatorParameters={indicatorParameters}
+              indicatorParameters={canonicalIndicatorParameters}
               benchmarkData={benchmarkDataForChart}
               benchmarkLabel={benchmarkLabel}
               eventMarkers={chartCorporateEventMarkers}
               revealKey={`${stockId}:${effectiveTimeframe}`}
+              timeLabelFormatter={chartTimeLabelFormatter}
               volumePanelLabel={
                 isIndexProduct
                   ? t("chart.kline.tradeValueYi")
@@ -1791,11 +1782,7 @@ export default function StockDetailPanel({
                     : undefined
               }
               latestPreviousClose={chartOverlayPreviousClose}
-              canonicalIndicatorAuthority={
-                !isIndexProduct && effectiveTimeframe === "daily"
-                  ? "backend"
-                  : "presentation"
-              }
+              canonicalIndicatorAuthority="backend"
             />
           ) : (
             <EmptyDataState

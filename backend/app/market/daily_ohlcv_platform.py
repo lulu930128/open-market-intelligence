@@ -193,6 +193,7 @@ def build_taiwan_daily_cache_requirement(
     to_date: date,
     requested_at: datetime,
     max_rows: int,
+    minimum_authority: AuthorityClass = AuthorityClass.EXCHANGE,
 ) -> DataRequirementV2:
     """Build a zero-I/O completed-session read for viewer/research consumers."""
 
@@ -232,7 +233,7 @@ def build_taiwan_daily_cache_requirement(
                 "low_price",
                 "close_price",
             ),
-            minimum_authority=AuthorityClass.EXCHANGE,
+            minimum_authority=minimum_authority,
             allow_partial=False,
         ),
         bounds=RequestBounds(

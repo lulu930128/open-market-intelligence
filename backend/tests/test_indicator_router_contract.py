@@ -54,7 +54,7 @@ def test_indicator_point_keeps_backend_authority_metadata() -> None:
     point = DailyIndicatorPointRead.model_validate(
         {
             "time": "2026-08-25",
-            "algorithm_version": "tw.technical.indicators.v3",
+            "algorithm_version": "tw.technical.indicators.v4",
             "price_basis": "raw_unadjusted",
             "calculation_role": "backend_authoritative",
             "parameter_contract": {"rsi_period": 14},
@@ -63,7 +63,7 @@ def test_indicator_point_keeps_backend_authority_metadata() -> None:
         }
     )
 
-    assert point.algorithm_version == "tw.technical.indicators.v3"
+    assert point.algorithm_version == "tw.technical.indicators.v4"
     assert point.calculation_role == "backend_authoritative"
     assert point.parameter_contract == {"rsi_period": 14}
 
@@ -73,10 +73,10 @@ def test_active_indicator_contract_exposes_canonical_version() -> None:
         "app.routers.indicators.active_engine_contract",
         return_value={
             "active_engine": "canonical",
-            "algorithm_version": "tw.technical.indicators.v3",
+            "algorithm_version": "tw.technical.indicators.v4",
         },
     ):
         result = get_active_indicator_engine_contract()
 
     assert result["active_engine"] == "canonical"
-    assert result["algorithm_version"] == "tw.technical.indicators.v3"
+    assert result["algorithm_version"] == "tw.technical.indicators.v4"

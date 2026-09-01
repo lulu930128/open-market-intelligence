@@ -1118,25 +1118,18 @@ class IntradayContractRemediationTests(unittest.TestCase):
             }
         )
 
-        result = taiwan_stock._compact_intraday_bars(
-            dependencies=SimpleNamespace(
-                get_market_intraday_history=get_history,
-                build_taiwan_calendar_status=lambda: {
-                    "market": "tw",
-                    "timezone": "Asia/Taipei",
-                    "checked_at": "2026-07-20T13:17:00+08:00",
-                    "date": "2026-07-20",
-                    "is_trading_day": True,
-                    "phase": "regular",
-                    "previous_trading_day": "2026-07-17",
-                    "session": {"open_time": "09:00", "close_time": "13:30"},
-                },
-            ),
-            db=SimpleNamespace(),
-            stock_id="2330",
-            include_intraday=True,
-            market_data_params={"intraday_interval": "5m"},
-        )
+        with unittest.mock.patch.object(
+            taiwan_stock,
+            "project_taiwan_bar_series",
+            return_value=get_history.return_value,
+        ):
+            result = taiwan_stock._compact_intraday_bars(
+                dependencies=SimpleNamespace(read_taiwan_bars=get_history),
+                db=SimpleNamespace(),
+                stock_id="2330",
+                include_intraday=True,
+                market_data_params={"intraday_interval": "5m"},
+            )
 
         get_history.assert_called_once()
         self.assertEqual(get_history.call_args.kwargs["interval"], "5m")
@@ -1834,8 +1827,8 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(plan.requested_domains, ("quote", "intraday"))
         self.assertIn("live_intraday_bars", plan.required_capabilities)
         self.assertNotIn("live_intraday_bars", plan.excluded_capabilities)
-        self.assertIn("get_market_intraday_history", plan.required_readers)
-        self.assertNotIn("get_market_intraday_history", plan.excluded_readers)
+        self.assertIn("read_taiwan_bars", plan.required_readers)
+        self.assertNotIn("read_taiwan_bars", plan.excluded_readers)
         self.assertIn("broker_branch", plan.excluded_domains)
         self.assertIn("fundamentals", plan.excluded_domains)
         self.assertTrue(plan.matched_negative_terms)
@@ -1903,7 +1896,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
             build_taiwan_source_health=lambda **_kwargs: {},
             build_us_overnight_impact_report=lambda **_kwargs: {},
             get_broker_branch_trade_summary=lambda **_kwargs: {},
-            get_market_intraday_history=intraday_history,
+            read_taiwan_bars=intraday_history,
             read_taiwan_quote_evidence=quote_depth,
             acquire_taiwan_quote_evidence=quote_depth,
             read_taiwan_latest_daily_evidence=lambda *_args, **_kwargs: SimpleNamespace(
@@ -1949,11 +1942,11 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertIsNone(contract["provider_fallback_reason"])
         self.assertEqual(
             result["data"]["compact"]["freshness_by_domain"]["intraday"],
-            "missing",
+            "unavailable",
         )
         self.assertGreaterEqual(intraday_history.call_count, 1)
         for call in intraday_history.call_args_list:
-            self.assertFalse(call.kwargs["refresh"])
+            self.assertNotIn("refresh", call.kwargs)
 
     def test_prefer_live_without_external_fetch_reads_only_persisted_intraday(
         self,
@@ -1983,24 +1976,29 @@ class IntradayContractRemediationTests(unittest.TestCase):
             intraday_history=intraday_history,
         )
 
-        result = taiwan_stock.read_stock_quote_context(
-            db=SimpleNamespace(),
-            stock_id="2330",
-            market_data_params={
-                "requested_domains": ["quote", "intraday"],
-                "realtime_policy": "prefer_live",
-                "external_fetch_allowed": False,
-                "fallback_to_cached": True,
-            },
-            dependencies=dependencies,
-        )
+        with unittest.mock.patch.object(
+            taiwan_stock,
+            "project_taiwan_bar_series",
+            return_value=intraday_history.return_value,
+        ):
+            result = taiwan_stock.read_stock_quote_context(
+                db=SimpleNamespace(),
+                stock_id="2330",
+                market_data_params={
+                    "requested_domains": ["quote", "intraday"],
+                    "realtime_policy": "prefer_live",
+                    "external_fetch_allowed": False,
+                    "fallback_to_cached": True,
+                },
+                dependencies=dependencies,
+            )
 
         quote_depth.assert_called_once_with(db=unittest.mock.ANY, stock_id="2330")
         self.assertGreaterEqual(intraday_history.call_count, 1)
         for call in intraday_history.call_args_list:
-            self.assertFalse(call.kwargs["refresh"])
+            self.assertNotIn("refresh", call.kwargs)
         intraday = result["data"]["intraday_bars"]
-        self.assertEqual(intraday["read_mode"], "persisted_cache")
+        self.assertEqual(intraday["read_mode"], "taiwan_bar_service_cache_only")
         self.assertFalse(intraday["provider_refresh_allowed"])
         self.assertEqual(intraday["series"]["1m"]["cache_status"], "persisted_hit")
         contract = result["data"]["provider_contract"]

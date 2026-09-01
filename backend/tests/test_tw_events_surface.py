@@ -258,7 +258,7 @@ class TaiwanEventSurfaceTests(unittest.TestCase):
             build_taiwan_source_health=excluded,
             build_us_overnight_impact_report=excluded,
             get_broker_branch_trade_summary=excluded,
-            get_market_intraday_history=excluded,
+            read_taiwan_bars=excluded,
             read_taiwan_quote_evidence=excluded,
             acquire_taiwan_quote_evidence=excluded,
             read_taiwan_latest_daily_evidence=excluded,

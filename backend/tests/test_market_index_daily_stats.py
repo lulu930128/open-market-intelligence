@@ -62,7 +62,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         indices._FINAL_INDEX_DAILY_OHLC_CACHE.clear()
         self.db.close()
 
-    def test_taiex_daily_ohlc_uses_persisted_official_trade_value(self) -> None:
+    def test_legacy_taiex_ohlc_route_does_not_promote_daily_stats_to_bars(self) -> None:
         yahoo_points = [
             yahoo_point(date(2026, 1, 5), 23000),
             yahoo_point(date(2026, 1, 6), 23100),
@@ -112,11 +112,11 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 db=self.db,
             )
 
-        self.assertEqual([point["trade_value"] for point in payload["points"]], [1000, 2000])
-        self.assertEqual([point["volume"] for point in payload["points"]], [10, 20])
+        self.assertEqual(payload["points"], [])
+        self.assertEqual(payload["compatibility_owner"], "TaiwanBarService")
         self.assertEqual(self.db.query(MarketIndexDailyStat).count(), 2)
 
-    def test_weekly_ohlc_sums_daily_official_trade_value_by_week(self) -> None:
+    def test_legacy_weekly_route_does_not_aggregate_daily_stats(self) -> None:
         yahoo_points = [yahoo_point(date(2026, 1, 5), 23000)]
         official_rows = [
             {
@@ -163,9 +163,8 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 db=self.db,
             )
 
-        self.assertEqual(payload["points"][0]["trade_value"], 3000)
-        self.assertEqual(payload["points"][0]["volume"], 30)
-        self.assertEqual(payload["points"][0]["transaction_count"], 300)
+        self.assertEqual(payload["points"], [])
+        self.assertEqual(payload["compatibility_owner"], "TaiwanBarService")
 
     def test_tpex_daily_rows_parse_tpex_index_close(self) -> None:
         rows = indices._parse_tpex_market_daily_rows(
@@ -473,7 +472,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         )
         self.assertEqual(stored[-1].trade_value, 3_000)
 
-    def test_daily_ohlc_appends_newer_official_index_stat_when_yahoo_is_stale(self) -> None:
+    def test_legacy_daily_route_does_not_merge_yahoo_and_official_stats(self) -> None:
         yahoo_points = [
             yahoo_point(date(2026, 6, 11), 43000),
             yahoo_point(date(2026, 6, 12), 44169.04),
@@ -545,24 +544,10 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 db=self.db,
             )
 
-        self.assertEqual([point["time"] for point in payload["points"]], [date(2026, 6, 12), date(2026, 6, 15)])
-        self.assertEqual(payload["to_date"], date(2026, 6, 15))
-        self.assertEqual(payload["points"][-1]["open"], 44_800.0)
-        self.assertEqual(payload["points"][-1]["high"], 45_500.0)
-        self.assertEqual(payload["points"][-1]["low"], 44_700.0)
-        self.assertEqual(payload["points"][-1]["close"], 45396.99)
-        self.assertEqual(payload["points"][-1]["trade_value"], 1_115_744_351_199)
-        self.assertEqual(payload["latest_data_date"], date(2026, 6, 15))
-        self.assertEqual(payload["expected_data_date"], date(2026, 6, 15))
-        self.assertEqual(payload["freshness_status"], "current")
-        self.assertTrue(payload["is_current"])
-        self.assertFalse(payload["refresh_recommended"])
-        self.assertEqual(
-            payload["backfill"]["official_ohlc_overlay"]["status"],
-            "success",
-        )
+        self.assertEqual(payload["points"], [])
+        self.assertEqual(payload["compatibility_owner"], "TaiwanBarService")
 
-    def test_daily_ohlc_does_not_synthesize_taiex_bar_when_official_ohlc_fails(
+    def test_legacy_daily_route_does_not_fallback_to_yahoo_when_base_bar_missing(
         self,
     ) -> None:
         self.db.add(
@@ -605,20 +590,10 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 db=self.db,
             )
 
-        self.assertEqual(
-            [point["time"] for point in payload["points"]],
-            [date(2026, 6, 11), date(2026, 6, 12)],
-        )
-        self.assertEqual(payload["to_date"], date(2026, 6, 12))
-        self.assertEqual(payload["freshness_status"], "stale")
-        self.assertFalse(payload["is_current"])
-        self.assertTrue(payload["refresh_recommended"])
-        overlay = payload["backfill"]["official_ohlc_overlay"]
-        self.assertEqual(overlay["status"], "unavailable")
-        self.assertEqual(overlay["merged_date_count"], 0)
-        self.assertEqual(overlay["missing_dates"], ["2026-06-15"])
+        self.assertEqual(payload["points"], [])
+        self.assertEqual(payload["compatibility_owner"], "TaiwanBarService")
 
-    def test_tpex_daily_ohlc_uses_official_5s_values_when_yahoo_is_stale(
+    def test_legacy_tpex_route_does_not_run_adapter_local_5s_aggregation(
         self,
     ) -> None:
         self.db.add(
@@ -666,19 +641,10 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 db=self.db,
             )
 
-        latest = payload["points"][-1]
-        self.assertEqual(latest["time"], date(2026, 6, 15))
-        self.assertEqual(latest["open"], 383.72)
-        self.assertEqual(latest["high"], 391.96)
-        self.assertEqual(latest["low"], 378.50)
-        self.assertEqual(latest["close"], 391.37)
-        self.assertEqual(payload["data_quality"], "ok")
-        self.assertEqual(
-            payload["backfill"]["official_ohlc_overlay"]["status"],
-            "success",
-        )
+        self.assertEqual(payload["points"], [])
+        self.assertEqual(payload["compatibility_owner"], "TaiwanBarService")
 
-    def test_tpex_daily_ohlc_omits_missing_official_bar_instead_of_synthesizing(
+    def test_legacy_tpex_route_returns_truthful_missing_without_base_daily_candidate(
         self,
     ) -> None:
         self.db.add(
@@ -721,14 +687,8 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 db=self.db,
             )
 
-        self.assertEqual(payload["to_date"], date(2026, 6, 12))
-        self.assertNotIn(date(2026, 6, 15), [point["time"] for point in payload["points"]])
-        self.assertEqual(payload["data_quality"], "unavailable")
-        self.assertTrue(payload["warnings"])
-        self.assertEqual(
-            payload["backfill"]["official_ohlc_overlay"]["missing_dates"],
-            ["2026-06-15"],
-        )
+        self.assertEqual(payload["points"], [])
+        self.assertEqual(payload["compatibility_owner"], "TaiwanBarService")
 
     def test_current_month_index_stat_refresh_updates_existing_same_day_row(self) -> None:
         self.db.add(
@@ -1187,7 +1147,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["backfill"]["status"], "not_requested")
         self.assertEqual(
             payload["backfill"]["reason"],
-            "read_path_is_side_effect_free",
+            "legacy_index_ohlc_route_is_cache_only",
         )
 
     def test_market_index_scheduler_registers_five_second_collector(self) -> None:
@@ -1754,7 +1714,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(chart["data_quality"], "missing")
         self.assertEqual(contributions["source"], "tw.daily.ohlcv:TWSE")
 
-    def test_index_chart_uses_only_release_qualified_canonical_rows(self) -> None:
+    def test_index_chart_does_not_treat_market_index_daily_stat_as_ohlc(self) -> None:
         source = SourceRegistry(
             source_name=TWSE_INDEX_SOURCE_NAME,
             source_type="official",
@@ -1806,10 +1766,9 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             db=self.db,
         )
 
-        self.assertEqual(chart["point_count"], 1)
-        self.assertEqual(chart["latest_data_date"], date(2026, 6, 15))
-        self.assertEqual(chart["points"][0]["close"], 22_000)
-        self.assertNotEqual(chart["points"][0]["close"], 99_999)
+        self.assertEqual(chart["point_count"], 0)
+        self.assertEqual(chart["points"], [])
+        self.assertEqual(chart["compatibility_owner"], "TaiwanBarService")
 
     def test_index_intraday_overlays_mis_snapshot_on_yahoo_history(self) -> None:
         yahoo_payload = {

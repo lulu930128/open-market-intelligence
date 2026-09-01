@@ -510,7 +510,8 @@ def test_ai_intraday_compatibility_reader_cannot_trigger_provider_refresh() -> N
 
     assert compact_source is not None
     assert "refresh_allowed = False" in compact_source
-    assert "refresh=False" in compact_source
+    assert "dependencies.read_taiwan_bars" in compact_source
+    assert "include_partial=True" in compact_source
     assert "realtime_policy" not in compact_source
 
 
@@ -685,15 +686,16 @@ def test_taiwan_frontend_indicator_projection_honors_backend_authority_metadata(
         assert "backendIndicatorParametersMatch" in source, _relative(path)
 
 
-def test_taiwan_technical_truth_reads_resolved_daily_platform() -> None:
+def test_taiwan_technical_truth_reads_unified_bar_and_technical_owners() -> None:
     paths = (
         BACKEND_APP / "market" / "technical_indicator_gateway.py",
         BACKEND_APP / "market" / "technical_evidence.py",
     )
     for path in paths:
         source = path.read_text(encoding="utf-8")
-        assert "read_taiwan_official_daily" in source, _relative(path)
+        assert "TaiwanBarService" in source, _relative(path)
         assert "db.query(MarketDailyPrice)" not in source, _relative(path)
+    assert "TaiwanTechnicalService" in paths[0].read_text(encoding="utf-8")
 
 
 def test_index_summary_attaches_completed_data_core_projection() -> None:

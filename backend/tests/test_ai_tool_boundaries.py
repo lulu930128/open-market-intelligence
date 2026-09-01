@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import date, datetime, timezone
 import unittest
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 from sqlalchemy import create_engine
@@ -53,7 +54,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "f471b50e38f0b2e9947ba5fe3f4f57185c70c70faf1b07b628e5c813c64d0a79"
+    "b44972ba522a7608dc4d43c39cba62173acdfefb230df9178cf41afb34262571"
 )
 
 
@@ -428,9 +429,16 @@ class AIToolBoundaryTests(unittest.TestCase):
             patch.object(tools.market_service, "get_latest_trade_date", return_value=None),
             patch.object(
                 tools,
-                "get_market_index_intraday",
-                return_value=intraday_payload,
+                "_read_taiwan_bars",
+                side_effect=lambda **kwargs: SimpleNamespace(
+                    instrument_id=kwargs["instrument_id"]
+                ),
             ) as get_intraday,
+            patch.object(
+                taiwan_market,
+                "project_taiwan_bar_series",
+                return_value=intraday_payload,
+            ),
             patch.object(
                 tools,
                 "get_market_index_summary",
@@ -517,7 +525,7 @@ class AIToolBoundaryTests(unittest.TestCase):
 
         self.assertEqual(envelope["generated_at"], fixed_now)
         self.assertEqual(
-            [call.args[0] for call in get_intraday.call_args_list],
+            [call.kwargs["instrument_id"] for call in get_intraday.call_args_list],
             ["TAIEX", "TPEX"],
         )
         self.assertTrue(envelope["data"]["index_intraday"]["enabled"])

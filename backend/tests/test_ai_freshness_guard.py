@@ -954,13 +954,25 @@ class AiFreshnessGuardTests(unittest.TestCase):
                     ],
                 }
 
+            def bar_result(*, instrument_id, **_kwargs):
+                return SimpleNamespace(instrument_id=instrument_id)
+
             with (
                 patch.object(
                     ai_ask,
                     "_check_freshness",
                     return_value={"is_current": True, "missing": [], "warnings": []},
                 ),
-                patch.object(ai_ask.tools, "get_market_index_intraday", side_effect=intraday_result) as intraday,
+                patch.object(
+                    ai_ask.tools,
+                    "_read_taiwan_bars",
+                    side_effect=bar_result,
+                ) as intraday,
+                patch.object(
+                    taiwan_market,
+                    "project_taiwan_bar_series",
+                    side_effect=lambda series: intraday_result(series.instrument_id),
+                ),
             ):
                 response = ai_ask.ask(
                     db=db,
@@ -1014,7 +1026,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
                     "_check_freshness",
                     return_value={"is_current": True, "missing": [], "warnings": []},
                 ),
-                patch.object(ai_ask.tools, "get_market_index_intraday") as intraday,
+                patch.object(ai_ask.tools, "_read_taiwan_bars") as intraday,
             ):
                 response = ai_ask.ask(db=db, payload=payload)
 
@@ -3601,7 +3613,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_successful_intraday_tool_satisfies_rescan_capability(self) -> None:
+    def test_successful_intraday_tool_does_not_override_missing_canonical_capability(self) -> None:
         db = make_session()
         try:
             gaps = agentic_tools.scan_us_stock_gaps(
@@ -3611,8 +3623,80 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 satisfied_capabilities={"us_intraday_trend"},
             )
 
-            self.assertNotIn("us_intraday_trend", gaps["missing"])
+            self.assertIn("us_intraday_trend", gaps["missing"])
             self.assertIn("us_daily_price", gaps["missing"])
+            self.assertEqual(
+                gaps["tool_session_satisfied_capabilities"],
+                ["us_intraday_trend"],
+            )
+        finally:
+            db.close()
+
+    def test_canonical_intraday_ready_satisfies_gap_without_tool_run(self) -> None:
+        db = make_session()
+        try:
+            with patch.object(
+                agentic_tools.us_market_service,
+                "get_us_intraday_trend",
+                return_value={
+                    "capability_expectation": {
+                        "quote.snapshot": {
+                            "requirement_satisfied": True,
+                            "outcome": "ready",
+                            "availability": "available",
+                        },
+                        "intraday.bars": {
+                            "requirement_satisfied": True,
+                            "outcome": "ready",
+                            "availability": "available",
+                        },
+                    }
+                },
+            ):
+                gaps = agentic_tools.scan_us_stock_gaps(
+                    db,
+                    "SOX",
+                    question="SOX 最新行情",
+                )
+
+            self.assertNotIn("us_intraday_trend", gaps["missing"])
+            self.assertEqual(gaps["tool_session_satisfied_capabilities"], [])
+            self.assertTrue(
+                gaps["canonical_capabilities"]["intraday.bars"][
+                    "requirement_satisfied"
+                ]
+            )
+        finally:
+            db.close()
+
+    def test_requested_intraday_bars_require_canonical_bars_not_only_quote(self) -> None:
+        db = make_session()
+        try:
+            with patch.object(
+                agentic_tools.us_market_service,
+                "get_us_intraday_trend",
+                return_value={
+                    "capability_expectation": {
+                        "quote.snapshot": {
+                            "requirement_satisfied": True,
+                            "outcome": "ready",
+                            "availability": "available",
+                        },
+                        "intraday.bars": {
+                            "requirement_satisfied": False,
+                            "outcome": "expected_but_missing",
+                            "availability": "missing",
+                        },
+                    }
+                },
+            ):
+                gaps = agentic_tools.scan_us_stock_gaps(
+                    db,
+                    "SOX",
+                    requested_capabilities=("intraday.bars",),
+                )
+
+            self.assertIn("us_intraday_trend", gaps["missing"])
         finally:
             db.close()
 

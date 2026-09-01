@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import inspect
 import json
 
+import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
@@ -24,9 +25,11 @@ from app.market.providers.tw_intraday_bars import (
 from app.market.tw_intraday_acquisition import TaiwanIntradayAcquisitionExecutor
 from app.market.tw_intraday_capabilities import (
     NSTOCK_INTRADAY_DESCRIPTOR,
+    TW_INTRADAY_DESCRIPTORS,
     YAHOO_INTRADAY_DESCRIPTOR,
 )
 from app.market.tw_intraday_platform import (
+    bootstrap_taiwan_intraday_bars,
     build_taiwan_intraday_requirement,
     project_taiwan_intraday_bars,
     read_taiwan_intraday_bars,
@@ -257,6 +260,46 @@ def test_nstock_refresh_persists_actual_provider_lineage_then_rereads() -> None:
             bar.lineage.raw_receipt_id is not None
             for bar in result.resolved.bars
         )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_explicit_intraday_bootstrap_is_bounded_and_idempotent() -> None:
+    now = datetime(2026, 8, 26, 10, 1, 30, tzinfo=TAIPEI)
+    executor, _calls = _executor(now)
+    db, engine = _db()
+
+    def refresher(session, **kwargs):
+        return refresh_taiwan_intraday_bars(
+            session,
+            **kwargs,
+            acquisition=executor,
+        )
+
+    try:
+        first = bootstrap_taiwan_intraday_bars(
+            db,
+            symbols=["2330"],
+            max_symbols=1,
+            requested_at=now,
+            refresher=refresher,
+        )
+        second = bootstrap_taiwan_intraday_bars(
+            db,
+            symbols=["2330"],
+            max_symbols=1,
+            requested_at=now,
+            refresher=refresher,
+        )
+
+        assert first.status == "success"
+        assert first.planned_symbols == ("2330",)
+        assert first.receipts_written == first.per_symbol[0].receipts_written == 1
+        assert first.bars_written > 0
+        assert second.bars_written == 0
+        assert second.bars_unchanged > 0
+        assert db.query(MarketIntradayBar).filter_by(interval="5m").count() == 0
     finally:
         db.close()
         engine.dispose()
@@ -537,31 +580,33 @@ def test_intraday_service_no_longer_owns_provider_io_fallback_or_transaction() -
     assert "refresh: bool = False" in source
 
 
-def test_four_hour_local_aggregation_persists_derived_component_lineage() -> None:
+def test_all_taiwan_intraday_providers_advertise_base_1m_only() -> None:
+    assert all(descriptor.intervals == ("1m",) for descriptor in TW_INTRADAY_DESCRIPTORS)
+    assert YAHOO_INTRADAY_DESCRIPTOR.max_range_days == 5
+
+
+@pytest.mark.parametrize("interval", ["5m", "15m", "30m", "1h", "4h"])
+def test_higher_timeframe_refresh_fails_before_provider_io_or_persistence(
+    interval: str,
+) -> None:
     now = datetime(2026, 8, 26, 10, 1, 30, tzinfo=TAIPEI)
     executor, calls = _executor(now, nstock_status="failed")
     db, engine = _db()
     try:
-        result = refresh_taiwan_intraday_bars(
-            db,
-            stock_id="2330",
-            interval="4h",
-            range_value="1d",
-            requested_at=now,
-            descriptors=(YAHOO_INTRADAY_DESCRIPTOR,),
-            acquisition=executor,
-        )
-        points, metadata = project_taiwan_intraday_bars(db, result)
+        with pytest.raises(ValueError, match="TW_BASE_BAR_INTERVAL_REQUIRED"):
+            refresh_taiwan_intraday_bars(
+                db,
+                stock_id="2330",
+                interval=interval,
+                range_value="1d",
+                requested_at=now,
+                descriptors=(YAHOO_INTRADAY_DESCRIPTOR,),
+                acquisition=executor,
+            )
 
-        assert calls == ["yahoo_finance_chart"]
-        assert len(points) == 1
-        assert points[0]["source_interval"] == "1h"
-        assert points[0]["calculation_version"] == "omi.aggregate.4h.v1"
-        assert points[0]["component_raw_result_ids"]
-        assert metadata["component_raw_result_ids"]
-        lineage = db.query(MarketIntradayBarLineage).one()
-        assert lineage.source_interval == "1h"
-        assert lineage.calculation_version == "omi.aggregate.4h.v1"
+        assert calls == []
+        assert db.query(MarketIntradayBar).count() == 0
+        assert db.query(MarketIntradayBarLineage).count() == 0
     finally:
         db.close()
         engine.dispose()

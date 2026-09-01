@@ -45,7 +45,7 @@ QUOTE_ONLY_EXCLUDED_READERS = (
     "get_broker_branch_trade_summary",
     "build_stock_technical_report",
     "build_us_overnight_impact_report",
-    "get_market_intraday_history",
+    "read_taiwan_bars",
     "read_taiwan_quote_evidence",
 )
 BROKER_BRANCH_REQUIRED_CAPABILITIES = (
@@ -1137,7 +1137,7 @@ def build_query_plan(
         freshness_scope = ["stock_master", "market_daily_price"]
         domain_reader_contract = {
             "quote": ("quote_snapshot", "read_taiwan_quote_evidence"),
-            "intraday": ("live_intraday_bars", "get_market_intraday_history"),
+            "intraday": ("live_intraday_bars", "read_taiwan_bars"),
         }
         for domain in requested_domains:
             contract = domain_reader_contract.get(domain)

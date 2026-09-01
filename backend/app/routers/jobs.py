@@ -12,6 +12,12 @@ from app.jobs.us_current_market_bootstrap import (
     normalize_us_current_market_bootstrap_targets,
     run_us_current_market_bootstrap_job,
 )
+from app.jobs.taiwan_bar_bootstrap import (
+    enqueue_taiwan_index_daily_bootstrap,
+    enqueue_taiwan_intraday_bar_bootstrap,
+    run_taiwan_index_daily_bootstrap_job,
+    run_taiwan_intraday_bar_bootstrap_job,
+)
 from app.jobs.us_index_data_repair_gate import run_us_index_data_repair_job
 from app.jobs.job_types import (
     CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE,
@@ -21,9 +27,12 @@ from app.jobs.job_types import (
     TAIWAN_BROKER_BRANCH_BEHAVIOR_SHADOW_JOB_TYPE,
     TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
+    TAIWAN_INTRADAY_BAR_BOOTSTRAP_JOB_TYPE,
+    TAIWAN_INDEX_DAILY_BOOTSTRAP_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
     WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
     US_OHLC_HISTORY_REPAIR_JOB_TYPE,
+    US_INTRADAY_MINUTE_REPAIR_JOB_TYPE,
     US_INDEX_DATA_REPAIR_JOB_TYPE,
     US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE,
     US_PRIORITY_OHLC_RECONCILE_JOB_TYPE,
@@ -32,7 +41,12 @@ from app.jobs.job_types import (
     US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
     US_SEC_13F_QUARTER_SYNC_JOB_TYPE,
 )
-from app.jobs.schemas import JobRunRead, USCurrentMarketBootstrapJobRequest
+from app.jobs.schemas import (
+    JobRunRead,
+    TaiwanIndexDailyBootstrapJobRequest,
+    TaiwanIntradayBarBootstrapJobRequest,
+    USCurrentMarketBootstrapJobRequest,
+)
 from app.stocks.bootstrap import BOOTSTRAP_JOB_TYPE, run_stock_master_bootstrap_job
 from app.us_market.intraday_profiles import (
     US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS,
@@ -81,6 +95,31 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
 
     if job_type == BOOTSTRAP_JOB_TYPE:
         return run_stock_master_bootstrap_job, (True,), request
+
+    if job_type == TAIWAN_INTRADAY_BAR_BOOTSTRAP_JOB_TYPE:
+        symbols = tuple(_parse_string_list(request.get("symbols")))
+        return (
+            run_taiwan_intraday_bar_bootstrap_job,
+            (symbols, int(request.get("max_symbols", 10))),
+            request,
+        )
+
+    if job_type == TAIWAN_INDEX_DAILY_BOOTSTRAP_JOB_TYPE:
+        date_from = _parse_date(request.get("date_from"))
+        date_to = _parse_date(request.get("date_to"))
+        if date_from is None or date_to is None:
+            raise ValueError("Taiwan index bootstrap retry requires date range")
+        return (
+            run_taiwan_index_daily_bootstrap_job,
+            (
+                tuple(_parse_string_list(request.get("index_ids"))),
+                date_from,
+                date_to,
+                int(request.get("taiex_max_sessions", 260)),
+                int(request.get("tpex_max_sessions", 20)),
+            ),
+            request,
+        )
 
     if job_type == "market.twse_daily_price_backfill":
         return (
@@ -451,6 +490,22 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
             (
                 int(request.get("max_runtime_seconds", 600)),
                 request.get("cursor_symbol"),
+                int(request.get("max_symbols", 20)),
+                int(request.get("max_external_calls", 20)),
+                int(request.get("max_provider_attempts", 2)),
+            ),
+            request,
+        )
+
+    if job_type == US_INTRADAY_MINUTE_REPAIR_JOB_TYPE:
+        after_group_id = request.get("after_group_id")
+        return (
+            backfill_tasks.run_us_intraday_minute_repair_job,
+            (
+                bool(request.get("apply", False)),
+                int(request.get("max_groups", 200)),
+                int(request.get("max_candidate_rows", 10_000)),
+                int(after_group_id) if after_group_id is not None else None,
             ),
             request,
         )
@@ -630,6 +685,56 @@ def list_jobs(
         include_payload=include_payload,
     )
     return [service.serialize_job(job, include_payload=include_payload) for job in jobs]
+
+
+@router.post(
+    "/taiwan/bootstrap-index-daily-bars",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_taiwan_index_daily_bootstrap_operator(
+    request: TaiwanIndexDailyBootstrapJobRequest,
+    db: Session = Depends(get_db),
+):
+    """Explicit bounded canonical Base-1d bootstrap; never invoked from GET."""
+
+    try:
+        job, _created = enqueue_taiwan_index_daily_bootstrap(
+            db,
+            index_ids=request.index_ids,
+            date_from=request.date_from,
+            date_to=request.date_to,
+            taiex_max_sessions=request.taiex_max_sessions,
+            tpex_max_sessions=request.tpex_max_sessions,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return service.serialize_job(job)
+
+
+@router.post(
+    "/taiwan/bootstrap-intraday-bars",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_taiwan_intraday_bar_bootstrap_operator(
+    request: TaiwanIntradayBarBootstrapJobRequest,
+    db: Session = Depends(get_db),
+):
+    """Explicit operator-owned command; never runs from GET or startup."""
+
+    try:
+        job, _created = enqueue_taiwan_intraday_bar_bootstrap(
+            db,
+            symbols=request.symbols,
+            max_symbols=request.max_symbols,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    return service.serialize_job(job)
 
 
 @router.post(

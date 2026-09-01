@@ -8,7 +8,7 @@ from decimal import Decimal
 import json
 
 from pydantic import ValidationError
-from sqlalchemy import inspect
+from sqlalchemy import and_, inspect, or_
 from sqlalchemy.orm import Session, load_only
 
 from app.db.models import (
@@ -68,6 +68,7 @@ _RAW_FETCH_LINEAGE_COLUMNS = (
 @dataclass(frozen=True, slots=True)
 class TaiwanIndexSeriesRow:
     storage_row_id: int
+    source_id: int
     provider: str
     source: str
     authority: AuthorityClass
@@ -563,37 +564,86 @@ class TaiwanCurrentMarketRepository:
         normalized_index_id = str(index_id or "").strip().upper()
         if normalized_index_id not in {"TAIEX", "TPEX"}:
             raise ValueError("Taiwan index series requires TAIEX or TPEX")
-        bounded_rows = max(min(int(max_rows), 10_000), 1)
+        page_size = max(min(int(max_rows), 10_000), 1)
         if not inspect(self._db.get_bind()).has_table(
             TaiwanCurrentIndexSnapshot.__tablename__
         ):
             return TaiwanIndexSeriesBatch(
                 limitations=("TW_CURRENT_INDEX_SCHEMA_UNAVAILABLE",)
             )
-        rows = (
+        source_keys = (
             self._db.query(
-                TaiwanCurrentIndexSnapshot,
-                RawFetchResult,
-                SourceRegistry,
-            )
-            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
-            .join(
-                RawFetchResult,
-                RawFetchResult.id == TaiwanCurrentIndexSnapshot.raw_result_id,
-            )
-            .join(
-                SourceRegistry,
-                SourceRegistry.id == TaiwanCurrentIndexSnapshot.source_id,
+                TaiwanCurrentIndexSnapshot.provider,
+                TaiwanCurrentIndexSnapshot.source,
+                TaiwanCurrentIndexSnapshot.source_id,
             )
             .filter(TaiwanCurrentIndexSnapshot.index_id == normalized_index_id)
             .filter(TaiwanCurrentIndexSnapshot.trade_date == trade_date)
+            .distinct()
             .order_by(
-                TaiwanCurrentIndexSnapshot.event_at.asc(),
-                TaiwanCurrentIndexSnapshot.id.asc(),
+                TaiwanCurrentIndexSnapshot.provider.asc(),
+                TaiwanCurrentIndexSnapshot.source.asc(),
+                TaiwanCurrentIndexSnapshot.source_id.asc(),
             )
-            .limit(bounded_rows)
             .all()
         )
+        rows: list[
+            tuple[TaiwanCurrentIndexSnapshot, RawFetchResult, SourceRegistry]
+        ] = []
+        for provider, source_name, source_id in source_keys:
+            cursor_event_at: datetime | None = None
+            cursor_id: int | None = None
+            while True:
+                query = (
+                    self._db.query(
+                        TaiwanCurrentIndexSnapshot,
+                        RawFetchResult,
+                        SourceRegistry,
+                    )
+                    .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
+                    .join(
+                        RawFetchResult,
+                        RawFetchResult.id
+                        == TaiwanCurrentIndexSnapshot.raw_result_id,
+                    )
+                    .join(
+                        SourceRegistry,
+                        SourceRegistry.id == TaiwanCurrentIndexSnapshot.source_id,
+                    )
+                    .filter(
+                        TaiwanCurrentIndexSnapshot.index_id == normalized_index_id
+                    )
+                    .filter(TaiwanCurrentIndexSnapshot.trade_date == trade_date)
+                    .filter(TaiwanCurrentIndexSnapshot.provider == provider)
+                    .filter(TaiwanCurrentIndexSnapshot.source == source_name)
+                    .filter(TaiwanCurrentIndexSnapshot.source_id == source_id)
+                )
+                if cursor_event_at is not None and cursor_id is not None:
+                    query = query.filter(
+                        or_(
+                            TaiwanCurrentIndexSnapshot.event_at
+                            > cursor_event_at,
+                            and_(
+                                TaiwanCurrentIndexSnapshot.event_at
+                                == cursor_event_at,
+                                TaiwanCurrentIndexSnapshot.id > cursor_id,
+                            ),
+                        )
+                    )
+                page = (
+                    query.order_by(
+                        TaiwanCurrentIndexSnapshot.event_at.asc(),
+                        TaiwanCurrentIndexSnapshot.id.asc(),
+                    )
+                    .limit(page_size)
+                    .all()
+                )
+                rows.extend(page)
+                if len(page) < page_size:
+                    break
+                cursor_event_at = page[-1][0].event_at
+                cursor_id = page[-1][0].id
+        rows.sort(key=lambda item: (item[0].event_at, item[0].id))
         accepted: list[TaiwanIndexSeriesRow] = []
         rejections: list[CandidateRowRejection] = []
         limitations: list[str] = []
@@ -657,6 +707,7 @@ class TaiwanCurrentMarketRepository:
                 accepted.append(
                     TaiwanIndexSeriesRow(
                         storage_row_id=row.id,
+                        source_id=row.source_id,
                         provider=row.provider,
                         source=row.source,
                         authority=authority,
@@ -686,8 +737,6 @@ class TaiwanCurrentMarketRepository:
                         reason_code="INVALID_CANONICAL_CURRENT_INDEX_SERIES_ROW",
                     )
                 )
-        if len(rows) >= bounded_rows:
-            limitations.append("TW_INDEX_INTRADAY_ROW_BOUND_REACHED")
         if not accepted:
             limitations.append("TW_INDEX_INTRADAY_CANONICAL_CACHE_MISSING")
         if rejections:

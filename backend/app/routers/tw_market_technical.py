@@ -1,0 +1,135 @@
+"""Canonical Taiwan technical series and atomic chart bundle transport."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.orm import Session
+
+from app.db.session import get_db
+from app.market.technical_parameters import get_technical_analysis_parameters
+from app.market.tw_bar_service import TaiwanBarService
+from app.market.tw_chart_service import TaiwanChartBundleRead, TaiwanChartService
+from app.market.tw_technical_service import (
+    BarSeriesRevisionConflict,
+    TaiwanTechnicalSeriesRead,
+    TaiwanTechnicalService,
+    build_taiwan_technical_capability_contract,
+)
+
+
+router = APIRouter()
+
+
+def _technical(
+    bars,
+    *,
+    expected_series_revision: str | None,
+    ma_windows: str | None,
+    volume_ma_windows: str | None,
+) -> TaiwanTechnicalSeriesRead:
+    try:
+        parameters = get_technical_analysis_parameters(
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+        )
+        return TaiwanTechnicalService().calculate(
+            bars,
+            parameters=parameters,
+            expected_series_revision=expected_series_revision,
+        )
+    except BarSeriesRevisionConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "BAR_SERIES_REVISION_CONFLICT",
+                "expected_series_revision": exc.expected,
+                "current_series_revision": exc.current,
+            },
+        ) from exc
+
+
+@router.get("/technical/contracts/tw")
+def get_taiwan_technical_contract():
+    """Pure Backend capability/default contract; performs no market-data I/O."""
+
+    return build_taiwan_technical_capability_contract()
+
+
+@router.get(
+    "/technical/{instrument_id}/series",
+    response_model=TaiwanTechnicalSeriesRead,
+)
+def get_taiwan_technical_series(
+    instrument_id: str,
+    interval: str = Query(default="1d"),
+    from_time: datetime | None = Query(default=None, alias="from"),
+    to_time: datetime | None = Query(default=None, alias="to"),
+    limit: int = Query(default=500, ge=1, le=5000),
+    include_partial: bool = True,
+    expected_series_revision: str | None = None,
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        bars = TaiwanBarService(db).read_bars(
+            instrument_id=instrument_id,
+            interval=interval,
+            from_time=from_time,
+            to_time=to_time,
+            limit=limit,
+            include_partial=include_partial,
+        )
+        return _technical(
+            bars,
+            expected_series_revision=expected_series_revision,
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/chart/{instrument_id}", response_model=TaiwanChartBundleRead)
+def get_taiwan_chart_bundle(
+    instrument_id: str,
+    interval: str = Query(default="1d"),
+    from_time: datetime | None = Query(default=None, alias="from"),
+    to_time: datetime | None = Query(default=None, alias="to"),
+    limit: int = Query(default=500, ge=1, le=5000),
+    include_partial: bool = True,
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        parameters = get_technical_analysis_parameters(
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+        )
+        return TaiwanChartService(db).read(
+            instrument_id=instrument_id,
+            interval=interval,
+            from_time=from_time,
+            to_time=to_time,
+            limit=limit,
+            include_partial=include_partial,
+            parameters=parameters,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+__all__ = ["TaiwanChartBundleRead", "router"]

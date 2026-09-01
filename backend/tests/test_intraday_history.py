@@ -55,35 +55,57 @@ def point(
     }
 
 
-def fake_result(*, fallback_used: bool = False):
-    return SimpleNamespace(
-        resolved=SimpleNamespace(
-            health=SimpleNamespace(fallback_used=fallback_used),
-        ),
-        acquisition=SimpleNamespace(
-            status=SimpleNamespace(value="not_attempted"),
-        ),
-    )
-
-
-def projection(
+def bar_series(
     points: list[dict],
     *,
-    provider: str = "yahoo_finance_chart",
-    source: str = "yahoo_finance_chart",
-    source_interval: str = "1m",
-    calculation_versions: list[str] | None = None,
-) -> tuple[list[dict], dict]:
-    return points, {
-        "provider": provider,
-        "source": source,
-        "source_interval": source_interval,
-        "calculation_versions": calculation_versions or [],
-        "component_raw_result_ids": ["raw_fetch_result:1"],
-        "resolved_health": {"status": "selected"},
-        "candidate_rejections": [],
-        "limitations": [],
-    }
+    interval: str = "1m",
+) -> SimpleNamespace:
+    derived = interval != "1m"
+    bars = tuple(
+        SimpleNamespace(
+            start_at=item["time"],
+            end_at=item["time"] + timedelta(
+                hours=(4 if interval == "4h" else 1 if interval == "1h" else 0),
+                minutes=(0 if interval in {"1h", "4h"} else int(interval[:-1])),
+            ),
+            open_price=item["open"],
+            high_price=item["high"],
+            low_price=item["low"],
+            close_price=item["close"],
+            volume=SimpleNamespace(value=item["volume"]),
+            turnover_value=None,
+            finalization=SimpleNamespace(value="final"),
+            lineage=SimpleNamespace(
+                provider=("omi_taiwan_bar_service" if derived else "kgi_superpy"),
+                source=("tw.bar.aggregate" if derived else "kgi_superpy_minute_kbars"),
+            ),
+        )
+        for item in points
+    )
+    return SimpleNamespace(
+        bars=bars,
+        derived=derived,
+        base_interval="1m",
+        aggregation_version="tw.bar.aggregate.v1" if derived else None,
+        history=SimpleNamespace(
+            history_status=SimpleNamespace(value="ready"),
+            requested_coverage_satisfied=True,
+            requested_session_count=max(
+                len({item["time"].date() for item in points}), 1
+            ),
+            covered_session_count=max(
+                len({item["time"].date() for item in points}), 1
+            ),
+        ),
+        identity=SimpleNamespace(
+            series_revision="r" * 64,
+            series_fingerprint="f" * 64,
+            lineage_digest="l" * 64,
+            state_digest="s" * 64,
+        ),
+        session_resolution=(),
+        limitations=(),
+    )
 
 
 class MarketIntradayHistoryTests(unittest.TestCase):
@@ -101,23 +123,19 @@ class MarketIntradayHistoryTests(unittest.TestCase):
         interval: str = "1m",
         **metadata,
     ) -> dict:
+        del metadata
         with (
-            patch.object(
-                intraday,
-                "read_taiwan_intraday_bars",
-                return_value=fake_result(),
-            ),
-            patch.object(
-                intraday,
-                "project_taiwan_intraday_bars",
-                return_value=projection(points, **metadata),
-            ),
+            patch.object(intraday, "TaiwanBarService") as service,
             patch.object(
                 self.db,
                 "commit",
                 side_effect=AssertionError("history GET must not commit"),
             ),
         ):
+            service.return_value.read_bars.return_value = bar_series(
+                points,
+                interval=interval,
+            )
             return intraday.get_market_intraday_history(
                 self.db,
                 stock_id="2330",
@@ -140,14 +158,12 @@ class MarketIntradayHistoryTests(unittest.TestCase):
         result = self._read(
             [point(9, 0, 105, 3000), point(13, 0, 103, 3000)],
             interval="4h",
-            source_interval="1h",
-            calculation_versions=["omi.aggregate.4h.v1"],
         )
 
         self.assertEqual(result["interval"], "4h")
-        self.assertEqual(result["source_interval"], "1h")
-        self.assertEqual(result["calculation_versions"], ["omi.aggregate.4h.v1"])
-        self.assertEqual(result["component_raw_result_ids"], ["raw_fetch_result:1"])
+        self.assertEqual(result["source_interval"], "1m")
+        self.assertEqual(result["calculation_versions"], ["tw.bar.aggregate.v1"])
+        self.assertEqual(result["component_raw_result_ids"], [])
 
     def test_one_minute_cache_keeps_recent_trading_days_across_calendar_gap(self) -> None:
         result = self._read([point(9, 0, 101, days_ago=6)])
@@ -171,35 +187,25 @@ class MarketIntradayHistoryTests(unittest.TestCase):
         self.assertEqual(result["window_volume_sum_shares"], 33_000)
         self.assertEqual(result["bar_volume_trade_date"], expected_trade_date)
         self.assertEqual(result["bar_volume_sum_shares"], 3_000)
-        self.assertEqual(result["cumulative_volume_shares"], 3_000)
+        self.assertIsNone(result["cumulative_volume_shares"])
+        self.assertEqual(result["cumulative_volume_status"], "partial_coverage")
         self.assertAlmostEqual(result["approx_vwap"], 200.0)
 
     def test_five_minute_history_uses_resolved_provider_not_local_legacy_overlay(self) -> None:
         result = self._read(
             [point(13, 15, 103, 6000)],
             interval="5m",
-            source_interval="5m",
         )
 
-        self.assertEqual(result["source"], "yahoo_finance_chart")
-        self.assertEqual(result["provider"], "yahoo_finance_chart")
+        self.assertEqual(result["source"], "tw.bar.aggregate")
+        self.assertEqual(result["provider"], "omi_taiwan_bar_service")
         self.assertEqual(result["points"][-1]["close"], 103)
         self.assertEqual(result["points"][-1]["volume"], 6000)
 
     def test_repeated_cache_reads_never_report_refresh_updates(self) -> None:
         points = [point(9, 0, 101, 1000)]
-        with (
-            patch.object(
-                intraday,
-                "read_taiwan_intraday_bars",
-                return_value=fake_result(),
-            ) as read,
-            patch.object(
-                intraday,
-                "project_taiwan_intraday_bars",
-                return_value=projection(points),
-            ),
-        ):
+        with patch.object(intraday, "TaiwanBarService") as service:
+            service.return_value.read_bars.return_value = bar_series(points)
             first = intraday.get_market_intraday_history(
                 self.db,
                 stock_id="2330",
@@ -215,7 +221,7 @@ class MarketIntradayHistoryTests(unittest.TestCase):
                 refresh=True,
             )
 
-        self.assertEqual(read.call_count, 2)
+        self.assertEqual(service.return_value.read_bars.call_count, 2)
         self.assertEqual(first["refreshed_count"], 0)
         self.assertEqual(second["refreshed_count"], 0)
 

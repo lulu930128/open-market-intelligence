@@ -868,12 +868,15 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             return_value={
                 "series": {"1m": {"returned_point_count": 1}}
             },
+        ), patch.object(
+            taiwan_market,
+            "project_taiwan_bar_series",
+            return_value={"points": [{"price": 1.0}]},
         ):
             pack = taiwan_market._market_index_intraday_pack(
+                db=None,
                 dependencies=SimpleNamespace(
-                    get_market_index_intraday=lambda _index_id: {
-                        "points": [{"price": 1.0}]
-                    }
+                    read_taiwan_bars=lambda **_kwargs: object()
                 ),
                 include_intraday=True,
                 market_data_params={"index_ids": ["TAIEX", "TPEX"]},

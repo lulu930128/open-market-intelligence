@@ -226,7 +226,7 @@ class TechnicalReportTests(unittest.TestCase):
         ai_latest = evidence["indicators"]["timeframes"]["daily"]["completed"]
 
         self.assertEqual(api_latest["close"], 179.0)
-        self.assertEqual(api_latest["algorithm_version"], "tw.technical.indicators.v3")
+        self.assertEqual(api_latest["algorithm_version"], "tw.technical.indicators.v4")
         self.assertEqual(api_latest["calculation_role"], "backend_authoritative")
         self.assertEqual(api_latest["rsi"], ai_latest["rsi"])
         self.assertEqual(api_latest["macd"], ai_latest["macd"])
@@ -279,29 +279,26 @@ class TechnicalReportTests(unittest.TestCase):
         report_indicator = report["data"]["daily_indicator"]
         signal_indicator = signal["indicator_snapshot"]
 
-        self.assertEqual(report["algorithm_version"], "tw.technical.indicators.v3")
+        self.assertEqual(report["algorithm_version"], "tw.technical.indicators.v4")
         self.assertEqual(signal["indicator_engine"], report["indicator_engine"])
         self.assertEqual(report_indicator["rsi"], signal_indicator["rsi"])
         self.assertEqual(report_indicator["macd"], signal_indicator["macd"])
         self.assertEqual(report_indicator["kd"], signal_indicator["kd"])
         self.assertIn("j9", report_indicator["kd"])
 
-    def test_legacy_indicator_engine_remains_a_bounded_rollback(self) -> None:
-        with patch(
-            "app.market.technical_indicator_gateway.settings.technical_canonical_v2_active",
-            False,
-        ):
-            report = build_stock_technical_report(
-                db=self.db,
-                stock_id="2330",
-                timeframe="daily",
-                include_intraday=False,
-            )
+    def test_indicator_engine_has_no_runtime_legacy_fallback(self) -> None:
+        report = build_stock_technical_report(
+            db=self.db,
+            stock_id="2330",
+            timeframe="daily",
+            include_intraday=False,
+        )
 
-        self.assertEqual(report["indicator_engine"]["active_engine"], "legacy")
+        self.assertEqual(report["indicator_engine"]["active_engine"], "canonical")
+        self.assertFalse(report["indicator_engine"]["legacy_fallback_allowed"])
         self.assertEqual(
             report["algorithm_version"],
-            "tw.technical.indicators.v1-legacy",
+            "tw.technical.indicators.v4",
         )
 
     def test_daily_report_separates_finalized_decision_from_provisional_current_state(self) -> None:
@@ -311,7 +308,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 23, 10, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "source": "test_intraday",
                     "previous_close": 179.0,
@@ -339,13 +336,13 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertTrue(price_context["is_provisional"])
         self.assertEqual(
             price_context["technical_price_basis"],
-            "intraday_partial_daily_bar",
+            "intraday_series_latest_price",
         )
         self.assertFalse(price_context["bid_ask_price_used"])
         self.assertEqual(price_context["daily_indicator_time"], "2026-03-21")
         self.assertEqual(
             price_context["moving_average_structure"]["price_state"],
-            "below_all",
+            "above_all",
         )
         price_row = next(
             row for row in report["rows"] if row["key"] == "price_position"
@@ -363,50 +360,22 @@ class TechnicalReportTests(unittest.TestCase):
         )
         self.assertEqual(report["data"]["decision_snapshot"], "completed")
         self.assertEqual(report["data"]["decision_state"]["position"]["price"], 179.0)
-        self.assertEqual(report["data"]["current_state"]["position"]["price"], 130.0)
+        self.assertEqual(report["data"]["current_state"]["position"]["price"], 179.0)
         self.assertEqual(report["data"]["decision_state_time"], "2026-03-21")
-        self.assertEqual(report["data"]["current_state_time"], "2026-03-23")
-        self.assertFalse(report["data"]["current_state_decision_usable"])
-        partial = report["data"]["current_partial_indicator"]
-        self.assertEqual(partial["time"], date(2026, 3, 23))
-        self.assertEqual(partial["bar_status"], "intraday_partial")
-        self.assertEqual(
-            partial["indicator_semantics"]["volume_based"],
-            "partial_cumulative_volume",
-        )
-        self.assertFalse(partial["decision_usable"])
-        current_observation = report["data"]["current_observation"]
-        self.assertEqual(current_observation["status"], "intraday_partial")
-        self.assertEqual(current_observation["time"], "2026-03-23")
-        self.assertFalse(current_observation["decision_usable"])
-        self.assertEqual(
-            current_observation["current_state"],
-            report["data"]["current_state"],
-        )
+        self.assertEqual(report["data"]["current_state_time"], "2026-03-21")
+        self.assertTrue(report["data"]["current_state_decision_usable"])
+        self.assertIsNone(report["data"]["current_partial_indicator"])
+        self.assertIsNone(report["data"]["current_observation"])
         self.assertEqual(report["data"]["daily_indicator"]["time"], date(2026, 3, 21))
 
-    def test_post_close_session_close_replaces_stale_intraday_headline_price(self) -> None:
-        event_at = datetime(2026, 8, 27, 13, 30, tzinfo=TAIPEI_TZ)
-        quote = SimpleNamespace(
-            trade_date=date(2026, 8, 27),
-            lineage=SimpleNamespace(
-                event_at=event_at,
-                provider="twse_mis",
-                source="twse_mis",
-            ),
-            last_trade_price=605.0,
-            open_price=608.0,
-            high_price=608.0,
-            low_price=593.0,
-            cumulative_quantity=SimpleNamespace(value=11_106_000),
-        )
+    def test_post_close_report_does_not_inject_session_close_into_bar_truth(self) -> None:
         with (
             patch(
                 "app.market.technical_report._now",
                 return_value=datetime(2026, 8, 27, 14, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "source": "persisted_intraday",
                     "previous_close": 592.0,
@@ -419,19 +388,6 @@ class TechnicalReportTests(unittest.TestCase):
                     ],
                 },
             ),
-            patch(
-                "app.market.technical_report.read_taiwan_session_close",
-                return_value=SimpleNamespace(
-                    resolved=SimpleNamespace(quote=quote),
-                ),
-            ),
-            patch(
-                "app.market.technical_report.project_taiwan_session_close",
-                return_value={
-                    "available": True,
-                    "finalization": "session_final",
-                },
-            ),
         ):
             report = build_stock_technical_report(
                 db=self.db,
@@ -440,16 +396,15 @@ class TechnicalReportTests(unittest.TestCase):
                 include_intraday=True,
             )
 
-        self.assertEqual(report["data"]["price_context"]["price"], 605.0)
+        self.assertEqual(report["data"]["price_context"]["price"], 601.0)
         self.assertEqual(
             report["data"]["price_context"]["technical_price_basis"],
-            "session_close_provisional_daily_bar",
+            "intraday_series_latest_price",
         )
-        self.assertEqual(report["data"]["current_partial_indicator"]["close"], 605.0)
-        self.assertEqual(report["data"]["current_partial_indicator"]["volume"], 11_106_000)
-        self.assertEqual(report["data"]["current_state"]["position"]["price"], 605.0)
+        self.assertIsNone(report["data"]["current_partial_indicator"])
+        self.assertEqual(report["data"]["current_state"]["position"]["price"], 179.0)
         self.assertEqual(report["data"]["decision_state"]["position"]["price"], 179.0)
-        self.assertFalse(report["data"]["current_observation"]["decision_usable"])
+        self.assertIsNone(report["data"]["current_observation"])
 
     def test_post_close_official_daily_owns_headline_when_already_published(self) -> None:
         lineage = (
@@ -497,7 +452,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 8, 27, 14, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "source": "persisted_intraday",
                     "previous_close": 592.0,
@@ -568,7 +523,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 23, 13, 24, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "source": "nstock_minute_stock_data",
                     "previous_close": 179.0,
@@ -621,7 +576,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 20, 19, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend"
+                "app.market.technical_report._canonical_intraday_payload"
             ) as intraday,
         ):
             report = build_stock_technical_report(
@@ -769,7 +724,7 @@ class TechnicalReportTests(unittest.TestCase):
     def test_stock_context_exposes_compact_evidence_without_intraday_fetch(self) -> None:
         with (
             patch("app.ai.tools.read_taiwan_quote_evidence_projection") as quote_depth,
-            patch("app.ai.tools.get_market_intraday_history") as intraday_history,
+            patch("app.ai.tools._read_taiwan_bars") as bar_reader,
         ):
             context = ai_tools.read_stock_context(
                 db=self.db,
@@ -779,7 +734,7 @@ class TechnicalReportTests(unittest.TestCase):
             )
 
         quote_depth.assert_not_called()
-        intraday_history.assert_not_called()
+        bar_reader.assert_not_called()
 
         compact = context["data"]["compact"]
         self.assertEqual(compact["kind"], "stock_compact_evidence")
@@ -872,42 +827,91 @@ class TechnicalReportTests(unittest.TestCase):
     def test_stock_context_compact_intraday_includes_quote_and_bars(self) -> None:
         quote_time = datetime(2026, 3, 21, 10, 5)
 
-        def history_result(*, db, stock_id, interval, range_value, refresh):
-            return {
-                "stock_id": stock_id,
-                "symbol": "2330.TW",
-                "interval": interval,
-                "range": range_value,
-                "provider": "test_provider",
-                "source": f"test_{interval}",
-                "from_time": datetime(2026, 3, 21, 9, 0),
-                "to_time": quote_time,
-                "point_count": 2,
-                "cached_count": 0,
-                "refreshed_count": 2,
-                "points": [
-                    {
-                        "time": datetime(2026, 3, 21, 9, 0),
-                        "open": 180.0,
-                        "high": 181.0,
-                        "low": 179.5,
-                        "close": 180.5,
-                        "volume": 1000,
+        def bar_series_result(*, db, instrument_id, interval, **kwargs):
+            start = datetime(2026, 3, 21, 9, 0)
+            bars = (
+                SimpleNamespace(
+                    start_at=start,
+                    end_at=start + timedelta(minutes=1),
+                    open_price=180.0,
+                    high_price=181.0,
+                    low_price=179.5,
+                    close_price=180.5,
+                    volume=SimpleNamespace(
+                        value=1000,
+                        unit=SimpleNamespace(value="shares"),
+                    ),
+                    turnover_value=None,
+                    trade_count=None,
+                    finalization=SimpleNamespace(value="final"),
+                    lineage=SimpleNamespace(
+                        provider="test_provider",
+                        source=f"test_{interval}",
+                    ),
+                    volume_status="available",
+                ),
+                SimpleNamespace(
+                    start_at=quote_time,
+                    end_at=quote_time + timedelta(minutes=1),
+                    open_price=180.5,
+                    high_price=182.0,
+                    low_price=180.0,
+                    close_price=181.5,
+                    volume=SimpleNamespace(
+                        value=1500,
+                        unit=SimpleNamespace(value="shares"),
+                    ),
+                    turnover_value=None,
+                    trade_count=None,
+                    finalization=SimpleNamespace(value="final"),
+                    lineage=SimpleNamespace(
+                        provider="test_provider",
+                        source=f"test_{interval}",
+                    ),
+                    volume_status="available",
+                ),
+            )
+            return SimpleNamespace(
+                instrument=SimpleNamespace(
+                    symbol=instrument_id,
+                    model_dump=lambda **_kwargs: {
+                        "market": "TW",
+                        "symbol": instrument_id,
+                        "instrument_type": "stock",
+                        "venue": "TWSE",
                     },
-                    {
-                        "time": quote_time,
-                        "open": 180.5,
-                        "high": 182.0,
-                        "low": 180.0,
-                        "close": 181.5,
-                        "volume": 1500,
-                    },
-                ],
-            }
+                ),
+                requested_interval=interval,
+                base_interval="1m",
+                bars=bars,
+                bar_states=tuple(
+                    SimpleNamespace(
+                        start_at=bar.start_at,
+                        source_interval="1m",
+                        technical_eligible=True,
+                    )
+                    for bar in bars
+                ),
+                history=SimpleNamespace(
+                    available_from=start,
+                    available_to=quote_time,
+                    requested_coverage_satisfied=True,
+                    history_status=SimpleNamespace(value="ready"),
+                    model_dump=lambda **_kwargs: {"history_status": "ready"},
+                ),
+                identity=SimpleNamespace(
+                    series_fingerprint="a" * 64,
+                    lineage_digest="b" * 64,
+                    state_digest="c" * 64,
+                    series_revision="d" * 64,
+                ),
+                warnings=(),
+                limitations=(),
+            )
 
         with (
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "source": "test_intraday",
                     "point_count": 2,
@@ -964,7 +968,7 @@ class TechnicalReportTests(unittest.TestCase):
                     },
                 },
             ) as quote_depth,
-            patch("app.ai.tools.get_market_intraday_history", side_effect=history_result) as intraday_history,
+            patch("app.ai.tools._read_taiwan_bars", side_effect=bar_series_result) as bar_reader,
         ):
             context = ai_tools.read_stock_context(
                 db=self.db,
@@ -974,7 +978,7 @@ class TechnicalReportTests(unittest.TestCase):
             )
 
         quote_depth.assert_called_once()
-        self.assertEqual(intraday_history.call_count, 2)
+        bar_reader.assert_called_once()
 
         compact = context["data"]["compact"]
         self.assertEqual(compact["quote"]["source"], "twse_mis_public_quote")
@@ -990,9 +994,9 @@ class TechnicalReportTests(unittest.TestCase):
         )
         self.assertEqual(compact["quote"]["session_phase"], "regular")
         self.assertTrue(compact["intraday_bars"]["enabled"])
-        self.assertEqual(set(compact["intraday_bars"]["series"].keys()), {"1m", "5m"})
+        self.assertEqual(set(compact["intraday_bars"]["series"].keys()), {"1m"})
         self.assertEqual(compact["intraday_bars"]["series"]["1m"]["returned_point_count"], 2)
-        self.assertEqual(compact["intraday_bars"]["series"]["5m"]["latest"]["close"], 181.5)
+        self.assertEqual(compact["intraday_bars"]["series"]["1m"]["latest"]["close"], 181.5)
         self.assertEqual(compact["freshness_by_domain"]["quote"]["status"], "live")
         self.assertEqual(compact["slots"]["quote"]["status"], "ready")
         self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
@@ -1000,8 +1004,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertTrue(
             any(ref["name"] == "market_intraday_bar" for ref in compact["source_refs"])
         )
-        for call in intraday_history.call_args_list:
-            self.assertFalse(call.kwargs["refresh"])
+        self.assertNotIn("refresh", bar_reader.call_args.kwargs)
 
     def test_tw_index_context_compact_intraday_respects_payload_level(self) -> None:
         daily_points = [
@@ -1028,29 +1031,104 @@ class TechnicalReportTests(unittest.TestCase):
             for index in range(12)
         ]
 
-        def chart_result(*, index_id, timeframe, bars, db):
-            return {
-                "index_id": index_id,
-                "timeframe": timeframe,
-                "from_date": daily_points[0]["time"],
-                "to_date": daily_points[-1]["time"],
-                "point_count": len(daily_points),
-                "points": daily_points,
-            }
+        def chart_bundle(*, instrument_id, interval, **kwargs):
+            source_points = intraday_points if interval == "1m" else daily_points
+            bars = []
+            states = []
+            for point in source_points:
+                raw_time = point["time"]
+                start_at = (
+                    raw_time
+                    if isinstance(raw_time, datetime)
+                    else datetime.combine(raw_time, datetime.min.time(), TAIPEI_TZ)
+                )
+                end_at = start_at + (
+                    timedelta(minutes=1) if interval == "1m" else timedelta(days=1)
+                )
+                bars.append(
+                    SimpleNamespace(
+                        start_at=start_at,
+                        end_at=end_at,
+                        open_price=point["open"],
+                        high_price=point["high"],
+                        low_price=point["low"],
+                        close_price=point.get("close", point.get("price")),
+                        volume=None,
+                        turnover_value=None,
+                        trade_count=None,
+                        finalization=SimpleNamespace(value="final"),
+                        lineage=SimpleNamespace(
+                            provider="test_provider",
+                            source="tw_bar_service",
+                        ),
+                        volume_status="not_applicable",
+                    )
+                )
+                states.append(
+                    SimpleNamespace(
+                        start_at=start_at,
+                        source_interval="1m" if interval == "1m" else "1d",
+                        technical_eligible=True,
+                    )
+                )
+            revision = (interval.replace("m", "1") + "e" * 64)[:64]
+            bar_series = SimpleNamespace(
+                instrument=SimpleNamespace(
+                    symbol=instrument_id,
+                    model_dump=lambda **_kwargs: {
+                        "market": "TW",
+                        "symbol": instrument_id,
+                        "instrument_type": "index",
+                        "venue": "TWSE",
+                    },
+                ),
+                requested_interval=interval,
+                base_interval="1m" if interval == "1m" else "1d",
+                bars=tuple(bars),
+                bar_states=tuple(states),
+                history=SimpleNamespace(
+                    available_from=bars[0].start_at,
+                    available_to=bars[-1].start_at,
+                    requested_coverage_satisfied=True,
+                    history_status=SimpleNamespace(value="ready"),
+                    model_dump=lambda **_kwargs: {"history_status": "ready"},
+                ),
+                identity=SimpleNamespace(
+                    series_fingerprint="a" * 64,
+                    lineage_digest="b" * 64,
+                    state_digest="c" * 64,
+                    series_revision=revision,
+                ),
+                warnings=(),
+                limitations=(),
+            )
+            technical_points = tuple(
+                {
+                    "time": bar.start_at,
+                    "close": float(bar.close_price),
+                }
+                for bar in bars
+            )
+            technical = SimpleNamespace(
+                points=technical_points,
+                algorithm_version="tw.technical.indicators.v4",
+                parameter_contract={"schema_version": "tw.technical.parameters.v1"},
+                status=SimpleNamespace(value="available"),
+                warnings=(),
+                model_dump=lambda **_kwargs: {
+                    "points": list(technical_points),
+                    "algorithm_version": "tw.technical.indicators.v4",
+                    "bar_series_revision": revision,
+                },
+            )
+            return SimpleNamespace(
+                bars=bar_series,
+                technical=technical,
+                series_revision=revision,
+            )
 
         with (
-            patch("app.ai.tools.get_market_index_ohlc_chart_data", side_effect=chart_result),
-            patch(
-                "app.ai.tools.get_market_index_intraday",
-                return_value={
-                    "stock_id": "TAIEX",
-                    "symbol": "^TWII",
-                    "source": "twse_index_5s",
-                    "previous_close": 18090.0,
-                    "point_count": len(intraday_points),
-                    "points": intraday_points,
-                },
-            ),
+            patch("app.ai.tools._read_taiwan_chart", side_effect=chart_bundle),
             patch(
                 "app.ai.tools.get_market_index_summary",
                 return_value={
@@ -1111,7 +1189,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(compact["payload_level"], "summary")
         self.assertEqual(compact["target"]["type"], "tw_index")
         self.assertEqual(compact["quote"]["price"], 18111.0)
-        self.assertEqual(compact["daily_chart"]["timeframe"], "daily")
+        self.assertEqual(compact["daily_chart"]["requested_interval"], "1d")
         self.assertTrue(compact["daily_chart"]["points"])
         self.assertEqual(compact["intraday_bars"]["bar_limit"], 1)
         series = compact["intraday_bars"]["series"]["1m"]
@@ -1159,7 +1237,7 @@ class TechnicalReportTests(unittest.TestCase):
                 "app.market.technical_report._now",
                 return_value=datetime(2026, 6, 14, 10, 0, tzinfo=TAIPEI_TZ),
             ),
-            patch("app.market.technical_report.get_intraday_trend") as intraday,
+            patch("app.market.technical_report._canonical_intraday_payload") as intraday,
         ):
             report = build_stock_technical_report(
                 db=self.db,
@@ -1186,7 +1264,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 23, 10, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "stock_id": "2330",
                     "symbol": "2330",
@@ -1217,7 +1295,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 23, 10, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "stock_id": "2330",
                     "symbol": "2330",
@@ -1260,7 +1338,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 23, 10, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "stock_id": "2330",
                     "symbol": "2330",
@@ -1298,7 +1376,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 24, 8, 30, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "stock_id": "2330",
                     "symbol": "2330",
@@ -1330,28 +1408,16 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertFalse(report["data"]["intraday"]["score_eligible"])
         TechnicalReportRead.model_validate(report)
 
-    def test_today_report_uses_session_close_semantics_after_close(self) -> None:
-        event_at = datetime(2026, 3, 23, 13, 30, tzinfo=TAIPEI_TZ)
-        quote = SimpleNamespace(
-            trade_date=date(2026, 3, 23),
-            lineage=SimpleNamespace(
-                event_at=event_at,
-                provider="twse_mis",
-                source="twse_mis_quote_depth",
-            ),
-            last_trade_price=185.0,
-            open_price=181.0,
-            high_price=186.0,
-            low_price=180.0,
-            cumulative_quantity=SimpleNamespace(value=20_000),
-        )
+    def test_today_report_uses_finalized_backend_daily_projection_after_close(
+        self,
+    ) -> None:
         with (
             patch(
                 "app.market.technical_report._now",
                 return_value=datetime(2026, 3, 23, 14, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "source": "test_intraday",
                     "previous_close": 180.0,
@@ -1365,16 +1431,16 @@ class TechnicalReportTests(unittest.TestCase):
                 },
             ),
             patch(
-                "app.market.technical_report.read_taiwan_session_close",
-                return_value=SimpleNamespace(
-                    resolved=SimpleNamespace(quote=quote)
-                ),
-            ),
-            patch(
-                "app.market.technical_report.project_taiwan_session_close",
+                "app.market.technical_report._current_partial_daily_indicator",
                 return_value={
-                    "available": True,
-                    "finalization": "session_final",
+                    "close": 185.0,
+                    "open": 181.0,
+                    "high": 186.0,
+                    "low": 180.0,
+                    "volume": 20_000,
+                    "event_time": "2026-03-23T13:30:00+08:00",
+                    "source": "taiwan_bar_service",
+                    "session_close_finalization": "final",
                 },
             ),
         ):
@@ -1404,7 +1470,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 23, 14, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "source": "test_intraday",
                     "previous_close": 180.0,
@@ -1418,14 +1484,8 @@ class TechnicalReportTests(unittest.TestCase):
                 },
             ),
             patch(
-                "app.market.technical_report.read_taiwan_session_close",
-                return_value=SimpleNamespace(
-                    resolved=SimpleNamespace(quote=None)
-                ),
-            ),
-            patch(
-                "app.market.technical_report.project_taiwan_session_close",
-                return_value={"available": False},
+                "app.market.technical_report._current_partial_daily_indicator",
+                return_value=None,
             ),
         ):
             report = build_stock_technical_report(
@@ -1444,30 +1504,16 @@ class TechnicalReportTests(unittest.TestCase):
             "last_intraday_trade_pending_session_close",
         )
 
-    def test_today_report_accepts_session_close_when_intraday_series_is_empty(
+    def test_today_report_does_not_synthesize_bar_from_session_close_when_intraday_empty(
         self,
     ) -> None:
-        event_at = datetime(2026, 3, 23, 13, 30, tzinfo=TAIPEI_TZ)
-        quote = SimpleNamespace(
-            trade_date=date(2026, 3, 23),
-            lineage=SimpleNamespace(
-                event_at=event_at,
-                provider="twse_mis",
-                source="twse_mis_quote_depth",
-            ),
-            last_trade_price=185.0,
-            open_price=181.0,
-            high_price=186.0,
-            low_price=180.0,
-            cumulative_quantity=SimpleNamespace(value=20_000),
-        )
         with (
             patch(
                 "app.market.technical_report._now",
                 return_value=datetime(2026, 3, 23, 14, 0, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "source": "test_intraday",
                     "previous_close": 180.0,
@@ -1475,17 +1521,8 @@ class TechnicalReportTests(unittest.TestCase):
                 },
             ),
             patch(
-                "app.market.technical_report.read_taiwan_session_close",
-                return_value=SimpleNamespace(
-                    resolved=SimpleNamespace(quote=quote)
-                ),
-            ),
-            patch(
-                "app.market.technical_report.project_taiwan_session_close",
-                return_value={
-                    "available": True,
-                    "finalization": "session_final",
-                },
+                "app.market.technical_report._current_partial_daily_indicator",
+                return_value=None,
             ),
         ):
             report = build_stock_technical_report(
@@ -1495,10 +1532,10 @@ class TechnicalReportTests(unittest.TestCase):
                 include_intraday=True,
             )
 
-        self.assertEqual(report["phase"], "post_close")
-        self.assertEqual(report["rows"][0]["label"], "收盤成交")
-        self.assertEqual(report["rows"][0]["value"], 185.0)
-        self.assertNotIn("intraday_trend.points", report["missing"])
+        self.assertEqual(report["phase"], "post_close_pending_close")
+        self.assertEqual(report["rows"][0]["label"], "資料狀態")
+        self.assertIsNone(report["value"])
+        self.assertIn("intraday_trend.points", report["missing"])
 
     def test_today_report_uses_same_time_volume_pace_instead_of_daily_average(self) -> None:
         points = [
@@ -1538,7 +1575,7 @@ class TechnicalReportTests(unittest.TestCase):
                 return_value=datetime(2026, 3, 23, 10, 5, tzinfo=TAIPEI_TZ),
             ),
             patch(
-                "app.market.technical_report.get_intraday_trend",
+                "app.market.technical_report._canonical_intraday_payload",
                 return_value={
                     "stock_id": "2330",
                     "symbol": "2330",

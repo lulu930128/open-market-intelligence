@@ -200,6 +200,18 @@ def taiwan_presentation_session(now: datetime | None = None) -> dict[str, object
     }
 
 
+def latest_completed_taiwan_session_date(now: datetime | None = None) -> date:
+    """Return the latest session whose 13:33 close resolution has completed."""
+
+    presentation = taiwan_presentation_session(now)
+    trade_date = presentation["trade_date"]
+    if not isinstance(trade_date, date):
+        raise RuntimeError("Taiwan presentation session returned invalid trade date")
+    if presentation["state"] in {"completed", "previous_session"}:
+        return trade_date
+    return previous_taiwan_trading_day(trade_date, include_value=False)
+
+
 def normalize_taiwan_session_phase(value: object) -> str:
     normalized = str(value or "unknown").strip().casefold().replace("-", "_")
     return TAIWAN_SESSION_PHASE_ALIASES.get(normalized, normalized)

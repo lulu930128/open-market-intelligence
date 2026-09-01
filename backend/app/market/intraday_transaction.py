@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
-import json
 
 from sqlalchemy.orm import Session
 
@@ -13,9 +12,9 @@ from app.db.models import (
     MarketIntradayBarLineage,
     RawFetchResult,
     SourceRegistry,
-    StockMaster,
     utc_now,
 )
+from app.market.tw_instrument import resolve_taiwan_instrument
 from app.market.tw_intraday_capabilities import (
     TW_INTRADAY_BARS_CAPABILITY_ID,
     intraday_source_binding,
@@ -123,6 +122,8 @@ class TaiwanIntradayBarTransaction:
             raise ValueError("intraday observation crossed requested instrument")
         if observation.instrument.market is not Market.TW:
             raise ValueError("intraday transaction requires market=TW")
+        if requirement.request.interval != "1m" or observation.interval != "1m":
+            raise ValueError("TW_BASE_BAR_INTERVAL_REQUIRED")
         if observation.interval != requirement.request.interval:
             raise ValueError("intraday observation interval mismatch")
         if (
@@ -140,15 +141,6 @@ class TaiwanIntradayBarTransaction:
         if observation.lineage.event_at is None:
             raise ValueError("intraday observation requires event_at")
 
-    def _stock_exists(self, stock_id: str) -> None:
-        if (
-            self._db.query(StockMaster.id)
-            .filter(StockMaster.stock_id == stock_id)
-            .first()
-            is None
-        ):
-            raise ValueError("intraday target is missing from StockMaster")
-
     def _upsert(
         self,
         requirement: DataRequirementV2,
@@ -159,19 +151,34 @@ class TaiwanIntradayBarTransaction:
         receipt: RawFetchReceiptV1,
     ) -> bool:
         self._validate_observation(requirement, observation, receipt)
-        self._stock_exists(observation.instrument.symbol)
+        resolved_instrument = resolve_taiwan_instrument(
+            self._db,
+            observation.instrument.symbol,
+        )
+        if resolved_instrument != observation.instrument:
+            raise ValueError("intraday observation instrument identity mismatch")
         existing = (
             self._db.query(MarketIntradayBar)
-            .filter(MarketIntradayBar.provider == receipt.provider)
+            .filter(MarketIntradayBar.source_id == source.id)
+            .filter(MarketIntradayBar.canonical_market == Market.TW.value)
+            .filter(MarketIntradayBar.venue == observation.instrument.venue)
+            .filter(
+                MarketIntradayBar.instrument_type
+                == observation.instrument.instrument_type.value
+            )
             .filter(MarketIntradayBar.stock_id == observation.instrument.symbol)
             .filter(MarketIntradayBar.interval == observation.interval)
             .filter(MarketIntradayBar.bar_time == observation.start_at)
             .first()
         )
         incoming = {
+            "source_id": source.id,
             "provider": receipt.provider,
             "stock_id": observation.instrument.symbol,
             "market": observation.instrument.venue,
+            "canonical_market": Market.TW.value,
+            "venue": observation.instrument.venue,
+            "instrument_type": observation.instrument.instrument_type.value,
             "symbol": observation.instrument.symbol,
             "interval": observation.interval,
             "bar_time": observation.start_at,
@@ -213,7 +220,6 @@ class TaiwanIntradayBarTransaction:
         if lineage is None:
             lineage = MarketIntradayBarLineage(bar_id=existing.id)
             self._db.add(lineage)
-        derived = observation.interval == "4h"
         lineage.source_id = source.id
         lineage.raw_result_id = raw.id
         lineage.provider = receipt.provider
@@ -226,11 +232,9 @@ class TaiwanIntradayBarTransaction:
         )
         lineage.fetched_at = _as_utc(receipt.fetched_at)
         lineage.finalization = observation.finalization.value
-        lineage.source_interval = "1h" if derived else observation.interval
-        lineage.calculation_version = "omi.aggregate.4h.v1" if derived else None
-        lineage.component_raw_result_ids_json = (
-            json.dumps([raw.id]) if derived else None
-        )
+        lineage.source_interval = "1m"
+        lineage.calculation_version = None
+        lineage.component_raw_result_ids_json = None
         lineage.updated_at = utc_now()
         return unchanged
 

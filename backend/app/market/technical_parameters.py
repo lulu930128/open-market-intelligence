@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import asdict
 from typing import Any
 
 from app.config import settings
@@ -553,6 +554,37 @@ def get_technical_analysis_parameters(
     if resolved.kd_oversold_d > resolved.kd_overbought_d:
         raise ValueError("TECHNICAL_KD_OVERSOLD_D must be less than or equal to TECHNICAL_KD_OVERBOUGHT_D.")
     return resolved
+
+
+def build_taiwan_technical_parameter_contract(
+    *,
+    parameters: TechnicalAnalysisParameters | None = None,
+) -> dict[str, Any]:
+    """Return the Backend-owned defaults/ranges used by every TW consumer."""
+
+    resolved = parameters or get_technical_analysis_parameters()
+    defaults = asdict(resolved)
+    return {
+        "contract_version": "tw.technical.parameters.v1",
+        "authority": "backend",
+        "defaults": defaults,
+        "ranges": {
+            "period": {"min": 1, "max": MAX_WINDOW, "step": 1},
+            "windows": {
+                "min_items": 1,
+                "max_items": 16,
+                "item_min": 1,
+                "item_max": MAX_WINDOW,
+            },
+            "positive_decimal": {"exclusive_min": 0},
+        },
+        "normalization": {
+            "ma_windows": "sorted_unique_positive_integers",
+            "volume_ma_windows": "sorted_unique_positive_integers",
+            "macd": "fast_period_must_be_less_than_slow_period",
+            "pvo": "fast_period_must_be_less_than_slow_period",
+        },
+    }
 
 
 def _setting_value(

@@ -544,7 +544,7 @@ class QueryPlanContractTests(unittest.TestCase):
             build_taiwan_source_health=Mock(),
             build_us_overnight_impact_report=excluded["build_us_overnight_impact_report"],
             get_broker_branch_trade_summary=excluded["get_broker_branch_trade_summary"],
-            get_market_intraday_history=excluded["get_market_intraday_history"],
+            read_taiwan_bars=excluded["read_taiwan_bars"],
             read_taiwan_quote_evidence=excluded["read_taiwan_quote_evidence"],
             acquire_taiwan_quote_evidence=excluded["read_taiwan_quote_evidence"],
             read_taiwan_latest_daily_evidence=market_service.get_latest_stock_daily_price,
@@ -668,7 +668,7 @@ class QueryPlanContractTests(unittest.TestCase):
             build_taiwan_source_health=Mock(),
             build_us_overnight_impact_report=excluded["build_us_overnight_impact_report"],
             get_broker_branch_trade_summary=Mock(return_value=branch_summary),
-            get_market_intraday_history=excluded["get_market_intraday_history"],
+            read_taiwan_bars=excluded["read_taiwan_bars"],
             read_taiwan_quote_evidence=excluded["read_taiwan_quote_evidence"],
             acquire_taiwan_quote_evidence=excluded["read_taiwan_quote_evidence"],
             read_taiwan_latest_daily_evidence=Mock(

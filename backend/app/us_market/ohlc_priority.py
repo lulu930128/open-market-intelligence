@@ -77,6 +77,26 @@ def list_us_priority_ohlc_symbols(db: Session) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def list_us_priority_ohlc_critical_symbols(db: Session) -> tuple[str, ...]:
+    """Return the priority targets that must be audited on every scheduler run."""
+
+    ordered: dict[str, None] = {
+        normalize_us_symbol(symbol): None for symbol in PRIORITY_US_INDEX_SYMBOLS
+    }
+    holding_rows = (
+        db.query(PortfolioHolding.symbol)
+        .filter(PortfolioHolding.market == "US")
+        .filter(PortfolioHolding.is_active.is_(True))
+        .order_by(PortfolioHolding.symbol.asc())
+        .all()
+    )
+    for row in holding_rows:
+        symbol = normalize_us_symbol(row.symbol)
+        if symbol:
+            ordered[symbol] = None
+    return tuple(ordered)
+
+
 def reconcile_us_priority_ohlc(
     *,
     max_runtime_seconds: int = 600,
@@ -107,17 +127,26 @@ def reconcile_us_priority_ohlc(
     universe_db = resolved_session_factory()
     try:
         universe_symbols = list_us_priority_ohlc_symbols(universe_db)
+        critical_symbols = tuple(
+            symbol
+            for symbol in list_us_priority_ohlc_critical_symbols(universe_db)
+            if symbol in universe_symbols
+        )
     finally:
         universe_db.close()
+    rotatable_symbols = tuple(
+        symbol for symbol in universe_symbols if symbol not in critical_symbols
+    )
     normalized_cursor = normalize_us_symbol(cursor_symbol)
-    if normalized_cursor and normalized_cursor in universe_symbols:
-        cursor_index = universe_symbols.index(normalized_cursor)
-        symbols = (
-            universe_symbols[cursor_index + 1 :]
-            + universe_symbols[: cursor_index + 1]
+    if normalized_cursor and normalized_cursor in rotatable_symbols:
+        cursor_index = rotatable_symbols.index(normalized_cursor)
+        rotated_symbols = (
+            rotatable_symbols[cursor_index + 1 :]
+            + rotatable_symbols[: cursor_index + 1]
         )
     else:
-        symbols = universe_symbols
+        rotated_symbols = rotatable_symbols
+    symbols = critical_symbols + rotated_symbols
     run_symbols = symbols[:max_symbols]
     operation_rollout = (
         build_us_daily_acquisition_rollout_state(
@@ -252,6 +281,8 @@ def reconcile_us_priority_ohlc(
         "status": status,
         "dataset_id": PRIORITY_DAILY_RESEARCH_CONTRACT.dataset_id,
         "scope": "indices+active_holdings+enabled_watchlist",
+        "critical_symbol_count": len(critical_symbols),
+        "rotatable_symbol_count": len(rotatable_symbols),
         "contract": {
             "timeframe": PRIORITY_DAILY_RESEARCH_CONTRACT.timeframe,
             "bars": PRIORITY_DAILY_RESEARCH_CONTRACT.minimum_bar_count,
@@ -300,6 +331,7 @@ __all__ = [
     "PRIORITY_DAILY_RESEARCH_CONTRACT",
     "PRIORITY_US_INDEX_SYMBOLS",
     "USPriorityDailyResearchContract",
+    "list_us_priority_ohlc_critical_symbols",
     "list_us_priority_ohlc_symbols",
     "reconcile_us_priority_ohlc",
 ]
