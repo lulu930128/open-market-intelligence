@@ -207,12 +207,39 @@ class USIntradaySourceStatusRead(BaseModel):
     is_live_window: bool = False
     as_of: str | None = None
     lag_seconds: float | None = None
+    provider_snapshot_as_of: str | None = None
+    provider_snapshot_lag_seconds: float | None = None
+    provider_snapshot_freshness: str = "unknown"
+    trade_state: str = "unknown"
+    trade_recency: str = "unknown"
     is_fallback: bool = False
     has_usable_data: bool = False
     decision_usable: bool = False
     selection_reason: str | None = None
     limitations: list[str] = Field(default_factory=list)
     message: str | None = None
+
+
+class USCapabilityExpectationRead(BaseModel):
+    contract_version: str = "omi.us.capability_expectation.v1"
+    capability_id: str
+    market_phase: str
+    expectation: str
+    expected_now: bool
+    required_now: bool
+    expected_session_scope: str
+    requested_session_scope: str
+    applicability: str
+    support_status: str
+    live_support_status: str
+    availability: str
+    evidence_freshness: str
+    provider_snapshot_freshness: str
+    trade_state: str
+    trade_recency: str
+    requirement_satisfied: bool | None = None
+    outcome: str
+    reason_code: str
 
 
 class USResolvedQuoteValueRead(BaseModel):
@@ -249,7 +276,14 @@ class USResolvedQuoteSnapshotRead(BaseModel):
     research_usable: bool = False
     limitations: list[str] = Field(default_factory=list)
     candidates: list[dict] = Field(default_factory=list)
+    eligible_providers: list[str] = Field(default_factory=list)
+    eligible_provider_count: int = 0
+    single_source: bool = False
     quote: USResolvedQuoteValueRead | None = None
+    market_phase: str | None = None
+    capability_expectation: USCapabilityExpectationRead | None = None
+    source_status: USIntradaySourceStatusRead | None = None
+    session_date_relation: dict | None = None
 
 
 class USIntradayCurrentObservationRead(BaseModel):
@@ -264,8 +298,38 @@ class USIntradayCurrentObservationRead(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     previous_close: float | None = None
     previous_close_provider: str | None = None
+    previous_close_source: str | None = None
+    previous_close_trade_date: str | None = None
+    expected_previous_close_trade_date: str | None = None
+    previous_close_status: str = "unknown"
+    prior_regular_close: float | None = None
+    prior_regular_close_source: str | None = None
+    prior_regular_close_trade_date: str | None = None
+    prior_regular_close_provider: str | None = None
+    prior_regular_close_status: str = "unknown"
+    current_day_regular_close: float | None = None
+    current_day_regular_close_source: str | None = None
+    current_day_regular_close_trade_date: str | None = None
+    current_day_regular_close_provider: str | None = None
+    current_day_regular_close_status: str = "unknown"
+    change_reference_price: float | None = None
+    change_reference_source: str | None = None
+    change_reference_trade_date: str | None = None
+    change_reference_provider: str | None = None
+    change_reference_type: str = "unavailable"
+    change_reference_status: str = "missing"
+    change_reference_reason_code: str = "CHANGE_REFERENCE_UNAVAILABLE"
     freshness_status: str
     decision_usable: bool = False
+
+
+class USIntradaySessionCoverageRead(BaseModel):
+    trade_date: str | None = None
+    regular_point_count: int = 0
+    extended_point_count: int = 0
+    has_extended_hours: bool = False
+    requested_scope: str = "regular"
+    requested_point_count: int = 0
 
 
 class USIntradayTrendRead(BaseModel):
@@ -282,9 +346,13 @@ class USIntradayTrendRead(BaseModel):
     partial_bar_count: int = 0
     session_scope: str = "regular"
     session_phase: str | None = None
+    market_phase: str | None = None
     has_extended_hours: bool = False
     regular_point_count: int = 0
     extended_point_count: int = 0
+    session_coverage: USIntradaySessionCoverageRead = Field(
+        default_factory=USIntradaySessionCoverageRead
+    )
     previous_close: float | None = None
     previous_close_source: str | None = None
     previous_close_trade_date: str | None = None
@@ -292,6 +360,23 @@ class USIntradayTrendRead(BaseModel):
     expected_previous_close_trade_date: str | None = None
     previous_close_status: str = "unknown"
     rejected_previous_close_trade_date: str | None = None
+    prior_regular_close: float | None = None
+    prior_regular_close_source: str | None = None
+    prior_regular_close_trade_date: str | None = None
+    prior_regular_close_provider: str | None = None
+    prior_regular_close_status: str = "unknown"
+    current_day_regular_close: float | None = None
+    current_day_regular_close_source: str | None = None
+    current_day_regular_close_trade_date: str | None = None
+    current_day_regular_close_provider: str | None = None
+    current_day_regular_close_status: str = "unknown"
+    change_reference_price: float | None = None
+    change_reference_source: str | None = None
+    change_reference_trade_date: str | None = None
+    change_reference_provider: str | None = None
+    change_reference_type: str = "unavailable"
+    change_reference_status: str = "missing"
+    change_reference_reason_code: str = "CHANGE_REFERENCE_UNAVAILABLE"
     regular_session_close: float | None = None
     regular_session_close_time: str | None = None
     point_count: int
@@ -302,9 +387,13 @@ class USIntradayTrendRead(BaseModel):
     volume_coverage: dict = Field(default_factory=dict)
     volume_pace: dict | None = None
     quote_snapshot: USResolvedQuoteSnapshotRead | None = None
+    session_date_relation: dict | None = None
     current_observation: USIntradayCurrentObservationRead | None = None
     current_source_status: USIntradaySourceStatusRead | None = None
     bar_source_status: USIntradaySourceStatusRead | None = None
+    capability_expectation: dict[str, USCapabilityExpectationRead] = Field(
+        default_factory=dict
+    )
     source_status: USIntradaySourceStatusRead
     source_url: str | None = None
     warnings: list[str] = Field(default_factory=list)
@@ -653,6 +742,10 @@ class USSourceHealthEntryRead(BaseModel):
     latest_filing_date: date | None = None
     last_checked_at: datetime | None = None
     freshness_basis: str | None = None
+    latest_observed_at: datetime | None = None
+    provider_snapshot_age_seconds: int | None = None
+    event_age_seconds: int | None = None
+    limitations: list[str] = Field(default_factory=list)
     latest_event_id: int | None = None
     latest_event_at: datetime | None = None
     latest_event_status: str | None = None
@@ -781,7 +874,7 @@ class USWatchlistRankingItemRead(BaseModel):
     selected_session: str | None = None
     selection_reason: str | None = None
     fallback_used: bool = False
-    price_basis: str = "raw_unadjusted"
+    price_basis: str | None = "raw_unadjusted"
     has_extended_hours: bool = False
     intraday_previous_close: float | None = None
     intraday_points: list[dict] = Field(default_factory=list)

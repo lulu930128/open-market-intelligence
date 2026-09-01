@@ -18,6 +18,7 @@ from typing import Any, Iterable
 from app.market.tw_current_market_capabilities import (
     FUGLE_CURRENT_INDEX_DESCRIPTOR,
     TW_CURRENT_INDEX_CAPABILITY_ID,
+    TW_CURRENT_INDEX_MAX_ABS_CHANGE_RATIO,
 )
 from app.market.tw_intraday_capabilities import (
     FUGLE_INTRADAY_PARSER_VERSION,
@@ -39,8 +40,10 @@ from app.market_data.contracts import (
     EnablementStatus,
     EntitlementStatus,
     EvidenceFreshness,
+    InstrumentKey,
     Market,
     MarketIndexObservation,
+    MarketSession,
     ObservationState,
     OperationalStatus,
     ProviderResourceHealth,
@@ -68,11 +71,20 @@ from app.market_data.integration_contracts import (
 
 
 FUGLE_WEBSOCKET_URL = "wss://api.fugle.tw/marketdata/v1.0/stock/streaming"
-FUGLE_TAIEX_SYMBOL = "IR0001"
+FUGLE_TAIEX_SYMBOL = "IX0001"
 FUGLE_INDEX_SOURCE = "fugle_indices_stream"
 FUGLE_INDEX_PARSER_VERSION = "fugle.websocket.indices.v1"
 FUGLE_MAX_SUBSCRIPTIONS = 5
+FUGLE_INDEX_MAX_ABS_CHANGE_RATIO = TW_CURRENT_INDEX_MAX_ABS_CHANGE_RATIO
 TAIPEI_TZ = timezone(timedelta(hours=8))
+
+
+class FugleIndexValueAnomaly(ValueError):
+    """Raised when an index tick is not plausible against its canonical seed."""
+
+
+class FugleIndexSessionNotMaterializable(ValueError):
+    """Raised when a live vendor tick cannot claim completed-session finality."""
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -506,10 +518,18 @@ def fugle_index_acquisition(
     if requirement.request.capability_id != TW_CURRENT_INDEX_CAPABILITY_ID:
         raise ValueError("Fugle index capability mismatch")
     if requirement.target.scope_key != "TAIEX" or record.symbol != FUGLE_TAIEX_SYMBOL:
-        raise ValueError("Fugle index materialization is bounded to TAIEX/IR0001")
+        raise ValueError("Fugle index materialization is bounded to TAIEX/IX0001")
+    if requirement.session in {MarketSession.POST_CLOSE, MarketSession.CLOSED}:
+        raise FugleIndexSessionNotMaterializable(
+            "Fugle live index cannot materialize completed-session evidence"
+        )
     value = _decimal(record.payload.get("index"), positive=True)
     if value is None or previous_close <= 0:
         raise ValueError("Fugle index requires current value and seeded previous close")
+    if abs(value - previous_close) / previous_close > FUGLE_INDEX_MAX_ABS_CHANGE_RATIO:
+        raise FugleIndexValueAnomaly(
+            "Fugle index value exceeds the bounded previous-close deviation"
+        )
     observation = MarketIndexObservation(
         market=Market.TW,
         index_id="TAIEX",
@@ -694,11 +714,14 @@ def fugle_bar_acquisition(
 
 __all__ = [
     "FUGLE_INDEX_PARSER_VERSION",
+    "FUGLE_INDEX_MAX_ABS_CHANGE_RATIO",
     "FUGLE_INDEX_SOURCE",
     "FUGLE_MAX_SUBSCRIPTIONS",
     "FUGLE_TAIEX_SYMBOL",
     "FUGLE_WEBSOCKET_URL",
     "FugleRealtimeBuffer",
+    "FugleIndexSessionNotMaterializable",
+    "FugleIndexValueAnomaly",
     "FugleStreamRecord",
     "FugleSubscription",
     "FugleSubscriptionAllocator",

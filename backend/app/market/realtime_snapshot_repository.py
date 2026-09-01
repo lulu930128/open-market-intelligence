@@ -18,6 +18,7 @@ from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_realtime_capabilities import (
     TW_AUCTION_CAPABILITY_ID,
     TW_ORDER_BOOK_CAPABILITY_ID,
+    TW_REALTIME_SOURCE_BINDINGS,
     capability_source_binding,
 )
 from app.market_data.contracts import (
@@ -29,6 +30,7 @@ from app.market_data.contracts import (
     DepthPriceState,
     InstrumentKey,
     Market,
+    MarketSession,
     ObservationState,
     Quantity,
     QuantityUnit,
@@ -44,6 +46,7 @@ class PersistedDepthRead:
     provider_priority: int = 100
     storage_row_id: int | None = None
     raw_result_id: int | None = None
+    market_session: MarketSession | None = None
     limitations: tuple[str, ...] = ()
 
 
@@ -208,6 +211,7 @@ class TaiwanDepthRepository(_RealtimeRepository):
         try:
             state = ObservationState(row.observation_state)
             capability = DepthCapability(row.depth_capability)
+            market_session = MarketSession(row.market_session)
             decoded = {
                 side: tuple(
                     DepthLevel(
@@ -251,6 +255,7 @@ class TaiwanDepthRepository(_RealtimeRepository):
             provider_priority=priority,
             storage_row_id=row.id,
             raw_result_id=row.raw_result_id,
+            market_session=market_session,
         )
 
     def load_candidates(
@@ -262,17 +267,36 @@ class TaiwanDepthRepository(_RealtimeRepository):
         self._validate_target(instrument)
         if not 1 <= max_candidates <= 8:
             raise ValueError("depth max_candidates must be between 1 and 8")
-        rows = (
+        base_query = (
             self._db.query(TaiwanStockDepthSnapshot)
             .filter(TaiwanStockDepthSnapshot.stock_id == instrument.symbol)
             .filter(TaiwanStockDepthSnapshot.market == instrument.venue)
-            .order_by(
-                TaiwanStockDepthSnapshot.event_at.desc(),
-                TaiwanStockDepthSnapshot.id.desc(),
-            )
-            .limit(32)
-            .all()
         )
+        rows: list[TaiwanStockDepthSnapshot] = []
+        for binding in sorted(
+            (
+                item
+                for item in TW_REALTIME_SOURCE_BINDINGS
+                if item.descriptor.capability_id == TW_ORDER_BOOK_CAPABILITY_ID
+            ),
+            key=lambda item: item.descriptor.priority,
+        ):
+            row = (
+                base_query.filter(
+                    TaiwanStockDepthSnapshot.provider
+                    == binding.descriptor.provider_key,
+                    TaiwanStockDepthSnapshot.source == binding.source,
+                )
+                .order_by(
+                    TaiwanStockDepthSnapshot.event_at.desc(),
+                    TaiwanStockDepthSnapshot.id.desc(),
+                )
+                .first()
+            )
+            if row is not None:
+                rows.append(row)
+                if len(rows) >= max_candidates:
+                    break
         if not rows:
             return (PersistedDepthRead(limitations=("TW_DEPTH_CANDIDATE_MISSING",)),)
         reads: list[PersistedDepthRead] = []
@@ -396,18 +420,37 @@ class TaiwanAuctionRepository(_RealtimeRepository):
         self._validate_target(instrument)
         if not 1 <= max_candidates <= 8:
             raise ValueError("auction max_candidates must be between 1 and 8")
-        rows = (
+        base_query = (
             self._db.query(TaiwanStockAuctionSnapshot)
             .filter(TaiwanStockAuctionSnapshot.stock_id == instrument.symbol)
             .filter(TaiwanStockAuctionSnapshot.market == instrument.venue)
             .filter(TaiwanStockAuctionSnapshot.auction_type == auction_type.value)
-            .order_by(
-                TaiwanStockAuctionSnapshot.event_at.desc(),
-                TaiwanStockAuctionSnapshot.id.desc(),
-            )
-            .limit(32)
-            .all()
         )
+        rows: list[TaiwanStockAuctionSnapshot] = []
+        for binding in sorted(
+            (
+                item
+                for item in TW_REALTIME_SOURCE_BINDINGS
+                if item.descriptor.capability_id == TW_AUCTION_CAPABILITY_ID
+            ),
+            key=lambda item: item.descriptor.priority,
+        ):
+            row = (
+                base_query.filter(
+                    TaiwanStockAuctionSnapshot.provider
+                    == binding.descriptor.provider_key,
+                    TaiwanStockAuctionSnapshot.source == binding.source,
+                )
+                .order_by(
+                    TaiwanStockAuctionSnapshot.event_at.desc(),
+                    TaiwanStockAuctionSnapshot.id.desc(),
+                )
+                .first()
+            )
+            if row is not None:
+                rows.append(row)
+                if len(rows) >= max_candidates:
+                    break
         if not rows:
             return (
                 PersistedAuctionRead(

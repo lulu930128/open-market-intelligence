@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import atexit
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -37,6 +37,7 @@ AUCTION_OBSERVATION_LIMIT = 120
 MINUTE_KBAR_LIMIT = 120
 QUOTE_EVENT_LIMIT = 240
 DIAGNOSTIC_EVENT_LIMIT = 240
+RELEASED_DIAGNOSTIC_SYMBOL_LIMIT = 16
 
 DIAGNOSTIC_COUNTER_KEYS = (
     "callback_count",
@@ -90,6 +91,7 @@ class KgiSuperPyQuoteManager:
         self._recent_trades: dict[str, deque[dict[str, Any]]] = {}
         self._auction_observations: dict[str, deque[dict[str, Any]]] = {}
         self._minute_kbars: dict[str, deque[dict[str, Any]]] = {}
+        self._released_diagnostics: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._last_trade_signatures: dict[str, tuple[Any, ...]] = {}
         self._last_auction_signatures: dict[str, tuple[Any, ...]] = {}
         self._last_trade_prices: dict[str, float] = {}
@@ -939,6 +941,28 @@ class KgiSuperPyQuoteManager:
                 bars[existing_index] = record
             self._capability_warnings.get(symbol, {}).pop("minute_kbars", None)
 
+    def _archive_symbol_diagnostics_locked(self, symbol: str) -> None:
+        diagnostics = list(self._diagnostic_events.get(symbol, ()))
+        counters = self._diagnostic_counter_payload(
+            self._diagnostic_counters.get(symbol)
+        )
+        trades = list(self._recent_trades.get(symbol, ()))
+        auctions = list(self._auction_observations.get(symbol, ()))
+        kbars = list(self._minute_kbars.get(symbol, ()))
+        if not (diagnostics or counters or trades or auctions or kbars):
+            return
+        self._released_diagnostics[symbol] = {
+            "released_at": datetime.now(timezone.utc).isoformat(),
+            "diagnostic_events": diagnostics,
+            "diagnostic_counters": counters,
+            "recent_trades": trades,
+            "auction_observations": auctions,
+            "minute_kbars": kbars,
+        }
+        self._released_diagnostics.move_to_end(symbol)
+        while len(self._released_diagnostics) > RELEASED_DIAGNOSTIC_SYMBOL_LIMIT:
+            self._released_diagnostics.popitem(last=False)
+
     def market_stream_snapshot(
         self,
         symbol: str,
@@ -984,9 +1008,26 @@ class KgiSuperPyQuoteManager:
             received_at = self._stream_received_at.get(normalized)
             capability_warnings = dict(self._capability_warnings.get(normalized, {}))
             session_phase = self._stream_session_phases.get(normalized)
+            retained = (
+                dict(self._released_diagnostics.get(normalized) or {})
+                if provider_snapshot.active_leases == 0
+                else {}
+            )
+            if not diagnostics and retained:
+                diagnostics = list(retained.get("diagnostic_events") or ())
+                diagnostic_counters = dict(
+                    retained.get("diagnostic_counters") or {}
+                )
+            if not trades and retained:
+                trades = list(retained.get("recent_trades") or ())
+            if not auctions and retained:
+                auctions = list(retained.get("auction_observations") or ())
+            if not kbars and retained:
+                kbars = list(retained.get("minute_kbars") or ())
 
         status = provider_snapshot.status
         active = provider_snapshot.active_leases > 0
+        retained_after_release = bool(retained) and not active
         warming = active and status in {
             "starting",
             "subscribing",
@@ -1006,11 +1047,29 @@ class KgiSuperPyQuoteManager:
             sampled_at=sampled_at,
         )
         capability_status = {
-            "recent_trades": "available" if trades else "warming" if warming else "empty",
-            "auction_observations": "available" if auctions else "warming" if warming else "empty",
+            "recent_trades": (
+                "retained"
+                if trades and retained_after_release
+                else "available"
+                if trades
+                else "warming"
+                if warming
+                else "empty"
+            ),
+            "auction_observations": (
+                "retained"
+                if auctions and retained_after_release
+                else "available"
+                if auctions
+                else "warming"
+                if warming
+                else "empty"
+            ),
             "minute_kbars": (
                 "unavailable"
                 if "minute_kbars" in capability_warnings
+                else "retained"
+                if kbars and retained_after_release
                 else "available"
                 if kbars
                 else "warming"
@@ -1029,7 +1088,10 @@ class KgiSuperPyQuoteManager:
             ),
             "latency": "available" if latency else "warming" if warming else "empty",
             "diagnostics": (
-                "available"
+                "retained"
+                if diagnostic_counters["callback_count"] > 0
+                and retained_after_release
+                else "available"
                 if diagnostic_counters["callback_count"] > 0
                 else "warming"
                 if warming
@@ -1059,6 +1121,8 @@ class KgiSuperPyQuoteManager:
             "selection_reason": (
                 "active_kgi_viewer_or_acceptance_lease"
                 if active
+                else "retained_diagnostics_after_lease_release"
+                if retained_after_release
                 else "latest_kgi_callback_cache"
             ),
             "fallback_used": False,
@@ -1081,6 +1145,11 @@ class KgiSuperPyQuoteManager:
             "diagnostic_events": (
                 diagnostics[-diagnostic_limit:] if diagnostic_limit > 0 else []
             ),
+            "diagnostic_retention": {
+                "retained_after_release": retained_after_release,
+                "released_at": retained.get("released_at") if retained else None,
+                "max_symbols": RELEASED_DIAGNOSTIC_SYMBOL_LIMIT,
+            },
             "warnings": list(dict.fromkeys(warnings)),
         }
 
@@ -1338,6 +1407,7 @@ class KgiSuperPyQuoteManager:
         finally:
             with self._lock:
                 if not self._symbol_leases.get(symbol):
+                    self._archive_symbol_diagnostics_locked(symbol)
                     self._quotes.pop(symbol, None)
                     self._quote_events.pop(symbol, None)
                     self._diagnostic_events.pop(symbol, None)
@@ -1748,6 +1818,13 @@ class KgiSuperPyQuoteManager:
                 "error": "KGI SuperPy quote bridge exited.",
             }
             with self._lock:
+                for symbol in set(
+                    self._diagnostic_events
+                    | self._recent_trades
+                    | self._auction_observations
+                    | self._minute_kbars
+                ):
+                    self._archive_symbol_diagnostics_locked(symbol)
                 if self._process is process:
                     self._process = None
                 pending = list(self._pending.values())

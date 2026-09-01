@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
@@ -94,7 +94,14 @@ from app.us_market.ohlc_continuity import build_us_daily_continuity
 from app.us_market.resolved_reads import (
     read_resolved_us_daily_bars_for_symbols,
 )
-from app.market_data.contracts import InstrumentKey, InstrumentType, Market
+from app.market_data.contracts import (
+    BarFinalization,
+    EvidenceFreshness,
+    InstrumentKey,
+    InstrumentType,
+    Market,
+    TradeObservationState,
+)
 from app.us_market.sources import (
     MacroSeriesObservationRecord,
     USDailyPriceRecord,
@@ -117,7 +124,7 @@ from app.us_market.sources import (
     parse_yahoo_intraday_prices,
     parse_yahoo_symbol_record,
 )
-from app.us_market.source_health import build_us_source_health
+from app.us_market.source_health import build_us_source_health, snapshot_us_source_health
 from app.us_market.sec_fundamentals.freshness import evaluate_sec_filing_freshness
 from app.us_market.sec_fundamentals.submissions import (
     SEC_SUBMISSIONS_CACHE,
@@ -128,6 +135,7 @@ from app.us_market.trading_calendar import (
     US_MARKET_TIMEZONE,
     is_us_daily_price_finalized,
     previous_us_trading_day,
+    us_session_close_time,
 )
 from app.us_market.volume_semantics import summarize_intraday_volume
 from app.market.calendar_status import build_us_calendar_status, expected_us_trade_date
@@ -157,6 +165,13 @@ from app.us_market.intraday_platform import (
     build_us_resolved_volume_pace,
 )
 from app.us_market.providers.canonical import us_session_for_timestamp
+from app.us_market.temporal_expectedness import (
+    USCapabilityAvailability,
+    USCapabilitySessionScope,
+    USTradeRecency,
+    build_us_capability_expectation,
+    build_us_session_date_relation,
+)
 
 
 _translate_us_provider_errors = translate_provider_http_errors(USMarketDataFetchError)
@@ -454,6 +469,9 @@ def _build_us_resolved_source_status(
     source: str | None,
     resolved_status: str | None,
     selected_event_at: object,
+    selected_fetched_at: object = None,
+    trade_state: str | None = None,
+    provider_snapshot_controls_freshness: bool = False,
     fallback_used: bool,
     facts_usable: bool,
     research_usable: bool,
@@ -468,6 +486,7 @@ def _build_us_resolved_source_status(
     if checked_at.tzinfo is None or checked_at.utcoffset() is None:
         checked_at = checked_at.replace(tzinfo=timezone.utc)
     event_at = _parse_us_evidence_time(selected_event_at)
+    fetched_at = _parse_us_evidence_time(selected_fetched_at)
     lag_seconds = (
         max(
             0.0,
@@ -493,10 +512,55 @@ def _build_us_resolved_source_status(
         )
     )
     delayed_vendor = "DELAYED_VENDOR_EVIDENCE" in normalized_limitations
+    snapshot_lag_seconds = (
+        max(
+            0.0,
+            (
+                checked_at.astimezone(timezone.utc)
+                - fetched_at.astimezone(timezone.utc)
+            ).total_seconds(),
+        )
+        if fetched_at is not None
+        else None
+    )
+    if fetched_at is None:
+        provider_snapshot_freshness = (
+            "missing" if provider in {None, "unresolved"} else "unknown"
+        )
+    elif snapshot_lag_seconds is not None and snapshot_lag_seconds <= 300:
+        provider_snapshot_freshness = "fresh"
+    else:
+        provider_snapshot_freshness = "stale"
+    if event_at is None:
+        trade_recency = "missing"
+    elif not is_live_window:
+        trade_recency = "historical"
+    elif lag_seconds is not None and lag_seconds > US_INTRADAY_STALE_AFTER_SECONDS:
+        trade_recency = "old"
+    elif lag_seconds is not None and lag_seconds > US_INTRADAY_DELAYED_AFTER_SECONDS:
+        trade_recency = "delayed"
+    else:
+        trade_recency = "current"
+    valid_empty_snapshot = bool(
+        provider_snapshot_controls_freshness
+        and trade_state == TradeObservationState.AWAITING_FIRST_TRADE.value
+        and fetched_at is not None
+    )
 
-    if not facts_usable or event_at is None:
+    if valid_empty_snapshot and provider_snapshot_freshness == "fresh":
+        status = "ok"
+        freshness_status = "current"
+    elif not facts_usable or event_at is None:
         status = "unavailable"
         freshness_status = "missing"
+    elif (
+        provider_snapshot_controls_freshness
+        and is_live_window
+        and provider_snapshot_freshness == "fresh"
+        and trade_recency == "old"
+    ):
+        status = "ok" if research_usable else "degraded"
+        freshness_status = "current"
     elif resolved_status == "stale" or (
         is_live_window
         and lag_seconds is not None
@@ -527,6 +591,17 @@ def _build_us_resolved_source_status(
         "is_live_window": is_live_window,
         "as_of": event_at.isoformat() if event_at is not None else None,
         "lag_seconds": round(lag_seconds, 3) if lag_seconds is not None else None,
+        "provider_snapshot_as_of": (
+            fetched_at.isoformat() if fetched_at is not None else None
+        ),
+        "provider_snapshot_lag_seconds": (
+            round(snapshot_lag_seconds, 3)
+            if snapshot_lag_seconds is not None
+            else None
+        ),
+        "provider_snapshot_freshness": provider_snapshot_freshness,
+        "trade_state": trade_state or "unknown",
+        "trade_recency": trade_recency,
         "is_fallback": bool(fallback_used),
         "has_usable_data": bool(facts_usable),
         "decision_usable": bool(research_usable),
@@ -534,6 +609,205 @@ def _build_us_resolved_source_status(
         "limitations": list(normalized_limitations),
         "message": selection_reason if status != "ok" else None,
     }
+
+
+def _us_requested_session_scope(value: str) -> USCapabilitySessionScope:
+    try:
+        return USCapabilitySessionScope(value)
+    except ValueError:
+        return USCapabilitySessionScope.ALL
+
+
+def _us_evidence_freshness(value: object) -> EvidenceFreshness:
+    try:
+        return EvidenceFreshness(str(value or "").strip().lower())
+    except ValueError:
+        return EvidenceFreshness.UNKNOWN
+
+
+def _us_trade_state(value: object) -> TradeObservationState:
+    try:
+        return TradeObservationState(str(value or "").strip().lower())
+    except ValueError:
+        return TradeObservationState.UNKNOWN
+
+
+def _us_trade_recency(value: object) -> USTradeRecency:
+    try:
+        return USTradeRecency(str(value or "").strip().lower())
+    except ValueError:
+        return USTradeRecency.UNKNOWN
+
+
+def _us_bar_evidence_freshness(source_status: dict | None) -> EvidenceFreshness:
+    value = str((source_status or {}).get("freshness_status") or "").lower()
+    if value == "stale":
+        return EvidenceFreshness.STALE
+    if value == "missing":
+        return EvidenceFreshness.MISSING
+    if value in {"current", "delayed"}:
+        return EvidenceFreshness.FRESH
+    if value == "off_session":
+        return EvidenceFreshness.NOT_APPLICABLE
+    return EvidenceFreshness.UNKNOWN
+
+
+def _build_us_capability_expectations(
+    *,
+    market_phase: str,
+    session_scope: str,
+    instrument_type: InstrumentType | None,
+    quote_snapshot: dict | None,
+    quote_source_status: dict | None,
+    bar_source_status: dict | None,
+    point_count: int,
+) -> dict[str, dict]:
+    quote_value = (
+        quote_snapshot.get("quote")
+        if isinstance(quote_snapshot, dict)
+        and isinstance(quote_snapshot.get("quote"), dict)
+        else None
+    )
+    quote_trade_state = _us_trade_state(
+        quote_value.get("trade_state") if quote_value else None
+    )
+    if quote_trade_state is TradeObservationState.AWAITING_FIRST_TRADE:
+        quote_availability = USCapabilityAvailability.VALID_EMPTY
+    elif (
+        isinstance(quote_snapshot, dict)
+        and quote_snapshot.get("facts_usable") is True
+        and quote_value is not None
+    ):
+        quote_availability = USCapabilityAvailability.AVAILABLE
+    else:
+        quote_availability = USCapabilityAvailability.MISSING
+    bar_availability = (
+        USCapabilityAvailability.AVAILABLE
+        if point_count > 0
+        else USCapabilityAvailability.MISSING
+    )
+    requested_scope = _us_requested_session_scope(session_scope)
+    phase = str(market_phase or "market_closed")
+    quote_expectation = build_us_capability_expectation(
+        capability_id="quote.snapshot",
+        market_phase=phase,
+        requested_session_scope=requested_scope,
+        instrument_type=instrument_type,
+        availability=quote_availability,
+        evidence_freshness=_us_evidence_freshness(
+            (quote_source_status or {}).get("provider_snapshot_freshness")
+        ),
+        provider_snapshot_freshness=_us_evidence_freshness(
+            (quote_source_status or {}).get("provider_snapshot_freshness")
+        ),
+        trade_state=quote_trade_state,
+        trade_recency=_us_trade_recency(
+            (quote_source_status or {}).get("trade_recency")
+        ),
+    )
+    bar_expectation = build_us_capability_expectation(
+        capability_id="intraday.bars",
+        market_phase=phase,
+        requested_session_scope=requested_scope,
+        instrument_type=instrument_type,
+        availability=bar_availability,
+        evidence_freshness=_us_bar_evidence_freshness(
+            bar_source_status
+        ),
+        provider_snapshot_freshness=_us_evidence_freshness(
+            (bar_source_status or {}).get("provider_snapshot_freshness")
+        ),
+        trade_state=(
+            TradeObservationState.TRADE_OBSERVED
+            if point_count > 0
+            else TradeObservationState.UNKNOWN
+        ),
+        trade_recency=_us_trade_recency(
+            (bar_source_status or {}).get("trade_recency")
+        ),
+    )
+    return {
+        "quote.snapshot": quote_expectation.model_dump(mode="json"),
+        "intraday.bars": bar_expectation.model_dump(mode="json"),
+    }
+
+
+def _project_us_quote_temporal_contract(
+    platform_result,
+    *,
+    now: datetime,
+) -> tuple[dict, dict]:
+    projection = dict(platform_result.projection)
+    quote_value = (
+        projection.get("quote")
+        if isinstance(projection.get("quote"), dict)
+        else None
+    )
+    source_status = _build_us_resolved_source_status(
+        provider=projection.get("selected_provider"),
+        source=projection.get("selected_source"),
+        resolved_status=projection.get("status"),
+        selected_event_at=(
+            projection.get("selected_event_at")
+            or (quote_value.get("event_at") if quote_value else None)
+        ),
+        selected_fetched_at=(
+            quote_value.get("fetched_at") if quote_value else None
+        ),
+        trade_state=quote_value.get("trade_state") if quote_value else None,
+        provider_snapshot_controls_freshness=True,
+        fallback_used=projection.get("fallback_used") is True,
+        facts_usable=projection.get("facts_usable") is True,
+        research_usable=projection.get("research_usable") is True,
+        selection_reason=projection.get("selection_reason"),
+        limitations=projection.get("limitations"),
+        session_scope="all",
+        now=now,
+    )
+    market_phase = str(source_status.get("market_phase") or "market_closed")
+    expectation = _build_us_capability_expectations(
+        market_phase=market_phase,
+        session_scope="all",
+        instrument_type=platform_result.identity.instrument.instrument_type,
+        quote_snapshot=projection,
+        quote_source_status=source_status,
+        bar_source_status=None,
+        point_count=0,
+    )["quote.snapshot"]
+    projection.update(
+        {
+            "market_phase": market_phase,
+            "capability_expectation": expectation,
+            "source_status": source_status,
+        }
+    )
+    return projection, source_status
+
+
+def _attach_us_session_date_relation(
+    projection: dict | None,
+    *,
+    previous_close_reference: dict,
+    now: datetime,
+    market_phase: str,
+) -> dict | None:
+    if not isinstance(projection, dict):
+        return None
+    quote_value = (
+        projection.get("quote")
+        if isinstance(projection.get("quote"), dict)
+        else {}
+    )
+    relation = build_us_session_date_relation(
+        quote_date=quote_value.get("trade_date"),
+        completed_daily_date=previous_close_reference.get(
+            "previous_close_trade_date"
+        ),
+        now=now,
+        market_phase=market_phase,
+    )
+    projection["session_date_relation"] = relation
+    return relation
 
 
 def _us_intraday_fallback_payload(
@@ -1931,6 +2205,11 @@ def _read_us_daily_previous_close_reference(
 ) -> tuple[dict, object | None]:
     expected_state = expected_us_completed_daily_state(now=now)
     expected_date = expected_state.expected_trade_date
+    local_date = now.astimezone(US_MARKET_TIMEZONE).date()
+    prior_regular_date = previous_us_trading_day(
+        local_date,
+        include_value=False,
+    )
     reference = {
         "previous_close": None,
         "previous_close_source": None,
@@ -1938,6 +2217,11 @@ def _read_us_daily_previous_close_reference(
         "previous_close_provider": None,
         "expected_previous_close_trade_date": expected_date.isoformat(),
         "previous_close_status": "missing",
+        "prior_regular_close": None,
+        "prior_regular_close_source": None,
+        "prior_regular_close_trade_date": prior_regular_date.isoformat(),
+        "prior_regular_close_provider": None,
+        "prior_regular_close_status": "missing",
     }
     try:
         daily = USDailyOhlcvPlatform(db).read(
@@ -1956,18 +2240,167 @@ def _read_us_daily_previous_close_reference(
         ),
         None,
     )
-    if exact is None:
-        return reference, daily
-    reference.update(
+    prior_exact = next(
+        (
+            bar
+            for bar in reversed(daily.result.resolved.bars)
+            if bar.end_at.astimezone(US_MARKET_TIMEZONE).date()
+            == prior_regular_date
+        ),
+        None,
+    )
+    if exact is not None:
+        reference.update(
+            {
+                "previous_close": float(exact.close_price),
+                "previous_close_source": exact.lineage.source,
+                "previous_close_trade_date": expected_date.isoformat(),
+                "previous_close_provider": exact.lineage.provider,
+                "previous_close_status": "current",
+            }
+        )
+    if prior_exact is not None:
+        reference.update(
+            {
+                "prior_regular_close": float(prior_exact.close_price),
+                "prior_regular_close_source": prior_exact.lineage.source,
+                "prior_regular_close_provider": prior_exact.lineage.provider,
+                "prior_regular_close_status": "current",
+            }
+        )
+    return reference, daily
+
+
+def _build_us_change_reference(
+    *,
+    previous_close_reference: dict,
+    resolved_bars: Iterable,
+    market_phase: str,
+    now: datetime,
+) -> dict:
+    """Select the phase-correct comparison base without inventing a price."""
+
+    result = dict(previous_close_reference)
+    result.update(
         {
-            "previous_close": float(exact.close_price),
-            "previous_close_source": exact.lineage.source,
-            "previous_close_trade_date": expected_date.isoformat(),
-            "previous_close_provider": exact.lineage.provider,
-            "previous_close_status": "current",
+            "current_day_regular_close": None,
+            "current_day_regular_close_source": None,
+            "current_day_regular_close_trade_date": None,
+            "current_day_regular_close_provider": None,
+            "current_day_regular_close_status": "missing",
+            "change_reference_price": None,
+            "change_reference_source": None,
+            "change_reference_trade_date": None,
+            "change_reference_provider": None,
+            "change_reference_type": "unavailable",
+            "change_reference_status": "missing",
+            "change_reference_reason_code": "CHANGE_REFERENCE_UNAVAILABLE",
         }
     )
-    return reference, daily
+    local_date = now.astimezone(US_MARKET_TIMEZONE).date()
+    bars = tuple(resolved_bars)
+    session_close_at = datetime.combine(
+        local_date,
+        us_session_close_time(local_date),
+        tzinfo=US_MARKET_TIMEZONE,
+    )
+    final_regular_bars = tuple(
+        bar
+        for bar in bars
+        if bar.start_at.astimezone(US_MARKET_TIMEZONE).date() == local_date
+        and us_session_for_timestamp(bar.start_at).value
+        in {"continuous", "closing_auction"}
+        and bar.finalization is not BarFinalization.PROVISIONAL
+        and bar.end_at.astimezone(US_MARKET_TIMEZONE) >= session_close_at
+    )
+    current_day_bar = max(
+        final_regular_bars,
+        key=lambda bar: bar.end_at,
+        default=None,
+    )
+    if current_day_bar is not None:
+        result.update(
+            {
+                "current_day_regular_close": float(current_day_bar.close_price),
+                "current_day_regular_close_source": current_day_bar.lineage.source,
+                "current_day_regular_close_trade_date": local_date.isoformat(),
+                "current_day_regular_close_provider": current_day_bar.lineage.provider,
+                "current_day_regular_close_status": "current",
+            }
+        )
+    elif (
+        result.get("previous_close_status") == "current"
+        and result.get("previous_close_trade_date") == local_date.isoformat()
+    ):
+        result.update(
+            {
+                "current_day_regular_close": result.get("previous_close"),
+                "current_day_regular_close_source": result.get(
+                    "previous_close_source"
+                ),
+                "current_day_regular_close_trade_date": local_date.isoformat(),
+                "current_day_regular_close_provider": result.get(
+                    "previous_close_provider"
+                ),
+                "current_day_regular_close_status": "current",
+            }
+        )
+
+    def apply_reference(prefix: str, reference_type: str, reason_code: str) -> bool:
+        price = result.get(prefix)
+        status = result.get(f"{prefix}_status")
+        if status != "current" or not _valid_number(price):
+            return False
+        result.update(
+            {
+                "change_reference_price": float(price),
+                "change_reference_source": result.get(f"{prefix}_source"),
+                "change_reference_trade_date": result.get(
+                    f"{prefix}_trade_date"
+                ),
+                "change_reference_provider": result.get(f"{prefix}_provider"),
+                "change_reference_type": reference_type,
+                "change_reference_status": "current",
+                "change_reference_reason_code": reason_code,
+            }
+        )
+        return True
+
+    if market_phase in {"pre_market_pending", "pre_market", "regular"}:
+        if not apply_reference(
+            "prior_regular_close",
+            "prior_regular_close",
+            "PRIOR_REGULAR_CLOSE_SELECTED",
+        ):
+            result["change_reference_reason_code"] = (
+                "PRIOR_REGULAR_CLOSE_MISSING"
+            )
+    elif market_phase in {"after_hours", "post_close"}:
+        if not apply_reference(
+            "current_day_regular_close",
+            "current_day_regular_close",
+            "CURRENT_DAY_REGULAR_CLOSE_SELECTED",
+        ):
+            result["change_reference_reason_code"] = (
+                "CURRENT_DAY_REGULAR_CLOSE_PENDING"
+            )
+    elif result.get("previous_close_status") == "current":
+        result.update(
+            {
+                "change_reference_price": result.get("previous_close"),
+                "change_reference_source": result.get("previous_close_source"),
+                "change_reference_trade_date": result.get(
+                    "previous_close_trade_date"
+                ),
+                "change_reference_provider": result.get(
+                    "previous_close_provider"
+                ),
+                "change_reference_type": "last_completed_regular_close",
+                "change_reference_status": "historical",
+                "change_reference_reason_code": "MARKET_CLOSED",
+            }
+        )
+    return result
 
 
 def _attach_us_daily_previous_close(
@@ -1985,6 +2418,26 @@ def _attach_us_daily_previous_close(
         "expected_previous_close_trade_date"
     )
     fused["previous_close_status"] = reference.get("previous_close_status")
+    for field in (
+        "prior_regular_close",
+        "prior_regular_close_source",
+        "prior_regular_close_trade_date",
+        "prior_regular_close_provider",
+        "prior_regular_close_status",
+        "current_day_regular_close",
+        "current_day_regular_close_source",
+        "current_day_regular_close_trade_date",
+        "current_day_regular_close_provider",
+        "current_day_regular_close_status",
+        "change_reference_price",
+        "change_reference_source",
+        "change_reference_trade_date",
+        "change_reference_provider",
+        "change_reference_type",
+        "change_reference_status",
+        "change_reference_reason_code",
+    ):
+        fused[field] = reference.get(field)
     if reference.get("previous_close_status") != "current":
         fused["limitations"] = list(
             dict.fromkeys(
@@ -2017,6 +2470,71 @@ def get_us_intraday_trend(
         raise ValueError("unsupported US intraday interval")
     normalized_symbol = normalize_us_symbol(symbol)
     now = datetime.now(timezone.utc)
+    calendar_status = build_us_calendar_status(now)
+    market_phase = str(calendar_status.get("phase") or "market_closed")
+    instrument_type: InstrumentType | None = None
+
+    def finalize_temporal_payload(
+        payload: dict,
+        *,
+        quote_snapshot: dict | None,
+        quote_source_status: dict | None,
+        bar_source_status: dict | None,
+        coverage_points: list[dict] | tuple[dict, ...] = (),
+    ) -> dict:
+        aggregated = aggregate_intraday_payload(
+            payload,
+            interval=interval,
+            session_scope=session_scope,
+        )
+        coverage = aggregate_intraday_payload(
+            {
+                "points": list(coverage_points),
+                "source_status": payload.get("source_status") or {},
+            },
+            interval=interval,
+            session_scope="all",
+        )
+        coverage_trade_date = None
+        if coverage.get("points"):
+            coverage_trade_date = (
+                datetime.fromisoformat(str(coverage["points"][-1]["time"]))
+                .astimezone(US_MARKET_TIMEZONE)
+                .date()
+                .isoformat()
+            )
+        aggregated["session_coverage"] = {
+            "trade_date": coverage_trade_date,
+            "regular_point_count": int(coverage.get("regular_point_count") or 0),
+            "extended_point_count": int(coverage.get("extended_point_count") or 0),
+            "has_extended_hours": bool(coverage.get("has_extended_hours")),
+            "requested_scope": session_scope,
+            "requested_point_count": int(aggregated.get("point_count") or 0),
+        }
+        # These compatibility fields describe the available current-session
+        # coverage, not only the requested chart slice.  Consumers that need
+        # the selected view count continue to use ``point_count``.
+        aggregated["regular_point_count"] = aggregated["session_coverage"][
+            "regular_point_count"
+        ]
+        aggregated["extended_point_count"] = aggregated["session_coverage"][
+            "extended_point_count"
+        ]
+        aggregated["has_extended_hours"] = aggregated["session_coverage"][
+            "has_extended_hours"
+        ]
+        point_count = int(aggregated.get("point_count") or 0)
+        aggregated["market_phase"] = market_phase
+        aggregated["capability_expectation"] = _build_us_capability_expectations(
+            market_phase=market_phase,
+            session_scope=session_scope,
+            instrument_type=instrument_type,
+            quote_snapshot=quote_snapshot,
+            quote_source_status=quote_source_status,
+            bar_source_status=bar_source_status,
+            point_count=point_count,
+        )
+        return aggregated
 
     def missing_payload(
         reason: str,
@@ -2033,10 +2551,15 @@ def get_us_intraday_trend(
             "status": "unavailable",
             "resolved_status": "missing",
             "freshness_status": "missing",
-            "market_phase": None,
-            "is_live_window": False,
+            "market_phase": market_phase,
+            "is_live_window": market_phase in {"pre_market", "regular", "after_hours"},
             "as_of": None,
             "lag_seconds": None,
+            "provider_snapshot_as_of": None,
+            "provider_snapshot_lag_seconds": None,
+            "provider_snapshot_freshness": "missing",
+            "trade_state": "unknown",
+            "trade_recency": "missing",
             "is_fallback": False,
             "has_usable_data": False,
             "decision_usable": False,
@@ -2044,7 +2567,7 @@ def get_us_intraday_trend(
             "limitations": ["US_INTRADAY_CANONICAL_CACHE_MISSING"],
             "message": reason,
         }
-        return aggregate_intraday_payload(
+        return finalize_temporal_payload(
             {
                 "stock_id": normalized_symbol,
                 "symbol": normalized_symbol,
@@ -2052,16 +2575,7 @@ def get_us_intraday_trend(
                 "session_scope": session_scope,
                 "points": [],
                 "point_count": 0,
-                "previous_close": previous.get("previous_close"),
-                "previous_close_source": previous.get("previous_close_source"),
-                "previous_close_trade_date": previous.get("previous_close_trade_date"),
-                "previous_close_provider": previous.get("previous_close_provider"),
-                "expected_previous_close_trade_date": previous.get(
-                    "expected_previous_close_trade_date"
-                ),
-                "previous_close_status": previous.get(
-                    "previous_close_status", "missing"
-                ),
+                **previous,
                 "volume_pace": None,
                 "quote_snapshot": quote_snapshot,
                 "current_observation": current_observation,
@@ -2072,19 +2586,26 @@ def get_us_intraday_trend(
                 # Compatibility alias: source_status remains chart/bar health.
                 "source_status": bar_source_status,
             },
-            interval=interval,
-            session_scope=session_scope,
+            quote_snapshot=quote_snapshot,
+            quote_source_status=current_source_status,
+            bar_source_status=bar_source_status,
         )
 
     if db is None:
         return missing_payload("Canonical US intraday cache requires a database session.")
     platform = USIntradayMarketPlatform(db)
     quote_snapshot = None
+    quote_source_status = None
     try:
-        quote_snapshot = platform.read_quote(
+        quote_read = platform.read_quote(
             symbol=normalized_symbol,
             now=now,
-        ).projection
+        )
+        instrument_type = quote_read.identity.instrument.instrument_type
+        quote_snapshot, quote_source_status = _project_us_quote_temporal_contract(
+            quote_read,
+            now=now,
+        )
     except (LookupError, ValueError):
         quote_snapshot = None
     quote_value = (
@@ -2099,26 +2620,6 @@ def get_us_intraday_trend(
     )
     quote_event_at = _parse_us_evidence_time(
         quote_value.get("event_at") if quote_value else None
-    )
-    quote_source_status = (
-        _build_us_resolved_source_status(
-            provider=quote_snapshot.get("selected_provider"),
-            source=quote_snapshot.get("selected_source"),
-            resolved_status=quote_snapshot.get("status"),
-            selected_event_at=(
-                quote_snapshot.get("selected_event_at")
-                or (quote_value.get("event_at") if quote_value else None)
-            ),
-            fallback_used=quote_snapshot.get("fallback_used") is True,
-            facts_usable=quote_snapshot.get("facts_usable") is True,
-            research_usable=quote_snapshot.get("research_usable") is True,
-            selection_reason=quote_snapshot.get("selection_reason"),
-            limitations=quote_snapshot.get("limitations"),
-            session_scope=session_scope,
-            now=now,
-        )
-        if isinstance(quote_snapshot, dict)
-        else None
     )
     quote_observation = (
         {
@@ -2146,12 +2647,25 @@ def get_us_intraday_trend(
         symbol=normalized_symbol,
         now=now,
     )
+    session_date_relation = _attach_us_session_date_relation(
+        quote_snapshot,
+        previous_close_reference=previous_close_reference,
+        now=now,
+        market_phase=market_phase,
+    )
+    previous_close_reference = _build_us_change_reference(
+        previous_close_reference=previous_close_reference,
+        resolved_bars=(),
+        market_phase=market_phase,
+        now=now,
+    )
     quote_observation = _attach_us_daily_previous_close(
         quote_observation,
         previous_close_reference,
     )
     try:
         read = platform.read_intraday_bars(symbol=normalized_symbol, bars=5000, now=now)
+        instrument_type = read.identity.instrument.instrument_type
     except LookupError as exc:
         return missing_payload(
             str(exc),
@@ -2163,6 +2677,16 @@ def get_us_intraday_trend(
             previous_close_reference=previous_close_reference,
         )
     resolved = read.result.resolved
+    previous_close_reference = _build_us_change_reference(
+        previous_close_reference=previous_close_reference,
+        resolved_bars=resolved.bars,
+        market_phase=market_phase,
+        now=now,
+    )
+    quote_observation = _attach_us_daily_previous_close(
+        quote_observation,
+        previous_close_reference,
+    )
     history_points: list[dict] = []
     for bar in resolved.bars:
         session = us_session_for_timestamp(bar.start_at)
@@ -2176,10 +2700,6 @@ def get_us_intraday_trend(
             else None
         )
         if point_session is None:
-            continue
-        if session_scope == "regular" and point_session != "regular":
-            continue
-        if session_scope == "extended" and point_session == "regular":
             continue
         history_points.append(
             {
@@ -2195,19 +2715,46 @@ def get_us_intraday_trend(
                 "is_partial": bar.finalization.value == "provisional",
             }
         )
-    current_points = latest_market_trade_date_points(
+    all_current_points = latest_market_trade_date_points(
         history_points,
         market_timezone=US_MARKET_TIMEZONE,
     )
-    latest_point = current_points[-1] if current_points else None
+    current_points = [
+        point
+        for point in all_current_points
+        if not (
+            (session_scope == "regular" and point.get("session") != "regular")
+            or (
+                session_scope == "extended"
+                and point.get("session") == "regular"
+            )
+        )
+    ]
+    # Headline/current evidence is canonical market truth and must not change
+    # when the viewer switches the chart's presentation-only session scope.
+    latest_point = all_current_points[-1] if all_current_points else None
     latest_point_at = _parse_us_evidence_time(
         latest_point.get("time") if latest_point else None
+    )
+    selected_bar_fetched_at = max(
+        (
+            bar.lineage.fetched_at
+            for bar in resolved.bars
+            if bar.lineage.fetched_at is not None
+        ),
+        default=None,
     )
     bar_source_status = _build_us_resolved_source_status(
         provider=resolved.health.selected_provider,
         source=resolved.health.selected_source,
         resolved_status=resolved.health.status.value,
         selected_event_at=resolved.health.selected_event_at,
+        selected_fetched_at=selected_bar_fetched_at,
+        trade_state=(
+            TradeObservationState.TRADE_OBSERVED.value
+            if all_current_points
+            else TradeObservationState.UNKNOWN.value
+        ),
         fallback_used=resolved.health.fallback_used,
         facts_usable=resolved.health.facts_usable,
         research_usable=resolved.health.research_usable,
@@ -2259,6 +2806,7 @@ def get_us_intraday_trend(
         **previous_close_reference,
         "volume_pace": None,
         "quote_snapshot": quote_snapshot,
+        "session_date_relation": session_date_relation,
         "current_observation": current_observation,
         "current_source_status": current_source_status,
         "bar_source_status": bar_source_status,
@@ -2330,7 +2878,13 @@ def get_us_intraday_trend(
         payload.setdefault("warnings", []).append(
             "US intraday volume pace is unavailable until resolved Daily evidence is available."
         )
-    return aggregate_intraday_payload(payload, interval=interval, session_scope=session_scope)
+    return finalize_temporal_payload(
+        payload,
+        quote_snapshot=quote_snapshot,
+        quote_source_status=quote_source_status,
+        bar_source_status=bar_source_status,
+        coverage_points=all_current_points,
+    )
 
 
 def get_us_quote_snapshot(
@@ -2341,10 +2895,27 @@ def get_us_quote_snapshot(
 ) -> dict:
     """Read the persisted resolved Quote projection without provider I/O."""
 
-    return USIntradayMarketPlatform(db).read_quote(
+    requested_at = now or datetime.now(timezone.utc)
+    result = USIntradayMarketPlatform(db).read_quote(
         symbol=normalize_us_symbol(symbol),
-        now=now or datetime.now(timezone.utc),
-    ).projection
+        now=requested_at,
+    )
+    projection, source_status = _project_us_quote_temporal_contract(
+        result,
+        now=requested_at,
+    )
+    previous_close_reference, _ = _read_us_daily_previous_close_reference(
+        db,
+        symbol=normalize_us_symbol(symbol),
+        now=requested_at,
+    )
+    _attach_us_session_date_relation(
+        projection,
+        previous_close_reference=previous_close_reference,
+        now=requested_at,
+        market_phase=str(source_status.get("market_phase") or "market_closed"),
+    )
+    return projection
 
 
 def refresh_us_quote_snapshot(
@@ -2354,13 +2925,30 @@ def refresh_us_quote_snapshot(
     require_live: bool = False,
     max_provider_calls: int = 2,
 ) -> dict:
+    requested_at = datetime.now(timezone.utc)
     refreshed = USIntradayMarketPlatform(db).refresh_quote(
         symbol=symbol,
+        now=requested_at,
         require_live=require_live,
         max_provider_calls=max_provider_calls,
     )
+    projection, _ = _project_us_quote_temporal_contract(
+        refreshed,
+        now=requested_at,
+    )
+    previous_close_reference, _ = _read_us_daily_previous_close_reference(
+        db,
+        symbol=normalize_us_symbol(symbol),
+        now=requested_at,
+    )
+    _attach_us_session_date_relation(
+        projection,
+        previous_close_reference=previous_close_reference,
+        now=requested_at,
+        market_phase=str(projection.get("market_phase") or "market_closed"),
+    )
     return {
-        **refreshed.projection,
+        **projection,
         "acquisition": refreshed.result.acquisition.model_dump(mode="json"),
         "persistence": refreshed.result.persistence.model_dump(mode="json"),
         "dataset_health": (

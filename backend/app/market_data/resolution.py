@@ -44,6 +44,7 @@ from app.market_data.integration_contracts import (
     DataRequirementV2,
     FreshnessBasis,
     InstrumentTarget,
+    freshness_timestamp,
 )
 from app.market_data.policies import RealtimePolicy, parse_realtime_policy
 from app.market_data.quality_policy import (
@@ -188,7 +189,11 @@ def _evaluate(
             quality.reason_code.value,
             quality,
         )
-    observed_at = _observation_time(observation)
+    observed_at = (
+        freshness_timestamp(observation.lineage, requirement.freshness.basis)
+        if requirement is not None
+        else _observation_time(observation)
+    )
     freshness, temporal_rejection = _effective_freshness(
         candidate.freshness,
         observed_at=observed_at,

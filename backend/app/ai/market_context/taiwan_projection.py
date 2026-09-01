@@ -200,6 +200,17 @@ def _intraday_slot_status(intraday_bars: dict[str, Any]) -> str:
     series = intraday_bars.get("series") if isinstance(intraday_bars.get("series"), dict) else {}
     for item in series.values():
         if isinstance(item, dict) and (item.get("latest") or item.get("returned_point_count")):
+            coverage = (
+                item.get("series_coverage")
+                if isinstance(item.get("series_coverage"), dict)
+                else {}
+            )
+            coverage_status = coverage.get("status")
+            if coverage_status and coverage_status not in {
+                "complete_prefix",
+                "complete_session",
+            }:
+                return "partial"
             return "ready"
     return "missing"
 
@@ -1009,46 +1020,114 @@ def _component_freshness(
     status: str,
     available: bool,
     event_time: Any,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    quote_freshness = (
-        quote.get("freshness")
-        if isinstance(quote.get("freshness"), dict)
+    component_evidence = evidence if isinstance(evidence, dict) else {}
+    resolved_health = (
+        component_evidence.get("resolved_health")
+        if isinstance(component_evidence.get("resolved_health"), dict)
+        else {}
+    )
+    dataset_health = (
+        component_evidence.get("dataset_health")
+        if isinstance(component_evidence.get("dataset_health"), dict)
+        else {}
+    )
+    component_freshness = (
+        component_evidence.get("freshness")
+        if isinstance(component_evidence.get("freshness"), dict)
+        else {}
+    )
+    lineage = (
+        component_evidence.get("lineage")
+        if isinstance(component_evidence.get("lineage"), dict)
         else {}
     )
     normalized_status = str(status or "unavailable")
-    is_stale = bool(quote_freshness.get("is_stale"))
+    has_resolved_health = bool(resolved_health)
+    resolved_usable = bool(
+        resolved_health.get("research_usable")
+        or resolved_health.get("facts_usable")
+    )
     is_current = bool(
         available
-        and not is_stale
-        and normalized_status
-        not in {"missing", "stale", "unavailable", "pending"}
+        and (
+            resolved_usable
+            if has_resolved_health
+            else component_freshness.get("is_current") is True
+            if "is_current" in component_freshness
+            else normalized_status
+            not in {"missing", "stale", "unavailable", "pending"}
+        )
+    )
+    selected_event_time = (
+        resolved_health.get("selected_event_at")
+        or component_evidence.get("event_time")
+        or lineage.get("event_at")
+        or event_time
     )
     return {
         "status": normalized_status,
         "dataset": dataset,
         "is_current": is_current,
-        "latest": _json_value(event_time),
+        "latest": _json_value(selected_event_time),
         "expected": _json_value(
-            quote_freshness.get("expected_trade_date")
+            component_freshness.get("expected_trade_date")
+            or dataset_health.get("expected_date")
         ),
         "event_time_basis": (
-            "provider_event_time"
-            if event_time
+            "resolved_component_event_time"
+            if resolved_health.get("selected_event_at")
+            else "component_lineage_event_time"
+            if lineage.get("event_at")
+            else "provider_event_time"
+            if selected_event_time
             else "taiwan_completed_trade_date"
         ),
-        "age_seconds": quote_freshness.get("age_seconds"),
+        "age_seconds": component_freshness.get("age_seconds"),
         "latency_ms": quote.get("latency_ms"),
-        "provider": quote.get("provider"),
-        "source": quote.get("source"),
-        "refresh_recommended": normalized_status
-        in {
-            "missing",
-            "stale",
-            "unavailable",
-            "unavailable_after_release",
-        },
-        "reason": quote_freshness.get("message"),
+        "provider": resolved_health.get("selected_provider")
+        or component_evidence.get("provider")
+        or quote.get("provider"),
+        "source": resolved_health.get("selected_source")
+        or component_evidence.get("source")
+        or quote.get("source"),
+        "refresh_recommended": bool(
+            not is_current
+            and normalized_status
+            not in {"not_applicable", "latest_completed_session"}
+        ),
+        "reason": component_freshness.get("message")
+        or resolved_health.get("selection_reason")
+        or dataset_health.get("detail_code"),
     }
+
+
+def _component_status(
+    evidence: dict[str, Any],
+    *,
+    available: bool,
+    fallback: str,
+) -> str:
+    resolved_health = (
+        evidence.get("resolved_health")
+        if isinstance(evidence.get("resolved_health"), dict)
+        else {}
+    )
+    if resolved_health:
+        if (
+            resolved_health.get("research_usable") is True
+            or resolved_health.get("facts_usable") is True
+        ):
+            return "current"
+        health_status = str(resolved_health.get("status") or "unavailable")
+        return "stale" if health_status == "stale" else "unavailable"
+    if available:
+        explicit_status = str(evidence.get("status") or "")
+        if explicit_status in {"missing", "stale", "unavailable", "pending"}:
+            return explicit_status
+        return "current"
+    return str(evidence.get("status") or fallback or "unavailable")
 
 
 def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
@@ -1089,16 +1168,29 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     depth_available = bool(quote.get("depth_available"))
-    depth_status = (
-        "current"
-        if depth_available
-        and not bool((quote.get("freshness") or {}).get("is_stale"))
-        else "not_applicable"
-        if post_close
-        else str(quote.get("depth_status") or "unavailable")
+    depth_snapshot_available = bool(quote.get("depth_snapshot_available"))
+    order_book_available = depth_available or depth_snapshot_available
+    depth_status = _component_status(
+        order_book_evidence,
+        available=order_book_available,
+        fallback=(
+            "closing_session_snapshot"
+            if depth_snapshot_available
+            else "not_applicable"
+            if post_close and not order_book_available
+            else str(quote.get("depth_status") or "current")
+            if depth_available
+            else str(quote.get("depth_status") or "unavailable")
+        ),
     )
     snapshot_time = (
-        quote.get("snapshot_time")
+        quote.get("depth_snapshot_event_time")
+        or (order_book_evidence.get("resolved_health") or {}).get(
+            "selected_event_at"
+        )
+        or order_book_evidence.get("event_time")
+        or (order_book_evidence.get("lineage") or {}).get("event_at")
+        or quote.get("snapshot_time")
         or quote.get("provider_event_time")
         or quote.get("quote_time")
     )
@@ -1106,8 +1198,9 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         quote,
         dataset="taiwan_quote_order_book",
         status=depth_status,
-        available=depth_available,
+        available=order_book_available,
         event_time=snapshot_time,
+        evidence=order_book_evidence,
     )
     order_book_freshness.update(
         {
@@ -1117,11 +1210,23 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
             "dataset_health": order_book_evidence.get("dataset_health"),
         }
     )
-    if post_close and not depth_available:
+    if depth_snapshot_available:
         order_book_freshness.update(
             {
                 "status": "latest_completed_session",
-                "is_current": True,
+                "is_current": False,
+                "is_live": False,
+                "refresh_possible_now": False,
+                "refresh_recommended": False,
+                "applicability_status": "historical_snapshot",
+                "reason_code": "CLOSING_SESSION_DEPTH_SNAPSHOT_NON_TRADABLE",
+            }
+        )
+    elif post_close and not depth_available:
+        order_book_freshness.update(
+            {
+                "status": "latest_completed_session",
+                "is_current": False,
                 "refresh_possible_now": False,
                 "refresh_recommended": False,
                 "applicability_status": "not_applicable",
@@ -1131,18 +1236,35 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
     order_book = {
         "kind": "quote_order_book",
         "status": depth_status,
-        "available": depth_available,
+        "available": order_book_available,
+        "live_available": depth_available,
+        "snapshot_available": depth_snapshot_available,
+        "snapshot_status": quote.get("depth_snapshot_status"),
+        "snapshot_semantics": quote.get("depth_snapshot_semantics"),
+        "snapshot_trade_date": _json_value(
+            quote.get("depth_snapshot_trade_date")
+        ),
+        "snapshot_session": quote.get("depth_snapshot_session"),
+        "snapshot_decision_usable": bool(
+            quote.get("depth_snapshot_decision_usable")
+        ),
         "applicability_status": (
-            "not_applicable"
+            "historical_snapshot"
+            if depth_snapshot_available
+            else "not_applicable"
             if post_close and not depth_available
             else "applicable"
         ),
         "availability_status": (
-            "available" if depth_available else "unavailable"
+            "closing_session_snapshot"
+            if depth_snapshot_available
+            else "available"
+            if depth_available
+            else "unavailable"
         ),
         "unavailable_reason_code": (
             "MARKET_CLOSED_ORDER_BOOK_UNAVAILABLE"
-            if post_close and not depth_available
+            if post_close and not order_book_available
             else None
         ),
         "market_session_status": session_phase or None,
@@ -1174,8 +1296,12 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         ),
         "fetched_at": _json_value(quote.get("fetched_at")),
         "latency_ms": quote.get("latency_ms"),
-        "provider": order_book_evidence.get("provider") or quote.get("provider"),
-        "source": order_book_evidence.get("source") or quote.get("source"),
+        "provider": quote.get("depth_snapshot_provider")
+        or order_book_evidence.get("provider")
+        or quote.get("provider"),
+        "source": quote.get("depth_snapshot_source")
+        or order_book_evidence.get("source")
+        or quote.get("source"),
         "lineage": order_book_evidence.get("lineage"),
         "resolved_health": order_book_evidence.get("resolved_health"),
         "dataset_health": order_book_evidence.get("dataset_health"),
@@ -1205,21 +1331,27 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
     raw_auction_status = str(
         quote.get("auction_book_status") or "unavailable"
     )
-    auction_status = (
-        "current"
-        if auction_available
-        and not bool((quote.get("freshness") or {}).get("is_stale"))
-        else raw_auction_status
-        if auction_relevant
-        else "not_applicable"
+    auction_status = _component_status(
+        auction_evidence,
+        available=auction_available,
+        fallback=(raw_auction_status if auction_relevant else "not_applicable"),
     )
-    auction_time = quote.get("auction_book_time") or snapshot_time
+    auction_time = (
+        (auction_evidence.get("resolved_health") or {}).get(
+            "selected_event_at"
+        )
+        or auction_evidence.get("event_time")
+        or (auction_evidence.get("lineage") or {}).get("event_at")
+        or quote.get("auction_book_time")
+        or snapshot_time
+    )
     auction_freshness = _component_freshness(
         quote,
         dataset="taiwan_quote_auction",
         status=auction_status,
         available=auction_available,
         event_time=auction_time,
+        evidence=auction_evidence,
     )
     auction_freshness.update(
         {
@@ -1230,7 +1362,7 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         }
     )
     if auction_status == "not_applicable":
-        auction_freshness["is_current"] = True
+        auction_freshness["is_current"] = False
         auction_freshness["refresh_recommended"] = False
         auction_freshness["applicability_status"] = "not_applicable"
         auction_freshness["reason_code"] = (
@@ -1338,6 +1470,7 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         status=close_status,
         available=close_available,
         event_time=close_time,
+        evidence=official_close_evidence,
     )
     close_freshness.update(
         {
@@ -1531,8 +1664,19 @@ def _compact_quote_snapshot(
     price_available = quote_depth.get("price_available")
     if not isinstance(price_available, bool):
         price_available = last_trade_price is not None
-    latest_price = last_trade_price if price_available else None
+    headline_price = quote_depth.get("headline_price")
+    latest_price = (
+        headline_price
+        if isinstance(headline_price, (int, float))
+        else last_trade_price
+        if price_available
+        else None
+    )
     depth_available = bool(quote_depth.get("depth_available"))
+    depth_snapshot_available = bool(
+        quote_depth.get("depth_snapshot_available")
+    )
+    depth_visible = depth_available or depth_snapshot_available
     volume_contract = build_taiwan_quote_volume_contract(
         snapshot_trade_date=quote_depth.get("trade_date"),
         cumulative_volume_lots=quote_depth.get(
@@ -1616,7 +1760,9 @@ def _compact_quote_snapshot(
         "quote_time": _json_value(quote_depth.get("quote_time")),
         "quote_time_basis": quote_depth.get("quote_time_basis"),
         "snapshot_time": _json_value(
-            quote_depth.get("snapshot_time") or quote_depth.get("quote_time")
+            quote_depth.get("depth_snapshot_event_time")
+            or quote_depth.get("snapshot_time")
+            or quote_depth.get("quote_time")
         ),
         "snapshot_time_basis": quote_depth.get("snapshot_time_basis"),
         "provider_event_time": _json_value(
@@ -1639,6 +1785,19 @@ def _compact_quote_snapshot(
         "latest_price": latest_price,
         "price": latest_price,
         "last_price": latest_price,
+        "headline_price": quote_depth.get("headline_price"),
+        "headline_reference_price": quote_depth.get("headline_reference_price"),
+        "headline_change": quote_depth.get("headline_change"),
+        "headline_change_pct": quote_depth.get("headline_change_pct"),
+        "headline_event_time": _json_value(quote_depth.get("headline_event_time")),
+        "headline_trade_date": _json_value(quote_depth.get("headline_trade_date")),
+        "headline_basis": quote_depth.get("headline_basis"),
+        "headline_finalization": quote_depth.get("headline_finalization"),
+        "headline_authority": quote_depth.get("headline_authority"),
+        "headline_source": quote_depth.get("headline_source"),
+        "headline_decision_usable": bool(
+            quote_depth.get("headline_decision_usable")
+        ),
         "price_available": price_available,
         "last_trade_available": last_trade_available,
         "last_trade_price": (
@@ -1695,58 +1854,58 @@ def _compact_quote_snapshot(
         "currency": "TWD",
         "price_unit": "TWD",
         "best_bid_price": (
-            quote_depth.get("best_bid_price") if depth_available else None
+            quote_depth.get("best_bid_price") if depth_visible else None
         ),
         "best_bid_size_lots": (
-            quote_depth.get("best_bid_size_lots") if depth_available else None
+            quote_depth.get("best_bid_size_lots") if depth_visible else None
         ),
         "best_ask_price": (
-            quote_depth.get("best_ask_price") if depth_available else None
+            quote_depth.get("best_ask_price") if depth_visible else None
         ),
         "best_ask_size_lots": (
-            quote_depth.get("best_ask_size_lots") if depth_available else None
+            quote_depth.get("best_ask_size_lots") if depth_visible else None
         ),
-        "spread": quote_depth.get("spread") if depth_available else None,
+        "spread": quote_depth.get("spread") if depth_visible else None,
         "spread_pct": (
-            quote_depth.get("spread_pct") if depth_available else None
+            quote_depth.get("spread_pct") if depth_visible else None
         ),
         "bid_levels": (
             quote_depth.get("bid_levels") or []
-            if depth_available
+            if depth_visible
             else []
         ),
         "ask_levels": (
             quote_depth.get("ask_levels") or []
-            if depth_available
+            if depth_visible
             else []
         ),
         "bid_depth": (
             quote_depth.get("bid_depth")
             or quote_depth.get("bid_levels")
             or []
-            if depth_available
+            if depth_visible
             else []
         ),
         "ask_depth": (
             quote_depth.get("ask_depth")
             or quote_depth.get("ask_levels")
             or []
-            if depth_available
+            if depth_visible
             else []
         ),
         "top5_bid_volume_lots": (
             quote_depth.get("top5_bid_volume_lots")
-            if depth_available
+            if depth_visible
             else None
         ),
         "top5_ask_volume_lots": (
             quote_depth.get("top5_ask_volume_lots")
-            if depth_available
+            if depth_visible
             else None
         ),
         "top5_imbalance": (
             quote_depth.get("top5_imbalance")
-            if depth_available
+            if depth_visible
             else None
         ),
         "depth_volume_unit": quote_depth.get("depth_volume_unit"),
@@ -1755,7 +1914,31 @@ def _compact_quote_snapshot(
             "not_provided",
         ),
         "depth_available": depth_available,
-        "depth_status": "available" if depth_available else "unavailable",
+        "depth_live_available": depth_available,
+        "depth_snapshot_available": depth_snapshot_available,
+        "depth_snapshot_status": quote_depth.get("depth_snapshot_status"),
+        "depth_snapshot_semantics": quote_depth.get(
+            "depth_snapshot_semantics"
+        ),
+        "depth_snapshot_event_time": _json_value(
+            quote_depth.get("depth_snapshot_event_time")
+        ),
+        "depth_snapshot_trade_date": _json_value(
+            quote_depth.get("depth_snapshot_trade_date")
+        ),
+        "depth_snapshot_provider": quote_depth.get("depth_snapshot_provider"),
+        "depth_snapshot_source": quote_depth.get("depth_snapshot_source"),
+        "depth_snapshot_session": quote_depth.get("depth_snapshot_session"),
+        "depth_snapshot_decision_usable": bool(
+            quote_depth.get("depth_snapshot_decision_usable")
+        ),
+        "depth_status": (
+            "closing_session_snapshot"
+            if depth_snapshot_available
+            else "available"
+            if depth_available
+            else "unavailable"
+        ),
         "auction_book_available": bool(
             quote_depth.get("auction_book_available")
         ),
@@ -1953,6 +2136,16 @@ def _compact_intraday_history(
         history.get("requested_interval")
         or effective_interval
     )
+    series_coverage = (
+        history.get("series_coverage")
+        if isinstance(history.get("series_coverage"), dict)
+        else None
+    )
+    coverage_status = (
+        series_coverage.get("status")
+        if series_coverage
+        else history.get("coverage_status")
+    )
     return {
         "status": (
             "partial"
@@ -1981,7 +2174,8 @@ def _compact_intraday_history(
         "returned_point_count": len(compact_points),
         "bar_limit": point_limit,
         "truncated": len(points) > len(compact_points),
-        "coverage_status": history.get("coverage_status"),
+        "coverage_status": coverage_status,
+        "series_coverage": series_coverage,
         "is_partial": bool(history.get("is_partial")),
         "synthetic": bool(history.get("synthetic")),
         "synthetic_semantics": history.get("synthetic_semantics"),
@@ -2152,6 +2346,7 @@ def _compact_single_intraday_series(
         "point_count": payload.get("point_count") if payload.get("point_count") is not None else len(points),
         "trade_date": payload.get("trade_date"),
         "coverage_status": payload.get("coverage_status"),
+        "series_coverage": payload.get("series_coverage"),
         "is_partial": payload.get("is_partial"),
         "synthetic": payload.get("synthetic"),
         "synthetic_semantics": payload.get("synthetic_semantics"),
@@ -3445,17 +3640,116 @@ def _compact_index_quote(
         else []
     )
     effective_calendar = calendar_status or build_taiwan_calendar_status()
-    resolution = resolve_taiwan_index_quote_state(
-        intraday=intraday,
-        index_snapshot=snapshot,
-        calendar_status=effective_calendar,
-        index_id=index_id,
-        acquisition_policy=str(
-            (intraday or {}).get("acquisition_policy")
-            or snapshot.get("acquisition_policy")
-            or "unspecified"
-        ),
+    current_data_core = (
+        snapshot.get("current_data_core")
+        if isinstance(snapshot.get("current_data_core"), dict)
+        else {}
     )
+    canonical_current = (
+        current_data_core.get("index")
+        if isinstance(current_data_core.get("index"), dict)
+        else snapshot.get("current_observation")
+        if isinstance(snapshot.get("current_observation"), dict)
+        else None
+    )
+    if canonical_current is not None:
+        health = (
+            canonical_current.get("resolved_health")
+            if isinstance(canonical_current.get("resolved_health"), dict)
+            else {}
+        )
+        selected_value = canonical_current.get("close")
+        selected_time = canonical_current.get("as_of")
+        selected_date = canonical_current.get("trade_date")
+        decision_usable = canonical_current.get("decision_usable") is True
+        official_confirmed = bool(
+            decision_usable
+            and canonical_current.get("official") is True
+            and canonical_current.get("provisional") is not True
+            and str(effective_calendar.get("phase") or "")
+            in {"post_close", "post_close_snapshot", "market_closed"}
+        )
+        resolution = {
+            "selected_source": canonical_current.get("source"),
+            "selected_value": selected_value,
+            "selected_event_time": _json_value(selected_time),
+            "selected_trade_date": _json_value(selected_date),
+            "last_trade_available": bool(
+                selected_value is not None and not official_confirmed
+            ),
+            "last_trade_price": (
+                selected_value if not official_confirmed else None
+            ),
+            "last_trade_time": (
+                _json_value(selected_time) if not official_confirmed else None
+            ),
+            "last_trade_is_current_session": bool(
+                decision_usable and not official_confirmed
+            ),
+            "official_close_available": official_confirmed,
+            "official_close_status": (
+                "confirmed" if official_confirmed else "pending"
+            ),
+            "official_close_price": (
+                selected_value if official_confirmed else None
+            ),
+            "official_close_trade_date": (
+                _json_value(selected_date) if official_confirmed else None
+            ),
+            "official_close_source": (
+                canonical_current.get("source") if official_confirmed else None
+            ),
+            "official_close_raw": (
+                selected_value if official_confirmed else None
+            ),
+            "official_close_display": (
+                f"{float(selected_value):,.2f}"
+                if official_confirmed
+                and isinstance(selected_value, (int, float))
+                else None
+            ),
+            "official_close_precision": 2 if official_confirmed else None,
+            "resolution_version": health.get("contract_version"),
+            "resolution_id": None,
+            "acquisition_policy": "cache_only",
+            "decision_usable": decision_usable,
+            "current_observation": canonical_current,
+            "selected_candidate": "canonical_current_index",
+            "selection_reason": health.get("selection_reason"),
+            "candidates": [
+                {
+                    "candidate": "canonical_current_index",
+                    "eligible": decision_usable,
+                    "value": selected_value,
+                    "event_time": _json_value(selected_time),
+                    "trade_date": _json_value(selected_date),
+                    "source": canonical_current.get("source"),
+                    "provider": canonical_current.get("provider"),
+                }
+            ],
+            "quote_semantics": (
+                "official_session_close"
+                if official_confirmed
+                else "current_session_index_snapshot"
+                if decision_usable
+                else "latest_completed_session_reference"
+            ),
+            "delivery_status": canonical_current.get("status") or "missing",
+            "expected_trade_date": effective_calendar.get("date"),
+            "warnings": list(canonical_current.get("limitations") or []),
+        }
+    else:
+        resolution = resolve_taiwan_index_quote_state(
+            intraday=intraday,
+            index_snapshot=snapshot,
+            calendar_status=effective_calendar,
+            index_id=index_id,
+            acquisition_policy=str(
+                (intraday or {}).get("acquisition_policy")
+                or snapshot.get("acquisition_policy")
+                or "unspecified"
+            ),
+        )
     source = str(
         resolution.get("selected_source")
         or snapshot.get("source")
@@ -3463,7 +3757,10 @@ def _compact_index_quote(
     )
     latest_price = resolution.get("selected_value")
     previous_close = (
-        intraday.get("previous_close")
+        canonical_current.get("previous_close")
+        if canonical_current is not None
+        and canonical_current.get("previous_close") is not None
+        else intraday.get("previous_close")
         if isinstance(intraday, dict) and intraday.get("previous_close") is not None
         else snapshot.get("previous_close")
     )

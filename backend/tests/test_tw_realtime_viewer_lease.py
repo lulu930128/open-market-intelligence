@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Base, StockMaster
 from app.market.tw_realtime_lease_platform import (
+    _sync_canonical_snapshot,
     acquire_taiwan_realtime_quote_lease,
 )
 from app.market.tw_realtime_capabilities import KGI_QUOTE_SNAPSHOT_DESCRIPTOR
@@ -524,6 +526,178 @@ def test_taiwan_platform_preserves_public_shape_with_neutral_coordinator() -> No
     assert state.stock_id == "2330"
     assert state.provider == "kgi_superpy"
     assert state.owner_kind == "frontend_viewer"
+
+
+def test_close_resolution_sync_persists_quote_without_depth_or_auction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def sync_quote(*_args, **_kwargs):
+        calls.append("quote")
+        return SimpleNamespace(
+            requirement=SimpleNamespace(session=MarketSession.CLOSE_RESOLUTION)
+        )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("close resolution must not reacquire depth or auction")
+
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform.acquire_taiwan_public_last_trade_quote",
+        sync_quote,
+    )
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform.acquire_taiwan_depth",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform.acquire_taiwan_auction",
+        forbidden,
+    )
+
+    _sync_canonical_snapshot(
+        SimpleNamespace(),
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 26, 13, 31, tzinfo=TAIPEI),
+    )
+
+    assert calls == ["quote"]
+
+
+def test_kgi_depth_failure_uses_one_market_owned_mis_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def sync_quote(*_args, **_kwargs):
+        calls.append("quote")
+        return SimpleNamespace(
+            requirement=SimpleNamespace(session=MarketSession.CONTINUOUS)
+        )
+
+    def sync_depth(*_args, **_kwargs):
+        calls.append("kgi_depth")
+        raise TimeoutError("broker depth timed out")
+
+    def sync_mis(*_args, **_kwargs):
+        calls.append("mis_depth")
+
+    def sync_auction(*_args, **_kwargs):
+        calls.append("auction")
+
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform.acquire_taiwan_public_last_trade_quote",
+        sync_quote,
+    )
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform.acquire_taiwan_depth",
+        sync_depth,
+    )
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform._sync_mis_depth_snapshot",
+        sync_mis,
+    )
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform.acquire_taiwan_auction",
+        sync_auction,
+    )
+
+    _sync_canonical_snapshot(
+        SimpleNamespace(),
+        stock_id="2330",
+        requested_at=NOW,
+    )
+
+    assert calls == ["quote", "kgi_depth", "mis_depth", "auction"]
+
+
+def test_unavailable_broker_lease_refreshes_bounded_mis_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="台積電",
+            market="TWSE",
+            instrument_type="stock",
+        )
+    )
+    db.commit()
+    port = FakeViewerPort("alpha", enabled=False)
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5),),
+        ports={"alpha": port},
+    )
+    fallback_calls: list[tuple[str, datetime]] = []
+
+    def sync_mis(_db, *, stock_id: str, requested_at: datetime) -> None:
+        fallback_calls.append((stock_id, requested_at))
+
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform._sync_mis_depth_snapshot",
+        sync_mis,
+    )
+    try:
+        state = acquire_taiwan_realtime_quote_lease(
+            db,
+            stock_id="2330",
+            requested_at=NOW,
+            coordinator=coordinator,
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+    assert fallback_calls == [("2330", NOW)]
+    assert state.lease_id is None
+    assert state.status == "degraded"
+    assert state.fallback_source == "twse_mis_quote_depth"
+
+
+def test_post_close_unavailable_lease_does_not_fetch_mis_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="台積電",
+            market="TWSE",
+            instrument_type="stock",
+        )
+    )
+    db.commit()
+    port = FakeViewerPort("alpha", enabled=False)
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(_descriptor("alpha", 5),),
+        ports={"alpha": port},
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("post-close must not refresh order-book depth")
+
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform._sync_mis_depth_snapshot",
+        forbidden,
+    )
+    try:
+        state = acquire_taiwan_realtime_quote_lease(
+            db,
+            stock_id="2330",
+            requested_at=datetime(2026, 8, 26, 14, 0, tzinfo=TAIPEI),
+            coordinator=coordinator,
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+    assert state.lease_id is None
+    assert state.status == "unavailable"
 
 
 def test_router_no_longer_owns_kgi_specific_lease_lifecycle() -> None:

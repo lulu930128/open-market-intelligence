@@ -10,12 +10,13 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.models import (
     ProviderEvent,
-    StockMaster,
     TaiwanQuoteContractSnapshot,
-    WatchlistGroup,
-    WatchlistItem,
 )
-from app.market.quote_contract_capture import TAIWAN_QUOTE_CONTRACT_SLOTS
+from app.market.quote_contract_capture import (
+    TAIWAN_QUOTE_CONTRACT_SLOTS,
+    quote_contract_snapshot_semantic_status,
+)
+from app.market.tw_intraday_universe import resolve_taiwan_tier_a_target_plan
 
 
 QUOTE_CONTRACT_HEALTH_VERSION = "tw.quote.health.v1"
@@ -45,54 +46,23 @@ def _universe_digest(*, source: str, symbols: list[str], max_symbols: int) -> st
 
 
 def resolve_taiwan_quote_contract_universe(db: Session) -> dict[str, Any]:
-    configured = list(
-        dict.fromkeys(
-            value.strip()
-            for value in settings.scheduler_taiwan_quote_contract_symbols.split(",")
-            if value.strip()
-        )
-    )
     max_symbols = max(
         min(int(settings.scheduler_taiwan_quote_contract_max_symbols), 20),
         1,
     )
-    unknown_symbols: list[str] = []
-    if configured:
-        known = {
-            str(row[0])
-            for row in (
-                db.query(StockMaster.stock_id)
-                .filter(StockMaster.stock_id.in_(configured))
-                .all()
-            )
-        }
-        unknown_symbols = [symbol for symbol in configured if symbol not in known]
-        symbols = [symbol for symbol in configured if symbol in known][:max_symbols]
-        source = "configured_symbols"
-    else:
-        rows = (
-            db.query(WatchlistItem.stock_id)
-            .join(WatchlistGroup, WatchlistGroup.id == WatchlistItem.group_id)
-            .filter(WatchlistItem.enabled.is_(True))
-            .filter(WatchlistGroup.is_active.is_(True))
-            .order_by(
-                WatchlistItem.priority.asc(),
-                WatchlistItem.stock_id.asc(),
-            )
-            .limit(max_symbols * 4)
-            .all()
-        )
-        symbols = []
-        seen: set[str] = set()
-        for (stock_id,) in rows:
-            normalized = str(stock_id or "").strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            symbols.append(normalized)
-            if len(symbols) >= max_symbols:
-                break
-        source = "active_watchlist"
+    plan = resolve_taiwan_tier_a_target_plan(
+        db,
+        operation_profile="acceptance_canary",
+        max_symbols=max_symbols,
+    )
+    symbols = list(plan["symbols"])
+    source = "shared_tier_a_target_plan:acceptance_canary"
+    unknown_symbols = [
+        str(item["stock_id"])
+        for item in plan["skipped_targets"]
+        if item.get("reason") == "target_not_found"
+        and "configured" in (item.get("origins") or [])
+    ]
     digest = _universe_digest(
         source=source,
         symbols=symbols,
@@ -104,11 +74,12 @@ def resolve_taiwan_quote_contract_universe(db: Session) -> dict[str, Any]:
         "symbols": symbols,
         "symbol_count": len(symbols),
         "max_symbols": max_symbols,
-        "configured_symbol_count": len(configured),
+        "configured_symbol_count": int(plan["configured_symbol_count"]),
         "unknown_symbols": unknown_symbols,
         "symbol_set_digest": digest,
         "target": f"universe:{digest}",
         "scope_semantics": "bounded_symbol_universe_not_all_market",
+        "target_plan": plan,
     }
 
 
@@ -175,32 +146,39 @@ def build_taiwan_quote_scheduler_contract(
         for key, row in rows_by_key.items()
         if str(row.capture_status or "").startswith("captured")
     }
+    ready_pairs = {
+        key
+        for key, row in rows_by_key.items()
+        if quote_contract_snapshot_semantic_status(row)["ready"] is True
+    }
     failed_pairs = {
         key
         for key, row in rows_by_key.items()
         if not str(row.capture_status or "").startswith("captured")
     }
     missing_pairs = [pair for pair in required_pairs if pair not in rows_by_key]
+    unsatisfied_pairs = [pair for pair in required_pairs if pair not in ready_pairs]
     missing_symbols = [
         symbol
         for symbol in scoped_symbols
         if required_slots
-        and not any(pair[0] == symbol for pair in captured_pairs)
+        and not any(pair[0] == symbol for pair in ready_pairs)
     ]
     partial_symbols = [
         symbol
         for symbol in scoped_symbols
         if any(pair[0] == symbol for pair in captured_pairs)
-        and any(pair[0] == symbol for pair in missing_pairs)
+        and any(pair[0] == symbol for pair in unsatisfied_pairs)
     ]
     complete_symbols = [
         symbol
         for symbol in scoped_symbols
         if required_slots
-        and all((symbol, slot) in captured_pairs for slot in required_slots)
+        and all((symbol, slot) in ready_pairs for slot in required_slots)
     ]
     requested_count = len(required_pairs)
-    captured_count = len(captured_pairs)
+    transport_captured_count = len(captured_pairs)
+    captured_count = len(ready_pairs)
     status = (
         "disabled"
         if not settings.enable_taiwan_quote_contract_scheduler
@@ -240,8 +218,10 @@ def build_taiwan_quote_scheduler_contract(
         "complete_symbol_count": len(complete_symbols),
         "requested_count": requested_count,
         "captured_count": captured_count,
+        "transport_captured_count": transport_captured_count,
         "failed_count": len(failed_pairs),
         "missing_count": len(missing_pairs),
+        "semantic_unsatisfied_count": len(unsatisfied_pairs),
         "unsatisfied_count": max(requested_count - captured_count, 0),
         "coverage_ratio": (
             captured_count / requested_count if requested_count else None
@@ -251,9 +231,9 @@ def build_taiwan_quote_scheduler_contract(
         "missing_symbols": missing_symbols,
         "missing_symbol_slots": [
             {"stock_id": symbol, "capture_slot": slot}
-            for symbol, slot in missing_pairs[:100]
+            for symbol, slot in unsatisfied_pairs[:100]
         ],
-        "missing_symbol_slots_truncated": len(missing_pairs) > 100,
+        "missing_symbol_slots_truncated": len(unsatisfied_pairs) > 100,
         "read_path_side_effects": False,
     }
 

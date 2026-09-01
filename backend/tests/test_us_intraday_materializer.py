@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.models import (
     Base,
+    MarketIntradayBar,
+    MarketIntradayBarLineage,
     RawFetchResult,
     SourceRegistry,
     USQuoteSnapshot,
@@ -17,12 +19,17 @@ from app.db.models import (
 )
 from app.jobs.us_intraday_materializer_scheduler import (
     add_us_intraday_materializer_jobs,
+    collect_us_intraday_bars,
 )
 from app.market_data.gateway import PostAcquisitionError
 from app.market_data.integration_contracts import AcquisitionStatus, AcquisitionSummary
-from app.us_market.intraday_maintenance import prune_expired_us_quote_snapshots
+from app.us_market.intraday_maintenance import (
+    inspect_us_yahoo_intraday_minute_integrity,
+    prune_expired_us_quote_snapshots,
+)
 from app.us_market.intraday_materializer import (
     US_BOOTSTRAP_MATERIALIZER_PROFILE,
+    _materializer_lock_for,
     bootstrap_us_current_market,
     materialize_us_intraday_capability,
     resolve_us_materializer_universe,
@@ -174,6 +181,17 @@ def test_us_materializer_universe_is_configuration_owned_and_hard_bounded() -> N
         "is_bounded": True,
         "max_symbols": 2,
     }
+
+
+def test_us_materializer_universe_preserves_explicit_dynamic_owner() -> None:
+    universe = resolve_us_materializer_universe(
+        "AAPL,TSM,MSFT",
+        max_symbols=3,
+        owner="configuration+portfolio+watchlist",
+    )
+
+    assert universe["owner"] == "configuration+portfolio+watchlist"
+    assert universe["symbols"] == ["AAPL", "TSM", "MSFT"]
 
 
 def test_us_materializer_skips_weekend_before_opening_database() -> None:
@@ -473,6 +491,62 @@ def test_us_materializer_rejects_duplicate_concurrent_run() -> None:
     assert result["duration_ms"] >= 0
 
 
+def test_default_materializer_lock_is_keyed_by_lane_and_capability() -> None:
+    equity_quote_lock = _materializer_lock_for(
+        "equity_research",
+        "quote.snapshot",
+    )
+    equity_quote_lock.acquire()
+    try:
+        same_key = materialize_us_intraday_capability(
+            "quote.snapshot",
+            configured_symbols="AAPL",
+            lane_id="equity_research",
+            now=datetime(2026, 8, 28, 15, 0, tzinfo=timezone.utc),
+        )
+        different_key = materialize_us_intraday_capability(
+            "quote.snapshot",
+            configured_symbols="",
+            lane_id="index_current",
+            instrument_type="index",
+            now=datetime(2026, 8, 28, 15, 0, tzinfo=timezone.utc),
+        )
+    finally:
+        equity_quote_lock.release()
+
+    assert same_key["reason"] == "materializer_run_in_flight"
+    assert different_key["reason"] == "no_configured_symbols"
+
+
+def test_cache_satisfaction_is_not_reported_as_provider_refresh() -> None:
+    db = _FakeDb()
+
+    class _Platform:
+        def refresh_quote(self, **_kwargs):
+            result = _refresh_result()
+            result.result.acquisition = SimpleNamespace(
+                attempted=False,
+                external_calls=0,
+            )
+            result.result.persistence = SimpleNamespace(committed=False)
+            return result
+
+    result = materialize_us_intraday_capability(
+        "quote.snapshot",
+        configured_symbols="AAPL",
+        now=datetime(2026, 8, 28, 15, 0, tzinfo=timezone.utc),
+        session_factory=lambda: db,
+        platform_factory=lambda _db: _Platform(),
+    )
+
+    assert result["status"] == "success"
+    assert result["succeeded_count"] == 1
+    assert result["cache_satisfied_count"] == 1
+    assert result["acquired_count"] == 0
+    assert result["persisted_count"] == 0
+    assert result["refreshed_count"] == 0
+
+
 def test_runtime_summary_counts_repeated_lane_lock_contention() -> None:
     before = us_intraday_materializer_runtime_summary().get(
         "counters_by_lane",
@@ -567,12 +641,99 @@ def test_quote_retention_deletes_only_rows_before_cutoff() -> None:
         engine.dispose()
 
 
+def test_us_intraday_minute_integrity_inspection_is_bounded_and_read_only() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    observed_at = datetime(2026, 8, 28, 14, 30, tzinfo=timezone.utc)
+    try:
+        source = SourceRegistry(
+            source_name="yahoo.chart.1m",
+            source_type="api",
+            category="market_data",
+        )
+        db.add(source)
+        db.flush()
+        raw_results = []
+        for offset in (20, 55):
+            raw = RawFetchResult(
+                source_id=source.id,
+                method="GET",
+                content_hash=(f"fixture-{offset}".ljust(64, "a"))[:64],
+                parser_version="yahoo.chart.v8",
+                fetched_at=observed_at + timedelta(seconds=offset),
+            )
+            db.add(raw)
+            db.flush()
+            raw_results.append(raw)
+
+        bars = []
+        for second in (15, 52, 0):
+            bar = MarketIntradayBar(
+                provider="yahoo_chart",
+                stock_id="AAPL",
+                market="NASDAQ",
+                symbol="AAPL",
+                interval="1m",
+                bar_time=(
+                    observed_at.replace(second=second)
+                    if second
+                    else observed_at + timedelta(minutes=1)
+                ),
+                open_price=200.0,
+                high_price=201.0,
+                low_price=199.0,
+                close_price=200.5,
+                trade_volume=100,
+                source="yahoo.chart.1m",
+            )
+            db.add(bar)
+            db.flush()
+            bars.append(bar)
+        for bar, raw in zip(bars[:2], raw_results, strict=True):
+            db.add(
+                MarketIntradayBarLineage(
+                    bar_id=bar.id,
+                    source_id=source.id,
+                    raw_result_id=raw.id,
+                    provider="yahoo_chart",
+                    source="yahoo.chart.1m",
+                    authority="vendor",
+                    raw_contract_version="yahoo.chart.v8",
+                    event_at=bar.bar_time,
+                    received_at=raw.fetched_at,
+                    fetched_at=raw.fetched_at,
+                    finalization="final",
+                    source_interval="1m",
+                )
+            )
+        db.commit()
+        before = [row.bar_time for row in db.query(MarketIntradayBar).all()]
+
+        report = inspect_us_yahoo_intraday_minute_integrity(db, max_rows=10)
+
+        assert report["dry_run"] is True
+        assert report["status"] == "complete"
+        assert report["inspected_row_count"] == 3
+        assert report["non_minute_row_count"] == 2
+        assert report["duplicate_minute_bucket_count"] == 1
+        assert report["rows_in_duplicate_minute_buckets"] == 2
+        assert report["missing_lineage_count"] == 1
+        assert report["writes_performed"] == 0
+        assert report["conflicts"][0]["recommended_survivor_id"] == bars[1].id
+        assert [row.bar_time for row in db.query(MarketIntradayBar).all()] == before
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_us_materializer_scheduler_registers_three_non_overlapping_owner_jobs(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(settings, "enable_scheduler", True)
+    monkeypatch.setattr(settings, "enable_scheduler", False)
     monkeypatch.setattr(settings, "enable_us_intraday_materializer", True)
     monkeypatch.setattr(settings, "enable_us_index_quote_materializer", False)
+    monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", True)
     scheduler = _FakeScheduler()
 
@@ -584,14 +745,52 @@ def test_us_materializer_scheduler_registers_three_non_overlapping_owner_jobs(
     ]
     assert all(job["max_instances"] == 1 for job in scheduler.jobs)
     assert all(job["coalesce"] is True for job in scheduler.jobs)
-    assert scheduler.jobs[0]["seconds"] >= 300
+    assert scheduler.jobs[0]["seconds"] == 60
+    assert scheduler.jobs[0]["seconds"] > 45
     assert scheduler.jobs[1]["seconds"] >= 60
 
 
+def test_intraday_scheduler_reuses_complete_recurring_profile(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _materialize(capability, **kwargs):
+        captured["capability"] = capability
+        captured.update(kwargs)
+        return {
+            "status": "success",
+            "requested_count": 0,
+            "refreshed_count": 0,
+            "failed_count": 0,
+            "external_call_count": 0,
+            "duration_ms": 0,
+            "reason": None,
+        }
+
+    monkeypatch.setattr(
+        "app.jobs.us_intraday_materializer_scheduler.materialize_us_intraday_capability",
+        _materialize,
+    )
+    monkeypatch.setattr(settings, "scheduler_us_intraday_materializer_bars", 720)
+
+    result = collect_us_intraday_bars()
+
+    profile = captured["profile"]
+    assert result["status"] == "success"
+    assert captured["capability"] == "intraday.bars"
+    assert profile.profile_id == "recurring_current"
+    assert profile.intraday_bars == 720
+    assert profile.acquisition_history_days == 1
+    assert profile.producer_refresh_due_seconds == 45
+    assert profile.consumer_stale_after_seconds == 180
+
+
 def test_quote_retention_registration_is_independent_of_materializer(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "enable_scheduler", True)
+    monkeypatch.setattr(settings, "enable_scheduler", False)
     monkeypatch.setattr(settings, "enable_us_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_index_quote_materializer", False)
+    monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", True)
     scheduler = _FakeScheduler()
 
@@ -600,9 +799,10 @@ def test_quote_retention_registration_is_independent_of_materializer(monkeypatch
 
 
 def test_index_quote_lane_registers_without_equity_intraday_lane(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "enable_scheduler", True)
+    monkeypatch.setattr(settings, "enable_scheduler", False)
     monkeypatch.setattr(settings, "enable_us_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_index_quote_materializer", True)
+    monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", False)
     scheduler = _FakeScheduler()
 
@@ -610,6 +810,33 @@ def test_index_quote_lane_registers_without_equity_intraday_lane(monkeypatch) ->
     assert [job["id"] for job in scheduler.jobs] == [
         "us_index_quote_snapshot_materialization"
     ]
+
+
+def test_index_intraday_lane_registers_without_index_quote_lane(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "enable_us_intraday_materializer", False)
+    monkeypatch.setattr(settings, "enable_us_index_quote_materializer", False)
+    monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", True)
+    monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", False)
+    scheduler = _FakeScheduler()
+
+    assert add_us_intraday_materializer_jobs(scheduler) is True
+    assert [job["id"] for job in scheduler.jobs] == [
+        "us_index_intraday_bar_materialization"
+    ]
+
+
+def test_us_materializer_scheduler_noops_when_all_owned_flags_are_disabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "enable_scheduler", True)
+    monkeypatch.setattr(settings, "enable_us_intraday_materializer", False)
+    monkeypatch.setattr(settings, "enable_us_index_quote_materializer", False)
+    monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", False)
+    monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", False)
+    scheduler = _FakeScheduler()
+
+    assert add_us_intraday_materializer_jobs(scheduler) is False
+    assert scheduler.jobs == []
 
 
 def test_index_lane_accepts_only_configured_index_targets() -> None:
@@ -646,7 +873,7 @@ def test_bootstrap_is_explicit_bounded_and_noops_when_cache_is_satisfied() -> No
 
     assert result["status"] == "success"
     assert result["external_call_count"] == 0
-    assert len(result["runs"]) == 3
+    assert len(result["runs"]) == 4
     assert all(
         item["reason"] == "canonical_cache_already_satisfied"
         for run in result["runs"]
@@ -729,23 +956,31 @@ def test_sunday_default_cold_bootstrap_completes_with_twelve_call_budget() -> No
     )
 
     assert result["status"] == "success"
-    assert result["external_call_count"] == 10
+    assert result["external_call_count"] == 16
     assert result["remaining_external_calls"] == 2
     assert US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS == (
         US_CURRENT_MARKET_BOOTSTRAP_NORMAL_PATH_CALLS
         + US_CURRENT_MARKET_BOOTSTRAP_FALLBACK_HEADROOM
     )
-    assert len(result["runs"]) == 3
-    assert [run["external_call_count"] for run in result["runs"]] == [6, 2, 2]
+    assert len(result["runs"]) == 4
+    assert [run["external_call_count"] for run in result["runs"]] == [6, 6, 2, 2]
     assert all(run["status"] == "success" for run in result["runs"])
     assert all(
-        item["resolved_status"] == "stale"
-        and "LATEST_AVAILABLE_STALE_ACCEPTED"
-        in item["postcondition_reasons"]
+        (
+            item["resolved_status"] == "selected"
+            and "LATEST_AVAILABLE_STALE_ACCEPTED"
+            not in item["postcondition_reasons"]
+        )
+        if run["capability"] == "quote.snapshot"
+        else (
+            item["resolved_status"] == "stale"
+            and "LATEST_AVAILABLE_STALE_ACCEPTED"
+            in item["postcondition_reasons"]
+        )
         for run in result["runs"]
         for item in run["results"]
     )
-    assert len(calls) == 10
+    assert len(calls) == 16
     assert {provider for _capability, _symbol, provider in calls} == {
         "yahoo_chart"
     }
@@ -806,8 +1041,8 @@ def test_bootstrap_falls_back_after_first_provider_failure() -> None:
     assert result["status"] == "success"
     assert result["external_call_count"] == 2
     assert result["results"][0]["selected_provider"] == "twelve_data"
-    assert result["results"][0]["resolved_status"] == "stale"
-    assert "LATEST_AVAILABLE_STALE_ACCEPTED" in result["results"][0][
+    assert result["results"][0]["resolved_status"] == "selected"
+    assert "LATEST_AVAILABLE_STALE_ACCEPTED" not in result["results"][0][
         "postcondition_reasons"
     ]
     engine.dispose()

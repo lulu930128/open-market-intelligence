@@ -14,7 +14,11 @@ from app.db.models import (
     TaiwanStockQuoteSnapshot,
 )
 from app.market.trading_calendar import TAIWAN_TZ
-from app.market.tw_realtime_capabilities import quote_source_binding
+from app.market.tw_realtime_capabilities import (
+    TW_QUOTE_SNAPSHOT_CAPABILITY_ID,
+    TW_REALTIME_SOURCE_BINDINGS,
+    quote_source_binding,
+)
 from app.market_data.contracts import (
     InstrumentKey,
     Market,
@@ -263,17 +267,57 @@ class TaiwanPublicQuoteRepository:
             raise ValueError("Taiwan public quote venue must be TWSE or TPEX")
         if not 1 <= max_candidates <= 8:
             raise ValueError("public quote max_candidates must be between 1 and 8")
-        rows = (
+        base_query = (
             self._db.query(TaiwanStockQuoteSnapshot)
             .filter(TaiwanStockQuoteSnapshot.stock_id == instrument.symbol)
             .filter(TaiwanStockQuoteSnapshot.market == instrument.venue)
-            .order_by(
-                TaiwanStockQuoteSnapshot.quote_time.desc(),
-                TaiwanStockQuoteSnapshot.id.desc(),
-            )
-            .limit(32)
-            .all()
         )
+        quote_bindings = sorted(
+            (
+                binding
+                for binding in TW_REALTIME_SOURCE_BINDINGS
+                if binding.descriptor.capability_id
+                == TW_QUOTE_SNAPSHOT_CAPABILITY_ID
+            ),
+            key=lambda binding: binding.descriptor.priority,
+        )
+        rows_by_id: dict[int, TaiwanStockQuoteSnapshot] = {}
+        for binding in quote_bindings:
+            row = (
+                base_query.filter(
+                    TaiwanStockQuoteSnapshot.provider
+                    == binding.descriptor.provider_key
+                )
+                .filter(TaiwanStockQuoteSnapshot.source == binding.source)
+                .order_by(
+                    TaiwanStockQuoteSnapshot.quote_time.desc(),
+                    TaiwanStockQuoteSnapshot.id.desc(),
+                )
+                .limit(1)
+                .first()
+            )
+            if row is not None:
+                rows_by_id[row.id] = row
+                if len(rows_by_id) >= max_candidates:
+                    break
+        if len(rows_by_id) < max_candidates:
+            fallback_rows = (
+                base_query.order_by(
+                    TaiwanStockQuoteSnapshot.quote_time.desc(),
+                    TaiwanStockQuoteSnapshot.id.desc(),
+                )
+                .limit(max_candidates)
+                .all()
+            )
+            for row in fallback_rows:
+                rows_by_id.setdefault(row.id, row)
+                if len(rows_by_id) >= max_candidates:
+                    break
+        rows = sorted(
+            rows_by_id.values(),
+            key=lambda row: (row.quote_time, row.id),
+            reverse=True,
+        )[:max_candidates]
         if not rows:
             return (
                 PersistedPublicQuoteRead(

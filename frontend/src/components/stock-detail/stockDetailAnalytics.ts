@@ -166,11 +166,17 @@ export function averageRecentChartValue(
 }
 
 export function resolveTodayHeadlineValues({
+  backendPrice,
+  backendChange,
+  backendChangePct,
   currentPrice,
   currentReferenceClose,
   completedSessionPrice,
   completedSessionReferenceClose,
 }: {
+  backendPrice?: number | null;
+  backendChange?: number | null;
+  backendChangePct?: number | null;
   currentPrice: number | null | undefined;
   currentReferenceClose: number | null | undefined;
   completedSessionPrice: number | null | undefined;
@@ -179,8 +185,18 @@ export function resolveTodayHeadlineValues({
   price: number | null,
   change: number | null,
   changePct: number | null,
-  source: "current_session" | "completed_session" | "unavailable",
+  source: "backend_headline" | "current_session" | "completed_session" | "unavailable",
 ] {
+  const normalizedBackendPrice = finiteNumber(backendPrice) ? backendPrice : null;
+  if (normalizedBackendPrice !== null) {
+    return [
+      normalizedBackendPrice,
+      finiteNumber(backendChange) ? backendChange : null,
+      finiteNumber(backendChangePct) ? backendChangePct : null,
+      "backend_headline",
+    ] as const;
+  }
+
   const normalizedCurrentPrice = finiteNumber(currentPrice) ? currentPrice : null;
   const normalizedCurrentReference = finiteNumber(currentReferenceClose)
     ? currentReferenceClose
@@ -222,6 +238,64 @@ export function resolveTodayHeadlineValues({
   }
 
   return [null, null, null, "unavailable"] as const;
+}
+
+export function resolveQuoteDepthHeadlineValues({
+  allowIndicative,
+  indicativeAvailable,
+  indicativePrice,
+  headlinePrice,
+  headlineChange,
+  headlineChangePct,
+  legacyPrice,
+  legacyChange,
+  legacyChangePct,
+  previousClose,
+}: {
+  allowIndicative: boolean;
+  indicativeAvailable: boolean | undefined;
+  indicativePrice: number | null | undefined;
+  headlinePrice: number | null | undefined;
+  headlineChange: number | null | undefined;
+  headlineChangePct: number | null | undefined;
+  legacyPrice: number | null | undefined;
+  legacyChange: number | null | undefined;
+  legacyChangePct: number | null | undefined;
+  previousClose: number | null | undefined;
+}): readonly [number | null, number | null, number | null] {
+  const selectedIndicative =
+    allowIndicative && indicativeAvailable && finiteNumber(indicativePrice)
+      ? indicativePrice
+      : null;
+  if (selectedIndicative !== null) {
+    const reference = finiteNumber(previousClose) ? previousClose : null;
+    const change = reference !== null ? selectedIndicative - reference : null;
+    return [
+      selectedIndicative,
+      change,
+      change !== null && reference !== null && reference !== 0
+        ? (change / reference) * 100
+        : null,
+    ] as const;
+  }
+
+  return [
+    finiteNumber(headlinePrice)
+      ? headlinePrice
+      : finiteNumber(legacyPrice)
+        ? legacyPrice
+        : null,
+    finiteNumber(headlineChange)
+      ? headlineChange
+      : finiteNumber(legacyChange)
+        ? legacyChange
+        : null,
+    finiteNumber(headlineChangePct)
+      ? headlineChangePct
+      : finiteNumber(legacyChangePct)
+        ? legacyChangePct
+        : null,
+  ] as const;
 }
 
 export function chartWindowStats(points: ChartPoint[], windowSize: number) {

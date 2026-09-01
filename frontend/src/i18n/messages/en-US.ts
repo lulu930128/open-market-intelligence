@@ -1899,6 +1899,9 @@ export const enUS = {
       refreshEvery: "Updates every {seconds}s during session",
       refreshEveryUpdated:
         "Updates every {seconds}s during session, last updated {updatedAt}",
+      cachePollEvery: "Checks the local cache every {seconds}s",
+      cachePollEveryUpdated:
+        "Checks the local cache every {seconds}s, latest data {updatedAt}",
       currentTradeAvailable: "MIS trade {time} · history gap {lag}s, aligned by backend",
       currentTradeUnavailable:
         "Current trade is unconfirmed ({reason}); retaining the history-source trend",
@@ -2770,6 +2773,15 @@ export const enUS = {
     },
   },
   usStockDetail: {
+    currentQuote: {
+      unavailable: "Current-session quote is not available yet",
+      expectedMissing: "Pre-market or after-hours quote is not available yet",
+      requiredMissing: "Live quote is unexpectedly unavailable",
+      noTrade: "No new trade has occurred yet",
+      notExpected: "Live quote is not expected in this session",
+      previousCloseReference: "Prev close {price} · {date}",
+      currentDayRegularCloseReference: "Today's regular close {price} · {date}",
+    },
     sourceStatus: {
       providerErrorTitle: "{provider} upstream issue",
       delayedTitle: "{provider} upstream delay",
@@ -2870,7 +2882,13 @@ export const enUS = {
       title: "US pre-market / after-hours",
       meta: "{phase} · regular {regular} / extended {extended}",
       noExtendedData:
-        "Yahoo chart did not return pre-market or after-hours minute data yet; showing available regular-session data.",
+        "No pre-market or after-hours minute data is available; switch to Regular to view available data.",
+      cacheOnlyPolicy:
+        "This view reads the local cache; the background updater owns market-data acquisition.",
+      regularMissingExtendedAvailable:
+        "Regular-session data is not available yet; {count} pre/post points are available under Pre/Post or All.",
+      extendedMissingRegularAvailable:
+        "Pre/post data is not available yet; {count} regular-session points are available under Regular.",
       scopes: {
         regular: "Regular",
         extended: "Pre/Post",

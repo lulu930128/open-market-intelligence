@@ -46,6 +46,18 @@ class MarketSession(str, Enum):
     UNKNOWN = "unknown"
 
 
+class CapabilityExpectation(str, Enum):
+    """Whether a capability should exist at the current policy checkpoint.
+
+    Session scope, provider support, applicability, availability, and freshness
+    remain separate axes. Market owners decide the value for their calendar.
+    """
+
+    NOT_EXPECTED = "not_expected"
+    EXPECTED = "expected"
+    REQUIRED = "required"
+
+
 class InstrumentTradability(str, Enum):
     TRADABLE = "tradable"
     HALTED = "halted"

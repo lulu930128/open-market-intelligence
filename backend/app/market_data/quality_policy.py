@@ -26,6 +26,7 @@ from app.market_data.integration_contracts import (
     DataRequirementV2,
     FreshnessBasis,
     SnapshotCapabilityRequest,
+    freshness_timestamp,
 )
 from app.market_data.policies import RealtimePolicy
 
@@ -165,10 +166,6 @@ def _lineage_has_future_timestamp(lineage: SourceLineage, *, now: datetime) -> b
     )
 
 
-def _observed_at(lineage: SourceLineage) -> datetime | None:
-    return lineage.event_at or lineage.received_at or lineage.fetched_at
-
-
 def evaluate_candidate_quality(
     observation: CanonicalModel,
     *,
@@ -275,10 +272,14 @@ def evaluate_candidate_quality(
         research_usable = False
 
     if freshness is not None and isinstance(lineage, SourceLineage):
-        observed_at = _observed_at(lineage)
+        observed_at = freshness_timestamp(
+            lineage,
+            requirement.freshness.basis,
+        )
         if (
             observed_at is not None
-            and requirement.freshness.basis is FreshnessBasis.WALL_CLOCK
+            and requirement.freshness.basis
+            is not FreshnessBasis.COMPLETED_SESSION_DATE
             and requirement.realtime_policy is not RealtimePolicy.COMPLETED_SESSION
             and evaluation_time - observed_at
             > timedelta(seconds=requirement.freshness.max_age_seconds)

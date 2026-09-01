@@ -246,14 +246,24 @@ def canonical_yahoo_chart_payload(
         raise ValueError("Yahoo chart payload has no timestamp/quote series")
 
     bars: list[BarObservation] = []
+    minute_bars: dict[datetime, tuple[datetime, BarObservation]] = {}
     skipped = 0
     extended_zero_volume_count = 0
+    duplicate_minute_count = 0
     for index, raw_timestamp in enumerate(timestamps):
         try:
-            start_at = datetime.fromtimestamp(int(raw_timestamp), tz=US_EASTERN)
+            provider_event_at = datetime.fromtimestamp(
+                int(raw_timestamp),
+                tz=US_EASTERN,
+            )
         except (OSError, OverflowError, TypeError, ValueError):
             skipped += 1
             continue
+        start_at = (
+            provider_event_at.replace(second=0, microsecond=0)
+            if interval == "1m"
+            else provider_event_at
+        )
         session = (
             MarketSession.POST_CLOSE
             if interval == "1d"
@@ -310,42 +320,52 @@ def canonical_yahoo_chart_payload(
             if volume_status == "provider_unavailable":
                 extended_zero_volume_count += 1
             parsed_volume = _quantity(normalized_volume)
-        bars.append(
-            BarObservation(
-                instrument=instrument,
-                lineage=_lineage(
-                    provider="yahoo_chart",
-                    source=f"yahoo.chart.{interval}",
-                    event_at=end_at,
-                    fetched_at=fetched_at,
-                    raw_contract_version="yahoo.chart.v8",
-                ),
-                interval=interval,
-                start_at=start_at,
-                end_at=end_at,
-                open_price=open_price,
-                high_price=high_price,
-                low_price=low_price,
-                close_price=close_price,
-                volume=parsed_volume,
-                volume_status=(
-                    "not_applicable"
-                    if daily_index_volume_not_applicable
-                    else "observed"
-                    if parsed_volume is not None
-                    else "missing"
-                ),
-                price_basis="raw",
-                finalization=finalization,
-            )
+        bar = BarObservation(
+            instrument=instrument,
+            lineage=_lineage(
+                provider="yahoo_chart",
+                source=f"yahoo.chart.{interval}",
+                event_at=(provider_event_at if interval == "1m" else end_at),
+                fetched_at=fetched_at,
+                raw_contract_version="yahoo.chart.v8",
+            ),
+            interval=interval,
+            start_at=start_at,
+            end_at=end_at,
+            open_price=open_price,
+            high_price=high_price,
+            low_price=low_price,
+            close_price=close_price,
+            volume=parsed_volume,
+            volume_status=(
+                "not_applicable"
+                if daily_index_volume_not_applicable
+                else "observed"
+                if parsed_volume is not None
+                else "missing"
+            ),
+            price_basis="raw",
+            finalization=finalization,
         )
+        if interval == "1m":
+            existing = minute_bars.get(start_at)
+            if existing is not None:
+                duplicate_minute_count += 1
+            if existing is None or provider_event_at >= existing[0]:
+                minute_bars[start_at] = (provider_event_at, bar)
+        else:
+            bars.append(bar)
+    if interval == "1m":
+        bars.extend(bar for _, bar in minute_bars.values())
     bars.sort(key=lambda item: item.start_at)
-    if any(current.start_at == following.start_at for current, following in zip(bars, bars[1:])):
-        raise ValueError("Yahoo chart payload contains duplicate bar timestamps")
     limitations = tuple(
         code
         for code, present in (
             ("MALFORMED_BARS_SKIPPED", skipped > 0),
+            (
+                "YAHOO_DUPLICATE_MINUTE_BARS_DEDUPLICATED",
+                duplicate_minute_count > 0,
+            ),
             (
                 "YAHOO_EXTENDED_VOLUME_ZERO_FILLED",
                 extended_zero_volume_count > 0,

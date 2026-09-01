@@ -809,8 +809,44 @@ export type ChartPoint = {
   low: number | null;
   close: number | null;
   volume: number | null;
+  cumulative_volume?: number | null;
   trade_value: number | null;
   transaction_count: number | null;
+  finalization?: string | null;
+  finalized?: boolean | null;
+  is_partial?: boolean | null;
+  bar_type?: string | null;
+  source_event_type?: string | null;
+  market_event?: string | null;
+  display_eligible?: boolean | null;
+  indicator_eligible?: boolean | null;
+  price_semantics?: string | null;
+  synthetic?: boolean;
+  session_phase?: string | null;
+  gap_reason?: string | null;
+  evidence_trade_date?: string | null;
+  evidence_finalization?: string | null;
+  evidence_event_time?: string | null;
+  session_close_price?: number | null;
+  session_close_trade_date?: string | null;
+  session_close_event_time?: string | null;
+  session_close_provider?: string | null;
+  session_close_source?: string | null;
+  official_close_price?: number | null;
+  official_close_trade_date?: string | null;
+  official_close_event_time?: string | null;
+  official_close_provider?: string | null;
+  official_close_source?: string | null;
+  closing_match_volume_shares?: number | null;
+  closing_match_volume_lots?: number | null;
+  session_cumulative_volume_shares?: number | null;
+  session_cumulative_volume_lots?: number | null;
+  session_cumulative_volume_trade_date?: string | null;
+  session_cumulative_volume_event_time?: string | null;
+  volume_provider?: string | null;
+  volume_source?: string | null;
+  volume_event_time?: string | null;
+  volume_scope?: string | null;
 };
 
 export type OhlcIntradayOverlay = {
@@ -1202,10 +1238,40 @@ export type IntradayTrendPoint = {
   source_event_type?: string | null;
   market_event?: string | null;
   finalized?: boolean | null;
+  finalization?: string | null;
   is_partial?: boolean | null;
   display_eligible?: boolean | null;
   indicator_eligible?: boolean | null;
   price_semantics?: string | null;
+  synthetic?: boolean;
+  session_phase?: string | null;
+  gap_reason?: string | null;
+  bar_close_time?: string | null;
+  evidence_trade_date?: string | null;
+  evidence_finalization?: string | null;
+  evidence_event_time?: string | null;
+  provider?: string | null;
+  source?: string | null;
+  session_close_price?: number | null;
+  session_close_trade_date?: string | null;
+  session_close_event_time?: string | null;
+  session_close_provider?: string | null;
+  session_close_source?: string | null;
+  official_close_price?: number | null;
+  official_close_trade_date?: string | null;
+  official_close_event_time?: string | null;
+  official_close_provider?: string | null;
+  official_close_source?: string | null;
+  closing_match_volume_shares?: number | null;
+  closing_match_volume_lots?: number | null;
+  session_cumulative_volume_shares?: number | null;
+  session_cumulative_volume_lots?: number | null;
+  session_cumulative_volume_trade_date?: string | null;
+  session_cumulative_volume_event_time?: string | null;
+  volume_provider?: string | null;
+  volume_source?: string | null;
+  volume_event_time?: string | null;
+  volume_scope?: string | null;
   volume_status?: string | null;
   trade_value_status?: string | null;
 };
@@ -1242,6 +1308,23 @@ export type IntradayCurrentObservation = {
   limitations?: string[];
   previous_close?: number | null;
   previous_close_provider?: string | null;
+  previous_close_source?: string | null;
+  previous_close_trade_date?: string | null;
+  previous_close_status?: string;
+  prior_regular_close?: number | null;
+  current_day_regular_close?: number | null;
+  change_reference_price?: number | null;
+  change_reference_source?: string | null;
+  change_reference_trade_date?: string | null;
+  change_reference_provider?: string | null;
+  change_reference_type?:
+    | "prior_regular_close"
+    | "current_day_regular_close"
+    | "last_completed_regular_close"
+    | "unavailable"
+    | string;
+  change_reference_status?: "current" | "historical" | "missing" | string;
+  change_reference_reason_code?: string;
   freshness_status: string;
   decision_usable: boolean;
 };
@@ -1287,12 +1370,58 @@ export type USIntradaySourceStatus = {
   is_live_window: boolean;
   as_of: string | null;
   lag_seconds: number | null;
+  provider_snapshot_as_of?: string | null;
+  provider_snapshot_lag_seconds?: number | null;
+  provider_snapshot_freshness?: "fresh" | "stale" | "missing" | "unknown" | string;
+  trade_state?: string;
+  trade_recency?: "current" | "delayed" | "old" | "historical" | "missing" | "unknown" | string;
   is_fallback: boolean;
   has_usable_data: boolean;
   decision_usable?: boolean;
   selection_reason?: string | null;
   limitations?: string[];
   message: string | null;
+};
+
+export type USIntradaySessionCoverage = {
+  trade_date: string | null;
+  regular_point_count: number;
+  extended_point_count: number;
+  has_extended_hours: boolean;
+  requested_scope: "regular" | "extended" | "all" | string;
+  requested_point_count: number;
+};
+
+export type USCapabilityExpectation = {
+  contract_version: "omi.us.capability_expectation.v1" | string;
+  capability_id: "quote.snapshot" | "intraday.bars" | string;
+  market_phase: string;
+  expectation: "not_expected" | "expected" | "required";
+  expected_now: boolean;
+  required_now: boolean;
+  expected_session_scope: "none" | "regular" | "extended" | "all";
+  requested_session_scope: "none" | "regular" | "extended" | "all";
+  applicability: "applicable" | "not_applicable" | "unknown";
+  support_status: "supported" | "unsupported" | "unknown";
+  live_support_status: "supported" | "unsupported" | "unknown";
+  availability: "available" | "valid_empty" | "missing" | "unavailable" | "unknown";
+  evidence_freshness: "live" | "fresh" | "stale" | "missing" | "not_applicable" | "unknown";
+  provider_snapshot_freshness: "live" | "fresh" | "stale" | "missing" | "not_applicable" | "unknown";
+  trade_state: string;
+  trade_recency: string;
+  requirement_satisfied: boolean | null;
+  outcome:
+    | "ready"
+    | "stale"
+    | "expected_but_missing"
+    | "valid_empty"
+    | "historical"
+    | "not_expected"
+    | "unsupported"
+    | "not_applicable"
+    | "unavailable"
+    | "unknown";
+  reason_code: string;
 };
 
 export type USResolvedQuoteValue = {
@@ -1314,6 +1443,20 @@ export type USResolvedQuoteValue = {
   fetched_at: string | null;
 };
 
+export type USSessionDateRelation = {
+  kind: "session_date_relation" | string;
+  version: "omi.us.session_date_relation.v1" | string;
+  relation: string;
+  status: "aligned" | "missing" | "mismatch" | "unknown" | string;
+  expected: boolean;
+  quote_date: string | null;
+  completed_daily_date: string | null;
+  expected_completed_daily_date: string;
+  current_session_date: string;
+  release_at: string;
+  market_phase: string;
+};
+
 export type USResolvedQuoteSnapshot = {
   kind: string;
   schema_version: string;
@@ -1329,7 +1472,40 @@ export type USResolvedQuoteSnapshot = {
   research_usable: boolean;
   limitations: string[];
   candidates: Array<Record<string, unknown>>;
+  eligible_providers?: string[];
+  eligible_provider_count?: number;
+  single_source?: boolean;
   quote: USResolvedQuoteValue | null;
+  market_phase?: string | null;
+  capability_expectation?: USCapabilityExpectation | null;
+  source_status?: USIntradaySourceStatus | null;
+  session_date_relation?: USSessionDateRelation | null;
+};
+
+export type TaiwanIntradaySeriesCoverage = {
+  status: "complete_prefix" | "complete_session" | "trailing_window" | "partial_prefix" | "partial_window" | "sparse" | "missing" | string;
+  trade_date?: string | null;
+  observed_bar_count?: number;
+  observed_regular_minute_count?: number;
+  expected_point_count_approx?: number;
+  expected_full_session_point_count_approx?: number;
+  first_bar_at?: string | null;
+  last_bar_at?: string | null;
+  observed_start?: string | null;
+  observed_end?: string | null;
+  expected_session_start?: string | null;
+  expected_observed_end?: string | null;
+  expected_continuous_end?: string | null;
+  expected_close_time?: string | null;
+  opening_covered?: boolean;
+  expected_window_end_covered?: boolean;
+  current_window_complete?: boolean;
+  continuous_session_covered?: boolean;
+  session_volume_complete?: boolean;
+  current_cumulative_volume_complete?: boolean;
+  gap_count?: number;
+  gap_reason?: string | null;
+  coverage_semantics?: string;
 };
 
 export type IntradayTrendResponse = {
@@ -1341,15 +1517,18 @@ export type IntradayTrendResponse = {
   source_interval?: string | null;
   effective_interval?: string | null;
   source_point_count?: number | null;
+  projection_event_count?: number;
   aggregation_method?: string | null;
   bar_finalization_status?: string | null;
   trade_date?: string | null;
   coverage_status?: string | null;
   session_scope?: string;
   session_phase?: string | null;
+  market_phase?: string | null;
   has_extended_hours?: boolean;
   regular_point_count?: number;
   extended_point_count?: number;
+  session_coverage?: USIntradaySessionCoverage;
   previous_close: number | null;
   previous_close_source?: string | null;
   previous_close_trade_date?: string | null;
@@ -1357,6 +1536,28 @@ export type IntradayTrendResponse = {
   expected_previous_close_trade_date?: string | null;
   previous_close_status?: "current" | "missing" | "unknown" | string;
   rejected_previous_close_trade_date?: string | null;
+  prior_regular_close?: number | null;
+  prior_regular_close_source?: string | null;
+  prior_regular_close_trade_date?: string | null;
+  prior_regular_close_provider?: string | null;
+  prior_regular_close_status?: "current" | "missing" | string;
+  current_day_regular_close?: number | null;
+  current_day_regular_close_source?: string | null;
+  current_day_regular_close_trade_date?: string | null;
+  current_day_regular_close_provider?: string | null;
+  current_day_regular_close_status?: "current" | "missing" | string;
+  change_reference_price?: number | null;
+  change_reference_source?: string | null;
+  change_reference_trade_date?: string | null;
+  change_reference_provider?: string | null;
+  change_reference_type?:
+    | "prior_regular_close"
+    | "current_day_regular_close"
+    | "last_completed_regular_close"
+    | "unavailable"
+    | string;
+  change_reference_status?: "current" | "historical" | "missing" | string;
+  change_reference_reason_code?: string;
   regular_session_close?: number | null;
   regular_session_close_time?: string | null;
   regular_session_close_source?: string | null;
@@ -1365,8 +1566,11 @@ export type IntradayTrendResponse = {
   points: IntradayTrendPoint[];
   volume_pace?: StockVolumePace | null;
   quote_snapshot?: USResolvedQuoteSnapshot | null;
+  session_date_relation?: USSessionDateRelation | null;
   current_source_status?: USIntradaySourceStatus | null;
   bar_source_status?: USIntradaySourceStatus | null;
+  capability_expectation?: Record<string, USCapabilityExpectation>;
+  series_coverage?: TaiwanIntradaySeriesCoverage | null;
   source_status?: USIntradaySourceStatus | null;
   as_of?: string | null;
   total_volume?: number | null;
@@ -1489,6 +1693,17 @@ export type TaiwanStockQuoteDepthRead = {
   low_price: number | null;
   change: number | null;
   change_pct: number | null;
+  headline_price?: number | null;
+  headline_reference_price?: number | null;
+  headline_change?: number | null;
+  headline_change_pct?: number | null;
+  headline_event_time?: string | null;
+  headline_trade_date?: string | null;
+  headline_basis?: string;
+  headline_finalization?: string;
+  headline_authority?: string;
+  headline_source?: string | null;
+  headline_decision_usable?: boolean;
   total_volume_lots: number | null;
   cumulative_volume_lots?: number | null;
   cumulative_volume_shares?: number | null;
@@ -1527,6 +1742,16 @@ export type TaiwanStockQuoteDepthRead = {
   bid_levels: TaiwanStockQuoteDepthLevel[];
   ask_levels: TaiwanStockQuoteDepthLevel[];
   depth_available: boolean;
+  depth_live_available?: boolean;
+  depth_snapshot_available?: boolean;
+  depth_snapshot_status?: string;
+  depth_snapshot_semantics?: string;
+  depth_snapshot_event_time?: string | null;
+  depth_snapshot_trade_date?: string | null;
+  depth_snapshot_provider?: string | null;
+  depth_snapshot_source?: string | null;
+  depth_snapshot_session?: string | null;
+  depth_snapshot_decision_usable?: boolean;
   auction_book_available?: boolean;
   auction_book_status?: string;
   auction_book_time?: string | null;
@@ -1767,10 +1992,16 @@ export type TaiwanRealtimeMarketStreamRead = {
 export type TaiwanQuoteContractReplaySnapshotRead = {
   capture_slot: string;
   status: string;
+  capture_transport_status: string;
+  required_capabilities: string[];
   scheduled_at: string | null;
   captured_at: string | null;
   quote_time: string | null;
   freshness_status: string | null;
+  semantic_status: string;
+  semantic_ready: boolean;
+  semantic_acceptance: string;
+  semantic_reason: string | null;
   refresh_outcome: string | null;
   error: string | null;
   quote: TaiwanStockQuoteDepthRead | null;
@@ -1784,6 +2015,7 @@ export type TaiwanQuoteContractReplayRead = {
   required_slots: string[];
   required_count: number;
   captured_count: number;
+  semantic_ready_count: number;
   coverage_ratio: number;
   complete: boolean;
   missing_slots: string[];
@@ -1804,6 +2036,7 @@ export type IntradayHistoryResponse = {
   to_time: string | null;
   point_count: number;
   cached_count: number;
+  projection_event_count?: number;
   refreshed_count: number;
   read_policy?: "cache_only" | string;
   acquisition_status?: string | null;
@@ -1812,6 +2045,7 @@ export type IntradayHistoryResponse = {
   limitations?: string[];
   component_raw_result_ids?: string[];
   calculation_versions?: string[];
+  series_coverage?: TaiwanIntradaySeriesCoverage | null;
   points: ChartPoint[];
 };
 

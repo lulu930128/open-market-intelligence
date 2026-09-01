@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 from app.ai.market_context import taiwan_market, taiwan_screening
+from app.market.indices import assess_market_index_contribution_quality
 
 
 class TaiwanMarketAggregateTests(unittest.TestCase):
@@ -130,7 +131,11 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             "read_market_chips_context": Mock(),
             "read_market_volume_state": Mock(),
             "build_taiwan_source_health": Mock(),
-            "now": Mock(),
+            "now": Mock(
+                return_value=datetime.fromisoformat(
+                    "2026-07-29T14:00:00+08:00"
+                )
+            ),
             "get_market_index_contributions": Mock(),
             "list_taiwan_corporate_events": None,
         }
@@ -332,6 +337,10 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             return_value={
                 "trade_date": "2026-07-29",
                 "source": "twse_official",
+                "status": "ready",
+                "decision_usable": True,
+                "current_for_requested_session": True,
+                "is_complete": True,
                 "reconciliation_status": "within_tolerance",
                 "positive": [],
                 "negative": [],
@@ -375,6 +384,71 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             capability["missing"],
             ["market_index_contributions.TPEX"],
         )
+        self.assertFalse(capability["decision_usable"])
+
+    def test_contribution_quality_rejects_empty_or_unreconciled_estimate(
+        self,
+    ) -> None:
+        quality = assess_market_index_contribution_quality(
+            {
+                "trade_date": "2026-07-29",
+                "component_universe_count": 100,
+                "covered_component_count": 0,
+                "coverage_ratio": 0.0,
+                "estimated_total_contribution_points": 0.0,
+                "reconciliation_status": "outside_tolerance",
+                "confidence": "low",
+            },
+            expected_trade_date="2026-07-29",
+        )
+
+        self.assertEqual(quality["status"], "partial")
+        self.assertFalse(quality["decision_usable"])
+        self.assertFalse(quality["current_for_requested_session"])
+        self.assertIn("COVERED_COMPONENTS_EMPTY", quality["reason_codes"])
+        self.assertIn(
+            "RECONCILIATION_NOT_WITHIN_TOLERANCE",
+            quality["reason_codes"],
+        )
+
+    def test_contribution_quality_requires_expected_trade_date_match(
+        self,
+    ) -> None:
+        quality = assess_market_index_contribution_quality(
+            {
+                "trade_date": "2026-07-28",
+                "component_universe_count": 100,
+                "covered_component_count": 95,
+                "coverage_ratio": 0.95,
+                "estimated_total_contribution_points": 42.0,
+                "reconciliation_status": "within_tolerance",
+                "confidence": "high",
+            },
+            expected_trade_date="2026-07-29",
+        )
+
+        self.assertFalse(quality["decision_usable"])
+        self.assertEqual(quality["reason_codes"], ["TRADE_DATE_MISMATCH"])
+
+    def test_contribution_quality_accepts_current_reconciled_estimate(
+        self,
+    ) -> None:
+        quality = assess_market_index_contribution_quality(
+            {
+                "trade_date": "2026-07-29",
+                "component_universe_count": 100,
+                "covered_component_count": 95,
+                "coverage_ratio": 0.95,
+                "estimated_total_contribution_points": 42.0,
+                "reconciliation_status": "within_tolerance",
+                "confidence": "high",
+            },
+            expected_trade_date="2026-07-29",
+        )
+
+        self.assertEqual(quality["status"], "ready")
+        self.assertTrue(quality["decision_usable"])
+        self.assertTrue(quality["current_for_requested_session"])
 
     def test_current_empty_event_calendar_is_valid(self) -> None:
         listing = Mock(

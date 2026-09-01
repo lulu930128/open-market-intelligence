@@ -11,6 +11,69 @@ from app.ai.market_context.taiwan_projection import (
 
 
 class TaiwanQuoteComponentTests(unittest.TestCase):
+    def test_order_book_freshness_uses_component_health_not_parent_quote(
+        self,
+    ) -> None:
+        stale_component = _compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth={
+                "session_phase": "regular_live",
+                "depth_available": True,
+                "depth_status": "current",
+                "snapshot_time": "2026-08-27T10:00:00+08:00",
+                "freshness": {"status": "current", "is_stale": False},
+                "data_core_components": {
+                    "quote.order_book": {
+                        "provider": "kgi_superpy",
+                        "source": "kgi_quote_depth",
+                        "resolved_health": {
+                            "status": "stale",
+                            "selected_event_at": "2026-08-27T09:00:00+08:00",
+                            "research_usable": False,
+                            "facts_usable": False,
+                            "selection_reason": "component_stale",
+                        },
+                    }
+                },
+            },
+            quote_error=None,
+        )["components"]["order_book"]
+
+        self.assertEqual(stale_component["status"], "stale")
+        self.assertFalse(stale_component["freshness"]["is_current"])
+        self.assertEqual(
+            stale_component["freshness"]["latest"],
+            "2026-08-27T09:00:00+08:00",
+        )
+
+        current_component = _compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth={
+                "session_phase": "regular_live",
+                "depth_available": True,
+                "depth_status": "stale",
+                "snapshot_time": "2026-08-27T10:00:00+08:00",
+                "freshness": {"status": "stale", "is_stale": True},
+                "data_core_components": {
+                    "quote.order_book": {
+                        "provider": "kgi_superpy",
+                        "source": "kgi_quote_depth",
+                        "resolved_health": {
+                            "status": "selected",
+                            "selected_event_at": "2026-08-27T10:00:00+08:00",
+                            "research_usable": True,
+                            "facts_usable": True,
+                            "selection_reason": "component_current",
+                        },
+                    }
+                },
+            },
+            quote_error=None,
+        )["components"]["order_book"]
+
+        self.assertEqual(current_component["status"], "current")
+        self.assertTrue(current_component["freshness"]["is_current"])
+
     def test_post_close_session_close_owns_headline_while_official_daily_is_pending(
         self,
     ) -> None:

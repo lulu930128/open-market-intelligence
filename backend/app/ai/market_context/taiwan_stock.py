@@ -183,6 +183,70 @@ def _latest_daily_value(evidence: Any) -> Any:
     return getattr(evidence, "daily", evidence)
 
 
+def _apply_taiwan_official_daily_release_truth(
+    *,
+    latest_daily: Any,
+    calendar_status: dict[str, Any],
+    missing: list[str],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Project release-window truth without treating D-1 as today's official EOD."""
+
+    release_windows = (
+        calendar_status.get("release_windows")
+        if isinstance(calendar_status.get("release_windows"), dict)
+        else {}
+    )
+    daily_window = (
+        release_windows.get("market_daily_price")
+        if isinstance(release_windows.get("market_daily_price"), dict)
+        else {}
+    )
+    expected_trade_date = _json_value(daily_window.get("expected_trade_date"))
+    latest_trade_date = _json_value(getattr(latest_daily, "trade_date", None))
+    release_status = str(daily_window.get("status") or "unknown")
+    is_released = bool(
+        daily_window.get("is_released") is True or release_status == "released"
+    )
+    latest_is_older = bool(
+        latest_trade_date
+        and expected_trade_date
+        and str(latest_trade_date) < str(expected_trade_date)
+    )
+    unavailable_after_release = bool(
+        is_released
+        and expected_trade_date
+        and (latest_trade_date is None or latest_is_older)
+    )
+    if unavailable_after_release:
+        if "market_daily_price" not in missing:
+            missing.append("market_daily_price")
+        warning = (
+            "TW_OFFICIAL_DAILY_RELEASED_BUT_UNAVAILABLE: Taiwan official daily "
+            f"EOD is released for {expected_trade_date}, but canonical "
+            f"market_daily_price latest trade date is {latest_trade_date or 'missing'}."
+        )
+        if warning not in warnings:
+            warnings.append(warning)
+    elif latest_is_older:
+        warning = (
+            "Latest local daily quote is older than the expected Taiwan trading date."
+        )
+        if warning not in warnings:
+            warnings.append(warning)
+    return {
+        "status": (
+            "released_but_unavailable"
+            if unavailable_after_release
+            else release_status
+        ),
+        "is_released": is_released,
+        "expected_trade_date": expected_trade_date,
+        "latest_trade_date": latest_trade_date,
+        "unavailable_after_release": unavailable_after_release,
+    }
+
+
 def _apply_disposition_quote_contract(
     quote: dict[str, Any],
     disposition: dict[str, Any],
@@ -815,6 +879,20 @@ def _apply_taiwan_current_price_contract(
         is_trading_day=calendar_status.get("is_trading_day"),
         session_phase=calendar_status.get("phase"),
     )
+    current_session_date = _json_value(calendar_status.get("date"))
+    if (
+        resolved.get("value") is None
+        and resolved.get("source_kind") == "previous_close_reference"
+        and completed_daily_date
+        and current_session_date
+        and str(completed_daily_date) < str(current_session_date)
+    ):
+        latest_completed_close = _json_value(
+            getattr(latest_daily, "close_price", None)
+        )
+        if isinstance(latest_completed_close, (int, float, Decimal)):
+            if latest_completed_close > 0:
+                resolved["reference_price"] = latest_completed_close
     quote["provider_trade_date"] = provider_trade_date
     quote["current_price"] = resolved
     quote["current_price_available"] = resolved.get("value") is not None
@@ -1027,27 +1105,19 @@ def read_stock_quote_context(
         missing.append("market_daily_price")
 
     calendar_status = dependencies.build_taiwan_calendar_status()
-    release_windows = (
-        calendar_status.get("release_windows")
-        if isinstance(calendar_status.get("release_windows"), dict)
-        else {}
+    official_daily_release = _apply_taiwan_official_daily_release_truth(
+        latest_daily=latest_daily,
+        calendar_status=calendar_status,
+        missing=missing,
+        warnings=warnings,
     )
-    daily_window = (
-        release_windows.get("market_daily_price")
-        if isinstance(release_windows.get("market_daily_price"), dict)
-        else {}
-    )
-    expected_trade_date = daily_window.get("expected_trade_date")
-    latest_trade_date = _json_value(getattr(latest_daily, "trade_date", None))
+    expected_trade_date = official_daily_release["expected_trade_date"]
+    latest_trade_date = official_daily_release["latest_trade_date"]
     quote_is_stale = bool(
         latest_trade_date
         and expected_trade_date
         and str(latest_trade_date) < str(expected_trade_date)
     )
-    if quote_is_stale:
-        warnings.append(
-            "Latest local daily quote is older than the expected Taiwan trading date."
-        )
 
     params = market_data_params if isinstance(market_data_params, dict) else {}
     requested_domain_values = tuple(
@@ -1134,6 +1204,7 @@ def read_stock_quote_context(
             }
         )
     quote["freshness"] = quote_freshness
+    quote["official_daily_release"] = official_daily_release
     quote["market_status"] = market_status_from_session(calendar_status)
     quote["timezone"] = calendar_status.get("timezone") or "Asia/Taipei"
     session = calendar_status.get("session") if isinstance(calendar_status.get("session"), dict) else {}
@@ -2207,6 +2278,12 @@ def read_stock_context(
             ]
         )
     market_calendar_status = dependencies.build_taiwan_calendar_status()
+    official_daily_release = _apply_taiwan_official_daily_release_truth(
+        latest_daily=latest_daily,
+        calendar_status=market_calendar_status,
+        missing=missing,
+        warnings=warnings,
+    )
     source_health = dependencies.build_taiwan_source_health(
         db=db,
         stock_id=normalized_stock_id,
@@ -2520,6 +2597,7 @@ def read_stock_context(
                 latest_daily_evidence=latest_daily_evidence,
             ),
             "market_calendar_status": market_calendar_status,
+            "official_daily_release": official_daily_release,
             "source_health": source_health,
             "events": {
                 key.split(".", 1)[1]: value

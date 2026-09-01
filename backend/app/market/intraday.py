@@ -167,6 +167,7 @@ def _intraday_bar_semantics(
         "regular_interval",
         "closing_auction",
         "official_close_marker",
+        "session_close_marker",
         "post_close_summary",
         "provider_irregular",
         "synthetic_fill",
@@ -205,6 +206,7 @@ def _intraday_bar_semantics(
         "regular_interval": "regular",
         "closing_auction": "closing_auction",
         "official_close_marker": "post_close",
+        "session_close_marker": "post_close",
         "post_close_summary": "post_close",
         "synthetic_fill": "synthetic",
         "provider_irregular": "provider_irregular",
@@ -213,6 +215,7 @@ def _intraday_bar_semantics(
         "regular_interval": "continuous_trading",
         "closing_auction": "closing_auction",
         "official_close_marker": "official_close",
+        "session_close_marker": "session_close",
         "post_close_summary": "post_close_confirmation",
         "synthetic_fill": "synthetic_fill",
         "provider_irregular": "provider_irregular",
@@ -221,12 +224,33 @@ def _intraday_bar_semantics(
         point.get("source_event_type")
         or ("synthetic" if synthetic else "provider_bar")
     )
+    display_eligible = bool(
+        not synthetic
+        and bar_type
+        in {
+            "regular_interval",
+            "closing_auction",
+            "official_close_marker",
+            "session_close_marker",
+        }
+    )
+    price_semantics = point.get("price_semantics") or {
+        "regular_interval": "intraday_bar_close",
+        "closing_auction": "closing_auction_interval_close",
+        "official_close_marker": "official_close",
+        "session_close_marker": "session_close",
+        "post_close_summary": "post_close_summary",
+        "synthetic_fill": "synthetic_fill",
+        "provider_irregular": "provider_irregular",
+    }[bar_type]
     return {
         "bar_type": bar_type,
         "synthetic": synthetic,
         "session_phase": session_phase,
         "market_event": market_event,
         "source_event_type": source_event_type,
+        "display_eligible": display_eligible,
+        "price_semantics": price_semantics,
         "gap_reason": point.get("gap_reason"),
     }
 
@@ -306,6 +330,7 @@ def _enrich_intraday_contract(
     interval: str,
     source: str,
     now: datetime | None = None,
+    series_coverage: dict | None = None,
 ) -> tuple[list[dict], dict]:
     checked_at = (now or datetime.now(TAIPEI_TZ)).astimezone(TAIPEI_TZ)
     provider_volume_unit = _provider_volume_unit(source)
@@ -338,13 +363,29 @@ def _enrich_intraday_contract(
             and volume_shares >= 0
             else None
         )
-        bar_close_time = point_time + interval_delta if point_time is not None else None
-        is_partial = bool(
-            bar_close_time is not None
-            and point_time is not None
-            and point_time.date() == checked_at.date()
-            and checked_at < bar_close_time
+        explicit_bar_type = str(point.get("bar_type") or "").strip().lower()
+        is_close_marker = explicit_bar_type in {
+            "official_close_marker",
+            "session_close_marker",
+        }
+        bar_close_time = (
+            point_time + interval_delta
+            if point_time is not None and not is_close_marker
+            else None
         )
+        canonical_finalization = str(point.get("finalization") or "").strip().lower()
+        if canonical_finalization:
+            finalized = canonical_finalization == "final"
+            is_partial = not finalized
+        else:
+            is_partial = bool(
+                bar_close_time is not None
+                and point_time is not None
+                and point_time.date() == checked_at.date()
+                and checked_at < bar_close_time
+            )
+            finalized = not is_partial if point_time is not None else False
+            canonical_finalization = "final" if finalized else "provisional"
         elapsed_seconds = (
             max(int((checked_at - point_time).total_seconds()), 0)
             if point_time is not None
@@ -355,7 +396,6 @@ def _enrich_intraday_contract(
             point_time=point_time,
             interval=interval,
         )
-        finalized = not is_partial if point_time is not None else False
         indicator_eligible = bool(
             finalized
             and not bar_semantics["synthetic"]
@@ -388,6 +428,7 @@ def _enrich_intraday_contract(
                 "elapsed_seconds": elapsed_seconds,
                 "is_partial": is_partial,
                 "finalized": finalized,
+                "finalization": canonical_finalization,
                 "indicator_eligible": indicator_eligible,
                 **bar_semantics,
             }
@@ -395,8 +436,20 @@ def _enrich_intraday_contract(
         enriched.append(point)
 
     latest_trade_date, session_points = _latest_trade_date_points(enriched)
-    session_metrics = _intraday_bar_metrics(session_points)
-    window_metrics = _intraday_bar_metrics(enriched)
+    interval_session_points = [
+        point
+        for point in session_points
+        if str(point.get("bar_type") or "")
+        not in {"official_close_marker", "session_close_marker"}
+    ]
+    interval_window_points = [
+        point
+        for point in enriched
+        if str(point.get("bar_type") or "")
+        not in {"official_close_marker", "session_close_marker"}
+    ]
+    session_metrics = _intraday_bar_metrics(interval_session_points)
+    window_metrics = _intraday_bar_metrics(interval_window_points)
     volume_points = int(session_metrics["volume_points"] or 0)
     total_volume_shares = int(session_metrics["total_volume_shares"] or 0)
     exact_value_points = int(session_metrics["exact_value_points"] or 0)
@@ -405,10 +458,56 @@ def _enrich_intraday_contract(
     exact_complete = bool(session_metrics["exact_complete"])
     approximate_vwap = _as_float(session_metrics["approx_vwap"])
     official_vwap = _as_float(session_metrics["official_vwap"])
-    bar_latest_time = (
-        _point_datetime(session_points[-1]) if session_points else None
+    bar_latest_time = next(
+        (
+            _point_datetime(point)
+            for point in reversed(interval_session_points)
+            if _as_int(point.get("volume_shares")) is not None
+        ),
+        None,
     )
     bar_volume_sum_shares = total_volume_shares if volume_points else None
+    close_marker = next(
+        (
+            point
+            for point in reversed(session_points)
+            if str(point.get("bar_type") or "")
+            in {"official_close_marker", "session_close_marker"}
+        ),
+        None,
+    )
+    closing_match_volume_shares = (
+        _as_int(close_marker.get("closing_match_volume_shares"))
+        if close_marker is not None
+        else None
+    )
+    closing_match_volume_lots = (
+        _as_float(close_marker.get("closing_match_volume_lots"))
+        if close_marker is not None
+        else None
+    )
+    session_cumulative_volume_shares = (
+        _as_int(close_marker.get("session_cumulative_volume_shares"))
+        if close_marker is not None
+        else None
+    )
+    session_cumulative_volume_lots = (
+        _as_float(close_marker.get("session_cumulative_volume_lots"))
+        if close_marker is not None
+        else None
+    )
+    session_cumulative_event_time = (
+        close_marker.get("session_cumulative_volume_event_time")
+        if close_marker is not None
+        and session_cumulative_volume_shares is not None
+        else None
+    )
+    session_cumulative_source = (
+        close_marker.get("volume_source")
+        if close_marker is not None
+        and session_cumulative_volume_shares is not None
+        else None
+    )
     window_volume_points = int(window_metrics["volume_points"] or 0)
     window_volume_sum_shares = (
         int(window_metrics["total_volume_shares"] or 0)
@@ -429,7 +528,57 @@ def _enrich_intraday_contract(
         if estimated_trade_value > 0
         else "not_provided"
     )
+    coverage_known = isinstance(series_coverage, dict)
+    session_volume_complete = bool(
+        series_coverage.get("current_cumulative_volume_complete")
+    ) if coverage_known else True
+    cumulative_bar_sum_usable = bool(
+        bar_volume_sum_shares is not None and session_volume_complete
+    )
+    authoritative_cumulative_available = bool(
+        session_cumulative_volume_shares is not None
+        and session_cumulative_volume_shares >= 0
+    )
+    selected_cumulative_volume_shares = (
+        session_cumulative_volume_shares
+        if authoritative_cumulative_available
+        else bar_volume_sum_shares
+        if cumulative_bar_sum_usable
+        else None
+    )
+    selected_cumulative_volume_lots = (
+        session_cumulative_volume_lots
+        if authoritative_cumulative_available
+        and session_cumulative_volume_lots is not None
+        else selected_cumulative_volume_shares / 1000
+        if selected_cumulative_volume_shares is not None
+        else None
+    )
+    observed_session_volume_shares = (
+        (bar_volume_sum_shares or 0) + (closing_match_volume_shares or 0)
+        if bar_volume_sum_shares is not None
+        or closing_match_volume_shares is not None
+        else None
+    )
+    unallocated_volume_shares = (
+        session_cumulative_volume_shares - observed_session_volume_shares
+        if authoritative_cumulative_available
+        and observed_session_volume_shares is not None
+        else None
+    )
+    bar_type_counts: dict[str, int] = {}
+    for point in enriched:
+        bar_type = str(point.get("bar_type") or "unknown")
+        bar_type_counts[bar_type] = bar_type_counts.get(bar_type, 0) + 1
+    finalized_bar_count = sum(
+        1 for point in enriched if point.get("finalized") is True
+    )
+    indicator_eligible_count = sum(
+        1 for point in enriched if point.get("indicator_eligible") is True
+    )
     metadata = {
+        "bar_contract_version": "tw.intraday.bar.v1",
+        "bar_type_counts": bar_type_counts,
         "canonical_volume_unit": "shares",
         "provider_volume_unit": provider_volume_unit,
         "volume_conversion": (
@@ -439,8 +588,18 @@ def _enrich_intraday_contract(
             if provider_volume_unit == "shares"
             else "unknown"
         ),
-        "volume_semantics": "latest_trade_date_interval_bar_sum_fallback",
-        "volume_scope": "latest_trade_date_interval_bar_sum",
+        "volume_semantics": (
+            "session_close_provider_cumulative"
+            if authoritative_cumulative_available
+            else "latest_trade_date_interval_bar_sum_fallback"
+            if session_volume_complete
+            else "observed_window_bar_sum_not_session_cumulative"
+        ),
+        "volume_scope": (
+            "completed_regular_session"
+            if authoritative_cumulative_available
+            else "latest_trade_date_interval_bar_sum"
+        ),
         "bar_volume_sum_shares": bar_volume_sum_shares,
         "bar_volume_sum_lots": (
             bar_volume_sum_shares / 1000
@@ -465,66 +624,130 @@ def _enrich_intraday_contract(
         ),
         "window_volume_scope": "query_window_interval_bar_sum",
         "window_trade_date_count": len(trade_dates),
-        "session_cumulative_volume_shares": None,
-        "session_cumulative_volume_lots": None,
-        "session_cumulative_volume_trade_date": None,
-        "session_cumulative_volume_source": None,
-        "session_cumulative_volume_source_field": None,
-        "session_cumulative_volume_event_time": None,
+        "closing_match_volume_shares": closing_match_volume_shares,
+        "closing_match_volume_lots": closing_match_volume_lots,
+        "closing_match_volume_source": (
+            close_marker.get("volume_source") if close_marker is not None else None
+        ),
+        "closing_match_volume_source_field": (
+            close_marker.get("closing_match_volume_source_field")
+            if close_marker is not None
+            else None
+        ),
+        "closing_match_volume_event_time": (
+            close_marker.get("volume_event_time")
+            if close_marker is not None
+            else None
+        ),
+        "session_cumulative_volume_shares": session_cumulative_volume_shares,
+        "session_cumulative_volume_lots": selected_cumulative_volume_lots
+        if authoritative_cumulative_available
+        else None,
+        "session_cumulative_volume_trade_date": (
+            latest_trade_date.isoformat()
+            if authoritative_cumulative_available and latest_trade_date is not None
+            else None
+        ),
+        "session_cumulative_volume_source": session_cumulative_source,
+        "session_cumulative_volume_source_field": (
+            close_marker.get("session_cumulative_volume_source_field")
+            if close_marker is not None
+            and authoritative_cumulative_available
+            else None
+        ),
+        "session_cumulative_volume_event_time": session_cumulative_event_time,
         "session_cumulative_volume_status": (
-            "fallback_bar_sum"
+            "session_final"
+            if authoritative_cumulative_available
+            else "fallback_bar_sum"
+            if cumulative_bar_sum_usable
+            else "partial_coverage"
             if bar_volume_sum_shares is not None
             else "unavailable"
         ),
-        "cumulative_volume_shares": (
-            bar_volume_sum_shares
-        ),
-        "cumulative_volume_lots": (
-            bar_volume_sum_shares / 1000
-            if bar_volume_sum_shares is not None
-            else None
-        ),
+        "cumulative_volume_shares": selected_cumulative_volume_shares,
+        "cumulative_volume_lots": selected_cumulative_volume_lots,
         "cumulative_volume_trade_date": (
             latest_trade_date.isoformat() if latest_trade_date is not None else None
-        ),
+        ) if selected_cumulative_volume_shares is not None else None,
         "cumulative_volume_source": (
-            "intraday_bar_sum" if bar_volume_sum_shares is not None else None
+            session_cumulative_source
+            if authoritative_cumulative_available
+            else "intraday_bar_sum"
+            if cumulative_bar_sum_usable
+            else None
         ),
         "cumulative_volume_source_field": (
-            "interval_bar.volume" if bar_volume_sum_shares is not None else None
+            close_marker.get("session_cumulative_volume_source_field")
+            if close_marker is not None and authoritative_cumulative_available
+            else "interval_bar.volume"
+            if cumulative_bar_sum_usable
+            else None
         ),
         "cumulative_volume_event_time": (
-            _normalize_bar_time(bar_latest_time).isoformat()
-            if bar_latest_time is not None
+            session_cumulative_event_time
+            if authoritative_cumulative_available
+            else _normalize_bar_time(bar_latest_time).isoformat()
+            if cumulative_bar_sum_usable and bar_latest_time is not None
             else None
         ),
         "cumulative_volume_status": (
-            "fallback_bar_sum"
+            "session_final"
+            if authoritative_cumulative_available
+            else "fallback_bar_sum"
+            if cumulative_bar_sum_usable
+            else "partial_coverage"
             if bar_volume_sum_shares is not None
             else "unavailable"
         ),
-        "unallocated_volume_shares": None,
-        "unallocated_volume_lots": None,
+        "series_coverage": series_coverage,
+        "unallocated_volume_shares": unallocated_volume_shares,
+        "unallocated_volume_lots": (
+            unallocated_volume_shares / 1000
+            if unallocated_volume_shares is not None
+            else None
+        ),
         "volume_reconciliation": {
-            "status": "unavailable",
+            "status": (
+                "matched"
+                if unallocated_volume_shares == 0
+                else "difference"
+                if unallocated_volume_shares is not None
+                else "unavailable"
+            ),
             "trade_date": (
                 latest_trade_date.isoformat()
                 if latest_trade_date is not None
                 else None
             ),
-            "exchange_cumulative_shares": None,
+            "exchange_cumulative_shares": session_cumulative_volume_shares,
             "bar_volume_sum_shares": bar_volume_sum_shares,
-            "difference_shares": None,
-            "difference_lots": None,
-            "difference_pct": None,
-            "exchange_event_time": None,
+            "difference_shares": unallocated_volume_shares,
+            "difference_lots": (
+                unallocated_volume_shares / 1000
+                if unallocated_volume_shares is not None
+                else None
+            ),
+            "difference_pct": (
+                unallocated_volume_shares
+                / session_cumulative_volume_shares
+                * 100
+                if unallocated_volume_shares is not None
+                and session_cumulative_volume_shares
+                else None
+            ),
+            "exchange_event_time": session_cumulative_event_time,
             "bar_latest_time": (
                 _normalize_bar_time(bar_latest_time).isoformat()
                 if bar_latest_time is not None
                 else None
             ),
             "time_skew_seconds": None,
-            "reason": "exchange_cumulative_unavailable",
+            "reason": (
+                "session_close_cumulative_vs_interval_bars_and_closing_match"
+                if authoritative_cumulative_available
+                else "exchange_cumulative_unavailable"
+            ),
         },
         "cumulative_trade_value": (
             official_trade_value if exact_complete else None
@@ -559,9 +782,10 @@ def _enrich_intraday_contract(
         "partial_bar_count": sum(
             1 for point in enriched if point.get("is_partial") is True
         ),
-        "indicator_eligible_point_count": sum(
-            1 for point in enriched if point.get("indicator_eligible") is True
-        ),
+        "finalized_bar_count": finalized_bar_count,
+        "indicator_eligible_count": indicator_eligible_count,
+        "indicator_eligible_point_count": indicator_eligible_count,
+        "post_close_summary_count": bar_type_counts.get("post_close_summary", 0),
         "bar_classification_policy": "taiwan_cash_session_v1",
         "indicator_policy": (
             "finalized_regular_interval_or_closing_auction_only"
@@ -997,6 +1221,206 @@ def _attach_cached_public_quote(
     )
 
 
+def _append_completed_session_close_marker(
+    db: Session,
+    *,
+    stock_id: str,
+    points: list[dict],
+    requested_at: datetime | None = None,
+) -> list[dict]:
+    """Append one cache-only close event without manufacturing a trade bar."""
+
+    latest_trade_date, _ = _latest_trade_date_points(points)
+    if latest_trade_date is None:
+        return points
+    effective_requested_at = requested_at or datetime.now(TAIPEI_TZ)
+    official_marker: dict | None = None
+    session_marker: dict | None = None
+    try:
+        evidence = read_taiwan_latest_daily_evidence(
+            db,
+            stock_id,
+            to_date=latest_trade_date,
+            requested_at=effective_requested_at,
+        )
+        daily = evidence.daily
+        if (
+            daily is not None
+            and daily.trade_date == latest_trade_date
+            and evidence.resolved_health.facts_usable
+        ):
+            official_marker = {
+                "price": float(daily.close_price),
+                "bar_type": "official_close_marker",
+                "source_event_type": "official_close",
+                "market_event": "official_close",
+                "price_semantics": "official_close",
+                "evidence_finalization": "final",
+                "provider": daily.provider,
+                "source": daily.source,
+                "evidence_event_time": daily.event_at,
+                "official_close_price": float(daily.close_price),
+                "official_close_trade_date": daily.trade_date,
+                "official_close_event_time": daily.event_at,
+                "official_close_provider": daily.provider,
+                "official_close_source": daily.source,
+            }
+    except Exception as exc:
+        observe_provider_fallback(
+            exc,
+            operation="intraday.official_close_marker_cache_read",
+        )
+
+    try:
+        projected = project_taiwan_session_close(
+            read_taiwan_session_close(
+                db,
+                stock_id=stock_id,
+                requested_at=effective_requested_at,
+            )
+        )
+        trade_date = projected.get("trade_date")
+        if isinstance(trade_date, str):
+            try:
+                trade_date = date.fromisoformat(trade_date)
+            except ValueError:
+                trade_date = None
+        if (
+            projected.get("available") is True
+            and trade_date == latest_trade_date
+            and projected.get("price") is not None
+        ):
+            session_marker = {
+                "price": float(projected["price"]),
+                "bar_type": "session_close_marker",
+                "source_event_type": "session_close",
+                "market_event": "session_close",
+                "price_semantics": "session_close",
+                "evidence_finalization": projected.get("finalization"),
+                "provider": projected.get("provider"),
+                "source": projected.get("source"),
+                "evidence_event_time": projected.get("event_time"),
+                "session_close_price": projected.get("price"),
+                "session_close_trade_date": trade_date,
+                "session_close_event_time": projected.get("event_time"),
+                "session_close_provider": projected.get("provider"),
+                "session_close_source": projected.get("source"),
+                "closing_match_volume_shares": projected.get(
+                    "closing_match_volume_shares"
+                ),
+                "closing_match_volume_lots": projected.get(
+                    "closing_match_volume_lots"
+                ),
+                "closing_match_volume_semantics": projected.get(
+                    "closing_match_volume_semantics"
+                ),
+                "closing_match_volume_source_field": projected.get(
+                    "closing_match_volume_source_field"
+                ),
+                "session_cumulative_volume_shares": projected.get(
+                    "session_cumulative_volume_shares"
+                ),
+                "session_cumulative_volume_lots": projected.get(
+                    "session_cumulative_volume_lots"
+                ),
+                "session_cumulative_volume_trade_date": projected.get(
+                    "session_cumulative_volume_trade_date"
+                ),
+                "session_cumulative_volume_event_time": projected.get(
+                    "session_cumulative_volume_event_time"
+                ),
+                "session_cumulative_volume_source_field": projected.get(
+                    "session_cumulative_volume_source_field"
+                ),
+                "volume_provider": projected.get("volume_provider"),
+                "volume_source": projected.get("volume_source"),
+                "volume_event_time": projected.get("volume_event_time"),
+                "volume_status": projected.get("volume_status"),
+                "volume_scope": projected.get("volume_scope"),
+            }
+    except Exception as exc:
+        observe_provider_fallback(
+            exc,
+            operation="intraday.session_close_marker_cache_read",
+        )
+
+    marker = official_marker or session_marker
+    if marker is not None and session_marker is not None:
+        marker = {
+            **marker,
+            **{
+                key: value
+                for key, value in session_marker.items()
+                if key.startswith("session_")
+                or key.startswith("closing_match_")
+                or key.startswith("volume_")
+            },
+        }
+
+    if marker is None:
+        return points
+
+    marker_time = datetime.combine(
+        latest_trade_date,
+        time(13, 30),
+        tzinfo=TAIPEI_TZ,
+    )
+    price = marker["price"]
+    closing_match_volume_shares = _as_int(
+        marker.get("closing_match_volume_shares")
+    )
+    session_cumulative_volume_shares = _as_int(
+        marker.get("session_cumulative_volume_shares")
+    )
+    close_marker = {
+        "time": marker_time,
+        "price": price,
+        "open": price,
+        "high": price,
+        "low": price,
+        "close": price,
+        "volume": closing_match_volume_shares,
+        "cumulative_volume": session_cumulative_volume_shares,
+        "trade_value": None,
+        "transaction_count": None,
+        "finalization": "final",
+        "finalized": True,
+        "is_partial": False,
+        "synthetic": False,
+        "display_eligible": True,
+        "indicator_eligible": False,
+        "evidence_trade_date": latest_trade_date,
+        **marker,
+    }
+    retained = [
+        point
+        for point in points
+        if not (
+            (
+                str(point.get("bar_type") or "")
+                in {"official_close_marker", "session_close_marker"}
+                and (
+                    (point_time := _point_datetime(point)) is not None
+                    and _normalize_bar_time(point_time).date() == latest_trade_date
+                )
+            )
+            or (
+                (point_time := _point_datetime(point)) is not None
+                and _normalize_bar_time(point_time) == marker_time
+                and (_as_int(point.get("volume")) or 0) == 0
+            )
+        )
+    ]
+    return sorted(
+        [*retained, close_marker],
+        key=lambda point: (
+            _normalize_bar_time(point_time).timestamp()
+            if (point_time := _point_datetime(point)) is not None
+            else float("inf")
+        ),
+    )
+
+
 def _load_intraday_trend_uncached(
     db: Session,
     *,
@@ -1030,6 +1454,13 @@ def _load_intraday_trend_uncached(
             ],
         }
     source = str(metadata.get("source") or "unavailable")
+    source_point_count = len(points)
+    points, contract_metadata = _enrich_intraday_contract(
+        points,
+        interval="1m",
+        source=source,
+        series_coverage=metadata.get("series_coverage"),
+    )
     result = {
         "stock_id": stock_id,
         "symbol": _yahoo_symbol(stock_id=stock_id, market=market),
@@ -1037,6 +1468,7 @@ def _load_intraday_trend_uncached(
         "provider": metadata.get("provider"),
         "previous_close": None,
         "point_count": len(points),
+        "source_point_count": source_point_count,
         "points": points,
         "interval": "1m",
         "source_interval": metadata.get("source_interval") or "1m",
@@ -1048,13 +1480,28 @@ def _load_intraday_trend_uncached(
             metadata.get("component_raw_result_ids") or []
         ),
         "bar_calculation_versions": metadata.get("calculation_versions") or [],
+        "series_coverage": metadata.get("series_coverage"),
+        **contract_metadata,
     }
+    result = _attach_cached_public_quote(db, stock_id=stock_id, result=result)
+    points_with_marker = _append_completed_session_close_marker(
+        db,
+        stock_id=stock_id,
+        points=result["points"],
+    )
+    points_with_marker, marker_metadata = _enrich_intraday_contract(
+        points_with_marker,
+        interval="1m",
+        source=source,
+        series_coverage=metadata.get("series_coverage"),
+    )
+    result.update(marker_metadata)
+    result["points"] = points_with_marker
+    result["point_count"] = len(points_with_marker)
+    result["projection_event_count"] = len(points_with_marker) - source_point_count
     return _cache_set(
         cache_key,
-        _apply_disposition_intraday_contract(
-            _attach_cached_public_quote(db, stock_id=stock_id, result=result),
-            disposition,
-        ),
+        _apply_disposition_intraday_contract(result, disposition),
     )
 
 
@@ -1108,6 +1555,8 @@ def get_market_intraday_history(
         requested_at=requested_at,
     )
     points, resolution_metadata = project_taiwan_intraday_bars(db, resolved)
+    persisted_point_count = len(points)
+    persisted_latest_time = _point_datetime(points[-1]) if points else None
     source = str(resolution_metadata.get("source") or "unavailable")
     provider = str(resolution_metadata.get("provider") or "unavailable")
     is_disposition_batch = (
@@ -1116,10 +1565,17 @@ def get_market_intraday_history(
     )
     if is_disposition_batch:
         points = _dedupe_disposition_points(points)
+    points = _append_completed_session_close_marker(
+        db,
+        stock_id=stock_id,
+        points=points,
+        requested_at=requested_at,
+    )
     points, contract_metadata = _enrich_intraday_contract(
         points,
         interval=interval,
         source=source,
+        series_coverage=resolution_metadata.get("series_coverage"),
     )
 
     return {
@@ -1137,18 +1593,19 @@ def get_market_intraday_history(
         "from_time": _point_datetime(points[0]) if points else None,
         "to_time": _point_datetime(points[-1]) if points else None,
         "point_count": len(points),
-        "cached_count": len(points),
+        "cached_count": persisted_point_count,
+        "projection_event_count": len(points) - persisted_point_count,
         "refreshed_count": 0,
         "cache_status": "persisted_hit" if points else "persisted_miss",
         "cache_hit": bool(points),
         "cache_trade_date": (
-            _normalize_bar_time(_point_datetime(points[-1])).date().isoformat()
-            if points and _point_datetime(points[-1]) is not None
+            _normalize_bar_time(persisted_latest_time).date().isoformat()
+            if persisted_latest_time is not None
             else None
         ),
         "cache_latest_time": (
-            _normalize_bar_time(_point_datetime(points[-1]))
-            if points and _point_datetime(points[-1]) is not None
+            _normalize_bar_time(persisted_latest_time)
+            if persisted_latest_time is not None
             else None
         ),
         "fallback_used": resolved.resolved.health.fallback_used,
@@ -1166,6 +1623,7 @@ def get_market_intraday_history(
         if is_disposition_batch
         else None,
         **contract_metadata,
+        "series_coverage": resolution_metadata.get("series_coverage"),
         "read_policy": "cache_only",
         "acquisition_status": resolved.acquisition.status.value,
         "resolved_health": resolution_metadata.get("resolved_health"),

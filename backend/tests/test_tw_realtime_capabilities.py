@@ -142,11 +142,16 @@ def _quote(*, indicative: bool = False) -> dict[str, object]:
     }
 
 
-def _adapter(quote: dict[str, object]) -> KgiRealtimeAcquisitionAdapter:
+def _adapter(
+    quote: dict[str, object],
+    *,
+    latest_trade: dict[str, object] | None = None,
+) -> KgiRealtimeAcquisitionAdapter:
     return KgiRealtimeAcquisitionAdapter(
         lambda _symbol: KgiRealtimeProviderSnapshot(
             quote=dict(quote),
             status="live",
+            latest_trade=latest_trade,
         ),
         clock=lambda: NOW,
     )
@@ -188,6 +193,8 @@ def test_tw_realtime_descriptors_separate_capability_and_resource_contracts() ->
         MarketSession.CONTINUOUS,
         MarketSession.CLOSING_AUCTION,
     )
+    assert MarketSession.CLOSE_RESOLUTION in KGI_QUOTE_SNAPSHOT_DESCRIPTOR.supported_sessions
+    assert MarketSession.CLOSE_RESOLUTION not in KGI_ORDER_BOOK_DESCRIPTOR.supported_sessions
 
 
 def test_kgi_quote_acquisition_returns_canonical_observation_and_raw_receipt() -> None:
@@ -211,6 +218,47 @@ def test_kgi_quote_acquisition_returns_canonical_observation_and_raw_receipt() -
     assert observation.lineage.content_hash == result.receipts[0].content_hash
     assert result.receipts[0].method == "STREAM"
     assert result.receipts[0].raw_text is not None
+
+
+def test_kgi_quote_acquisition_treats_close_resolution_match_as_trade() -> None:
+    requirement, plan = _plan(
+        KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
+        session=MarketSession.CLOSE_RESOLUTION,
+    )
+
+    result = _adapter(
+        _quote(),
+        latest_trade={
+            "event_time": "2026-08-26T13:30:00+08:00",
+            "received_at": "2026-08-26T05:30:01+00:00",
+            "session_phase": "closing_auction",
+            "price": 1182,
+            "volume_lots": 7,
+            "total_volume_lots": 107,
+        },
+    ).acquire_quote_observations(requirement, plan)
+
+    assert result.summary.status.value == "completed"
+    assert len(result.observations) == 1
+    assert result.observations[0].trade_state is TradeObservationState.TRADE_OBSERVED
+    assert result.observations[0].last_trade_price == 1182
+    assert result.observations[0].lineage.event_at.isoformat() == "2026-08-26T13:30:00+08:00"
+
+
+def test_kgi_close_resolution_without_classified_formal_match_fails_closed() -> None:
+    requirement, plan = _plan(
+        KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
+        session=MarketSession.CLOSE_RESOLUTION,
+    )
+
+    result = _adapter(_quote()).acquire_quote_observations(requirement, plan)
+
+    assert result.observations == ()
+    assert result.receipts == ()
+    assert result.summary.status.value == "unavailable"
+    assert result.summary.limitations == (
+        "KGI_CLOSE_RESOLUTION_FORMAL_MATCH_UNAVAILABLE",
+    )
 
 
 def test_kgi_depth_acquisition_preserves_level_five_semantics_and_lineage() -> None:

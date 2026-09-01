@@ -557,12 +557,17 @@ def _technical_state_projection_from_indicator(
     }
 
 
-def _intraday_minutes(value: str | None) -> float | None:
+def _intraday_minutes(value: Any) -> float | None:
     if not value:
         return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    else:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=TAIPEI_TZ)
@@ -1068,8 +1073,59 @@ def _build_today_report(
     points = intraday.get("points") or []
     latest_point = points[-1] if points else None
     reference_close = intraday.get("previous_close") or previous_close
+    after_close = market_session.get("is_after_close") is True
+    official_daily_confirmed = bool(
+        after_close
+        and _json_value(latest_daily_date) == _json_value(market_session.get("date"))
+        and _finite(indicator.get("close"))
+    )
+    official_daily_reference = (
+        indicator.get("close") - indicator.get("change")
+        if official_daily_confirmed
+        and _finite(indicator.get("change"))
+        else None
+    )
+    if official_daily_confirmed and _finite(official_daily_reference):
+        reference_close = official_daily_reference
+    if latest_point is None and official_daily_confirmed:
+        latest_point = {
+            "time": latest_daily_date,
+            "price": indicator.get("close"),
+            "open": indicator.get("open"),
+            "high": indicator.get("high"),
+            "low": indicator.get("low"),
+            "volume": indicator.get("volume"),
+        }
+        points = [latest_point]
+    preloaded_current_partial_indicator: dict[str, Any] | None = None
+    if latest_point is None and market_session.get("is_after_close"):
+        preloaded_current_partial_indicator = _current_partial_daily_indicator(
+            db=db,
+            stock_id=stock_id,
+            intraday_points=[],
+            market_session=market_session,
+            parameters=technical_parameters,
+        )
+        if (
+            isinstance(preloaded_current_partial_indicator, dict)
+            and preloaded_current_partial_indicator.get(
+                "session_close_finalization"
+            )
+            == "session_final"
+            and _finite(preloaded_current_partial_indicator.get("close"))
+        ):
+            latest_point = {
+                "time": preloaded_current_partial_indicator.get("event_time"),
+                "price": preloaded_current_partial_indicator.get("close"),
+                "open": preloaded_current_partial_indicator.get("open"),
+                "high": preloaded_current_partial_indicator.get("high"),
+                "low": preloaded_current_partial_indicator.get("low"),
+                "volume": preloaded_current_partial_indicator.get("volume"),
+            }
+            points = [latest_point]
 
     if latest_point is None:
+        after_close_pending = after_close
         if include_intraday:
             missing.append("intraday_trend.points")
         rows.extend(
@@ -1077,7 +1133,11 @@ def _build_today_report(
                 _row(
                     key="data_status",
                     label="資料狀態",
-                    description="尚未取得今日第一筆成交或即時快照",
+                    description=(
+                        "收盤後尚未取得 canonical session close"
+                        if after_close_pending
+                        else "尚未取得今日第一筆成交或即時快照"
+                    ),
                     value=0,
                     display_value="0筆",
                     basis="intraday point count",
@@ -1094,16 +1154,37 @@ def _build_today_report(
                 ),
             ]
         )
-        badges.append(_badge("等待盤中", "neutral"))
+        badges.append(
+            _badge(
+                "收盤待確認" if after_close_pending else "等待盤中",
+                "warning" if after_close_pending else "neutral",
+            )
+        )
+        if after_close_pending:
+            warnings.append(
+                "The market is post-close but canonical session-close evidence is not yet available."
+            )
         return {
             "kind": "tw_stock_technical_report",
             "stock_id": stock_id,
             "timeframe": "today",
-            "phase": "waiting_intraday",
+            "phase": (
+                "post_close_pending_close"
+                if after_close_pending
+                else "waiting_intraday"
+            ),
             "confidence": "low",
             "generated_at": _now(),
-            "title": "等待盤中資料",
-            "summary": "尚未取得今日第一筆成交，日線資料暫不作盤中判斷",
+            "title": (
+                "等待收盤成交確認"
+                if after_close_pending
+                else "等待盤中資料"
+            ),
+            "summary": (
+                "收盤成交尚未確認，不產生收盤後技術判斷"
+                if after_close_pending
+                else "尚未取得今日第一筆成交，日線資料暫不作盤中判斷"
+            ),
             "score": 0,
             "value": None,
             "value_label": "vs 昨收",
@@ -1123,7 +1204,25 @@ def _build_today_report(
             "source_refs": _technical_source_refs(timeframe="today", include_intraday=include_intraday),
         }
 
+    series_coverage = (
+        intraday.get("series_coverage")
+        if isinstance(intraday.get("series_coverage"), dict)
+        else None
+    )
+    coverage_analysis_usable = bool(
+        series_coverage is None
+        or series_coverage.get("status")
+        in {"complete_prefix", "complete_session"}
+    )
     stats = _intraday_stats(points)
+    if series_coverage is not None:
+        if series_coverage.get("opening_covered") is not True:
+            stats["open"] = None
+        if series_coverage.get("current_window_complete") is not True:
+            stats["high"] = None
+            stats["low"] = None
+        if series_coverage.get("current_cumulative_volume_complete") is not True:
+            stats["volume"] = None
     latest_price = latest_point.get("price")
     latest_minutes = _intraday_minutes(latest_point.get("time"))
     minutes_from_open = latest_minutes - SESSION_START_MINUTES if _finite(latest_minutes) else None
@@ -1133,7 +1232,8 @@ def _build_today_report(
         market_session["date"],
     )
     current_partial_indicator = (
-        _current_partial_daily_indicator(
+        preloaded_current_partial_indicator
+        or _current_partial_daily_indicator(
             db=db,
             stock_id=stock_id,
             intraday_points=points,
@@ -1141,34 +1241,116 @@ def _build_today_report(
             parameters=technical_parameters,
         )
         if latest_in_current_session
+        and (coverage_analysis_usable or after_close)
         else None
     )
+    session_close_confirmed = bool(
+        after_close
+        and isinstance(current_partial_indicator, dict)
+        and current_partial_indicator.get("session_close_finalization")
+        == "session_final"
+        and _finite(current_partial_indicator.get("close"))
+    )
+    if session_close_confirmed:
+        latest_price = current_partial_indicator.get("close")
+        latest_point = {
+            **latest_point,
+            "price": latest_price,
+            "time": current_partial_indicator.get("event_time")
+            or latest_point.get("time"),
+        }
+        stats = {
+            **stats,
+            "open": current_partial_indicator.get("open") or stats.get("open"),
+            "high": current_partial_indicator.get("high") or stats.get("high"),
+            "low": current_partial_indicator.get("low") or stats.get("low"),
+            "volume": current_partial_indicator.get("volume")
+            or stats.get("volume"),
+        }
+    elif official_daily_confirmed:
+        latest_price = indicator.get("close")
+        latest_point = {
+            **latest_point,
+            "price": latest_price,
+            "time": latest_daily_date,
+        }
+        stats = {
+            **stats,
+            "open": indicator.get("open") or stats.get("open"),
+            "high": indicator.get("high") or stats.get("high"),
+            "low": indicator.get("low") or stats.get("low"),
+            "volume": indicator.get("volume") or stats.get("volume"),
+        }
     opening_phase = (
-        minutes_from_open is None
-        or minutes_from_open < OPENING_OBSERVATION_MINUTES
-        or point_count < OPENING_OBSERVATION_MIN_POINTS
+        not after_close
+        and (
+            minutes_from_open is None
+            or minutes_from_open < OPENING_OBSERVATION_MINUTES
+            or point_count < OPENING_OBSERVATION_MIN_POINTS
+        )
     )
     phase = (
-        "stale_intraday"
+        "post_close"
+        if session_close_confirmed or official_daily_confirmed
+        else "post_close_pending_close"
+        if after_close
+        else "stale_intraday"
         if not latest_in_current_session
         else "opening"
         if opening_phase
         else "intraday"
     )
-    confidence = "low" if phase != "intraday" else ("high" if point_count >= 20 else "medium")
+    confidence = (
+        "medium"
+        if phase == "post_close"
+        else "low"
+        if phase == "intraday" and not coverage_analysis_usable
+        else "low"
+        if phase != "intraday"
+        else "high"
+        if point_count >= 20
+        else "medium"
+    )
     open_price = stats["open"]
     high_price = stats["high"]
     low_price = stats["low"]
-    volume_pace = build_tw_stock_volume_pace(
-        db,
-        stock_id=stock_id,
-        current_points=points,
+    volume_pace = (
+        build_tw_stock_volume_pace(
+            db,
+            stock_id=stock_id,
+            current_points=points,
+        )
+        if series_coverage is None
+        or series_coverage.get("current_cumulative_volume_complete") is True
+        else {
+            "kind": "tw_stock_same_time_volume_pace",
+            "stock_id": stock_id,
+            "status": "partial",
+            "as_of": latest_point.get("time"),
+            "trade_date": _json_value(market_session.get("date")),
+            "comparison_minute": None,
+            "current_cumulative_volume": None,
+            "same_time_baseline_5d": {"sample_days": 0, "pace_ratio": None},
+            "same_time_baseline_20d": {"sample_days": 0, "pace_ratio": None},
+            "calculation_basis": "unavailable_due_to_partial_intraday_series_coverage",
+            "warnings": [
+                "Current intraday series does not cover the full regular session; volume pace is unavailable."
+            ],
+            "series_coverage": series_coverage,
+        }
     )
     pace_current_volume = volume_pace.get("current_cumulative_volume")
     current_volume = (
         pace_current_volume
         if pace_current_volume is not None
-        else stats["volume"] or latest_point.get("volume")
+        else stats["volume"]
+        if (
+            series_coverage is None
+            or series_coverage.get("current_cumulative_volume_complete") is True
+            or session_close_confirmed
+            or official_daily_confirmed
+        )
+        else None
     )
     change_pct = _pct_change(latest_price, reference_close)
     change = latest_price - reference_close if _finite(latest_price) and _finite(reference_close) else None
@@ -1214,14 +1396,53 @@ def _build_today_report(
     rows.extend(
         [
             _row(
-                key="live_price",
-                label="即時價格",
-                description=f"相對昨收 {_fmt_pct(change_pct)}，{point_count} 筆盤中資料",
+                key=(
+                    "official_close_price"
+                    if official_daily_confirmed
+                    else "session_close_price"
+                    if session_close_confirmed
+                    else "last_intraday_price"
+                    if after_close
+                    else "live_price"
+                ),
+                label=(
+                    "正式收盤"
+                    if official_daily_confirmed
+                    else "收盤成交"
+                    if session_close_confirmed
+                    else "最後盤中成交"
+                    if after_close
+                    else "即時價格"
+                ),
+                description=(
+                    f"相對昨收 {_fmt_pct(change_pct)}，正式日線已發布"
+                    if official_daily_confirmed
+                    else f"相對昨收 {_fmt_pct(change_pct)}，已由 canonical session close 確認"
+                    if session_close_confirmed
+                    else f"相對昨收 {_fmt_pct(change_pct)}，收盤成交尚未確認"
+                    if after_close
+                    else f"相對昨收 {_fmt_pct(change_pct)}，{point_count} 筆盤中資料"
+                ),
                 value=latest_price,
                 display_value=_fmt_price(latest_price),
                 direction=change_pct,
-                basis="latest intraday price vs previous close",
-                source=str(intraday.get("source") or "intraday"),
+                basis=(
+                    "official daily close vs official previous close"
+                    if official_daily_confirmed
+                    else "canonical session close vs previous close"
+                    if session_close_confirmed
+                    else "last observed intraday price pending session close"
+                    if after_close
+                    else "latest intraday price vs previous close"
+                ),
+                source=str(
+                    "market_daily_price"
+                    if official_daily_confirmed
+                    else current_partial_indicator.get("source")
+                    if session_close_confirmed
+                    and isinstance(current_partial_indicator, dict)
+                    else intraday.get("source") or "intraday"
+                ),
             ),
             _row(
                 key="opening_structure",
@@ -1286,13 +1507,35 @@ def _build_today_report(
     if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at:
         badges.append(_badge("日線 RSI 過熱", "warning"))
 
-    if phase == "stale_intraday":
+    if phase == "post_close":
+        if official_daily_confirmed:
+            title = "正式日線已發布"
+            badges.append(_badge("正式收盤", "neutral"))
+        else:
+            title = "收盤成交已確認"
+            badges.append(_badge("收盤成交", "neutral"))
+            warnings.append(
+                "Session close is current-session evidence; completed official daily indicators remain the decision snapshot."
+            )
+    elif phase == "post_close_pending_close":
+        title = "等待收盤成交確認"
+        badges.append(_badge("收盤待確認", "warning"))
+        warnings.append(
+            "The market is post-close but canonical session-close evidence is not yet available."
+        )
+    elif phase == "stale_intraday":
         title = "盤中資料非當前交易時段"
         warnings.append("Latest intraday point is not from the current Taiwan trading session.")
     elif phase == "opening":
         title = "開盤資料尚不足"
         warnings.append(
             f"Intraday scoring requires at least {OPENING_OBSERVATION_MIN_POINTS} current-session points after the opening observation window."
+        )
+    elif phase == "intraday" and not coverage_analysis_usable:
+        title = "盤中資料涵蓋不完整"
+        badges.append(_badge("盤中涵蓋不完整", "warning"))
+        warnings.append(
+            "Current intraday coverage is partial; opening, full-session range, cumulative volume, and technical score are unavailable."
         )
     else:
         title = _title_from_score(
@@ -1301,12 +1544,34 @@ def _build_today_report(
             neutral="盤中觀察",
             negative="盤中偏弱",
         )
-    summary_parts = [
-        f"{point_count} 筆盤中資料",
-        "現價高於昨收" if _finite(change_pct) and change_pct >= 0 else "現價低於昨收" if _finite(change_pct) else "漲跌資料不足",
-        "開高" if _finite(opening_gap_pct) and opening_gap_pct >= 0 else "開低" if _finite(opening_gap_pct) else "開盤資料不足",
-        "日線指標僅作背景" if opening_phase else "盤中資料已進入觀察期",
-    ]
+    summary_parts = (
+        [
+            "正式日線已發布" if official_daily_confirmed else "收盤成交已確認",
+            "收盤高於昨收" if _finite(change_pct) and change_pct >= 0 else "收盤低於昨收" if _finite(change_pct) else "漲跌資料不足",
+            (
+                "今日正式日線是決策快照"
+                if official_daily_confirmed
+                else "正式日線尚待發布，既有完成日線仍是決策快照"
+            ),
+        ]
+        if phase == "post_close"
+        else [
+            "收盤成交尚未確認",
+            "僅保留最後盤中成交作參考",
+            "不產生收盤後技術判斷",
+        ]
+        if phase == "post_close_pending_close"
+        else [
+            f"{point_count} 筆盤中資料",
+            "現價高於昨收" if _finite(change_pct) and change_pct >= 0 else "現價低於昨收" if _finite(change_pct) else "漲跌資料不足",
+            "開高" if _finite(opening_gap_pct) and opening_gap_pct >= 0 else "開低" if _finite(opening_gap_pct) else "開盤資料不足",
+            "日線指標僅作背景"
+            if opening_phase
+            else "盤中資料涵蓋不足，只保留最新成交作參考"
+            if not coverage_analysis_usable
+            else "盤中資料已進入觀察期",
+        ]
+    )
 
     return {
         "kind": "tw_stock_technical_report",
@@ -1317,7 +1582,9 @@ def _build_today_report(
         "generated_at": _now(),
         "title": title,
         "summary": "，".join(summary_parts),
-        "score": score if phase == "intraday" else 0,
+        "score": (
+            score if phase == "intraday" and coverage_analysis_usable else 0
+        ),
         "value": change_pct,
         "value_label": "vs 昨收",
         "rows": rows,
@@ -1326,12 +1593,24 @@ def _build_today_report(
             "intraday": {
                 "source": intraday.get("source"),
                 "technical_price_basis": "intraday_series_latest_price",
+                "price_semantics": (
+                    "official_daily_close"
+                    if official_daily_confirmed
+                    else "session_close"
+                    if session_close_confirmed
+                    else "last_intraday_trade_pending_session_close"
+                    if after_close
+                    else "intraday_last_trade"
+                ),
                 "bid_ask_price_used": False,
                 "point_count": point_count,
                 "previous_close": reference_close,
                 "latest_point": latest_point,
                 "is_current_session": latest_in_current_session,
-                "score_eligible": phase == "intraday",
+                "score_eligible": (
+                    phase == "intraday" and coverage_analysis_usable
+                ),
+                "series_coverage": series_coverage,
                 "stats": stats,
                 "change": change,
                 "change_pct": change_pct,
@@ -1470,6 +1749,16 @@ def _build_daily_report(
     if should_load_intraday:
         intraday = get_intraday_trend(db=db, stock_id=stock_id)
         intraday_points = intraday.get("points") or []
+        intraday_series_coverage = (
+            intraday.get("series_coverage")
+            if isinstance(intraday.get("series_coverage"), dict)
+            else None
+        )
+        intraday_coverage_usable = bool(
+            intraday_series_coverage is None
+            or intraday_series_coverage.get("status")
+            in {"complete_prefix", "complete_session"}
+        )
         latest_intraday_point = intraday_points[-1] if intraday_points else None
         latest_intraday_price = (
             latest_intraday_point.get("price")
@@ -1491,6 +1780,7 @@ def _build_daily_report(
             "previous_close": intraday.get("previous_close"),
             "latest_point": latest_intraday_point,
             "is_current_session": is_current_session,
+            "series_coverage": intraday_series_coverage,
         }
         if _finite(latest_intraday_price) and is_current_session:
             analysis_price = latest_intraday_price
@@ -1514,13 +1804,18 @@ def _build_daily_report(
                 "No current-session intraday series is available; session-close evidence will be used when available."
             )
         if market_session["is_after_close"] and current_partial_indicator is None:
-            current_partial_indicator = _current_partial_daily_indicator(
-                db=db,
-                stock_id=stock_id,
-                intraday_points=intraday_points,
-                market_session=market_session,
-                parameters=technical_parameters,
-            )
+            if intraday_coverage_usable or market_session["is_after_close"]:
+                current_partial_indicator = _current_partial_daily_indicator(
+                    db=db,
+                    stock_id=stock_id,
+                    intraday_points=intraday_points,
+                    market_session=market_session,
+                    parameters=technical_parameters,
+                )
+            else:
+                warnings.append(
+                    "Current intraday coverage is partial; provisional OHLCV indicators are unavailable and only the latest trade remains contextual."
+                )
         partial_price = (
             current_partial_indicator.get("close")
             if current_partial_indicator is not None

@@ -15,6 +15,7 @@ from app.db.models import (
     StockMaster,
 )
 from app.market import intraday
+from app.market.schemas import IntradayTrendRead, MarketIntradayChartRead
 from app.market.providers.tw_intraday_bars import (
     IntradayProviderPayload,
     NStockIntradayAdapter,
@@ -239,6 +240,15 @@ def test_nstock_refresh_persists_actual_provider_lineage_then_rereads() -> None:
         assert result.dataset_health is not None
         assert result.dataset_health.status is DatasetHealthStatus.STALE
         assert result.resolved.bars[-1].lineage.provider == "nstock"
+        assert [int(bar.volume.value) for bar in result.resolved.bars] == [1000, 1000]
+        assert [bar.finalization.value for bar in result.resolved.bars] == [
+            "final",
+            "provisional",
+        ]
+        assert (
+            "PROVIDER_SESSION_TOTAL_VOLUME_NOT_ALLOCATED_TO_BARS"
+            in result.acquisition.limitations
+        )
         assert db.query(MarketIntradayBar).count() == 2
         assert {row.provider for row in db.query(MarketIntradayBar).all()} == {"nstock"}
         assert db.query(MarketIntradayBarLineage).count() == 2
@@ -247,6 +257,87 @@ def test_nstock_refresh_persists_actual_provider_lineage_then_rereads() -> None:
             bar.lineage.raw_receipt_id is not None
             for bar in result.resolved.bars
         )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_nstock_trailing_window_projects_incomplete_session_coverage() -> None:
+    now = datetime(2026, 8, 26, 14, 0, tzinfo=TAIPEI)
+    payload = json.dumps(
+        {
+            "data": [
+                {
+                    "參考價": "1170",
+                    "總成交量": "30000",
+                    "分K": [
+                        {
+                            "交易日": "20260826",
+                            "交易時間": "112500",
+                            "開盤價": "1170",
+                            "最高價": "1172",
+                            "最低價": "1168",
+                            "收盤價": "1171",
+                            "成交量": "1",
+                        },
+                        {
+                            "交易日": "20260826",
+                            "交易時間": "132400",
+                            "開盤價": "1178",
+                            "最高價": "1182",
+                            "最低價": "1176",
+                            "收盤價": "1180",
+                            "成交量": "1",
+                        },
+                    ],
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    adapter = NStockIntradayAdapter(
+        lambda _symbol, _timeout: IntradayProviderPayload(
+            raw_text=payload,
+            status="available",
+            url="https://example.test/nstock",
+            status_code=200,
+            content_type="application/json",
+        ),
+        clock=lambda: now,
+    )
+    executor = TaiwanIntradayAcquisitionExecutor(
+        nstock=adapter,
+        yahoo=YahooIntradayAdapter(
+            lambda *_args: IntradayProviderPayload(
+                raw_text=None,
+                status="failed",
+                url="https://example.test/yahoo",
+            ),
+            clock=lambda: now,
+        ),
+        clock=lambda: now,
+    )
+    db, engine = _db()
+    try:
+        result = refresh_taiwan_intraday_bars(
+            db,
+            stock_id="2330",
+            interval="1m",
+            range_value="1d",
+            requested_at=now,
+            descriptors=(NSTOCK_INTRADAY_DESCRIPTOR,),
+            acquisition=executor,
+        )
+        points, metadata = project_taiwan_intraday_bars(db, result)
+
+        coverage = metadata["series_coverage"]
+        assert len(points) == 2
+        assert coverage["status"] == "trailing_window"
+        assert coverage["opening_covered"] is False
+        assert coverage["continuous_session_covered"] is False
+        assert coverage["session_volume_complete"] is False
+        assert coverage["gap_reason"] == "provider_trailing_window"
+        assert coverage["expected_point_count_approx"] == 265
     finally:
         db.close()
         engine.dispose()
@@ -356,7 +447,81 @@ def test_cache_only_history_and_trend_do_not_call_provider_or_commit(monkeypatch
         assert history["read_policy"] == "cache_only"
         assert history["point_count"] == 2
         assert history["refreshed_count"] == 0
+        public_history = MarketIntradayChartRead.model_validate(history)
+        assert public_history.points[0].finalized is True
+        assert public_history.points[0].indicator_eligible is True
+        assert public_history.points[0].bar_type == "regular_interval"
+        assert public_history.points[0].price_semantics == "intraday_bar_close"
+        assert public_history.points[1].finalized is False
+        assert public_history.points[1].indicator_eligible is False
     finally:
+        db.close()
+        engine.dispose()
+
+
+def test_today_projection_enriches_canonical_bar_semantics(monkeypatch) -> None:
+    db, engine = _db()
+    try:
+        monkeypatch.setattr(
+            intraday,
+            "read_taiwan_intraday_bars",
+            lambda *_args, **_kwargs: object(),
+        )
+        monkeypatch.setattr(
+            intraday,
+            "project_taiwan_intraday_bars",
+            lambda *_args, **_kwargs: (
+                [
+                    {
+                        "time": datetime(2026, 8, 26, 10, 0, tzinfo=TAIPEI),
+                        "price": 1178.0,
+                        "close": 1178.0,
+                        "volume": 1000,
+                        "finalization": "final",
+                    },
+                    {
+                        "time": datetime(2026, 8, 26, 10, 1, tzinfo=TAIPEI),
+                        "price": 1180.0,
+                        "close": 1180.0,
+                        "volume": 1000,
+                        "finalization": "provisional",
+                    },
+                ],
+                {
+                    "provider": "nstock",
+                    "source": "nstock_minute_stock_data",
+                    "series_coverage": {"status": "complete_prefix"},
+                },
+            ),
+        )
+        monkeypatch.setattr(
+            intraday,
+            "_attach_cached_public_quote",
+            lambda _db, *, stock_id, result: result,
+        )
+        monkeypatch.setattr(
+            intraday,
+            "get_taiwan_disposition_status",
+            lambda *_args, **_kwargs: {},
+        )
+        intraday._INTRADAY_CACHE.clear()
+
+        result = intraday._load_intraday_trend_uncached(
+            db,
+            stock_id="2330",
+            market="TWSE",
+            cache_key="test:today-contract",
+        )
+        public = IntradayTrendRead.model_validate(result)
+
+        assert public.bar_contract_version == "tw.intraday.bar.v1"
+        assert public.finalized_bar_count == 1
+        assert public.indicator_eligible_count == 1
+        assert public.points[0].indicator_eligible is True
+        assert public.points[1].indicator_eligible is False
+        assert public.points[1].finalization == "provisional"
+    finally:
+        intraday._INTRADAY_CACHE.clear()
         db.close()
         engine.dispose()
 

@@ -227,6 +227,10 @@ def _us_intraday_compact(
                 "provider": "yahoo_chart" if source == "yahoo_finance_chart" else source,
                 "session_scope": intraday_summary.get("session_scope") or "regular",
                 "session_phase": intraday_summary.get("session_phase"),
+                "market_phase": intraday_summary.get("market_phase"),
+                "capability_expectation": intraday_summary.get(
+                    "capability_expectation"
+                ),
                 "point_count": point_count,
                 "returned_point_count": len(compact_points),
                 "latest": latest,
@@ -235,6 +239,15 @@ def _us_intraday_compact(
                 "previous_close": intraday_summary.get("previous_close"),
                 "previous_close_source": intraday_summary.get("previous_close_source"),
                 "previous_close_trade_date": intraday_summary.get("previous_close_trade_date"),
+                "change_reference_price": intraday_summary.get(
+                    "change_reference_price"
+                ),
+                "change_reference_type": intraday_summary.get(
+                    "change_reference_type"
+                ),
+                "change_reference_trade_date": intraday_summary.get(
+                    "change_reference_trade_date"
+                ),
                 "regular_session_close": intraday_summary.get("regular_session_close"),
                 "regular_session_close_time": intraday_summary.get("regular_session_close_time"),
                 "has_extended_hours": intraday_summary.get("has_extended_hours"),
@@ -308,11 +321,16 @@ def _us_intraday_quote(
 
     price = latest.get("price")
     previous_close = intraday_summary.get("previous_close")
+    change_reference = intraday_summary.get("change_reference_price")
     change = None
     change_pct = None
-    if isinstance(price, (int, float)) and isinstance(previous_close, (int, float)) and previous_close:
-        change = float(price) - float(previous_close)
-        change_pct = change / float(previous_close) * 100
+    if (
+        isinstance(price, (int, float))
+        and isinstance(change_reference, (int, float))
+        and change_reference
+    ):
+        change = float(price) - float(change_reference)
+        change_pct = change / float(change_reference) * 100
 
     market_calendar = calendar_status or build_us_calendar_status()
     current_phase = str(market_calendar.get("phase") or "closed")
@@ -352,6 +370,22 @@ def _us_intraday_quote(
         if isinstance(intraday_summary.get("source_status"), dict)
         else {}
     )
+    current_source_status = (
+        intraday_summary.get("current_source_status")
+        if isinstance(intraday_summary.get("current_source_status"), dict)
+        else {}
+    )
+    quote_expectation = (
+        intraday_summary.get("capability_expectation", {}).get("quote.snapshot")
+        if isinstance(intraday_summary.get("capability_expectation"), dict)
+        else None
+    )
+    if current_source_status:
+        is_live = bool(
+            current_source_status.get("status") == "current"
+            and current_source_status.get("decision_usable") is True
+        )
+        quote_age_seconds = current_source_status.get("lag_seconds")
     return {
         "source": intraday_summary.get("source") or "yahoo_finance_chart",
         "price": price,
@@ -385,6 +419,21 @@ def _us_intraday_quote(
         "previous_close_source": intraday_summary.get("previous_close_source"),
         "previous_close_trade_date": intraday_summary.get("previous_close_trade_date"),
         "previous_close_provider": intraday_summary.get("previous_close_provider"),
+        "change_reference_price": change_reference,
+        "change_reference_type": intraday_summary.get("change_reference_type"),
+        "change_reference_trade_date": intraday_summary.get(
+            "change_reference_trade_date"
+        ),
+        "change_reference_source": intraday_summary.get(
+            "change_reference_source"
+        ),
+        "market_phase": intraday_summary.get("market_phase") or current_phase,
+        "capability_expectation": quote_expectation,
+        "provider_snapshot_freshness": current_source_status.get(
+            "provider_snapshot_freshness"
+        ),
+        "trade_recency": current_source_status.get("trade_recency"),
+        "trade_state": current_source_status.get("trade_state"),
         "regular_session_close": intraday_summary.get("regular_session_close"),
         "regular_session_close_time": regular_session_close_time,
         "regular_session_close_trade_date": _market_trade_date(
@@ -415,10 +464,15 @@ def _us_resolved_quote(
     previous_close = _optional_float(
         (previous_close_reference or {}).get("previous_close")
     )
-    change = price - previous_close if previous_close not in {None, 0} else None
+    change_reference = _optional_float(
+        (previous_close_reference or {}).get("change_reference_price")
+    )
+    if change_reference is None:
+        change_reference = previous_close
+    change = price - change_reference if change_reference not in {None, 0} else None
     change_pct = (
-        change / previous_close * 100
-        if change is not None and previous_close not in {None, 0}
+        change / change_reference * 100
+        if change is not None and change_reference not in {None, 0}
         else None
     )
     market_calendar = calendar_status or build_us_calendar_status()
@@ -455,6 +509,17 @@ def _us_resolved_quote(
         and quote_age_seconds is not None
         and quote_age_seconds <= 300
     )
+    source_status = (
+        quote_snapshot.get("source_status")
+        if isinstance(quote_snapshot.get("source_status"), dict)
+        else {}
+    )
+    if source_status:
+        is_live = bool(
+            source_status.get("status") == "current"
+            and source_status.get("decision_usable") is True
+        )
+        quote_age_seconds = source_status.get("lag_seconds")
     return {
         "source": quote_snapshot.get("selected_source") or "canonical_quote_cache",
         "price": price,
@@ -492,6 +557,25 @@ def _us_resolved_quote(
         "previous_close_provider": (previous_close_reference or {}).get(
             "previous_close_provider"
         ),
+        "change_reference_price": change_reference,
+        "change_reference_type": (previous_close_reference or {}).get(
+            "change_reference_type"
+        ),
+        "change_reference_trade_date": (previous_close_reference or {}).get(
+            "change_reference_trade_date"
+        ),
+        "change_reference_source": (previous_close_reference or {}).get(
+            "change_reference_source"
+        ),
+        "market_phase": quote_snapshot.get("market_phase") or current_phase,
+        "capability_expectation": quote_snapshot.get(
+            "capability_expectation"
+        ),
+        "provider_snapshot_freshness": source_status.get(
+            "provider_snapshot_freshness"
+        ),
+        "trade_recency": source_status.get("trade_recency"),
+        "trade_state": source_status.get("trade_state") or value.get("trade_state"),
         "regular_session_close": None,
         "regular_session_close_time": None,
         "regular_session_close_trade_date": None,
@@ -1095,11 +1179,33 @@ def read_us_stock_context(
         if latest_daily is not None and latest_daily.close_price is not None
         else None
     )
+    temporal_change_reference = (
+        {
+            **(daily_previous_close_reference or {}),
+            "change_reference_price": intraday_summary.get(
+                "change_reference_price"
+            ),
+            "change_reference_type": intraday_summary.get(
+                "change_reference_type"
+            ),
+            "change_reference_trade_date": intraday_summary.get(
+                "change_reference_trade_date"
+            ),
+            "change_reference_source": intraday_summary.get(
+                "change_reference_source"
+            ),
+            "change_reference_provider": intraday_summary.get(
+                "change_reference_provider"
+            ),
+        }
+        if isinstance(intraday_summary, dict)
+        else daily_previous_close_reference
+    )
     resolved_quote = _us_resolved_quote(
         quote_snapshot,
         calendar_status=us_calendar_status,
         instrument_type=instrument_type,
-        previous_close_reference=daily_previous_close_reference,
+        previous_close_reference=temporal_change_reference,
     )
     intraday_quote = _us_intraday_quote(
         intraday_summary,

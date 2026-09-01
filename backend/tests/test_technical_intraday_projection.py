@@ -139,6 +139,47 @@ class TechnicalIntradayProjectionTests(unittest.TestCase):
         self.assertFalse(partial["official_daily_confirmed"])
         self.assertFalse(partial["decision_usable"])
 
+    def test_close_marker_uses_session_cumulative_volume_not_marker_time_bar_sum(
+        self,
+    ) -> None:
+        intraday = [
+            *self.intraday,
+            {
+                "time": datetime(2026, 8, 13, 13, 30, tzinfo=TAIPEI_TZ),
+                "open": 156.0,
+                "high": 156.0,
+                "low": 156.0,
+                "close": 156.0,
+                "volume": 37_000,
+                "cumulative_volume": 12_345_000,
+                "session_cumulative_volume_shares": 12_345_000,
+                "volume_source": "twse_mis_quote_depth",
+                "volume_event_time": datetime(
+                    2026, 8, 13, 13, 30, tzinfo=TAIPEI_TZ
+                ),
+                "bar_type": "official_close_marker",
+                "indicator_eligible": False,
+            },
+        ]
+        partial = build_current_partial_daily_bar(
+            completed_daily_points=self.completed,
+            intraday_points=intraday,
+            quote={},
+            session_date=date(2026, 8, 13),
+            session_phase="post_close",
+        )
+
+        assert partial is not None
+        self.assertEqual(partial["volume"], 12_345_000)
+        self.assertEqual(
+            partial["volume_semantics"],
+            "provider_reported_session_cumulative_volume",
+        )
+        self.assertEqual(
+            partial["volume_event_time"],
+            "2026-08-13T13:30:00+08:00",
+        )
+
     def test_official_daily_row_suppresses_partial(self) -> None:
         completed = _daily_points(50, end=date(2026, 8, 13))
         partial = build_current_partial_daily_bar(

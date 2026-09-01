@@ -35,6 +35,8 @@ def test_registry_contains_per_symbol_and_full_market_eod_datasets() -> None:
         "tw.quote.auction.snapshot",
         "tw.intraday.bars",
         "tw.market_index.current",
+        "tw.market_index.intraday",
+        "tw.market_index.directory",
         "tw.market_breadth.current",
         "tw.daily.ohlcv",
         "tw.technical.daily",

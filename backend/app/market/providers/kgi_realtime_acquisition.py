@@ -26,7 +26,7 @@ from app.market.tw_realtime_capabilities import (
     KGI_ORDER_BOOK_RESOURCE_ID,
     KGI_QUOTE_RESOURCE_ID,
 )
-from app.market_data.contracts import CanonicalMarketSnapshot
+from app.market_data.contracts import CanonicalMarketSnapshot, MarketSession
 from app.market_data.gateway import (
     AuctionAcquisitionResult,
     DepthAcquisitionResult,
@@ -52,6 +52,7 @@ class KgiRealtimeProviderSnapshot:
     quote: dict[str, Any] | None
     status: str
     error: str | None = None
+    latest_trade: dict[str, Any] | None = None
 
 
 KgiRealtimeSnapshotReader = Callable[[str], KgiRealtimeProviderSnapshot]
@@ -144,6 +145,49 @@ class KgiRealtimeAcquisitionAdapter:
         if sampled_at.tzinfo is None or sampled_at.utcoffset() is None:
             raise ValueError("KGI acquisition clock must return timezone-aware time")
         quote = dict(provider_snapshot.quote)
+        if requirement.session is MarketSession.CLOSE_RESOLUTION:
+            latest_trade = dict(provider_snapshot.latest_trade or {})
+            event_time_text = str(latest_trade.get("event_time") or "").strip()
+            try:
+                formal_event_at = datetime.fromisoformat(
+                    event_time_text.replace("Z", "+00:00")
+                )
+            except ValueError:
+                formal_event_at = None
+            if (
+                formal_event_at is None
+                or formal_event_at.tzinfo is None
+                or formal_event_at.utcoffset() is None
+                or latest_trade.get("session_phase") != "closing_auction"
+                or formal_event_at.date()
+                != requirement.requested_at.astimezone(formal_event_at.tzinfo).date()
+                or latest_trade.get("price") is None
+                or latest_trade.get("volume_lots") is None
+                or latest_trade.get("total_volume_lots") is None
+            ):
+                return _CanonicalAcquisition(
+                    snapshot=None,
+                    summary=AcquisitionSummary(
+                        attempted=True,
+                        status=AcquisitionStatus.UNAVAILABLE,
+                        providers_attempted=(KGI_PROVIDER,),
+                        resource_attempts=(attempt,),
+                        limitations=(
+                            "KGI_CLOSE_RESOLUTION_FORMAL_MATCH_UNAVAILABLE",
+                        ),
+                    ),
+                    receipts=(),
+                )
+            quote.update(
+                {
+                    "datetime": formal_event_at.strftime("%Y%m%d%H%M%S"),
+                    "received_at": latest_trade.get("received_at"),
+                    "close": latest_trade["price"],
+                    "volume": latest_trade["volume_lots"],
+                    "total_volume": latest_trade["total_volume_lots"],
+                    "simtrade": 0,
+                }
+            )
         raw_text = json.dumps(
             quote,
             ensure_ascii=False,

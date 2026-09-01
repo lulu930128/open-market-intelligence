@@ -16,6 +16,7 @@ from app.db.models import (
     MacroSeriesObservation,
     MarketDailyPrice,
     StockMaster,
+    SourceHealthSnapshot,
     USDailyPrice,
     USCompanyProfile,
     USCorporateAction,
@@ -27,7 +28,12 @@ from app.db.models import (
     WatchlistGroup,
     WatchlistItem,
 )
-from app.us_market.schemas import USWatchlistGroupCreate, USWatchlistItemCreate
+from app.us_market.schemas import (
+    USWatchlistGroupCreate,
+    USWatchlistItemCreate,
+    USWatchlistRankingItemRead,
+    USSourceHealthRead,
+)
 from app.us_market.price_store import list_us_daily_prices
 from app.us_market.service import (
     USStockNotFoundError,
@@ -47,6 +53,7 @@ from app.us_market.service import (
     refresh_us_watchlist_resources,
     repair_us_daily_price_quality,
     search_us_stocks,
+    snapshot_us_source_health,
     upsert_macro_series_observation_records,
     upsert_us_company_profile_records,
     upsert_us_corporate_action_records,
@@ -1374,6 +1381,29 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(entries[("sec_facts", "sec_edgar")]["status"], "empty")
         self.assertEqual(health["summary"]["stale_count"], 1)
         self.assertGreaterEqual(health["summary"]["empty_count"], 1)
+        self.assertEqual(self.db.query(SourceHealthSnapshot).count(), 0)
+
+        realtime = {
+            (entry["resource"], entry["provider"]): entry
+            for entry in health["entries"]
+            if entry["resource"] in {"quote_snapshot", "intraday_bars"}
+        }
+        self.assertEqual(
+            realtime[("quote_snapshot", "yahoo_chart")]["freshness_basis"],
+            "fetched_time",
+        )
+        USSourceHealthRead.model_validate(health)
+        self.assertEqual(
+            realtime[("intraday_bars", "yahoo_chart")]["freshness_basis"],
+            "event_time",
+        )
+
+        snapshot_us_source_health(
+            self.db,
+            symbol="IBM",
+            expected_daily_price_date=date(2026, 6, 2),
+        )
+        self.assertGreater(self.db.query(SourceHealthSnapshot).count(), 0)
 
     def test_us_source_health_marks_preclose_daily_row_as_partial(self) -> None:
         upsert_canonical_us_daily_price_records(
@@ -1620,6 +1650,19 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["results"][0]["price_basis"], "raw")
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
         self.assertEqual(self.db.query(MarketDailyPrice).count(), 0)
+
+    def test_us_watchlist_ranking_contract_preserves_unknown_price_basis(self) -> None:
+        row = USWatchlistRankingItemRead.model_validate(
+            {
+                "rank": 1,
+                "symbol": "LYV",
+                "group_id": 36,
+                "status": "ready",
+                "price_basis": None,
+            }
+        )
+
+        self.assertIsNone(row.price_basis)
 
     def test_us_watchlist_ranking_uses_resolver_priority_and_raw_price_basis(self) -> None:
         upsert_us_symbol_records(

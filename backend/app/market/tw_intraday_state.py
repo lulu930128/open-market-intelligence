@@ -907,6 +907,7 @@ def _group_metrics(
     group_type: str,
     membership_source: str,
     states: list[TaiwanIntradayStockState],
+    markets: set[str] | None = None,
 ) -> dict[str, Any] | None:
     returns = [
         float(state.change_pct)
@@ -935,6 +936,12 @@ def _group_metrics(
         "group_name": group_name,
         "group_type": group_type,
         "membership_source": membership_source,
+        "market": (
+            next(iter(markets))
+            if markets and len(markets) == 1
+            else "TW"
+        ),
+        "markets": sorted(markets or []),
         "member_count": len(states),
         "observed_count": len(returns),
         "advance_count": sum(value > 0 for value in returns),
@@ -984,12 +991,13 @@ def build_tw_hot_groups_snapshot(
     *,
     limit: int = 20,
     generated_at: datetime | None = None,
+    include_watchlist_groups: bool = True,
 ) -> dict[str, Any]:
     return build_tw_intraday_group_snapshots(
         db,
         hot_group_limit=limit,
         generated_at=generated_at,
-        include_watchlist_groups=True,
+        include_watchlist_groups=include_watchlist_groups,
     )["hot_groups"]
 
 
@@ -1053,6 +1061,7 @@ def build_tw_intraday_group_snapshots(
     industry_groups: dict[str, list[TaiwanIntradayStockState]] = defaultdict(
         list
     )
+    industry_markets: dict[str, set[str]] = defaultdict(set)
     for stock_id, state in states_by_stock.items():
         stock = stocks_by_id.get(stock_id)
         if stock is None:
@@ -1060,6 +1069,7 @@ def build_tw_intraday_group_snapshots(
         industry = str(stock.industry or stock.category or "").strip()
         if industry:
             industry_groups[industry].append(state)
+            industry_markets[industry].add(str(stock.market or "TW"))
 
     exchange_groups: list[dict[str, Any]] = []
     for industry, states in industry_groups.items():
@@ -1069,6 +1079,7 @@ def build_tw_intraday_group_snapshots(
             group_type="exchange_industry",
             membership_source="stock_master.industry",
             states=states,
+            markets=industry_markets[industry],
         )
         if metrics is not None:
             exchange_groups.append(metrics)
@@ -1093,10 +1104,15 @@ def build_tw_intraday_group_snapshots(
         tuple[int, str],
         list[TaiwanIntradayStockState],
     ] = defaultdict(list)
+    watchlist_markets: dict[tuple[int, str], set[str]] = defaultdict(set)
     for group_id, group_name, stock_id in watchlist_rows:
         state = states_by_stock.get(str(stock_id))
         if state is not None:
-            watchlist_members[(int(group_id), str(group_name))].append(state)
+            key = (int(group_id), str(group_name))
+            watchlist_members[key].append(state)
+            stock = stocks_by_id.get(str(stock_id))
+            if stock is not None:
+                watchlist_markets[key].add(str(stock.market or "TW"))
     watchlist_groups: list[dict[str, Any]] = []
     for (group_id, group_name), states in watchlist_members.items():
         metrics = _group_metrics(
@@ -1105,6 +1121,7 @@ def build_tw_intraday_group_snapshots(
             group_type="user_curated_watchlist",
             membership_source="watchlist_group+watchlist_item",
             states=states,
+            markets=watchlist_markets[(group_id, group_name)],
         )
         if metrics is not None:
             watchlist_groups.append(metrics)
@@ -1151,6 +1168,19 @@ def build_tw_intraday_group_snapshots(
         if exchange_groups
         else "missing"
     )
+    snapshot_decision_usable = snapshot_status == "ready"
+    for group in groups:
+        member_count = int(group.get("member_count") or 0)
+        observed_count = int(group.get("observed_count") or 0)
+        group.update(
+            {
+                "status": snapshot_status,
+                "coverage_ratio": (
+                    observed_count / member_count if member_count else 0.0
+                ),
+                "decision_usable": snapshot_decision_usable,
+            }
+        )
     observed_trade_date = (
         latest_trade_date.isoformat() if latest_trade_date else None
     )
@@ -1196,6 +1226,9 @@ def build_tw_intraday_group_snapshots(
         "snapshot_version": GROUP_SNAPSHOT_VERSION,
         "snapshot_id": snapshot_id,
         "status": snapshot_status,
+        "decision_usable": snapshot_decision_usable,
+        "current_for_requested_session": snapshot_decision_usable,
+        "is_complete": snapshot_decision_usable,
         "groups": groups[:hot_group_limit],
         "group_count": len(groups),
         "exchange_industry_group_count": len(exchange_groups),

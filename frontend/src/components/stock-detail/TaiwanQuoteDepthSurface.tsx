@@ -34,6 +34,7 @@ export default function TaiwanQuoteDepthSurface({
     enabled: true,
     stockId,
     leaseEnabled: false,
+    streamEnabled: quoteDepth?.presentation_session_state !== "completed",
     depthEnabled: false,
   });
 

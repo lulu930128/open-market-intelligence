@@ -266,6 +266,22 @@ def resolve_taiwan_index_quote_state(
     }
 
     summary_time = snapshot.get("as_of")
+    summary_observed_at = index_candidate_datetime(
+        summary_time,
+        timezone_name=timezone_name,
+    )
+    summary_age_seconds = (
+        max(int((checked_at - summary_observed_at).total_seconds()), 0)
+        if summary_observed_at is not None
+        else None
+    )
+    summary_fresh_for_phase = bool(
+        phase not in {"regular", "regular_live", "closing_auction"}
+        or (
+            summary_age_seconds is not None
+            and summary_age_seconds <= 240
+        )
+    )
     summary_date = index_candidate_date(
         snapshot.get("time")
         or snapshot.get("trade_date")
@@ -283,6 +299,8 @@ def resolve_taiwan_index_quote_state(
         "trade_date": summary_date.isoformat() if summary_date else None,
         "source": str(snapshot.get("source") or "market_index_summary"),
         "provider": snapshot.get("provider"),
+        "age_seconds": summary_age_seconds,
+        "stale_after_seconds": 240,
         "eligible": bool(
             (
                 snapshot.get("close") is not None
@@ -290,6 +308,7 @@ def resolve_taiwan_index_quote_state(
             )
             and expected_trade_date is not None
             and summary_date == expected_trade_date
+            and summary_fresh_for_phase
         ),
     }
 

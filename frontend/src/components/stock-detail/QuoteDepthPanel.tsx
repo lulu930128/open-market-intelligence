@@ -7,6 +7,7 @@ import {
   formatPrice,
   valueTone,
 } from "@/components/stock-detail/StockDetailDataViews";
+import { resolveQuoteDepthHeadlineValues } from "@/components/stock-detail/stockDetailAnalytics";
 import type {
   TaiwanQuoteContractReplayRead,
   TaiwanQuoteContractReplaySnapshotRead,
@@ -71,11 +72,51 @@ function sourceLabel(
   quoteDepth:
     | Pick<
         TaiwanStockQuoteDepthRead,
-        "source" | "primary_provider" | "primary_source_status" | "fallback_used"
+        | "provider"
+        | "source"
+        | "primary_provider"
+        | "primary_source_status"
+        | "fallback_used"
+        | "data_core_components"
+        | "depth_snapshot_available"
+        | "depth_snapshot_provider"
+        | "depth_snapshot_source"
       >
     | null
     | undefined
 ) {
+  if (quoteDepth?.depth_snapshot_available) {
+    const provider = quoteDepth.depth_snapshot_provider;
+    if (provider === "twse_mis") return "收盤五檔 · TWSE MIS";
+    if (provider === "kgi_superpy") return "收盤五檔 · KGI SUPER PY";
+    return `收盤五檔 · ${quoteDepth.depth_snapshot_source ?? provider ?? "-"}`;
+  }
+  const orderBook = quoteDepth?.data_core_components?.["quote.order_book"];
+  const depthProvider =
+    typeof orderBook?.provider === "string" ? orderBook.provider : null;
+  const resolvedHealth =
+    orderBook?.resolved_health &&
+    typeof orderBook.resolved_health === "object" &&
+    !Array.isArray(orderBook.resolved_health)
+      ? (orderBook.resolved_health as Record<string, unknown>)
+      : null;
+  const depthFallback =
+    resolvedHealth?.fallback_used === true || resolvedHealth?.status === "fallback";
+  const providerLabel = (provider: string | null | undefined) => {
+    if (provider === "kgi_superpy") return "KGI SUPER PY";
+    if (provider === "twse_mis") return "TWSE MIS";
+    if (provider === "fugle") return "FUGLE";
+    return provider?.replaceAll("_", " ").toUpperCase() ?? null;
+  };
+  if (depthProvider) {
+    const quoteProvider = quoteDepth?.provider ?? quoteDepth?.primary_provider;
+    const labels = [`五檔 ${providerLabel(depthProvider)}`];
+    if (quoteProvider && quoteProvider !== depthProvider) {
+      labels.push(`成交 ${providerLabel(quoteProvider)}`);
+    }
+    if (depthFallback) labels.push("備援");
+    return labels.join(" · ");
+  }
   const source = quoteDepth?.source;
   if (source === "kgi_superpy_quote_all") return "KGI SUPER PY";
   if (source === "twse_mis_quote_depth") {
@@ -367,12 +408,15 @@ function tradeDirectionTone(direction: string) {
 function RecentTradesPanel({
   quoteStream,
   loadState,
+  marketCompleted,
 }: {
   quoteStream: TaiwanRealtimeMarketStreamRead | null;
   loadState: QuoteDepthLoadState;
+  marketCompleted: boolean;
 }) {
   const presentationTelemetry = isPresentationTelemetry(quoteStream);
-  const trades = presentationTelemetry ? quoteStream?.recent_trades ?? [] : [];
+  const trades =
+    !marketCompleted && presentationTelemetry ? quoteStream?.recent_trades ?? [] : [];
   const warning = quoteStream?.warnings[0] ?? null;
   const isLive = quoteStream?.status === "live" && !quoteStream.is_stale;
 
@@ -401,7 +445,7 @@ function RecentTradesPanel({
           ].join(" ")}
           data-testid="quote-recent-trades-status"
         >
-          {streamStatusLabel(quoteStream, loadState)}
+          {marketCompleted ? "已收盤" : streamStatusLabel(quoteStream, loadState)}
         </span>
       </div>
 
@@ -437,10 +481,16 @@ function RecentTradesPanel({
           <div className="flex h-full min-h-[140px] items-center justify-center px-4 text-center">
             <div>
               <div className="text-xs font-semibold text-omi-text-strong">
-                {loadState === "loading" ? "等待即時成交流" : "尚無正式成交事件"}
+                {marketCompleted
+                  ? "市場已收盤"
+                  : loadState === "loading"
+                    ? "等待即時成交流"
+                    : "尚無正式成交事件"}
               </div>
               <div className="mt-1 text-[10px] leading-4 text-omi-text-muted">
-                {quoteStream?.status === "not_subscribed"
+                {marketCompleted
+                  ? "即時成交與五檔串流已停止；保存回放仍可檢視試撮快照。"
+                  : quoteStream?.status === "not_subscribed"
                   ? "選取標的並建立 viewer lease 後才會開始收集。"
                   : "試撮事件不會混入正式成交列表。"}
               </div>
@@ -855,9 +905,18 @@ export default function QuoteDepthPanel({
     : useReplaySnapshot
       ? replayDisplayQuote
       : quoteDepth;
+  const isCompletedLiveView = Boolean(
+    !isPreview &&
+      !isReplay &&
+      displayQuoteDepth?.presentation_session_state === "completed"
+  );
+  const showClosingSnapshot = Boolean(
+    isCompletedLiveView && displayQuoteDepth?.depth_snapshot_available
+  );
   const streamDepth =
     !isPreview &&
     !isReplay &&
+    !isCompletedLiveView &&
     quoteStream !== null &&
     isPresentationTelemetry(quoteStream) &&
     (quoteDepth === null || quoteStream.stock_id === quoteDepth.stock_id) &&
@@ -869,7 +928,9 @@ export default function QuoteDepthPanel({
       ? quoteStream.depth
       : null;
   const status = streamDepth?.freshness_status ?? displayQuoteDepth?.freshness.status;
-  const phaseLabel = displayQuoteDepth?.phase_label ?? "五檔";
+  const phaseLabel = showClosingSnapshot
+    ? "收盤五檔快照"
+    : displayQuoteDepth?.phase_label ?? "五檔";
   const bidLevels: TaiwanStockQuoteDepthLevel[] = streamDepth
     ? streamDepth.bid_levels.map(({ level, price, size_lots }) => ({
         level,
@@ -888,23 +949,26 @@ export default function QuoteDepthPanel({
   const normalizedBidLevels = normalizeDepthLevels(bidLevels);
   const normalizedAskLevels = normalizeDepthLevels(askLevels);
   const maxSize = depthMaxSize(normalizedBidLevels, normalizedAskLevels);
-  const indicativePrice =
-    displayQuoteDepth?.indicative_match_available &&
-    isFiniteNumber(displayQuoteDepth.indicative_match_price)
-      ? displayQuoteDepth.indicative_match_price
-      : null;
-  const headlinePrice = indicativePrice ?? displayQuoteDepth?.last_price;
-  const headlineChange =
-    indicativePrice !== null && isFiniteNumber(displayQuoteDepth?.previous_close)
-      ? indicativePrice - displayQuoteDepth.previous_close
-      : displayQuoteDepth?.change;
-  const headlineChangePct =
-    indicativePrice !== null &&
-    isFiniteNumber(displayQuoteDepth?.previous_close) &&
-    displayQuoteDepth.previous_close !== 0
-      ? (headlineChange! / displayQuoteDepth.previous_close) * 100
-      : displayQuoteDepth?.change_pct;
-  const message = streamDepth
+  const [headlinePrice, headlineChange, headlineChangePct] =
+    resolveQuoteDepthHeadlineValues({
+      allowIndicative: isPreview || isCurrentAuction || isReplay,
+      indicativeAvailable: displayQuoteDepth?.indicative_match_available,
+      indicativePrice: displayQuoteDepth?.indicative_match_price,
+      headlinePrice: displayQuoteDepth?.headline_price,
+      headlineChange: displayQuoteDepth?.headline_change,
+      headlineChangePct: displayQuoteDepth?.headline_change_pct,
+      legacyPrice: displayQuoteDepth?.last_price,
+      legacyChange: displayQuoteDepth?.change,
+      legacyChangePct: displayQuoteDepth?.change_pct,
+      previousClose: displayQuoteDepth?.previous_close,
+    });
+  const message = showClosingSnapshot
+    ? `當日最後保存委託簿 · ${formatEventClock(
+        displayQuoteDepth?.depth_snapshot_event_time ?? null
+      )}；此快照不代表目前可成交掛單。`
+    : isCompletedLiveView
+    ? "市場已收盤；目前沒有合格的收盤五檔快照，不沿用盤中或前一交易日掛單。"
+    : streamDepth
     ? `${streamProviderLabel(quoteStream)} 即時呈現五檔（非研究證據） · ${formatEventClock(
         streamDepth.event_time
       )}`
@@ -917,6 +981,8 @@ export default function QuoteDepthPanel({
   const footerStatus = displayQuoteDepth?.freshness.is_stale || showDepth ? message : phaseLabel;
   const observationTimeLabel = streamDepth?.event_time
     ? formatDateTime(streamDepth.event_time)
+    : showClosingSnapshot && displayQuoteDepth?.depth_snapshot_event_time
+    ? formatDateTime(displayQuoteDepth.depth_snapshot_event_time)
     : displayQuoteDepth?.quote_time
     ? formatDateTime(displayQuoteDepth.quote_time)
     : displayQuoteDepth?.presentation_trade_date
@@ -944,6 +1010,11 @@ export default function QuoteDepthPanel({
             {isReplay ? (
               <span className="inline-flex items-center border border-omi-info bg-omi-info-soft px-2 py-0.5 text-[11px] font-bold text-omi-info-strong">
                 保存回放
+              </span>
+            ) : null}
+            {showClosingSnapshot ? (
+              <span className="inline-flex items-center border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[11px] font-bold text-amber-200">
+                非即時掛單
               </span>
             ) : null}
             <span className="text-[11px] text-omi-text-muted">
@@ -1010,20 +1081,44 @@ export default function QuoteDepthPanel({
         data-testid="quote-depth-content"
       >
         <div className="h-[18rem] min-w-0" data-testid="quote-depth-book-column">
-          <div className="grid h-full grid-cols-2 gap-2" data-testid="quote-depth-book">
-            <DepthSide
-              levels={normalizedBidLevels}
-              maxSize={maxSize}
-              previousClose={displayQuoteDepth?.previous_close}
-              side="bid"
-            />
-            <DepthSide
-              levels={normalizedAskLevels}
-              maxSize={maxSize}
-              previousClose={displayQuoteDepth?.previous_close}
-              side="ask"
-            />
-          </div>
+          {isCompletedLiveView && !showClosingSnapshot ? (
+            <div
+              className="flex h-full items-center justify-center border border-omi-border-subtle bg-omi-surface-muted px-6 text-center"
+              data-testid="quote-depth-market-closed"
+            >
+              <div>
+                <div className="text-sm font-bold text-omi-text-strong">市場已收盤</div>
+                <div className="mt-2 text-xs leading-5 text-omi-text-muted">
+                  五檔委託簿目前不適用，不沿用盤中或前一交易日掛單。
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex h-full min-h-0 flex-col gap-2">
+              {showClosingSnapshot ? (
+                <div
+                  className="border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] leading-4 text-omi-text-muted"
+                  data-testid="quote-depth-closing-snapshot-notice"
+                >
+                  此為當日收盤時保存的五檔委託簿，只供盤後回顧，不代表目前仍可成交。
+                </div>
+              ) : null}
+              <div className="grid min-h-0 flex-1 grid-cols-2 gap-2" data-testid="quote-depth-book">
+                <DepthSide
+                  levels={normalizedBidLevels}
+                  maxSize={maxSize}
+                  previousClose={displayQuoteDepth?.previous_close}
+                  side="bid"
+                />
+                <DepthSide
+                  levels={normalizedAskLevels}
+                  maxSize={maxSize}
+                  previousClose={displayQuoteDepth?.previous_close}
+                  side="ask"
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="h-[18rem] min-w-0" data-testid="quote-depth-summary-column">
@@ -1045,6 +1140,7 @@ export default function QuoteDepthPanel({
             <RecentTradesPanel
               quoteStream={quoteStream}
               loadState={quoteStreamLoadState}
+              marketCompleted={isCompletedLiveView}
             />
           )}
         </div>

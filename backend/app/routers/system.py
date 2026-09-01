@@ -15,6 +15,7 @@ from app.observability.schemas import ProviderEventRead, SourceHealthSnapshotRea
 from app.market.tw_realtime_lease_platform import summarize_fugle_realtime_runtime
 from app.us_market.daily_rollout import us_daily_rollout_snapshot
 from app.us_market.intraday_materializer import (
+    US_RECURRING_MATERIALIZER_PROFILE,
     us_intraday_materializer_runtime_summary,
 )
 from app.us_market.ohlc_priority import PRIORITY_US_INDEX_SYMBOLS
@@ -87,10 +88,7 @@ def health_check():
             ],
             "us_daily_acquisition_limitations": us_daily_rollout["limitations"],
             "us_intraday_materializer": {
-                "enabled": (
-                    settings.enable_scheduler
-                    and settings.enable_us_intraday_materializer
-                ),
+                "enabled": settings.enable_us_intraday_materializer,
                 "configured_symbols": [
                     item.strip().upper()
                     for item in settings.scheduler_us_intraday_materializer_symbols.split(",")
@@ -103,20 +101,24 @@ def health_check():
                 "max_provider_calls": settings.scheduler_us_intraday_materializer_max_provider_calls,
                 "max_external_calls": settings.scheduler_us_intraday_materializer_max_external_calls,
                 "equity_lane": {
-                    "enabled": (
-                        settings.enable_scheduler
-                        and settings.enable_us_intraday_materializer
-                    ),
+                    "enabled": settings.enable_us_intraday_materializer,
                     "instrument_type": "stock",
                     "max_symbols": settings.scheduler_us_intraday_materializer_max_symbols,
+                    "universe_owner": (
+                        "configuration+portfolio+watchlist"
+                        if settings.enable_us_dynamic_equity_materializer_universe
+                        else "configuration"
+                    ),
                 },
                 "index_lane": {
                     "enabled": (
-                        settings.enable_scheduler
-                        and settings.enable_us_index_quote_materializer
+                        settings.enable_us_index_quote_materializer
+                        or settings.enable_us_index_intraday_materializer
                     ),
+                    "quote_enabled": settings.enable_us_index_quote_materializer,
+                    "intraday_enabled": settings.enable_us_index_intraday_materializer,
                     "instrument_type": "index",
-                    "capabilities": ["quote.snapshot"],
+                    "capabilities": ["quote.snapshot", "intraday.bars"],
                     "configured_symbols": [
                         item.strip().upper()
                         for item in settings.scheduler_us_index_quote_symbols.split(",")
@@ -124,11 +126,17 @@ def health_check():
                     ][: settings.scheduler_us_index_quote_max_symbols],
                     "max_symbols": settings.scheduler_us_index_quote_max_symbols,
                     "max_external_calls": settings.scheduler_us_index_quote_max_external_calls,
+                    "intraday_interval_seconds": settings.scheduler_us_index_intraday_materializer_interval_seconds,
+                    "intraday_bars": settings.scheduler_us_index_intraday_materializer_bars,
+                    "intraday_max_external_calls": settings.scheduler_us_index_intraday_max_external_calls,
                 },
-                "retention_enabled": (
-                    settings.enable_scheduler
-                    and settings.enable_us_quote_retention_scheduler
-                ),
+                "freshness_contract": {
+                    "quote_basis": "fetched_time",
+                    "intraday_basis": "event_time",
+                    "producer_refresh_due_seconds": US_RECURRING_MATERIALIZER_PROFILE.producer_refresh_due_seconds,
+                    "consumer_stale_after_seconds": US_RECURRING_MATERIALIZER_PROFILE.consumer_stale_after_seconds,
+                },
+                "retention_enabled": settings.enable_us_quote_retention_scheduler,
                 "retention_days": settings.us_quote_snapshot_retention_days,
                 **us_intraday_materializer_runtime_summary(),
             },
@@ -147,6 +155,9 @@ def health_check():
                 ),
                 "max_attempts": (
                     settings.scheduler_us_index_data_repair_max_attempts
+                ),
+                "manual_attention_backoff_seconds": (
+                    settings.scheduler_us_index_data_repair_manual_attention_backoff_seconds
                 ),
                 "max_runtime_seconds": (
                     settings.scheduler_us_index_data_repair_max_runtime_seconds

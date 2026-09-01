@@ -286,12 +286,14 @@ Registry 目前涵蓋：
   market breadth。
 - 美股：quote/intraday、daily price、technical indicators／structure、SEC company facts；technical quality會保留raw price basis、corporate-action coverage、warm-up與decision-usability限制。US Index Daily沿用同一Canonical OHLCV與Shared Technical Engine，但volume與company corporate actions明示`not_applicable`；不得套用equity shares／corporate-action completeness規則，也不得以`0`取代不適用值。
 
-美股current-market projection中的`previous_close`、`change`與`change_pct`必須以exact expected completed-session的resolved Daily作為唯一reference。Quote provider payload內的previous close只能保留在diagnostic evidence；Daily缺失時outward值維持`null`並揭露`CANONICAL_US_DAILY_PREVIOUS_CLOSE_MISSING`，HTTP、AI、MCP與Frontend不得改用Quote或Intraday history自行補值。
+美股current-market projection中的相容欄位`previous_close`仍只接受exact expected completed-session的resolved Daily。`change`與`change_pct`則必須使用Backend明示的`change_reference_price`：盤前／正常盤為`prior_regular_close`，盤後為exact finalized `current_day_regular_close`；`change_reference_type`、trade date、source與status必須一併保留。Quote provider payload內的previous close只能留在diagnostic evidence；所需reference缺失時outward值維持`null`並揭露對應limitation／reason code，HTTP、AI、MCP與Frontend不得自行從Quote、Intraday history或時鐘推導替代值。
 - Crypto：ticker/quote、OHLCV、order book、derivatives。
 
 Generic 台股 quote intent 只預設要求 `quote.snapshot`；`quote.session_close` 只有
 在 explicit selection 或問題明確要求今日／當日／盤後 completed-session close 時
 加入。Session close 不得成為所有 quote 問題的隱性 blocking dependency。
+
+`quote.session_close`可攜帶closing-match volume與session cumulative volume，但price、volume、official release與reconciliation仍是不同axes。`quote.order_book`的`available`可以表示live book或明示的closing-session snapshot；Consumer必須讀`live_available`、`snapshot_available`、`snapshot_semantics`、`snapshot_trade_date`、`snapshot_session`與`snapshot_decision_usable`，不得把盤後snapshot說成即時掛單或decision-ready evidence。
 
 `CapabilitySpec.paths` 是 outward capability projection 的唯一 executable path
 owner。`capability_projection_registry` 的 advertised projector 必須由這組 paths

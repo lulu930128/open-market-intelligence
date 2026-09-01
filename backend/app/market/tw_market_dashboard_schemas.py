@@ -18,11 +18,13 @@ class TaiwanDashboardSessionRead(BaseModel):
 
 class TaiwanDashboardFreshnessRead(BaseModel):
     status: str
+    basis: str = "producer_cadence"
     cache_only: Literal[True] = True
     oldest_as_of: datetime | None = None
     newest_as_of: datetime | None = None
     max_age_seconds: int | None = None
     source: str
+    producer_cadence_seconds: int | None = None
 
 
 class TaiwanDashboardBreadthRead(BaseModel):

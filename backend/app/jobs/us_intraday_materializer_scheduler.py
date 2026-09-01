@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Callable
 
 from app.config import settings
 from app.db.session import SessionLocal
+from app.db.models import PortfolioHolding, USWatchlistItem
 from app.us_market.intraday_maintenance import prune_expired_us_quote_snapshots
 from app.us_market.intraday_materializer import (
-    USMaterializerProfile,
+    US_RECURRING_MATERIALIZER_PROFILE,
     materialize_us_intraday_capability,
 )
 from app.us_market.trading_calendar import US_MARKET_TIMEZONE
@@ -19,15 +21,50 @@ from app.us_market.trading_calendar import US_MARKET_TIMEZONE
 logger = logging.getLogger(__name__)
 
 
+def _equity_materializer_universe() -> tuple[str, str]:
+    configured = settings.scheduler_us_intraday_materializer_symbols
+    if not settings.enable_us_dynamic_equity_materializer_universe:
+        return configured, "configuration"
+
+    db = SessionLocal()
+    try:
+        dynamic_symbols = [
+            row.symbol
+            for row in (
+                db.query(PortfolioHolding)
+                .filter(
+                    PortfolioHolding.market == "US",
+                    PortfolioHolding.is_active.is_(True),
+                )
+                .order_by(PortfolioHolding.id.asc())
+                .all()
+            )
+        ]
+        dynamic_symbols.extend(
+            row.symbol
+            for row in (
+                db.query(USWatchlistItem)
+                .filter(USWatchlistItem.enabled.is_(True))
+                .order_by(USWatchlistItem.priority.asc(), USWatchlistItem.id.asc())
+                .all()
+            )
+        )
+    finally:
+        db.close()
+    return ",".join((configured, *dynamic_symbols)), "configuration+portfolio+watchlist"
+
+
 def collect_us_quote_snapshots(*, now: datetime | None = None) -> dict[str, Any]:
+    configured_symbols, universe_owner = _equity_materializer_universe()
     result = materialize_us_intraday_capability(
         "quote.snapshot",
-        configured_symbols=settings.scheduler_us_intraday_materializer_symbols,
+        configured_symbols=configured_symbols,
         max_symbols=settings.scheduler_us_intraday_materializer_max_symbols,
         max_provider_calls=settings.scheduler_us_intraday_materializer_max_provider_calls,
         max_external_calls=settings.scheduler_us_intraday_materializer_max_external_calls,
         lane_id="equity_research",
         instrument_type="stock",
+        universe_owner=universe_owner,
         now=now,
     )
     logger.info(
@@ -45,16 +82,18 @@ def collect_us_quote_snapshots(*, now: datetime | None = None) -> dict[str, Any]
 
 
 def collect_us_intraday_bars(*, now: datetime | None = None) -> dict[str, Any]:
+    configured_symbols, universe_owner = _equity_materializer_universe()
     result = materialize_us_intraday_capability(
         "intraday.bars",
-        configured_symbols=settings.scheduler_us_intraday_materializer_symbols,
+        configured_symbols=configured_symbols,
         max_symbols=settings.scheduler_us_intraday_materializer_max_symbols,
         max_provider_calls=settings.scheduler_us_intraday_materializer_max_provider_calls,
         max_external_calls=settings.scheduler_us_intraday_materializer_max_external_calls,
         lane_id="equity_research",
         instrument_type="stock",
-        profile=USMaterializerProfile(
-            profile_id="recurring_current",
+        universe_owner=universe_owner,
+        profile=replace(
+            US_RECURRING_MATERIALIZER_PROFILE,
             intraday_bars=settings.scheduler_us_intraday_materializer_bars,
         ),
         now=now,
@@ -98,6 +137,35 @@ def collect_us_index_quote_snapshots(*, now: datetime | None = None) -> dict[str
     return result
 
 
+def collect_us_index_intraday_bars(*, now: datetime | None = None) -> dict[str, Any]:
+    result = materialize_us_intraday_capability(
+        "intraday.bars",
+        configured_symbols=settings.scheduler_us_index_quote_symbols,
+        max_symbols=settings.scheduler_us_index_quote_max_symbols,
+        max_provider_calls=2,
+        max_external_calls=settings.scheduler_us_index_intraday_max_external_calls,
+        lane_id="index_current",
+        instrument_type="index",
+        profile=replace(
+            US_RECURRING_MATERIALIZER_PROFILE,
+            intraday_bars=settings.scheduler_us_index_intraday_materializer_bars,
+        ),
+        now=now,
+    )
+    logger.info(
+        "US Index Intraday materializer status=%s requested=%s refreshed=%s "
+        "failed=%s calls=%s duration_ms=%s reason=%s.",
+        result["status"],
+        result["requested_count"],
+        result["refreshed_count"],
+        result["failed_count"],
+        result["external_call_count"],
+        result["duration_ms"],
+        result.get("reason"),
+    )
+    return result
+
+
 def cleanup_us_quote_snapshots(
     *,
     now: datetime | None = None,
@@ -123,7 +191,7 @@ def cleanup_us_quote_snapshots(
 
 
 def add_us_intraday_materializer_jobs(scheduler: Any) -> bool:
-    if not settings.enable_scheduler:
+    if not us_intraday_materializer_jobs_requested():
         return False
 
     now = datetime.now(timezone.utc)
@@ -162,6 +230,18 @@ def add_us_intraday_materializer_jobs(scheduler: Any) -> bool:
             next_run_time=now + timedelta(seconds=20),
         )
         registered = True
+    if settings.enable_us_index_intraday_materializer:
+        scheduler.add_job(
+            collect_us_index_intraday_bars,
+            trigger="interval",
+            seconds=settings.scheduler_us_index_intraday_materializer_interval_seconds,
+            id="us_index_intraday_bar_materialization",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            next_run_time=now + timedelta(seconds=50),
+        )
+        registered = True
     if settings.enable_us_quote_retention_scheduler:
         scheduler.add_job(
             cleanup_us_quote_snapshots,
@@ -178,10 +258,25 @@ def add_us_intraday_materializer_jobs(scheduler: Any) -> bool:
     return registered
 
 
+def us_intraday_materializer_jobs_requested() -> bool:
+    """Return whether any independently owned US intraday job is requested."""
+
+    return any(
+        (
+            settings.enable_us_intraday_materializer,
+            settings.enable_us_index_quote_materializer,
+            settings.enable_us_index_intraday_materializer,
+            settings.enable_us_quote_retention_scheduler,
+        )
+    )
+
+
 __all__ = [
     "add_us_intraday_materializer_jobs",
     "cleanup_us_quote_snapshots",
     "collect_us_index_quote_snapshots",
+    "collect_us_index_intraday_bars",
     "collect_us_intraday_bars",
     "collect_us_quote_snapshots",
+    "us_intraday_materializer_jobs_requested",
 ]

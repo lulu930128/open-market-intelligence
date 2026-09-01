@@ -602,6 +602,7 @@ class AiCapabilityContractTests(unittest.TestCase):
     def test_volume_contract_fields_survive_capability_projection(self) -> None:
         intraday = capability_contract.CAPABILITIES["intraday.bars"]
         daily = capability_contract.CAPABILITIES["daily.ohlcv"]
+        session_close = capability_contract.CAPABILITIES["quote.session_close"]
 
         for field in (
             "base_volume_unit",
@@ -615,6 +616,11 @@ class AiCapabilityContractTests(unittest.TestCase):
             "bar_volume_trade_date",
             "bar_volume_latest_time",
             "bar_volume_scope",
+            "closing_match_volume_shares",
+            "closing_match_volume_lots",
+            "closing_match_volume_source",
+            "closing_match_volume_source_field",
+            "closing_match_volume_event_time",
             "session_cumulative_volume_shares",
             "session_cumulative_volume_lots",
             "session_cumulative_volume_trade_date",
@@ -642,6 +648,38 @@ class AiCapabilityContractTests(unittest.TestCase):
         ):
             self.assertIn(field, daily.fields)
             self.assertIn(field, daily.default_fields)
+        for field in (
+            "closing_match_volume_shares",
+            "closing_match_volume_lots",
+            "session_cumulative_volume_shares",
+            "session_cumulative_volume_lots",
+            "session_cumulative_volume_trade_date",
+            "session_cumulative_volume_event_time",
+            "volume_available",
+            "volume_status",
+            "volume_provider",
+            "volume_source",
+            "volume_event_time",
+            "volume_scope",
+            "volume_decision_usable",
+        ):
+            self.assertIn(field, session_close.fields)
+            self.assertIn(field, session_close.default_fields)
+
+    def test_order_book_contract_exposes_non_tradable_closing_snapshot_axes(self) -> None:
+        order_book = capability_contract.CAPABILITIES["quote.order_book"]
+
+        for field in (
+            "live_available",
+            "snapshot_available",
+            "snapshot_status",
+            "snapshot_semantics",
+            "snapshot_trade_date",
+            "snapshot_session",
+            "snapshot_decision_usable",
+        ):
+            self.assertIn(field, order_book.fields)
+            self.assertIn(field, order_book.default_fields)
 
     def test_tw_futures_intraday_projection_prefers_contract_volume_chart(self) -> None:
         selection = capability_contract.normalize_selection(

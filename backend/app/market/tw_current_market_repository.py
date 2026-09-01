@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 
@@ -22,7 +23,9 @@ from app.market.tw_current_market_capabilities import (
     TW_CURRENT_BREADTH_DATASET_ID,
     TW_CURRENT_INDEX_CAPABILITY_ID,
     TW_CURRENT_INDEX_DATASET_ID,
+    TW_CURRENT_INDEX_MAX_ABS_CHANGE_RATIO,
     current_source_binding,
+    expected_index_symbol,
 )
 from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_health
 from app.market_data.candidate_repository import CandidateRowRejection
@@ -52,6 +55,7 @@ from app.market_data.resolution import ResolutionCandidate
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
+CURRENT_INDEX_MAX_ABS_CHANGE_RATIO = TW_CURRENT_INDEX_MAX_ABS_CHANGE_RATIO
 
 _RAW_FETCH_LINEAGE_COLUMNS = (
     RawFetchResult.id,
@@ -59,6 +63,34 @@ _RAW_FETCH_LINEAGE_COLUMNS = (
     RawFetchResult.content_hash,
     RawFetchResult.parser_version,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TaiwanIndexSeriesRow:
+    storage_row_id: int
+    provider: str
+    source: str
+    authority: AuthorityClass
+    provider_priority: int
+    raw_result_id: int
+    content_hash: str
+    trade_date: date
+    event_at: datetime
+    received_at: datetime
+    fetched_at: datetime
+    session: MarketSession
+    close_value: Decimal
+    price_change: Decimal
+    finalization: BarFinalization
+    official: bool
+    provisional: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TaiwanIndexSeriesBatch:
+    rows: tuple[TaiwanIndexSeriesRow, ...] = ()
+    rejections: tuple[CandidateRowRejection, ...] = ()
+    limitations: tuple[str, ...] = ()
 
 
 def _aware(value: datetime, *, tz=timezone.utc) -> datetime:
@@ -129,6 +161,23 @@ class TaiwanCurrentMarketRepository:
             and raw.content_hash
         )
 
+    @staticmethod
+    def _raw_scope_identity_valid(
+        *,
+        binding,
+        scope_key: str,
+        raw: RawFetchResult,
+    ) -> bool:
+        expected_symbol = expected_index_symbol(binding, index_id=scope_key)
+        if expected_symbol is None:
+            return True
+        try:
+            payload = json.loads(raw.raw_text or "")
+            actual_symbol = str(payload["data"]["symbol"]).strip().upper()
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return actual_symbol == expected_symbol
+
     def read_market_index_candidates(
         self,
         requirement: DataRequirementV2,
@@ -151,24 +200,41 @@ class TaiwanCurrentMarketRepository:
                 ),
                 limitations=("TW_CURRENT_INDEX_SCHEMA_UNAVAILABLE",),
             )
-        rows = (
-            self._db.query(
-                TaiwanCurrentIndexSnapshot,
-                RawFetchResult,
-                SourceRegistry,
-            )
-            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
-            .join(RawFetchResult, RawFetchResult.id == TaiwanCurrentIndexSnapshot.raw_result_id)
-            .join(SourceRegistry, SourceRegistry.id == TaiwanCurrentIndexSnapshot.source_id)
+        providers = (
+            self._db.query(TaiwanCurrentIndexSnapshot.provider)
             .filter(TaiwanCurrentIndexSnapshot.index_id == target.scope_key)
-            .order_by(
-                TaiwanCurrentIndexSnapshot.provider.asc(),
-                TaiwanCurrentIndexSnapshot.event_at.desc(),
-                TaiwanCurrentIndexSnapshot.id.desc(),
-            )
+            .distinct()
+            .order_by(TaiwanCurrentIndexSnapshot.provider.asc())
             .limit(requirement.bounds.max_candidates * 4)
             .all()
         )
+        rows = []
+        for (provider,) in providers:
+            latest = (
+                self._db.query(
+                    TaiwanCurrentIndexSnapshot,
+                    RawFetchResult,
+                    SourceRegistry,
+                )
+                .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
+                .join(
+                    RawFetchResult,
+                    RawFetchResult.id == TaiwanCurrentIndexSnapshot.raw_result_id,
+                )
+                .join(
+                    SourceRegistry,
+                    SourceRegistry.id == TaiwanCurrentIndexSnapshot.source_id,
+                )
+                .filter(TaiwanCurrentIndexSnapshot.index_id == target.scope_key)
+                .filter(TaiwanCurrentIndexSnapshot.provider == provider)
+                .order_by(
+                    TaiwanCurrentIndexSnapshot.event_at.desc(),
+                    TaiwanCurrentIndexSnapshot.id.desc(),
+                )
+                .first()
+            )
+            if latest is not None:
+                rows.append(latest)
         seen: set[str] = set()
         candidates: list[ResolutionCandidate[MarketIndexObservation]] = []
         rejections: list[CandidateRowRejection] = []
@@ -205,6 +271,41 @@ class TaiwanCurrentMarketRepository:
                     )
                 )
                 continue
+            if not self._raw_scope_identity_valid(
+                binding=binding,
+                scope_key=target.scope_key,
+                raw=raw,
+            ):
+                rejections.append(
+                    CandidateRowRejection(
+                        provider=row.provider,
+                        source=row.source,
+                        storage_row_id=row.id,
+                        raw_result_id=row.raw_result_id,
+                        event_date=row.trade_date,
+                        reason_code="CURRENT_INDEX_RAW_SCOPE_IDENTITY_MISMATCH",
+                    )
+                )
+                continue
+            close_value = Decimal(str(row.close_value))
+            price_change = Decimal(str(row.price_change))
+            previous_close = close_value - price_change
+            if (
+                previous_close <= 0
+                or abs(price_change) / previous_close
+                > CURRENT_INDEX_MAX_ABS_CHANGE_RATIO
+            ):
+                rejections.append(
+                    CandidateRowRejection(
+                        provider=row.provider,
+                        source=row.source,
+                        storage_row_id=row.id,
+                        raw_result_id=row.raw_result_id,
+                        event_date=row.trade_date,
+                        reason_code="CURRENT_INDEX_CHANGE_IMPLAUSIBLE",
+                    )
+                )
+                continue
             try:
                 observation = MarketIndexObservation(
                     market=Market.TW,
@@ -225,8 +326,8 @@ class TaiwanCurrentMarketRepository:
                     ),
                     session=MarketSession(row.session),
                     trade_date=row.trade_date,
-                    close_value=Decimal(str(row.close_value)),
-                    price_change=Decimal(str(row.price_change)),
+                    close_value=close_value,
+                    price_change=price_change,
                     trade_volume=(
                         Quantity(
                             value=Decimal(row.trade_volume),
@@ -450,5 +551,156 @@ class TaiwanCurrentMarketRepository:
             limitations=tuple(dict.fromkeys(limitations)),
         )
 
+    def read_market_index_series_rows(
+        self,
+        *,
+        index_id: str,
+        trade_date: date,
+        max_rows: int = 5000,
+    ) -> TaiwanIndexSeriesBatch:
+        """Read lineage-valid current-index events for a derived minute series."""
 
-__all__ = ["TaiwanCurrentMarketRepository"]
+        normalized_index_id = str(index_id or "").strip().upper()
+        if normalized_index_id not in {"TAIEX", "TPEX"}:
+            raise ValueError("Taiwan index series requires TAIEX or TPEX")
+        bounded_rows = max(min(int(max_rows), 10_000), 1)
+        if not inspect(self._db.get_bind()).has_table(
+            TaiwanCurrentIndexSnapshot.__tablename__
+        ):
+            return TaiwanIndexSeriesBatch(
+                limitations=("TW_CURRENT_INDEX_SCHEMA_UNAVAILABLE",)
+            )
+        rows = (
+            self._db.query(
+                TaiwanCurrentIndexSnapshot,
+                RawFetchResult,
+                SourceRegistry,
+            )
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
+            .join(
+                RawFetchResult,
+                RawFetchResult.id == TaiwanCurrentIndexSnapshot.raw_result_id,
+            )
+            .join(
+                SourceRegistry,
+                SourceRegistry.id == TaiwanCurrentIndexSnapshot.source_id,
+            )
+            .filter(TaiwanCurrentIndexSnapshot.index_id == normalized_index_id)
+            .filter(TaiwanCurrentIndexSnapshot.trade_date == trade_date)
+            .order_by(
+                TaiwanCurrentIndexSnapshot.event_at.asc(),
+                TaiwanCurrentIndexSnapshot.id.asc(),
+            )
+            .limit(bounded_rows)
+            .all()
+        )
+        accepted: list[TaiwanIndexSeriesRow] = []
+        rejections: list[CandidateRowRejection] = []
+        limitations: list[str] = []
+        for row, raw, source in rows:
+            binding = current_source_binding(
+                provider=row.provider,
+                source=row.source,
+                capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+            )
+            if binding is None or not self._identity_valid(
+                provider=row.provider,
+                source_name=row.source,
+                authority=row.authority,
+                parser_version=row.raw_contract_version,
+                source_id=row.source_id,
+                raw_result_id=row.raw_result_id,
+                source=source,
+                raw=raw,
+                capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+            ):
+                rejections.append(
+                    CandidateRowRejection(
+                        provider=row.provider,
+                        source=row.source,
+                        storage_row_id=row.id,
+                        raw_result_id=row.raw_result_id,
+                        event_date=row.trade_date,
+                        reason_code="CURRENT_INDEX_LINEAGE_IDENTITY_MISMATCH",
+                    )
+                )
+                continue
+            if not self._raw_scope_identity_valid(
+                binding=binding,
+                scope_key=normalized_index_id,
+                raw=raw,
+            ):
+                rejections.append(
+                    CandidateRowRejection(
+                        provider=row.provider,
+                        source=row.source,
+                        storage_row_id=row.id,
+                        raw_result_id=row.raw_result_id,
+                        event_date=row.trade_date,
+                        reason_code="CURRENT_INDEX_RAW_SCOPE_IDENTITY_MISMATCH",
+                    )
+                )
+                continue
+            try:
+                close_value = Decimal(str(row.close_value))
+                price_change = Decimal(str(row.price_change))
+                previous_close = close_value - price_change
+                authority = AuthorityClass(row.authority)
+                session = MarketSession(row.session)
+                if (
+                    close_value <= 0
+                    or previous_close <= 0
+                    or abs(price_change) / previous_close
+                    > CURRENT_INDEX_MAX_ABS_CHANGE_RATIO
+                ):
+                    raise ValueError("implausible current index value")
+                accepted.append(
+                    TaiwanIndexSeriesRow(
+                        storage_row_id=row.id,
+                        provider=row.provider,
+                        source=row.source,
+                        authority=authority,
+                        provider_priority=binding.descriptor.priority,
+                        raw_result_id=row.raw_result_id,
+                        content_hash=str(raw.content_hash),
+                        trade_date=row.trade_date,
+                        event_at=_aware(row.event_at, tz=TAIPEI_TZ),
+                        received_at=_aware(row.received_at),
+                        fetched_at=_aware(row.fetched_at),
+                        session=session,
+                        close_value=close_value,
+                        price_change=price_change,
+                        finalization=BarFinalization(row.finalization),
+                        official=bool(row.official),
+                        provisional=bool(row.provisional),
+                    )
+                )
+            except (TypeError, ValueError):
+                rejections.append(
+                    CandidateRowRejection(
+                        provider=row.provider,
+                        source=row.source,
+                        storage_row_id=row.id,
+                        raw_result_id=row.raw_result_id,
+                        event_date=row.trade_date,
+                        reason_code="INVALID_CANONICAL_CURRENT_INDEX_SERIES_ROW",
+                    )
+                )
+        if len(rows) >= bounded_rows:
+            limitations.append("TW_INDEX_INTRADAY_ROW_BOUND_REACHED")
+        if not accepted:
+            limitations.append("TW_INDEX_INTRADAY_CANONICAL_CACHE_MISSING")
+        if rejections:
+            limitations.append("TW_INDEX_INTRADAY_CANDIDATES_REJECTED")
+        return TaiwanIndexSeriesBatch(
+            rows=tuple(accepted),
+            rejections=tuple(rejections),
+            limitations=tuple(dict.fromkeys(limitations)),
+        )
+
+
+__all__ = [
+    "TaiwanCurrentMarketRepository",
+    "TaiwanIndexSeriesBatch",
+    "TaiwanIndexSeriesRow",
+]

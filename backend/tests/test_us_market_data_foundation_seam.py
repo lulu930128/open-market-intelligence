@@ -63,7 +63,7 @@ def test_integration_manifest_exposes_capability_keyed_us_production_bindings() 
     assert not hasattr(manifest, "candidate_reader")
     assert "US_INTRADAY_MATERIALIZER_FEATURE_OFF_BOUNDED_CANARY_ONLY" in manifest.limitations
     assert (
-        "US_MATERIALIZER_SCHEDULER_CONTENTION_RUNTIME_ACCEPTANCE_PENDING"
+        "US_MATERIALIZER_KEYED_CONCURRENCY_RUNTIME_ACCEPTANCE_PENDING"
         in manifest.limitations
     )
     assert {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -29,6 +29,7 @@ from app.ai.market_context.taiwan_projection import (
     _compact_intraday_history,
     _compact_quote_snapshot,
     _compact_single_intraday_series,
+    _intraday_slot_status,
 )
 from app.ai.tools import _health_dimensions
 from app.ai.schemas import AiAskRequest
@@ -37,6 +38,7 @@ from app.ai.scope_resolution import _resolve_scope
 from app.ai.market_payload_contract import requested_intraday_interval
 from app.ai.technical_analysis import _normalize_technical_points
 from app.market.intraday import (
+    _append_completed_session_close_marker,
     _dedupe_disposition_points,
     _enrich_intraday_contract,
     _intraday_row_to_point,
@@ -54,6 +56,152 @@ from app.observability.provider_http import (
 
 
 class IntradayContractRemediationTests(unittest.TestCase):
+    def test_intraday_projection_appends_official_close_marker_without_indicator_use(
+        self,
+    ) -> None:
+        evidence = SimpleNamespace(
+            daily=SimpleNamespace(
+                trade_date=date(2026, 8, 31),
+                close_price=584,
+                provider="twse_openapi",
+                source="twse_daily_trading",
+                event_at=datetime.fromisoformat("2026-08-31T15:15:00+08:00"),
+            ),
+            resolved_health=SimpleNamespace(facts_usable=True),
+        )
+        with (
+            patch(
+                "app.market.intraday.read_taiwan_latest_daily_evidence",
+                return_value=evidence,
+            ),
+            patch("app.market.intraday.read_taiwan_session_close", return_value=object()),
+            patch(
+                "app.market.intraday.project_taiwan_session_close",
+                return_value={
+                    "available": True,
+                    "status": "session_final",
+                    "finalization": "session_final",
+                    "price": 580,
+                    "trade_date": date(2026, 8, 31),
+                    "event_time": datetime.fromisoformat(
+                        "2026-08-31T13:30:00+08:00"
+                    ),
+                    "provider": "twse_mis",
+                    "source": "twse_mis_public_quote",
+                    "closing_match_volume_shares": 37_000,
+                    "closing_match_volume_lots": 37,
+                    "closing_match_volume_semantics": (
+                        "provider_reported_closing_match_volume"
+                    ),
+                    "closing_match_volume_source_field": "tv",
+                    "session_cumulative_volume_shares": 26_754_000,
+                    "session_cumulative_volume_lots": 26_754,
+                    "session_cumulative_volume_trade_date": date(2026, 8, 31),
+                    "session_cumulative_volume_event_time": datetime.fromisoformat(
+                        "2026-08-31T13:30:00+08:00"
+                    ),
+                    "session_cumulative_volume_source_field": "v",
+                    "volume_provider": "twse_mis",
+                    "volume_source": "twse_mis_quote_depth",
+                    "volume_event_time": datetime.fromisoformat(
+                        "2026-08-31T13:30:00+08:00"
+                    ),
+                    "volume_status": "session_final",
+                    "volume_scope": "completed_regular_session",
+                },
+            ),
+        ):
+            projected = _append_completed_session_close_marker(
+                object(),
+                stock_id="3711",
+                points=[
+                    {
+                        "time": "2026-08-31T13:24:00+08:00",
+                        "price": 580,
+                        "close": 580,
+                        "volume": 1000,
+                        "finalization": "final",
+                    }
+                ],
+                requested_at=datetime.fromisoformat(
+                    "2026-08-31T16:00:00+08:00"
+                ),
+            )
+
+        points, metadata = _enrich_intraday_contract(
+            projected,
+            interval="1m",
+            source="nstock_minute_stock_data",
+            now=datetime.fromisoformat("2026-08-31T16:00:00+08:00"),
+        )
+        marker = points[-1]
+        self.assertEqual(marker["time"], datetime.fromisoformat("2026-08-31T13:30:00+08:00"))
+        self.assertEqual(marker["price"], 584)
+        self.assertEqual(marker["bar_type"], "official_close_marker")
+        self.assertEqual(marker["price_semantics"], "official_close")
+        self.assertTrue(marker["display_eligible"])
+        self.assertFalse(marker["indicator_eligible"])
+        self.assertEqual(marker["volume"], 37_000)
+        self.assertEqual(marker["cumulative_volume"], 26_754_000)
+        self.assertEqual(marker["provider"], "twse_openapi")
+        self.assertEqual(marker["session_close_provider"], "twse_mis")
+        self.assertIsNone(marker["bar_close_time"])
+        self.assertEqual(metadata["bar_type_counts"]["official_close_marker"], 1)
+        self.assertEqual(metadata["indicator_eligible_count"], 1)
+        self.assertEqual(metadata["bar_volume_latest_time"], "2026-08-31T13:24:00+08:00")
+        self.assertEqual(metadata["closing_match_volume_shares"], 37_000)
+        self.assertEqual(metadata["session_cumulative_volume_shares"], 26_754_000)
+        self.assertEqual(metadata["cumulative_volume_shares"], 26_754_000)
+        self.assertEqual(metadata["cumulative_volume_status"], "session_final")
+
+    def test_intraday_projection_falls_back_to_confirmed_session_close_marker(
+        self,
+    ) -> None:
+        missing_daily = SimpleNamespace(
+            daily=None,
+            resolved_health=SimpleNamespace(facts_usable=False),
+        )
+        with (
+            patch(
+                "app.market.intraday.read_taiwan_latest_daily_evidence",
+                return_value=missing_daily,
+            ),
+            patch("app.market.intraday.read_taiwan_session_close", return_value=object()),
+            patch(
+                "app.market.intraday.project_taiwan_session_close",
+                return_value={
+                    "available": True,
+                    "status": "session_final",
+                    "finalization": "session_final",
+                    "price": 605,
+                    "trade_date": date(2026, 8, 31),
+                    "event_time": datetime.fromisoformat(
+                        "2026-08-31T13:30:00+08:00"
+                    ),
+                    "provider": "twse_mis",
+                    "source": "twse_mis_public_quote",
+                },
+            ),
+        ):
+            projected = _append_completed_session_close_marker(
+                object(),
+                stock_id="2330",
+                points=[
+                    {
+                        "time": "2026-08-31T13:24:00+08:00",
+                        "price": 600,
+                        "close": 600,
+                        "volume": 1000,
+                    }
+                ],
+            )
+
+        marker = projected[-1]
+        self.assertEqual(marker["bar_type"], "session_close_marker")
+        self.assertEqual(marker["price_semantics"], "session_close")
+        self.assertEqual(marker["evidence_finalization"], "session_final")
+        self.assertFalse(marker["indicator_eligible"])
+
     def test_legacy_intraday_timeframe_alias_does_not_capture_daily_timeframes(self) -> None:
         self.assertEqual(
             requested_intraday_interval({"timeframe": "5m"}),
@@ -118,9 +266,15 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertTrue(points[1]["is_partial"])
         self.assertFalse(points[1]["finalized"])
         self.assertEqual(points[0]["bar_type"], "regular_interval")
+        self.assertEqual(points[0]["price_semantics"], "intraday_bar_close")
+        self.assertTrue(points[0]["display_eligible"])
         self.assertTrue(points[0]["indicator_eligible"])
         self.assertFalse(points[1]["indicator_eligible"])
         self.assertEqual(metadata["canonical_volume_unit"], "shares")
+        self.assertEqual(metadata["bar_contract_version"], "tw.intraday.bar.v1")
+        self.assertEqual(metadata["bar_type_counts"], {"regular_interval": 2})
+        self.assertEqual(metadata["finalized_bar_count"], 1)
+        self.assertEqual(metadata["indicator_eligible_count"], 1)
         self.assertEqual(metadata["bar_volume_sum_shares"], 1_500)
         self.assertEqual(metadata["bar_volume_sum_lots"], 1.5)
         self.assertEqual(metadata["window_volume_sum_shares"], 1_500)
@@ -192,6 +346,40 @@ class IntradayContractRemediationTests(unittest.TestCase):
             "latest_trade_date_interval_bars",
         )
 
+    def test_partial_series_keeps_bar_sum_but_suppresses_session_cumulative(self) -> None:
+        _, metadata = _enrich_intraday_contract(
+            [
+                {
+                    "time": "2026-08-06T11:25:00+08:00",
+                    "close": 200.0,
+                    "volume": 1_000,
+                    "finalization": "final",
+                },
+                {
+                    "time": "2026-08-06T13:24:00+08:00",
+                    "close": 201.0,
+                    "volume": 2_000,
+                    "finalization": "final",
+                },
+            ],
+            interval="1m",
+            source="nstock_minute_stock_data",
+            now=datetime.fromisoformat("2026-08-06T14:00:00+08:00"),
+            series_coverage={
+                "status": "trailing_window",
+                "current_cumulative_volume_complete": False,
+                "session_volume_complete": False,
+            },
+        )
+
+        self.assertEqual(metadata["bar_volume_sum_shares"], 3_000)
+        self.assertIsNone(metadata["cumulative_volume_shares"])
+        self.assertEqual(metadata["cumulative_volume_status"], "partial_coverage")
+        self.assertEqual(
+            metadata["volume_semantics"],
+            "observed_window_bar_sum_not_session_cumulative",
+        )
+
     def test_intraday_compact_projection_preserves_dual_volume_contract(self) -> None:
         compact = _compact_intraday_history(
             {
@@ -202,6 +390,11 @@ class IntradayContractRemediationTests(unittest.TestCase):
                 "range": "1d",
                 "provider": "nstock",
                 "source": "nstock_minute_stock_data",
+                "series_coverage": {
+                    "status": "trailing_window",
+                    "opening_covered": False,
+                    "current_window_complete": False,
+                },
                 "bar_volume_sum_shares": 3_012_567,
                 "bar_volume_sum_lots": 3_012.567,
                 "bar_volume_trade_date": "2026-08-06",
@@ -233,9 +426,44 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(compact["bar_volume_trade_date"], "2026-08-06")
         self.assertEqual(compact["cumulative_volume_source"], "intraday_bar_sum")
         self.assertEqual(compact["window_trade_date_count"], 1)
+        self.assertEqual(compact["coverage_status"], "trailing_window")
+        self.assertEqual(
+            compact["series_coverage"]["opening_covered"],
+            False,
+        )
         self.assertEqual(
             compact["vwap_volume_scope"],
             "latest_trade_date_interval_bars",
+        )
+
+    def test_intraday_slot_is_partial_when_series_coverage_is_incomplete(self) -> None:
+        self.assertEqual(
+            _intraday_slot_status(
+                {
+                    "enabled": True,
+                    "series": {
+                        "1m": {
+                            "returned_point_count": 2,
+                            "series_coverage": {"status": "trailing_window"},
+                        }
+                    },
+                }
+            ),
+            "partial",
+        )
+        self.assertEqual(
+            _intraday_slot_status(
+                {
+                    "enabled": True,
+                    "series": {
+                        "1m": {
+                            "returned_point_count": 2,
+                            "series_coverage": {"status": "complete_prefix"},
+                        }
+                    },
+                }
+            ),
+            "ready",
         )
 
     def test_aligned_mis_volume_reconciles_without_mutating_points(self) -> None:

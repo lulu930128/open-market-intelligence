@@ -924,6 +924,40 @@ class KgiSuperPyQuoteTests(unittest.TestCase):
         self.assertEqual(payload["minute_kbars"][0]["close"], 2400)
         self.assertEqual(payload["capability_status"]["minute_kbars"], "available")
 
+    def test_released_stream_diagnostics_are_retained_but_not_current(self) -> None:
+        manager = _NoProcessManager(_config())
+        event_time = datetime(2026, 8, 21, 10, 0, 0, tzinfo=TAIWAN_TZ)
+        try:
+            manager._accept_kbar(
+                {
+                    "symbol": "2330",
+                    "datetime": event_time.strftime("%Y%m%d%H%M"),
+                    "received_at": datetime.now(timezone.utc).isoformat(),
+                    "timeframe": 1,
+                    "open": 2395,
+                    "high": 2400,
+                    "low": 2395,
+                    "close": 2398,
+                    "volume": 20,
+                }
+            )
+            with manager._lock:
+                manager._archive_symbol_diagnostics_locked("2330")
+                manager._minute_kbars.pop("2330", None)
+            payload = manager.market_stream_snapshot("2330")
+        finally:
+            manager.close()
+
+        self.assertTrue(
+            payload["diagnostic_retention"]["retained_after_release"]
+        )
+        self.assertEqual(
+            payload["selection_reason"],
+            "retained_diagnostics_after_lease_release",
+        )
+        self.assertEqual(payload["capability_status"]["minute_kbars"], "retained")
+        self.assertEqual(len(payload["minute_kbars"]), 1)
+
     def test_data_backfill_classifies_provider_permission_failure(self) -> None:
         manager = _NoProcessManager(_config())
         try:

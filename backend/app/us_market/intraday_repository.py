@@ -43,6 +43,7 @@ from app.market_data.integration_contracts import (
     DataRequirementV2,
     InstrumentTarget,
     SnapshotCapabilityRequest,
+    freshness_timestamp,
 )
 from app.market_data.resolution import BarSeriesCandidate, ResolutionCandidate
 from app.us_market.market_data.descriptors import (
@@ -89,8 +90,21 @@ def _interval_delta(interval: str) -> timedelta:
     raise ValueError("unsupported US persisted intraday interval")
 
 
-def _freshness(requirement: DataRequirementV2, event_at: datetime) -> EvidenceFreshness:
-    age = (requirement.requested_at - _utc(event_at)).total_seconds()
+def _freshness(
+    requirement: DataRequirementV2,
+    lineage: SourceLineage,
+) -> EvidenceFreshness:
+    observed_at = freshness_timestamp(lineage, requirement.freshness.basis)
+    if observed_at is None:
+        return EvidenceFreshness.UNKNOWN
+    return _timestamp_freshness(requirement, observed_at)
+
+
+def _timestamp_freshness(
+    requirement: DataRequirementV2,
+    observed_at: datetime,
+) -> EvidenceFreshness:
+    age = (requirement.requested_at - _utc(observed_at)).total_seconds()
     return EvidenceFreshness.LIVE if -300 <= age <= requirement.freshness.max_age_seconds else EvidenceFreshness.STALE
 
 
@@ -122,7 +136,7 @@ def _fair_budgets(total_rows: int, provider_count: int) -> tuple[int, ...]:
 
 def _dataset_health(requirement: DataRequirementV2, *, dataset_id: str, events: list[datetime], partial: bool) -> DatasetHealth:
     latest = max(events) if events else None
-    current = latest is not None and _freshness(requirement, latest) is EvidenceFreshness.LIVE
+    current = latest is not None and _timestamp_freshness(requirement, latest) is EvidenceFreshness.LIVE
     status = DatasetHealthStatus.PARTIAL if partial and events else DatasetHealthStatus.HEALTHY if current else DatasetHealthStatus.STALE if events else DatasetHealthStatus.MISSING
     return DatasetHealth(
         dataset_id=dataset_id,
@@ -238,8 +252,10 @@ class USQuoteRepository:
             except (TypeError, ValueError, ValidationError):
                 rejections.append(CandidateRowRejection(provider=row.provider, source=row.source, storage_row_id=row.id, raw_result_id=row.raw_result_id, event_date=_utc(row.event_at).date(), reason_code="INVALID_CANONICAL_US_QUOTE"))
                 continue
-            freshness = _freshness(requirement, row.event_at)
-            events.append(_utc(row.event_at))
+            freshness = _freshness(requirement, quote.lineage)
+            observed_at = freshness_timestamp(quote.lineage, requirement.freshness.basis)
+            if observed_at is not None:
+                events.append(_utc(observed_at))
             candidates.append(
                 ResolutionCandidate(
                     observation=quote,
@@ -445,7 +461,7 @@ class USIntradayBarRepository:
             candidates.append(
                 BarSeriesCandidate(
                     bars=bars,
-                    freshness=_freshness(requirement, event_at),
+                    freshness=_freshness(requirement, bars[-1].lineage),
                     provider_priority=priorities[identity],
                     session=us_session_for_timestamp(event_at),
                     limitations=descriptor.limitations,

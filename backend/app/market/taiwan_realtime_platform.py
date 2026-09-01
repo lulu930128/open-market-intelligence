@@ -265,6 +265,27 @@ class TaiwanDepthCandidateReader:
                 continue
             event_at = read.observation.lineage.event_at
             assert event_at is not None
+            expected_date = requirement.requested_at.astimezone(TAIWAN_TZ).date()
+            event_date = event_at.astimezone(TAIWAN_TZ).date()
+            if event_date != expected_date:
+                limitations.append("TW_DEPTH_EVENT_DATE_MISMATCH")
+                if (
+                    read.provider
+                    and read.source
+                    and read.storage_row_id is not None
+                    and read.raw_result_id is not None
+                ):
+                    rejections.append(
+                        CandidateRowRejection(
+                            provider=read.provider,
+                            source=read.source,
+                            storage_row_id=read.storage_row_id,
+                            raw_result_id=read.raw_result_id,
+                            event_date=event_date,
+                            reason_code="TW_DEPTH_EVENT_DATE_MISMATCH",
+                        )
+                    )
+                continue
             freshness = _freshness(requirement, event_at)
             event_times.append(event_at)
             freshness_values.append(freshness)
@@ -273,7 +294,7 @@ class TaiwanDepthCandidateReader:
                     observation=read.observation,
                     freshness=freshness,
                     provider_priority=read.provider_priority,
-                    session=requirement.session,
+                    session=read.market_session or requirement.session,
                 )
             )
             health.append(
@@ -299,6 +320,7 @@ class TaiwanDepthCandidateReader:
                         MarketSession.OPENING_AUCTION,
                         MarketSession.CONTINUOUS,
                         MarketSession.CLOSING_AUCTION,
+                        MarketSession.CLOSE_RESOLUTION,
                     }
                 ),
                 event_times=event_times,
@@ -371,6 +393,27 @@ class TaiwanAuctionCandidateReader:
                 continue
             event_at = read.observation.lineage.event_at
             assert event_at is not None
+            expected_date = requirement.requested_at.astimezone(TAIWAN_TZ).date()
+            event_date = event_at.astimezone(TAIWAN_TZ).date()
+            if event_date != expected_date:
+                limitations.append("TW_AUCTION_EVENT_DATE_MISMATCH")
+                if (
+                    read.provider
+                    and read.source
+                    and read.storage_row_id is not None
+                    and read.raw_result_id is not None
+                ):
+                    rejections.append(
+                        CandidateRowRejection(
+                            provider=read.provider,
+                            source=read.source,
+                            storage_row_id=read.storage_row_id,
+                            raw_result_id=read.raw_result_id,
+                            event_date=event_date,
+                            reason_code="TW_AUCTION_EVENT_DATE_MISMATCH",
+                        )
+                    )
+                continue
             freshness = _freshness(requirement, event_at)
             event_times.append(event_at)
             freshness_values.append(freshness)

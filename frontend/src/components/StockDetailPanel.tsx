@@ -966,6 +966,9 @@ export default function StockDetailPanel({
       ? latestChart.close - chartPreviousClose
       : null;
   const todayHeadlineValues = resolveTodayHeadlineValues({
+    backendPrice: quoteDepth?.headline_price,
+    backendChange: quoteDepth?.headline_change,
+    backendChangePct: quoteDepth?.headline_change_pct,
     currentPrice: latestTodayDisplayPrice,
     currentReferenceClose: todayReferenceClose,
     completedSessionPrice: completedSessionHeadline,

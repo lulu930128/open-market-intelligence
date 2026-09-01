@@ -21,12 +21,9 @@ from app.ai.market_payload_contract import (
 )
 from app.db.models import StockMaster
 from app.market.calendar_status import build_taiwan_calendar_status
-from app.market.index_resolution import resolve_taiwan_index_quote_state
-from app.market.taiwan_index_minute import read_taiwan_index_minute_series
 from app.market.taiwan_industries import normalize_tw_industry_label
 from app.market.trading_calendar import (
     taiwan_market_session_phase,
-    taiwan_now,
 )
 from app.market.tw_market_breadth_contract import (
     TW_MARKET_BREADTH_STOCK_STATE_VERSION,
@@ -1158,9 +1155,7 @@ def _market_indices_capability(
         if callable(getattr(dependencies, "now", None))
         else datetime.now(timezone.utc)
     )
-    local_now = taiwan_now(checked_at)
     session_phase = taiwan_market_session_phase(checked_at)
-    calendar_status = build_taiwan_calendar_status(now=checked_at)
     active_index_session = session_phase in {"regular", "closing_auction"}
     try:
         summary = dependencies.get_market_index_summary(
@@ -1199,6 +1194,18 @@ def _market_indices_capability(
         )
         if item is None:
             continue
+        current_data_core = (
+            item.get("current_data_core")
+            if isinstance(item.get("current_data_core"), dict)
+            else {}
+        )
+        current = (
+            current_data_core.get("index")
+            if isinstance(current_data_core.get("index"), dict)
+            else item.get("current_observation")
+            if isinstance(item.get("current_observation"), dict)
+            else {}
+        )
         completed_official = item.get("completed_official_index")
         if not isinstance(completed_official, dict):
             completed_official = None
@@ -1239,98 +1246,66 @@ def _market_indices_capability(
             or item.get("date")
             or official_as_of
         )
-        live_series: dict[str, Any] = {}
-        if active_index_session and hasattr(db, "query"):
-            live_series = read_taiwan_index_minute_series(
-                db,
-                index_id=index_id,
-                trade_date=local_now.date(),
-            )
-        live_points = (
-            live_series.get("points")
-            if isinstance(live_series.get("points"), list)
-            else []
+        resolved_health = (
+            current.get("resolved_health")
+            if isinstance(current.get("resolved_health"), dict)
+            else {}
         )
-        latest_live = live_points[-1] if live_points else None
-        live_time = (
-            str(latest_live.get("time") or "")
-            if isinstance(latest_live, dict)
-            else ""
+        current_for_requested_session = current.get("decision_usable") is True
+        selected_value = (
+            current.get("close")
+            if current.get("close") is not None
+            else close
         )
-        try:
-            parsed_live_time = datetime.fromisoformat(
-                live_time.replace("Z", "+00:00")
-            )
-            if parsed_live_time.tzinfo is None:
-                parsed_live_time = parsed_live_time.replace(tzinfo=timezone.utc)
-            live_age_seconds = max(
-                int(
-                    (
-                        checked_at.astimezone(timezone.utc)
-                        - parsed_live_time.astimezone(timezone.utc)
-                    ).total_seconds()
-                ),
-                0,
-            )
-        except (TypeError, ValueError):
-            live_age_seconds = None
-        live_current = bool(
-            latest_live
-            and live_series.get("trade_date") == local_now.date().isoformat()
-            and live_age_seconds is not None
-            and live_age_seconds <= 240
-        )
-        resolution = resolve_taiwan_index_quote_state(
-            intraday=live_series,
-            index_snapshot=item,
-            calendar_status=calendar_status,
-            index_id=index_id,
-            acquisition_policy="cache_only",
-        )
-        previous_close = live_series.get("previous_close")
-        live_value = (
-            latest_live.get("price")
-            if isinstance(latest_live, dict)
-            else None
-        )
-        live_change = (
-            float(live_value) - float(previous_close)
-            if isinstance(live_value, (int, float))
-            and isinstance(previous_close, (int, float))
-            else None
-        )
-        live_change_pct = (
-            live_change / float(previous_close) * 100
-            if live_change is not None and previous_close
-            else None
-        )
-        current_for_requested_session = bool(
-            resolution.get("decision_usable")
-        )
-        selected_value = resolution.get("selected_value")
         selected_as_of = (
-            resolution.get("selected_event_time")
+            current.get("as_of")
             or official_as_of
             or trade_date
         )
-        selected_is_live = (
-            resolution.get("selected_candidate") == "intraday_last_trade"
+        selected_trade_date = _date_iso(
+            current.get("trade_date") or trade_date or selected_as_of
+        )
+        selected_change = (
+            current.get("change")
+            if current.get("change") is not None
+            else change
+        )
+        selected_previous_close = current.get("previous_close")
+        selected_change_pct = (
+            selected_change / selected_previous_close * 100
+            if isinstance(selected_change, (int, float))
+            and isinstance(selected_previous_close, (int, float))
+            and selected_previous_close != 0
+            else change_pct
+        )
+        provisional_estimate = bool(
+            current.get("provisional") is True
+            or (
+                not current
+                and selected_value is not None
+                and session_phase in {"post_close", "market_closed"}
+            )
+        )
+        finalization = (
+            "final"
+            if current_for_requested_session
+            and session_phase in {"post_close", "market_closed"}
+            and current.get("official") is True
+            and current.get("provisional") is not True
+            else "provisional"
+            if provisional_estimate
+            else "intraday"
+            if current
+            else "unknown"
         )
         quote_semantics = (
             "current_session_index_snapshot"
-            if selected_is_live
-            else "official_previous_close"
-            if session_phase in {
-                "preopen_pending",
-                "preopen",
-                "regular",
-                "closing_auction",
-            }
+            if current_for_requested_session and active_index_session
             else "official_session_close"
+            if current_for_requested_session
+            and session_phase in {"post_close", "market_closed"}
+            else "official_previous_close"
         )
-        selected_trade_date = resolution.get("selected_trade_date")
-        selected_change = live_change if selected_is_live else change
-        selected_change_pct = live_change_pct if selected_is_live else change_pct
         items.append(
             {
                 "index_id": index_id,
@@ -1350,16 +1325,14 @@ def _market_indices_capability(
                 },
                 "live_snapshot": (
                     {
-                        "value": live_value,
-                        "change": live_change,
-                        "change_pct": live_change_pct,
-                        "event_time": live_time or None,
-                        "age_seconds": live_age_seconds,
-                        "source": live_series.get("source"),
-                        "coverage_status": live_series.get("coverage_status"),
-                        "is_partial": live_series.get("is_partial") is True,
+                        "value": current.get("close"),
+                        "change": current.get("change"),
+                        "change_pct": selected_change_pct,
+                        "event_time": _json_scalar(current.get("as_of")),
+                        "source": current.get("source"),
+                        "is_partial": current.get("provisional") is True,
                     }
-                    if latest_live
+                    if current and active_index_session
                     else None
                 ),
                 "value": selected_value,
@@ -1367,39 +1340,48 @@ def _market_indices_capability(
                 "change": selected_change,
                 "change_pct": selected_change_pct,
                 "trade_date": selected_trade_date,
-                "event_time": resolution.get("selected_event_time"),
+                "event_time": _json_scalar(current.get("as_of")),
                 "as_of": selected_as_of,
-                # Preserve the established capability vocabulary while the
-                # nested resolution exposes the more precise canonical term.
                 "quote_semantics": quote_semantics,
-                "resolution_quote_semantics": resolution.get(
-                    "quote_semantics"
-                ),
+                "resolution_quote_semantics": quote_semantics,
                 "current_for_requested_session": current_for_requested_session,
                 "decision_usable": current_for_requested_session,
-                "coverage_status": resolution.get("coverage_status"),
-                "finalization": resolution.get("selected_finalization"),
-                "provisional": resolution.get("provisional_estimate") is True,
-                "delivery_status": resolution.get("delivery_status"),
-                "source": resolution.get("selected_source")
+                "coverage_status": (
+                    "complete" if current_for_requested_session else "partial"
+                ),
+                "finalization": finalization,
+                "provisional": provisional_estimate,
+                "delivery_status": current.get("status") or "missing",
+                "source": current.get("source")
                 or item.get("source")
                 or summary.get("source")
                 or "market_index_summary",
-                "resolution_version": resolution.get("resolution_version"),
-                "resolution_id": resolution.get("resolution_id"),
-                "acquisition_policy": resolution.get("acquisition_policy"),
-                "selected_candidate": resolution.get("selected_candidate"),
-                "selection_reason": resolution.get("selection_reason"),
-                "current_observation": resolution.get("current_observation"),
-                "official_close_status": resolution.get(
-                    "official_close_status"
+                "provider": current.get("provider"),
+                "resolution_version": resolved_health.get("contract_version"),
+                "resolution_id": None,
+                "acquisition_policy": "cache_only",
+                "selected_candidate": (
+                    "canonical_current_index" if current else None
                 ),
-                "canonical_status_ref": resolution.get("resolution_id"),
-                "resolution": resolution,
+                "selection_reason": resolved_health.get("selection_reason"),
+                "current_observation": current,
+                "official_close_status": (
+                    "confirmed"
+                    if finalization == "final"
+                    else "pending"
+                ),
+                "canonical_status_ref": "current_data_core.index.resolved_health",
+                "resolution": resolved_health,
                 "freshness": {
-                    "status": resolution.get("freshness_status"),
+                    "status": (
+                        "current"
+                        if current_for_requested_session
+                        else "stale"
+                        if current
+                        else "missing"
+                    ),
                     "decision_usable": current_for_requested_session,
-                    "event_time": resolution.get("selected_event_time"),
+                    "event_time": _json_scalar(current.get("as_of")),
                 },
                 "source_freshness": item.get("freshness")
                 or item.get("quote_status")
@@ -1460,8 +1442,8 @@ def _market_indices_capability(
         "current_for_requested_session": current_count == 2,
         "is_current": current_count == 2,
         "decision_usable": is_complete and current_count == 2,
-        "canonical_status_ref": "items[].resolution_id",
-        "status_authority": "tw.index.resolution.v1",
+        "canonical_status_ref": "items[].current_observation.resolved_health",
+        "status_authority": "shared_market_data_core",
         "is_complete": is_complete,
         "coverage_status": "complete" if is_complete else "partial" if items else "missing",
         "observation_mix": sorted(
@@ -1473,7 +1455,7 @@ def _market_indices_capability(
         ),
         "count": len(items),
         "items": items,
-        "source": "market_index_summary+taiwan_index_minute_snapshot",
+        "source": "shared_market_data_core",
         "missing": (
             []
             if len(items) == 2
@@ -1504,6 +1486,19 @@ def _market_index_contributions_capability(
     dependencies: TaiwanMarketDependencies,
     data_params: dict[str, Any],
 ) -> dict[str, Any]:
+    checked_at = (
+        dependencies.now()
+        if callable(getattr(dependencies, "now", None))
+        else datetime.now(timezone.utc)
+    )
+    calendar_status = build_taiwan_calendar_status(now=checked_at)
+    calendar_phase = str(calendar_status.get("phase") or "unknown")
+    expected_trade_date = (
+        calendar_status.get("date")
+        if calendar_status.get("is_trading_day") is True
+        and calendar_phase not in {"preopen_pending", "preopen", "market_closed"}
+        else calendar_status.get("previous_trading_day")
+    )
     parameters = _capability_parameters(
         data_params,
         "market.index_contributions",
@@ -1589,6 +1584,7 @@ def _market_index_contributions_capability(
                 index_id=index_id,
                 limit=limit,
                 db=db,
+                expected_trade_date=expected_trade_date,
             )
             result = (
                 rows[index_id]
@@ -1622,10 +1618,7 @@ def _market_index_contributions_capability(
                         "limit": limit,
                         "requested_capabilities": requested_capabilities,
                     },
-                    "result_status": (
-                        result.get("reconciliation_status")
-                        or "completed"
-                    ),
+                    "result_status": result.get("status") or "completed",
                     "fallback_used": fallback_used,
                 }
             )
@@ -1662,18 +1655,40 @@ def _market_index_contributions_capability(
         for item in rows.values()
         if isinstance(item, dict)
     }
+    quality_ready = bool(
+        len(rows) == len(index_ids)
+        and all(
+            isinstance(item, dict)
+            and item.get("decision_usable") is True
+            for item in rows.values()
+        )
+    )
+    quality_reason_codes = list(
+        dict.fromkeys(
+            str(reason)
+            for item in rows.values()
+            if isinstance(item, dict)
+            for reason in item.get("reason_codes") or []
+            if reason
+        )
+    )
+    if rows and not quality_ready:
+        warnings.append(
+            "Index contribution estimates are present but one or more "
+            "market-owned quality gates are not satisfied."
+        )
     return {
         "kind": "tw_market_index_contributions",
         "status": (
             "ready"
-            if len(rows) == len(index_ids)
+            if quality_ready
             else "partial"
             if rows
             else "unavailable"
         ),
         "applicability_status": "applicable",
         "availability_status": "available" if rows else "missing",
-        "policy_satisfied": len(rows) == len(index_ids),
+        "policy_satisfied": quality_ready,
         "execution_status": (
             "completed"
             if len(rows) == len(index_ids)
@@ -1681,7 +1696,12 @@ def _market_index_contributions_capability(
             if rows
             else "failed"
         ),
-        "decision_usable": len(rows) == len(index_ids),
+        "decision_usable": quality_ready,
+        "current_for_requested_session": quality_ready,
+        "is_complete": quality_ready,
+        "market_session": calendar_phase,
+        "expected_trade_date": _date_iso(expected_trade_date),
+        "reason_codes": quality_reason_codes,
         "as_of": max(trade_dates) if trade_dates else None,
         "index_ids": index_ids,
         "indices": rows,
@@ -2304,9 +2324,15 @@ def _aggregate_freshness(
     dataset: str,
 ) -> dict[str, Any]:
     status = str(payload.get("status") or "missing")
+    requires_explicit_session_currentness = capability_id in {
+        "market.indices",
+        "market.index_contributions",
+    }
     current_for_requested_session = (
         bool(payload.get("current_for_requested_session"))
         if "current_for_requested_session" in payload
+        else False
+        if requires_explicit_session_currentness
         else status == "ready"
     )
     is_complete = (

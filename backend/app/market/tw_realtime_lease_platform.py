@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from threading import Lock
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.models import StockMaster
 from app.market.providers.kgi_canonical import KGI_PROVIDER
+from app.market.providers.kgi_intraday_bars import kgi_minute_kbar_acquisition
 from app.market.providers.kgi_realtime_lease import KgiRealtimeQuoteLeasePort
 from app.market.providers.fugle_realtime_lease import FugleRealtimeQuoteLeasePort
 from app.market.providers.fugle_realtime_runtime import get_fugle_realtime_runtime
@@ -18,7 +20,10 @@ from app.market.public_quote_platform import acquire_taiwan_public_last_trade_qu
 from app.market.taiwan_realtime_platform import (
     acquire_taiwan_auction,
     acquire_taiwan_depth,
+    refresh_taiwan_realtime_snapshot,
 )
+from app.market.intraday_transaction import TaiwanIntradayBarTransaction
+from app.market.tw_intraday_platform import build_taiwan_intraday_requirement
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_realtime_capabilities import (
     FUGLE_PROVIDER,
@@ -26,13 +31,17 @@ from app.market.tw_realtime_capabilities import (
     KGI_AUCTION_DESCRIPTOR,
     KGI_ORDER_BOOK_DESCRIPTOR,
     KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
+    MIS_ORDER_BOOK_DESCRIPTOR,
+    TW_ORDER_BOOK_CAPABILITY_ID,
 )
 from app.market_data.contracts import (
     InstrumentKey,
     InstrumentType,
     Market,
     MarketSession,
+    ResolvedDepth,
 )
+from app.market_data.integration_contracts import MarketDataResultV1
 from app.market_data.integration_contracts import RequestBounds
 from app.market_data.policies import RealtimePolicy
 from app.market_data.research_lease import (
@@ -66,6 +75,8 @@ def _instrument(db: Session, stock_id: str) -> InstrumentKey:
 
 _KGI_REALTIME_PORT = KgiRealtimeQuoteLeasePort()
 _FUGLE_REALTIME_PORT = FugleRealtimeQuoteLeasePort()
+_KGI_BAR_MATERIALIZATION_LOCK = Lock()
+_KGI_LAST_MATERIALIZED_FINAL_BAR: dict[str, str] = {}
 
 
 def _coordinator() -> ViewerLeaseCoordinator:
@@ -84,6 +95,33 @@ def _coordinator() -> ViewerLeaseCoordinator:
 _TAIWAN_REALTIME_VIEWER_LEASES = _coordinator()
 
 
+def _has_research_usable_depth(result: MarketDataResultV1) -> bool:
+    return (
+        isinstance(result.resolved, ResolvedDepth)
+        and result.resolved.depth is not None
+        and result.resolved.health.research_usable
+    )
+
+
+def _sync_mis_depth_snapshot(
+    db: Session,
+    *,
+    stock_id: str,
+    requested_at: datetime,
+) -> None:
+    """Acquire one bounded public depth fallback through the market owner."""
+
+    refreshed = refresh_taiwan_realtime_snapshot(
+        db,
+        stock_id=stock_id,
+        policy=RealtimePolicy.REQUIRE_LIVE,
+        requested_at=requested_at,
+        requested_capabilities=(TW_ORDER_BOOK_CAPABILITY_ID,),
+    )
+    if not _has_research_usable_depth(refreshed.depth):
+        raise RuntimeError("MIS_DEPTH_FALLBACK_UNAVAILABLE")
+
+
 def _sync_canonical_snapshot(
     db: Session,
     *,
@@ -91,7 +129,7 @@ def _sync_canonical_snapshot(
     requested_at: datetime,
 ) -> None:
     adapter = _KGI_REALTIME_PORT.acquisition_adapter(clock=lambda: requested_at)
-    acquire_taiwan_public_last_trade_quote(
+    quote = acquire_taiwan_public_last_trade_quote(
         db,
         stock_id=stock_id,
         policy=RealtimePolicy.REQUIRE_LIVE,
@@ -99,15 +137,37 @@ def _sync_canonical_snapshot(
         acquisition=adapter,
         descriptors=(KGI_QUOTE_SNAPSHOT_DESCRIPTOR,),
     )
-    depth = acquire_taiwan_depth(
+    _sync_kgi_minute_bars(
         db,
         stock_id=stock_id,
-        policy=RealtimePolicy.REQUIRE_LIVE,
         requested_at=requested_at,
-        descriptors=(KGI_ORDER_BOOK_DESCRIPTOR,),
-        acquisition=adapter,
     )
-    session = depth.requirement.session
+    if quote.requirement.session is MarketSession.CLOSE_RESOLUTION:
+        # During the bounded close-resolution window, the formal-match quote is
+        # the only capability that remains applicable. Depth and auction routes
+        # intentionally stay fail-closed after the closing auction ends.
+        return
+    depth = None
+    try:
+        depth = acquire_taiwan_depth(
+            db,
+            stock_id=stock_id,
+            policy=RealtimePolicy.REQUIRE_LIVE,
+            requested_at=requested_at,
+            descriptors=(KGI_ORDER_BOOK_DESCRIPTOR,),
+            acquisition=adapter,
+        )
+    except Exception:
+        # The public fallback below owns the recovery attempt. The outer lease
+        # state reports degradation only if both bounded paths fail.
+        pass
+    if depth is None or not _has_research_usable_depth(depth):
+        _sync_mis_depth_snapshot(
+            db,
+            stock_id=stock_id,
+            requested_at=requested_at,
+        )
+    session = quote.requirement.session
     auction_session = (
         MarketSession.OPENING_AUCTION
         if session is MarketSession.PRE_OPEN
@@ -124,11 +184,81 @@ def _sync_canonical_snapshot(
     )
 
 
-def _sync_fugle_snapshot(db: Session, *, stock_id: str) -> None:
+def _sync_kgi_minute_bars(
+    db: Session,
+    *,
+    stock_id: str,
+    requested_at: datetime,
+) -> None:
+    """Materialize at most once for each newly closed buffered minute."""
+
+    stream = _KGI_REALTIME_PORT.market_stream_snapshot(
+        stock_id,
+        recent_trade_limit=1,
+        auction_limit=1,
+        kbar_limit=120,
+    )
+    rows = [
+        item
+        for item in stream.get("minute_kbars") or []
+        if isinstance(item, dict)
+    ]
+    finalized_rows: list[dict] = []
+    for row in rows:
+        value = row.get("event_time")
+        try:
+            start_at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if start_at.tzinfo is None or start_at.utcoffset() is None:
+            start_at = start_at.replace(tzinfo=TAIWAN_TZ)
+        if requested_at >= start_at + timedelta(minutes=1):
+            finalized_rows.append(row)
+    if not finalized_rows:
+        return
+    latest_signature = str(
+        finalized_rows[-1].get("event_id")
+        or finalized_rows[-1].get("event_time")
+        or ""
+    )
+    if not latest_signature:
+        return
+    with _KGI_BAR_MATERIALIZATION_LOCK:
+        if _KGI_LAST_MATERIALIZED_FINAL_BAR.get(stock_id) == latest_signature:
+            return
+        requirement = build_taiwan_intraday_requirement(
+            instrument=_instrument(db, stock_id),
+            interval="1m",
+            range_value="1d",
+            policy=RealtimePolicy.PREFER_LIVE,
+            requested_at=requested_at,
+            acquiring=True,
+        )
+        acquisition = kgi_minute_kbar_acquisition(stream, requirement)
+        if not acquisition.observations:
+            return
+        TaiwanIntradayBarTransaction(db).persist_bar_acquisition(
+            requirement,
+            acquisition,
+        )
+        _KGI_LAST_MATERIALIZED_FINAL_BAR[stock_id] = latest_signature
+
+
+def _sync_fugle_snapshot(
+    db: Session,
+    *,
+    stock_id: str,
+    requested_at: datetime,
+) -> None:
     runtime = get_fugle_realtime_runtime()
     if runtime is None:
         raise RuntimeError("FUGLE_RUNTIME_UNAVAILABLE")
     runtime.materializer.materialize(db, active_stock=stock_id)
+    _sync_mis_depth_snapshot(
+        db,
+        stock_id=stock_id,
+        requested_at=requested_at,
+    )
 
 
 def _sync_if_live(
@@ -141,7 +271,11 @@ def _sync_if_live(
         return state
     try:
         if state.provider == FUGLE_PROVIDER:
-            _sync_fugle_snapshot(db, stock_id=state.stock_id)
+            _sync_fugle_snapshot(
+                db,
+                stock_id=state.stock_id,
+                requested_at=requested_at,
+            )
         else:
             _sync_canonical_snapshot(
                 db,
@@ -197,14 +331,47 @@ def acquire_taiwan_realtime_quote_lease(
             result.lease,
             requested_at=effective_requested_at,
         )
+    fallback_error: str | None = None
+    if requirement.session in MIS_ORDER_BOOK_DESCRIPTOR.supported_sessions:
+        try:
+            _sync_mis_depth_snapshot(
+                db,
+                stock_id=instrument.symbol,
+                requested_at=effective_requested_at,
+            )
+        except Exception as exc:
+            fallback_error = f"MIS_DEPTH_FALLBACK_FAILED:{type(exc).__name__}"
+        else:
+            return ViewerLeaseState(
+                stock_id=instrument.symbol,
+                provider=(
+                    result.selected_provider
+                    or KGI_QUOTE_SNAPSHOT_DESCRIPTOR.provider_key
+                ),
+                owner_kind=owner_kind,
+                status="degraded",
+                fallback_source=MIS_SOURCE,
+                message=(
+                    "broker即時租約目前不可用；已完成一次有界TWSE MIS五檔備援更新。"
+                ),
+                error=result.detail_code,
+            )
     return ViewerLeaseState(
         stock_id=instrument.symbol,
         provider=result.selected_provider or KGI_QUOTE_SNAPSHOT_DESCRIPTOR.provider_key,
         owner_kind=owner_kind,
         status="unavailable",
         fallback_source=MIS_SOURCE,
-        message="即時行情租約目前不可用；行情維持既有resolved fallback。",
-        error=result.detail_code,
+        message=(
+            "即時行情租約目前不可用；行情維持既有resolved cache。"
+            if fallback_error is None
+            else "即時行情租約與TWSE MIS五檔備援目前皆不可用。"
+        ),
+        error=(
+            result.detail_code
+            if fallback_error is None
+            else f"{result.detail_code}:{fallback_error}"
+        ),
     )
 
 

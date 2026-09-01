@@ -17,9 +17,11 @@ from app.jobs.taiwan_intraday_bar_scheduler import (
     add_taiwan_intraday_bar_jobs,
     collect_taiwan_intraday_bars,
 )
+from app.market.quote_contract_health import resolve_taiwan_quote_contract_universe
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_intraday_universe import (
     resolve_taiwan_intraday_target_universe,
+    resolve_taiwan_tier_a_target_plan,
 )
 
 
@@ -220,6 +222,116 @@ def test_intraday_target_universe_reports_unknown_and_inactive_targets() -> None
             "inactive_instrument",
             "target_not_found",
         ]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_acceptance_canary_is_an_explicit_subset_of_the_shared_plan() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    db = Session(engine)
+    try:
+        db.add_all(
+            [
+                StockMaster(
+                    stock_id="2330",
+                    market="TWSE",
+                    instrument_type="stock",
+                ),
+                StockMaster(
+                    stock_id="3711",
+                    market="TWSE",
+                    instrument_type="stock",
+                ),
+                PortfolioHolding(
+                    market="tw",
+                    symbol="3711",
+                    quantity=1000,
+                    currency="TWD",
+                    is_active=True,
+                ),
+            ]
+        )
+        db.commit()
+
+        plan = resolve_taiwan_tier_a_target_plan(
+            db,
+            operation_profile="acceptance_canary",
+            max_symbols=5,
+            configured_symbols=["2330"],
+            lease_symbols=[],
+        )
+
+        assert plan["symbols"] == ["2330"]
+        assert plan["operation_profile"] == "acceptance_canary"
+        assert plan["profile_semantics"] == (
+            "configured_canary_subset_of_canonical_plan"
+        )
+        assert plan["candidate_count"] == 2
+        assert plan["eligible_count"] == 2
+        assert plan["skipped_targets"] == [
+            {
+                "stock_id": "3711",
+                "reason": "acceptance_canary_profile_excluded",
+                "origins": ["holding"],
+            }
+        ]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_quote_contract_universe_projects_the_shared_acceptance_profile(
+    monkeypatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    db = Session(engine)
+    try:
+        db.add_all(
+            [
+                StockMaster(
+                    stock_id="2330",
+                    market="TWSE",
+                    instrument_type="stock",
+                ),
+                StockMaster(
+                    stock_id="3711",
+                    market="TWSE",
+                    instrument_type="stock",
+                ),
+                PortfolioHolding(
+                    market="tw",
+                    symbol="3711",
+                    quantity=1000,
+                    currency="TWD",
+                    is_active=True,
+                ),
+            ]
+        )
+        db.commit()
+        monkeypatch.setattr(
+            "app.market.tw_intraday_universe.settings."
+            "scheduler_taiwan_quote_contract_symbols",
+            "2330",
+        )
+        monkeypatch.setattr(
+            "app.market.quote_contract_health.settings."
+            "scheduler_taiwan_quote_contract_max_symbols",
+            3,
+        )
+
+        universe = resolve_taiwan_quote_contract_universe(db)
+
+        assert universe["symbols"] == ["2330"]
+        assert universe["source"] == (
+            "shared_tier_a_target_plan:acceptance_canary"
+        )
+        assert universe["target_plan"]["operation_profile"] == (
+            "acceptance_canary"
+        )
+        assert universe["target_plan"]["candidate_count"] == 2
     finally:
         db.close()
         engine.dispose()

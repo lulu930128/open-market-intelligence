@@ -14,7 +14,9 @@ from app.market.trading_calendar import TAIWAN_TZ
 from app.market.taiwan_industries import normalize_tw_industry_label
 from app.market.tw_intraday_state import persist_taiwan_intraday_stock_states
 from app.market.tw_market_dashboard import (
+    _freshness_status,
     build_dashboard_moving_average_series,
+    _dashboard_intraday_chart,
     _dashboard_previous_close,
     build_tw_dashboard_stock_detail,
     build_tw_market_dashboard,
@@ -36,6 +38,57 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
+
+    def test_freshness_respects_regular_session_producer_cadence(self) -> None:
+        observed_at = datetime(2026, 8, 31, 10, 0, tzinfo=TAIWAN_TZ)
+
+        within_cycle = _freshness_status(
+            observed_at,
+            now=datetime(2026, 8, 31, 10, 4, 59, tzinfo=TAIWAN_TZ),
+            evidence_trade_date=date(2026, 8, 31),
+            expected_trade_date=date(2026, 8, 31),
+            presentation_state="observing",
+            completed_session_evidence=False,
+            producer_cadence_seconds=300,
+        )
+        outside_cycle = _freshness_status(
+            observed_at,
+            now=datetime(2026, 8, 31, 10, 6, 1, tzinfo=TAIWAN_TZ),
+            evidence_trade_date=date(2026, 8, 31),
+            expected_trade_date=date(2026, 8, 31),
+            presentation_state="observing",
+            completed_session_evidence=False,
+            producer_cadence_seconds=300,
+        )
+
+        self.assertEqual(within_cycle, ("current", 299))
+        self.assertEqual(outside_cycle, ("delayed", 361))
+
+    def test_freshness_preserves_completed_session_and_rejects_wrong_date(self) -> None:
+        close_at = datetime(2026, 8, 31, 13, 30, tzinfo=TAIWAN_TZ)
+        checked_at = datetime(2026, 8, 31, 23, 40, tzinfo=TAIWAN_TZ)
+
+        completed = _freshness_status(
+            close_at,
+            now=checked_at,
+            evidence_trade_date=date(2026, 8, 31),
+            expected_trade_date=date(2026, 8, 31),
+            presentation_state="completed",
+            completed_session_evidence=True,
+            producer_cadence_seconds=300,
+        )
+        wrong_date = _freshness_status(
+            close_at,
+            now=datetime(2026, 9, 1, 10, 0, tzinfo=TAIWAN_TZ),
+            evidence_trade_date=date(2026, 8, 31),
+            expected_trade_date=date(2026, 9, 1),
+            presentation_state="observing",
+            completed_session_evidence=True,
+            producer_cadence_seconds=300,
+        )
+
+        self.assertEqual(completed[0], "latest_completed_session")
+        self.assertEqual(wrong_date[0], "stale")
 
     def _seed_preopen_state(self) -> int:
         stocks = [
@@ -138,6 +191,53 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         )
         return int(group.id)
 
+    def test_post_close_dashboard_uses_completed_session_freshness(self) -> None:
+        close_at = datetime(2026, 8, 31, 13, 30, tzinfo=TAIWAN_TZ)
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+                industry="24",
+                is_active=True,
+            )
+        )
+        self.db.commit()
+        persist_taiwan_intraday_stock_states(
+            self.db,
+            rows=[
+                {
+                    "provider": "nstock",
+                    "market": "TWSE",
+                    "code": "2330",
+                    "trade_date": date(2026, 8, 31),
+                    "as_of": close_at,
+                    "snapshot_as_of": close_at,
+                    "previous_close": 1180.0,
+                    "current_price": 1195.0,
+                    "has_actual_trade": True,
+                    "indicative_match_available": False,
+                    "market_session": "post_close",
+                    "price_semantics": "last_trade",
+                }
+            ],
+            now=close_at,
+        )
+
+        payload = build_tw_market_dashboard(
+            self.db,
+            now=datetime(2026, 8, 31, 23, 40, tzinfo=TAIWAN_TZ),
+        )
+
+        self.assertEqual(payload["session"]["presentation_state"], "completed")
+        self.assertEqual(payload["freshness"]["status"], "latest_completed_session")
+        self.assertEqual(payload["freshness"]["basis"], "completed_session_date")
+        self.assertNotIn(
+            "Dashboard snapshot freshness is stale.",
+            payload["warnings"],
+        )
+
     def test_preopen_dashboard_is_cache_only_and_preserves_breadth_invariants(
         self,
     ) -> None:
@@ -159,6 +259,8 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertEqual(payload["version"], "omi.tw_market_dashboard.v1")
         self.assertEqual(payload["session"]["phase"], "preopen")
         self.assertTrue(payload["freshness"]["cache_only"])
+        self.assertEqual(payload["freshness"]["basis"], "producer_cadence")
+        self.assertEqual(payload["freshness"]["producer_cadence_seconds"], 300)
         self.assertGreater(payload["state_version"], 0)
 
         twse = payload["breadth"]["TWSE"]
@@ -196,11 +298,13 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
             tpex["unknown"],
         )
 
-        self.assertEqual(payload["hot_groups"][0]["group_id"], "TWSE:24")
-        self.assertEqual(payload["hot_groups"][0]["group_key"], "24")
-        self.assertEqual(payload["hot_groups"][0]["label"], "半導體業")
-        self.assertEqual(payload["hot_groups"][0]["coverage"], 3)
-        self.assertFalse(payload["hot_groups"][0]["decision_usable"])
+        self.assertEqual(payload["hot_groups"], [])
+        self.assertTrue(
+            any(
+                "No scheduler-owned intraday group state" in warning
+                for warning in payload["warnings"]
+            )
+        )
         self.assertEqual(
             payload["watchlist"]["selection"]["selection_policy"],
             "explicit_group_id",
@@ -514,6 +618,57 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertEqual(series[-1]["ma5"], 18.0)
         self.assertEqual(series[-1]["ma20"], 10.5)
         self.assertIsNone(series[-1]["ma60"])
+
+    def test_stock_detail_moving_average_excludes_close_marker(self) -> None:
+        points = [
+            {
+                "time": datetime(2026, 8, 31, 13, minute, tzinfo=TAIWAN_TZ),
+                "close": float(value),
+                "indicator_eligible": True,
+            }
+            for minute, value in zip(range(20, 25), (576, 577, 578, 579, 580))
+        ]
+        points.append(
+            {
+                "time": datetime(2026, 8, 31, 13, 30, tzinfo=TAIWAN_TZ),
+                "close": 584.0,
+                "bar_type": "official_close_marker",
+                "indicator_eligible": False,
+            }
+        )
+
+        series = build_dashboard_moving_average_series(points)
+
+        self.assertEqual(series[-2]["ma5"], 578.0)
+        self.assertEqual(series[-1]["ma5"], 578.0)
+
+    def test_today_chart_limits_display_but_keeps_full_technical_volume_scope(self) -> None:
+        cached_history = {
+            "source": "market_intraday_bar_cache",
+            "effective_interval": "1m",
+            "points": [
+                {
+                    "time": f"2026-08-31T09:{minute:02d}:00+08:00",
+                    "close": 100.0 + minute,
+                    "volume": 1000,
+                }
+                for minute in range(10)
+            ],
+        }
+        with patch(
+            "app.market.tw_market_dashboard.get_market_intraday_history",
+            return_value=cached_history,
+        ):
+            chart, technical = _dashboard_intraday_chart(
+                self.db,
+                stock_id="2330",
+                bars=3,
+            )
+
+        self.assertEqual(chart["point_count"], 3)
+        self.assertEqual(len(chart["points"]), 3)
+        self.assertEqual(technical["point_count"], 10)
+        self.assertEqual(len(technical["points"]), 10)
 
     def test_today_chart_previous_close_excludes_the_current_trade_date(self) -> None:
         points = [

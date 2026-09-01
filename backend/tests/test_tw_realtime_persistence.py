@@ -22,6 +22,11 @@ from app.market.providers.kgi_realtime_acquisition import (
     KgiRealtimeAcquisitionAdapter,
     KgiRealtimeProviderSnapshot,
 )
+from app.market.providers.twse_mis_canonical import MIS_SOURCE
+from app.market.realtime_snapshot_repository import (
+    TaiwanAuctionRepository,
+    TaiwanDepthRepository,
+)
 from app.market.realtime_snapshot_transaction import TaiwanDepthTransaction
 from app.market.taiwan_realtime_platform import (
     acquire_taiwan_auction,
@@ -33,6 +38,8 @@ from app.market.taiwan_realtime_platform import (
 from app.market.tw_realtime_capabilities import (
     KGI_AUCTION_DESCRIPTOR,
     KGI_ORDER_BOOK_DESCRIPTOR,
+    MIS_AUCTION_DESCRIPTOR,
+    MIS_ORDER_BOOK_DESCRIPTOR,
     TW_ORDER_BOOK_CAPABILITY_ID,
 )
 from app.market_data.contracts import (
@@ -174,6 +181,54 @@ def test_depth_acquisition_persists_typed_lineage_then_rereads(db: Session) -> N
     assert cached.resolved.depth == result.resolved.depth
 
 
+def test_depth_candidate_read_is_provider_fair_before_total_bound(db: Session) -> None:
+    acquire_taiwan_depth(
+        db,
+        stock_id="2330",
+        policy=RealtimePolicy.REQUIRE_LIVE,
+        descriptors=(KGI_ORDER_BOOK_DESCRIPTOR,),
+        acquisition=_adapter(),
+        requested_at=NOW,
+        session=MarketSession.CONTINUOUS,
+    )
+    base = db.query(TaiwanStockDepthSnapshot).one()
+    values = {
+        column.name: getattr(base, column.name)
+        for column in TaiwanStockDepthSnapshot.__table__.columns
+        if column.name != "id"
+    }
+    db.add(
+        TaiwanStockDepthSnapshot(
+            **{
+                **values,
+                "provider": MIS_ORDER_BOOK_DESCRIPTOR.provider_key,
+                "source": MIS_SOURCE,
+                "event_at": NOW - timedelta(seconds=1),
+            }
+        )
+    )
+    for offset in range(1, 41):
+        db.add(
+            TaiwanStockDepthSnapshot(
+                **{
+                    **values,
+                    "event_at": NOW + timedelta(seconds=offset),
+                }
+            )
+        )
+    db.commit()
+
+    reads = TaiwanDepthRepository(db).load_candidates(
+        _instrument(),
+        max_candidates=2,
+    )
+
+    assert {read.provider for read in reads} == {
+        KGI_ORDER_BOOK_DESCRIPTOR.provider_key,
+        MIS_ORDER_BOOK_DESCRIPTOR.provider_key,
+    }
+
+
 def test_trial_auction_stays_provisional_and_never_becomes_quote(db: Session) -> None:
     result = acquire_taiwan_auction(
         db,
@@ -205,6 +260,117 @@ def test_trial_auction_stays_provisional_and_never_becomes_quote(db: Session) ->
     )
     assert cached.acquisition.attempted is False
     assert cached.resolved.auction == result.resolved.auction
+
+
+def test_auction_candidate_read_is_provider_fair_before_total_bound(db: Session) -> None:
+    acquire_taiwan_auction(
+        db,
+        stock_id="2330",
+        policy=RealtimePolicy.REQUIRE_LIVE,
+        descriptors=(KGI_AUCTION_DESCRIPTOR,),
+        acquisition=_adapter(indicative=True),
+        requested_at=NOW,
+        session=MarketSession.CLOSING_AUCTION,
+    )
+    base = db.query(TaiwanStockAuctionSnapshot).one()
+    values = {
+        column.name: getattr(base, column.name)
+        for column in TaiwanStockAuctionSnapshot.__table__.columns
+        if column.name != "id"
+    }
+    db.add(
+        TaiwanStockAuctionSnapshot(
+            **{
+                **values,
+                "provider": MIS_AUCTION_DESCRIPTOR.provider_key,
+                "source": MIS_SOURCE,
+                "event_at": NOW - timedelta(seconds=1),
+            }
+        )
+    )
+    for offset in range(1, 41):
+        db.add(
+            TaiwanStockAuctionSnapshot(
+                **{
+                    **values,
+                    "event_at": NOW + timedelta(seconds=offset),
+                }
+            )
+        )
+    db.commit()
+
+    reads = TaiwanAuctionRepository(db).load_candidates(
+        _instrument(),
+        max_candidates=2,
+        auction_type=AuctionType.CLOSING,
+    )
+
+    assert {read.provider for read in reads} == {
+        KGI_AUCTION_DESCRIPTOR.provider_key,
+        MIS_AUCTION_DESCRIPTOR.provider_key,
+    }
+
+
+def test_previous_session_auction_is_rejected_from_current_outward_read(
+    db: Session,
+) -> None:
+    result = acquire_taiwan_auction(
+        db,
+        stock_id="2330",
+        policy=RealtimePolicy.REQUIRE_LIVE,
+        descriptors=(KGI_AUCTION_DESCRIPTOR,),
+        acquisition=_adapter(indicative=True),
+        requested_at=NOW,
+        session=MarketSession.CLOSING_AUCTION,
+    )
+    assert result.persistence.committed is True
+
+    stored = db.query(TaiwanStockAuctionSnapshot).one()
+    stored.event_at = stored.event_at - timedelta(days=1)
+    db.commit()
+
+    cached = read_taiwan_auction(
+        db,
+        stock_id="2330",
+        requested_at=NOW,
+        session=MarketSession.CLOSING_AUCTION,
+    )
+
+    assert cached.resolved.auction is None
+    assert cached.resolved.health.facts_usable is False
+    assert cached.candidate_rejections[0].reason_code == "TW_AUCTION_EVENT_DATE_MISMATCH"
+    assert "TW_AUCTION_EVENT_DATE_MISMATCH" in cached.limitations
+
+
+def test_previous_session_depth_is_rejected_from_current_outward_read(
+    db: Session,
+) -> None:
+    result = acquire_taiwan_depth(
+        db,
+        stock_id="2330",
+        policy=RealtimePolicy.REQUIRE_LIVE,
+        descriptors=(KGI_ORDER_BOOK_DESCRIPTOR,),
+        acquisition=_adapter(),
+        requested_at=NOW,
+        session=MarketSession.CONTINUOUS,
+    )
+    assert result.persistence.committed is True
+
+    stored = db.query(TaiwanStockDepthSnapshot).one()
+    stored.event_at = stored.event_at - timedelta(days=1)
+    db.commit()
+
+    cached = read_taiwan_depth(
+        db,
+        stock_id="2330",
+        requested_at=NOW,
+        session=MarketSession.CONTINUOUS,
+    )
+
+    assert cached.resolved.depth is None
+    assert cached.resolved.health.facts_usable is False
+    assert cached.candidate_rejections[0].reason_code == "TW_DEPTH_EVENT_DATE_MISMATCH"
+    assert "TW_DEPTH_EVENT_DATE_MISMATCH" in cached.limitations
 
 
 def test_auction_dataset_is_not_applicable_outside_auction_session(

@@ -1329,6 +1329,9 @@ export const jaJP = {
       pointCount: "{count} 点",
       refreshEvery: "ザラ場は {seconds} 秒ごとに更新",
       refreshEveryUpdated: "ザラ場は {seconds} 秒ごとに更新、最終更新 {updatedAt}",
+      cachePollEvery: "{seconds} 秒ごとにローカルキャッシュを確認",
+      cachePollEveryUpdated:
+        "{seconds} 秒ごとにローカルキャッシュを確認、最新データ {updatedAt}",
       previousClose: "前日終値",
       low: "安値",
       high: "高値",
@@ -2069,6 +2072,15 @@ export const jaJP = {
   },
   usStockDetail: {
     ...zhTW.usStockDetail,
+    currentQuote: {
+      unavailable: "現在の取引時間帯の価格はまだ取得できていません",
+      expectedMissing: "プレマーケット／時間外取引の価格はまだ取得できていません",
+      requiredMissing: "リアルタイム価格を取得できない異常が発生しています",
+      noTrade: "現在、新しい約定はありません",
+      notExpected: "現在はリアルタイム価格の対象時間外です",
+      previousCloseReference: "前日終値 {price} · {date}",
+      currentDayRegularCloseReference: "本日の通常取引終値 {price} · {date}",
+    },
     sourceStatus: {
       providerErrorTitle: "{provider} 上流データ障害",
       delayedTitle: "{provider} 上流データ遅延",
@@ -2160,7 +2172,13 @@ export const jaJP = {
       title: "米国株プレ / アフター",
       meta: "{phase} · regular {regular} / extended {extended}",
       noExtendedData:
-        "Yahoo chart はまだプレ/アフターの分足を返していません。利用可能な通常時間データを表示します。",
+        "プレ/アフターの分足はまだありません。通常時間に切り替えると利用可能なデータを確認できます。",
+      cacheOnlyPolicy:
+        "この画面はローカルキャッシュのみを読み取り、市場データの取得はバックグラウンド更新が担当します。",
+      regularMissingExtendedAvailable:
+        "通常時間のデータはまだありません。プレ/アフターには {count} 点あり、「プレ/アフター」または「すべて」で確認できます。",
+      extendedMissingRegularAvailable:
+        "プレ/アフターのデータはまだありません。通常時間には {count} 点あり、「通常」で確認できます。",
       scopes: {
         regular: "通常",
         extended: "プレ/アフター",

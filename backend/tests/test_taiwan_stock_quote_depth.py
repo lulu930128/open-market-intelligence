@@ -85,6 +85,7 @@ def test_fixed_slot_capture_serializes_decimal_values() -> None:
             )
 
         assert result["capture_status"] == "captured"
+        assert result["semantic_ready"] is True
         replay = get_taiwan_quote_contract_replay(
             db=db,
             stock_id="2330",
@@ -217,6 +218,7 @@ def test_fixed_slot_capture_is_idempotent_and_replay_is_read_only() -> None:
             )
 
         assert replay["captured_count"] == 2
+        assert replay["semantic_ready_count"] == 2
         assert replay["complete"] is False
         assert "08:30" in replay["missing_slots"]
         projected = next(
@@ -227,6 +229,125 @@ def test_fixed_slot_capture_is_idempotent_and_replay_is_read_only() -> None:
         assert projected["indicative_match_price"] == 2412.5
         assert projected["replay_projection"] == "captured_public_contract_preserved"
         assert replay["read_path_side_effects"] is False
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_close_slot_capture_requires_session_close_semantics() -> None:
+    db, engine = _db()
+    captured_at = datetime(2026, 6, 30, 13, 34, 1, tzinfo=TAIWAN_TZ)
+    payload = _captured_payload()
+    payload.update(
+        {
+            "quote_time": datetime(2026, 6, 30, 13, 29, 50, tzinfo=TAIWAN_TZ),
+            "session_phase": "post_close_snapshot",
+            "session_close_available": False,
+            "session_close_status": "unavailable",
+            "data_core_components": {
+                "quote.session_close": {
+                    "status": "unavailable",
+                    "available": False,
+                    "trade_date": "2026-06-30",
+                }
+            },
+        }
+    )
+    try:
+        with (
+            patch(
+                "app.market.quote_contract_capture.acquire_taiwan_session_close"
+            ) as acquire_close,
+            patch(
+                "app.market.quote_contract_capture.refresh_taiwan_realtime_snapshot"
+            ) as refresh_snapshot,
+            patch(
+                "app.market.quote_contract_capture.get_taiwan_stock_quote_depth",
+                return_value=payload,
+            ),
+        ):
+            result = capture_taiwan_quote_contract_snapshot(
+                db=db,
+                stock_id="2330",
+                capture_slot="13:34",
+                now=captured_at,
+            )
+
+        acquire_close.assert_called_once()
+        refresh_snapshot.assert_not_called()
+        assert result["capture_status"] == "captured"
+        assert result["semantic_status"] == "captured_partial"
+        assert result["semantic_ready"] is False
+        assert result["semantic_reason"] == "session_close_confirmation_missing"
+
+        replay = get_taiwan_quote_contract_replay(
+            db=db,
+            stock_id="2330",
+            trade_date=captured_at.date(),
+        )
+        assert replay["captured_count"] == 1
+        assert replay["semantic_ready_count"] == 0
+        assert replay["complete"] is False
+        assert "13:34" in replay["missing_slots"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_close_slot_accepts_explicit_truthful_unavailable_reason() -> None:
+    db, engine = _db()
+    captured_at = datetime(2026, 6, 30, 13, 34, 1, tzinfo=TAIWAN_TZ)
+    payload = _captured_payload()
+    payload.update(
+        {
+            "quote_time": datetime(2026, 6, 30, 13, 30, 0, tzinfo=TAIWAN_TZ),
+            "session_phase": "post_close_snapshot",
+            "session_close_available": False,
+            "session_close_status": "unavailable",
+            "data_core_components": {
+                "quote.session_close": {
+                    "status": "unavailable",
+                    "available": False,
+                    "trade_date": "2026-06-30",
+                    "event_time": "2026-06-30T13:30:00+08:00",
+                    "provider": "kgi_superpy",
+                    "source": "kgi_superpy_quote_stream",
+                    "limitations": ["SESSION_CLOSE_AUTHORITY_UNVERIFIED"],
+                }
+            },
+        }
+    )
+    try:
+        with (
+            patch(
+                "app.market.quote_contract_capture.acquire_taiwan_session_close"
+            ),
+            patch(
+                "app.market.quote_contract_capture.refresh_taiwan_realtime_snapshot"
+            ) as refresh_snapshot,
+            patch(
+                "app.market.quote_contract_capture.get_taiwan_stock_quote_depth",
+                return_value=payload,
+            ),
+        ):
+            result = capture_taiwan_quote_contract_snapshot(
+                db=db,
+                stock_id="2330",
+                capture_slot="13:34",
+                now=captured_at,
+            )
+
+        refresh_snapshot.assert_not_called()
+        assert result["capture_transport_status"] == "success"
+        assert result["required_capabilities"] == ["quote.session_close"]
+        assert result["semantic_status"] == "truthful_unavailable"
+        assert result["semantic_ready"] is True
+        assert result["semantic_acceptance"] == "accepted"
+        assert result["semantic_reason"] == "SESSION_CLOSE_AUTHORITY_UNVERIFIED"
+        assert result["provider"] == "kgi_superpy"
+        assert result["observed_event_time"] == datetime(
+            2026, 6, 30, 13, 30, tzinfo=TAIWAN_TZ
+        )
     finally:
         db.close()
         engine.dispose()

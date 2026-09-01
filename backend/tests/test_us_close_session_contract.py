@@ -164,6 +164,9 @@ class USQuoteSessionContractTests(unittest.TestCase):
                 "session_scope": "all",
                 "session_phase": "after_hours",
                 "previous_close": 90.0,
+                "change_reference_price": 91.25,
+                "change_reference_type": "current_day_regular_close",
+                "change_reference_trade_date": "2026-06-02",
                 "regular_session_close": 91.25,
                 "regular_session_close_time": "2026-06-02T16:00:00-04:00",
                 "latest_point": {
@@ -185,6 +188,12 @@ class USQuoteSessionContractTests(unittest.TestCase):
         self.assertEqual(quote["trade_date"], "2026-06-02")
         self.assertEqual(quote["quote_semantics"], "after_hours_last_trade")
         self.assertEqual(quote["regular_session_close"], 91.25)
+        self.assertEqual(quote["change"], 0.75)
+        self.assertEqual(quote["change_reference_price"], 91.25)
+        self.assertEqual(
+            quote["change_reference_type"],
+            "current_day_regular_close",
+        )
         self.assertEqual(
             quote["regular_session_close_trade_date"],
             "2026-06-02",

@@ -19,6 +19,11 @@ FUGLE_INTRADAY_SOURCE = "fugle_candles_stream"
 FUGLE_INTRADAY_RESOURCE_ID = "tw.fugle.candles.stream"
 FUGLE_INTRADAY_PARSER_VERSION = "fugle.websocket.candles.v1"
 
+KGI_INTRADAY_PROVIDER = "kgi_superpy"
+KGI_INTRADAY_SOURCE = "kgi_superpy_minute_kbars"
+KGI_INTRADAY_RESOURCE_ID = "tw.kgi.minute_kbars.stream"
+KGI_INTRADAY_PARSER_VERSION = "kgi.superpy.minute_kbars.v1"
+
 NSTOCK_INTRADAY_PROVIDER = "nstock"
 NSTOCK_INTRADAY_SOURCE = "nstock_minute_stock_data"
 NSTOCK_INTRADAY_RESOURCE_ID = "tw.nstock.minute.bars"
@@ -84,6 +89,34 @@ FUGLE_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     ),
 )
 
+KGI_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key=KGI_INTRADAY_PROVIDER,
+    market=Market.TW,
+    capability_id=TW_INTRADAY_BARS_CAPABILITY_ID,
+    resource_id=KGI_INTRADAY_RESOURCE_ID,
+    authority=AuthorityClass.BROKER,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+    venue_scope=("TWSE", "TPEX"),
+    instrument_types=(InstrumentType.STOCK, InstrumentType.ETF),
+    intervals=("1m",),
+    acquisition_modes=(AcquisitionMode.SUBSCRIPTION,),
+    priority=8,
+    can_produce_live=True,
+    can_produce_final=True,
+    max_timeout_seconds=5,
+    max_external_calls_per_attempt=0,
+    max_subscriptions_per_attempt=1,
+    max_symbols_per_call=1,
+    max_range_days=1,
+    health_ttl_seconds=30,
+    allow_unknown_health=True,
+    limitations=(
+        "ACTIVE_KGI_LEASE_REQUIRED",
+        "MATERIALIZED_FROM_BOUNDED_STREAM_BUFFER",
+        "BROKER_AUTHORITY",
+    ),
+)
+
 YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     provider_key=YAHOO_INTRADAY_PROVIDER,
     market=Market.TW,
@@ -109,6 +142,7 @@ YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
 
 TW_INTRADAY_DESCRIPTORS = (
     FUGLE_INTRADAY_DESCRIPTOR,
+    KGI_INTRADAY_DESCRIPTOR,
     NSTOCK_INTRADAY_DESCRIPTOR,
     YAHOO_INTRADAY_DESCRIPTOR,
 )
@@ -132,6 +166,14 @@ _BINDINGS = (
         source_type="stream",
         auth_type="api_key",
         reliability_level="vendor",
+    ),
+    TaiwanIntradaySourceBinding(
+        descriptor=KGI_INTRADAY_DESCRIPTOR,
+        source=KGI_INTRADAY_SOURCE,
+        parser_version=KGI_INTRADAY_PARSER_VERSION,
+        source_type="stream",
+        auth_type="broker_credentials",
+        reliability_level="broker",
     ),
     TaiwanIntradaySourceBinding(
         descriptor=NSTOCK_INTRADAY_DESCRIPTOR,
@@ -171,6 +213,11 @@ __all__ = [
     "FUGLE_INTRADAY_PROVIDER",
     "FUGLE_INTRADAY_RESOURCE_ID",
     "FUGLE_INTRADAY_SOURCE",
+    "KGI_INTRADAY_DESCRIPTOR",
+    "KGI_INTRADAY_PARSER_VERSION",
+    "KGI_INTRADAY_PROVIDER",
+    "KGI_INTRADAY_RESOURCE_ID",
+    "KGI_INTRADAY_SOURCE",
     "NSTOCK_INTRADAY_DESCRIPTOR",
     "NSTOCK_INTRADAY_PARSER_VERSION",
     "NSTOCK_INTRADAY_PROVIDER",

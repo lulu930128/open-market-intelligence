@@ -21,6 +21,8 @@ from app.db.models import (
 from app.market.providers.fugle_realtime import (
     FUGLE_TAIEX_SYMBOL,
     FugleRealtimeBuffer,
+    FugleIndexSessionNotMaterializable,
+    FugleIndexValueAnomaly,
     FugleSubscriptionAllocator,
     fugle_bar_acquisition,
     fugle_index_acquisition,
@@ -39,6 +41,7 @@ from app.market.providers.tw_current_market import (
 from app.market.public_quote_platform import build_taiwan_public_quote_requirement
 from app.market.tw_current_market_acquisition import TaiwanCurrentIndexAcquisitionExecutor
 from app.market.tw_current_market_capabilities import (
+    FUGLE_CURRENT_INDEX_DESCRIPTOR,
     FUGLE_INDEX_PREVIOUS_CLOSE_LINEAGE_LIMITATION,
     TW_CURRENT_INDEX_DESCRIPTORS,
     TW_CURRENT_INDEX_CAPABILITY_ID,
@@ -59,6 +62,7 @@ from app.market_data.contracts import (
     InstrumentKey,
     InstrumentType,
     Market,
+    MarketSession,
     ObservationState,
     QuantityUnit,
     ResolvedEvidenceStatus,
@@ -80,6 +84,15 @@ NOW = datetime(
 )
 
 
+def test_fugle_descriptor_does_not_advertise_post_close_materialization() -> None:
+    assert MarketSession.POST_CLOSE not in (
+        FUGLE_CURRENT_INDEX_DESCRIPTOR.supported_sessions
+    )
+    assert MarketSession.CLOSE_RESOLUTION in (
+        FUGLE_CURRENT_INDEX_DESCRIPTOR.supported_sessions
+    )
+
+
 def _instrument(
     symbol: str = "2330",
     venue: str = "TWSE",
@@ -92,11 +105,16 @@ def _instrument(
     )
 
 
-def _index_message(*, value: float = 35276.44, micros: int = 1787892930000000) -> dict:
+def _index_message(
+    *,
+    symbol: str = FUGLE_TAIEX_SYMBOL,
+    value: float = 35276.44,
+    micros: int = 1787892930000000,
+) -> dict:
     return {
         "event": "data",
         "data": {
-            "symbol": FUGLE_TAIEX_SYMBOL,
+            "symbol": symbol,
             "type": "INDEX",
             "exchange": "TWSE",
             "index": value,
@@ -212,12 +230,13 @@ def _persist_mis_index_seed(
 
 
 def test_allocator_keeps_one_connection_budget_and_switches_stock_two_phase() -> None:
+    assert FUGLE_TAIEX_SYMBOL == "IX0001"
     allocator = FugleSubscriptionAllocator(maximum=5)
     assert allocator.snapshot()["desired_count"] == 1
     allocator.set_active_stock("2330")
     desired = allocator.desired()
     assert {(item.channel, item.symbol) for item in desired} == {
-        ("indices", "IR0001"),
+        ("indices", "IX0001"),
         ("aggregates", "2330"),
         ("candles", "2330"),
     }
@@ -274,7 +293,7 @@ def test_official_examples_convert_to_existing_canonical_contracts() -> None:
         acquiring=True,
     )
     index = fugle_index_acquisition(
-        buffer.latest("indices", "IR0001"),  # type: ignore[arg-type]
+        buffer.latest("indices", "IX0001"),  # type: ignore[arg-type]
         index_requirement,
         previous_close=Decimal("35000"),
     )
@@ -306,7 +325,6 @@ def test_official_examples_convert_to_existing_canonical_contracts() -> None:
     assert quote.last_trade_quantity.original_unit is QuantityUnit.BOARD_LOT
     assert quote.cumulative_quantity is not None
     assert quote.cumulative_quantity.value == Decimal("54538000")
-
     bar_requirement = build_taiwan_intraday_requirement(
         instrument=_instrument(),
         interval="1m",
@@ -324,6 +342,123 @@ def test_official_examples_convert_to_existing_canonical_contracts() -> None:
     assert bar.volume.original_value == Decimal("4778")
     assert bar.volume.original_unit is QuantityUnit.BOARD_LOT
     assert bar.end_at - bar.start_at == __import__("datetime").timedelta(minutes=1)
+
+
+def test_fugle_index_rejects_implausible_change_from_canonical_seed() -> None:
+    buffer = FugleRealtimeBuffer()
+    assert buffer.ingest(_index_message(value=105_527.95), received_at=NOW)
+    requirement = build_taiwan_current_requirement(
+        dataset_id=TW_CURRENT_INDEX_DATASET_ID,
+        capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+        scope_key="TAIEX",
+        requested_at=NOW,
+        policy=RealtimePolicy.PREFER_LIVE,
+        acquiring=True,
+    )
+
+    with pytest.raises(FugleIndexValueAnomaly):
+        fugle_index_acquisition(
+            buffer.latest("indices", "IX0001"),  # type: ignore[arg-type]
+            requirement,
+            previous_close=Decimal("46331.45"),
+        )
+
+
+def test_fugle_tri_record_cannot_materialize_as_canonical_taiex() -> None:
+    buffer = FugleRealtimeBuffer()
+    assert buffer.ingest(
+        _index_message(symbol="IR0001", value=105_527.95),
+        received_at=NOW,
+    )
+    requirement = build_taiwan_current_requirement(
+        dataset_id=TW_CURRENT_INDEX_DATASET_ID,
+        capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+        scope_key="TAIEX",
+        requested_at=NOW,
+        policy=RealtimePolicy.PREFER_LIVE,
+        acquiring=True,
+    )
+    tri_record = buffer.latest("indices", "IR0001")
+    assert tri_record is not None
+
+    with pytest.raises(ValueError, match="TAIEX/IX0001"):
+        fugle_index_acquisition(
+            tri_record,
+            requirement,
+            previous_close=Decimal("35000"),
+        )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    try:
+        assert FugleCanonicalMaterializer(buffer).materialize(
+            db,
+            active_stock=None,
+        ) == {}
+        assert db.query(TaiwanCurrentIndexSnapshot).count() == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_fugle_post_close_index_remains_transport_only() -> None:
+    post_close_at = datetime(
+        2026,
+        8,
+        28,
+        14,
+        5,
+        tzinfo=timezone(timedelta(hours=8)),
+    )
+    stream_time = int(post_close_at.astimezone(timezone.utc).timestamp() * 1_000_000)
+    buffer = FugleRealtimeBuffer()
+    assert buffer.ingest(
+        _index_message(micros=stream_time),
+        received_at=post_close_at,
+    )
+    requirement = build_taiwan_current_requirement(
+        dataset_id=TW_CURRENT_INDEX_DATASET_ID,
+        capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+        scope_key="TAIEX",
+        requested_at=post_close_at,
+        policy=RealtimePolicy.PREFER_LIVE,
+        acquiring=True,
+    )
+
+    with pytest.raises(
+        FugleIndexSessionNotMaterializable,
+        match="cannot materialize completed-session evidence",
+    ):
+        fugle_index_acquisition(
+            buffer.latest("indices", "IX0001"),  # type: ignore[arg-type]
+            requirement,
+            previous_close=Decimal("35000"),
+        )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    try:
+        _persist_mis_index_seed(
+            db,
+            requested_at=NOW,
+            close=35_000,
+            previous_close=34_900,
+        )
+        assert FugleCanonicalMaterializer(buffer).materialize(
+            db,
+            active_stock=None,
+        ) == {
+            "index": {
+                "status": "pending",
+                "limitation": "FUGLE_INDEX_COMPLETED_SESSION_NOT_MATERIALIZABLE",
+            }
+        }
+        assert db.query(TaiwanCurrentIndexSnapshot).count() == 1
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_fugle_tpex_stock_can_allocate_quote_and_candle_subscription() -> None:
@@ -560,6 +695,26 @@ def test_runtime_quote_readiness_requires_auth_ack_and_fresh_record() -> None:
     assert runtime.quote_readiness("2330")["ready"] is True
 
 
+def test_runtime_index_readiness_exposes_bounded_ix0001_evidence() -> None:
+    runtime = FugleRealtimeRuntime(api_key="test", clock=lambda: NOW)
+    runtime.connection_status = "connected"
+    runtime.entitlement_status = "entitled"
+    runtime.allocator.acknowledge_subscribed(
+        channel_id="index-taiex",
+        channel="indices",
+        symbol="IX0001",
+    )
+    assert runtime.buffer.ingest(_index_message(), received_at=NOW)
+
+    readiness = runtime.index_readiness()
+
+    assert readiness["ready"] is True
+    assert readiness["expected_symbol"] == "IX0001"
+    assert readiness["record_symbol"] == "IX0001"
+    assert readiness["record_value"] == pytest.approx(35_276.44)
+    assert runtime.health()["index_readiness"] == readiness
+
+
 def test_fugle_lease_not_live_until_requested_symbol_quote_is_fresh(monkeypatch) -> None:
     runtime = FugleRealtimeRuntime(api_key="test", clock=lambda: NOW)
     runtime.connection_status = "connected"
@@ -778,7 +933,7 @@ def test_fugle_index_cannot_use_same_day_fugle_row_as_its_own_seed() -> None:
             acquiring=True,
         )
         acquisition = fugle_index_acquisition(
-            old_buffer.latest("indices", "IR0001"),  # type: ignore[arg-type]
+            old_buffer.latest("indices", "IX0001"),  # type: ignore[arg-type]
             requirement,
             previous_close=Decimal("23900"),
         )

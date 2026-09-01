@@ -30,6 +30,7 @@ from app.market.public_quote_platform import (
     acquire_taiwan_public_last_trade_quote,
     build_taiwan_public_quote_requirement,
     read_taiwan_public_last_trade_quote,
+    read_taiwan_session_close,
 )
 from app.market.public_quote_repository import TaiwanPublicQuoteRepository
 from app.market.public_quote_transaction import TaiwanPublicQuoteTransaction
@@ -254,6 +255,63 @@ def test_kgi_and_mis_candidates_resolve_deterministically_from_descriptors(
     assert result.resolved.quote.lineage.provider == KGI_PROVIDER
     assert result.resolved.quote.last_trade_price is not None
     assert result.resolved.quote.last_trade_price == 1180
+
+
+def test_candidate_read_is_provider_fair_before_total_bound(db: Session) -> None:
+    _persist_kgi(db)
+    _persist_mis(db)
+    base = (
+        db.query(TaiwanStockQuoteSnapshot)
+        .filter(TaiwanStockQuoteSnapshot.provider == KGI_PROVIDER)
+        .one()
+    )
+    for offset in range(1, 41):
+        values = {
+            column.name: getattr(base, column.name)
+            for column in TaiwanStockQuoteSnapshot.__table__.columns
+            if column.name != "id"
+        }
+        values["quote_time"] = NOW + timedelta(seconds=offset)
+        values["received_at"] = NOW + timedelta(seconds=offset)
+        values["fetched_at"] = NOW + timedelta(seconds=offset)
+        db.add(TaiwanStockQuoteSnapshot(**values))
+    db.commit()
+
+    reads = TaiwanPublicQuoteRepository(db).load_quote_candidates(
+        _instrument(),
+        max_candidates=2,
+    )
+
+    assert {read.provider for read in reads} == {
+        KGI_PROVIDER,
+        TWSE_MIS_QUOTE_PROVIDER,
+    }
+
+
+def test_kgi_broker_quote_cannot_finalize_session_close(db: Session) -> None:
+    requested_at = datetime(2026, 8, 26, 13, 31, tzinfo=TAIPEI)
+    _persist_kgi(db)
+    row = (
+        db.query(TaiwanStockQuoteSnapshot)
+        .filter(TaiwanStockQuoteSnapshot.provider == KGI_PROVIDER)
+        .one()
+    )
+    row.quote_time = requested_at.replace(minute=30)
+    row.received_at = requested_at
+    row.fetched_at = requested_at
+    row.market_session = MarketSession.CLOSE_RESOLUTION.value
+    raw = db.query(RawFetchResult).filter(RawFetchResult.id == row.raw_result_id).one()
+    raw.fetched_at = requested_at
+    db.commit()
+
+    result = read_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=requested_at,
+    )
+
+    assert result.resolved.quote is None
+    assert "SESSION_CLOSE_AUTHORITY_UNVERIFIED" in result.limitations
 
 
 def test_minimum_exchange_authority_rejects_kgi_and_selects_mis(db: Session) -> None:

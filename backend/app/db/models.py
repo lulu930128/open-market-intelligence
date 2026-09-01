@@ -2491,6 +2491,62 @@ class TaiwanCurrentIndexSnapshot(Base):
     )
 
 
+class TaiwanMarketIndexDirectorySnapshot(Base):
+    __tablename__ = "taiwan_market_index_directory_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"), index=True
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"), unique=True, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    authority: Mapped[str] = mapped_column(String(40), index=True)
+    raw_contract_version: Mapped[str] = mapped_column(String(96))
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    content_hash: Mapped[str] = mapped_column(String(128), index=True)
+    item_count: Mapped[int] = mapped_column(Integer)
+    observation_state: Mapped[str] = mapped_column(String(24), index=True)
+    limitations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class TaiwanMarketIndexDirectoryItem(Base):
+    __tablename__ = "taiwan_market_index_directory_item"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            "rank",
+            name="uq_tw_market_index_directory_snapshot_rank",
+        ),
+        UniqueConstraint(
+            "snapshot_id",
+            "name",
+            name="uq_tw_market_index_directory_snapshot_name",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("taiwan_market_index_directory_snapshot.id"), index=True
+    )
+    rank: Mapped[int] = mapped_column(Integer)
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    close_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TaiwanCurrentBreadthSnapshot(Base):
     __tablename__ = "taiwan_current_breadth_snapshot"
 

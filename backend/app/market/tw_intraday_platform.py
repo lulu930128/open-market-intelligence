@@ -275,9 +275,156 @@ def project_taiwan_intraday_bars(
                 "source_interval": source_interval or bar.interval,
                 "calculation_version": calculation_version,
                 "component_raw_result_ids": raw_components,
+                "finalization": bar.finalization.value,
             }
         )
     selected = bars[-1] if bars else None
+    latest_trade_date = (
+        selected.start_at.astimezone(TAIPEI_TZ).date()
+        if selected is not None
+        else None
+    )
+    session_bars = [
+        bar
+        for bar in bars
+        if latest_trade_date is not None
+        and bar.start_at.astimezone(TAIPEI_TZ).date() == latest_trade_date
+    ]
+    continuous_bars = [
+        bar
+        for bar in session_bars
+        if time(9, 0)
+        <= bar.start_at.astimezone(TAIPEI_TZ).time()
+        < time(13, 25)
+    ]
+    first_bar_at = continuous_bars[0].start_at if continuous_bars else None
+    last_bar_at = continuous_bars[-1].start_at if continuous_bars else None
+    observed_minutes_all = {
+        bar.start_at.astimezone(TAIPEI_TZ).replace(second=0, microsecond=0)
+        for bar in continuous_bars
+    }
+    requested_local = result.requirement.requested_at.astimezone(TAIPEI_TZ)
+    expected_session_start = (
+        datetime.combine(latest_trade_date, time(9, 0), tzinfo=TAIPEI_TZ)
+        if latest_trade_date is not None
+        else None
+    )
+    expected_full_session_last = (
+        datetime.combine(latest_trade_date, time(13, 24), tzinfo=TAIPEI_TZ)
+        if latest_trade_date is not None
+        else None
+    )
+    active_same_session = bool(
+        latest_trade_date == requested_local.date()
+        and time(9, 0) <= requested_local.time() < time(13, 25)
+    )
+    expected_observed_end = expected_full_session_last
+    if active_same_session and expected_session_start is not None:
+        expected_observed_end = min(
+            requested_local.replace(second=0, microsecond=0)
+            - timedelta(minutes=1),
+            expected_full_session_last,
+        )
+    expected_minutes = (
+        {
+            expected_session_start + timedelta(minutes=offset)
+            for offset in range(
+                max(
+                    int(
+                        (expected_observed_end - expected_session_start)
+                        .total_seconds()
+                        // 60
+                    )
+                    + 1,
+                    0,
+                )
+            )
+        }
+        if expected_session_start is not None
+        and expected_observed_end is not None
+        and expected_observed_end >= expected_session_start
+        else set()
+    )
+    observed_minutes = {
+        value for value in observed_minutes_all if value in expected_minutes
+    }
+    expected_point_count = len(expected_minutes)
+    gap_count = len(expected_minutes - observed_minutes)
+    session_start_covered = bool(
+        first_bar_at is not None
+        and first_bar_at.astimezone(TAIPEI_TZ).time() <= time(9, 1)
+    )
+    expected_window_end_covered = bool(
+        last_bar_at is not None
+        and expected_observed_end is not None
+        and last_bar_at.astimezone(TAIPEI_TZ) >= expected_observed_end
+    )
+    full_session_end_covered = bool(
+        last_bar_at is not None
+        and last_bar_at.astimezone(TAIPEI_TZ).time() >= time(13, 24)
+    )
+    expected_window_complete = bool(
+        session_start_covered and expected_window_end_covered and gap_count == 0
+    )
+    coverage_status = (
+        "missing"
+        if not continuous_bars
+        else "complete_session"
+        if expected_window_complete and full_session_end_covered
+        else "complete_prefix"
+        if expected_window_complete
+        else "sparse"
+        if session_start_covered and expected_window_end_covered
+        else "trailing_window"
+        if not session_start_covered and expected_window_end_covered
+        else "partial_prefix"
+        if session_start_covered
+        else "partial_window"
+    )
+    gap_reason = (
+        None
+        if gap_count == 0
+        else "provider_trailing_window"
+        if coverage_status == "trailing_window"
+        else "missing_expected_minutes"
+    )
+    series_coverage = {
+        "status": coverage_status,
+        "trade_date": latest_trade_date,
+        "observed_bar_count": len(session_bars),
+        "observed_regular_minute_count": len(observed_minutes_all),
+        "expected_point_count_approx": expected_point_count,
+        "expected_full_session_point_count_approx": 265,
+        "first_bar_at": first_bar_at,
+        "last_bar_at": last_bar_at,
+        "observed_start": first_bar_at,
+        "observed_end": last_bar_at,
+        "expected_session_start": expected_session_start,
+        "expected_observed_end": expected_observed_end,
+        "expected_continuous_end": (
+            datetime.combine(latest_trade_date, time(13, 25), tzinfo=TAIPEI_TZ)
+            if latest_trade_date is not None
+            else None
+        ),
+        "expected_close_time": (
+            datetime.combine(latest_trade_date, time(13, 30), tzinfo=TAIPEI_TZ)
+            if latest_trade_date is not None
+            else None
+        ),
+        "session_start_covered": session_start_covered,
+        "session_end_covered": full_session_end_covered,
+        "expected_window_end_covered": expected_window_end_covered,
+        "opening_covered": session_start_covered,
+        "current_window_complete": expected_window_complete,
+        "continuous_session_covered": coverage_status == "complete_session",
+        "session_volume_complete": coverage_status == "complete_session",
+        "current_cumulative_volume_complete": expected_window_complete,
+        "gap_count": gap_count,
+        "gap_reason": gap_reason,
+        "coverage_semantics": "observed_regular_minute_window_with_expected_session_bounds",
+        "provider_session_total_volume_shares": None,
+        "provider_session_total_volume_semantics": "not_projected_from_raw_receipt",
+    }
     return points, {
         "provider": selected.lineage.provider if selected is not None else None,
         "source": selected.lineage.source if selected is not None else None,
@@ -293,6 +440,7 @@ def project_taiwan_intraday_bars(
             item.model_dump(mode="json") for item in result.candidate_rejections
         ],
         "limitations": list(result.limitations),
+        "series_coverage": series_coverage,
     }
 
 

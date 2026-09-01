@@ -15,7 +15,6 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import Field
 from sqlalchemy import MetaData, Table, inspect, select
 from sqlalchemy.orm import Session
 
@@ -94,6 +93,12 @@ TW_DATASET_STORAGE_PROBES: dict[str, TaiwanDatasetStorageProbe] = {
     "tw.intraday.bars": _probe("market_intraday_bar", "bar_time", "stock_id"),
     "tw.market_index.current": _probe(
         "taiwan_current_index_snapshot", "event_at", "index_id"
+    ),
+    "tw.market_index.intraday": _probe(
+        "taiwan_current_index_snapshot", "event_at", "index_id"
+    ),
+    "tw.market_index.directory": _probe(
+        "taiwan_market_index_directory_snapshot", "fetched_at", "market"
     ),
     "tw.market_breadth.current": _probe(
         "taiwan_current_breadth_snapshot", "event_at", "venue"

@@ -578,6 +578,29 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         )
 
     def test_taiwan_market_indices_select_current_snapshot_without_losing_close(self) -> None:
+        def current(index_id: str, value: float, previous_close: float) -> dict:
+            return {
+                "status": "selected",
+                "index_id": index_id,
+                "provider": "twse_mis",
+                "source": "twse_mis_index_snapshot",
+                "close": value,
+                "change": value - previous_close,
+                "previous_close": previous_close,
+                "as_of": "2026-07-29T10:00:00+08:00",
+                "trade_date": "2026-07-29",
+                "session": "continuous",
+                "provisional": True,
+                "official": False,
+                "decision_usable": True,
+                "resolved_health": {
+                    "contract_version": "omi.market.resolved_evidence_health.v1",
+                    "status": "selected",
+                    "selection_reason": "canonical_current_index",
+                    "research_usable": True,
+                },
+            }
+
         summary = {
             "source": "market_index_summary",
             "indices": [
@@ -586,46 +609,30 @@ class AIMarketContextProjectionTests(unittest.TestCase):
                     "market": "TWSE",
                     "close": 24_000.0,
                     "trade_date": "2026-07-28",
+                    "current_data_core": {
+                        "index": current("TAIEX", 24_100.0, 24_000.0)
+                    },
                 },
                 {
                     "index_id": "TPEX",
                     "market": "TPEX",
                     "close": 267.0,
                     "trade_date": "2026-07-28",
+                    "current_data_core": {
+                        "index": current("TPEX", 268.0, 267.0)
+                    },
                 },
             ],
         }
-
-        def minute_series(_db, *, index_id, trade_date):
-            value = 24_100.0 if index_id == "TAIEX" else 268.0
-            return {
-                "source": "taiwan_index_minute_snapshot",
-                "trade_date": trade_date.isoformat(),
-                "coverage_status": "synthetic_partial",
-                "is_partial": True,
-                "previous_close": 24_000.0 if index_id == "TAIEX" else 267.0,
-                "points": [
-                    {
-                        "time": "2026-07-29T10:00:00+08:00",
-                        "price": value,
-                    }
-                ],
-            }
-
-        with patch.object(
-            taiwan_market,
-            "read_taiwan_index_minute_series",
-            side_effect=minute_series,
-        ):
-            result = taiwan_market._market_indices_capability(
-                db=SimpleNamespace(query=lambda *_args, **_kwargs: None),
-                dependencies=SimpleNamespace(
-                    get_market_index_summary=lambda *_args, **_kwargs: summary
-                ),
-                generated_at=datetime.fromisoformat(
-                    "2026-07-29T10:01:00+08:00"
-                ),
-            )
+        result = taiwan_market._market_indices_capability(
+            db=SimpleNamespace(),
+            dependencies=SimpleNamespace(
+                get_market_index_summary=lambda *_args, **_kwargs: summary
+            ),
+            generated_at=datetime.fromisoformat(
+                "2026-07-29T10:01:00+08:00"
+            ),
+        )
 
         self.assertEqual(result["status"], "ready")
         self.assertTrue(result["current_for_requested_session"])
@@ -1005,6 +1012,9 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             },
             previous_close_reference={
                 "previous_close": 99.5,
+                "change_reference_price": 100.0,
+                "change_reference_type": "prior_regular_close",
+                "change_reference_trade_date": "2026-07-16",
                 "previous_close_source": "yahoo.chart.1d",
                 "previous_close_trade_date": "2026-07-16",
                 "previous_close_provider": "yahoo_chart",
@@ -1020,6 +1030,9 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(quote["previous_close"], 99.5)
         self.assertEqual(quote["previous_close_source"], "yahoo.chart.1d")
         self.assertEqual(quote["previous_close_trade_date"], "2026-07-16")
+        self.assertEqual(quote["change"], 1.25)
+        self.assertEqual(quote["change_reference_price"], 100.0)
+        self.assertEqual(quote["change_reference_type"], "prior_regular_close")
         self.assertIn("DELAYED_VENDOR_EVIDENCE", quote["limitations"])
 
     def test_us_intraday_quote_uses_resolved_source_status_provider(self) -> None:

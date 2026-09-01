@@ -6,6 +6,7 @@ import inspect
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -50,6 +51,7 @@ from app.us_market.intraday_repository import (
     USIntradayBarRepository,
     USIntradayVolumeSession,
 )
+from app.us_market.intraday_transaction import _validate_intraday_bar_identity
 from app.us_market.market_data.descriptors import (
     TWELVE_INTRADAY_DESCRIPTOR,
     TWELVE_INTRADAY_RESOURCE_ID,
@@ -294,6 +296,29 @@ def _canonical_bar(
     )
 
 
+def test_intraday_transaction_rejects_noncanonical_minute_identity() -> None:
+    unaligned = _canonical_bar(
+        start_at=datetime(2026, 8, 28, 14, 30, 15, tzinfo=UTC),
+        interval="1m",
+        volume=100,
+    )
+    with pytest.raises(ValueError, match="minute-aligned"):
+        _validate_intraday_bar_identity(unaligned)
+
+    aligned = _canonical_bar(
+        start_at=datetime(2026, 8, 28, 14, 30, tzinfo=UTC),
+        interval="1m",
+        volume=100,
+    )
+    future_lineage = aligned.lineage.model_copy(
+        update={"event_at": aligned.lineage.fetched_at + timedelta(seconds=1)}
+    )
+    with pytest.raises(ValueError, match="later than fetched_at"):
+        _validate_intraday_bar_identity(
+            aligned.model_copy(update={"lineage": future_lineage})
+        )
+
+
 def test_registry_separates_quote_and_intraday_lifecycles() -> None:
     quote = DATASET_REGISTRY.get("us.quote.snapshot")
     bars = DATASET_REGISTRY.get("us.intraday.bars")
@@ -349,6 +374,34 @@ def test_us_quote_get_remains_cache_only_by_source_contract() -> None:
     assert "fetch_" not in router_source
 
 
+def test_quote_cache_miss_preserves_backend_owned_session_expectedness() -> None:
+    db = _db()
+
+    premarket = us_market_service.get_us_quote_snapshot(
+        db,
+        symbol="AAPL",
+        now=datetime(2026, 8, 28, 8, 1, tzinfo=UTC),
+    )
+    premarket_pending = us_market_service.get_us_quote_snapshot(
+        db,
+        symbol="AAPL",
+        now=datetime(2026, 8, 28, 7, 0, tzinfo=UTC),
+    )
+
+    assert premarket["market_phase"] == "pre_market"
+    assert premarket["capability_expectation"]["expectation"] == "expected"
+    assert premarket["capability_expectation"]["outcome"] == (
+        "expected_but_missing"
+    )
+    assert premarket_pending["market_phase"] == "pre_market_pending"
+    assert premarket_pending["capability_expectation"]["expectation"] == (
+        "not_expected"
+    )
+    assert premarket_pending["capability_expectation"]["outcome"] == (
+        "not_expected"
+    )
+
+
 def test_volume_pace_has_no_raw_daily_storage_dependency() -> None:
     source = inspect.getsource(build_us_resolved_volume_pace)
 
@@ -392,6 +445,41 @@ def test_refresh_persists_then_rereads_quote_and_intraday_candidates() -> None:
     assert stored_lineage.raw_result_id > 0
 
 
+def test_us_quote_projection_exposes_backend_owned_session_date_relation() -> None:
+    db = _db()
+    now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
+    _seed_daily_previous_close(
+        db,
+        trade_date=datetime(2026, 8, 27, tzinfo=UTC).date(),
+        close_price=198.0,
+    )
+
+    def fetch(_route, _requirement):
+        return _yahoo_payload(now), "https://query1.finance.yahoo.com/v8/finance/chart/AAPL"
+
+    platform = USIntradayMarketPlatform(
+        db,
+        acquisition=USIntradayAcquisitionExecutor(
+            fetchers={YAHOO_QUOTE_RESOURCE_ID: fetch},
+            clock=lambda: now,
+        ),
+        quote_descriptors=(YAHOO_QUOTE_DESCRIPTOR,),
+    )
+    platform.refresh_quote(symbol="AAPL", now=now, max_provider_calls=1)
+
+    projection = us_market_service.get_us_quote_snapshot(
+        db,
+        symbol="AAPL",
+        now=now,
+    )
+
+    relation = projection["session_date_relation"]
+    assert relation["status"] == "aligned"
+    assert relation["expected"] is True
+    assert relation["quote_date"] == "2026-08-28"
+    assert relation["completed_daily_date"] == "2026-08-27"
+
+
 def test_lineage_free_legacy_intraday_rows_are_not_resolution_candidates() -> None:
     db = _db()
     now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
@@ -419,7 +507,7 @@ def test_lineage_free_legacy_intraday_rows_are_not_resolution_candidates() -> No
     assert "US_INTRADAY_LEGACY_ROWS_WITHOUT_CANONICAL_LINEAGE_IGNORED" in read.result.limitations
 
 
-def test_stale_yahoo_quote_falls_through_to_fresh_twelve_candidate() -> None:
+def test_fresh_yahoo_snapshot_with_old_trade_does_not_fall_through() -> None:
     db = _db()
     now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
 
@@ -449,11 +537,137 @@ def test_stale_yahoo_quote_falls_through_to_fresh_twelve_candidate() -> None:
 
     refreshed = platform.refresh_quote(symbol="AAPL", now=now, max_provider_calls=2)
 
-    assert refreshed.result.acquisition.providers_attempted == ("yahoo_chart", "twelve_data")
+    assert refreshed.result.acquisition.providers_attempted == ("yahoo_chart",)
+    yahoo_health = next(
+        item
+        for item in refreshed.result.provider_health
+        if item.provider == "yahoo_chart"
+    )
+    assert yahoo_health.freshness.value == "fresh"
+    assert yahoo_health.operational.value == "healthy"
+    assert yahoo_health.detail_code == "LAST_TRADE_OLD_BUT_PROVIDER_CURRENT"
+    assert refreshed.result.resolved.health.selected_provider == "yahoo_chart"
+    assert refreshed.result.resolved.quote is not None
+    assert refreshed.result.resolved.quote.last_trade_price == 200.5
+    assert "LAST_TRADE_OLD_BUT_PROVIDER_CURRENT" in refreshed.result.limitations
+
+
+def test_quote_and_bar_requirements_separate_refresh_due_from_consumer_stale() -> None:
+    db = _db()
+    now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
+    platform = USIntradayMarketPlatform(db)
+    identity = platform.read_quote(symbol="AAPL", now=now).identity
+
+    quote_read = platform._quote_requirement(
+        identity,
+        now=now,
+        allow_acquisition=False,
+        require_live=False,
+        max_provider_calls=0,
+        profile=US_RECURRING_INTRADAY_PROFILE,
+    )
+    quote_refresh = platform._quote_requirement(
+        identity,
+        now=now,
+        allow_acquisition=True,
+        require_live=False,
+        max_provider_calls=2,
+        profile=US_RECURRING_INTRADAY_PROFILE,
+    )
+    bar_read = platform._bar_requirement(
+        identity,
+        now=now,
+        bars=60,
+        history_days=1,
+        allow_acquisition=False,
+        require_live=False,
+        max_provider_calls=0,
+    )
+
+    assert quote_read.freshness.max_age_seconds == 180
+    assert quote_refresh.freshness.max_age_seconds == 45
+    assert quote_read.freshness.basis.value == "fetched_time"
+    assert bar_read.freshness.basis.value == "event_time"
+
+
+def test_unusable_yahoo_quote_falls_through_to_twelve_candidate() -> None:
+    db = _db()
+    now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
+
+    def yahoo(_route, _requirement):
+        payload = _yahoo_payload(now)
+        payload["chart"]["result"][0]["indicators"]["quote"][0]["close"] = [None]
+        return payload, "https://query1.finance.yahoo.com/v8/finance/chart/AAPL"
+
+    def twelve(_route, _requirement):
+        return _twelve_quote_payload(now), "https://api.twelvedata.com/quote?symbol=AAPL"
+
+    platform = USIntradayMarketPlatform(
+        db,
+        acquisition=USIntradayAcquisitionExecutor(
+            fetchers={YAHOO_QUOTE_RESOURCE_ID: yahoo, TWELVE_QUOTE_RESOURCE_ID: twelve},
+            clock=lambda: now,
+        ),
+    )
+
+    refreshed = platform.refresh_quote(symbol="AAPL", now=now, max_provider_calls=2)
+
+    assert refreshed.result.acquisition.providers_attempted == (
+        "yahoo_chart",
+        "twelve_data",
+    )
     assert refreshed.result.resolved.health.selected_provider == "twelve_data"
     assert refreshed.result.resolved.quote is not None
-    assert refreshed.result.resolved.quote.last_trade_price == 202.5
-    assert "PARTIAL_US_MARKET_VOLUME" in refreshed.result.limitations
+
+
+def test_index_quote_truthfully_exposes_single_source_and_never_routes_twelve() -> None:
+    db = _db()
+    now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
+    calls: list[str] = []
+
+    def yahoo(_route, _requirement):
+        calls.append("yahoo_chart")
+        raise RuntimeError("Yahoo unavailable")
+
+    def twelve(_route, _requirement):
+        calls.append("twelve_data")
+        return _twelve_quote_payload(now), "https://api.twelvedata.com/quote?symbol=%5EGSPC"
+
+    platform = USIntradayMarketPlatform(
+        db,
+        acquisition=USIntradayAcquisitionExecutor(
+            fetchers={
+                YAHOO_QUOTE_RESOURCE_ID: yahoo,
+                TWELVE_QUOTE_RESOURCE_ID: twelve,
+            },
+            clock=lambda: now,
+        ),
+    )
+
+    result = platform.refresh_quote(
+        symbol="^GSPC",
+        now=now,
+        max_provider_calls=2,
+    )
+
+    assert calls == ["yahoo_chart"]
+    assert result.result.acquisition.providers_attempted == ("yahoo_chart",)
+    assert result.projection["eligible_providers"] == ["yahoo_chart"]
+    assert result.projection["eligible_provider_count"] == 1
+    assert result.projection["single_source"] is True
+    assert "US_SINGLE_ELIGIBLE_PROVIDER" in result.projection["limitations"]
+
+
+def test_stock_quote_exposes_both_eligible_provider_capabilities() -> None:
+    db = _db()
+    projection = USIntradayMarketPlatform(db).read_quote(
+        symbol="AAPL",
+        now=datetime(2026, 8, 28, 14, 32, tzinfo=UTC),
+    ).projection
+
+    assert projection["eligible_providers"] == ["yahoo_chart", "twelve_data"]
+    assert projection["eligible_provider_count"] == 2
+    assert projection["single_source"] is False
 
 
 def test_twelve_quote_limitations_survive_persisted_reread() -> None:
@@ -528,6 +742,15 @@ def test_persisted_quote_is_bound_to_intraday_and_ranking_read_surfaces() -> Non
     assert trend["bar_source_status"] == trend["source_status"]
     assert trend["bar_source_status"]["provider"] == "unresolved"
     assert trend["bar_source_status"]["freshness_status"] == "missing"
+    assert trend["market_phase"] == "regular"
+    assert trend["capability_expectation"]["quote.snapshot"]["expectation"] == "required"
+    assert trend["capability_expectation"]["quote.snapshot"]["outcome"] == "ready"
+    assert trend["capability_expectation"]["intraday.bars"]["outcome"] == (
+        "expected_but_missing"
+    )
+    assert trend["current_source_status"]["provider_snapshot_freshness"] == "fresh"
+    assert trend["current_source_status"]["trade_recency"] == "current"
+    USIntradayTrendRead.model_validate(trend)
     assert trend["quote_snapshot"]["quote"]["previous_close"] == "200.0"
     assert trend["current_observation"]["previous_close"] is None
     assert "CANONICAL_US_DAILY_PREVIOUS_CLOSE_MISSING" in trend[
@@ -623,6 +846,77 @@ def test_newer_persisted_bar_wins_over_older_quote_on_current_observation() -> N
     assert trend["quote_snapshot"]["selected_provider"] == "twelve_data"
 
 
+def test_chart_session_scope_does_not_change_headline_or_hide_other_coverage() -> None:
+    db = _db()
+    quote_now = datetime(2026, 8, 31, 12, 50, tzinfo=UTC)
+    bars_now = datetime(2026, 8, 31, 12, 53, tzinfo=UTC)
+    read_now = datetime(2026, 8, 31, 14, 32, tzinfo=UTC)
+
+    def twelve_quote(_route, _requirement):
+        return _twelve_quote_payload(quote_now), "https://api.twelvedata.com/quote?symbol=AAPL"
+
+    def yahoo_bars(_route, _requirement):
+        return (
+            _yahoo_bars_payload(bars_now, count=2, age_seconds=0),
+            "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+        )
+
+    USIntradayMarketPlatform(
+        db,
+        acquisition=USIntradayAcquisitionExecutor(
+            fetchers={TWELVE_QUOTE_RESOURCE_ID: twelve_quote},
+            clock=lambda: quote_now,
+        ),
+        quote_descriptors=(TWELVE_QUOTE_DESCRIPTOR,),
+    ).refresh_quote(symbol="AAPL", now=quote_now, max_provider_calls=1)
+    USIntradayMarketPlatform(
+        db,
+        acquisition=USIntradayAcquisitionExecutor(
+            fetchers={YAHOO_INTRADAY_RESOURCE_ID: yahoo_bars},
+            clock=lambda: bars_now,
+        ),
+        bar_descriptors=(YAHOO_INTRADAY_DESCRIPTOR,),
+    ).refresh_intraday_bars(
+        symbol="AAPL",
+        bars=100,
+        now=bars_now,
+        max_provider_calls=1,
+    )
+
+    with _service_clock(read_now):
+        regular = us_market_service.get_us_intraday_trend(
+            symbol="AAPL", session_scope="regular", db=db
+        )
+        extended = us_market_service.get_us_intraday_trend(
+            symbol="AAPL", session_scope="extended", db=db
+        )
+        all_sessions = us_market_service.get_us_intraday_trend(
+            symbol="AAPL", session_scope="all", db=db
+        )
+
+    assert regular["points"] == []
+    assert len(extended["points"]) == 2
+    assert len(all_sessions["points"]) == 2
+    assert regular["current_observation"] == extended["current_observation"]
+    assert extended["current_observation"] == all_sessions["current_observation"]
+    assert regular["current_observation"]["price_semantics"] == (
+        "resolved_intraday_bar_close"
+    )
+    assert regular["session_coverage"] == {
+        "trade_date": "2026-08-31",
+        "regular_point_count": 0,
+        "extended_point_count": 2,
+        "has_extended_hours": True,
+        "requested_scope": "regular",
+        "requested_point_count": 0,
+    }
+    assert regular["regular_point_count"] == 0
+    assert regular["extended_point_count"] == 2
+    assert extended["session_coverage"]["requested_point_count"] == 2
+    assert all_sessions["session_coverage"]["requested_point_count"] == 2
+    USIntradayTrendRead.model_validate(regular)
+
+
 def test_fresh_quote_headline_is_not_downgraded_by_stale_bar_status() -> None:
     db = _db()
     now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
@@ -666,6 +960,7 @@ def test_fresh_quote_headline_is_not_downgraded_by_stale_bar_status() -> None:
     assert trend["current_source_status"]["freshness_status"] == "current"
     assert trend["bar_source_status"]["provider"] == "yahoo_chart"
     assert trend["bar_source_status"]["freshness_status"] == "stale"
+    assert trend["capability_expectation"]["intraday.bars"]["outcome"] == "stale"
 
 
 def test_bar_only_current_observation_keeps_legacy_intraday_behavior() -> None:
@@ -713,6 +1008,9 @@ def test_resolved_current_source_status_preserves_freshness_axes() -> None:
             source="twelve_data.quote",
             resolved_status="selected",
             selected_event_at=now - timedelta(seconds=30),
+            selected_fetched_at=now - timedelta(seconds=5),
+            trade_state="trade_observed",
+            provider_snapshot_controls_freshness=True,
             fallback_used=False,
             facts_usable=True,
             research_usable=True,
@@ -726,6 +1024,8 @@ def test_resolved_current_source_status_preserves_freshness_axes() -> None:
             source="yahoo.chart.quote",
             resolved_status="selected",
             selected_event_at=now - timedelta(seconds=30),
+            selected_fetched_at=now - timedelta(seconds=5),
+            trade_state="trade_observed",
             fallback_used=False,
             facts_usable=True,
             research_usable=True,
@@ -739,6 +1039,8 @@ def test_resolved_current_source_status_preserves_freshness_axes() -> None:
             source="twelve_data.time_series.1m",
             resolved_status="stale",
             selected_event_at=now - timedelta(minutes=20),
+            selected_fetched_at=now - timedelta(minutes=20),
+            trade_state="trade_observed",
             fallback_used=False,
             facts_usable=True,
             research_usable=False,
@@ -750,10 +1052,130 @@ def test_resolved_current_source_status_preserves_freshness_axes() -> None:
 
     assert current["freshness_status"] == "current"
     assert current["status"] == "ok"
+    assert current["provider_snapshot_freshness"] == "fresh"
+    assert current["trade_recency"] == "current"
     assert delayed["freshness_status"] == "delayed"
     assert delayed["status"] == "degraded"
     assert stale["freshness_status"] == "stale"
+    assert stale["provider_snapshot_freshness"] == "stale"
+    assert stale["trade_recency"] == "old"
     assert stale["decision_usable"] is False
+
+
+def test_old_trade_does_not_make_fresh_provider_snapshot_stale() -> None:
+    now = datetime(2026, 8, 28, 11, 5, tzinfo=UTC)
+    with patch.object(
+        us_market_service,
+        "build_us_calendar_status",
+        return_value={"phase": "pre_market"},
+    ):
+        status = us_market_service._build_us_resolved_source_status(
+            provider="twelve_data",
+            source="twelve_data.quote",
+            resolved_status="selected",
+            selected_event_at=now - timedelta(minutes=17),
+            selected_fetched_at=now - timedelta(seconds=5),
+            trade_state="trade_observed",
+            provider_snapshot_controls_freshness=True,
+            fallback_used=False,
+            facts_usable=True,
+            research_usable=True,
+            selection_reason="PRIMARY_SELECTED",
+            limitations=(),
+            session_scope="all",
+            now=now,
+        )
+
+    assert status["provider_snapshot_freshness"] == "fresh"
+    assert status["trade_recency"] == "old"
+    assert status["freshness_status"] == "current"
+
+
+def test_fresh_valid_empty_quote_snapshot_is_not_provider_unavailable() -> None:
+    now = datetime(2026, 8, 28, 11, 5, tzinfo=UTC)
+    with patch.object(
+        us_market_service,
+        "build_us_calendar_status",
+        return_value={"phase": "pre_market"},
+    ):
+        status = us_market_service._build_us_resolved_source_status(
+            provider="twelve_data",
+            source="twelve_data.quote",
+            resolved_status="empty",
+            selected_event_at=None,
+            selected_fetched_at=now - timedelta(seconds=5),
+            trade_state="awaiting_first_trade",
+            provider_snapshot_controls_freshness=True,
+            fallback_used=False,
+            facts_usable=False,
+            research_usable=False,
+            selection_reason="NO_TRADE_OBSERVED",
+            limitations=(),
+            session_scope="all",
+            now=now,
+        )
+
+    assert status["status"] == "ok"
+    assert status["freshness_status"] == "current"
+    assert status["provider_snapshot_freshness"] == "fresh"
+    assert status["trade_state"] == "awaiting_first_trade"
+    assert status["trade_recency"] == "missing"
+
+
+def test_after_hours_change_reference_uses_current_day_regular_close() -> None:
+    now = datetime(2026, 8, 28, 20, 1, tzinfo=UTC)
+    regular_close_bar = _canonical_bar(
+        start_at=datetime(2026, 8, 28, 19, 59, tzinfo=UTC),
+        interval="1m",
+        volume=1000,
+    )
+    reference = us_market_service._build_us_change_reference(
+        previous_close_reference={
+            "previous_close": 199.0,
+            "previous_close_source": "yahoo.chart.1d",
+            "previous_close_trade_date": "2026-08-27",
+            "previous_close_provider": "yahoo_chart",
+            "previous_close_status": "current",
+            "prior_regular_close": 199.0,
+            "prior_regular_close_source": "yahoo.chart.1d",
+            "prior_regular_close_trade_date": "2026-08-27",
+            "prior_regular_close_provider": "yahoo_chart",
+            "prior_regular_close_status": "current",
+        },
+        resolved_bars=(regular_close_bar,),
+        market_phase="after_hours",
+        now=now,
+    )
+
+    assert reference["current_day_regular_close"] == 100.5
+    assert reference["current_day_regular_close_trade_date"] == "2026-08-28"
+    assert reference["change_reference_price"] == 100.5
+    assert reference["change_reference_type"] == "current_day_regular_close"
+    assert reference["change_reference_reason_code"] == (
+        "CURRENT_DAY_REGULAR_CLOSE_SELECTED"
+    )
+
+
+def test_early_close_change_reference_uses_thirteen_hundred_close() -> None:
+    now = datetime(2026, 11, 27, 18, 1, tzinfo=UTC)
+    early_close_bar = _canonical_bar(
+        start_at=datetime(2026, 11, 27, 17, 59, tzinfo=UTC),
+        interval="1m",
+        volume=1000,
+    )
+    reference = us_market_service._build_us_change_reference(
+        previous_close_reference={
+            "previous_close_status": "missing",
+            "prior_regular_close_status": "missing",
+        },
+        resolved_bars=(early_close_bar,),
+        market_phase="after_hours",
+        now=now,
+    )
+
+    assert reference["current_day_regular_close"] == 100.5
+    assert reference["current_day_regular_close_trade_date"] == "2026-11-27"
+    assert reference["change_reference_type"] == "current_day_regular_close"
 
 
 def test_twelve_intraday_limitations_survive_persisted_reread() -> None:
@@ -1063,7 +1485,7 @@ def test_acquisition_enforces_total_requirement_row_bound() -> None:
     )
 
 
-def test_bootstrap_accepts_latest_available_stale_without_calling_it_live() -> None:
+def test_bootstrap_quote_uses_fresh_snapshot_even_when_last_trade_is_old() -> None:
     db = _db()
     friday = datetime(2026, 8, 28, 19, 59, tzinfo=UTC)
     sunday = datetime(2026, 8, 30, 14, 0, tzinfo=UTC)
@@ -1092,11 +1514,11 @@ def test_bootstrap_accepts_latest_available_stale_without_calling_it_live() -> N
     )
 
     assert bootstrap.result.persistence.committed is True
-    assert recurring.postcondition_satisfied is False
-    assert "FRESHNESS_POSTCONDITION_UNSATISFIED" in recurring.postcondition_reasons
+    assert recurring.postcondition_satisfied is True
+    assert recurring.postcondition_reasons == ()
     assert bootstrap.postcondition_satisfied is True
-    assert bootstrap.result.resolved.health.status.value == "stale"
-    assert bootstrap.postcondition_reasons == ("LATEST_AVAILABLE_STALE_ACCEPTED",)
+    assert bootstrap.result.resolved.health.status.value == "selected"
+    assert bootstrap.postcondition_reasons == ()
 
 
 def test_yahoo_range_tracks_recurring_and_bootstrap_profiles() -> None:

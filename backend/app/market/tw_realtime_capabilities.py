@@ -57,6 +57,10 @@ _ACTIVE_QUOTE_SESSIONS = (
     MarketSession.CONTINUOUS,
     MarketSession.CLOSING_AUCTION,
 )
+_KGI_QUOTE_SESSIONS = (
+    *_ACTIVE_QUOTE_SESSIONS,
+    MarketSession.CLOSE_RESOLUTION,
+)
 _AUCTION_SESSIONS = (
     MarketSession.OPENING_AUCTION,
     MarketSession.CONTINUOUS,
@@ -132,7 +136,7 @@ def _mis_descriptor(
 KGI_QUOTE_SNAPSHOT_DESCRIPTOR = _kgi_descriptor(
     capability_id=TW_QUOTE_SNAPSHOT_CAPABILITY_ID,
     resource_id=KGI_QUOTE_RESOURCE_ID,
-    sessions=_ACTIVE_QUOTE_SESSIONS,
+    sessions=_KGI_QUOTE_SESSIONS,
     limitations=(
         "ENTITLEMENT_REQUIRED",
         "ACTIVE_LEASE_REQUIRED",
@@ -193,11 +197,12 @@ KGI_AUCTION_DESCRIPTOR = _kgi_descriptor(
 MIS_ORDER_BOOK_DESCRIPTOR = _mis_descriptor(
     capability_id=TW_ORDER_BOOK_CAPABILITY_ID,
     resource_id=MIS_ORDER_BOOK_RESOURCE_ID,
-    sessions=_ACTIVE_QUOTE_SESSIONS,
+    sessions=(*_ACTIVE_QUOTE_SESSIONS, MarketSession.CLOSE_RESOLUTION),
     limitations=(
         "PUBLIC_BEST_EFFORT_NO_SLA",
         "LEVEL_5_MAXIMUM",
         "SINGLE_SYMBOL_ONLY",
+        "CLOSE_RESOLUTION_SNAPSHOT_ONLY",
     ),
 )
 MIS_AUCTION_DESCRIPTOR = _mis_descriptor(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -48,6 +48,19 @@ def _quantity(value: Quantity | None) -> int | None:
     if value.value != value.value.to_integral_value():
         raise ValueError("US market quantities must contain integral shares")
     return int(value.value)
+
+
+def _validate_intraday_bar_identity(bar: BarObservation) -> None:
+    if bar.interval != "1m":
+        return
+    if bar.start_at.second != 0 or bar.start_at.microsecond != 0:
+        raise ValueError("US 1m intraday bar start_at must be minute-aligned")
+    if bar.end_at - bar.start_at != timedelta(minutes=1):
+        raise ValueError("US 1m intraday bar must cover exactly one minute")
+    event_at = bar.lineage.event_at
+    fetched_at = bar.lineage.fetched_at
+    if event_at is not None and fetched_at is not None and event_at > fetched_at:
+        raise ValueError("US intraday event_at cannot be later than fetched_at")
 
 
 class _USRawReceiptTransaction:
@@ -227,6 +240,7 @@ class USIntradayBarTransaction:
             for bar in acquisition.observations:
                 if bar.instrument != requirement.target.instrument or bar.instrument.market is not Market.US or bar.interval != requirement.request.interval:
                     raise ValueError("US intraday observation identity mismatch")
+                _validate_intraday_bar_identity(bar)
                 matched = stored.get((bar.lineage.provider, bar.lineage.source))
                 if matched is None:
                     raise ValueError("US intraday observation has no raw receipt")

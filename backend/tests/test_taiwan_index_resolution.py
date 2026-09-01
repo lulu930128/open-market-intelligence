@@ -113,6 +113,31 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
         self.assertFalse(result["decision_usable"])
         self.assertEqual(result["freshness_status"], "stale")
 
+    def test_active_session_rejects_stale_same_day_summary_fallback(self) -> None:
+        checked_at = datetime(2026, 8, 14, 11, 0, tzinfo=TAIWAN_TZ)
+        result = resolve_taiwan_index_quote_state(
+            intraday=None,
+            index_snapshot={
+                "index_id": "TAIEX",
+                "trade_date": "2026-08-14",
+                "as_of": "2026-08-14T09:05:00+08:00",
+                "close": 24_100.0,
+                "source": "twse_mis_index_snapshot",
+            },
+            calendar_status=_calendar(
+                phase="regular",
+                checked_at=checked_at,
+            ),
+            index_id="TAIEX",
+            acquisition_policy="cache_only",
+        )
+
+        summary_candidate = result["candidates"][1]
+        self.assertFalse(summary_candidate["eligible"])
+        self.assertGreater(summary_candidate["age_seconds"], 240)
+        self.assertIsNone(result["selected_candidate"])
+        self.assertFalse(result["decision_usable"])
+
     def test_completed_official_component_keeps_its_own_trade_date(self) -> None:
         checked_at = datetime(2026, 8, 14, 10, 0, tzinfo=TAIWAN_TZ)
         result = resolve_taiwan_index_quote_state(

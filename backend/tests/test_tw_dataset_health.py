@@ -156,8 +156,8 @@ def test_data_core_router_is_provider_neutral_and_unknown_dataset_is_404(
 ) -> None:
     datasets = tw_data_core.list_taiwan_data_core_datasets()
     operations = tw_data_core.list_taiwan_data_core_operations()
-    assert len(datasets) == 32
-    assert len(operations) == 22
+    assert len(datasets) == len(TW_DATASET_CATALOG.all())
+    assert len(operations) == len(TW_DATASET_CATALOG.operations())
     assert all("provider" not in item.dataset_id for item in datasets)
 
     with pytest.raises(HTTPException) as raised:

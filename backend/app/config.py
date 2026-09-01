@@ -200,6 +200,12 @@ class Settings(BaseSettings):
     enable_taiwan_intraday_bar_scheduler: bool = True
     scheduler_taiwan_intraday_bar_interval_seconds: int = 300
     scheduler_taiwan_intraday_bar_max_symbols: int = 3
+    enable_taiwan_session_close_scheduler: bool = True
+    scheduler_taiwan_session_close_max_symbols: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+    )
     enable_taiwan_futures_scheduler: bool = True
     taiwan_futures_quote_provider: str = "taifex_mis"
     scheduler_taiwan_futures_symbols: str = "TXF,MXF,TMF"
@@ -218,10 +224,11 @@ class Settings(BaseSettings):
     scheduler_us_market_refresh_adjusted: bool = False
     scheduler_us_market_refresh_sleep_seconds: float = 12.0
     enable_us_intraday_materializer: bool = False
+    enable_us_dynamic_equity_materializer_universe: bool = False
     scheduler_us_intraday_materializer_symbols: str = "AAPL,TSM"
-    scheduler_us_intraday_materializer_max_symbols: int = Field(default=2, ge=1, le=2)
+    scheduler_us_intraday_materializer_max_symbols: int = Field(default=2, ge=1, le=20)
     scheduler_us_quote_materializer_interval_seconds: int = Field(
-        default=300, ge=60, le=3600
+        default=60, ge=60, le=3600
     )
     scheduler_us_intraday_materializer_interval_seconds: int = Field(
         default=60, ge=60, le=3600
@@ -233,12 +240,22 @@ class Settings(BaseSettings):
         default=2, ge=1, le=2
     )
     scheduler_us_intraday_materializer_max_external_calls: int = Field(
-        default=4, ge=1, le=4
+        default=4, ge=1, le=40
     )
     enable_us_index_quote_materializer: bool = False
+    enable_us_index_intraday_materializer: bool = False
     scheduler_us_index_quote_symbols: str = "^GSPC,^DJI,^IXIC,^SOX,^NDX,^VIX"
     scheduler_us_index_quote_max_symbols: int = Field(default=6, ge=1, le=6)
     scheduler_us_index_quote_max_external_calls: int = Field(default=6, ge=1, le=12)
+    scheduler_us_index_intraday_materializer_interval_seconds: int = Field(
+        default=60, ge=60, le=3600
+    )
+    scheduler_us_index_intraday_materializer_bars: int = Field(
+        default=600, ge=60, le=1000
+    )
+    scheduler_us_index_intraday_max_external_calls: int = Field(
+        default=6, ge=1, le=12
+    )
     enable_us_quote_retention_scheduler: bool = False
     us_quote_snapshot_retention_days: int = Field(default=30, ge=1, le=365)
     scheduler_us_quote_cleanup_max_rows: int = Field(
@@ -260,6 +277,9 @@ class Settings(BaseSettings):
     )
     scheduler_us_index_data_repair_max_attempts: int = Field(
         default=2, ge=1, le=5
+    )
+    scheduler_us_index_data_repair_manual_attention_backoff_seconds: int = Field(
+        default=21600, ge=1800, le=604800
     )
     scheduler_us_index_data_repair_max_runtime_seconds: int = Field(
         default=600, ge=30, le=3600

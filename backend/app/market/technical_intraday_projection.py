@@ -158,6 +158,8 @@ def build_current_partial_daily_bar(
 
     cumulative_volume = None
     volume_source = None
+    volume_event_at = None
+    volume_semantics = "unavailable"
     if quote_current:
         cumulative_volume = _number(quote.get("cumulative_volume_shares"))
         if cumulative_volume is None:
@@ -165,11 +167,59 @@ def build_current_partial_daily_bar(
             cumulative_volume = lots * 1000 if lots is not None else None
         if cumulative_volume is not None:
             volume_source = str(quote.get("volume_source") or quote.get("provider") or "quote")
+            volume_event_at = _datetime(
+                quote.get("volume_event_time")
+                or quote.get("event_time")
+                or quote.get("provider_event_time")
+            )
+            volume_semantics = str(
+                quote.get("volume_semantics")
+                or "session_cumulative_partial"
+            )
+    if cumulative_volume is None and selected:
+        cumulative_point = next(
+            (
+                (event_at, point)
+                for event_at, point in reversed(selected)
+                if _number(
+                    point.get(
+                        "session_cumulative_volume_shares",
+                        point.get("cumulative_volume"),
+                    )
+                )
+                is not None
+            ),
+            None,
+        )
+        if cumulative_point is not None:
+            volume_event_at, point = cumulative_point
+            cumulative_volume = _number(
+                point.get(
+                    "session_cumulative_volume_shares",
+                    point.get("cumulative_volume"),
+                )
+            )
+            volume_source = str(
+                point.get("volume_source")
+                or point.get("session_close_source")
+                or point.get("provider")
+                or "session_close"
+            )
+            volume_semantics = "provider_reported_session_cumulative_volume"
     if cumulative_volume is None and selected:
         bar_volumes = [_number(point.get("volume")) for _, point in selected]
         if bar_volumes and all(value is not None and value >= 0 for value in bar_volumes):
             cumulative_volume = sum(value for value in bar_volumes if value is not None)
             volume_source = "intraday_bar_sum"
+            volume_event_at = next(
+                (
+                    event_at
+                    for event_at, point in reversed(selected)
+                    if _number(point.get("volume")) is not None
+                ),
+                None,
+            )
+            volume_semantics = "observed_intraday_bar_sum"
 
     event_at = max(
         [value for value in [quote_event_at, selected[-1][0] if selected else None] if value is not None],
@@ -194,6 +244,12 @@ def build_current_partial_daily_bar(
             in {"session_final", "official_daily_confirmed"}
         )
     )
+    if (
+        session_close_final
+        and cumulative_volume is not None
+        and volume_semantics == "session_cumulative_partial"
+    ):
+        volume_semantics = "provider_reported_session_cumulative_volume"
     bar_status = (
         "provisional_close"
         if phase in _POST_CLOSE_PHASES and session_close_final
@@ -229,6 +285,9 @@ def build_current_partial_daily_bar(
         "official_daily_confirmed": False,
         "decision_usable": False,
         "event_time": event_at.isoformat() if event_at is not None else None,
+        "volume_event_time": (
+            volume_event_at.isoformat() if volume_event_at is not None else None
+        ),
         "source": "+".join(
             value
             for value in (
@@ -238,7 +297,14 @@ def build_current_partial_daily_bar(
             if value
         ),
         "volume_source": volume_source,
-        "volume_semantics": "session_cumulative_partial",
+        "volume_semantics": volume_semantics,
+        "volume_status": (
+            "session_final"
+            if session_close_final and cumulative_volume is not None
+            else "partial"
+            if cumulative_volume is not None
+            else "unavailable"
+        ),
     }
 
 

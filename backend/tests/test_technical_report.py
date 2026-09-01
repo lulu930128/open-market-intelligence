@@ -451,6 +451,164 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["data"]["decision_state"]["position"]["price"], 179.0)
         self.assertFalse(report["data"]["current_observation"]["decision_usable"])
 
+    def test_post_close_official_daily_owns_headline_when_already_published(self) -> None:
+        lineage = (
+            self.db.query(MarketDailyPrice)
+            .filter(MarketDailyPrice.stock_id == "2330")
+            .order_by(MarketDailyPrice.trade_date.desc())
+            .first()
+        )
+        self.assertIsNotNone(lineage)
+        self.db.add_all(
+            [
+                MarketDailyPrice(
+                    source_id=lineage.source_id,
+                    raw_result_id=lineage.raw_result_id,
+                    trade_date=date(2026, 8, 26),
+                    stock_id="2330",
+                    stock_name="TSMC",
+                    trade_volume=10_500_000,
+                    open_price=590.0,
+                    high_price=595.0,
+                    low_price=588.0,
+                    close_price=592.0,
+                    price_change=2.0,
+                ),
+                MarketDailyPrice(
+                source_id=lineage.source_id,
+                raw_result_id=lineage.raw_result_id,
+                trade_date=date(2026, 8, 27),
+                stock_id="2330",
+                stock_name="TSMC",
+                trade_volume=11_106_000,
+                open_price=608.0,
+                high_price=608.0,
+                low_price=593.0,
+                close_price=605.0,
+                price_change=13.0,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 8, 27, 14, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "source": "persisted_intraday",
+                    "previous_close": 592.0,
+                    "points": [
+                        {
+                            "time": "2026-08-27T11:49:55+08:00",
+                            "price": 601.0,
+                            "volume": 8_000_000,
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "app.market.technical_report._current_partial_daily_indicator",
+                return_value=None,
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        self.assertEqual(report["phase"], "post_close")
+        self.assertEqual(report["title"], "正式日線已發布")
+        self.assertEqual(report["rows"][0]["key"], "official_close_price")
+        self.assertEqual(report["rows"][0]["label"], "正式收盤")
+        self.assertEqual(report["rows"][0]["value"], 605.0)
+        self.assertEqual(
+            report["data"]["intraday"]["price_semantics"],
+            "official_daily_close",
+        )
+        self.assertEqual(report["data"]["intraday"]["previous_close"], 592.0)
+
+    def test_trailing_intraday_window_does_not_invent_open_range_or_volume_pace(self) -> None:
+        points = [
+            {
+                "time": f"2026-03-23T11:{25 + index:02d}:00+08:00",
+                "price": 180.0 + index,
+                "open": 180.0 + index,
+                "high": 181.0 + index,
+                "low": 179.0 + index,
+                "volume": 1_000,
+            }
+            for index in range(9)
+        ]
+        points.append(
+            {
+                "time": "2026-03-23T13:24:00+08:00",
+                "price": 190.0,
+                "open": 189.0,
+                "high": 191.0,
+                "low": 188.0,
+                "volume": 1_000,
+            }
+        )
+        coverage = {
+            "status": "trailing_window",
+            "opening_covered": False,
+            "continuous_session_covered": False,
+            "session_volume_complete": False,
+            "gap_count": 255,
+        }
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 13, 24, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "source": "nstock_minute_stock_data",
+                    "previous_close": 179.0,
+                    "points": points,
+                    "series_coverage": coverage,
+                },
+            ),
+            patch(
+                "app.market.technical_report._current_partial_daily_indicator",
+                side_effect=AssertionError(
+                    "partial coverage must not build provisional OHLCV indicators"
+                ),
+            ),
+            patch(
+                "app.market.technical_report.build_tw_stock_volume_pace",
+                side_effect=AssertionError(
+                    "partial coverage must not compute cumulative volume pace"
+                ),
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        intraday = report["data"]["intraday"]
+        self.assertEqual(report["phase"], "intraday")
+        self.assertEqual(report["title"], "盤中資料涵蓋不完整")
+        self.assertEqual(report["score"], 0)
+        self.assertFalse(intraday["score_eligible"])
+        self.assertIsNone(intraday["stats"]["open"])
+        self.assertIsNone(intraday["stats"]["high"])
+        self.assertIsNone(intraday["stats"]["low"])
+        self.assertIsNone(intraday["stats"]["volume"])
+        self.assertIsNone(intraday["opening_gap_pct"])
+        self.assertIsNone(intraday["price_vs_open_pct"])
+        self.assertEqual(intraday["volume_pace"]["status"], "partial")
+
     def test_daily_report_uses_finalized_daily_state_after_close(self) -> None:
         self.db.query(MarketDailyPrice).filter(
             MarketDailyPrice.trade_date > date(2026, 3, 20)
@@ -904,6 +1062,28 @@ class TechnicalReportTests(unittest.TestCase):
                             "source": "fugle_indices_stream",
                             "time": date(2026, 3, 20),
                             "close": 18111.0,
+                            "current_data_core": {
+                                "index": {
+                                    "status": "selected",
+                                    "index_id": "TAIEX",
+                                    "provider": "fugle_marketdata",
+                                    "source": "fugle_indices_stream",
+                                    "close": 18111.0,
+                                    "change": 21.0,
+                                    "previous_close": 18090.0,
+                                    "as_of": "2026-03-20T13:20:00+08:00",
+                                    "trade_date": "2026-03-20",
+                                    "session": "continuous",
+                                    "provisional": True,
+                                    "official": False,
+                                    "decision_usable": True,
+                                    "resolved_health": {
+                                        "status": "selected",
+                                        "research_usable": True,
+                                        "selection_reason": "canonical_current_index",
+                                    },
+                                }
+                            },
                         }
                     ]
                 },
@@ -1072,6 +1252,45 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertGreater(report["value"], 0)
         self.assertTrue(any(row["key"] == "daily_background" for row in report["rows"]))
 
+    def test_today_report_accepts_datetime_intraday_point_time(self) -> None:
+        point_time = datetime(2026, 3, 23, 9, 1, tzinfo=TAIPEI_TZ)
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 10, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "stock_id": "2330",
+                    "symbol": "2330",
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "point_count": 1,
+                    "points": [
+                        {
+                            "time": point_time,
+                            "price": 183.0,
+                            "volume": 3_000,
+                            "open": 182.0,
+                            "high": 183.0,
+                            "low": 182.0,
+                        }
+                    ],
+                },
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        self.assertEqual(report["phase"], "opening")
+        self.assertEqual(report["data"]["intraday"]["latest_point"]["time"], point_time)
+        TechnicalReportRead.model_validate(report)
+
     def test_today_report_stale_intraday_preserves_response_score_contract(self) -> None:
         with (
             patch(
@@ -1110,6 +1329,176 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["score"], 0)
         self.assertFalse(report["data"]["intraday"]["score_eligible"])
         TechnicalReportRead.model_validate(report)
+
+    def test_today_report_uses_session_close_semantics_after_close(self) -> None:
+        event_at = datetime(2026, 3, 23, 13, 30, tzinfo=TAIPEI_TZ)
+        quote = SimpleNamespace(
+            trade_date=date(2026, 3, 23),
+            lineage=SimpleNamespace(
+                event_at=event_at,
+                provider="twse_mis",
+                source="twse_mis_quote_depth",
+            ),
+            last_trade_price=185.0,
+            open_price=181.0,
+            high_price=186.0,
+            low_price=180.0,
+            cumulative_quantity=SimpleNamespace(value=20_000),
+        )
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 14, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "points": [
+                        {
+                            "time": "2026-03-23T11:49:00+08:00",
+                            "price": 183.0,
+                            "volume": 10_000,
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "app.market.technical_report.read_taiwan_session_close",
+                return_value=SimpleNamespace(
+                    resolved=SimpleNamespace(quote=quote)
+                ),
+            ),
+            patch(
+                "app.market.technical_report.project_taiwan_session_close",
+                return_value={
+                    "available": True,
+                    "finalization": "session_final",
+                },
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        self.assertEqual(report["phase"], "post_close")
+        self.assertEqual(report["score"], 0)
+        price_row = report["rows"][0]
+        self.assertEqual(price_row["key"], "session_close_price")
+        self.assertEqual(price_row["label"], "收盤成交")
+        self.assertEqual(price_row["value"], 185.0)
+        self.assertNotIn("即時價格", str(report))
+        self.assertEqual(
+            report["data"]["intraday"]["price_semantics"],
+            "session_close",
+        )
+
+    def test_today_report_does_not_call_last_trade_live_after_close(self) -> None:
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 14, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "points": [
+                        {
+                            "time": "2026-03-23T11:49:00+08:00",
+                            "price": 183.0,
+                            "volume": 10_000,
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "app.market.technical_report.read_taiwan_session_close",
+                return_value=SimpleNamespace(
+                    resolved=SimpleNamespace(quote=None)
+                ),
+            ),
+            patch(
+                "app.market.technical_report.project_taiwan_session_close",
+                return_value={"available": False},
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        self.assertEqual(report["phase"], "post_close_pending_close")
+        self.assertEqual(report["score"], 0)
+        self.assertEqual(report["rows"][0]["label"], "最後盤中成交")
+        self.assertNotIn("即時價格", str(report))
+        self.assertEqual(
+            report["data"]["intraday"]["price_semantics"],
+            "last_intraday_trade_pending_session_close",
+        )
+
+    def test_today_report_accepts_session_close_when_intraday_series_is_empty(
+        self,
+    ) -> None:
+        event_at = datetime(2026, 3, 23, 13, 30, tzinfo=TAIPEI_TZ)
+        quote = SimpleNamespace(
+            trade_date=date(2026, 3, 23),
+            lineage=SimpleNamespace(
+                event_at=event_at,
+                provider="twse_mis",
+                source="twse_mis_quote_depth",
+            ),
+            last_trade_price=185.0,
+            open_price=181.0,
+            high_price=186.0,
+            low_price=180.0,
+            cumulative_quantity=SimpleNamespace(value=20_000),
+        )
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 14, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "points": [],
+                },
+            ),
+            patch(
+                "app.market.technical_report.read_taiwan_session_close",
+                return_value=SimpleNamespace(
+                    resolved=SimpleNamespace(quote=quote)
+                ),
+            ),
+            patch(
+                "app.market.technical_report.project_taiwan_session_close",
+                return_value={
+                    "available": True,
+                    "finalization": "session_final",
+                },
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        self.assertEqual(report["phase"], "post_close")
+        self.assertEqual(report["rows"][0]["label"], "收盤成交")
+        self.assertEqual(report["rows"][0]["value"], 185.0)
+        self.assertNotIn("intraday_trend.points", report["missing"])
 
     def test_today_report_uses_same_time_volume_pace_instead_of_daily_average(self) -> None:
         points = [

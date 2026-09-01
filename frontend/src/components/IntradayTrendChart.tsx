@@ -21,6 +21,7 @@ type Props = {
   session?: IntradaySessionConfig;
   revealKey?: string;
   refreshIntervalMs?: number;
+  refreshMode?: "data" | "cache_poll";
   updatedAt?: string | null;
   priceLimitEnabled?: boolean;
   totalVolume?: number | null;
@@ -429,7 +430,7 @@ function labelPosition(
   } as const;
 }
 
-function aggregateIntradayPoints(
+export function aggregateIntradayPoints(
   points: IntradayTrendPoint[],
   interval: IntradayInterval,
   session: IntradaySessionConfig,
@@ -439,7 +440,7 @@ function aggregateIntradayPoints(
     const displayEligible =
       point.display_eligible !== null && point.display_eligible !== undefined
         ? point.display_eligible
-        : point.indicator_eligible !== false || point.bar_type === "official_close_marker";
+        : point.indicator_eligible !== false;
     return (
       validNumber(point.price) &&
       (!tradeDate || point.time.slice(0, 10) === tradeDate) &&
@@ -458,9 +459,20 @@ function aggregateIntradayPoints(
     }));
   }
 
+  const closeMarkers = regularPoints.filter(
+    (point) =>
+      point.bar_type === "official_close_marker" ||
+      point.bar_type === "session_close_marker"
+  );
+  const intervalPoints = regularPoints.filter(
+    (point) =>
+      point.bar_type !== "official_close_marker" &&
+      point.bar_type !== "session_close_marker"
+  );
+
   const buckets = new Map<number, IntradayTrendPoint[]>();
 
-  regularPoints.forEach((point) => {
+  intervalPoints.forEach((point) => {
     const minutes = session.getMinutesOfDay(point.time);
 
     if (minutes === null) return;
@@ -474,7 +486,7 @@ function aggregateIntradayPoints(
     buckets.set(bucket, current);
   });
 
-  return Array.from(buckets.entries())
+  const aggregated = Array.from(buckets.entries())
     .sort(([a], [b]) => a - b)
     .map(([, bucketPoints]) => {
       const first = bucketPoints[0];
@@ -508,6 +520,8 @@ function aggregateIntradayPoints(
         price_semantics: last.price_semantics,
       };
     });
+  return [...aggregated, ...closeMarkers]
+    .sort((left, right) => new Date(left.time).getTime() - new Date(right.time).getTime());
 }
 
 function calculateEma(values: number[], period: number) {
@@ -578,7 +592,7 @@ function calculateRsi(values: number[], period: number) {
   });
 }
 
-function enrichIntradayPoints(points: IntradayTrendPoint[]): IntradayChartPoint[] {
+export function enrichIntradayPoints(points: IntradayTrendPoint[]): IntradayChartPoint[] {
   const indicatorPoints = points.filter((point) => point.indicator_eligible !== false);
   const closes = indicatorPoints.map((point) => point.price);
   const emaFast = calculateEma(closes, 5);
@@ -706,6 +720,7 @@ export default function IntradayTrendChart({
   session = taiwanIntradaySession,
   revealKey,
   refreshIntervalMs,
+  refreshMode = "data",
   updatedAt,
   priceLimitEnabled = true,
   totalVolume,
@@ -1074,9 +1089,13 @@ export default function IntradayTrendChart({
           {refreshIntervalMs ? (
             <div className="mt-1 text-xs text-omi-text-muted">
               {t(
-                updatedAt
-                  ? "stockDetail.intraday.refreshEveryUpdated"
-                  : "stockDetail.intraday.refreshEvery",
+                refreshMode === "cache_poll"
+                  ? updatedAt
+                    ? "stockDetail.intraday.cachePollEveryUpdated"
+                    : "stockDetail.intraday.cachePollEvery"
+                  : updatedAt
+                    ? "stockDetail.intraday.refreshEveryUpdated"
+                    : "stockDetail.intraday.refreshEvery",
                 {
                   seconds: Math.round(refreshIntervalMs / 1000),
                   updatedAt,

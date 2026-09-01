@@ -1897,6 +1897,8 @@ export const zhTW = {
       pointCount: "{count} 點",
       refreshEvery: "盤中每 {seconds} 秒更新",
       refreshEveryUpdated: "盤中每 {seconds} 秒更新，最後更新 {updatedAt}",
+      cachePollEvery: "每 {seconds} 秒檢查一次本機快取",
+      cachePollEveryUpdated: "每 {seconds} 秒檢查本機快取，最新資料 {updatedAt}",
       currentTradeAvailable: "MIS 成交 {time} · 歷史差 {lag} 秒，已由 backend 對齊",
       currentTradeUnavailable: "目前成交價未確認（{reason}），保留歷史來源走勢",
       previousClose: "昨收",
@@ -3038,6 +3040,15 @@ export const zhTW = {
     },
   },
   usStockDetail: {
+    currentQuote: {
+      unavailable: "目前時段報價尚未取得",
+      expectedMissing: "盤前／盤後報價尚未取得",
+      requiredMissing: "即時報價異常，尚未取得",
+      noTrade: "目前尚無新成交",
+      notExpected: "目前不在即時報價時段",
+      previousCloseReference: "前收 {price} · {date}",
+      currentDayRegularCloseReference: "今日正常盤收盤 {price} · {date}",
+    },
     sourceStatus: {
       providerErrorTitle: "{provider} 上游資料異常",
       delayedTitle: "{provider} 上游資料延遲",
@@ -3130,7 +3141,12 @@ export const zhTW = {
     extendedHours: {
       title: "美股盤前 / 盤後",
       meta: "{phase} · regular {regular} / extended {extended}",
-      noExtendedData: "Yahoo chart 目前未回傳盤前或盤後分鐘資料；先顯示可用盤中資料。",
+      noExtendedData: "目前沒有盤前或盤後分鐘資料；可切換盤中查看可用資料。",
+      cacheOnlyPolicy: "此畫面只讀本機快取；行情由背景更新服務負責取得。",
+      regularMissingExtendedAvailable:
+        "盤中資料尚未取得；盤前／盤後已有 {count} 筆，可切換「盤前/盤後」或「全部」查看。",
+      extendedMissingRegularAvailable:
+        "盤前／盤後資料尚未取得；盤中已有 {count} 筆，可切換「盤中」查看。",
       scopes: {
         regular: "盤中",
         extended: "盤前/盤後",

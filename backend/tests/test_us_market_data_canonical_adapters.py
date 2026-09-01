@@ -33,8 +33,18 @@ def _instrument() -> InstrumentKey:
     )
 
 
-def _timestamp(hour: int, minute: int) -> int:
-    return int(datetime(2026, 8, 21, hour, minute, tzinfo=NEW_YORK).timestamp())
+def _timestamp(hour: int, minute: int, second: int = 0) -> int:
+    return int(
+        datetime(
+            2026,
+            8,
+            21,
+            hour,
+            minute,
+            second,
+            tzinfo=NEW_YORK,
+        ).timestamp()
+    )
 
 
 def _yahoo_payload() -> dict:
@@ -110,6 +120,59 @@ def test_yahoo_scope_filter_and_provisional_bar_are_truthful() -> None:
     assert len(batch.bars) == 1
     assert batch.bars[0].start_at.hour == 9
     assert batch.bars[0].finalization is BarFinalization.PROVISIONAL
+
+
+def test_yahoo_intraday_normalizes_and_deduplicates_provider_minute_identity() -> None:
+    payload = _yahoo_payload()
+    payload["chart"]["result"][0]["timestamp"] = [
+        _timestamp(9, 30, 15),
+        _timestamp(9, 30, 52),
+    ]
+    quote = payload["chart"]["result"][0]["indicators"]["quote"][0]
+    quote["open"] = [225.0, 225.4]
+    quote["high"] = [225.5, 226.0]
+    quote["low"] = [224.9, 225.2]
+    quote["close"] = [225.4, 225.8]
+    quote["volume"] = [300, 500]
+    fetched_at = datetime(2026, 8, 21, 9, 30, 58, tzinfo=NEW_YORK)
+
+    batch = canonical_yahoo_chart_payload(
+        instrument=_instrument(),
+        payload=payload,
+        fetched_at=fetched_at,
+        interval="1m",
+        session_scope="regular",
+    )
+
+    assert len(batch.bars) == 1
+    assert batch.bars[0].start_at == datetime(
+        2026,
+        8,
+        21,
+        9,
+        30,
+        tzinfo=NEW_YORK,
+    )
+    assert batch.bars[0].end_at == datetime(
+        2026,
+        8,
+        21,
+        9,
+        31,
+        tzinfo=NEW_YORK,
+    )
+    assert batch.bars[0].close_price == Decimal("225.8")
+    assert batch.bars[0].lineage.event_at == datetime(
+        2026,
+        8,
+        21,
+        9,
+        30,
+        52,
+        tzinfo=NEW_YORK,
+    )
+    assert batch.bars[0].lineage.event_at <= fetched_at
+    assert "YAHOO_DUPLICATE_MINUTE_BARS_DEDUPLICATED" in batch.limitations
 
 
 def test_yahoo_extended_zero_volume_is_unknown_not_traded_zero() -> None:

@@ -20,6 +20,7 @@ const quoteDepthLivePhases = new Set([
   "closing_auction",
 ]);
 const quoteStreamReconnectDelaysMs = [5_000, 15_000, 30_000] as const;
+const quoteLeaseAcquireRetryMs = 15_000;
 
 function isPresentationTelemetry(
   snapshot: TaiwanRealtimeMarketStreamRead
@@ -73,19 +74,23 @@ export function useTaiwanQuoteDepth({
   const [replayLoadState, setReplayLoadState] =
     useState<QuoteReplayLoadState>("idle");
   const activeStockIdRef = useRef(stockId);
+  const leaseSessionActive =
+    quoteDepth?.stock_id !== stockId ||
+    quoteDepth.presentation_session_state !== "completed";
 
   useEffect(() => {
     activeStockIdRef.current = stockId;
   }, [stockId]);
 
   useEffect(() => {
-    if (!enabled || !leaseEnabled || !stockId) return;
+    if (!enabled || !leaseEnabled || !stockId || !leaseSessionActive) return;
 
     let cancelled = false;
     let pageActive = true;
     let leaseId: string | null = null;
     let leaseExpiresInSeconds = 60;
     let heartbeatTimer: number | undefined;
+    let acquireRetryTimer: number | undefined;
     let lifecycle = Promise.resolve();
 
     function shouldHoldLease() {
@@ -97,6 +102,21 @@ export function useTaiwanQuoteDepth({
         window.clearTimeout(heartbeatTimer);
         heartbeatTimer = undefined;
       }
+    }
+
+    function clearAcquireRetry() {
+      if (acquireRetryTimer !== undefined) {
+        window.clearTimeout(acquireRetryTimer);
+        acquireRetryTimer = undefined;
+      }
+    }
+
+    function scheduleAcquireRetry(delayMs = quoteLeaseAcquireRetryMs) {
+      clearAcquireRetry();
+      if (leaseId || !shouldHoldLease()) return;
+      acquireRetryTimer = window.setTimeout(() => {
+        void enqueueLifecycle(false);
+      }, delayMs);
     }
 
     function scheduleHeartbeat(expiresInSeconds = leaseExpiresInSeconds) {
@@ -114,6 +134,7 @@ export function useTaiwanQuoteDepth({
 
     async function releaseLease(keepalive: boolean) {
       clearHeartbeat();
+      clearAcquireRetry();
       const releasingLeaseId = leaseId;
       leaseId = null;
       if (!releasingLeaseId) return true;
@@ -149,6 +170,7 @@ export function useTaiwanQuoteDepth({
 
     async function acquireLease() {
       if (!shouldHoldLease()) return;
+      clearAcquireRetry();
       if (leaseId) {
         scheduleHeartbeat(15);
         return;
@@ -164,7 +186,10 @@ export function useTaiwanQuoteDepth({
             }),
           }
         );
-        if (!lease.lease_id) return;
+        if (!lease.lease_id) {
+          scheduleAcquireRetry();
+          return;
+        }
         if (!shouldHoldLease()) {
           leaseId = lease.lease_id;
           await releaseLease(true);
@@ -176,6 +201,7 @@ export function useTaiwanQuoteDepth({
       } catch {
         // Quote-depth polling remains on the existing fallback source. The
         // backend contract exposes primary-source status when a lease exists.
+        scheduleAcquireRetry(30_000);
       }
     }
 
@@ -236,12 +262,13 @@ export function useTaiwanQuoteDepth({
     return () => {
       cancelled = true;
       clearHeartbeat();
+      clearAcquireRetry();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("pageshow", handlePageShow);
       void enqueueLifecycle(true);
     };
-  }, [enabled, leaseEnabled, stockId]);
+  }, [enabled, leaseEnabled, leaseSessionActive, stockId]);
 
   useEffect(() => {
     if (!enabled || !streamEnabled || !stockId) {

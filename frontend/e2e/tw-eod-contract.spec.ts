@@ -7,7 +7,15 @@ import {
 } from "@/components/stock-k-line/indicatorAuthority";
 import { projectStockKLineData } from "@/components/stock-k-line/indicatorProjection";
 import { mapBackendTechnicalReport } from "@/components/stock-detail/TechnicalDataViews";
-import { resolveTodayHeadlineValues } from "@/components/stock-detail/stockDetailAnalytics";
+import {
+  aggregateIntradayPoints,
+  enrichIntradayPoints,
+  taiwanIntradaySession,
+} from "@/components/IntradayTrendChart";
+import {
+  resolveQuoteDepthHeadlineValues,
+  resolveTodayHeadlineValues,
+} from "@/components/stock-detail/stockDetailAnalytics";
 import type { ChartPoint, StockTechnicalReportRead } from "@/types/market";
 
 function chartPoints(): ChartPoint[] {
@@ -96,6 +104,18 @@ test("unknown stock-chart volume units keep the provider value unchanged", () =>
 test("today headline never mixes a missing price with another session change", () => {
   expect(
     resolveTodayHeadlineValues({
+      backendPrice: 584,
+      backendChange: -37,
+      backendChangePct: (-37 / 621) * 100,
+      currentPrice: 580,
+      currentReferenceClose: 621,
+      completedSessionPrice: 584,
+      completedSessionReferenceClose: 621,
+    })
+  ).toEqual([584, -37, (-37 / 621) * 100, "backend_headline"]);
+
+  expect(
+    resolveTodayHeadlineValues({
       currentPrice: null,
       currentReferenceClose: 592,
       completedSessionPrice: null,
@@ -111,6 +131,94 @@ test("today headline never mixes a missing price with another session change", (
       completedSessionReferenceClose: 592,
     })
   ).toEqual([605, 13, (13 / 592) * 100, "completed_session"]);
+});
+
+test("quote depth prefers backend headline and ignores stale indicative data after close", () => {
+  expect(
+    resolveQuoteDepthHeadlineValues({
+      allowIndicative: false,
+      indicativeAvailable: true,
+      indicativePrice: 601,
+      headlinePrice: 584,
+      headlineChange: -37,
+      headlineChangePct: (-37 / 621) * 100,
+      legacyPrice: 580,
+      legacyChange: -41,
+      legacyChangePct: (-41 / 621) * 100,
+      previousClose: 621,
+    })
+  ).toEqual([584, -37, (-37 / 621) * 100]);
+
+  expect(
+    resolveQuoteDepthHeadlineValues({
+      allowIndicative: true,
+      indicativeAvailable: true,
+      indicativePrice: 601,
+      headlinePrice: 584,
+      headlineChange: -37,
+      headlineChangePct: (-37 / 621) * 100,
+      legacyPrice: 580,
+      legacyChange: -41,
+      legacyChangePct: (-41 / 621) * 100,
+      previousClose: 621,
+    })
+  ).toEqual([601, -20, (-20 / 621) * 100]);
+});
+
+test("close marker stays visible but separate from interval indicators", () => {
+  const aggregated = aggregateIntradayPoints(
+    [
+      {
+        time: "2026-08-31T13:25:00+08:00",
+        price: 580,
+        volume: 1000,
+        open: 579,
+        high: 581,
+        low: 579,
+        bar_type: "closing_auction",
+        display_eligible: true,
+        indicator_eligible: true,
+      },
+      {
+        time: "2026-08-31T13:26:00+08:00",
+        price: 581,
+        volume: 1000,
+        open: 580,
+        high: 582,
+        low: 580,
+        bar_type: "closing_auction",
+        display_eligible: true,
+        indicator_eligible: true,
+      },
+      {
+        time: "2026-08-31T13:30:00+08:00",
+        price: 584,
+        volume: null,
+        open: 584,
+        high: 584,
+        low: 584,
+        bar_type: "official_close_marker",
+        price_semantics: "official_close",
+        display_eligible: true,
+        indicator_eligible: false,
+      },
+    ],
+    5,
+    taiwanIntradaySession,
+    "2026-08-31"
+  );
+
+  expect(aggregated).toHaveLength(2);
+  expect(aggregated[0].price).toBe(581);
+  expect(aggregated[0].indicator_eligible).toBe(true);
+  expect(aggregated[1].bar_type).toBe("official_close_marker");
+  expect(aggregated[1].price).toBe(584);
+  expect(aggregated[1].indicator_eligible).toBe(false);
+
+  const enriched = enrichIntradayPoints(aggregated);
+  expect(enriched[1].twap).toBeNull();
+  expect(enriched[1].vwap).toBeNull();
+  expect(enriched[1].emaFast).toBeNull();
 });
 
 test("Taiwan technical mapping keeps finalized decision and provisional observation separate", () => {

@@ -31,6 +31,7 @@ from app.market_data.contracts import (
     ResolvedMarketIndex,
     ResolvedQuote,
     ResolvedTradingStatus,
+    SourceLineage,
 )
 from app.market_data.policies import (
     DataPurpose,
@@ -154,7 +155,25 @@ CapabilityRequest = Annotated[
 
 class FreshnessBasis(str, Enum):
     WALL_CLOCK = "wall_clock"
+    EVENT_TIME = "event_time"
+    RECEIVED_TIME = "received_time"
+    FETCHED_TIME = "fetched_time"
     COMPLETED_SESSION_DATE = "completed_session_date"
+
+
+def freshness_timestamp(
+    lineage: SourceLineage,
+    basis: FreshnessBasis,
+) -> datetime | None:
+    """Return the canonical lineage timestamp owned by a freshness contract."""
+
+    if basis is FreshnessBasis.EVENT_TIME:
+        return lineage.event_at
+    if basis is FreshnessBasis.RECEIVED_TIME:
+        return lineage.received_at
+    if basis is FreshnessBasis.FETCHED_TIME:
+        return lineage.fetched_at
+    return lineage.event_at or lineage.received_at or lineage.fetched_at
 
 
 class EvidenceTarget(str, Enum):
@@ -551,6 +570,7 @@ __all__ = [
     "DatasetTarget",
     "FreshnessBasis",
     "FreshnessRequirement",
+    "freshness_timestamp",
     "InstrumentTarget",
     "MarketDataResultV1",
     "PersistenceSummary",

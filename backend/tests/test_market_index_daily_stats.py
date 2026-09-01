@@ -1201,12 +1201,23 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             enabled = job_scheduler._add_taiwan_market_index_collector_job(scheduler)
 
         self.assertTrue(enabled)
-        self.assertEqual(scheduler.add_job.call_count, 4)
-        collector_call, breadth_call, reconciliation_call, startup_call = scheduler.add_job.call_args_list
+        self.assertEqual(scheduler.add_job.call_count, 5)
+        (
+            collector_call,
+            directory_call,
+            breadth_call,
+            reconciliation_call,
+            startup_call,
+        ) = scheduler.add_job.call_args_list
         self.assertEqual(collector_call.kwargs["seconds"], 5)
         self.assertEqual(
             collector_call.kwargs["id"],
             "taiwan_market_index_summary_collector",
+        )
+        self.assertEqual(directory_call.kwargs["hours"], 1)
+        self.assertEqual(
+            directory_call.kwargs["id"],
+            "taiwan_market_index_directory_refresh",
         )
         self.assertEqual(breadth_call.kwargs["seconds"], 60)
         self.assertEqual(
@@ -1703,7 +1714,6 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         )
 
     def test_index_get_surfaces_do_not_call_provider_acquisition(self) -> None:
-        indices._INDEX_LIST_CACHE.clear()
         indices._INDEX_OHLC_CACHE.clear()
         indices._CONTRIBUTION_CACHE.clear()
 
@@ -1729,7 +1739,7 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 side_effect=AssertionError("GET contribution called index provider"),
             ),
         ):
-            index_list = indices.get_market_index_list("TWSE")
+            index_list = indices.get_market_index_list("TWSE", db=self.db)
             chart = indices.get_market_index_ohlc_chart_data(
                 "TAIEX",
                 db=self.db,
@@ -1739,7 +1749,8 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 db=self.db,
             )
 
-        self.assertEqual(index_list["source"], "cache_miss")
+        self.assertEqual(index_list["source"], "unavailable")
+        self.assertEqual(index_list["status"], "missing")
         self.assertEqual(chart["data_quality"], "missing")
         self.assertEqual(contributions["source"], "tw.daily.ohlcv:TWSE")
 

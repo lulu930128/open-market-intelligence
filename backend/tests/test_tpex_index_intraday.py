@@ -171,7 +171,7 @@ class TpexIndexIntradayTests(unittest.TestCase):
             result["points"][-1]["bar_type"],
             "official_close_marker",
         )
-        self.assertTrue(result["points"][-1]["indicator_eligible"])
+        self.assertFalse(result["points"][-1]["indicator_eligible"])
         self.assertEqual(result["post_close_summary_count"], 1)
         self.assertFalse(
             any(
@@ -247,7 +247,11 @@ class TpexIndexIntradayTests(unittest.TestCase):
         self.assertTrue(public_payload["warnings"])
         self.assertEqual(
             public_payload["points"][0]["bar_type"],
-            "official_close_marker",
+            "session_close_marker",
+        )
+        self.assertEqual(
+            public_payload["points"][0]["price_semantics"],
+            "session_close_index_value",
         )
         self.assertEqual(public_payload["current_observation"]["value"], 391.37)
 
@@ -315,7 +319,7 @@ class TpexIndexIntradayTests(unittest.TestCase):
         self.assertTrue(auction["display_eligible"])
         self.assertFalse(auction["finalized"])
         self.assertFalse(auction["indicator_eligible"])
-        self.assertTrue(result["points"][-1]["indicator_eligible"])
+        self.assertFalse(result["points"][-1]["indicator_eligible"])
         self.assertFalse(
             any(point["time"].endswith("13:33:00+08:00") for point in result["points"])
         )

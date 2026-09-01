@@ -9,6 +9,9 @@ from sqlalchemy.orm import Query, Session
 
 from app.db.models import (
     MacroSeriesObservation,
+    MarketIntradayBar,
+    MarketIntradayBarLineage,
+    PortfolioHolding,
     USDailyPrice,
     USCompanyProfile,
     USCorporateAction,
@@ -22,6 +25,8 @@ from app.db.models import (
     USSecOwnershipTransaction,
     USShortVolumeDaily,
     USStockMaster,
+    USQuoteSnapshot,
+    USWatchlistItem,
     USSecurityIdentifierMap,
 )
 from app.market.calendar_status import expected_us_trade_date
@@ -37,6 +42,12 @@ from app.observability.source_health_contract import (
 )
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.market_data_policy import us_provider_order
+from app.us_market.market_data.descriptors import (
+    US_INTRADAY_PROVIDER_DESCRIPTORS,
+    US_QUOTE_PROVIDER_DESCRIPTORS,
+)
+from app.us_market.symbols import US_INDEX_SYMBOLS
+from app.us_market.intraday_profiles import US_RECURRING_INTRADAY_PROFILE
 from app.us_market.sec_fundamentals.freshness import evaluate_sec_filing_freshness
 from app.us_market.sec_fundamentals.submissions import (
     SEC_SUBMISSIONS_CACHE,
@@ -78,6 +89,10 @@ class USSourceHealthEntry:
     latest_filing_date: date | None = None
     last_checked_at: datetime | None = None
     freshness_basis: str | None = None
+    latest_observed_at: datetime | None = None
+    provider_snapshot_age_seconds: int | None = None
+    event_age_seconds: int | None = None
+    limitations: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +132,14 @@ class USSourceHealthEntry:
                 self.last_checked_at.isoformat() if self.last_checked_at else None
             ),
             "freshness_basis": self.freshness_basis,
+            "latest_observed_at": (
+                self.latest_observed_at.isoformat()
+                if self.latest_observed_at
+                else None
+            ),
+            "provider_snapshot_age_seconds": self.provider_snapshot_age_seconds,
+            "event_age_seconds": self.event_age_seconds,
+            "limitations": list(self.limitations),
         }
 
 
@@ -144,6 +167,188 @@ def _status_for(
 
 def _latest_or_none(query: Query, *order_by):
     return query.order_by(*order_by).first()
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _age_seconds(now: datetime, value: datetime | None) -> int | None:
+    normalized = _utc(value)
+    return max(0, int((now - normalized).total_seconds())) if normalized else None
+
+
+def _configured_realtime_symbols(
+    db: Session,
+    symbol: str | None,
+) -> tuple[str, ...]:
+    if symbol:
+        return (symbol,)
+    ordered: dict[str, None] = {}
+    configured = (
+        settings.scheduler_us_intraday_materializer_symbols,
+        settings.scheduler_us_index_quote_symbols,
+    )
+    limits = (
+        settings.scheduler_us_intraday_materializer_max_symbols,
+        settings.scheduler_us_index_quote_max_symbols,
+    )
+    for raw_symbols, limit in zip(configured, limits, strict=True):
+        count = 0
+        for raw_symbol in raw_symbols.split(","):
+            normalized = normalize_us_symbol(raw_symbol)
+            if normalized and normalized not in ordered:
+                ordered[normalized] = None
+                count += 1
+            if count >= limit:
+                break
+    if settings.enable_us_dynamic_equity_materializer_universe:
+        dynamic_symbols = [
+            row.symbol
+            for row in (
+                db.query(PortfolioHolding)
+                .filter(
+                    PortfolioHolding.market == "US",
+                    PortfolioHolding.is_active.is_(True),
+                )
+                .order_by(PortfolioHolding.id.asc())
+                .all()
+            )
+        ]
+        dynamic_symbols.extend(
+            row.symbol
+            for row in (
+                db.query(USWatchlistItem)
+                .filter(USWatchlistItem.enabled.is_(True))
+                .order_by(USWatchlistItem.priority.asc(), USWatchlistItem.id.asc())
+                .all()
+            )
+        )
+        for raw_symbol in dynamic_symbols:
+            normalized = normalize_us_symbol(raw_symbol)
+            if normalized and normalized not in US_INDEX_SYMBOLS:
+                ordered[normalized] = None
+    max_targets = (
+        settings.scheduler_us_intraday_materializer_max_symbols
+        + settings.scheduler_us_index_quote_max_symbols
+    )
+    return tuple(ordered)[:max_targets]
+
+
+def _realtime_entries(
+    db: Session,
+    *,
+    symbol: str | None,
+    now: datetime,
+) -> list[USSourceHealthEntry]:
+    entries: list[USSourceHealthEntry] = []
+    stale_after = US_RECURRING_INTRADAY_PROFILE.consumer_stale_after_seconds
+    for target_symbol in _configured_realtime_symbols(db, symbol):
+        is_index = target_symbol in US_INDEX_SYMBOLS
+        for descriptor in US_QUOTE_PROVIDER_DESCRIPTORS:
+            if is_index and "index" not in {
+                item.value for item in descriptor.instrument_types
+            }:
+                continue
+            query = db.query(USQuoteSnapshot).filter(
+                USQuoteSnapshot.symbol == target_symbol,
+                USQuoteSnapshot.provider == descriptor.provider_key,
+            )
+            latest = query.order_by(
+                USQuoteSnapshot.fetched_at.desc(),
+                USQuoteSnapshot.id.desc(),
+            ).first()
+            row_count = query.count()
+            snapshot_age = _age_seconds(now, latest.fetched_at if latest else None)
+            event_age = _age_seconds(now, latest.event_at if latest else None)
+            status = (
+                "empty"
+                if latest is None
+                else "current"
+                if snapshot_age is not None and snapshot_age <= stale_after
+                else "stale"
+            )
+            entries.append(
+                USSourceHealthEntry(
+                    resource="quote_snapshot",
+                    provider=descriptor.provider_key,
+                    target=target_symbol,
+                    status=status,
+                    ok=status == "current",
+                    row_count=row_count,
+                    latest_fetched_at=_utc(latest.fetched_at) if latest else None,
+                    latest_observed_at=_utc(latest.event_at) if latest else None,
+                    provider_snapshot_age_seconds=snapshot_age,
+                    event_age_seconds=event_age,
+                    freshness_basis="fetched_time",
+                    data_quality="usable" if status == "current" else status,
+                    reason=(
+                        "No canonical quote snapshot is persisted."
+                        if latest is None
+                        else "Provider snapshot is within the consumer freshness window."
+                        if status == "current"
+                        else "Provider snapshot exceeds the consumer freshness window."
+                    ),
+                    limitations=tuple(descriptor.limitations),
+                )
+            )
+        for descriptor in US_INTRADAY_PROVIDER_DESCRIPTORS:
+            if is_index and "index" not in {
+                item.value for item in descriptor.instrument_types
+            }:
+                continue
+            query = (
+                db.query(MarketIntradayBarLineage)
+                .join(MarketIntradayBar, MarketIntradayBar.id == MarketIntradayBarLineage.bar_id)
+                .filter(
+                    MarketIntradayBar.stock_id == target_symbol,
+                    MarketIntradayBar.interval == "1m",
+                    MarketIntradayBarLineage.provider == descriptor.provider_key,
+                )
+            )
+            latest = query.order_by(
+                MarketIntradayBarLineage.event_at.desc(),
+                MarketIntradayBarLineage.id.desc(),
+            ).first()
+            row_count = query.count()
+            event_age = _age_seconds(now, latest.event_at if latest else None)
+            snapshot_age = _age_seconds(now, latest.fetched_at if latest else None)
+            status = (
+                "empty"
+                if latest is None
+                else "current"
+                if event_age is not None and event_age <= stale_after
+                else "stale"
+            )
+            entries.append(
+                USSourceHealthEntry(
+                    resource="intraday_bars",
+                    provider=descriptor.provider_key,
+                    target=target_symbol,
+                    status=status,
+                    ok=status == "current",
+                    row_count=row_count,
+                    latest_fetched_at=_utc(latest.fetched_at) if latest else None,
+                    latest_observed_at=_utc(latest.event_at) if latest else None,
+                    provider_snapshot_age_seconds=snapshot_age,
+                    event_age_seconds=event_age,
+                    freshness_basis="event_time",
+                    data_quality="usable" if status == "current" else status,
+                    reason=(
+                        "No canonical 1m intraday bars are persisted."
+                        if latest is None
+                        else "Latest bar is within the consumer freshness window."
+                        if status == "current"
+                        else "Latest bar exceeds the consumer freshness window."
+                    ),
+                    limitations=tuple(descriptor.limitations),
+                )
+            )
+    return entries
 
 
 def _entry_from_query(
@@ -718,6 +923,8 @@ def build_us_source_health(
 ) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol) if symbol else None
     normalized_series_id = series_id.strip().upper() if series_id else None
+    generated_at = _generated_at()
+    evaluated_at = _utc(now) or generated_at
     expected_date = expected_daily_price_date or expected_us_trade_date(
         "us_daily_price",
         now=now,
@@ -740,20 +947,17 @@ def build_us_source_health(
             expected_daily_price_date=expected_date,
         ),
         _macro_entry(db, series_id=normalized_series_id),
+        *_realtime_entries(
+            db,
+            symbol=normalized_symbol,
+            now=evaluated_at,
+        ),
     ]
-    generated_at = _generated_at()
     entry_dicts = enrich_source_health_entries(
         db,
         market="us",
         entries=[entry.to_dict() for entry in entries],
     )
-    sync_source_health_snapshots(
-        db,
-        market="us",
-        entries=entry_dicts,
-        checked_at=generated_at,
-    )
-
     return {
         "kind": "us_source_health",
         "generated_at": generated_at.isoformat(),
@@ -767,7 +971,35 @@ def build_us_source_health(
     }
 
 
+def snapshot_us_source_health(
+    db: Session,
+    *,
+    symbol: str | None = None,
+    series_id: str | None = None,
+    now: datetime | None = None,
+    expected_daily_price_date: date | None = None,
+) -> dict[str, Any]:
+    """Explicitly persist the current read-only US source-health projection."""
+
+    payload = build_us_source_health(
+        db,
+        symbol=symbol,
+        series_id=series_id,
+        now=now,
+        expected_daily_price_date=expected_daily_price_date,
+    )
+    checked_at = datetime.fromisoformat(payload["generated_at"])
+    sync_source_health_snapshots(
+        db,
+        market="us",
+        entries=payload["entries"],
+        checked_at=checked_at,
+    )
+    return payload
+
+
 __all__ = [
     "USSourceHealthEntry",
     "build_us_source_health",
+    "snapshot_us_source_health",
 ]

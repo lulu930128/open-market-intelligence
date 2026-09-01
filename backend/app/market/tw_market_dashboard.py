@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import date, datetime, time
 from hashlib import sha256
 from math import isfinite
-from statistics import median, pstdev
 from typing import Any, Iterable
 
 from sqlalchemy import case, or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import (
     StockMaster,
     StockProfile,
@@ -20,6 +20,7 @@ from app.market.official_index_platform import read_taiwan_official_index_series
 from app.market.intraday import get_market_intraday_history
 from app.market.indices import get_market_index_summary
 from app.market.trading_calendar import (
+    TAIWAN_SESSION_CLOSE_TIME,
     TAIWAN_TZ,
     previous_taiwan_trading_day,
     taiwan_market_session_phase,
@@ -28,7 +29,10 @@ from app.market.trading_calendar import (
 from app.market.service import list_stock_ohlc_chart_data
 from app.market.technical_report import build_stock_technical_report
 from app.market.taiwan_industries import normalize_tw_industry_label
-from app.market.tw_intraday_state import INTRADAY_STATE_VERSION
+from app.market.tw_intraday_state import (
+    INTRADAY_STATE_VERSION,
+    build_tw_hot_groups_snapshot,
+)
 from app.market_data.contracts import MarketIndexObservation
 from app.watchlists.service import list_groups, list_items
 
@@ -82,13 +86,36 @@ def _freshness_status(
     newest_as_of: datetime | None,
     *,
     now: datetime,
+    evidence_trade_date: date | None,
+    expected_trade_date: date,
+    presentation_state: str,
+    completed_session_evidence: bool,
+    producer_cadence_seconds: int | None = None,
 ) -> tuple[str, int | None]:
     if newest_as_of is None:
         return "missing", None
     age_seconds = max(int((now - newest_as_of).total_seconds()), 0)
-    if age_seconds <= 90:
+    if evidence_trade_date != expected_trade_date:
+        return "stale", age_seconds
+    if (
+        presentation_state in {"completed", "previous_session"}
+        and completed_session_evidence
+    ):
+        return "latest_completed_session", age_seconds
+
+    cadence_seconds = max(
+        int(
+            producer_cadence_seconds
+            if producer_cadence_seconds is not None
+            else settings.scheduler_taiwan_intraday_bar_interval_seconds
+        ),
+        60,
+    )
+    current_threshold_seconds = max(90, cadence_seconds + 60)
+    delayed_threshold_seconds = max(600, cadence_seconds * 3)
+    if age_seconds <= current_threshold_seconds:
         return "current", age_seconds
-    if age_seconds <= 600:
+    if age_seconds <= delayed_threshold_seconds:
         return "delayed", age_seconds
     return "stale", age_seconds
 
@@ -280,72 +307,49 @@ def _build_breadth(
     }
 
 
-def _build_hot_groups(
-    stocks: Iterable[StockMaster],
-    state_by_stock: dict[tuple[str, str], TaiwanIntradayStockState],
+def _project_hot_groups_for_dashboard(
+    snapshot: dict[str, Any],
     *,
     session_phase: str,
-    limit: int,
 ) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str], list[StockMaster]] = defaultdict(list)
-    for stock in stocks:
-        group_key = str(stock.industry or stock.category or "").strip()
-        if group_key:
-            grouped[(stock.market, group_key)].append(stock)
+    """Project the canonical group snapshot without re-evaluating quality."""
 
-    items: list[dict[str, Any]] = []
-    for (market, group_key), group_stocks in grouped.items():
-        observations = [
-            _observation(
-                state_by_stock.get((market, stock.stock_id)),
-                session_phase=session_phase,
-            )
-            for stock in group_stocks
-        ]
-        observed = [item for item in observations if item["status"] == "observed"]
-        changes = [float(item["change_pct"]) for item in observed]
-        universe = len(group_stocks)
-        coverage = len(changes)
-        if coverage < 3:
+    event_time = snapshot.get("event_time")
+    output: list[dict[str, Any]] = []
+    for group in snapshot.get("groups") or []:
+        if not isinstance(group, dict):
             continue
-        coverage_ratio = coverage / universe if universe else 0.0
-        advance_ratio = sum(1 for value in changes if value > 0) / coverage
-        as_of_values = [
-            item["as_of"] for item in observed if item["as_of"] is not None
-        ]
-        items.append(
+        group_id = str(group.get("group_id") or "")
+        group_key = (
+            group_id.split(":", 1)[1]
+            if ":" in group_id
+            else group_id
+        )
+        universe = int(group.get("member_count") or 0)
+        coverage = int(group.get("observed_count") or 0)
+        output.append(
             {
-                "group_id": f"{market}:{group_key}",
-                "group_key": group_key,
-                "label": normalize_tw_industry_label(group_key),
-                "market": market,
-                "status": "ready" if coverage == universe else "partial",
+                "group_id": f"{group.get('market') or 'TW'}:{group_key}",
+                "group_key": group_key or None,
+                "label": normalize_tw_industry_label(
+                    str(group.get("group_name") or group_key)
+                ),
+                "market": str(group.get("market") or "TW"),
+                "status": str(group.get("status") or snapshot.get("status") or "missing"),
                 "universe": universe,
                 "coverage": coverage,
-                "unknown": universe - coverage,
-                "coverage_ratio": coverage_ratio,
-                "advance_ratio": advance_ratio,
-                "mean_change_pct": sum(changes) / coverage,
-                "median_change_pct": median(changes),
-                "dispersion_pct": pstdev(changes) if coverage > 1 else 0.0,
-                "as_of": max(as_of_values) if as_of_values else None,
+                "unknown": max(universe - coverage, 0),
+                "coverage_ratio": float(group.get("coverage_ratio") or 0.0),
+                "advance_ratio": group.get("advance_ratio"),
+                "mean_change_pct": group.get("mean_return_pct"),
+                "median_change_pct": group.get("median_return_pct"),
+                "dispersion_pct": group.get("return_dispersion_pct"),
+                "as_of": event_time,
                 "provisional": session_phase in {"preopen", "closing_auction"},
-                "decision_usable": session_phase not in {
-                    "preopen",
-                    "preopen_pending",
-                },
+                "decision_usable": group.get("decision_usable") is True,
             }
         )
-
-    items.sort(
-        key=lambda item: (
-            -float(item["median_change_pct"]),
-            -float(item["advance_ratio"]),
-            -float(item["coverage_ratio"]),
-            str(item["group_id"]),
-        )
-    )
-    return items[:limit]
+    return output
 
 
 def _list_watchlist_groups(db: Session) -> list[dict[str, Any]]:
@@ -966,6 +970,21 @@ def build_tw_market_dashboard(
     freshness_status, max_age_seconds = _freshness_status(
         newest_as_of,
         now=checked_at,
+        evidence_trade_date=(
+            max(state.trade_date for state in state_by_stock.values())
+            if state_by_stock
+            else None
+        ),
+        expected_trade_date=trade_date,
+        presentation_state=str(presentation["state"]),
+        completed_session_evidence=any(
+            (
+                _aware_taipei(state.event_time)
+                or _state_as_of(state)
+            ).time()
+            >= TAIWAN_SESSION_CLOSE_TIME
+            for state in state_by_stock.values()
+        ),
     )
     breadth = {
         market: _build_breadth(
@@ -982,11 +1001,15 @@ def build_tw_market_dashboard(
         item["decision_usable"] = False
         item["deprecated"] = True
         item["canonical_ref"] = f"resolved_breadth.{market}"
-    hot_groups = _build_hot_groups(
-        stocks,
-        state_by_stock,
-        session_phase=session_phase,
+    hot_group_snapshot = build_tw_hot_groups_snapshot(
+        db,
         limit=group_limit,
+        generated_at=checked_at,
+        include_watchlist_groups=False,
+    )
+    hot_groups = _project_hot_groups_for_dashboard(
+        hot_group_snapshot,
+        session_phase=session_phase,
     )
     watchlist = _build_watchlist(
         db,
@@ -1033,6 +1056,7 @@ def build_tw_market_dashboard(
     ]
     warnings.extend(watchlist["warnings"])
     warnings.extend(resolved_index_warnings)
+    warnings.extend(str(item) for item in hot_group_snapshot.get("warnings") or [])
     if freshness_status in {"delayed", "stale", "missing"}:
         warnings.append(f"Dashboard snapshot freshness is {freshness_status}.")
     if any(item["status"] != "partial" for item in indices):
@@ -1064,11 +1088,19 @@ def build_tw_market_dashboard(
         "watchlist": watchlist,
         "freshness": {
             "status": freshness_status,
+            "basis": (
+                "completed_session_date"
+                if freshness_status == "latest_completed_session"
+                else "producer_cadence"
+            ),
             "cache_only": True,
             "oldest_as_of": oldest_as_of,
             "newest_as_of": newest_as_of,
             "max_age_seconds": max_age_seconds,
             "source": "taiwan_intraday_stock_state",
+            "producer_cadence_seconds": int(
+                settings.scheduler_taiwan_intraday_bar_interval_seconds
+            ),
         },
         "warnings": warnings,
         "limitations": [
@@ -1076,7 +1108,7 @@ def build_tw_market_dashboard(
             "Preopen observations and all index estimates are provisional and not decision-usable.",
             "The legacy indices field contains proxy estimates; resolved_indices is the authoritative headline projection.",
             "The legacy breadth field is deprecated and never decision-usable; resolved_breadth preserves the canonical index-summary breadth owner and scope.",
-            "Hot groups use current StockMaster industry/category membership.",
+            "Hot groups are a compatibility projection of the canonical scheduler-owned intraday group snapshot.",
         ],
     }
 
@@ -1142,23 +1174,24 @@ def build_dashboard_moving_average_series(
     points: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows = list(points)
-    closes = [_number(row.get("close")) for row in rows]
     periods = (5, 20, 60)
     output: list[dict[str, Any]] = []
-    for index, row in enumerate(rows):
+    eligible_closes: list[float] = []
+    for row in rows:
         raw_time = row.get("time")
         item: dict[str, Any] = {
             "time": raw_time.isoformat()
             if isinstance(raw_time, (date, datetime))
             else str(raw_time or "")
         }
+        close = _number(row.get("close"))
+        if row.get("indicator_eligible") is not False and close is not None:
+            eligible_closes.append(close)
         for period in periods:
-            start = index - period + 1
-            window = closes[start : index + 1] if start >= 0 else []
+            window = eligible_closes[-period:]
             item[f"ma{period}"] = (
-                sum(float(value) for value in window) / period
+                sum(window) / period
                 if len(window) == period
-                and all(value is not None for value in window)
                 else None
             )
         output.append(item)
@@ -1222,11 +1255,12 @@ def _dashboard_intraday_chart(
         dated_points.append((point_time.date(), point))
 
     trade_date = max((item[0] for item in dated_points), default=None)
-    session_points = [
+    full_session_points = [
         point
         for point_date, point in dated_points
         if point_date == trade_date
-    ][-bars:]
+    ]
+    session_points = full_session_points[-bars:]
     source = str(history.get("source") or "market_intraday_bar_cache")
     volume_semantics = str(
         history.get("volume_semantics")
@@ -1246,13 +1280,13 @@ def _dashboard_intraday_chart(
     return chart, {
         "source": source,
         "previous_close": None,
-        "point_count": len(session_points),
+        "point_count": len(full_session_points),
         "points": [
             {
                 **point,
                 "price": point.get("close"),
             }
-            for point in session_points
+            for point in full_session_points
         ],
     }
 

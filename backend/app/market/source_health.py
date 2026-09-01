@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 import json
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Query, Session
 
 from app.db.models import (
@@ -558,6 +559,77 @@ def _stock_intraday_entry(
         phase=str(calendar_status.get("phase") or "unknown"),
         stale_after_seconds=stale_after_seconds,
     )
+    coverage_query = query
+    if latest is not None:
+        coverage_query = coverage_query.filter(
+            MarketIntradayBar.provider == latest.provider,
+            MarketIntradayBar.source == latest.source,
+        )
+    if latest_data_date is not None:
+        coverage_query = coverage_query.filter(
+            func.date(MarketIntradayBar.bar_time) == latest_data_date.isoformat()
+        )
+    coverage_count, first_bar_time, last_bar_time = coverage_query.with_entities(
+        func.count(MarketIntradayBar.id),
+        func.min(MarketIntradayBar.bar_time),
+        func.max(MarketIntradayBar.bar_time),
+    ).one()
+    first_bar_at = _taiwan_observed_at(first_bar_time)
+    last_bar_at = _taiwan_observed_at(last_bar_time)
+    session_start_covered = bool(
+        first_bar_at is not None and first_bar_at.time() <= time(9, 1)
+    )
+    phase = str(calendar_status.get("phase") or "unknown")
+    local_current_time = current_time.astimezone(TAIWAN_TZ)
+    active_same_session = bool(
+        latest_data_date == local_current_time.date()
+        and phase == "regular"
+        and local_current_time.time() < time(13, 25)
+    )
+    expected_end_minutes = 13 * 60 + 24
+    if active_same_session:
+        expected_end_minutes = min(
+            local_current_time.hour * 60 + local_current_time.minute - 1,
+            expected_end_minutes,
+        )
+    expected_point_count = max(expected_end_minutes - 9 * 60 + 1, 0)
+    expected_end_clock = (
+        time(expected_end_minutes // 60, expected_end_minutes % 60)
+        if expected_point_count > 0
+        else None
+    )
+    expected_window_end_covered = bool(
+        last_bar_at is not None
+        and expected_end_clock is not None
+        and last_bar_at.time() >= expected_end_clock
+    )
+    full_session_end_covered = bool(
+        last_bar_at is not None and last_bar_at.time() >= time(13, 24)
+    )
+    gap_count = max(expected_point_count - int(coverage_count or 0), 0)
+    expected_window_complete = bool(
+        session_start_covered and expected_window_end_covered and gap_count == 0
+    )
+    coverage_status = (
+        "missing"
+        if not coverage_count
+        else "complete_session"
+        if expected_window_complete and full_session_end_covered
+        else "complete_prefix"
+        if expected_window_complete
+        else "sparse"
+        if session_start_covered and expected_window_end_covered
+        else "trailing_window"
+        if not session_start_covered and expected_window_end_covered
+        else "partial_prefix"
+        if session_start_covered
+        else "partial_window"
+    )
+    if required and coverage_status not in {"complete_prefix", "complete_session"} and ok:
+        status_value = "partial"
+        ok = False
+        data_quality = "partial"
+        reason = "Intraday evidence is current but does not cover the expected session window."
     return TaiwanSourceHealthEntry(
         resource="market_intraday_bar_1m",
         label="Taiwan stock intraday 1m bars",
@@ -585,6 +657,27 @@ def _stock_intraday_entry(
             "requested_symbol_count": 1,
             "current_count": 1 if ok else 0,
             "missing_symbols": [stock_id] if row_count <= 0 else [],
+            "series_coverage": {
+                "status": coverage_status,
+                "provider": getattr(latest, "provider", None) if latest else None,
+                "source": getattr(latest, "source", None) if latest else None,
+                "trade_date": latest_data_date.isoformat() if latest_data_date else None,
+                "observed_bar_count": int(coverage_count or 0),
+                "expected_point_count_approx": expected_point_count,
+                "expected_full_session_point_count_approx": 265,
+                "first_bar_at": first_bar_at.isoformat() if first_bar_at else None,
+                "last_bar_at": last_bar_at.isoformat() if last_bar_at else None,
+                "session_start_covered": session_start_covered,
+                "session_end_covered": full_session_end_covered,
+                "expected_window_end_covered": expected_window_end_covered,
+                "opening_covered": session_start_covered,
+                "current_window_complete": expected_window_complete,
+                "continuous_session_covered": coverage_status == "complete_session",
+                "session_volume_complete": coverage_status == "complete_session",
+                "current_cumulative_volume_complete": expected_window_complete,
+                "gap_count": gap_count,
+                "coverage_semantics": "resolved_provider_observed_regular_minute_window",
+            },
         },
     )
 
@@ -622,17 +715,19 @@ def _stock_intraday_universe_entry(
         observed_at = _taiwan_observed_at(
             symbol_latest.bar_time if symbol_latest else None
         )
-        latest_data_date = observed_at.date() if observed_at else None
-        status_value, ok, _quality, reason, age_seconds = (
-            _realtime_observation_status(
-                row_count=symbol_row_count,
-                latest_data_date=latest_data_date,
-                expected_data_date=expected_data_date,
-                observed_at=observed_at,
-                current_time=current_time,
-                phase=phase,
-                stale_after_seconds=stale_after_seconds,
-            )
+        symbol_health = _stock_intraday_entry(
+            db,
+            stock_id=symbol,
+            calendar_status=calendar_status,
+            current_time=current_time,
+            required=required,
+        )
+        status_value = symbol_health.status
+        ok = symbol_health.ok
+        reason = symbol_health.reason
+        age_seconds = symbol_health.age_seconds
+        series_coverage = symbol_health.health_dimensions.get(
+            "series_coverage"
         )
         target_statuses.append(
             {
@@ -645,6 +740,7 @@ def _stock_intraday_universe_entry(
                 ),
                 "age_seconds": age_seconds,
                 "reason": reason,
+                "series_coverage": series_coverage,
             }
         )
         if observed_at is not None and (

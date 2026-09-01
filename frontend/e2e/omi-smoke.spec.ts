@@ -2296,7 +2296,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     return true;
   }
 
-  await page.route("**/omi-data/**", async (route) => {
+  const handleOmiApiRoute = async (route: Route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
     const method = route.request().method();
@@ -2497,7 +2497,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
             low: 861,
             bar_type: "official_close_marker",
             display_eligible: true,
-            indicator_eligible: true,
+            indicator_eligible: false,
           },
         ],
       });
@@ -3648,7 +3648,9 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     }
 
     throw new Error(`Unhandled mocked OMI API route: ${route.request().method()} ${path}`);
-  });
+  };
+  await page.route("**/omi-data/**", handleOmiApiRoute);
+  await page.route("**/api/**", handleOmiApiRoute);
 }
 
 test.describe("OMI dashboard smoke", () => {
@@ -3949,6 +3951,178 @@ test.describe("OMI dashboard smoke", () => {
     await statusToggle.click();
     await expect(sidebar.getByText(new RegExp(timeoutDetail))).toBeVisible();
     await expect(page.getByRole("heading", { name: /^AAPL(?:\s|$)/ })).toBeVisible();
+  });
+
+  test("US Today keeps a missing current quote distinct from the previous close", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path }) => {
+        if (!path.endsWith("/us-market/intraday/AAPL")) return null;
+
+        return {
+          body: {
+            ...usIntradayResponse("AAPL"),
+            previous_close: 417.52,
+            previous_close_trade_date: "2026-08-28",
+            previous_close_status: "current",
+            session_phase: null,
+            market_phase: "pre_market",
+            change_reference_price: 417.52,
+            change_reference_trade_date: "2026-08-28",
+            change_reference_type: "prior_regular_close",
+            capability_expectation: {
+              "quote.snapshot": {
+                expectation: "required",
+                outcome: "expected_but_missing",
+              },
+            },
+            point_count: 0,
+            points: [],
+            current_observation: null,
+          },
+        };
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const detailPanel = page.getByTestId("us-stock-kline-panel");
+    const todayTimeframe = detailPanel.getByRole("button", { name: "今日", exact: true });
+    await expect(async () => {
+      await todayTimeframe.click();
+      await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/, {
+        timeout: 750,
+      });
+    }).toPass({ timeout: 5_000 });
+
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("-");
+    await expect(page.getByTestId("us-today-quote-unavailable")).toContainText(
+      "即時報價異常，尚未取得"
+    );
+    await expect(page.getByTestId("us-today-quote-unavailable")).toContainText(
+      "前收 417.52 · 2026-08-28"
+    );
+    await expect(detailPanel).toContainText("盤前 · regular 0 / extended 0");
+  });
+
+  test("US Today keeps headline truth stable across chart scopes and exposes coverage", async ({
+    page,
+  }) => {
+    const extendedPoints = [
+      {
+        time: "2026-08-31T08:52:00-04:00",
+        price: 416.7,
+        open: 416.6,
+        high: 416.8,
+        low: 416.5,
+        volume: 900,
+        session: "pre_market",
+      },
+      {
+        time: "2026-08-31T08:53:00-04:00",
+        price: 416.74,
+        open: 416.7,
+        high: 416.8,
+        low: 416.65,
+        volume: 1000,
+        session: "pre_market",
+      },
+    ];
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path, url }) => {
+        if (!path.endsWith("/us-market/intraday/AAPL")) return null;
+
+        const scope = url.searchParams.get("session_scope") ?? "regular";
+        const points = scope === "regular" ? [] : extendedPoints;
+        return {
+          body: {
+            ...usIntradayResponse("AAPL"),
+            session_scope: scope,
+            session_phase: null,
+            market_phase: "regular",
+            point_count: points.length,
+            points,
+            regular_point_count: 0,
+            extended_point_count: 2,
+            has_extended_hours: true,
+            session_coverage: {
+              trade_date: "2026-08-31",
+              regular_point_count: 0,
+              extended_point_count: 2,
+              has_extended_hours: true,
+              requested_scope: scope,
+              requested_point_count: points.length,
+            },
+            capability_expectation: {
+              "quote.snapshot": {
+                expectation: "required",
+                outcome: "stale",
+              },
+              "intraday.bars": {
+                expectation: "required",
+                outcome: "stale",
+              },
+            },
+            current_observation: {
+              value: 416.74,
+              observed_at: "2026-08-31T08:53:00-04:00",
+              price_semantics: "resolved_intraday_bar_close",
+              provider: "yahoo_chart",
+              source: "yahoo.chart.1m",
+              freshness_status: "stale",
+              decision_usable: false,
+              change_reference_price: 417.52,
+            },
+            change_reference_price: 417.52,
+            change_reference_trade_date: "2026-08-28",
+            change_reference_type: "prior_regular_close",
+            as_of: "2026-08-31T08:53:00-04:00",
+            warnings: ["READ_POLICY_FORBIDS_ACQUISITION"],
+          },
+        };
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const detailPanel = page.getByTestId("us-stock-kline-panel");
+    const todayTimeframe = detailPanel.getByRole("button", { name: "今日", exact: true });
+    await expect(async () => {
+      await todayTimeframe.click();
+      await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/, {
+        timeout: 750,
+      });
+    }).toPass({ timeout: 5_000 });
+
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("416.74");
+    await expect(detailPanel).toContainText("盤中 · regular 0 / extended 2");
+    await expect(page.getByTestId("us-intraday-coverage-notice")).toContainText(
+      "盤中資料尚未取得；盤前／盤後已有 2 筆"
+    );
+    await expect(detailPanel).toContainText(
+      "此畫面只讀本機快取；行情由背景更新服務負責取得。"
+    );
+    await expect(detailPanel).not.toContainText("READ_POLICY_FORBIDS_ACQUISITION");
+
+    await detailPanel.getByRole("button", { name: "全部", exact: true }).click();
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("416.74");
+    await expect(page.getByTestId("intraday-trend-chart")).toHaveAttribute(
+      "data-rendered-point-count",
+      "2"
+    );
+    await expect(detailPanel).toContainText("每 5 秒檢查本機快取");
+
+    await detailPanel.getByRole("button", { name: "日K", exact: true }).click();
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("416.74");
   });
 
   test("US professional indicator menu uses the shared layout and parameter controls", async ({
@@ -4792,7 +4966,7 @@ test.describe("OMI dashboard smoke", () => {
                   low: 103,
                   bar_type: "official_close_marker",
                   display_eligible: true,
-                  indicator_eligible: true,
+                  indicator_eligible: false,
                 },
               ],
             },
@@ -4903,7 +5077,7 @@ test.describe("OMI dashboard smoke", () => {
                   low: 103,
                   bar_type: "official_close_marker",
                   display_eligible: true,
-                  indicator_eligible: true,
+                  indicator_eligible: false,
                 },
               ],
             },
@@ -5191,6 +5365,66 @@ test.describe("OMI dashboard smoke", () => {
         );
       })
       .toBe(true);
+  });
+
+  test("Taiwan quote depth shows mixed MIS fallback lineage and a truthful closed state", async ({
+    page,
+  }) => {
+    const completedQuote = {
+      ...quoteDepthResponse("2330"),
+      provider: "kgi_superpy",
+      primary_provider: "kgi_superpy",
+      source: "kgi_superpy_quote_all",
+      session_phase: "post_close_snapshot",
+      presentation_session_state: "completed",
+      presentation_trade_date: "2026-06-15",
+      phase_label: "收盤快照",
+      bid_levels: [],
+      ask_levels: [],
+      depth_available: false,
+      data_core_components: {
+        "quote.snapshot": {
+          provider: "kgi_superpy",
+          source: "kgi_superpy_quote_all",
+        },
+        "quote.order_book": {
+          provider: "twse_mis",
+          source: "twse_mis_quote_depth",
+          resolved_health: {
+            status: "fallback",
+            fallback_used: true,
+          },
+        },
+      },
+      freshness: {
+        ...quoteDepthResponse("2330").freshness,
+        status: "final_snapshot",
+        is_live: false,
+        message: "Completed session snapshot",
+      },
+    };
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) =>
+        path.endsWith("/market/quote-depth/2330")
+          ? { body: completedQuote }
+          : null,
+    });
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const panel = page.getByTestId("quote-depth-panel");
+    await expect(panel).toContainText(
+      "五檔 TWSE MIS · 成交 KGI SUPER PY · 備援"
+    );
+    await expect(page.getByTestId("quote-depth-market-closed")).toContainText(
+      "五檔委託簿目前不適用"
+    );
+    await expect(page.getByTestId("quote-recent-trades-status")).toHaveText(
+      "已收盤"
+    );
+    await expect(page.getByTestId("quote-depth-bid-row")).toHaveCount(0);
+    await expect(page.getByTestId("quote-depth-ask-row")).toHaveCount(0);
   });
 
   test("Taiwan quote depth renders realtime stream before the GET baseline completes", async ({

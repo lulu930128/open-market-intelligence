@@ -82,6 +82,7 @@ import type {
   IntradayTrendPoint,
   IntradayTrendResponse,
   StockVolumePace,
+  USCapabilityExpectation,
   USIntradaySourceStatus,
   USMarketResearchRead,
   USCompanyProfileRead,
@@ -366,6 +367,7 @@ type USSupplementalData = {
 
 type USIntradayMeta = {
   sessionPhase: string | null;
+  marketPhase: string | null;
   regularPointCount: number;
   extendedPointCount: number;
   hasExtendedHours: boolean;
@@ -375,11 +377,17 @@ type USIntradayMeta = {
   barSourceStatus: USIntradaySourceStatus | null;
   currentPrice: number | null;
   currentPreviousClose: number | null;
+  currentPreviousCloseTradeDate: string | null;
+  changeReferencePrice: number | null;
+  changeReferenceTradeDate: string | null;
+  changeReferenceType: string | null;
   currentObservedAt: string | null;
+  quoteExpectation: USCapabilityExpectation | null;
 };
 
 const emptyUsIntradayMeta: USIntradayMeta = {
   sessionPhase: null,
+  marketPhase: null,
   regularPointCount: 0,
   extendedPointCount: 0,
   hasExtendedHours: false,
@@ -389,23 +397,98 @@ const emptyUsIntradayMeta: USIntradayMeta = {
   barSourceStatus: null,
   currentPrice: null,
   currentPreviousClose: null,
+  currentPreviousCloseTradeDate: null,
+  changeReferencePrice: null,
+  changeReferenceTradeDate: null,
+  changeReferenceType: null,
   currentObservedAt: null,
+  quoteExpectation: null,
 };
 
 function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMeta {
+  const sessionCoverage = response.session_coverage;
+  const quoteExpectation =
+    response.capability_expectation?.["quote.snapshot"] ?? null;
+  const barExpectation =
+    response.capability_expectation?.["intraday.bars"] ?? null;
+  const currentExpectation =
+    response.current_observation?.price_semantics === "resolved_quote_last_trade"
+      ? quoteExpectation
+      : barExpectation;
+  const projectedCurrentPrice =
+    currentExpectation &&
+    !["ready", "stale"].includes(currentExpectation.outcome)
+      ? null
+      : response.current_observation?.value ?? null;
   return {
     sessionPhase: response.session_phase ?? null,
-    regularPointCount: response.regular_point_count ?? response.points.length,
-    extendedPointCount: response.extended_point_count ?? 0,
-    hasExtendedHours: Boolean(response.has_extended_hours),
+    marketPhase: response.market_phase ?? null,
+    regularPointCount:
+      sessionCoverage?.regular_point_count ??
+      response.regular_point_count ??
+      response.points.length,
+    extendedPointCount:
+      sessionCoverage?.extended_point_count ?? response.extended_point_count ?? 0,
+    hasExtendedHours: Boolean(
+      sessionCoverage?.has_extended_hours ?? response.has_extended_hours
+    ),
     warnings: response.warnings ?? [],
     volumePace: response.volume_pace ?? null,
     currentSourceStatus: response.current_source_status ?? null,
     barSourceStatus: response.bar_source_status ?? response.source_status ?? null,
-    currentPrice: response.current_observation?.value ?? null,
+    currentPrice: projectedCurrentPrice,
     currentPreviousClose: response.current_observation?.previous_close ?? null,
+    currentPreviousCloseTradeDate: response.previous_close_trade_date ?? null,
+    changeReferencePrice:
+      response.current_observation?.change_reference_price ??
+      response.change_reference_price ??
+      null,
+    changeReferenceTradeDate:
+      response.current_observation?.change_reference_trade_date ??
+      response.change_reference_trade_date ??
+      null,
+    changeReferenceType:
+      response.current_observation?.change_reference_type ??
+      response.change_reference_type ??
+      null,
     currentObservedAt: response.current_observation?.observed_at ?? null,
+    quoteExpectation,
   };
+}
+
+function currentQuoteUnavailableMessageKey(
+  expectation: USCapabilityExpectation | null
+) {
+  if (expectation?.outcome === "valid_empty") {
+    return "usStockDetail.currentQuote.noTrade";
+  }
+  if (expectation?.outcome === "not_expected") {
+    return "usStockDetail.currentQuote.notExpected";
+  }
+  if (
+    expectation?.outcome === "expected_but_missing" &&
+    expectation.expectation === "required"
+  ) {
+    return "usStockDetail.currentQuote.requiredMissing";
+  }
+  if (expectation?.outcome === "expected_but_missing") {
+    return "usStockDetail.currentQuote.expectedMissing";
+  }
+  return "usStockDetail.currentQuote.unavailable";
+}
+
+function intradayWarningMessage(
+  t: TranslationFunction,
+  warnings: string[]
+) {
+  for (const warning of warnings) {
+    if (warning === "PRE_RESOLUTION_SATISFIED") continue;
+    if (warning === "READ_POLICY_FORBIDS_ACQUISITION") {
+      return t("usStockDetail.extendedHours.cacheOnlyPolicy");
+    }
+    return warning;
+  }
+  return null;
 }
 
 type IntradaySourcePresentation = {
@@ -1042,29 +1125,11 @@ export default function USStockDetailPanel({
   ]);
   const latestToday = visibleTodayTrend[visibleTodayTrend.length - 1] ?? null;
   const latestPoint = chartData[chartData.length - 1] ?? null;
-  const previousPoint = chartData[chartData.length - 2] ?? null;
   const latestProfessionalPoint = professionalChartData[professionalChartData.length - 1] ?? null;
   const displayDate =
-    timeframe === "today"
-      ? visibleTodayIntradayMeta.currentObservedAt ?? latestToday?.time ?? latestPoint?.time ?? null
-      : latestPoint?.time ?? null;
-  const latestClose =
-    timeframe === "today"
-      ? visibleTodayIntradayMeta.currentPrice ?? latestToday?.price ?? latestPoint?.close ?? null
-      : latestPoint?.close ?? null;
-  const previousClose =
-    timeframe === "today"
-      ? visibleTodayIntradayMeta.currentPreviousClose ??
-        (visibleTodayPreviousCloseStatus === "current"
-        ? visibleTodayPreviousClose
-        : null)
-      : timeframe === "daily"
-        ? chartMatchesSelection && chart?.previous_close_status === "current"
-          ? chart.previous_close
-          : null
-        : chartMatchesSelection && chart?.continuity_status === "complete"
-          ? previousPoint?.close ?? null
-          : null;
+    visibleTodayIntradayMeta.currentObservedAt ?? latestToday?.time ?? latestPoint?.time ?? null;
+  const latestClose = visibleTodayIntradayMeta.currentPrice;
+  const previousClose = visibleTodayIntradayMeta.changeReferencePrice;
   const change =
     latestClose !== null && previousClose !== null
       ? latestClose - previousClose
@@ -1073,6 +1138,18 @@ export default function USStockDetailPanel({
     change !== null && previousClose !== null && previousClose !== 0
       ? (change / previousClose) * 100
       : null;
+  const currentQuoteUnavailable = latestClose === null;
+  const todayHistoricalReferencePrice =
+    visibleTodayIntradayMeta.changeReferencePrice ??
+    visibleTodayIntradayMeta.currentPreviousClose ??
+    (visibleTodayPreviousCloseStatus === "current"
+      ? visibleTodayPreviousClose
+      : null);
+  const todayPreviousCloseReferenceDate =
+    visibleTodayIntradayMeta.changeReferenceTradeDate ??
+    visibleTodayIntradayMeta.currentPreviousCloseTradeDate ??
+    latestPoint?.time ??
+    null;
   const visibleMarketResearch =
     usSymbolKey(marketResearch?.symbol) === usSymbolKey(selectedSymbol)
       ? marketResearch
@@ -1291,16 +1368,35 @@ export default function USStockDetailPanel({
         : t("usStockDetail.selectStockPrompt");
   const activeIntradaySession = usIntradaySessionConfigForScope(intradaySessionScope);
   const intradaySessionMetaLine = t("usStockDetail.extendedHours.meta", {
-    phase: sessionPhaseLabel(t, visibleTodayIntradayMeta.sessionPhase),
+    phase: sessionPhaseLabel(
+      t,
+      visibleTodayIntradayMeta.sessionPhase ?? visibleTodayIntradayMeta.marketPhase
+    ),
     regular: visibleTodayIntradayMeta.regularPointCount,
     extended: visibleTodayIntradayMeta.extendedPointCount,
   });
+  const intradayCoverageNotice =
+    intradaySessionScope === "regular" &&
+    chartLoadState === "success" &&
+    visibleTodayTrend.length === 0 &&
+    visibleTodayIntradayMeta.extendedPointCount > 0
+      ? t("usStockDetail.extendedHours.regularMissingExtendedAvailable", {
+          count: visibleTodayIntradayMeta.extendedPointCount,
+        })
+      : intradaySessionScope === "extended" &&
+          chartLoadState === "success" &&
+          visibleTodayTrend.length === 0 &&
+          visibleTodayIntradayMeta.regularPointCount > 0
+        ? t("usStockDetail.extendedHours.extendedMissingRegularAvailable", {
+            count: visibleTodayIntradayMeta.regularPointCount,
+          })
+        : null;
   const intradaySessionWarning =
     intradaySessionScope !== "regular" &&
     chartLoadState === "success" &&
     !visibleTodayIntradayMeta.hasExtendedHours
       ? t("usStockDetail.extendedHours.noExtendedData")
-      : visibleTodayIntradayMeta.warnings[0] ?? null;
+      : intradayWarningMessage(t, visibleTodayIntradayMeta.warnings);
   const visibleCurrentSourcePresentation = intradaySourcePresentation(
     t,
     visibleTodayIntradayMeta.currentSourceStatus
@@ -1600,27 +1696,31 @@ export default function USStockDetailPanel({
             return;
           }
 
-          const chartDataResponse = await fetchJson<USOhlcChartRead>(
-            `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
-            {
-              timeframe: nextTimeframe,
-              bars: barsByTimeframe[nextTimeframe],
-              ensure_history: false,
-              outputsize: "full",
-            }
-          );
+          const [chartDataResponse, currentData] = await Promise.all([
+            fetchJson<USOhlcChartRead>(
+              `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
+              {
+                timeframe: nextTimeframe,
+                bars: barsByTimeframe[nextTimeframe],
+                ensure_history: false,
+                outputsize: "full",
+              }
+            ),
+            fetchUsIntradayTrend(symbol, intradaySessionScope),
+          ]);
 
           if (requestSeq.current !== requestId) return;
           if (chartDataResponse.backfill) onDailyPricesChangedRef.current?.();
 
           setSelectedStock(null);
           setChart(chartDataResponse);
-          setTodayTrend([]);
-          setTodayPreviousClose(null);
-          setTodayPreviousCloseStatus("unknown");
-          setTodaySource("unavailable");
-          setTodayUpdatedAt(null);
-          setTodayIntradayMeta(emptyUsIntradayMeta);
+          setTodayTrend(currentData.points);
+          setTodayPreviousClose(currentData.previous_close);
+          setTodayPreviousCloseStatus(currentData.previous_close_status ?? "unknown");
+          setTodaySource(currentData.source);
+          setTodayUpdatedAt(currentData.current_observation?.observed_at ?? null);
+          setTodayIntradayMeta(intradayMetaFromResponse(currentData));
+          publishIntradaySourceStatus(symbol, currentData);
           setFactRows([]);
           setFundamentalSummary(null);
           setFinancialContract(null);
@@ -1732,10 +1832,7 @@ export default function USStockDetailPanel({
           return;
         }
 
-        const [
-          stockData,
-          chartDataResponse,
-        ] = await Promise.all([
+        const [stockData, chartDataResponse, currentData] = await Promise.all([
           fetchJson<USStockMasterRead>(
             `/api/us-market/stocks/${encodeURIComponent(symbol)}`
           ),
@@ -1748,6 +1845,7 @@ export default function USStockDetailPanel({
               outputsize: nextTimeframe === "monthly" ? "full" : "compact",
             }
           ),
+          fetchUsIntradayTrend(symbol, intradaySessionScope),
         ]);
 
         if (requestSeq.current !== requestId) return;
@@ -1755,12 +1853,13 @@ export default function USStockDetailPanel({
 
         setSelectedStock(stockData);
         setChart(chartDataResponse);
-        setTodayTrend([]);
-        setTodayPreviousClose(null);
-        setTodayPreviousCloseStatus("unknown");
-        setTodaySource("unavailable");
-        setTodayUpdatedAt(null);
-        setTodayIntradayMeta(emptyUsIntradayMeta);
+        setTodayTrend(currentData.points);
+        setTodayPreviousClose(currentData.previous_close);
+        setTodayPreviousCloseStatus(currentData.previous_close_status ?? "unknown");
+        setTodaySource(currentData.source);
+        setTodayUpdatedAt(currentData.current_observation?.observed_at ?? null);
+        setTodayIntradayMeta(intradayMetaFromResponse(currentData));
+        publishIntradaySourceStatus(symbol, currentData);
         setFactRows([]);
         setFundamentalSummary(null);
         setFinancialContract(null);
@@ -1967,7 +2066,7 @@ export default function USStockDetailPanel({
   ]);
 
   useEffect(() => {
-    if (!selectedSymbol || timeframe !== "today" || loadState !== "success") return;
+    if (!selectedSymbol || loadState !== "success") return;
 
     let cancelled = false;
     let intradayTimer: number | undefined;
@@ -3513,11 +3612,11 @@ export default function USStockDetailPanel({
               <div className="mt-1 text-sm text-omi-text-muted">
                 {selectedSubtitle}
               </div>
-              {((timeframe === "today" && visibleCurrentSourcePresentation) ||
+              {(visibleCurrentSourcePresentation ||
                 upcomingCorporateEvents.length > 0 ||
                 corporateEventSourceUncertain) ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  {timeframe === "today" && visibleCurrentSourcePresentation ? (
+                  {visibleCurrentSourcePresentation ? (
                     <div
                       data-testid="us-intraday-source-status"
                       data-source-role="current_observation"
@@ -3568,17 +3667,48 @@ export default function USStockDetailPanel({
             </div>
 
             <div className="shrink-0 text-right">
-              <PriceUpdatePulse
-                value={latestClose}
-                direction={change}
-                resetKey={`${selectedSymbol ?? "empty"}:${timeframe}`}
-                className="text-3xl font-black text-omi-text-strong"
-              >
-                {formatNumber(latestClose)}
-              </PriceUpdatePulse>
-              <div className={`text-sm font-bold ${valueTone(changePct)}`}>
-                {formatNumber(change)} / {formatPct(changePct)}
+              <div data-testid="us-stock-header-price">
+                <PriceUpdatePulse
+                  value={latestClose}
+                  direction={change}
+                  resetKey={`${selectedSymbol ?? "empty"}:current-observation`}
+                  className="text-3xl font-black text-omi-text-strong"
+                >
+                  {formatNumber(latestClose)}
+                </PriceUpdatePulse>
               </div>
+              {currentQuoteUnavailable ? (
+                <div
+                  data-testid="us-today-quote-unavailable"
+                  className="mt-1 text-xs font-semibold text-omi-text-muted"
+                >
+                  <div>
+                    {t(
+                      currentQuoteUnavailableMessageKey(
+                        visibleTodayIntradayMeta.quoteExpectation
+                      )
+                    )}
+                  </div>
+                  {todayHistoricalReferencePrice !== null ? (
+                    <div>
+                      {t(
+                        visibleTodayIntradayMeta.changeReferenceType ===
+                          "current_day_regular_close"
+                          ? "usStockDetail.currentQuote.currentDayRegularCloseReference"
+                          : "usStockDetail.currentQuote.previousCloseReference",
+                        {
+                          price: formatNumber(todayHistoricalReferencePrice),
+                          date: formatDate(todayPreviousCloseReferenceDate),
+                        }
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className={`text-sm font-bold ${valueTone(changePct)}`}>
+                  {formatNumber(change)} / {formatPct(changePct)}
+                </div>
+              )}
               <div className="mt-3 inline-flex border border-omi-border-subtle bg-omi-surface-subtle p-1">
                 {timeframeOptions.map((option) => (
                   <button
@@ -3720,6 +3850,14 @@ export default function USStockDetailPanel({
                     {intradaySessionWarning}
                   </div>
                 ) : null}
+                {intradayCoverageNotice ? (
+                  <div
+                    className="mt-2 text-xs text-omi-accent"
+                    data-testid="us-intraday-coverage-notice"
+                  >
+                    {intradayCoverageNotice}
+                  </div>
+                ) : null}
               </div>
               <IntradayTrendChart
                 points={visibleTodayTrend}
@@ -3734,6 +3872,7 @@ export default function USStockDetailPanel({
                 session={activeIntradaySession}
                 revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${visibleTodayTrend.length}`}
                 refreshIntervalMs={US_INTRADAY_REFRESH_MS}
+                refreshMode="cache_poll"
                 updatedAt={visibleTodayUpdatedAt}
                 priceLimitEnabled={false}
               />

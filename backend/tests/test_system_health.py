@@ -103,6 +103,24 @@ class SystemHealthTests(unittest.TestCase):
         self.assertEqual(runtime["us_daily_acquisition_scope"], "none")
         self.assertIn("exceeds max_symbols=2", runtime["us_daily_acquisition_limitations"][0])
 
+    def test_us_intraday_health_reports_owned_flags_without_core_scheduler(self) -> None:
+        with (
+            unittest.mock.patch.object(settings, "enable_scheduler", False),
+            unittest.mock.patch.object(settings, "enable_us_intraday_materializer", True),
+            unittest.mock.patch.object(settings, "enable_us_index_quote_materializer", True),
+            unittest.mock.patch.object(settings, "enable_us_index_intraday_materializer", True),
+            unittest.mock.patch.object(settings, "enable_us_quote_retention_scheduler", True),
+        ):
+            materializer = health_check()["runtime"]["us_intraday_materializer"]
+
+        self.assertTrue(materializer["enabled"])
+        self.assertTrue(materializer["equity_lane"]["enabled"])
+        self.assertTrue(materializer["index_lane"]["enabled"])
+        self.assertTrue(materializer["index_lane"]["quote_enabled"])
+        self.assertTrue(materializer["index_lane"]["intraday_enabled"])
+        self.assertEqual(materializer["freshness_contract"]["quote_basis"], "fetched_time")
+        self.assertTrue(materializer["retention_enabled"])
+
     def test_liveness_check_does_not_depend_on_runtime_or_database(self) -> None:
         payload = liveness_check()
 

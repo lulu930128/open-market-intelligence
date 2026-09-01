@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -584,6 +584,61 @@ class QueryPlanContractTests(unittest.TestCase):
         market_service.get_latest_stock_daily_price.assert_called_once()
         for reader in excluded.values():
             reader.assert_not_called()
+
+    def test_released_official_daily_does_not_treat_previous_session_as_current(self) -> None:
+        missing: list[str] = []
+        warnings: list[str] = []
+        state = taiwan_stock._apply_taiwan_official_daily_release_truth(
+            latest_daily=SimpleNamespace(trade_date=date(2026, 8, 28)),
+            calendar_status={
+                "release_windows": {
+                    "market_daily_price": {
+                        "status": "released",
+                        "is_released": True,
+                        "expected_trade_date": "2026-08-31",
+                    }
+                }
+            },
+            missing=missing,
+            warnings=warnings,
+        )
+
+        self.assertEqual(state["status"], "released_but_unavailable")
+        self.assertTrue(state["unavailable_after_release"])
+        self.assertEqual(missing, ["market_daily_price"])
+        self.assertTrue(
+            any(
+                warning.startswith("TW_OFFICIAL_DAILY_RELEASED_BUT_UNAVAILABLE")
+                for warning in warnings
+            )
+        )
+
+    def test_current_session_reference_uses_latest_completed_close(self) -> None:
+        quote = {
+            "source": "market_daily_price",
+            "provider": "local_daily_close",
+            "trade_date": "2026-08-28",
+            "previous_close": 2410.0,
+        }
+
+        resolved = taiwan_stock._apply_taiwan_current_price_contract(
+            quote=quote,
+            intraday_bars={},
+            latest_daily=SimpleNamespace(
+                trade_date=date(2026, 8, 28),
+                close_price=2420.0,
+            ),
+            calendar_status={
+                "date": "2026-08-31",
+                "previous_trading_day": "2026-08-31",
+                "is_trading_day": True,
+                "phase": "post_close",
+            },
+            checked_at=datetime(2026, 8, 31, 15, 20, tzinfo=timezone(timedelta(hours=8))),
+        )
+
+        self.assertEqual(resolved["source_kind"], "previous_close_reference")
+        self.assertEqual(resolved["reference_price"], 2420.0)
 
     def test_broker_branch_reader_does_not_load_fundamental_or_technical_domains(self) -> None:
         stock = SimpleNamespace(stock_id="2330", stock_name="台積電", market="TWSE")

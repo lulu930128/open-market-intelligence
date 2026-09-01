@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 from app.market_data.contracts import AuthorityClass, Market, MarketSession
 from app.market_data.provider_catalog import (
@@ -13,12 +14,15 @@ from app.market_data.provider_catalog import (
 
 
 TW_CURRENT_INDEX_DATASET_ID = "tw.market_index.current"
+TW_INDEX_INTRADAY_DATASET_ID = "tw.market_index.intraday"
 TW_CURRENT_BREADTH_DATASET_ID = "tw.market_breadth.current"
 TW_CURRENT_INDEX_CAPABILITY_ID = "market.index.snapshot"
+TW_INDEX_INTRADAY_CAPABILITY_ID = "market.index.intraday"
 TW_CURRENT_BREADTH_CAPABILITY_ID = "market.breadth.current"
 FUGLE_INDEX_PREVIOUS_CLOSE_LINEAGE_LIMITATION = (
     "FUGLE_INDEX_PREVIOUS_CLOSE_INPUT_LINEAGE_NOT_PERSISTED"
 )
+TW_CURRENT_INDEX_MAX_ABS_CHANGE_RATIO = Decimal("0.20")
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +33,7 @@ class TaiwanCurrentSourceBinding:
     source_type: str = "api"
     auth_type: str = "none"
     persistent_limitations: tuple[str, ...] = ()
+    index_scope_symbols: tuple[tuple[str, str], ...] = ()
 
 
 def _descriptor(
@@ -84,6 +89,13 @@ _LIVE_SESSIONS = (
     MarketSession.UNKNOWN,
 )
 
+# Fugle ticks remain transport evidence after close, but the materializer
+# deliberately refuses to promote them into a completed-session observation.
+# Keep the executable descriptor aligned with that boundary.
+_FUGLE_MATERIALIZABLE_SESSIONS = tuple(
+    session for session in _LIVE_SESSIONS if session is not MarketSession.POST_CLOSE
+)
+
 FUGLE_CURRENT_INDEX_DESCRIPTOR = _descriptor(
     provider="fugle_marketdata",
     capability=TW_CURRENT_INDEX_CAPABILITY_ID,
@@ -93,7 +105,7 @@ FUGLE_CURRENT_INDEX_DESCRIPTOR = _descriptor(
     scopes=("TAIEX",),
     priority=5,
     live=True,
-    sessions=_LIVE_SESSIONS,
+    sessions=_FUGLE_MATERIALIZABLE_SESSIONS,
     acquisition_modes=(AcquisitionMode.SUBSCRIPTION,),
     venue_scope=("TWSE",),
     max_external_calls=0,
@@ -161,6 +173,7 @@ TW_CURRENT_SOURCE_BINDINGS = (
         source_type="stream",
         auth_type="api_key",
         persistent_limitations=(FUGLE_INDEX_PREVIOUS_CLOSE_LINEAGE_LIMITATION,),
+        index_scope_symbols=(("TAIEX", "IX0001"),),
     ),
     TaiwanCurrentSourceBinding(
         descriptor=TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,
@@ -199,6 +212,22 @@ def current_source_binding(
     return None
 
 
+def expected_index_symbol(
+    binding: TaiwanCurrentSourceBinding,
+    *,
+    index_id: str,
+) -> str | None:
+    normalized = str(index_id or "").strip().upper()
+    return next(
+        (
+            symbol
+            for scope_key, symbol in binding.index_scope_symbols
+            if scope_key == normalized
+        ),
+        None,
+    )
+
+
 __all__ = [
     "FUGLE_INDEX_PREVIOUS_CLOSE_LINEAGE_LIMITATION",
     "FUGLE_CURRENT_INDEX_DESCRIPTOR",
@@ -208,9 +237,13 @@ __all__ = [
     "TW_CURRENT_INDEX_CAPABILITY_ID",
     "TW_CURRENT_INDEX_DATASET_ID",
     "TW_CURRENT_INDEX_DESCRIPTORS",
+    "TW_CURRENT_INDEX_MAX_ABS_CHANGE_RATIO",
+    "TW_INDEX_INTRADAY_CAPABILITY_ID",
+    "TW_INDEX_INTRADAY_DATASET_ID",
     "TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR",
     "TWSE_MIS_CURRENT_INDEX_DESCRIPTOR",
     "TaiwanCurrentSourceBinding",
     "YAHOO_CURRENT_INDEX_DESCRIPTOR",
     "current_source_binding",
+    "expected_index_symbol",
 ]

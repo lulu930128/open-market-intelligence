@@ -18,6 +18,7 @@ from app.db.models import (
     SourceRegistry,
     StockMaster,
     TaiwanStockQuoteSnapshot,
+    TaiwanStockDepthSnapshot,
 )
 from app.market.providers.kgi_realtime_acquisition import (
     KgiRealtimeAcquisitionAdapter,
@@ -25,6 +26,7 @@ from app.market.providers.kgi_realtime_acquisition import (
 )
 from app.market.public_quote_platform import acquire_taiwan_public_last_trade_quote
 from app.market.quote_depth import (
+    _apply_headline_compatibility_aliases,
     _finalize_shared_projection_semantics,
     get_taiwan_stock_quote_depth,
 )
@@ -149,6 +151,7 @@ def _persist_official_daily_close(
             high_price=1185,
             low_price=1165,
             close_price=close_price,
+            price_change=close_price - 1170,
             trade_volume=1_000_000,
         )
     )
@@ -227,6 +230,57 @@ def test_quote_depth_get_projects_shared_quote_and_typed_depth_without_io() -> N
         engine.dispose()
 
 
+def test_post_close_projects_only_same_session_closing_depth_snapshot() -> None:
+    db, engine = _db()
+    try:
+        _persist_quote_and_depth(db)
+        row = db.query(TaiwanStockDepthSnapshot).one()
+        row.market_session = "close_resolution"
+        row.event_at = datetime(2026, 8, 26, 13, 30, tzinfo=TAIPEI)
+        db.commit()
+        after_close = datetime(2026, 8, 26, 13, 34, tzinfo=TAIPEI)
+
+        with patch.object(
+            db,
+            "commit",
+            side_effect=AssertionError("post-close snapshot read must not commit"),
+        ):
+            result = get_taiwan_stock_quote_depth(
+                db=db,
+                stock_id="2330",
+                now=after_close,
+            )
+
+        public = TaiwanStockQuoteDepthRead.model_validate(result)
+        assert public.depth_available is False
+        assert public.depth_live_available is False
+        assert public.depth_snapshot_available is True
+        assert public.depth_snapshot_status == "available"
+        assert public.depth_snapshot_semantics == "closing_session_snapshot"
+        assert public.depth_snapshot_session == "close_resolution"
+        assert public.depth_snapshot_decision_usable is False
+        assert len(public.bid_levels) == 2
+        assert len(public.ask_levels) == 2
+
+        ai_quote = _compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth=result,
+            quote_error=None,
+            session_phase="post_close",
+            current_session_date="2026-08-26",
+            is_trading_day=True,
+        )
+        order_book = ai_quote["components"]["order_book"]
+        assert order_book["available"] is True
+        assert order_book["live_available"] is False
+        assert order_book["snapshot_available"] is True
+        assert order_book["snapshot_decision_usable"] is False
+        assert order_book["availability_status"] == "closing_session_snapshot"
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_official_close_component_uses_canonical_daily_owner() -> None:
     db, engine = _db()
     try:
@@ -260,6 +314,18 @@ def test_official_close_component_uses_canonical_daily_owner() -> None:
         assert result["official_close_available"] is True
         assert result["official_close_source"] == TWSE_DAILY_TRADING_SOURCE_NAME
         assert result["official_close_price"] == 1182
+        assert result["last_price"] == 1182
+        assert result["change"] == 12
+        assert result["last_trade_price"] == 1180
+        assert result["headline_price"] == 1182
+        assert result["headline_reference_price"] == 1170
+        assert result["headline_change"] == 12
+        assert result["headline_basis"] == "official_close"
+        assert result["headline_trade_date"] == date(2026, 8, 26)
+        assert result["depth_available"] is False
+        assert result["depth_snapshot_available"] is False
+        assert result["bid_levels"] == []
+        assert result["ask_levels"] == []
 
         ai_quote = _compact_quote_snapshot(
             latest_daily=None,
@@ -332,7 +398,12 @@ def test_session_close_distinguishes_pending_from_released_but_missing_eod() -> 
         session_close=session_close,
         requested_at=datetime(2026, 8, 27, 16, 0, tzinfo=TAIPEI),
     )
+    _apply_headline_compatibility_aliases(after_release)
+    assert after_release["headline_price"] == 605
     assert after_release["last_price"] == 605
+    assert after_release["change"] is None
+    assert after_release["headline_basis"] == "session_close"
+    assert after_release.get("last_trade_price") is None
     assert after_release["quote_semantics"] == "completed_session_close"
     assert after_release["official_close_status"] == "unavailable_after_release"
     assert "released official daily EOD evidence is unavailable" in (

@@ -317,6 +317,13 @@ class TaiwanPublicQuoteCandidateReader:
                     is TradeObservationState.TRADE_OBSERVED
                     and observation.last_trade_price is not None
                 )
+                exchange_authority = (
+                    observation.lineage.authority.value == "exchange"
+                )
+                closeout_session = stored.market_session in {
+                    MarketSession.CLOSE_RESOLUTION,
+                    MarketSession.POST_CLOSE,
+                }
                 legal_session_event = bool(
                     local_event_at.date() == expected_trade_date
                     and TAIWAN_SESSION_CLOSE_TIME
@@ -328,6 +335,8 @@ class TaiwanPublicQuoteCandidateReader:
                     self._session_close
                     and same_trade_date
                     and actual_trade
+                    and exchange_authority
+                    and closeout_session
                     and legal_session_event
                     and confirmed_at is not None
                     and confirmed_at >= confirmation_boundary
@@ -337,7 +346,11 @@ class TaiwanPublicQuoteCandidateReader:
                 elif self._session_close:
                     freshness = EvidenceFreshness.STALE
                     limitations.append(
-                        "SESSION_CLOSE_EVENT_TIME_INVALID"
+                        "SESSION_CLOSE_AUTHORITY_UNVERIFIED"
+                        if not exchange_authority
+                        else "SESSION_CLOSE_CONTROL_SESSION_INVALID"
+                        if not closeout_session
+                        else "SESSION_CLOSE_EVENT_TIME_INVALID"
                         if not legal_session_event
                         else (
                             "SESSION_CLOSE_RESOLVING"
@@ -599,6 +612,16 @@ def _board_lot_value(quantity: Quantity | None) -> int | None:
     return None
 
 
+def _share_value(quantity: Quantity | None) -> int | None:
+    if quantity is None:
+        return None
+    if quantity.unit is QuantityUnit.SHARE:
+        return int(quantity.value)
+    if quantity.unit is QuantityUnit.BOARD_LOT:
+        return int(quantity.value * quantity.scale)
+    return None
+
+
 def project_taiwan_public_last_trade_quote(
     result: MarketDataResultV1,
 ) -> dict[str, object]:
@@ -809,6 +832,33 @@ def project_taiwan_session_close(
         else "unavailable"
     )
     price = quote.last_trade_price if quote is not None else None
+    closing_match_volume_shares = (
+        _share_value(quote.last_trade_quantity)
+        if session_final and quote is not None
+        else None
+    )
+    closing_match_volume_lots = (
+        _board_lot_value(quote.last_trade_quantity)
+        if session_final and quote is not None
+        else None
+    )
+    session_cumulative_volume_shares = (
+        _share_value(quote.cumulative_quantity)
+        if session_final and quote is not None
+        else None
+    )
+    session_cumulative_volume_lots = (
+        _board_lot_value(quote.cumulative_quantity)
+        if session_final and quote is not None
+        else None
+    )
+    volume_available = bool(
+        session_final
+        and (
+            closing_match_volume_shares is not None
+            or session_cumulative_volume_shares is not None
+        )
+    )
     authority_class = (
         quote.lineage.authority.value if quote is not None else None
     )
@@ -828,6 +878,42 @@ def project_taiwan_session_close(
         "available": session_final,
         "price": _decimal_value(price) if session_final else None,
         "candidate_price": _decimal_value(price) if resolving else None,
+        "closing_match_volume_shares": closing_match_volume_shares,
+        "closing_match_volume_lots": closing_match_volume_lots,
+        "closing_match_volume_semantics": "provider_reported_closing_match_volume",
+        "closing_match_volume_source_field": "tv",
+        "session_cumulative_volume_shares": session_cumulative_volume_shares,
+        "session_cumulative_volume_lots": session_cumulative_volume_lots,
+        "session_cumulative_volume_trade_date": (
+            quote.trade_date
+            if session_final and quote is not None
+            and session_cumulative_volume_shares is not None
+            else None
+        ),
+        "session_cumulative_volume_event_time": (
+            event_at if session_cumulative_volume_shares is not None else None
+        ),
+        "session_cumulative_volume_semantics": "provider_reported_session_cumulative_volume",
+        "session_cumulative_volume_source_field": "v",
+        "volume_available": volume_available,
+        "volume_status": (
+            "session_final"
+            if volume_available
+            else "not_provided"
+            if session_final
+            else status
+        ),
+        "volume_provider": (
+            quote.lineage.provider if volume_available and quote is not None else None
+        ),
+        "volume_source": (
+            quote.lineage.source if volume_available and quote is not None else None
+        ),
+        "volume_event_time": event_at if volume_available else None,
+        "volume_scope": "completed_regular_session",
+        "volume_decision_usable": bool(
+            session_final and session_cumulative_volume_shares is not None
+        ),
         "trade_date": quote.trade_date if quote is not None else None,
         "event_time": event_at,
         "event_time_basis": "provider_event_time",
@@ -900,10 +986,17 @@ def reconcile_taiwan_session_close(
     reconciled.update(
         {
             "official_daily": True,
-            "finalization": "official_daily_confirmed",
             "reconciliation_status": reconciliation_status,
             "official_close_price": float(bar.close_price),
             "official_close_trade_date": official_trade_date,
+            "reconciliation": {
+                "status": reconciliation_status,
+                "session_close_finalization": reconciled.get("finalization"),
+                "official_close_finalization": bar.finalization.value,
+                "official_close_provider": bar.lineage.provider,
+                "official_close_source": bar.lineage.source,
+                "official_close_event_time": bar.lineage.event_at,
+            },
         }
     )
     limitations = [

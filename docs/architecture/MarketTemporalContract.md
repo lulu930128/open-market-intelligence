@@ -65,6 +65,50 @@ Market-specific emergency closure overlay 高於 annual schedule cache。年度�
 「該日不存在」只代表未列於原年度排程，不得壓過後續宣布的颱風或其他臨時休市；
 所有 continuity、expected date 與 presentation-session 計算共用相同 calendar owner。
 
+### 8. Capability Expectedness
+
+`CapabilityExpectation = not_expected | expected | required` 回答「這個 capability
+在目前 market policy checkpoint 是否理應存在」。它不攜帶 session、support、
+availability 或 freshness，因此不得加入 `expected_extended`、`required_regular`、
+`unsupported` 或 `not_applicable` 這類混合值；這些語意由獨立欄位保存。
+
+US owner 位於 `backend/app/us_market/temporal_expectedness.py`，並只使用 Backend
+`America/New_York` calendar projection：
+
+| phase | `quote.snapshot` | `intraday.bars` | expected scope |
+| --- | --- | --- | --- |
+| `pre_market_pending` | `not_expected` | `not_expected` | `none` |
+| `pre_market` | `expected` | `expected` | `extended` |
+| `regular` | `required` | `required` | `regular` |
+| `after_hours` | `expected` | `expected` | `extended` |
+| `post_close`／`market_closed` | `not_expected` | `not_expected` | `none` |
+
+Outward `omi.us.capability_expectation.v1` 同時保留 expectation、requested／expected
+session scope、instrument applicability、descriptor-derived support／live support、
+availability、evidence freshness、provider snapshot freshness、trade state／recency、derived outcome 與
+reason code。`expected_but_missing` 是 derived outcome，不是 primitive expectation。
+
+Quote 的 provider snapshot freshness 以 `fetched_at` 判斷；last trade recency 以
+`event_at` 判斷。Provider 剛回應但最後一筆成交較舊時，允許
+`provider_snapshot_freshness=fresh`、`trade_recency=old` 與
+`LAST_TRADE_OLD_BUT_PROVIDER_CURRENT` 同時成立，不得把 provider 標成 stale。
+Intraday bar freshness 仍以最新 bar event time 判斷。
+
+Producer refresh-due 與 consumer stale-after 是兩個不同門檻。US recurring
+Quote／Intraday producer 在 evidence age 達 45 秒時即可 refresh；cache-only consumer
+要到 180 秒才標 stale。Quote／Intraday scheduler tick 目前都是 60 秒，因此正常交易
+時段每個 tick 都能重新評估已到期 evidence；tick 本身不代表必定呼叫 provider，
+Shared Core 仍先讀 canonical cache，只有 refresh-due 才進 acquisition。這組契約的
+source 目標是 current evidence age p95 不超過 90 秒；Runtime／Live 必須另行量測，
+Consumer 不得把 producer cadence 複製成自己的 stale 規則。
+
+US current-market comparison base 是另一個獨立 projection：盤前／正常盤使用
+`prior_regular_close`，盤後／extended 結束後使用 exact finalized
+`current_day_regular_close`。相容欄位 `previous_close` 仍表示 exact expected
+completed-session Daily；consumer 不得用它猜測盤後漲跌基準。若當日正常盤 close
+尚未可證明，`change_reference_status=missing` 並回
+`CURRENT_DAY_REGULAR_CLOSE_PENDING`，不得沿用前一交易日 close。
+
 ## Derived labels
 
 `official_final` 若需要作為 outward convenience label，只能是 derived state，不是 primitive enum member。至少同時需要：
@@ -103,15 +147,37 @@ reconciliation.status = matched | mismatched
 
 Official daily 的到達不應把 session-close observation 從 `session_final` 改成另一種跨軸狀態；兩份 evidence 與 comparison result 應分別保存。
 
+Today／intraday history若需要在13:30顯示completed-session close，必須新增projection event，而不是製造或回寫一根成交bar：
+
+```text
+bar_type = official_close_marker | session_close_marker
+price_semantics = official_close | session_close
+display_eligible = true
+indicator_eligible = false
+synthetic = false
+projection_event_count += 1
+cached_count unchanged
+```
+
+`session_close_marker` 表示13:30 formal close 已有同交易日的 session-close evidence；即使該 evidence 具 exchange authority，只要仍是 provisional，就不得升格成 `official_close_marker`。`official_close_marker` 只接受 release-qualified、非 provisional 且 final/corrected/official-final 的 official daily evidence。當兩者都合格時 official marker 優先。Marker可引用canonical close evidence，但其圖表時間是formal close boundary；evidence event time、trade date、authority與finalization必須另行保留。Consumer不得把marker納入EMA、RSI、MACD、VWAP、TWAP、bar volume或persisted coverage count。
+
+Marker可以攜帶兩個獨立的volume facts：closing-match volume與session cumulative volume。兩者必須來自session-close canonical observation並保留各自source field／event time；official close只擁有price axis。Interval bar sum與`bar_volume_latest_time`仍排除marker，technical若使用session cumulative volume，必須改用其volume event time與`session_final`狀態，不得把marker時間誤稱為最後一根interval bar。
+
+收盤五檔也是獨立temporal evidence。`depth_available`只代表當下live order book；盤後保存值使用`depth_snapshot_*`，只接受同交易日且stored market session為`closing_auction`或`close_resolution`的canonical depth。它的語意固定為`closing_session_snapshot`、`decision_usable=false`，盤後read path為cache-only，Consumer必須明示該資料不代表目前可成交掛單。Regular-session殘留值或前一交易日depth不得升格為收盤snapshot。
+
 ## Invariants
 
 - Market Session != Instrument Trading Status。
 - Market Session != item finalization。
 - Freshness != finalization。
+- Capability expectedness != availability／freshness／support。
+- Fresh provider snapshot != fresh last trade。
+- No Trade != missing evidence。
 - Authority != release。
 - `BarFinalization.final` != official daily released。
 - Session final != official daily final。
 - Post close != official daily released。
+- Live order book != closing-session depth snapshot。
 - Reconciliation 不得 mutate 原始 evidence semantics。
 - `post_close + session_final + pending_release` 是合法組合。
 - release window 已到但 canonical official daily evidence 尚未到達時，必須投影為 released-but-unavailable；不得繼續顯示 `pending_release`，也不得用前一交易日 official close 假裝當日資料。

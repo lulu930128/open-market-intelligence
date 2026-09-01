@@ -106,10 +106,23 @@ class KgiRealtimeQuoteLeasePort:
     def acquisition_adapter(self, *, clock) -> KgiRealtimeAcquisitionAdapter:
         def read_snapshot(symbol: str) -> KgiRealtimeProviderSnapshot:
             snapshot = get_kgi_superpy_quote_snapshot(symbol)
+            stream = get_kgi_superpy_market_stream_snapshot(
+                symbol,
+                recent_trade_limit=1,
+                auction_limit=1,
+                kbar_limit=1,
+            )
+            recent_trades = stream.get("recent_trades")
+            latest_trade = (
+                recent_trades[0]
+                if isinstance(recent_trades, list) and recent_trades
+                else None
+            )
             return KgiRealtimeProviderSnapshot(
                 quote=snapshot.quote,
                 status=snapshot.status,
                 error=snapshot.error,
+                latest_trade=latest_trade,
             )
 
         return KgiRealtimeAcquisitionAdapter(read_snapshot, clock=clock)

@@ -35,9 +35,18 @@ from app.market.schemas import TaiwanStockQuoteDepthRead
 from app.market.taiwan_quote_evidence import (
     acquire_taiwan_quote_evidence_bundle,
 )
-from app.market.taiwan_realtime_platform import refresh_taiwan_realtime_snapshot
+from app.market.taiwan_realtime_platform import (
+    acquire_taiwan_depth,
+    read_taiwan_depth,
+    refresh_taiwan_realtime_snapshot,
+)
 from app.market.tw_public_quote_contract import TWSE_MIS_QUOTE_RESOURCE_ID
-from app.market.tw_realtime_capabilities import KGI_QUOTE_SNAPSHOT_DESCRIPTOR
+from app.market.tw_realtime_capabilities import (
+    KGI_ORDER_BOOK_DESCRIPTOR,
+    KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
+    TW_ORDER_BOOK_CAPABILITY_ID,
+)
+from app.market_data.contracts import MarketSession
 from app.market_data.policies import RealtimePolicy
 
 
@@ -121,6 +130,10 @@ def _kgi_quote_adapter(now: datetime) -> KgiRealtimeAcquisitionAdapter:
                 "high": 1185,
                 "low": 1165,
                 "price_chg": 10,
+                "bid_prices": [1175, 1170],
+                "bid_volumes": [4, 5],
+                "ask_prices": [1180, 1185],
+                "ask_volumes": [3, 6],
             },
             status="live",
         ),
@@ -281,6 +294,54 @@ def test_mis_depth_attempt_does_not_contaminate_cached_kgi_quote_provenance() ->
         assert serialized["acquisition_scope"]["providers_attempted"] == [
             "twse_mis"
         ]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_same_day_mis_depth_wins_after_previous_day_kgi_candidate_expires() -> None:
+    now = datetime(2026, 8, 26, 10, 0, tzinfo=TAIPEI)
+    calls: list[tuple] = []
+    db, engine = _db()
+    try:
+        acquired_kgi = acquire_taiwan_depth(
+            db,
+            stock_id="2330",
+            policy=RealtimePolicy.REQUIRE_LIVE,
+            requested_at=now,
+            session=MarketSession.CONTINUOUS,
+            descriptors=(KGI_ORDER_BOOK_DESCRIPTOR,),
+            acquisition=_kgi_quote_adapter(now),
+        )
+        assert acquired_kgi.persistence.committed is True
+        kgi_row = db.query(TaiwanStockDepthSnapshot).one()
+        kgi_row.event_at = kgi_row.event_at - timedelta(days=1)
+        db.commit()
+
+        refreshed = refresh_taiwan_realtime_snapshot(
+            db,
+            stock_id="2330",
+            requested_at=now,
+            acquisition=_adapter(_payload(), now, calls),
+            requested_capabilities=(TW_ORDER_BOOK_CAPABILITY_ID,),
+        )
+        assert refreshed.depth.persistence.committed is True
+        assert len(calls) == 1
+
+        resolved = read_taiwan_depth(
+            db,
+            stock_id="2330",
+            requested_at=now + timedelta(seconds=30),
+            session=MarketSession.CONTINUOUS,
+        )
+
+        assert resolved.resolved.depth is not None
+        assert resolved.resolved.depth.lineage.provider == "twse_mis"
+        assert any(
+            rejection.reason_code == "TW_DEPTH_EVENT_DATE_MISMATCH"
+            for rejection in resolved.candidate_rejections
+        )
+        assert "TW_DEPTH_EVENT_DATE_MISMATCH" in resolved.limitations
     finally:
         db.close()
         engine.dispose()

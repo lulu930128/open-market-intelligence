@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     Base,
     RawFetchResult,
+    SourceRegistry,
     TaiwanCurrentBreadthSnapshot,
     TaiwanCurrentIndexSnapshot,
 )
@@ -188,6 +190,183 @@ def test_current_index_shared_plan_falls_back_persists_and_rereads() -> None:
         assert projected["close"] == 24_100.0
         assert projected["raw_result_id"]
         assert reread.resolved.market_index is not None
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_index_repository_keeps_latest_candidate_from_each_provider() -> None:
+    db, engine = _db()
+    try:
+        for offset in range(13):
+            observed_at = NOW - timedelta(minutes=30 - (offset * 2))
+            calls: list[str] = []
+            mis = CurrentIndexAdapter(
+                _binding(
+                    "twse_mis",
+                    "twse_mis_index_snapshot",
+                    TW_CURRENT_INDEX_CAPABILITY_ID,
+                ),
+                _payload_reader(
+                    {
+                        "as_of": observed_at.isoformat(),
+                        "trade_date": observed_at.date().isoformat(),
+                        "close": 24_000 + offset,
+                        "previous_close": 23_900,
+                    },
+                    calls,
+                    "mis",
+                ),
+                clock=lambda observed_at=observed_at: observed_at,
+            )
+            refresh_taiwan_current_index(
+                db,
+                index_id="TAIEX",
+                requested_at=observed_at,
+                descriptors=(TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,),
+                acquisition=TaiwanCurrentIndexAcquisitionExecutor((mis,)),
+            )
+            assert calls == ["mis:TAIEX"]
+
+        yahoo_calls: list[str] = []
+        yahoo = CurrentIndexAdapter(
+            _binding(
+                "yahoo_finance_chart",
+                "yahoo_finance_chart",
+                TW_CURRENT_INDEX_CAPABILITY_ID,
+            ),
+            _payload_reader(
+                {
+                    "as_of": NOW.isoformat(),
+                    "trade_date": NOW.date().isoformat(),
+                    "close": 24_500,
+                    "previous_close": 24_000,
+                },
+                yahoo_calls,
+                "yahoo",
+            ),
+            clock=lambda: NOW,
+        )
+        result = refresh_taiwan_current_index(
+            db,
+            index_id="TAIEX",
+            requested_at=NOW,
+            descriptors=(YAHOO_CURRENT_INDEX_DESCRIPTOR,),
+            acquisition=TaiwanCurrentIndexAcquisitionExecutor((yahoo,)),
+        )
+
+        assert yahoo_calls == ["yahoo:TAIEX"]
+        assert db.query(TaiwanCurrentIndexSnapshot).count() == 14
+        assert result.resolved.market_index is not None
+        assert result.resolved.market_index.lineage.provider == "yahoo_finance_chart"
+        assert result.resolved.market_index.close_value == 24_500
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_index_repository_rejects_implausible_persisted_change() -> None:
+    db, engine = _db()
+    try:
+        binding = _binding(
+            "fugle_marketdata",
+            "fugle_indices_stream",
+            TW_CURRENT_INDEX_CAPABILITY_ID,
+        )
+        source = SourceRegistry(
+            source_name=binding.source,
+            source_type=binding.source_type,
+            category="market_data",
+            enabled=True,
+            priority=binding.descriptor.priority,
+            parser_type=binding.parser_version,
+            auth_type=binding.auth_type,
+            reliability_level=binding.descriptor.authority.value,
+        )
+        db.add(source)
+        db.flush()
+        event_at = NOW - timedelta(minutes=1)
+        raw = RawFetchResult(
+            source_id=source.id,
+            fetched_at=event_at.astimezone(timezone.utc),
+            method="STREAM",
+            content_hash="persisted-implausible-fugle-index",
+            parser_version=binding.parser_version,
+        )
+        db.add(raw)
+        db.flush()
+        db.add(
+            TaiwanCurrentIndexSnapshot(
+                source_id=source.id,
+                raw_result_id=raw.id,
+                provider=binding.descriptor.provider_key,
+                source=binding.source,
+                authority=binding.descriptor.authority.value,
+                raw_contract_version=binding.parser_version,
+                index_id="TAIEX",
+                venue="TWSE",
+                trade_date=event_at.date(),
+                event_at=event_at,
+                received_at=event_at.astimezone(timezone.utc),
+                fetched_at=event_at.astimezone(timezone.utc),
+                session=MarketSession.CONTINUOUS.value,
+                close_value=105_555.87,
+                price_change=59_224.42,
+                observation_state="available",
+                value_semantics="current_index_snapshot",
+                finalization="provisional",
+                official=False,
+                provisional=True,
+            )
+        )
+        db.commit()
+
+        assert db.query(TaiwanCurrentIndexSnapshot).count() == 1
+
+        mis_calls: list[str] = []
+        mis_observed_at = NOW - timedelta(minutes=45)
+        mis = CurrentIndexAdapter(
+            _binding(
+                "twse_mis",
+                "twse_mis_index_snapshot",
+                TW_CURRENT_INDEX_CAPABILITY_ID,
+            ),
+            _payload_reader(
+                {
+                    "as_of": mis_observed_at.isoformat(),
+                    "trade_date": mis_observed_at.date().isoformat(),
+                    "close": 45_979.67,
+                    "previous_close": 46_331.45,
+                },
+                mis_calls,
+                "mis",
+            ),
+            clock=lambda: mis_observed_at,
+        )
+        result = refresh_taiwan_current_index(
+            db,
+            index_id="TAIEX",
+            requested_at=NOW,
+            descriptors=(TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,),
+            acquisition=TaiwanCurrentIndexAcquisitionExecutor((mis,)),
+        )
+        reread = read_taiwan_current_index(
+            db,
+            index_id="TAIEX",
+            requested_at=NOW,
+        )
+
+        assert mis_calls == ["mis:TAIEX"]
+        assert result.resolved.market_index is not None
+        assert result.resolved.market_index.lineage.provider == "twse_mis"
+        assert result.resolved.market_index.close_value == Decimal("45979.67")
+        assert reread.resolved.market_index is not None
+        assert reread.resolved.market_index.lineage.provider == "twse_mis"
+        assert any(
+            rejection.reason_code == "CURRENT_INDEX_RAW_SCOPE_IDENTITY_MISMATCH"
+            and rejection.provider == "fugle_marketdata"
+            for rejection in reread.candidate_rejections
+        )
     finally:
         db.close()
         engine.dispose()

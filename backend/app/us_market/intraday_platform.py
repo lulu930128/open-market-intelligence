@@ -19,6 +19,7 @@ from app.market_data.integration_contracts import (
     BarCapabilityRequest,
     DataRequirementV2,
     EvidenceTarget,
+    FreshnessBasis,
     FreshnessRequirement,
     InstrumentTarget,
     MarketDataResultV1,
@@ -295,7 +296,12 @@ class USIntradayMarketPlatform:
             session=_session(now),
             requested_at=now,
             freshness=FreshnessRequirement(
-                max_age_seconds=300,
+                max_age_seconds=(
+                    profile.producer_refresh_due_seconds
+                    if allow_acquisition
+                    else profile.consumer_stale_after_seconds
+                ),
+                basis=FreshnessBasis.FETCHED_TIME,
                 evidence_target=profile.evidence_target,
             ),
             quality=QualityRequirement(required_fields=("last_trade_price",), allow_partial=True, require_canonical_lineage=True),
@@ -340,7 +346,12 @@ class USIntradayMarketPlatform:
             session=_session(now),
             requested_at=now,
             freshness=FreshnessRequirement(
-                max_age_seconds=300,
+                max_age_seconds=(
+                    profile.producer_refresh_due_seconds
+                    if allow_acquisition
+                    else profile.consumer_stale_after_seconds
+                ),
+                basis=FreshnessBasis.EVENT_TIME,
                 evidence_target=profile.evidence_target,
             ),
             quality=QualityRequirement(required_fields=("open_price", "high_price", "low_price", "close_price"), allow_partial=True, require_canonical_lineage=True),
@@ -353,8 +364,8 @@ class USIntradayMarketPlatform:
             ),
         )
 
-    @staticmethod
     def _platform_result(
+        self,
         *,
         identity: USInstrumentIdentity,
         result: MarketDataResultV1,
@@ -362,6 +373,33 @@ class USIntradayMarketPlatform:
         profile: USIntradayOperationProfile,
     ) -> USIntradayPlatformResult:
         satisfied, reasons = _postcondition(result, profile=profile)
+        capability_id = result.requirement.request.capability_id
+        descriptors = (
+            self._quote_descriptors
+            if capability_id == "quote.snapshot"
+            else self._bar_descriptors
+        )
+        interval = getattr(result.requirement.request, "interval", None)
+        eligible_providers = tuple(
+            dict.fromkeys(
+                descriptor.provider_key
+                for descriptor in descriptors
+                if identity.instrument.instrument_type in descriptor.instrument_types
+                and (not interval or not descriptor.intervals or interval in descriptor.intervals)
+            )
+        )
+        single_source = len(eligible_providers) == 1
+        limitations = list(projection.get("limitations") or [])
+        if single_source and "US_SINGLE_ELIGIBLE_PROVIDER" not in limitations:
+            limitations.append("US_SINGLE_ELIGIBLE_PROVIDER")
+        projection.update(
+            {
+                "eligible_providers": list(eligible_providers),
+                "eligible_provider_count": len(eligible_providers),
+                "single_source": single_source,
+                "limitations": limitations,
+            }
+        )
         return USIntradayPlatformResult(
             identity=identity,
             result=result,

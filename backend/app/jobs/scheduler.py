@@ -36,8 +36,12 @@ from app.jobs.taiwan_quote_contract_scheduler import (
 from app.jobs.taiwan_intraday_bar_scheduler import (
     add_taiwan_intraday_bar_jobs,
 )
+from app.jobs.taiwan_session_close_scheduler import (
+    add_taiwan_session_close_jobs,
+)
 from app.jobs.us_intraday_materializer_scheduler import (
     add_us_intraday_materializer_jobs,
+    us_intraday_materializer_jobs_requested,
 )
 from app.jobs.us_index_data_repair_gate import (
     enqueue_us_index_data_repair_gate,
@@ -65,9 +69,6 @@ from app.market.broker_branch_behavior import (
 )
 from app.market.market_chips import normalize_market_chip_index_ids
 from app.market.taiwan_market_state import persist_taiwan_market_minute_state
-from app.market.taiwan_index_minute import (
-    persist_taiwan_index_minute_snapshots,
-)
 from app.market.indices import (
     TAIWAN_INDEX_RECONCILIATION_END_TIME,
     TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS,
@@ -75,6 +76,7 @@ from app.market.indices import (
     is_taiwan_index_live_refresh_window,
     market_index_summary_needs_reconciliation,
     refresh_market_index_summary,
+    refresh_market_index_list,
     refresh_current_market_breadth_snapshots,
     refresh_current_market_index_snapshots,
 )
@@ -1352,19 +1354,12 @@ def collect_taiwan_market_index_summary() -> None:
             finalized=False,
             now=now,
         )
-        index_minute_persistence = persist_taiwan_index_minute_snapshots(
-            db,
-            payload=payload,
-            now=now,
-        )
         logger.debug(
             "Taiwan market index summary cache refreshed as_of=%s indices=%s "
-            "minute_rows=%s index_minute_rows=%s.",
+            "minute_rows=%s.",
             payload.get("as_of"),
             len(payload.get("indices") or []),
             persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
-            index_minute_persistence.get("inserted_count", 0)
-            + index_minute_persistence.get("updated_count", 0),
         )
     except Exception:
         db.rollback()
@@ -1406,6 +1401,36 @@ def collect_taiwan_market_breadth_summary() -> None:
     except Exception:
         db.rollback()
         logger.exception("Taiwan market breadth cache refresh failed.")
+    finally:
+        db.close()
+
+
+def refresh_taiwan_market_index_directories() -> None:
+    """Refresh both durable index directories outside all GET/read paths."""
+
+    db = SessionLocal()
+    results: list[tuple[str, str, int]] = []
+    try:
+        for market in ("TWSE", "TPEX"):
+            try:
+                payload = refresh_market_index_list(
+                    market=market,
+                    limit=200,
+                    db=db,
+                )
+                results.append(
+                    (market, str(payload.get("status")), int(payload.get("count") or 0))
+                )
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Taiwan market index directory refresh failed market=%s.",
+                    market,
+                )
+        logger.info(
+            "Taiwan market index directory refresh completed results=%s.",
+            results,
+        )
     finally:
         db.close()
 
@@ -1584,6 +1609,16 @@ def _add_taiwan_market_index_collector_job(scheduler: Any) -> bool:
             coalesce=True,
             max_instances=1,
             next_run_time=datetime.now(_timezone()),
+        )
+        scheduler.add_job(
+            refresh_taiwan_market_index_directories,
+            trigger="interval",
+            hours=1,
+            id="taiwan_market_index_directory_refresh",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            next_run_time=datetime.now(_timezone()) + timedelta(seconds=15),
         )
     if settings.enable_taiwan_market_breadth_scheduler:
         scheduler.add_job(
@@ -2478,6 +2513,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_taiwan_market_index_scheduler
         and not settings.enable_taiwan_quote_contract_scheduler
         and not settings.enable_taiwan_intraday_bar_scheduler
+        and not settings.enable_taiwan_session_close_scheduler
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
@@ -2485,6 +2521,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_us_priority_ohlc_scheduler
         and not settings.enable_us_index_data_repair_gate
         and not settings.enable_eod_coverage_scheduler
+        and not us_intraday_materializer_jobs_requested()
     ):
         logger.info("Job scheduler disabled.")
         return None
@@ -2576,6 +2613,9 @@ def start_scheduler() -> Any | None:
     taiwan_intraday_bar_scheduler_enabled = add_taiwan_intraday_bar_jobs(
         scheduler
     )
+    taiwan_session_close_scheduler_enabled = add_taiwan_session_close_jobs(
+        scheduler
+    )
     taiwan_index_contract_snapshot_enabled = (
         add_taiwan_index_contract_snapshot_jobs(scheduler)
     )
@@ -2616,17 +2656,24 @@ def start_scheduler() -> Any | None:
         max(int(settings.scheduler_taiwan_intraday_bar_max_symbols), 1),
     )
     logger.info(
+        "Taiwan production session-close scheduler enabled=%s retries=13:30:01-13:34:01 "
+        "max_symbols=%s.",
+        taiwan_session_close_scheduler_enabled,
+        settings.scheduler_taiwan_session_close_max_symbols,
+    )
+    logger.info(
         "Priority US OHLC cache-only audit scheduler enabled=%s interval=%sm.",
         us_priority_ohlc_reconcile_enabled,
         max(int(settings.scheduler_us_priority_ohlc_interval_minutes), 5),
     )
     logger.info(
         "US index missing-data repair gate enabled=%s interval=%sm cooldown=%ss "
-        "max_attempts=%s.",
+        "max_attempts_per_window=%s manual_backoff=%ss.",
         us_index_data_repair_gate_enabled,
         settings.scheduler_us_index_data_repair_interval_minutes,
         settings.scheduler_us_index_data_repair_cooldown_seconds,
         settings.scheduler_us_index_data_repair_max_attempts,
+        settings.scheduler_us_index_data_repair_manual_attention_backoff_seconds,
     )
     logger.info(
         "Full-market EOD coverage scheduler enabled=%s markets=%s interval=%sm.",

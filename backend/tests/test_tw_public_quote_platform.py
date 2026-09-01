@@ -420,6 +420,17 @@ def test_session_close_reuses_receipt_and_quote_upsert_then_survives_cold_read(
     assert projection["status"] == "session_final"
     assert projection["available"] is True
     assert projection["price"] == 2400.0
+    assert projection["closing_match_volume_lots"] == 2997
+    assert projection["closing_match_volume_shares"] == 2_997_000
+    assert projection["session_cumulative_volume_lots"] == 12_789
+    assert projection["session_cumulative_volume_shares"] == 12_789_000
+    assert projection["session_cumulative_volume_trade_date"] == datetime(
+        2026, 8, 25
+    ).date()
+    assert projection["volume_status"] == "session_final"
+    assert projection["volume_provider"] == "twse_mis"
+    assert projection["volume_source"] == "twse_mis_quote_depth"
+    assert projection["session_cumulative_volume_source_field"] == "v"
     assert projection["trade_date"] == datetime(2026, 8, 25).date()
     assert projection["event_time"] == datetime(
         2026, 8, 25, 13, 30, tzinfo=TAIWAN_TZ
@@ -724,7 +735,8 @@ def test_official_daily_reconciles_session_close_and_wins_on_mismatch(
     matched_session = matched["data_core_components"]["quote.session_close"]
     assert matched_session["reconciliation_status"] == "matched"
     assert matched_session["official_daily"] is True
-    assert matched_session["finalization"] == "official_daily_confirmed"
+    assert matched_session["finalization"] == "session_final"
+    assert matched_session["reconciliation"]["official_close_finalization"] == "final"
     assert matched["official_close_available"] is True
     assert float(matched["last_price"]) == 2400.0
 
@@ -744,6 +756,9 @@ def test_official_daily_reconciles_session_close_and_wins_on_mismatch(
         "limitations"
     ]
     assert float(mismatched["last_price"]) == 2399.0
+    assert float(mismatched["last_trade_price"]) == 2400.0
+    assert float(mismatched["headline_price"]) == 2399.0
+    assert mismatched["headline_basis"] == "official_close"
     assert mismatched["quote_semantics"] == "official_close"
 
 
@@ -822,6 +837,8 @@ def test_3711_acceptance_is_independent_of_fixed_capture_universe(
     session_close = outward["data_core_components"]["quote.session_close"]
     official_close = outward["data_core_components"]["quote.official_close"]
     assert outward["last_price"] == 605.0
+    assert outward["headline_price"] == 605.0
+    assert outward["headline_basis"] == "session_close"
     assert outward["quote_semantics"] == "completed_session_close"
     assert session_close["trade_date"] == datetime(2026, 8, 27).date()
     assert session_close["finalization"] == "session_final"

@@ -760,11 +760,15 @@ class MarketIndexListItemRead(BaseModel):
 
 
 class MarketIndexListRead(BaseModel):
+    contract_version: str = "tw.market_index.directory.v1"
+    status: str = "missing"
+    freshness_status: str = "unknown"
     market: str
     source: str
-    as_of: datetime
+    as_of: datetime | None = None
     count: int
     items: list[MarketIndexListItemRead]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class MarketIndexContributionItemRead(BaseModel):
@@ -797,6 +801,7 @@ class IntradayTrendPointRead(BaseModel):
     time: datetime
     price: float
     volume: int | None = None
+    cumulative_volume: int | None = None
     open: float | None = None
     high: float | None = None
     low: float | None = None
@@ -806,10 +811,43 @@ class IntradayTrendPointRead(BaseModel):
     source_event_type: str | None = None
     market_event: str | None = None
     finalized: bool | None = None
+    finalization: str | None = None
     is_partial: bool | None = None
     display_eligible: bool | None = None
     indicator_eligible: bool | None = None
     price_semantics: str | None = None
+    synthetic: bool = False
+    session_phase: str | None = None
+    gap_reason: str | None = None
+    bar_close_time: datetime | None = None
+    evidence_trade_date: date | None = None
+    evidence_finalization: str | None = None
+    evidence_event_time: datetime | None = None
+    provider: str | None = None
+    source: str | None = None
+    session_close_price: float | None = None
+    session_close_trade_date: date | None = None
+    session_close_event_time: datetime | None = None
+    session_close_provider: str | None = None
+    session_close_source: str | None = None
+    official_close_price: float | None = None
+    official_close_trade_date: date | None = None
+    official_close_event_time: datetime | None = None
+    official_close_provider: str | None = None
+    official_close_source: str | None = None
+    closing_match_volume_shares: int | None = None
+    closing_match_volume_lots: float | None = None
+    closing_match_volume_semantics: str | None = None
+    closing_match_volume_source_field: str | None = None
+    session_cumulative_volume_shares: int | None = None
+    session_cumulative_volume_lots: float | None = None
+    session_cumulative_volume_trade_date: date | None = None
+    session_cumulative_volume_event_time: datetime | None = None
+    session_cumulative_volume_source_field: str | None = None
+    volume_provider: str | None = None
+    volume_source: str | None = None
+    volume_event_time: datetime | None = None
+    volume_scope: str | None = None
     volume_status: str | None = None
     trade_value_status: str | None = None
 
@@ -844,6 +882,7 @@ class IntradayTrendRead(BaseModel):
     source_interval: str | None = None
     effective_interval: str | None = None
     source_point_count: int | None = None
+    projection_event_count: int = 0
     trade_date: date | None = None
     coverage_status: str | None = None
     is_partial: bool = False
@@ -890,6 +929,7 @@ class IntradayTrendRead(BaseModel):
     bar_candidate_rejections: list[dict[str, Any]] = Field(default_factory=list)
     bar_component_raw_result_ids: list[str] = Field(default_factory=list)
     bar_calculation_versions: list[str] = Field(default_factory=list)
+    series_coverage: dict[str, Any] | None = None
     points: list[IntradayTrendPointRead]
 
 
@@ -1277,6 +1317,17 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     low_price: float | None = None
     change: float | None = None
     change_pct: float | None = None
+    headline_price: float | None = None
+    headline_reference_price: float | None = None
+    headline_change: float | None = None
+    headline_change_pct: float | None = None
+    headline_event_time: datetime | None = None
+    headline_trade_date: date | None = None
+    headline_basis: str = "unavailable"
+    headline_finalization: str = "unknown"
+    headline_authority: str = "unknown"
+    headline_source: str | None = None
+    headline_decision_usable: bool = False
     total_volume_lots: int | None = None
     cumulative_volume_lots: int | None = None
     cumulative_volume_shares: int | None = None
@@ -1329,6 +1380,16 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     top5_imbalance: float | None = None
     top5_imbalance_formula: str | None = None
     depth_available: bool
+    depth_live_available: bool = False
+    depth_snapshot_available: bool = False
+    depth_snapshot_status: str = "unavailable"
+    depth_snapshot_semantics: str = "unavailable"
+    depth_snapshot_event_time: datetime | None = None
+    depth_snapshot_trade_date: date | None = None
+    depth_snapshot_provider: str | None = None
+    depth_snapshot_source: str | None = None
+    depth_snapshot_session: str | None = None
+    depth_snapshot_decision_usable: bool = False
     ohlc_summary: dict[str, Any]
     quote_semantics: str
     delivery_status: str
@@ -1392,10 +1453,16 @@ class TaiwanStockQuoteDepthRead(BaseModel):
 class TaiwanQuoteContractReplaySnapshotRead(BaseModel):
     capture_slot: str
     status: str
+    capture_transport_status: str = "failed"
+    required_capabilities: list[str] = Field(default_factory=list)
     scheduled_at: datetime | None = None
     captured_at: datetime | None = None
     quote_time: datetime | None = None
     freshness_status: str | None = None
+    semantic_status: str = "captured_partial"
+    semantic_ready: bool = False
+    semantic_acceptance: str = "captured_partial"
+    semantic_reason: str | None = None
     refresh_outcome: str | None = None
     error: str | None = None
     quote: dict[str, Any] | None = None
@@ -1409,6 +1476,7 @@ class TaiwanQuoteContractReplayRead(BaseModel):
     required_slots: list[str]
     required_count: int
     captured_count: int
+    semantic_ready_count: int = 0
     coverage_ratio: float
     complete: bool
     missing_slots: list[str]
@@ -1460,6 +1528,7 @@ class MarketIntradayChartPointRead(BaseModel):
     close: float | None = None
 
     volume: int | None = None
+    cumulative_volume: int | None = None
     volume_shares: int | None = None
     volume_lots: float | None = None
     canonical_volume_unit: str = "shares"
@@ -1473,8 +1542,44 @@ class MarketIntradayChartPointRead(BaseModel):
     elapsed_seconds: int | None = None
     is_partial: bool = False
     finalized: bool = False
+    finalization: str | None = None
+    bar_type: str | None = None
+    source_event_type: str | None = None
+    market_event: str | None = None
+    display_eligible: bool | None = None
+    indicator_eligible: bool | None = None
+    price_semantics: str | None = None
+    synthetic: bool = False
+    session_phase: str | None = None
+    gap_reason: str | None = None
+    evidence_trade_date: date | None = None
+    evidence_finalization: str | None = None
+    evidence_event_time: datetime | None = None
     provider: str | None = None
     source: str | None = None
+    session_close_price: float | None = None
+    session_close_trade_date: date | None = None
+    session_close_event_time: datetime | None = None
+    session_close_provider: str | None = None
+    session_close_source: str | None = None
+    official_close_price: float | None = None
+    official_close_trade_date: date | None = None
+    official_close_event_time: datetime | None = None
+    official_close_provider: str | None = None
+    official_close_source: str | None = None
+    closing_match_volume_shares: int | None = None
+    closing_match_volume_lots: float | None = None
+    closing_match_volume_semantics: str | None = None
+    closing_match_volume_source_field: str | None = None
+    session_cumulative_volume_shares: int | None = None
+    session_cumulative_volume_lots: float | None = None
+    session_cumulative_volume_trade_date: date | None = None
+    session_cumulative_volume_event_time: datetime | None = None
+    session_cumulative_volume_source_field: str | None = None
+    volume_provider: str | None = None
+    volume_source: str | None = None
+    volume_event_time: datetime | None = None
+    volume_scope: str | None = None
     raw_result_id: str | None = None
     source_interval: str | None = None
     calculation_version: str | None = None
@@ -1510,6 +1615,7 @@ class MarketIntradayChartRead(BaseModel):
     to_time: datetime | None = None
     point_count: int
     cached_count: int
+    projection_event_count: int = 0
     refreshed_count: int
     cache_status: str | None = None
     cache_hit: bool = False
@@ -1537,6 +1643,11 @@ class MarketIntradayChartRead(BaseModel):
     window_volume_sum_lots: float | None = None
     window_volume_scope: str = "query_window_interval_bar_sum"
     window_trade_date_count: int = 0
+    closing_match_volume_shares: int | None = None
+    closing_match_volume_lots: float | None = None
+    closing_match_volume_source: str | None = None
+    closing_match_volume_source_field: str | None = None
+    closing_match_volume_event_time: datetime | None = None
     session_cumulative_volume_shares: int | None = None
     session_cumulative_volume_lots: int | None = None
     session_cumulative_volume_trade_date: date | None = None
@@ -1576,6 +1687,7 @@ class MarketIntradayChartRead(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     component_raw_result_ids: list[str] = Field(default_factory=list)
     calculation_versions: list[str] = Field(default_factory=list)
+    series_coverage: dict[str, Any] | None = None
     points: list[MarketIntradayChartPointRead]
 
 

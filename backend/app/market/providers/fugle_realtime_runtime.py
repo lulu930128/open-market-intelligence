@@ -21,6 +21,8 @@ from app.market.intraday_transaction import TaiwanIntradayBarTransaction
 from app.market.providers.fugle_realtime import (
     FUGLE_TAIEX_SYMBOL,
     FUGLE_WEBSOCKET_URL,
+    FugleIndexSessionNotMaterializable,
+    FugleIndexValueAnomaly,
     FugleRealtimeBuffer,
     FugleSubscriptionAllocator,
     fugle_bar_acquisition,
@@ -167,6 +169,16 @@ class FugleCanonicalMaterializer:
                         item.model_dump(mode="json")
                         for item in reread.resolved.candidates
                     ],
+                }
+            except FugleIndexValueAnomaly:
+                results["index"] = {
+                    "status": "rejected",
+                    "limitation": "FUGLE_INDEX_VALUE_IMPLAUSIBLE",
+                }
+            except FugleIndexSessionNotMaterializable:
+                results["index"] = {
+                    "status": "pending",
+                    "limitation": "FUGLE_INDEX_COMPLETED_SESSION_NOT_MATERIALIZABLE",
                 }
             except Exception:
                 self._release("indices", FUGLE_TAIEX_SYMBOL, index_record.content_hash)
@@ -398,6 +410,53 @@ class FugleRealtimeRuntime:
             "detail_code": detail_code,
         }
 
+    def index_readiness(self) -> dict[str, object]:
+        """Expose bounded IX0001 identity/value evidence without raw payloads."""
+
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Fugle runtime clock must be timezone-aware")
+        record = self.buffer.latest("indices", FUGLE_TAIEX_SYMBOL)
+        age_seconds = (
+            (now - record.received_at).total_seconds()
+            if record is not None
+            else None
+        )
+        subscribed = self.allocator.is_bound("indices", FUGLE_TAIEX_SYMBOL)
+        fresh_record = (
+            record is not None
+            and age_seconds is not None
+            and age_seconds >= 0
+            and age_seconds <= self.stale_seconds
+        )
+        raw_value = record.payload.get("index") if record is not None else None
+        try:
+            value = float(raw_value) if raw_value is not None else None
+        except (TypeError, ValueError):
+            value = None
+        ready = (
+            self.connection_status == "connected"
+            and self.entitlement_status == "entitled"
+            and subscribed
+            and fresh_record
+            and record is not None
+            and record.symbol == FUGLE_TAIEX_SYMBOL
+            and value is not None
+            and value > 0
+        )
+        return {
+            "expected_symbol": FUGLE_TAIEX_SYMBOL,
+            "record_symbol": record.symbol if record is not None else None,
+            "connection": self.connection_status,
+            "authenticated": self.entitlement_status == "entitled",
+            "subscribed": subscribed,
+            "fresh_record": fresh_record,
+            "record_age_seconds": age_seconds,
+            "record_event_at": record.event_at if record is not None else None,
+            "record_value": value,
+            "ready": ready,
+        }
+
     async def _send_commands(self, socket: FugleSocket) -> None:
         commands = self.allocator.commands()
         unsubscribe_ids = tuple(
@@ -585,6 +644,7 @@ class FugleRealtimeRuntime:
             "reconnect_count": self.reconnect_count,
             "subscriptions": self.allocator.snapshot(),
             "buffer": self.buffer.metrics(),
+            "index_readiness": self.index_readiness(),
             "active_quote_readiness": (
                 self.quote_readiness(active_stock) if active_stock else None
             ),

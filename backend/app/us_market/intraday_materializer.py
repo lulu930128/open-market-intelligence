@@ -38,10 +38,28 @@ _ACQUISITION_SESSIONS = {
     MarketSession.CLOSING_AUCTION,
     MarketSession.POST_CLOSE,
 }
-_MATERIALIZER_LOCK = Lock()
+_MATERIALIZER_LOCKS_GUARD = Lock()
+_MATERIALIZER_LOCKS: dict[tuple[str, USMaterializerCapability], Any] = {}
+_MAX_MATERIALIZER_LOCKS = 64
 _LAST_RUNS_LOCK = Lock()
 _LAST_RUNS: dict[tuple[str, USMaterializerCapability], dict[str, Any]] = {}
 _RUN_COUNTERS: dict[tuple[str, USMaterializerCapability], dict[str, Any]] = {}
+
+
+def _materializer_lock_for(
+    lane_id: str,
+    capability: USMaterializerCapability,
+) -> Any:
+    key = (lane_id, capability)
+    with _MATERIALIZER_LOCKS_GUARD:
+        lock = _MATERIALIZER_LOCKS.get(key)
+        if lock is not None:
+            return lock
+        if len(_MATERIALIZER_LOCKS) >= _MAX_MATERIALIZER_LOCKS:
+            raise RuntimeError("US materializer lock registry is full")
+        lock = Lock()
+        _MATERIALIZER_LOCKS[key] = lock
+        return lock
 
 
 def resolve_us_materializer_universe(
@@ -50,6 +68,7 @@ def resolve_us_materializer_universe(
     max_symbols: int,
     lane_id: str = "equity_research",
     instrument_type: USMaterializerInstrumentType = "stock",
+    owner: str = "configuration",
 ) -> dict[str, Any]:
     if max_symbols < 1 or max_symbols > 20:
         raise ValueError("US intraday materializer max_symbols must be between 1 and 20")
@@ -72,7 +91,7 @@ def resolve_us_materializer_universe(
     selected = configured[:max_symbols]
     return {
         "contract_version": "omi.us.materializer.universe.v1",
-        "owner": "configuration",
+        "owner": owner,
         "lane_id": lane_id,
         "instrument_type": instrument_type,
         "configured_count": len(configured),
@@ -101,10 +120,17 @@ def _base_result(
         "started_at": now.astimezone(timezone.utc).isoformat(),
         "phase": phase.value,
         "requested_count": 0,
+        "succeeded_count": 0,
+        "cache_satisfied_count": 0,
+        "acquired_count": 0,
+        "persisted_count": 0,
+        "selected_count": 0,
         "refreshed_count": 0,
         "failed_count": 0,
         "external_call_count": 0,
         "observed_external_call_count": 0,
+        "producer_refresh_due_seconds": profile.producer_refresh_due_seconds,
+        "consumer_stale_after_seconds": profile.consumer_stale_after_seconds,
         "results": [],
     }
 
@@ -128,6 +154,10 @@ def _record_last_run(capability: USMaterializerCapability, result: dict[str, Any
                 "materializer_run_in_flight_count": 0,
                 "external_call_count": 0,
                 "observed_external_call_count": 0,
+                "cache_satisfied_count": 0,
+                "acquired_count": 0,
+                "persisted_count": 0,
+                "selected_count": 0,
                 "refreshed_count": 0,
             },
         )
@@ -141,6 +171,10 @@ def _record_last_run(capability: USMaterializerCapability, result: dict[str, Any
         for field in (
             "external_call_count",
             "observed_external_call_count",
+            "cache_satisfied_count",
+            "acquired_count",
+            "persisted_count",
+            "selected_count",
             "refreshed_count",
         ):
             counters[field] += int(result.get(field) or 0)
@@ -209,13 +243,14 @@ def materialize_us_intraday_capability(
     max_external_calls: int | None = None,
     lane_id: str = "equity_research",
     instrument_type: USMaterializerInstrumentType = "stock",
+    universe_owner: str = "configuration",
     profile: USMaterializerProfile = US_RECURRING_MATERIALIZER_PROFILE,
     now: datetime | None = None,
     session_factory: Callable[[], Any] = SessionLocal,
     platform_factory: Callable[[Any], Any] = USIntradayMarketPlatform,
-    run_lock: Any = _MATERIALIZER_LOCK,
+    run_lock: Any | None = None,
 ) -> dict[str, Any]:
-    """Refresh one capability for a bounded configuration-owned universe."""
+    """Refresh one capability for a bounded, explicitly named universe owner."""
 
     if capability not in {"quote.snapshot", "intraday.bars"}:
         raise ValueError("Unsupported US intraday materializer capability")
@@ -263,7 +298,12 @@ def materialize_us_intraday_capability(
             started_monotonic=started_monotonic,
         )
 
-    if not run_lock.acquire(blocking=False):
+    effective_run_lock = (
+        run_lock
+        if run_lock is not None
+        else _materializer_lock_for(lane_id, capability)
+    )
+    if not effective_run_lock.acquire(blocking=False):
         result.update(
             {
                 "status": "skipped",
@@ -283,6 +323,7 @@ def materialize_us_intraday_capability(
             max_symbols=max_symbols,
             lane_id=lane_id,
             instrument_type=instrument_type,
+            owner=universe_owner,
         )
         symbols = list(universe["symbols"])
         result["universe"] = universe
@@ -345,6 +386,12 @@ def materialize_us_intraday_capability(
                                     "symbol": symbol,
                                     "status": "success",
                                     "reason": "canonical_cache_already_satisfied",
+                                    "cache_satisfied": True,
+                                    "acquisition_attempted": False,
+                                    "persistence_committed": False,
+                                    "selected": bool(
+                                        cached.result.resolved.health.selected_provider
+                                    ),
                                     "external_calls": 0,
                                     "resolved_status": cached.result.resolved.health.status.value,
                                     "selected_provider": cached.result.resolved.health.selected_provider,
@@ -377,6 +424,17 @@ def materialize_us_intraday_capability(
                         )
                     )
                     acquisition = getattr(refreshed.result, "acquisition", None)
+                    acquisition_attempted = bool(
+                        getattr(acquisition, "attempted", True)
+                    )
+                    persistence = getattr(refreshed.result, "persistence", None)
+                    persistence_committed = bool(
+                        getattr(
+                            persistence,
+                            "committed",
+                            acquisition_attempted,
+                        )
+                    )
                     external_calls = int(
                         getattr(acquisition, "external_calls", 0) or 0
                     )
@@ -389,10 +447,18 @@ def materialize_us_intraday_capability(
                             "symbol": symbol,
                             "status": "success" if postcondition else "failed",
                             "reason": (
-                                None
+                                "canonical_cache_already_satisfied"
+                                if postcondition and not acquisition_attempted
+                                else None
                                 if postcondition
                                 else "refresh_postcondition_unsatisfied"
                             ),
+                            "cache_satisfied": (
+                                postcondition and not acquisition_attempted
+                            ),
+                            "acquisition_attempted": acquisition_attempted,
+                            "persistence_committed": persistence_committed,
+                            "selected": bool(health.selected_provider),
                             "resolved_status": health.status.value,
                             "selected_provider": health.selected_provider,
                             "fallback_used": health.fallback_used,
@@ -450,17 +516,33 @@ def materialize_us_intraday_capability(
         finally:
             db.close()
 
-        result["refreshed_count"] = sum(
+        result["succeeded_count"] = sum(
             item["status"] == "success" for item in result["results"]
         )
-        result["failed_count"] = len(result["results"]) - result["refreshed_count"]
+        result["cache_satisfied_count"] = sum(
+            bool(item.get("cache_satisfied")) for item in result["results"]
+        )
+        result["acquired_count"] = sum(
+            bool(item.get("acquisition_attempted")) for item in result["results"]
+        )
+        result["persisted_count"] = sum(
+            bool(item.get("persistence_committed")) for item in result["results"]
+        )
+        result["selected_count"] = sum(
+            bool(item.get("selected")) for item in result["results"]
+        )
+        result["refreshed_count"] = sum(
+            item["status"] == "success" and bool(item.get("acquisition_attempted"))
+            for item in result["results"]
+        )
+        result["failed_count"] = len(result["results"]) - result["succeeded_count"]
         result.update(
             {
                 "status": (
                     "success"
                     if result["results"] and result["failed_count"] == 0
                     else "partial"
-                    if result["refreshed_count"] > 0
+                    if result["succeeded_count"] > 0
                     else "failed"
                     if result["results"]
                     else "skipped"
@@ -475,7 +557,7 @@ def materialize_us_intraday_capability(
             started_monotonic=started_monotonic,
         )
     finally:
-        run_lock.release()
+        effective_run_lock.release()
 
 
 def bootstrap_us_current_market(
@@ -495,6 +577,7 @@ def bootstrap_us_current_market(
     runs: list[dict[str, Any]] = []
     configured_plans = (
         ("index_current", "index", "quote.snapshot", index_symbols, 6),
+        ("index_current", "index", "intraday.bars", index_symbols, 6),
         ("equity_research", "stock", "quote.snapshot", equity_symbols, 2),
         ("equity_research", "stock", "intraday.bars", equity_symbols, 2),
     )

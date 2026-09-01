@@ -84,6 +84,7 @@ from app.us_market.service import (
     delete_us_watchlist_group,
     delete_us_watchlist_item,
     build_us_source_health,
+    snapshot_us_source_health,
     get_us_company_profile,
     get_us_intraday_trend,
     get_us_quote_snapshot,
@@ -1067,6 +1068,19 @@ def get_us_intraday_trend_api(
         session_scope=session_scope,
         interval=interval,
         db=db,
+    )
+
+
+@router.post("/source-health/snapshot", response_model=USSourceHealthRead)
+def create_us_source_health_snapshot(
+    symbol: str | None = None,
+    series_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return snapshot_us_source_health(
+        db=db,
+        symbol=symbol,
+        series_id=series_id,
     )
 
 

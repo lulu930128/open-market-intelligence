@@ -36,6 +36,7 @@ from app.market.twse_mis_observation import (
     resolve_twse_mis_observation,
 )
 from app.market_data.contracts import (
+    MarketSession,
     Quantity,
     QuantityUnit,
     ResolvedEvidenceStatus,
@@ -284,6 +285,42 @@ def _percent_change(change: float | None, base: float | None) -> float | None:
     if change is None or base is None or base == 0:
         return None
     return change / base * 100
+
+
+def _headline_contract(
+    *,
+    price: Any,
+    reference_price: Any,
+    event_time: Any,
+    trade_date: Any,
+    basis: str,
+    finalization: str,
+    authority: str,
+    source: str | None,
+    decision_usable: bool,
+) -> dict[str, Any]:
+    """Build one coherent outward price bundle from one evidence basis."""
+
+    normalized_price = _as_float(price)
+    normalized_reference = _as_float(reference_price)
+    change = (
+        normalized_price - normalized_reference
+        if normalized_price is not None and normalized_reference is not None
+        else None
+    )
+    return {
+        "headline_price": normalized_price,
+        "headline_reference_price": normalized_reference,
+        "headline_change": change,
+        "headline_change_pct": _percent_change(change, normalized_reference),
+        "headline_event_time": event_time,
+        "headline_trade_date": trade_date,
+        "headline_basis": basis,
+        "headline_finalization": finalization,
+        "headline_authority": authority,
+        "headline_source": source,
+        "headline_decision_usable": bool(decision_usable and normalized_price is not None),
+    }
 
 
 def _loads_levels(value: str | None) -> list[dict[str, Any]]:
@@ -1188,6 +1225,24 @@ def _row_to_response(
             ),
             row.previous_close,
         ),
+        **_headline_contract(
+            price=semantics["last_trade_price"],
+            reference_price=row.previous_close,
+            event_time=provider_event_time,
+            trade_date=row.trade_date,
+            basis="last_trade",
+            finalization="intraday",
+            authority=(
+                "broker"
+                if row.provider == KGI_SUPERPY_PROVIDER
+                else "exchange_feed"
+            ),
+            source=row.source,
+            decision_usable=bool(
+                semantics["last_trade_available"]
+                and not freshness.get("is_stale")
+            ),
+        ),
         **volume_contract,
         "best_bid_price": row.best_bid_price,
         "best_bid_size_lots": row.best_bid_size_lots,
@@ -1276,6 +1331,58 @@ def _depth_level_projection(level: Any) -> dict[str, Any]:
     }
 
 
+def project_taiwan_closing_depth_snapshot(
+    result: Any,
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    """Project a persisted closing-session book as historical, non-tradable evidence."""
+
+    depth = getattr(result.resolved, "depth", None)
+    event_time = depth.lineage.event_at if depth is not None else None
+    selected_session = getattr(result.resolved.health, "selected_session", None)
+    expected_trade_date = _expected_trade_date_for_phase(
+        phase,
+        now=getattr(result.requirement, "requested_at", None),
+    )
+    available = bool(
+        depth is not None
+        and phase in {"close_resolution", "post_close_snapshot"}
+        and selected_session
+        in {MarketSession.CLOSING_AUCTION, MarketSession.CLOSE_RESOLUTION}
+        and event_time is not None
+        and event_time.astimezone(TAIWAN_TZ).date() == expected_trade_date
+        and (depth.bids or depth.asks)
+    )
+    return {
+        "available": available,
+        "status": (
+            "available"
+            if available
+            else "not_applicable"
+            if phase not in {"close_resolution", "post_close_snapshot"}
+            else "unavailable"
+        ),
+        "semantics": "closing_session_snapshot" if available else "unavailable",
+        "event_time": event_time if available else None,
+        "trade_date": (
+            event_time.astimezone(TAIWAN_TZ).date()
+            if available and event_time is not None
+            else None
+        ),
+        "provider": depth.lineage.provider if available and depth is not None else None,
+        "source": depth.lineage.source if available and depth is not None else None,
+        "session": (
+            selected_session.value
+            if available and selected_session is not None
+            else None
+        ),
+        "bid_level_count": len(depth.bids) if available and depth is not None else 0,
+        "ask_level_count": len(depth.asks) if available and depth is not None else 0,
+        "decision_usable": False,
+    }
+
+
 def _apply_resolved_depth(
     payload: dict[str, Any],
     result: Any,
@@ -1284,32 +1391,54 @@ def _apply_resolved_depth(
 ) -> None:
     depth = getattr(result.resolved, "depth", None)
     usable = bool(depth is not None and result.resolved.health.facts_usable)
-    available = usable and phase in LIVE_DEPTH_PHASES
+    live_available = usable and phase in LIVE_DEPTH_PHASES
     depth_event_time = (
         depth.lineage.event_at if depth is not None else None
     )
+    snapshot = project_taiwan_closing_depth_snapshot(result, phase=phase)
+    snapshot_available = bool(snapshot["available"])
+    visible = live_available or snapshot_available
     bid_levels = (
         [_depth_level_projection(level) for level in depth.bids]
-        if available
+        if visible
         else []
     )
     ask_levels = (
         [_depth_level_projection(level) for level in depth.asks]
-        if available
+        if visible
         else []
     )
     depth_contract = _depth_contract(
         bid_levels=bid_levels,
         ask_levels=ask_levels,
-        depth_available=available,
+        depth_available=visible,
     )
+    if snapshot_available:
+        depth_contract.update(
+            {
+                "bid_depth_status": "closing_session_snapshot",
+                "ask_depth_status": "closing_session_snapshot",
+            }
+        )
     best_bid = _first_price_level(bid_levels)
     best_ask = _first_price_level(ask_levels)
     payload.update(
         {
             "bid_levels": bid_levels,
             "ask_levels": ask_levels,
-            "depth_available": available,
+            "depth_available": live_available,
+            "depth_live_available": live_available,
+            "depth_snapshot_available": snapshot_available,
+            "depth_snapshot_status": (
+                snapshot["status"]
+            ),
+            "depth_snapshot_semantics": snapshot["semantics"],
+            "depth_snapshot_event_time": snapshot["event_time"],
+            "depth_snapshot_trade_date": snapshot["trade_date"],
+            "depth_snapshot_provider": snapshot["provider"],
+            "depth_snapshot_source": snapshot["source"],
+            "depth_snapshot_session": snapshot["session"],
+            "depth_snapshot_decision_usable": False,
             "best_bid_price": best_bid.get("price") if best_bid else None,
             "best_bid_size_lots": best_bid.get("size_lots") if best_bid else None,
             "best_ask_price": best_ask.get("price") if best_ask else None,
@@ -1523,14 +1652,31 @@ def _finalize_shared_projection_semantics(
                     "session_close_trade_date": session_close.get("trade_date"),
                     "session_close_event_time": session_close.get("event_time"),
                     "session_close_confirmed_at": session_close.get("confirmed_at"),
-                    "last_price": session_price,
-                    "last_trade_price": session_price,
-                    "last_trade_available": True,
-                    "last_trade_is_current_session": True,
                     "price_available": True,
-                    "trade_date": session_close.get("trade_date"),
-                    "quote_time": session_close.get("event_time"),
-                    "provider_event_time": session_close.get("event_time"),
+                    **_headline_contract(
+                        price=session_price,
+                        reference_price=payload.get("previous_close"),
+                        event_time=session_close.get("event_time"),
+                        trade_date=session_close.get("trade_date"),
+                        basis="session_close",
+                        finalization=str(
+                            session_close.get("finalization")
+                            or session_close.get("status")
+                            or "session_final"
+                        ),
+                        authority=str(
+                            session_close.get("authority")
+                            or "market_data_provider"
+                        ),
+                        source=(
+                            str(session_close.get("source"))
+                            if session_close.get("source") is not None
+                            else None
+                        ),
+                        decision_usable=bool(
+                            session_close.get("decision_usable", True)
+                        ),
+                    ),
                 }
             )
             freshness = payload.get("freshness")
@@ -1690,13 +1836,6 @@ def _apply_resolved_official_close(
             "official_close_price": bar.close_price,
             "official_close_trade_date": trade_date,
             "official_close_source": bar.lineage.source,
-            "last_price": bar.close_price,
-            "last_trade_price": bar.close_price,
-            "last_trade_available": True,
-            "last_trade_is_current_session": status == "confirmed",
-            "trade_date": trade_date,
-            "quote_time": bar.lineage.event_at,
-            "provider_event_time": bar.lineage.event_at,
             "official_close_raw": raw_close,
             "official_close_display": raw_close,
             "official_close_precision": max(
@@ -1722,6 +1861,21 @@ def _apply_resolved_official_close(
                 else "latest_completed_session"
             ),
             "price_available": True,
+            **_headline_contract(
+                price=bar.close_price,
+                reference_price=(
+                    bar.close_price - bar.price_change
+                    if bar.price_change is not None
+                    else response.get("previous_close")
+                ),
+                event_time=bar.lineage.event_at,
+                trade_date=trade_date,
+                basis="official_close",
+                finalization=bar.finalization.value,
+                authority="exchange_official",
+                source=bar.lineage.source,
+                decision_usable=bool(result.resolved.health.research_usable),
+            ),
         }
     )
     freshness = response.get("freshness")
@@ -1747,6 +1901,25 @@ def _apply_resolved_official_close(
                 "semantics": "latest_completed_session",
             }
         )
+
+
+def _apply_headline_compatibility_aliases(response: dict[str, Any]) -> None:
+    """Keep legacy price fields aligned with the selected outward headline.
+
+    The actual trade identity remains available exclusively through
+    ``last_trade_*``.  These aliases are retained for older REST consumers that
+    have not migrated to the explicit ``headline_*`` contract yet.
+    """
+
+    if response.get("headline_price") is None:
+        return
+    response.update(
+        {
+            "last_price": response.get("headline_price"),
+            "change": response.get("headline_change"),
+            "change_pct": response.get("headline_change_pct"),
+        }
+    )
 
 
 def project_taiwan_quote_evidence_bundle(
@@ -1807,6 +1980,7 @@ def project_taiwan_quote_evidence_bundle(
         official_close_result,
         requested_at=requested_at,
     )
+    _apply_headline_compatibility_aliases(response)
     selected_sources = [
         observation.lineage.source
         for observation in (

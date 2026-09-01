@@ -207,53 +207,92 @@ def plan_us_index_data_repair(
             "job_id": active_job.id,
         }
 
+    attempt_query = db.query(JobRun).filter(
+        JobRun.job_type == US_INDEX_DATA_REPAIR_JOB_TYPE,
+        JobRun.target == target,
+    )
+    lifetime_attempt_count = attempt_query.count()
     rows = (
-        db.query(JobRun)
-        .filter(
-            JobRun.job_type == US_INDEX_DATA_REPAIR_JOB_TYPE,
-            JobRun.target == target,
-        )
-        .order_by(JobRun.created_at.asc(), JobRun.id.asc())
+        attempt_query.order_by(JobRun.created_at.desc(), JobRun.id.desc())
         .limit(100)
         .all()
     )
-    attempt_count = len(rows)
+    rows.reverse()
+    last_success_index = max(
+        (
+            index
+            for index, row in enumerate(rows)
+            if str(row.status).casefold() == "success"
+        ),
+        default=None,
+    )
+    attempts_since_success = (
+        len(rows) - last_success_index - 1
+        if last_success_index is not None
+        else lifetime_attempt_count
+    )
     max_attempts = int(settings.scheduler_us_index_data_repair_max_attempts)
-    if attempt_count >= max_attempts:
-        return {
-            **base,
-            "status": "exhausted",
-            "reason": "max_attempts_reached",
-            "attempt_count": attempt_count,
-            "max_attempts": max_attempts,
-        }
 
     cooldown_seconds = int(settings.scheduler_us_index_data_repair_cooldown_seconds)
     last_job = rows[-1] if rows else None
     last_ended_at = _utc(
         (last_job.ended_at or last_job.updated_at) if last_job is not None else None
     )
-    retry_at = (
+    cooldown_retry_at = (
         last_ended_at + timedelta(seconds=cooldown_seconds)
         if last_ended_at is not None
         else None
     )
-    if retry_at is not None and requested_at < retry_at:
+    completed_attempt_window = (
+        attempts_since_success > 0
+        and attempts_since_success % max_attempts == 0
+    )
+    if completed_attempt_window:
+        manual_backoff_seconds = int(
+            settings.scheduler_us_index_data_repair_manual_attention_backoff_seconds
+        )
+        retry_at = (
+            last_ended_at + timedelta(seconds=manual_backoff_seconds)
+            if last_ended_at is not None
+            else None
+        )
+        if retry_at is not None and requested_at < retry_at:
+            return {
+                **base,
+                "status": "manual_attention",
+                "reason": "attempt_window_backoff",
+                "retryable": True,
+                "attempt_count": lifetime_attempt_count,
+                "attempts_since_success": attempts_since_success,
+                "attempts_in_current_window": max_attempts,
+                "max_attempts": max_attempts,
+                "retry_at": retry_at,
+            }
+    elif cooldown_retry_at is not None and requested_at < cooldown_retry_at:
         return {
             **base,
-            "status": "suppressed",
+            "status": "backoff",
             "reason": "cooldown",
-            "attempt_count": attempt_count,
+            "retryable": True,
+            "attempt_count": lifetime_attempt_count,
+            "attempts_since_success": attempts_since_success,
+            "attempts_in_current_window": attempts_since_success % max_attempts,
             "max_attempts": max_attempts,
-            "retry_at": retry_at,
+            "retry_at": cooldown_retry_at,
         }
 
     return {
         **base,
         "status": "ready",
         "reason": "postcondition_missing",
-        "attempt_count": attempt_count,
-        "next_attempt": attempt_count + 1,
+        "retryable": True,
+        "attempt_count": lifetime_attempt_count,
+        "attempts_since_success": attempts_since_success,
+        "attempts_in_current_window": attempts_since_success % max_attempts,
+        "next_attempt": lifetime_attempt_count + 1,
+        "next_attempt_in_window": (
+            attempts_since_success % max_attempts
+        ) + 1,
         "max_attempts": max_attempts,
     }
 
@@ -384,6 +423,12 @@ def reconcile_us_index_data_repair_gate(
             "checked_at": requested_at,
             "target": decision["target"],
             "missing_count": decision["audit"]["missing_count"],
+            "attempt_count": decision.get("attempt_count"),
+            "attempts_since_success": decision.get("attempts_since_success"),
+            "attempts_in_current_window": decision.get(
+                "attempts_in_current_window"
+            ),
+            "retry_at": decision.get("retry_at"),
         }
         _record_decision(summary)
         return decision
@@ -394,6 +439,7 @@ def reconcile_us_index_data_repair_gate(
         "trigger": trigger,
         "requested_at": requested_at.isoformat(),
         "attempt": decision["next_attempt"],
+        "attempt_in_window": decision["next_attempt_in_window"],
         "max_attempts": decision["max_attempts"],
         "symbols": list(PRIORITY_US_INDEX_SYMBOLS),
         "missing_daily_symbols": audit["missing_daily_symbols"],

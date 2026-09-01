@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from collections import defaultdict
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Iterable, Literal
 
@@ -28,11 +29,17 @@ from app.market.tw_current_market_capabilities import (
     TW_CURRENT_INDEX_CAPABILITY_ID,
     TW_CURRENT_INDEX_DATASET_ID,
     TW_CURRENT_INDEX_DESCRIPTORS,
+    TW_INDEX_INTRADAY_CAPABILITY_ID,
+    TW_INDEX_INTRADAY_DATASET_ID,
 )
-from app.market.tw_current_market_repository import TaiwanCurrentMarketRepository
+from app.market.tw_current_market_repository import (
+    TaiwanCurrentMarketRepository,
+    TaiwanIndexSeriesRow,
+)
 from app.market.tw_current_market_transaction import TaiwanCurrentMarketTransaction
 from app.market_data.contracts import (
     AuthorityClass,
+    BarFinalization,
     CanonicalModel,
     Market,
     MarketSession,
@@ -65,6 +72,40 @@ class TaiwanIndexPreviousCloseSeed(CanonicalModel):
         "official_completed_session",
         "same_session_non_fugle",
     ]
+
+
+class TaiwanIndexIntradayPoint(CanonicalModel):
+    minute_at: datetime
+    event_at: datetime
+    open_value: Decimal = Field(gt=0)
+    high_value: Decimal = Field(gt=0)
+    low_value: Decimal = Field(gt=0)
+    close_value: Decimal = Field(gt=0)
+    provider: str
+    source: str
+    authority: AuthorityClass
+    raw_result_id: int = Field(gt=0)
+    source_observation_count: int = Field(gt=0)
+    session: MarketSession
+    finalization: BarFinalization
+    official: bool
+    provisional: bool
+
+
+class TaiwanIndexIntradaySeries(CanonicalModel):
+    contract_version: str = "tw.market_index.intraday.v1"
+    dataset_id: str = TW_INDEX_INTRADAY_DATASET_ID
+    capability_id: str = TW_INDEX_INTRADAY_CAPABILITY_ID
+    status: Literal["available", "partial", "missing"]
+    index_id: str
+    trade_date: date
+    points: tuple[TaiwanIndexIntradayPoint, ...] = ()
+    previous_close: Decimal | None = None
+    coverage_ratio: float = Field(ge=0, le=1)
+    expected_minute_count: int = Field(ge=0)
+    rejected_candidate_count: int = Field(ge=0)
+    candidate_rejections: tuple[dict[str, object], ...] = ()
+    limitations: tuple[str, ...] = ()
 
 
 def current_taiwan_market_session(requested_at: datetime) -> MarketSession:
@@ -166,6 +207,213 @@ def read_taiwan_current_index(
         # default (official-first) selection contract.
         official_first=False,
     )
+
+
+_INDEX_AUTHORITY_ORDER = {
+    AuthorityClass.EXCHANGE: 0,
+    AuthorityClass.BROKER: 1,
+    AuthorityClass.VENDOR: 2,
+    AuthorityClass.DERIVED: 3,
+    AuthorityClass.CACHE: 4,
+}
+
+
+def _expected_index_minutes(*, trade_date: date, requested_at: datetime) -> int:
+    local_now = requested_at.astimezone(TAIWAN_TZ)
+    if trade_date != local_now.date():
+        return 271
+    session_start = datetime.combine(trade_date, time(9, 0), tzinfo=TAIWAN_TZ)
+    session_end = datetime.combine(trade_date, time(13, 30), tzinfo=TAIWAN_TZ)
+    effective_end = min(max(local_now, session_start), session_end)
+    return int((effective_end - session_start).total_seconds() // 60) + 1
+
+
+def read_taiwan_index_intraday_series(
+    db: Session,
+    *,
+    index_id: str,
+    requested_at: datetime | None = None,
+) -> TaiwanIndexIntradaySeries:
+    """Resolve one deterministic minute series from canonical current events."""
+
+    now = requested_at or datetime.now(TAIWAN_TZ)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("requested_at must be timezone-aware")
+    normalized_index_id = str(index_id or "").strip().upper()
+    if normalized_index_id not in {"TAIEX", "TPEX"}:
+        raise ValueError("Taiwan index series requires TAIEX or TPEX")
+    trade_date = taiwan_presentation_session(now)["trade_date"]
+    batch = TaiwanCurrentMarketRepository(db).read_market_index_series_rows(
+        index_id=normalized_index_id,
+        trade_date=trade_date,
+    )
+    by_minute_source: dict[
+        datetime,
+        dict[tuple[str, str], list[TaiwanIndexSeriesRow]],
+    ] = defaultdict(lambda: defaultdict(list))
+    for row in batch.rows:
+        local_event_at = row.event_at.astimezone(TAIWAN_TZ)
+        local_clock = local_event_at.timetz().replace(tzinfo=None)
+        if not time(9, 0) <= local_clock <= time(13, 30):
+            continue
+        minute_at = local_event_at.replace(second=0, microsecond=0)
+        by_minute_source[minute_at][(row.provider, row.source)].append(row)
+
+    points: list[TaiwanIndexIntradayPoint] = []
+    for minute_at, source_groups in sorted(by_minute_source.items()):
+        candidates = [
+            sorted(rows, key=lambda item: (item.event_at, item.storage_row_id))
+            for rows in source_groups.values()
+        ]
+        selected = min(
+            candidates,
+            key=lambda rows: (
+                _INDEX_AUTHORITY_ORDER.get(rows[-1].authority, 99),
+                rows[-1].provider_priority,
+                rows[-1].provider,
+                rows[-1].source,
+            ),
+        )
+        first = selected[0]
+        last = selected[-1]
+        values = [row.close_value for row in selected]
+        points.append(
+            TaiwanIndexIntradayPoint(
+                minute_at=minute_at,
+                event_at=last.event_at,
+                open_value=first.close_value,
+                high_value=max(values),
+                low_value=min(values),
+                close_value=last.close_value,
+                provider=last.provider,
+                source=last.source,
+                authority=last.authority,
+                raw_result_id=last.raw_result_id,
+                source_observation_count=len(selected),
+                session=last.session,
+                finalization=last.finalization,
+                official=last.official,
+                provisional=last.provisional,
+            )
+        )
+
+    expected_minute_count = _expected_index_minutes(
+        trade_date=trade_date,
+        requested_at=now,
+    )
+    coverage_ratio = min(
+        len(points) / expected_minute_count if expected_minute_count else 0.0,
+        1.0,
+    )
+    limitations = list(batch.limitations)
+    if points and coverage_ratio < 0.95:
+        limitations.append("TW_INDEX_INTRADAY_COVERAGE_PARTIAL")
+    status: Literal["available", "partial", "missing"] = (
+        "missing"
+        if not points
+        else "available"
+        if coverage_ratio >= 0.95
+        else "partial"
+    )
+    first_row = next(
+        (
+            row
+            for row in batch.rows
+            if points and row.event_at.astimezone(TAIWAN_TZ).replace(second=0, microsecond=0)
+            == points[0].minute_at
+            and row.provider == points[0].provider
+            and row.source == points[0].source
+        ),
+        None,
+    )
+    previous_close = (
+        first_row.close_value - first_row.price_change
+        if first_row is not None
+        and first_row.close_value - first_row.price_change > 0
+        else None
+    )
+    return TaiwanIndexIntradaySeries(
+        status=status,
+        index_id=normalized_index_id,
+        trade_date=trade_date,
+        points=tuple(points),
+        previous_close=previous_close,
+        coverage_ratio=coverage_ratio,
+        expected_minute_count=expected_minute_count,
+        rejected_candidate_count=len(batch.rejections),
+        candidate_rejections=tuple(
+            item.model_dump(mode="json") for item in batch.rejections
+        ),
+        limitations=tuple(dict.fromkeys(limitations)),
+    )
+
+
+def project_taiwan_index_intraday_series(
+    series: TaiwanIndexIntradaySeries,
+) -> dict[str, object]:
+    components: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for point in series.points:
+        key = (point.provider, point.source)
+        if key in seen:
+            continue
+        seen.add(key)
+        components.append(
+            {
+                "provider": point.provider,
+                "source": point.source,
+                "authority": point.authority.value,
+            }
+        )
+    return {
+        "stock_id": series.index_id,
+        "source": "canonical_taiwan_current_index_series",
+        "provider": "resolved_multi_source",
+        "source_components": components,
+        "source_interval": "event",
+        "interval": "1m",
+        "trade_date": series.trade_date,
+        "coverage_status": series.status,
+        "is_partial": series.status != "available",
+        "previous_close": (
+            float(series.previous_close)
+            if series.previous_close is not None
+            else None
+        ),
+        "source_point_count": sum(
+            point.source_observation_count for point in series.points
+        ),
+        "points": [
+            {
+                "time": point.minute_at,
+                "price": float(point.close_value),
+                "open": float(point.open_value),
+                "high": float(point.high_value),
+                "low": float(point.low_value),
+                "close": float(point.close_value),
+                "volume": None,
+                "provider": point.provider,
+                "source": point.source,
+                "raw_result_id": point.raw_result_id,
+                "event_at": point.event_at,
+                "session": point.session.value,
+                "finalization": point.finalization.value,
+                "official": point.official,
+                "provisional": point.provisional,
+            }
+            for point in series.points
+        ],
+        "series_coverage": {
+            "status": series.status,
+            "coverage_ratio": series.coverage_ratio,
+            "expected_minute_count": series.expected_minute_count,
+            "resolved_minute_count": len(series.points),
+            "rejected_candidate_count": series.rejected_candidate_count,
+            "candidate_rejections": list(series.candidate_rejections),
+            "limitations": list(series.limitations),
+        },
+        "warnings": list(series.limitations),
+    }
 
 
 def read_taiwan_index_previous_close_seed(
@@ -442,13 +690,17 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
 
 
 __all__ = [
+    "TaiwanIndexIntradayPoint",
+    "TaiwanIndexIntradaySeries",
     "TaiwanIndexPreviousCloseSeed",
     "build_taiwan_current_requirement",
     "current_taiwan_market_session",
     "project_taiwan_current_breadth",
     "project_taiwan_current_index",
+    "project_taiwan_index_intraday_series",
     "read_taiwan_current_breadth",
     "read_taiwan_current_index",
+    "read_taiwan_index_intraday_series",
     "read_taiwan_index_previous_close_seed",
     "refresh_taiwan_current_breadth",
     "refresh_taiwan_current_index",

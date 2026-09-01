@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Literal
 
+from pydantic import Field
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -16,9 +17,44 @@ from app.market.taiwan_market_state import SUPPORTED_MARKETS
 from app.market.tw_realtime_lease_platform import (
     summarize_taiwan_realtime_quote_leases,
 )
+from app.market_data.contracts import CanonicalModel
 
 
 INTRADAY_UNIVERSE_VERSION = "tw.intraday.universe.v1"
+TIER_A_TARGET_PLAN_VERSION = "tw.tier_a_target_plan.v1"
+
+
+class TaiwanTierATarget(CanonicalModel):
+    stock_id: str
+    origins: tuple[str, ...]
+    instrument_type: str
+    market: str
+
+
+class TaiwanTierATargetPlan(CanonicalModel):
+    contract_version: str = TIER_A_TARGET_PLAN_VERSION
+    operation_profile: Literal[
+        "production_intraday",
+        "production_session_close",
+        "acceptance_canary",
+    ]
+    symbols: tuple[str, ...]
+    targets: tuple[TaiwanTierATarget, ...]
+    candidate_count: int = Field(ge=0)
+    eligible_count: int = Field(ge=0)
+    selected_count: int = Field(ge=0)
+    skipped_count: int = Field(ge=0)
+    max_symbols: int = Field(gt=0)
+    configured_symbol_count: int = Field(ge=0)
+    skipped_targets: tuple[dict[str, Any], ...] = ()
+    scope_semantics: str = "bounded_tier_a_universe_not_all_market"
+    profile_semantics: str
+    source_priority: tuple[str, ...] = (
+        "configured",
+        "holding",
+        "active_lease",
+        "watchlist",
+    )
 
 
 def _normalized_symbols(values: Iterable[object]) -> list[str]:
@@ -76,18 +112,30 @@ def _lease_symbols() -> list[str]:
     )
 
 
-def resolve_taiwan_intraday_target_universe(
+def resolve_taiwan_tier_a_target_plan(
     db: Session,
     *,
+    operation_profile: Literal[
+        "production_intraday",
+        "production_session_close",
+        "acceptance_canary",
+    ] = "production_intraday",
     max_symbols: int | None = None,
     configured_symbols: Iterable[object] | None = None,
     lease_symbols: Iterable[object] | None = None,
 ) -> dict[str, Any]:
-    """Resolve the bounded Tier-A target set shared by acquisition and health.
+    """Resolve the single ordered Tier-A target plan for one operation profile.
 
     This is a read-only target planner. It never expands to the full Taiwan
     market and it validates every candidate against the active StockMaster.
     """
+
+    if operation_profile not in {
+        "production_intraday",
+        "production_session_close",
+        "acceptance_canary",
+    }:
+        raise ValueError("unsupported Taiwan Tier-A operation profile")
 
     hard_cap = max(
         min(
@@ -100,14 +148,15 @@ def resolve_taiwan_intraday_target_universe(
         ),
         1,
     )
+    configured = _normalized_symbols(
+        configured_symbols
+        if configured_symbols is not None
+        else _configured_symbols()
+    )
     sources = (
         (
             "configured",
-            _normalized_symbols(
-                configured_symbols
-                if configured_symbols is not None
-                else _configured_symbols()
-            ),
+            configured,
         ),
         ("holding", _holding_symbols(db)),
         (
@@ -171,8 +220,28 @@ def resolve_taiwan_intraday_target_universe(
             continue
         eligible.append(symbol)
 
-    selected = eligible[:hard_cap]
-    for symbol in eligible[hard_cap:]:
+    profile_eligible = eligible
+    profile_semantics = "all_eligible_targets_in_canonical_order"
+    if operation_profile == "acceptance_canary" and configured:
+        configured_set = set(configured)
+        profile_eligible = [
+            symbol for symbol in eligible if symbol in configured_set
+        ]
+        profile_semantics = "configured_canary_subset_of_canonical_plan"
+        for symbol in eligible:
+            if symbol not in configured_set:
+                skipped_targets.append(
+                    {
+                        "stock_id": symbol,
+                        "reason": "acceptance_canary_profile_excluded",
+                        "origins": origins_by_symbol[symbol],
+                    }
+                )
+    elif operation_profile == "acceptance_canary":
+        profile_semantics = "watchlist_fallback_canary_from_canonical_plan"
+
+    selected = profile_eligible[:hard_cap]
+    for symbol in profile_eligible[hard_cap:]:
         skipped_targets.append(
             {
                 "stock_id": symbol,
@@ -181,35 +250,56 @@ def resolve_taiwan_intraday_target_universe(
             }
         )
 
+    plan = TaiwanTierATargetPlan(
+        operation_profile=operation_profile,
+        symbols=tuple(selected),
+        targets=tuple(
+            TaiwanTierATarget(
+                stock_id=symbol,
+                origins=tuple(origins_by_symbol[symbol]),
+                instrument_type=masters[symbol].instrument_type,
+                market=masters[symbol].market,
+            )
+            for symbol in selected
+        ),
+        candidate_count=len(ordered_candidates),
+        eligible_count=len(eligible),
+        selected_count=len(selected),
+        skipped_count=len(skipped_targets),
+        max_symbols=hard_cap,
+        configured_symbol_count=len(configured),
+        skipped_targets=tuple(skipped_targets),
+        profile_semantics=profile_semantics,
+    )
     return {
         "version": INTRADAY_UNIVERSE_VERSION,
-        "symbols": selected,
-        "targets": [
-            {
-                "stock_id": symbol,
-                "origins": origins_by_symbol[symbol],
-                "instrument_type": masters[symbol].instrument_type,
-                "market": masters[symbol].market,
-            }
-            for symbol in selected
-        ],
-        "candidate_count": len(ordered_candidates),
-        "eligible_count": len(eligible),
-        "selected_count": len(selected),
-        "skipped_count": len(skipped_targets),
-        "max_symbols": hard_cap,
-        "skipped_targets": skipped_targets,
-        "scope_semantics": "bounded_tier_a_universe_not_all_market",
-        "source_priority": [
-            "configured",
-            "holding",
-            "active_lease",
-            "watchlist",
-        ],
+        **plan.model_dump(mode="json"),
     }
+
+
+def resolve_taiwan_intraday_target_universe(
+    db: Session,
+    *,
+    max_symbols: int | None = None,
+    configured_symbols: Iterable[object] | None = None,
+    lease_symbols: Iterable[object] | None = None,
+) -> dict[str, Any]:
+    """Compatibility projection of the canonical production target plan."""
+
+    return resolve_taiwan_tier_a_target_plan(
+        db,
+        operation_profile="production_intraday",
+        max_symbols=max_symbols,
+        configured_symbols=configured_symbols,
+        lease_symbols=lease_symbols,
+    )
 
 
 __all__ = [
     "INTRADAY_UNIVERSE_VERSION",
+    "TIER_A_TARGET_PLAN_VERSION",
+    "TaiwanTierATarget",
+    "TaiwanTierATargetPlan",
     "resolve_taiwan_intraday_target_universe",
+    "resolve_taiwan_tier_a_target_plan",
 ]

@@ -21,6 +21,7 @@ from app.market.quote_depth import (
     _taiwan_exchange_datetime,
     get_taiwan_stock_quote_depth,
 )
+from app.market.public_quote_platform import acquire_taiwan_session_close
 from app.market.taiwan_realtime_platform import refresh_taiwan_realtime_snapshot
 from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day
 from app.market_data.policies import RealtimePolicy
@@ -44,6 +45,16 @@ TAIWAN_QUOTE_CONTRACT_SLOTS = (
     "13:32",
     "13:33",
     "13:34",
+)
+TAIWAN_QUOTE_CONTRACT_CLOSE_START = time(13, 30)
+TAIWAN_QUOTE_CONTRACT_CONFIRMATION_START = time(13, 33)
+TAIWAN_SESSION_CLOSE_TRUTHFUL_UNAVAILABLE_REASONS = (
+    "SESSION_CLOSE_AUTHORITY_UNVERIFIED",
+    "SESSION_CLOSE_CONTROL_SESSION_INVALID",
+    "SESSION_CLOSE_EVENT_TIME_INVALID",
+    "SESSION_CLOSE_CONFIRMATION_MISSING",
+    "PUBLIC_QUOTE_CANDIDATE_MISSING",
+    "PUBLIC_QUOTE_TRADE_DATE_MISMATCH",
 )
 
 
@@ -86,6 +97,148 @@ def _slot_time(capture_slot: str) -> time:
         )
     hour_text, minute_text = normalized.split(":", maxsplit=1)
     return time(int(hour_text), int(minute_text))
+
+
+def _parsed_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _taiwan_exchange_datetime(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return _taiwan_exchange_datetime(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+    return None
+
+
+def _slot_required_capabilities(capture_slot: str) -> list[str]:
+    slot_clock = _slot_time(capture_slot)
+    if slot_clock < time(9, 0):
+        return ["quote.snapshot", "quote.order_book", "quote.auction"]
+    if slot_clock < time(13, 25):
+        return ["quote.snapshot", "quote.order_book"]
+    if slot_clock < TAIWAN_QUOTE_CONTRACT_CLOSE_START:
+        return ["quote.snapshot", "quote.auction", "quote.order_book"]
+    return ["quote.session_close"]
+
+
+def quote_contract_snapshot_semantic_status(
+    row: TaiwanQuoteContractSnapshot,
+    *,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Separate transport capture from slot-specific semantic readiness."""
+
+    if not str(row.capture_status or "").startswith("captured"):
+        return {"status": "failed", "ready": False, "reason": "capture_failed"}
+    if payload is None and row.payload_json:
+        try:
+            loaded = json.loads(row.payload_json)
+            payload = loaded if isinstance(loaded, dict) else None
+        except (TypeError, ValueError):
+            payload = None
+    slot_clock = _slot_time(str(row.capture_slot))
+    if slot_clock < TAIWAN_QUOTE_CONTRACT_CLOSE_START:
+        quote_time = _parsed_datetime(
+            payload.get("quote_time") if payload is not None else row.quote_time
+        )
+        same_trade_date = bool(
+            quote_time is not None and quote_time.date() == row.trade_date
+        )
+        source_error = (
+            payload.get("freshness", {}).get("source_error")
+            if payload is not None
+            and isinstance(payload.get("freshness"), dict)
+            else None
+        )
+        ready = bool(same_trade_date and not source_error)
+        return {
+            "status": "ready" if ready else "captured_partial",
+            "ready": ready,
+            "reason": None if ready else "current_trade_date_observation_missing",
+        }
+
+    components = (
+        payload.get("data_core_components")
+        if payload is not None
+        and isinstance(payload.get("data_core_components"), dict)
+        else {}
+    )
+    session_close = (
+        components.get("quote.session_close")
+        if isinstance(components.get("quote.session_close"), dict)
+        else {}
+    )
+    status = str(
+        session_close.get("finalization")
+        or session_close.get("status")
+        or (payload or {}).get("session_close_status")
+        or "unavailable"
+    )
+    trade_date_value = (
+        session_close.get("trade_date")
+        or (payload or {}).get("session_close_trade_date")
+    )
+    event_at = _parsed_datetime(
+        session_close.get("event_time")
+        or (payload or {}).get("session_close_event_time")
+    )
+    same_trade_date = str(trade_date_value or "")[:10] == row.trade_date.isoformat()
+    legal_close_event = bool(
+        event_at is not None
+        and event_at.date() == row.trade_date
+        and TAIWAN_QUOTE_CONTRACT_CLOSE_START <= event_at.time()
+    )
+    if slot_clock < TAIWAN_QUOTE_CONTRACT_CONFIRMATION_START:
+        ready = bool(
+            same_trade_date
+            and legal_close_event
+            and status in {"resolving", "session_final"}
+        )
+        reason = None if ready else "session_close_candidate_missing"
+    else:
+        final_ready = bool(
+            same_trade_date
+            and legal_close_event
+            and status == "session_final"
+            and (
+                session_close.get("available") is True
+                or (payload or {}).get("session_close_available") is True
+            )
+        )
+        limitations = session_close.get("limitations")
+        truthful_unavailable_reason = next(
+            (
+                str(value)
+                for value in limitations or []
+                if str(value)
+                in TAIWAN_SESSION_CLOSE_TRUTHFUL_UNAVAILABLE_REASONS
+            ),
+            None,
+        )
+        truthful_unavailable = bool(
+            status == "unavailable"
+            and session_close.get("available") is False
+            and truthful_unavailable_reason is not None
+        )
+        ready = final_ready or truthful_unavailable
+        reason = (
+            None
+            if final_ready
+            else truthful_unavailable_reason
+            if truthful_unavailable
+            else "session_close_confirmation_missing"
+        )
+    return {
+        "status": (
+            "ready"
+            if ready and status == "session_final"
+            else "truthful_unavailable"
+            if ready
+            else "captured_partial"
+        ),
+        "ready": ready,
+        "reason": reason,
+    }
 
 
 def _upsert_snapshot(
@@ -196,12 +349,19 @@ def capture_taiwan_quote_contract_snapshot(
     payload: dict[str, Any] | None = None
     error: str | None = None
     try:
-        refresh_taiwan_realtime_snapshot(
-            db,
-            stock_id=normalized_stock_id,
-            policy=RealtimePolicy.PREFER_LIVE,
-            requested_at=local_now,
-        )
+        if _slot_time(capture_slot) >= TAIWAN_QUOTE_CONTRACT_CLOSE_START:
+            acquire_taiwan_session_close(
+                db,
+                stock_id=normalized_stock_id,
+                requested_at=local_now,
+            )
+        else:
+            refresh_taiwan_realtime_snapshot(
+                db,
+                stock_id=normalized_stock_id,
+                policy=RealtimePolicy.PREFER_LIVE,
+                requested_at=local_now,
+            )
         payload = get_taiwan_stock_quote_depth(
             db=db,
             stock_id=normalized_stock_id,
@@ -226,6 +386,33 @@ def capture_taiwan_quote_contract_snapshot(
     captured_at = _taiwan_exchange_datetime(row.captured_at)
     scheduled_at = _taiwan_exchange_datetime(row.scheduled_at)
     assert captured_at is not None and scheduled_at is not None
+    semantic = quote_contract_snapshot_semantic_status(row, payload=payload)
+    required_capabilities = _slot_required_capabilities(capture_slot)
+    components = (
+        payload.get("data_core_components")
+        if isinstance(payload, dict)
+        and isinstance(payload.get("data_core_components"), dict)
+        else {}
+    )
+    primary_component = next(
+        (
+            components.get(capability)
+            for capability in required_capabilities
+            if isinstance(components.get(capability), dict)
+        ),
+        {},
+    )
+    observed_event_time = _parsed_datetime(
+        primary_component.get("event_time")
+        or primary_component.get("provider_event_time")
+        or (payload or {}).get("provider_event_time")
+        or row.quote_time
+    )
+    lineage = (
+        primary_component.get("lineage")
+        if isinstance(primary_component.get("lineage"), dict)
+        else {}
+    )
     return {
         "stock_id": row.stock_id,
         "trade_date": row.trade_date,
@@ -234,8 +421,33 @@ def capture_taiwan_quote_contract_snapshot(
         "captured_at": captured_at,
         "capture_delay_seconds": int((captured_at - scheduled_at).total_seconds()),
         "capture_status": row.capture_status,
+        "capture_transport_status": (
+            "success"
+            if str(row.capture_status or "").startswith("captured")
+            else "failed"
+        ),
+        "required_capabilities": required_capabilities,
+        "observed_event_time": observed_event_time,
+        "provider": primary_component.get("provider") or row.provider,
+        "source": primary_component.get("source") or row.source,
+        "evidence_identity": (
+            lineage.get("observation_id")
+            or primary_component.get("observation_id")
+        ),
+        "freshness_to_slot_seconds": (
+            int((scheduled_at - observed_event_time).total_seconds())
+            if observed_event_time is not None
+            else None
+        ),
+        "acquisition_status": row.refresh_outcome,
         "refresh_outcome": row.refresh_outcome,
         "freshness_status": row.freshness_status,
+        "semantic_status": semantic["status"],
+        "semantic_acceptance": (
+            "accepted" if semantic["ready"] else semantic["status"]
+        ),
+        "semantic_ready": semantic["ready"],
+        "semantic_reason": semantic["reason"],
         "error": row.error,
     }
 
@@ -348,12 +560,26 @@ def get_taiwan_quote_contract_replay(
         assert captured_at is not None
         payload = json.loads(row.payload_json) if row.payload_json else None
         payload = _project_replay(payload, captured_at=captured_at)
+        semantic = quote_contract_snapshot_semantic_status(row, payload=payload)
+        required_capabilities = _slot_required_capabilities(capture_slot)
         if row.capture_status.startswith("captured"):
             captured_count += 1
         snapshots.append(
             {
                 "capture_slot": capture_slot,
                 "status": row.capture_status,
+                "capture_transport_status": (
+                    "success"
+                    if row.capture_status.startswith("captured")
+                    else "failed"
+                ),
+                "required_capabilities": required_capabilities,
+                "semantic_status": semantic["status"],
+                "semantic_ready": semantic["ready"],
+                "semantic_acceptance": (
+                    "accepted" if semantic["ready"] else semantic["status"]
+                ),
+                "semantic_reason": semantic["reason"],
                 "scheduled_at": _taiwan_exchange_datetime(row.scheduled_at),
                 "captured_at": captured_at,
                 "quote_time": _taiwan_exchange_datetime(row.quote_time),
@@ -364,10 +590,13 @@ def get_taiwan_quote_contract_replay(
             }
         )
     required_count = len(TAIWAN_QUOTE_CONTRACT_SLOTS)
+    semantic_ready_count = sum(
+        1 for item in snapshots if item.get("semantic_ready") is True
+    )
     missing_slots = [
         item["capture_slot"]
         for item in snapshots
-        if not str(item["status"]).startswith("captured")
+        if item.get("semantic_ready") is not True
     ]
     return {
         "kind": "taiwan_quote_contract_replay",
@@ -377,8 +606,9 @@ def get_taiwan_quote_contract_replay(
         "required_slots": list(TAIWAN_QUOTE_CONTRACT_SLOTS),
         "required_count": required_count,
         "captured_count": captured_count,
-        "coverage_ratio": captured_count / required_count,
-        "complete": captured_count == required_count,
+        "semantic_ready_count": semantic_ready_count,
+        "coverage_ratio": semantic_ready_count / required_count,
+        "complete": semantic_ready_count == required_count,
         "missing_slots": missing_slots,
         "snapshots": snapshots,
         "source": "taiwan_quote_contract_snapshot",
@@ -391,4 +621,5 @@ __all__ = [
     "TAIWAN_QUOTE_CONTRACT_SLOTS",
     "capture_taiwan_quote_contract_snapshot",
     "get_taiwan_quote_contract_replay",
+    "quote_contract_snapshot_semantic_status",
 ]

@@ -130,6 +130,8 @@ def test_missing_data_enqueues_one_exact_bounded_job(monkeypatch) -> None:
         assert kwargs["job_type"] == US_INDEX_DATA_REPAIR_JOB_TYPE
         assert kwargs["target"] == "index-gate:2026-08-28"
         assert kwargs["request"]["symbols"] == list(PRIORITY_US_INDEX_SYMBOLS)
+        assert kwargs["request"]["attempt"] == 1
+        assert kwargs["request"]["attempt_in_window"] == 1
         assert kwargs["request"]["daily_max_external_calls"] <= 12
         assert kwargs["request"]["quote_max_external_calls"] <= 12
         assert kwargs["progress_total"] == 3
@@ -138,12 +140,17 @@ def test_missing_data_enqueues_one_exact_bounded_job(monkeypatch) -> None:
         engine.dispose()
 
 
-def test_active_lease_cooldown_and_attempt_ceiling_suppress_repairs(monkeypatch) -> None:
+def test_active_lease_and_bounded_attempt_windows_remain_retryable(monkeypatch) -> None:
     db, engine = _db()
     missing = _audit(daily_missing=["^GSPC"])
     monkeypatch.setattr(gate, "audit_us_index_data", lambda *_args, **_kwargs: missing)
     monkeypatch.setattr(settings, "scheduler_us_index_data_repair_max_attempts", 2)
     monkeypatch.setattr(settings, "scheduler_us_index_data_repair_cooldown_seconds", 1800)
+    monkeypatch.setattr(
+        settings,
+        "scheduler_us_index_data_repair_manual_attention_backoff_seconds",
+        21600,
+    )
     try:
         db.add(
             JobRun(
@@ -165,7 +172,7 @@ def test_active_lease_cooldown_and_attempt_ceiling_suppress_repairs(monkeypatch)
             )
         )
         db.commit()
-        assert gate.plan_us_index_data_repair(db, now=NOW)["status"] == "suppressed"
+        assert gate.plan_us_index_data_repair(db, now=NOW)["status"] == "backoff"
 
         db.add(
             JobRun(
@@ -176,7 +183,20 @@ def test_active_lease_cooldown_and_attempt_ceiling_suppress_repairs(monkeypatch)
             )
         )
         db.commit()
-        assert gate.plan_us_index_data_repair(db, now=NOW)["status"] == "exhausted"
+        manual_attention = gate.plan_us_index_data_repair(db, now=NOW)
+        assert manual_attention["status"] == "manual_attention"
+        assert manual_attention["reason"] == "attempt_window_backoff"
+        assert manual_attention["retryable"] is True
+        assert manual_attention["attempt_count"] == 2
+        assert manual_attention["attempts_in_current_window"] == 2
+
+        ready_again = gate.plan_us_index_data_repair(
+            db,
+            now=NOW + timedelta(hours=5),
+        )
+        assert ready_again["status"] == "ready"
+        assert ready_again["next_attempt"] == 3
+        assert ready_again["next_attempt_in_window"] == 1
     finally:
         db.close()
         engine.dispose()
@@ -271,6 +291,7 @@ def test_health_discloses_gate_owner_and_hard_budgets(monkeypatch) -> None:
     assert payload["daily_max_external_calls"] <= 12
     assert payload["quote_max_external_calls"] <= 12
     assert payload["max_attempts"] <= 5
+    assert payload["manual_attention_backoff_seconds"] >= 1800
 
 
 def test_job_retry_preserves_the_exact_repair_budget_and_scope() -> None:

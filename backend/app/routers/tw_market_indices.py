@@ -188,9 +188,10 @@ def refresh_official_index_daily(
 def get_indices_list(
     market: str = Query(default="TWSE", pattern="^(TWSE|TPEX)$"),
     limit: int = Query(default=80, ge=1, le=200),
+    db: Session = Depends(get_db),
 ):
     try:
-        return get_market_index_list(market=market, limit=limit)
+        return get_market_index_list(market=market, limit=limit, db=db)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -202,9 +203,10 @@ def get_indices_list(
 def refresh_indices_list(
     market: str = Query(default="TWSE", pattern="^(TWSE|TPEX)$"),
     limit: int = Query(default=80, ge=1, le=200),
+    db: Session = Depends(get_db),
 ):
     try:
-        return refresh_market_index_list(market=market, limit=limit)
+        return refresh_market_index_list(market=market, limit=limit, db=db)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

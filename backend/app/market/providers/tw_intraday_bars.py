@@ -120,11 +120,13 @@ def _bar_prices(
     return open_value, high_value, low_value, close_value
 
 
-def _finalization(start_at: datetime, requested_at: datetime) -> BarFinalization:
+def _finalization(end_at: datetime, requested_at: datetime) -> BarFinalization:
+    """Finalize an interval only after its canonical close boundary."""
+
     return (
         BarFinalization.FINAL
-        if start_at.astimezone(TAIPEI_TZ).date()
-        < requested_at.astimezone(TAIPEI_TZ).date()
+        if requested_at.astimezone(TAIPEI_TZ)
+        >= end_at.astimezone(TAIPEI_TZ)
         else BarFinalization.PROVISIONAL
     )
 
@@ -200,6 +202,7 @@ def _result(
     fetched_at: datetime,
     bars: tuple[BarObservation, ...] = (),
     parse_error: str | None = None,
+    limitations: tuple[str, ...] = (),
 ) -> BarAcquisitionResult:
     raw_text = payload.raw_text or ""
     content_hash = sha256(raw_text.encode("utf-8")).hexdigest()
@@ -245,7 +248,7 @@ def _result(
                 ),
             ),
             external_calls=1,
-            limitations=limitation,
+            limitations=tuple(dict.fromkeys((*limitation, *limitations))),
         ),
         observations=bars,
         receipts=(receipt,),
@@ -354,6 +357,7 @@ class NStockIntradayAdapter:
             )
         bars: list[BarObservation] = []
         parse_error = None
+        limitations: list[str] = []
         content_hash = sha256((payload.raw_text or "").encode("utf-8")).hexdigest()
         if payload.status == "available" and payload.raw_text:
             try:
@@ -381,8 +385,9 @@ class NStockIntradayAdapter:
                 total_volume = _integer(data.get("總成交量"), multiplier=1000)
                 observed_total = sum(volume or 0 for _, _, volume in points)
                 if points and total_volume is not None and total_volume > observed_total:
-                    start_at, row, volume = points[-1]
-                    points[-1] = (start_at, row, (volume or 0) + total_volume - observed_total)
+                    limitations.append(
+                        "PROVIDER_SESSION_TOTAL_VOLUME_NOT_ALLOCATED_TO_BARS"
+                    )
                 for start_at, row, volume in points[-requirement.request.max_bars :]:
                     prices = _bar_prices(
                         open_price=row.get("開盤價"),
@@ -418,7 +423,10 @@ class NStockIntradayAdapter:
                                 if volume is not None
                                 else None
                             ),
-                            finalization=_finalization(start_at, requirement.requested_at),
+                            finalization=_finalization(
+                                start_at + timedelta(minutes=1),
+                                requirement.requested_at,
+                            ),
                         )
                     )
             except Exception as exc:
@@ -434,6 +442,7 @@ class NStockIntradayAdapter:
             fetched_at=fetched_at,
             bars=tuple(bars),
             parse_error=parse_error,
+            limitations=tuple(limitations),
         )
 
 
@@ -659,7 +668,10 @@ class YahooIntradayAdapter:
                                     if volume is not None
                                     else None
                                 ),
-                                finalization=_finalization(start_at, requirement.requested_at),
+                                finalization=_finalization(
+                                    start_at + timedelta(seconds=seconds),
+                                    requirement.requested_at,
+                                ),
                             )
                         )
                     bars = _aggregate_hourly(raw_bars, requirement=requirement)

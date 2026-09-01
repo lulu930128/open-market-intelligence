@@ -294,15 +294,23 @@ class USIntradayAcquisitionExecutor:
                     if current
                     else None
                 )
-                age_seconds = (
+                evidence_age_seconds = (
                     (requirement.requested_at - latest_event).total_seconds()
                     if latest_event is not None
                     else float("inf")
                 )
-                is_fresh = (
+                evidence_is_fresh = (
                     bool(current)
                     and -300
-                    <= age_seconds
+                    <= evidence_age_seconds
+                    <= requirement.freshness.max_age_seconds
+                )
+                snapshot_age_seconds = (
+                    requirement.requested_at - fetched_at
+                ).total_seconds()
+                snapshot_is_fresh = (
+                    -300
+                    <= snapshot_age_seconds
                     <= requirement.freshness.max_age_seconds
                 )
                 required_fields_present = _required_fields_present(
@@ -310,12 +318,16 @@ class USIntradayAcquisitionExecutor:
                     requirement,
                 )
                 target_satisfied = required_fields_present and (
-                    is_fresh
+                    (snapshot_is_fresh if quote else evidence_is_fresh)
                     or requirement.freshness.evidence_target
                     is EvidenceTarget.LATEST_AVAILABLE
                 )
-                if current and not is_fresh:
-                    limitations.append("REQUESTED_EVIDENCE_STALE")
+                if current and not evidence_is_fresh:
+                    limitations.append(
+                        "LAST_TRADE_OLD_BUT_PROVIDER_CURRENT"
+                        if quote and snapshot_is_fresh
+                        else "REQUESTED_EVIDENCE_STALE"
+                    )
                 if not target_satisfied:
                     failures += 1
                     if not current:
@@ -324,9 +336,11 @@ class USIntradayAcquisitionExecutor:
                         limitations.append("REQUESTED_EVIDENCE_UNUSABLE")
                 detail_code = (
                     "US_QUOTE_OBSERVED"
-                    if quote and is_fresh
+                    if quote and evidence_is_fresh
                     else "US_INTRADAY_OBSERVED"
-                    if is_fresh
+                    if evidence_is_fresh
+                    else "LAST_TRADE_OLD_BUT_PROVIDER_CURRENT"
+                    if quote and current and snapshot_is_fresh
                     else "LATEST_AVAILABLE_EVIDENCE_OBSERVED"
                     if target_satisfied
                     else "REQUESTED_EVIDENCE_UNUSABLE"
@@ -346,7 +360,8 @@ class USIntradayAcquisitionExecutor:
                     ),
                     freshness=(
                         EvidenceFreshness.FRESH
-                        if is_fresh
+                        if current
+                        and (snapshot_is_fresh if quote else evidence_is_fresh)
                         else EvidenceFreshness.STALE
                         if current
                         else EvidenceFreshness.MISSING
