@@ -34,7 +34,7 @@ def test_bootstrap_job_default_budget_reserves_two_fallback_calls() -> None:
     assert (
         request.max_external_calls
         == US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS
-        == 12
+        == 18
     )
 
 

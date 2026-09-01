@@ -3217,6 +3217,18 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         "previous_close": 180.0,
                         "point_count": 3,
                         "points": [],
+                        "capability_expectation": {
+                            "quote.snapshot": {
+                                "requirement_satisfied": True,
+                                "outcome": "ready",
+                                "availability": "available",
+                            },
+                            "intraday.bars": {
+                                "requirement_satisfied": True,
+                                "outcome": "ready",
+                                "availability": "available",
+                            },
+                        },
                     },
                 ) as intraday,
                 patch.object(
@@ -3236,12 +3248,18 @@ class AiFreshnessGuardTests(unittest.TestCase):
 
             planner.assert_called_once()
             refresh_intraday.assert_called_once()
-            intraday.assert_called_once_with(
-                symbol="TSM",
-                session_scope="regular",
-                interval="1m",
-                db=db,
-                persist_history=False,
+            self.assertIn(
+                {
+                    "symbol": "TSM",
+                    "session_scope": "regular",
+                    "interval": "1m",
+                    "db": db,
+                    "persist_history": False,
+                },
+                [item.kwargs for item in intraday.call_args_list],
+            )
+            self.assertTrue(
+                all(item.kwargs.get("persist_history") is False for item in intraday.call_args_list)
             )
             refresh_daily.assert_called_once()
             self.assertEqual(response["target"]["type"], "us_stock")
@@ -3280,11 +3298,27 @@ class AiFreshnessGuardTests(unittest.TestCase):
 
             with (
                 patch.object(ai_ask.agentic_tools.llm, "generate_tool_plan", return_value=planner_result),
-                patch.object(ai_ask.agentic_tools.us_market_service, "get_us_intraday_trend") as intraday,
+                patch.object(
+                    ai_ask.agentic_tools.us_market_service,
+                    "refresh_us_intraday_bars",
+                ) as refresh_intraday,
+                patch.object(
+                    ai_ask.agentic_tools.us_market_service,
+                    "get_us_intraday_trend",
+                    return_value={"capability_expectation": {}},
+                ) as intraday,
             ):
                 response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
 
-            intraday.assert_not_called()
+            refresh_intraday.assert_not_called()
+            self.assertGreaterEqual(intraday.call_count, 1)
+            self.assertTrue(
+                all(
+                    item.kwargs.get("session_scope") == "all"
+                    and item.kwargs.get("persist_history") is False
+                    for item in intraday.call_args_list
+                )
+            )
             self.assertEqual(response["tool_runs"][0]["status"], "blocked")
             self.assertIn("External fetch is not allowed", response["tool_runs"][0]["error"])
             self.assertFalse(response["policy"]["can_external_fetch"])

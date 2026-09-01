@@ -1080,7 +1080,7 @@ def test_bootstrap_is_explicit_bounded_and_noops_when_cache_is_satisfied() -> No
     )
 
 
-def test_sunday_default_cold_bootstrap_completes_with_twelve_call_budget() -> None:
+def test_sunday_default_cold_bootstrap_completes_with_eighteen_call_budget() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     friday = datetime(2026, 8, 28, 19, 59, tzinfo=timezone.utc)
