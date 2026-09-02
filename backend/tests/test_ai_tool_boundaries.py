@@ -54,7 +54,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "b44972ba522a7608dc4d43c39cba62173acdfefb230df9178cf41afb34262571"
+    "beb515030bdb178be959c267d3776a129a182157b069f6ae752619b6429b6eee"
 )
 
 
@@ -188,6 +188,12 @@ class AIToolBoundaryTests(unittest.TestCase):
                 }
             },
         }
+        indices_result = {
+            "contract_version": "omi.market.us_indices.v1",
+            "kind": "us_market_indices",
+            "market": "US",
+            "status": "missing",
+        }
 
         with (
             patch.object(
@@ -195,6 +201,13 @@ class AIToolBoundaryTests(unittest.TestCase):
                 "read_us_stock_context",
                 return_value=regional_result,
             ) as read_us,
+            patch.object(
+                ask_execution,
+                "read_us_market_indices",
+                return_value=SimpleNamespace(
+                    model_dump=lambda **_kwargs: indices_result
+                ),
+            ) as read_indices,
             patch.object(
                 ask_execution.tools,
                 "read_market_overview",
@@ -209,12 +222,17 @@ class AIToolBoundaryTests(unittest.TestCase):
         self.assertEqual(action, "omi.read_market_overview")
         read_us.assert_called_once()
         self.assertEqual(read_us.call_args.kwargs["symbol"], "^GSPC")
+        read_indices.assert_called_once()
         read_tw.assert_not_called()
         self.assertEqual(result["target"]["type"], "market")
         self.assertEqual(result["target"]["id"], "US")
         reference = result["data"]["compact"]["representative_index"]
         self.assertEqual(reference["id"], "^GSPC")
         self.assertFalse(reference["scope_replacement"])
+        self.assertEqual(
+            result["data"]["compact"]["market"]["indices"],
+            indices_result,
+        )
 
     def test_market_volume_uses_same_date_official_breadth_when_minute_cache_is_empty(
         self,

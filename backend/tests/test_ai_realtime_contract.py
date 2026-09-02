@@ -149,6 +149,95 @@ class AiRealtimeContractTests(unittest.TestCase):
         self.assertTrue(result["policy_satisfied"])
         self.assertTrue(result["decision_usable"])
 
+    def test_us_canonical_market_phase_and_session_proof_are_not_stale(self) -> None:
+        event_time = self.now - timedelta(seconds=60)
+        result = realtime_contract.classify_observation(
+            {
+                "price": 180.5,
+                "quote_time": event_time.isoformat(),
+                "market_phase": "regular",
+                "current_session_satisfied": True,
+                "trade_recency": "current",
+                "provider_snapshot_freshness": "fresh",
+                "capability_expectation": {"outcome": "ready"},
+                "source_status": {
+                    "freshness_status": "delayed",
+                    "decision_usable": True,
+                },
+            },
+            market="US",
+            realtime_policy="prefer_live",
+            now=self.now,
+        )
+
+        self.assertEqual(result["state"], "delayed")
+        self.assertTrue(result["facts_usable"])
+        self.assertTrue(result["decision_usable"])
+        self.assertEqual(result["canonical_session_phase"], "regular")
+
+    def test_us_current_session_old_trade_stays_stale_after_recent_fetch(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 18.5,
+                "quote_time": (self.now - timedelta(minutes=16)).isoformat(),
+                "fetched_at": (self.now - timedelta(seconds=5)).isoformat(),
+                "market_phase": "regular",
+                "current_session_satisfied": True,
+                "trade_recency": "old",
+                "provider_snapshot_freshness": "fresh",
+                "source_status": {
+                    "freshness_status": "stale",
+                    "decision_usable": False,
+                },
+            },
+            market="US",
+            realtime_policy="prefer_live",
+            now=self.now,
+        )
+
+        self.assertEqual(result["state"], "stale")
+        self.assertFalse(result["decision_usable"])
+        self.assertEqual(result["trade_recency"], "old")
+
+    def test_us_previous_session_event_cannot_be_revived_by_recent_fetch(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "price": 180.5,
+                "quote_time": (self.now - timedelta(hours=8)).isoformat(),
+                "fetched_at": (self.now - timedelta(seconds=5)).isoformat(),
+                "market_phase": "regular",
+                "current_session_satisfied": False,
+                "trade_recency": "historical",
+                "provider_snapshot_freshness": "fresh",
+            },
+            market="US",
+            realtime_policy="prefer_live",
+            now=self.now,
+        )
+
+        self.assertEqual(result["state"], "stale")
+        self.assertFalse(result["decision_usable"])
+
+    def test_us_awaiting_first_trade_is_valid_empty_without_price_promotion(self) -> None:
+        result = realtime_contract.classify_observation(
+            {
+                "market_phase": "regular",
+                "current_session_satisfied": True,
+                "trade_state": "awaiting_first_trade",
+                "provider_snapshot_freshness": "fresh",
+                "capability_expectation": {"outcome": "valid_empty"},
+            },
+            market="US",
+            realtime_policy="prefer_live",
+            now=self.now,
+        )
+
+        self.assertEqual(result["state"], "valid_empty")
+        self.assertEqual(result["observation_mode"], "awaiting_first_trade")
+        self.assertTrue(result["policy_satisfied"])
+        self.assertFalse(result["facts_usable"])
+        self.assertFalse(result["decision_usable"])
+
     def test_tw_futures_nested_after_hours_market_status_is_live(self) -> None:
         result = realtime_contract.classify_observation(
             {

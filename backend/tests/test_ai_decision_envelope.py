@@ -3359,6 +3359,123 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertFalse(canonical["status"]["readiness"]["decision_ready"])
         self.assertEqual(canonical["decision"]["price_levels"], {})
 
+    def test_v4_us_quality_accepts_typed_quote_completed_daily_relation(self) -> None:
+        response = _v2_response(
+            freshness_by_domain={"quote": "current", "chart": "current"}
+        )
+        response["target"] = {
+            "type": "us_index",
+            "id": "^SOX",
+            "market": "US",
+        }
+        response["resolution"]["target"] = dict(response["target"])
+        compact = response["result"]["data"]["compact"]
+        compact["quote"] = {
+            "price": 6_100,
+            "trade_date": "2026-09-02",
+            "quote_time": "2026-09-02T11:00:00-04:00",
+            "market_phase": "regular",
+            "current_session_satisfied": True,
+            "session_date_relation": {
+                "kind": "session_date_relation",
+                "version": "omi.us.session_date_relation.v1",
+                "relation": "current_session_daily_pending_release",
+                "status": "aligned",
+                "expected": True,
+                "quote_date": "2026-09-02",
+                "completed_daily_date": "2026-09-01",
+                "current_session_date": "2026-09-02",
+                "market_phase": "regular",
+            },
+        }
+        compact["chart"] = {
+            "latest_data_date": "2026-09-01",
+            "points": [
+                {
+                    "bar_time": "2026-09-01T16:00:00-04:00",
+                    "close_price": 6_000,
+                }
+            ],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["quote.snapshot", "daily.ohlcv"]},
+            output="decision_with_evidence",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="us_stock",
+            question_intent="entry_decision",
+            target_market="US",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "us_stock"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        projected_quote = canonical["evidence"]["data"]["quote.snapshot"]
+        issue_codes = {
+            item["code"]
+            for item in canonical["evidence"]["quality"]["fusion"]["issues"]
+        }
+        self.assertEqual(projected_quote["session_date_relation"]["status"], "aligned")
+        self.assertNotIn("quote_daily_date_mismatch", issue_codes)
+
+    def test_v4_us_quality_keeps_actual_completed_daily_mismatch_blocking(self) -> None:
+        response = _v2_response(
+            freshness_by_domain={"quote": "current", "chart": "current"}
+        )
+        response["target"] = {
+            "type": "us_index",
+            "id": "^SOX",
+            "market": "US",
+        }
+        response["resolution"]["target"] = dict(response["target"])
+        compact = response["result"]["data"]["compact"]
+        compact["quote"] = {
+            "price": 6_100,
+            "trade_date": "2026-09-02",
+            "quote_time": "2026-09-02T11:00:00-04:00",
+            "session_date_relation": {
+                "status": "mismatch",
+                "expected": False,
+                "quote_date": "2026-09-02",
+                "completed_daily_date": "2026-08-31",
+            },
+        }
+        compact["chart"] = {
+            "latest_data_date": "2026-08-31",
+            "points": [
+                {
+                    "bar_time": "2026-08-31T16:00:00-04:00",
+                    "close_price": 5_900,
+                }
+            ],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["quote.snapshot", "daily.ohlcv"]},
+            output="decision_with_evidence",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="us_stock",
+            question_intent="entry_decision",
+            target_market="US",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "us_stock"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        issue_codes = {
+            item["code"]
+            for item in canonical["evidence"]["quality"]["fusion"]["issues"]
+        }
+        self.assertIn("quote_daily_date_mismatch", issue_codes)
+
     def test_v4_quality_contract_requires_volume_units_for_decision_use(self) -> None:
         response = _v2_response(
             freshness_by_domain={

@@ -22,7 +22,10 @@ from app.market.financial_contract import (
     build_legacy_financial_contract,
 )
 from app.market.financial_metric_semantics import source_reported_financial_semantics
-from app.market.index_resolution import resolve_taiwan_index_quote_state
+from app.market.index_resolution import (
+    ResolvedTaiwanIndexTruth,
+    resolve_taiwan_index_truth,
+)
 from app.market.live_snapshot import classify_market_snapshot
 from app.market.monthly_revenue_continuity import analyze_monthly_revenue_continuity
 from app.market.quote_volume import build_taiwan_quote_volume_contract
@@ -3640,106 +3643,15 @@ def _compact_index_quote(
         else []
     )
     effective_calendar = calendar_status or build_taiwan_calendar_status()
-    current_data_core = (
-        snapshot.get("current_data_core")
-        if isinstance(snapshot.get("current_data_core"), dict)
-        else {}
-    )
-    canonical_current = (
-        current_data_core.get("index")
-        if isinstance(current_data_core.get("index"), dict)
-        else snapshot.get("current_observation")
-        if isinstance(snapshot.get("current_observation"), dict)
-        else None
-    )
-    if canonical_current is not None:
-        health = (
-            canonical_current.get("resolved_health")
-            if isinstance(canonical_current.get("resolved_health"), dict)
-            else {}
-        )
-        selected_value = canonical_current.get("close")
-        selected_time = canonical_current.get("as_of")
-        selected_date = canonical_current.get("trade_date")
-        decision_usable = canonical_current.get("decision_usable") is True
-        official_confirmed = bool(
-            decision_usable
-            and canonical_current.get("official") is True
-            and canonical_current.get("provisional") is not True
-            and str(effective_calendar.get("phase") or "")
-            in {"post_close", "post_close_snapshot", "market_closed"}
-        )
-        resolution = {
-            "selected_source": canonical_current.get("source"),
-            "selected_value": selected_value,
-            "selected_event_time": _json_value(selected_time),
-            "selected_trade_date": _json_value(selected_date),
-            "last_trade_available": bool(
-                selected_value is not None and not official_confirmed
-            ),
-            "last_trade_price": (
-                selected_value if not official_confirmed else None
-            ),
-            "last_trade_time": (
-                _json_value(selected_time) if not official_confirmed else None
-            ),
-            "last_trade_is_current_session": bool(
-                decision_usable and not official_confirmed
-            ),
-            "official_close_available": official_confirmed,
-            "official_close_status": (
-                "confirmed" if official_confirmed else "pending"
-            ),
-            "official_close_price": (
-                selected_value if official_confirmed else None
-            ),
-            "official_close_trade_date": (
-                _json_value(selected_date) if official_confirmed else None
-            ),
-            "official_close_source": (
-                canonical_current.get("source") if official_confirmed else None
-            ),
-            "official_close_raw": (
-                selected_value if official_confirmed else None
-            ),
-            "official_close_display": (
-                f"{float(selected_value):,.2f}"
-                if official_confirmed
-                and isinstance(selected_value, (int, float))
-                else None
-            ),
-            "official_close_precision": 2 if official_confirmed else None,
-            "resolution_version": health.get("contract_version"),
-            "resolution_id": None,
-            "acquisition_policy": "cache_only",
-            "decision_usable": decision_usable,
-            "current_observation": canonical_current,
-            "selected_candidate": "canonical_current_index",
-            "selection_reason": health.get("selection_reason"),
-            "candidates": [
-                {
-                    "candidate": "canonical_current_index",
-                    "eligible": decision_usable,
-                    "value": selected_value,
-                    "event_time": _json_value(selected_time),
-                    "trade_date": _json_value(selected_date),
-                    "source": canonical_current.get("source"),
-                    "provider": canonical_current.get("provider"),
-                }
-            ],
-            "quote_semantics": (
-                "official_session_close"
-                if official_confirmed
-                else "current_session_index_snapshot"
-                if decision_usable
-                else "latest_completed_session_reference"
-            ),
-            "delivery_status": canonical_current.get("status") or "missing",
-            "expected_trade_date": effective_calendar.get("date"),
-            "warnings": list(canonical_current.get("limitations") or []),
-        }
-    else:
-        resolution = resolve_taiwan_index_quote_state(
+    embedded_resolution = snapshot.get("resolution")
+    truth: ResolvedTaiwanIndexTruth | None = None
+    if isinstance(embedded_resolution, dict):
+        try:
+            truth = ResolvedTaiwanIndexTruth.model_validate(embedded_resolution)
+        except ValueError:
+            truth = None
+    if truth is None:
+        truth = resolve_taiwan_index_truth(
             intraday=intraday,
             index_snapshot=snapshot,
             calendar_status=effective_calendar,
@@ -3750,30 +3662,16 @@ def _compact_index_quote(
                 or "unspecified"
             ),
         )
+    resolution = truth.model_dump(mode="json")
     source = str(
         resolution.get("selected_source")
         or snapshot.get("source")
         or "market_index_summary"
     )
     latest_price = resolution.get("selected_value")
-    previous_close = (
-        canonical_current.get("previous_close")
-        if canonical_current is not None
-        and canonical_current.get("previous_close") is not None
-        else intraday.get("previous_close")
-        if isinstance(intraday, dict) and intraday.get("previous_close") is not None
-        else snapshot.get("previous_close")
-    )
-    change = (
-        latest_price - previous_close
-        if isinstance(latest_price, (int, float)) and isinstance(previous_close, (int, float))
-        else snapshot.get("change")
-    )
-    change_pct = (
-        (change / previous_close) * 100
-        if isinstance(change, (int, float)) and isinstance(previous_close, (int, float)) and previous_close != 0
-        else snapshot.get("change_pct")
-    )
+    previous_close = resolution.get("selected_previous_close")
+    change = resolution.get("selected_change")
+    change_pct = resolution.get("selected_change_pct")
     # A rejected stale candidate still needs an observable age.  Selection and
     # freshness are separate concerns: the resolver may refuse to use the
     # value while the outward contract continues to explain why it was stale.

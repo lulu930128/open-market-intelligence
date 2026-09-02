@@ -22,6 +22,7 @@ from app.ai.market_payload_contract import (
 )
 from app.db.models import StockMaster
 from app.market.calendar_status import build_taiwan_calendar_status
+from app.market.index_resolution import project_taiwan_index_headline
 from app.market.taiwan_industries import normalize_tw_industry_label
 from app.market.trading_calendar import (
     taiwan_market_session_phase,
@@ -1203,6 +1204,9 @@ def _market_indices_capability(
         )
         if item is None:
             continue
+        headline = project_taiwan_index_headline(item)
+        if headline is None:
+            continue
         current_data_core = (
             item.get("current_data_core")
             if isinstance(item.get("current_data_core"), dict)
@@ -1255,65 +1259,19 @@ def _market_indices_capability(
             or item.get("date")
             or official_as_of
         )
-        resolved_health = (
-            current.get("resolved_health")
-            if isinstance(current.get("resolved_health"), dict)
-            else {}
-        )
-        current_for_requested_session = current.get("decision_usable") is True
-        selected_value = (
-            current.get("close")
-            if current.get("close") is not None
-            else close
-        )
-        selected_as_of = (
-            current.get("as_of")
-            or official_as_of
-            or trade_date
-        )
+        current_for_requested_session = headline["decision_usable"] is True
+        selected_value = headline.get("value")
+        selected_as_of = headline.get("event_time") or headline.get("trade_date")
         selected_trade_date = _date_iso(
-            current.get("trade_date") or trade_date or selected_as_of
+            headline.get("trade_date") or selected_as_of
         )
-        selected_change = (
-            current.get("change")
-            if current.get("change") is not None
-            else change
-        )
-        selected_previous_close = current.get("previous_close")
-        selected_change_pct = (
-            selected_change / selected_previous_close * 100
-            if isinstance(selected_change, (int, float))
-            and isinstance(selected_previous_close, (int, float))
-            and selected_previous_close != 0
-            else change_pct
-        )
-        provisional_estimate = bool(
-            current.get("provisional") is True
-            or (
-                not current
-                and selected_value is not None
-                and session_phase in {"post_close", "market_closed"}
-            )
-        )
-        finalization = (
-            "final"
-            if current_for_requested_session
-            and session_phase in {"post_close", "market_closed"}
-            and current.get("official") is True
-            and current.get("provisional") is not True
-            else "provisional"
-            if provisional_estimate
-            else "intraday"
-            if current
-            else "unknown"
-        )
-        quote_semantics = (
-            "current_session_index_snapshot"
-            if current_for_requested_session and active_index_session
-            else "official_session_close"
-            if current_for_requested_session
-            and session_phase in {"post_close", "market_closed"}
-            else "official_previous_close"
+        selected_change = headline.get("change")
+        selected_previous_close = headline.get("previous_close")
+        selected_change_pct = headline.get("change_pct")
+        provisional_estimate = bool(headline.get("provisional_estimate"))
+        finalization = str(headline.get("finalization") or "unknown")
+        quote_semantics = str(
+            headline.get("quote_semantics") or "unavailable"
         )
         items.append(
             {
@@ -1336,7 +1294,7 @@ def _market_indices_capability(
                     {
                         "value": current.get("close"),
                         "change": current.get("change"),
-                        "change_pct": selected_change_pct,
+                        "change_pct": current.get("change_pct"),
                         "event_time": _json_scalar(current.get("as_of")),
                         "source": current.get("source"),
                         "is_partial": current.get("provisional") is True,
@@ -1346,51 +1304,45 @@ def _market_indices_capability(
                 ),
                 "value": selected_value,
                 "latest_value": selected_value,
+                "previous_close": selected_previous_close,
                 "change": selected_change,
                 "change_pct": selected_change_pct,
                 "trade_date": selected_trade_date,
-                "event_time": _json_scalar(current.get("as_of")),
-                "as_of": selected_as_of,
+                "event_time": _json_scalar(headline.get("event_time")),
+                "as_of": _json_scalar(selected_as_of),
                 "quote_semantics": quote_semantics,
                 "resolution_quote_semantics": quote_semantics,
                 "current_for_requested_session": current_for_requested_session,
-                "decision_usable": current_for_requested_session,
-                "coverage_status": (
-                    "complete" if current_for_requested_session else "partial"
-                ),
+                "decision_usable": bool(headline.get("decision_usable")),
+                "coverage_status": headline.get("coverage_status"),
                 "finalization": finalization,
                 "provisional": provisional_estimate,
-                "delivery_status": current.get("status") or "missing",
-                "source": current.get("source")
-                or item.get("source")
-                or summary.get("source")
-                or "market_index_summary",
-                "provider": current.get("provider"),
-                "resolution_version": resolved_health.get("contract_version"),
-                "resolution_id": None,
-                "acquisition_policy": "cache_only",
-                "selected_candidate": (
-                    "canonical_current_index" if current else None
-                ),
-                "selection_reason": resolved_health.get("selection_reason"),
+                "delivery_status": headline.get("delivery_status"),
+                "source": headline.get("source"),
+                "provider": headline.get("provider"),
+                "resolution_version": headline.get("resolution_version"),
+                "resolution_id": headline.get("resolution_id"),
+                "acquisition_policy": headline.get("acquisition_policy"),
+                "selected_candidate": headline.get("selected_candidate"),
+                "selection_reason": headline.get("selection_reason"),
                 "current_observation": current,
-                "official_close_status": (
-                    "confirmed"
-                    if finalization == "final"
-                    else "pending"
+                "official_close_status": headline.get("official_close_status"),
+                "official_source": bool(headline.get("official_source")),
+                "official_close_confirmed": bool(
+                    headline.get("official_close_confirmed")
                 ),
-                "canonical_status_ref": "current_data_core.index.resolved_health",
-                "resolution": resolved_health,
+                "authority": headline.get("authority"),
+                "canonical_status_ref": "resolution",
+                "resolution": item.get("resolution"),
+                "compatibility_fallback": bool(
+                    headline.get("compatibility_fallback")
+                ),
+                "limitations": list(headline.get("limitations") or []),
+                "warnings": list(headline.get("warnings") or []),
                 "freshness": {
-                    "status": (
-                        "current"
-                        if current_for_requested_session
-                        else "stale"
-                        if current
-                        else "missing"
-                    ),
-                    "decision_usable": current_for_requested_session,
-                    "event_time": _json_scalar(current.get("as_of")),
+                    "status": headline.get("freshness_status"),
+                    "decision_usable": bool(headline.get("decision_usable")),
+                    "event_time": _json_scalar(headline.get("event_time")),
                 },
                 "source_freshness": item.get("freshness")
                 or item.get("quote_status")
@@ -1451,7 +1403,7 @@ def _market_indices_capability(
         "current_for_requested_session": current_count == 2,
         "is_current": current_count == 2,
         "decision_usable": is_complete and current_count == 2,
-        "canonical_status_ref": "items[].current_observation.resolved_health",
+        "canonical_status_ref": "items[].resolution",
         "status_authority": "shared_market_data_core",
         "is_complete": is_complete,
         "coverage_status": "complete" if is_complete else "partial" if items else "missing",

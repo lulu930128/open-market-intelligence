@@ -1210,6 +1210,11 @@
           "market_phase",
           "capability_expectation",
           "source_status",
+          "session_date_relation",
+          "current_session_expected",
+          "current_session_satisfied",
+          "expected_trade_date",
+          "event_trade_date",
           "provider_snapshot_freshness",
           "trade_recency",
           "trade_state",
@@ -1394,6 +1399,11 @@
           "market_phase",
           "capability_expectation",
           "source_status",
+          "session_date_relation",
+          "current_session_expected",
+          "current_session_satisfied",
+          "expected_trade_date",
+          "event_trade_date",
           "provider_snapshot_freshness",
           "trade_recency",
           "trade_state",
@@ -4480,6 +4490,8 @@
         "capability_id": "market.indices",
         "default_fields": [
           "status",
+          "market",
+          "evaluated_at",
           "as_of",
           "oldest_as_of",
           "newest_as_of",
@@ -4490,6 +4502,9 @@
           "is_current",
           "is_complete",
           "coverage_status",
+          "expected_count",
+          "facts_usable",
+          "decision_usable",
           "observation_mix",
           "count",
           "items",
@@ -4499,12 +4514,14 @@
         ],
         "default_limit": 20,
         "deprecated": false,
-        "description": "Canonical TAIEX and TPEx index snapshots from the shared Taiwan market-index summary reader.",
+        "description": "Canonical market-index snapshots from the market-owned aggregate reader, including Taiwan indices and the six US cash indices.",
         "domain": "indices",
         "event_time_basis": "index_quote_or_completed_trade_date",
         "fields": [
           "kind",
+          "market",
           "status",
+          "evaluated_at",
           "as_of",
           "oldest_as_of",
           "newest_as_of",
@@ -4515,6 +4532,9 @@
           "is_current",
           "is_complete",
           "coverage_status",
+          "expected_count",
+          "facts_usable",
+          "decision_usable",
           "observation_mix",
           "count",
           "items",
@@ -4525,7 +4545,8 @@
         "fill_operations": {},
         "frequency": "intraday",
         "markets": [
-          "TW"
+          "TW",
+          "US"
         ],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4545,7 +4566,7 @@
         ],
         "side_effect_policy": "read_only",
         "slot": "market_indices",
-        "title": "Taiwan market indices",
+        "title": "Market indices",
         "unit_semantics": "index_points",
         "writes_cache": false
       },
@@ -7189,10 +7210,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "acf9327efceaf1c21078af24f52a8469d4875f757342606851dcdd886893c881",
+    "x-omi-capability-registry-digest": "7b7b403c7434dece6e529bc760722d43afd1c3faa9850fa596d076fe5ae725fe",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "acf9327efceaf1c21078af24f52a8469d4875f757342606851dcdd886893c881",
+    "x-omi-public-contract-digest": "7b7b403c7434dece6e529bc760722d43afd1c3faa9850fa596d076fe5ae725fe",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -7532,7 +7553,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "acf9327efceaf1c21078af24f52a8469d4875f757342606851dcdd886893c881",
+  "digest": "7b7b403c7434dece6e529bc760722d43afd1c3faa9850fa596d076fe5ae725fe",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

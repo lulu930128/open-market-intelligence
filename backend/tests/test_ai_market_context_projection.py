@@ -16,6 +16,7 @@ from app.ai.market_context.crypto_context import (
     _crypto_ohlcv_projection,
 )
 from app.crypto_market.assets import get_crypto_asset
+from app.market.index_resolution import resolve_taiwan_index_truth
 
 
 class AIMarketContextProjectionTests(unittest.TestCase):
@@ -637,11 +638,20 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(result["status"], "ready")
         self.assertTrue(result["current_for_requested_session"])
         self.assertTrue(result["is_complete"])
-        self.assertEqual(result["observation_mix"], ["current_session_index_snapshot"])
+        self.assertEqual(result["observation_mix"], ["compatibility_current_data_core"])
         self.assertEqual(result["items"][0]["latest_value"], 24_100.0)
         self.assertEqual(result["items"][0]["close"], 24_100.0)
         self.assertEqual(result["items"][0]["official_close"]["value"], 24_000.0)
         self.assertTrue(result["items"][0]["live_snapshot"]["is_partial"])
+        self.assertTrue(result["items"][0]["compatibility_fallback"])
+        self.assertIn(
+            "INDEX_HEADLINE_COMPATIBILITY_FALLBACK",
+            result["items"][0]["limitations"],
+        )
+        self.assertEqual(
+            result["items"][0]["resolution_version"],
+            "compatibility.current_data_core.v1",
+        )
 
     def test_taiwan_market_indices_keep_unconfirmed_post_close_summary_provisional(
         self,
@@ -682,10 +692,126 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             result["items"][0]["official_close"]["as_of"],
             "2026-08-04T13:30:00+08:00",
         )
-        self.assertEqual(result["items"][0]["official_close_status"], "pending")
-        self.assertEqual(result["items"][0]["finalization"], "provisional")
-        self.assertTrue(result["items"][0]["provisional"])
+        self.assertEqual(
+            result["items"][0]["official_close_status"],
+            "not_available_yet",
+        )
+        self.assertEqual(result["items"][0]["finalization"], "unknown")
+        self.assertFalse(result["items"][0]["provisional"])
         self.assertFalse(result["items"][0]["decision_usable"])
+        self.assertTrue(result["items"][0]["compatibility_fallback"])
+
+    def test_taiwan_market_indices_prefer_embedded_truth_over_current_core(self) -> None:
+        calendar_status = {
+            "timezone": "Asia/Taipei",
+            "checked_at": "2026-09-02T15:20:00+08:00",
+            "date": "2026-09-02",
+            "is_trading_day": True,
+            "phase": "post_close",
+            "previous_trading_day": "2026-09-01",
+        }
+
+        def item(
+            index_id: str,
+            market: str,
+            completed_close: float,
+            previous_close: float,
+            current_close: float,
+        ) -> dict:
+            source = (
+                "twse_indices_report_mi_5mins_hist"
+                if index_id == "TAIEX"
+                else "tpex_openapi_daily_index"
+            )
+            provider = "twse" if index_id == "TAIEX" else "tpex"
+            snapshot = {
+                "index_id": index_id,
+                "close": current_close,
+                "previous_close": previous_close,
+                "time": "2026-09-02",
+                "as_of": "2026-09-02T13:30:00+08:00",
+                "source": "fugle_indices_stream",
+                "provider": "fugle_marketdata",
+                "completed_daily_close": completed_close,
+                "completed_daily_trade_date": "2026-09-02",
+                "completed_daily_event_time": "2026-09-02T13:30:00+08:00",
+                "completed_daily_source": source,
+                "completed_daily_provider": provider,
+                "completed_daily_authority": "exchange",
+                "completed_daily_finalization": "final",
+                "completed_daily_official": True,
+                "completed_daily_release_status": "released",
+                "completed_daily_reconciliation_status": "not_applicable",
+                "completed_daily_qualified": True,
+                "completed_daily_previous_close": previous_close,
+                "completed_daily_previous_close_trade_date": "2026-09-01",
+                "completed_daily_previous_close_source": source,
+                "completed_daily_previous_close_provider": provider,
+                "completed_daily_previous_close_authority": "exchange",
+                "completed_daily_previous_close_finalization": "final",
+            }
+            truth = resolve_taiwan_index_truth(
+                intraday=None,
+                index_snapshot=snapshot,
+                calendar_status=calendar_status,
+                index_id=index_id,
+                acquisition_policy="cache_only",
+            )
+            return {
+                **snapshot,
+                "market": market,
+                "resolution": truth.model_dump(mode="json"),
+                "current_data_core": {
+                    "index": {
+                        "status": "stale",
+                        "index_id": index_id,
+                        "provider": "fugle_marketdata",
+                        "source": "fugle_indices_stream",
+                        "close": current_close,
+                        "previous_close": previous_close,
+                        "change": current_close - previous_close,
+                        "as_of": "2026-09-02T13:30:00+08:00",
+                        "trade_date": "2026-09-02",
+                        "provisional": True,
+                        "official": False,
+                        "decision_usable": False,
+                    }
+                },
+            }
+
+        summary = {
+            "source": "shared_market_data_core",
+            "indices": [
+                item("TAIEX", "TWSE", 46_164.72, 46_948.72, 46_221.63),
+                item("TPEX", "TPEX", 406.96, 410.77, 406.88),
+            ],
+        }
+        result = taiwan_market._market_indices_capability(
+            db=SimpleNamespace(),
+            dependencies=SimpleNamespace(
+                get_market_index_summary=lambda *_args, **_kwargs: summary
+            ),
+            generated_at=datetime.fromisoformat("2026-09-02T15:20:00+08:00"),
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["decision_usable"])
+        taiex, tpex = result["items"]
+        self.assertEqual(taiex["value"], 46_164.72)
+        self.assertEqual(taiex["change"], -784.0)
+        self.assertEqual(taiex["provider"], "twse")
+        self.assertEqual(
+            taiex["source"], "twse_indices_report_mi_5mins_hist"
+        )
+        self.assertEqual(
+            taiex["resolution_id"],
+            summary["indices"][0]["resolution"]["resolution_id"],
+        )
+        self.assertEqual(tpex["value"], 406.96)
+        self.assertAlmostEqual(tpex["change"], -3.81)
+        self.assertEqual(tpex["provider"], "tpex")
+        self.assertFalse(taiex["compatibility_fallback"])
+        self.assertIsNotNone(taiex["current_observation"])
 
     def test_aggregate_freshness_separates_temporal_currentness_from_coverage(self) -> None:
         freshness = taiwan_market._aggregate_freshness(
@@ -1000,6 +1126,31 @@ class AIMarketContextProjectionTests(unittest.TestCase):
                 "selected_source": "yahoo.chart.quote",
                 "selected_session": "continuous",
                 "limitations": ["DELAYED_VENDOR_EVIDENCE"],
+                "market_phase": "regular",
+                "source_status": {
+                    "status": "degraded",
+                    "freshness_status": "delayed",
+                    "provider_snapshot_freshness": "fresh",
+                    "trade_recency": "current",
+                    "trade_state": "trade_observed",
+                    "current_session_expected": True,
+                    "current_session_satisfied": True,
+                    "expected_trade_date": "2026-07-17",
+                    "event_trade_date": "2026-07-17",
+                    "decision_usable": True,
+                    "lag_seconds": 60,
+                },
+                "session_date_relation": {
+                    "kind": "session_date_relation",
+                    "version": "omi.us.session_date_relation.v1",
+                    "relation": "current_session_daily_pending_release",
+                    "status": "aligned",
+                    "expected": True,
+                    "quote_date": "2026-07-17",
+                    "completed_daily_date": "2026-07-16",
+                    "current_session_date": "2026-07-17",
+                    "market_phase": "regular",
+                },
                 "quote": {
                     "trade_date": "2026-07-17",
                     "currency": "USD",
@@ -1036,6 +1187,12 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(quote["change"], 1.25)
         self.assertEqual(quote["change_reference_price"], 100.0)
         self.assertEqual(quote["change_reference_type"], "prior_regular_close")
+        self.assertEqual(quote["source_status"]["freshness_status"], "delayed")
+        self.assertTrue(quote["current_session_satisfied"])
+        self.assertEqual(
+            quote["session_date_relation"]["status"],
+            "aligned",
+        )
         self.assertIn("DELAYED_VENDOR_EVIDENCE", quote["limitations"])
 
     def test_us_intraday_quote_uses_resolved_source_status_provider(self) -> None:

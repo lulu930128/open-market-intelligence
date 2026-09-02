@@ -437,6 +437,7 @@ def classify_observation(
             "market_status",
             "current_session_phase",
             "session_phase",
+            "market_phase",
             "session",
         )
         or ("continuous" if market_key in CONTINUOUS_MARKETS else "unknown")
@@ -454,6 +455,7 @@ def classify_observation(
         value,
         "current_session_phase",
         "session_phase",
+        "market_phase",
         "session",
     )
     canonical_session_phase = (
@@ -462,18 +464,80 @@ def classify_observation(
         in {"tw", "taiwan", "tw_stock", "tw_index", "tw_futures"}
         else str(session_phase or "").strip().casefold().replace("-", "_")
     )
+    source_status = (
+        value.get("source_status")
+        if isinstance(value, dict)
+        and isinstance(value.get("source_status"), dict)
+        else {}
+    )
+    capability_expectation = (
+        value.get("capability_expectation")
+        if isinstance(value, dict)
+        and isinstance(value.get("capability_expectation"), dict)
+        else {}
+    )
+    source_freshness_status = _first_text(
+        source_status,
+        "freshness_status",
+        "status",
+    )
+    trade_recency = _first_text(value, "trade_recency") or _first_text(
+        source_status,
+        "trade_recency",
+    )
+    trade_state = _first_text(value, "trade_state") or _first_text(
+        source_status,
+        "trade_state",
+    )
+    provider_snapshot_freshness = _first_text(
+        value,
+        "provider_snapshot_freshness",
+    ) or _first_text(source_status, "provider_snapshot_freshness")
+    current_session_satisfied = _first_bool(
+        value,
+        "current_session_satisfied",
+    )
+    if current_session_satisfied is None:
+        current_session_satisfied = _first_bool(
+            source_status,
+            "current_session_satisfied",
+        )
+    source_decision_usable = _first_bool(source_status, "decision_usable")
+    capability_outcome = _first_text(
+        capability_expectation,
+        "outcome",
+        "status",
+    )
     quote_semantics = _first_text(value, "quote_semantics")
     instrument_phase = _first_text(value, "instrument_phase")
     explicit_status = _first_text(value, "freshness_status", "status")
     freshness_status = _freshness_text(value, "freshness_status", "status")
     explicit_live = _first_bool(value, "is_live", "is_realtime") is True
-    explicit_stale = _first_bool(value, "is_stale") is True
+    explicit_stale = bool(
+        _first_bool(value, "is_stale") is True
+        or str(source_freshness_status or "").casefold()
+        in {"stale", "missing", "provider_error"}
+        or str(trade_recency or "").casefold()
+        in {"old", "historical", "missing"}
+        or (
+            current_session_satisfied is False
+            and canonical_session_phase in ACTIVE_SESSION_STATUSES
+        )
+        or str(capability_outcome or "").casefold()
+        in {"stale", "expected_but_missing", "unavailable"}
+    )
     latest_session = _first_bool(value, "is_latest_session_quote") is True
     historical = (
         _first_bool(value, "is_historical") is True
         or str(quote_semantics or "").casefold().startswith("historical_")
     )
     has_observation = _has_observation(value)
+    valid_empty = bool(
+        str(trade_state or "").casefold() == "awaiting_first_trade"
+        and str(provider_snapshot_freshness or "").casefold()
+        in {"live", "fresh", "current"}
+        and current_session_satisfied is True
+    )
     interval_seconds = _interval_seconds(value)
     intraday_bar_observation = _is_intraday_bar_observation(
         value,
@@ -513,7 +577,14 @@ def classify_observation(
     observation_mode = "unavailable"
     reason = "No usable price or bar observation was returned."
 
-    if has_observation:
+    if valid_empty:
+        state = "valid_empty"
+        observation_mode = "awaiting_first_trade"
+        reason = (
+            "A fresh current-session provider snapshot confirms that no trade "
+            "has occurred yet."
+        )
+    elif has_observation:
         if historical:
             state = "historical"
             observation_mode = "historical_close"
@@ -556,6 +627,13 @@ def classify_observation(
                 normalized_market_status in ACTIVE_SESSION_STATUSES
                 or normalized_session_phase in ACTIVE_SESSION_STATUSES
             )
+            if current_session_satisfied is False:
+                active_session = False
+            elif current_session_satisfied is True:
+                active_session = bool(
+                    active_session
+                    or normalized_session_phase in ACTIVE_SESSION_STATUSES
+                )
             calendar_completed_session = _calendar_completed_session(
                 market_key=market_key,
                 event_at=event_at,
@@ -590,7 +668,14 @@ def classify_observation(
             active_observation = active_session and not (
                 explicitly_completed and event_at is None
             )
-            if (
+            if active_observation and explicit_stale:
+                state = "stale"
+                observation_mode = "cached_snapshot"
+                reason = (
+                    "Backend temporal evidence marks the current-session "
+                    "observation as stale or unusable."
+                )
+            elif (
                 active_observation
                 and intraday_bar_observation
                 and event_age_seconds is not None
@@ -635,6 +720,13 @@ def classify_observation(
                     "Active-session observation is within the declared provider "
                     "delay window."
                 )
+            elif explicit_stale and market_open:
+                state = "stale"
+                observation_mode = "cached_snapshot"
+                reason = (
+                    "Backend temporal evidence does not belong to the active "
+                    "session or is no longer fresh enough."
+                )
             elif not active_observation and completed_session:
                 state = "latest_completed_session"
                 observation_mode = "session_close"
@@ -654,7 +746,7 @@ def classify_observation(
     if realtime_policy == "require_live":
         policy_satisfied = state == "live"
     else:
-        policy_satisfied = has_observation
+        policy_satisfied = has_observation or valid_empty
     facts_usable = state in {
         "live",
         "delayed",
@@ -663,7 +755,9 @@ def classify_observation(
         "latest_completed_session",
     }
     intraday_research_usable = bool(
-        has_observation and state in {"live", "delayed"}
+        has_observation
+        and state in {"live", "delayed"}
+        and source_decision_usable is not False
     )
     normalized_instrument_phase = str(instrument_phase or "").casefold()
     auction_observation = bool(
@@ -739,7 +833,11 @@ def classify_observation(
         "execution_grade_usable": execution_grade_usable,
         "price_decision_usable": actual_price_usable and not auction_observation,
         "auction_research_usable": auction_observation and intraday_research_usable,
-        "decision_usable": facts_usable and policy_satisfied,
+        "decision_usable": (
+            facts_usable
+            and policy_satisfied
+            and source_decision_usable is not False
+        ),
         "refresh_recommended": refresh_recommended,
         "refresh_possible_now": refresh_possible_now,
         "observation_mode": observation_mode,
@@ -747,6 +845,12 @@ def classify_observation(
         "market_status": market_status,
         "session_phase": session_phase,
         "canonical_session_phase": canonical_session_phase or None,
+        "current_session_satisfied": current_session_satisfied,
+        "source_freshness_status": source_freshness_status,
+        "trade_recency": trade_recency,
+        "trade_state": trade_state,
+        "provider_snapshot_freshness": provider_snapshot_freshness,
+        "capability_outcome": capability_outcome,
         "instrument_phase": instrument_phase,
         "observation_kind": (
             "intraday_bar" if intraday_bar_observation else "quote_snapshot"

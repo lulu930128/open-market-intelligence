@@ -571,6 +571,16 @@ def _us_resolved_quote(
         "capability_expectation": quote_snapshot.get(
             "capability_expectation"
         ),
+        "source_status": source_status or None,
+        "session_date_relation": quote_snapshot.get("session_date_relation"),
+        "current_session_expected": source_status.get(
+            "current_session_expected"
+        ),
+        "current_session_satisfied": source_status.get(
+            "current_session_satisfied"
+        ),
+        "expected_trade_date": source_status.get("expected_trade_date"),
+        "event_trade_date": source_status.get("event_trade_date"),
         "provider_snapshot_freshness": source_status.get(
             "provider_snapshot_freshness"
         ),

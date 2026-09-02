@@ -123,6 +123,16 @@ DOMAIN_HINTS = {
         "advance decline",
         "market breadth",
     ),
+    "indices": (
+        "市場指數",
+        "美股指數",
+        "大盤",
+        "指數",
+        "market indices",
+        "market index",
+        "indices",
+        "index",
+    ),
     "sample_ranking": (
         "排行",
         "漲幅榜",

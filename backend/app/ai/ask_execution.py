@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -18,6 +19,7 @@ from app.ai import (
 from app.ai import ask_policy
 from app.ai.market_date_request import parse_market_trade_date, requested_us_trade_date
 from app.ai.schemas import AiAskRequest
+from app.us_market.market_indices import read_us_market_indices
 
 
 _request_target_id = scope_resolution._request_target_id
@@ -30,6 +32,43 @@ REGIONAL_MARKET_REFERENCES: dict[str, tuple[str, str]] = {
     "JP": ("^N225", "Nikkei 225"),
     "KR": ("KOSPI", "KOSPI"),
 }
+
+
+def _requests_capability(
+    payload: AiAskRequest,
+    *,
+    capability_id: str,
+    policy: dict[str, Any] | None,
+) -> bool:
+    """Honor the normalized bounded selection before dispatching an extra reader."""
+
+    query_plan = (
+        policy.get("query_plan")
+        if isinstance(policy, dict) and isinstance(policy.get("query_plan"), dict)
+        else {}
+    )
+    if query_plan and any(
+        key in query_plan
+        for key in ("selected_capabilities", "optional_selected_capabilities")
+    ):
+        selected = {
+            str(value)
+            for key in ("selected_capabilities", "optional_selected_capabilities")
+            for value in query_plan.get(key) or []
+            if value
+        }
+        return capability_id in selected
+
+    raw_selection = payload.selection if isinstance(payload.selection, dict) else {}
+    explicit_values = [
+        str(value)
+        for key in ("include", "required", "optional")
+        for value in raw_selection.get(key) or []
+        if value
+    ]
+    if explicit_values:
+        return capability_id in explicit_values
+    return True
 
 
 def _market_data_params(
@@ -351,6 +390,7 @@ def _read_market_context(
         raise ValueError(f"Unsupported market scope: {market}")
     symbol, label = reference
     if market == "US":
+        evaluated_at = datetime.now(timezone.utc)
         result = agentic_tools.read_us_stock_context(
             db=db,
             symbol=symbol,
@@ -360,6 +400,26 @@ def _read_market_context(
                 policy=policy,
             ),
         )
+        if _requests_capability(
+            payload,
+            capability_id="market.indices",
+            policy=policy,
+        ):
+            indices = read_us_market_indices(
+                db,
+                evaluated_at=evaluated_at,
+            ).model_dump(mode="json")
+            data = result.setdefault("data", {})
+            data.setdefault("market", {})["indices"] = indices
+            compact = data.setdefault("compact", {})
+            compact.setdefault("market", {})["indices"] = indices
+            source_refs = result.setdefault("source_refs", [])
+            source_ref = {
+                "type": "resolved_market_data",
+                "name": "us.market.indices",
+            }
+            if source_ref not in source_refs:
+                source_refs.append(source_ref)
     elif market == "JP":
         result = agentic_tools.read_jp_stock_context(
             db=db,
