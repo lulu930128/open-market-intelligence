@@ -95,7 +95,12 @@ TW_DATASET_STORAGE_PROBES: dict[str, TaiwanDatasetStorageProbe] = {
         "taiwan_current_index_snapshot", "event_at", "index_id"
     ),
     "tw.market_index.intraday": _probe(
-        "taiwan_current_index_snapshot", "event_at", "index_id"
+        "market_intraday_bar",
+        "bar_time",
+        "stock_id",
+        ("canonical_market", "TW"),
+        ("instrument_type", "index"),
+        ("interval", "1m"),
     ),
     "tw.market_index.directory": _probe(
         "taiwan_market_index_directory_snapshot", "fetched_at", "market"

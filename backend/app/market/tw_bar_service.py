@@ -723,4 +723,56 @@ class TaiwanBarService:
         )
 
 
-__all__ = ["TaiwanBarService"]
+def read_taiwan_index_intraday_bars(
+    db: Session,
+    *,
+    index_id: str,
+    requested_at: datetime | None = None,
+) -> TaiwanBarSeriesRead:
+    """Read one Taiwan index 1m series through the unified Bar owner."""
+
+    local_now = _aware_taipei(requested_at or datetime.now(TAIWAN_TZ))
+    presentation = taiwan_presentation_session(local_now)
+    trade_date = presentation["trade_date"]
+    if not isinstance(trade_date, date):
+        raise RuntimeError("Taiwan presentation session returned invalid trade date")
+    from_time = datetime.combine(
+        trade_date,
+        TAIWAN_SESSION_OPEN_TIME,
+        tzinfo=TAIWAN_TZ,
+    )
+    to_time = (
+        local_now
+        if trade_date == local_now.date()
+        else datetime.combine(
+            trade_date,
+            TAIWAN_SESSION_CLOSE_TIME,
+            tzinfo=TAIWAN_TZ,
+        )
+        + timedelta(minutes=1)
+    )
+    if to_time <= from_time:
+        to_time = from_time + timedelta(minutes=1)
+    return TaiwanBarService(db).read_bars(
+        instrument_id=index_id,
+        interval="1m",
+        from_time=from_time,
+        to_time=to_time,
+        limit=500,
+        requested_at=local_now,
+    )
+
+
+def project_taiwan_index_intraday_bars(
+    series: TaiwanBarSeriesRead,
+) -> dict[str, object]:
+    """Project the canonical Bar contract without re-resolving providers."""
+
+    return series.model_dump(mode="json")
+
+
+__all__ = [
+    "TaiwanBarService",
+    "project_taiwan_index_intraday_bars",
+    "read_taiwan_index_intraday_bars",
+]

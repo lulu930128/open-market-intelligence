@@ -36,11 +36,13 @@ from app.market.tw_intraday_platform import (
     refresh_taiwan_intraday_bars,
 )
 from app.market_data.policies import RealtimePolicy
+from app.market_data.provider_catalog import plan_data_acquisition_v2
 from app.market_data.contracts import (
     DatasetHealthStatus,
     InstrumentKey,
     InstrumentType,
     Market,
+    ResolvedEvidenceStatus,
 )
 
 
@@ -143,9 +145,10 @@ def _nstock_payload() -> str:
 
 
 def _yahoo_payload(now: datetime) -> str:
+    current_minute = now.replace(second=0, microsecond=0)
     timestamps = [
-        int(now.replace(hour=9, minute=0, second=0).timestamp()),
-        int(now.replace(hour=9, minute=1, second=0).timestamp()),
+        int((current_minute - timedelta(minutes=1)).timestamp()),
+        int(current_minute.timestamp()),
     ]
     return json.dumps(
         {
@@ -224,7 +227,7 @@ def _executor(
 
 
 def test_nstock_refresh_persists_actual_provider_lineage_then_rereads() -> None:
-    now = datetime(2026, 8, 26, 10, 1, 30, tzinfo=TAIPEI)
+    now = datetime(2026, 8, 26, 10, 1, tzinfo=TAIPEI)
     executor, calls = _executor(now)
     db, engine = _db()
     try:
@@ -241,7 +244,8 @@ def test_nstock_refresh_persists_actual_provider_lineage_then_rereads() -> None:
         assert result.persistence.committed is True
         assert result.resolved.bars
         assert result.dataset_health is not None
-        assert result.dataset_health.status is DatasetHealthStatus.STALE
+        assert result.dataset_health.status is DatasetHealthStatus.HEALTHY
+        assert result.resolved.health.fallback_used is False
         assert result.resolved.bars[-1].lineage.provider == "nstock"
         assert [int(bar.volume.value) for bar in result.resolved.bars] == [1000, 1000]
         assert [bar.finalization.value for bar in result.resolved.bars] == [
@@ -260,6 +264,41 @@ def test_nstock_refresh_persists_actual_provider_lineage_then_rereads() -> None:
             bar.lineage.raw_receipt_id is not None
             for bar in result.resolved.bars
         )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_stale_primary_observations_do_not_stop_the_gateway_route_gate() -> None:
+    now = datetime(2026, 8, 26, 10, 1, 30, tzinfo=TAIPEI)
+    executor, calls = _executor(now)
+    db, engine = _db()
+    try:
+        result = refresh_taiwan_intraday_bars(
+            db,
+            stock_id="2330",
+            interval="1m",
+            range_value="1d",
+            requested_at=now,
+            acquisition=executor,
+        )
+
+        assert calls == ["nstock", "yahoo_finance_chart"]
+        assert result.acquisition.external_calls == 2
+        assert result.persistence.receipts_written == 2
+        assert result.dataset_health is not None
+        assert result.dataset_health.status is DatasetHealthStatus.STALE
+        assert result.resolved.health.status is ResolvedEvidenceStatus.STALE
+        assert result.resolved.health.fallback_used is False
+        assert any(
+            item.startswith("ROUTE_REQUIREMENT_UNSATISFIED:nstock:")
+            for item in result.acquisition.limitations
+        )
+        assert db.query(RawFetchResult).count() == 2
+        assert {row.provider for row in db.query(MarketIntradayBar).all()} == {
+            "nstock",
+            "yahoo_finance_chart",
+        }
     finally:
         db.close()
         engine.dispose()
@@ -387,7 +426,7 @@ def test_nstock_trailing_window_projects_incomplete_session_coverage() -> None:
 
 
 def test_shared_plan_falls_back_to_yahoo_without_intraday_service_selection() -> None:
-    now = datetime(2026, 8, 26, 10, 1, 30, tzinfo=TAIPEI)
+    now = datetime(2026, 8, 26, 10, 1, tzinfo=TAIPEI)
     executor, calls = _executor(now, nstock_status="failed")
     db, engine = _db()
     try:
@@ -407,6 +446,8 @@ def test_shared_plan_falls_back_to_yahoo_without_intraday_service_selection() ->
             "yahoo_finance_chart",
         )
         assert result.resolved.bars[-1].lineage.provider == "yahoo_finance_chart"
+        assert result.resolved.health.status is ResolvedEvidenceStatus.FALLBACK
+        assert result.resolved.health.fallback_used is True
         assert db.query(RawFetchResult).count() == 2
         assert {row.provider for row in db.query(MarketIntradayBar).all()} == {
             "yahoo_finance_chart"
@@ -578,6 +619,25 @@ def test_intraday_service_no_longer_owns_provider_io_fallback_or_transaction() -
     assert "_upsert_market_intraday_bars" not in source
     assert "db.commit" not in source
     assert "refresh: bool = False" in source
+
+
+def test_intraday_executor_rejects_multi_route_plan_before_provider_io() -> None:
+    now = datetime(2026, 8, 26, 10, 1, tzinfo=TAIPEI)
+    requirement = build_taiwan_intraday_requirement(
+        instrument=_instrument(),
+        interval="1m",
+        range_value="1d",
+        policy=RealtimePolicy.PREFER_LIVE,
+        requested_at=now,
+        acquiring=True,
+    )
+    plan = plan_data_acquisition_v2(requirement, TW_INTRADAY_DESCRIPTORS)
+    executor, calls = _executor(now)
+
+    assert len(plan.routes) == 2
+    with pytest.raises(ValueError, match="one Gateway-controlled route"):
+        executor.acquire_bar_observations(requirement, plan)
+    assert calls == []
 
 
 def test_all_taiwan_intraday_providers_advertise_base_1m_only() -> None:

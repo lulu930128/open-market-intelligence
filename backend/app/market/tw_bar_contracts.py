@@ -38,6 +38,7 @@ TPEX_DERIVED_DAILY_SOURCE = "tpex_index_5s_components"
 TPEX_OFFICIAL_5S_COMPONENT_SOURCE = "tpex_index_5s"
 TPEX_OFFICIAL_5S_PARSER_VERSION = "tpex.index_5s.v1"
 TAIWAN_DAILY_MATERIALIZATION_VERSION = "tw.daily.materialize.v1"
+TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION = "tw.tpex.daily.materialize.v2"
 TPEX_DERIVED_DAILY_KIND = "exchange_intraday_components_to_completed_daily"
 TAIWAN_HISTORY_SLO_CALENDAR_DAYS = {
     "5m": 31,

@@ -28,6 +28,7 @@ from app.market.tw_bar_contracts import (
     TAIEX_OFFICIAL_DAILY_PROVIDER,
     TAIEX_OFFICIAL_DAILY_SOURCE,
     TAIWAN_DAILY_MATERIALIZATION_VERSION,
+    TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
     TPEX_DERIVED_DAILY_KIND,
     TPEX_DERIVED_DAILY_PROVIDER,
     TPEX_DERIVED_DAILY_SOURCE,
@@ -293,12 +294,12 @@ class TaiwanOfficialDailyBarRepository:
                         and row.official is False
                         and row.derivation_kind == TPEX_DERIVED_DAILY_KIND
                         and row.aggregation_version
-                        == TAIWAN_DAILY_MATERIALIZATION_VERSION
+                        == TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION
                         and lineage is not None
                         and lineage.evidence_kind == "materialized"
                         and lineage.source_interval == "5s"
                         and lineage.materialization_version
-                        == TAIWAN_DAILY_MATERIALIZATION_VERSION
+                        == TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION
                         and component_hashes
                         and lineage.lineage_digest
                     )
@@ -414,12 +415,12 @@ class TaiwanOfficialDailyBarRepository:
                     and row.official is False
                     and row.derivation_kind == TPEX_DERIVED_DAILY_KIND
                     and row.aggregation_version
-                    == TAIWAN_DAILY_MATERIALIZATION_VERSION
+                    == TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION
                     and materialized_lineage is not None
                     and materialized_lineage.evidence_kind == "materialized"
                     and materialized_lineage.source_interval == "5s"
                     and materialized_lineage.materialization_version
-                    == TAIWAN_DAILY_MATERIALIZATION_VERSION
+                    == TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION
                     and component_hashes
                     and materialized_lineage.lineage_digest
                 )

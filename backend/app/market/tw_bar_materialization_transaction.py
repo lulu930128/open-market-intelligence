@@ -18,7 +18,7 @@ from app.db.models import (
     utc_now,
 )
 from app.market.tw_bar_contracts import (
-    TAIWAN_DAILY_MATERIALIZATION_VERSION,
+    TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
     TPEX_DERIVED_DAILY_KIND,
@@ -206,7 +206,7 @@ class TaiwanBarMaterializationTransaction:
                 category="market_data",
                 enabled=True,
                 priority=10,
-                parser_type=TAIWAN_DAILY_MATERIALIZATION_VERSION,
+                parser_type=TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
                 auth_type="none",
                 reliability_level="official",
             )
@@ -293,7 +293,7 @@ class TaiwanBarMaterializationTransaction:
             "release_status": "pending_release",
             "reconciliation_status": "pending",
             "derivation_kind": TPEX_DERIVED_DAILY_KIND,
-            "aggregation_version": TAIWAN_DAILY_MATERIALIZATION_VERSION,
+            "aggregation_version": TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
         }
         unchanged = False
         try:
@@ -319,7 +319,7 @@ class TaiwanBarMaterializationTransaction:
             lineage.raw_result_id = None
             lineage.evidence_kind = "materialized"
             lineage.source_interval = candidate.source_interval
-            lineage.materialization_version = TAIWAN_DAILY_MATERIALIZATION_VERSION
+            lineage.materialization_version = TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION
             lineage.component_raw_result_ids_json = json.dumps(
                 candidate.component_raw_result_ids,
                 separators=(",", ":"),
@@ -332,7 +332,7 @@ class TaiwanBarMaterializationTransaction:
                 json.dumps(
                     {
                         "source": TPEX_DERIVED_DAILY_SOURCE,
-                        "version": TAIWAN_DAILY_MATERIALIZATION_VERSION,
+                        "version": TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
                         "component_content_hashes": candidate.component_content_hashes,
                     },
                     sort_keys=True,
@@ -359,6 +359,7 @@ class TaiwanBarMaterializationTransaction:
         *,
         receipt: RawFetchReceiptV1,
         components: tuple[BarObservation, ...],
+        formal_close_component: BarObservation,
         as_of: datetime,
     ) -> PersistenceSummary:
         """Atomically persist one real 5s receipt and its derived daily candidate."""
@@ -406,6 +407,7 @@ class TaiwanBarMaterializationTransaction:
             self._db.flush()
             candidate = materialize_tpex_completed_daily_candidate(
                 components,
+                formal_close_component=formal_close_component,
                 component_raw_result_ids=(raw.id,),
                 component_content_hashes=(receipt.content_hash,),
                 coverage_complete=True,

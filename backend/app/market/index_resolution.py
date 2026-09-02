@@ -3,14 +3,135 @@ from __future__ import annotations
 from datetime import date, datetime
 import hashlib
 import json
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+from pydantic import ValidationError
 
-TAIWAN_INDEX_RESOLUTION_VERSION = "tw.index.resolution.v1"
+from app.market_data.contracts import CanonicalModel
+
+
+TAIWAN_INDEX_RESOLUTION_VERSION = "tw.index.resolution.v3"
+TAIWAN_INDEX_HEADLINE_COMPATIBILITY_VERSION = (
+    "compatibility.current_data_core.v1"
+)
+TAIWAN_INDEX_HEADLINE_COMPATIBILITY_LIMITATION = (
+    "INDEX_HEADLINE_COMPATIBILITY_FALLBACK"
+)
 TAIWAN_INDEX_ACQUISITION_POLICIES = frozenset(
     {"cache_only", "prefer_live", "require_live", "unspecified"}
 )
+
+
+TaiwanIndexCandidateKind = Literal[
+    "intraday_last_trade",
+    "index_summary",
+    "completed_daily_bar",
+    "official_close",
+]
+
+
+class TaiwanIndexTruthCandidate(CanonicalModel):
+    candidate: TaiwanIndexCandidateKind
+    value: float | int | None = None
+    raw_value: float | int | None = None
+    event_time: str | None = None
+    trade_date: str | None = None
+    source: str | None = None
+    provider: str | None = None
+    authority: str | None = None
+    finalization: str | None = None
+    official: bool | None = None
+    release_status: str | None = None
+    reconciliation_status: str | None = None
+    age_seconds: int | None = None
+    stale_after_seconds: int | None = None
+    eligible: bool
+    confirmation_evidence: str | None = None
+    previous_close: float | int | None = None
+    previous_close_trade_date: str | None = None
+    previous_close_source: str | None = None
+    previous_close_provider: str | None = None
+    previous_close_authority: str | None = None
+    previous_close_finalization: str | None = None
+    change: float | int | None = None
+    change_pct: float | int | None = None
+
+
+class TaiwanIndexTruthObservation(CanonicalModel):
+    value: float | int | None = None
+    observed_at: str | None = None
+    trade_date: str | None = None
+    source: str | None = None
+    provider: str | None = None
+    authority: str
+    finalization: str
+    semantics: str
+    decision_usable: bool
+    previous_close: float | int | None = None
+    previous_close_trade_date: str | None = None
+    previous_close_source: str | None = None
+    previous_close_provider: str | None = None
+    previous_close_authority: str | None = None
+    previous_close_finalization: str | None = None
+    change: float | int | None = None
+    change_pct: float | int | None = None
+
+
+class ResolvedTaiwanIndexTruth(CanonicalModel):
+    """Typed, market-owned Taiwan index headline truth.
+
+    Acquisition is intentionally outside this contract. The model validates
+    the one selected observation, its finality/authority, and the evidence that
+    explains why it was selected before API and AI consumers project it.
+    """
+
+    resolution_version: str
+    resolution_id: str
+    acquisition_policy: str
+    index_id: str | None = None
+    phase: str
+    expected_trade_date: str | None = None
+    selected_candidate: TaiwanIndexCandidateKind | None = None
+    selected_value: float | int | None = None
+    selected_source: str | None = None
+    selected_provider: str | None = None
+    selected_authority: str
+    selected_finalization: str
+    official_source: bool
+    official_close_confirmed: bool
+    provisional_estimate: bool
+    selected_event_time: str | None = None
+    selected_trade_date: str | None = None
+    selected_previous_close: float | int | None = None
+    selected_previous_close_trade_date: str | None = None
+    selected_previous_close_source: str | None = None
+    selected_previous_close_provider: str | None = None
+    selected_previous_close_authority: str | None = None
+    selected_previous_close_finalization: str | None = None
+    selected_change: float | int | None = None
+    selected_change_pct: float | int | None = None
+    selection_reason: str
+    last_trade_available: bool
+    last_trade_price: float | int | None = None
+    last_trade_time: str | None = None
+    last_trade_is_current_session: bool
+    official_close_available: bool
+    official_close_status: str
+    official_close_price: float | int | None = None
+    official_close_trade_date: str | None = None
+    official_close_source: str | None = None
+    official_close_raw: float | int | None = None
+    official_close_display: str | None = None
+    official_close_precision: int | None = None
+    current_observation: TaiwanIndexTruthObservation | None = None
+    quote_semantics: str
+    delivery_status: str
+    freshness_status: str
+    decision_usable: bool
+    coverage_status: str
+    candidates: tuple[TaiwanIndexTruthCandidate, ...]
+    warnings: tuple[str, ...]
 
 
 def normalize_index_acquisition_policy(value: Any) -> str:
@@ -80,6 +201,70 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _number(value: Any) -> float | int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _candidate_change_projection(
+    *,
+    value: Any,
+    previous_close: Any,
+    explicit_change: Any = None,
+    explicit_change_pct: Any = None,
+    previous_close_trade_date: Any = None,
+    previous_close_source: Any = None,
+    previous_close_provider: Any = None,
+    previous_close_authority: Any = None,
+    previous_close_finalization: Any = None,
+) -> dict[str, Any]:
+    selected_value = _number(value)
+    selected_previous_close = _number(previous_close)
+    if selected_value is not None and selected_previous_close is not None:
+        selected_change: float | int | None = (
+            round(float(selected_value) - float(selected_previous_close), 10)
+        )
+        selected_change_pct: float | int | None = (
+            selected_change / selected_previous_close * 100
+            if selected_previous_close != 0
+            else None
+        )
+    else:
+        selected_change = _number(explicit_change)
+        selected_change_pct = _number(explicit_change_pct)
+    return {
+        "previous_close": selected_previous_close,
+        "previous_close_trade_date": (
+            _json_value(previous_close_trade_date)
+            if selected_previous_close is not None
+            else None
+        ),
+        "previous_close_source": (
+            str(previous_close_source or "") or None
+            if selected_previous_close is not None
+            else None
+        ),
+        "previous_close_provider": (
+            str(previous_close_provider or "") or None
+            if selected_previous_close is not None
+            else None
+        ),
+        "previous_close_authority": (
+            str(previous_close_authority or "") or None
+            if selected_previous_close is not None
+            else None
+        ),
+        "previous_close_finalization": (
+            str(previous_close_finalization or "") or None
+            if selected_previous_close is not None
+            else None
+        ),
+        "change": selected_change,
+        "change_pct": selected_change_pct,
+    }
+
+
 def _resolution_id(payload: dict[str, Any]) -> str:
     encoded = json.dumps(
         payload,
@@ -89,6 +274,59 @@ def _resolution_id(payload: dict[str, Any]) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def _presentation_trade_date(
+    calendar_status: dict[str, Any],
+    *,
+    timezone_name: str,
+) -> date | None:
+    presentation_session = calendar_status.get("presentation_session")
+    if not isinstance(presentation_session, dict):
+        return None
+    return index_candidate_date(
+        presentation_session.get("trade_date"),
+        timezone_name=timezone_name,
+    )
+
+
+def _candidate_selection_key(
+    candidate: dict[str, Any],
+    *,
+    timezone_name: str,
+) -> tuple[int, datetime]:
+    candidate_kind = str(candidate.get("candidate") or "")
+    if candidate_kind == "official_close":
+        semantic_priority = 500
+    elif candidate_kind == "completed_daily_bar":
+        authority = str(candidate.get("authority") or "").casefold()
+        release_status = str(candidate.get("release_status") or "").casefold()
+        semantic_priority = (
+            450
+            if candidate.get("official") is True
+            and authority in {"exchange", "official_exchange"}
+            and release_status == "released"
+            else 400
+        )
+    elif candidate_kind == "index_summary":
+        semantic_priority = 200
+    else:
+        semantic_priority = 100
+    event_time = index_candidate_datetime(
+        candidate.get("event_time"),
+        timezone_name=timezone_name,
+    ) or datetime.min.replace(tzinfo=ZoneInfo(timezone_name))
+    return semantic_priority, event_time
+
+
+def _selection_reason(candidate: dict[str, Any]) -> str:
+    candidate_kind = str(candidate.get("candidate") or "")
+    return {
+        "official_close": "confirmed_official_close",
+        "completed_daily_bar": "qualified_completed_daily_bar",
+        "index_summary": "same_trade_date_summary_fallback",
+        "intraday_last_trade": "same_trade_date_intraday_fallback",
+    }.get(candidate_kind, "same_trade_date_candidate_selected")
 
 
 def _index_candidate_authority(
@@ -169,6 +407,23 @@ def _intraday_official_candidate(
         "confirmation_evidence": (
             "intraday_official_close_observation" if eligible else None
         ),
+        **_candidate_change_projection(
+            value=value,
+            previous_close=(
+                observation.get("previous_close")
+                if observation.get("previous_close") is not None
+                else intraday.get("previous_close")
+            ),
+            explicit_change=observation.get("change"),
+            explicit_change_pct=observation.get("change_pct"),
+            previous_close_trade_date=observation.get("previous_close_trade_date"),
+            previous_close_source=observation.get("previous_close_source"),
+            previous_close_provider=observation.get("previous_close_provider"),
+            previous_close_authority=observation.get("previous_close_authority"),
+            previous_close_finalization=observation.get(
+                "previous_close_finalization"
+            ),
+        ),
     }
 
 
@@ -203,11 +458,26 @@ def resolve_taiwan_index_quote_state(
         calendar_status.get("previous_trading_day"),
         timezone_name=timezone_name,
     )
+    presentation_trade_date = _presentation_trade_date(
+        calendar_status,
+        timezone_name=timezone_name,
+    )
+    active_session_phase = phase in {
+        "regular",
+        "regular_live",
+        "closing_auction",
+        "close_resolution",
+    }
+    current_trading_day_phase = active_session_phase or phase in {
+        "post_close",
+        "post_close_snapshot",
+        "market_closed",
+    }
     expected_trade_date = (
         current_date
         if calendar_status.get("is_trading_day") is True
-        and phase not in {"preopen_pending", "preopen", "market_closed"}
-        else previous_trading_day
+        and current_trading_day_phase
+        else presentation_trade_date or previous_trading_day
     )
 
     latest_point = latest_intraday_point(intraday)
@@ -263,6 +533,36 @@ def resolve_taiwan_index_quote_state(
             and intraday_date == expected_trade_date
             and intraday_fresh_for_phase
         ),
+        **_candidate_change_projection(
+            value=(
+                latest_point.get("price")
+                if latest_point and latest_point.get("price") is not None
+                else latest_point.get("close")
+                if latest_point
+                else None
+            ),
+            previous_close=(
+                latest_point.get("previous_close")
+                if latest_point
+                and latest_point.get("previous_close") is not None
+                else (intraday or {}).get("previous_close")
+            ),
+            explicit_change=(intraday or {}).get("change"),
+            explicit_change_pct=(intraday or {}).get("change_pct"),
+            previous_close_trade_date=(intraday or {}).get(
+                "previous_close_trade_date"
+            ),
+            previous_close_source=(intraday or {}).get("previous_close_source"),
+            previous_close_provider=(intraday or {}).get(
+                "previous_close_provider"
+            ),
+            previous_close_authority=(intraday or {}).get(
+                "previous_close_authority"
+            ),
+            previous_close_finalization=(intraday or {}).get(
+                "previous_close_finalization"
+            ),
+        ),
     }
 
     summary_time = snapshot.get("as_of")
@@ -310,6 +610,25 @@ def resolve_taiwan_index_quote_state(
             and summary_date == expected_trade_date
             and summary_fresh_for_phase
         ),
+        **_candidate_change_projection(
+            value=(
+                snapshot.get("close")
+                if snapshot.get("close") is not None
+                else snapshot.get("value")
+            ),
+            previous_close=snapshot.get("previous_close"),
+            explicit_change=snapshot.get("change"),
+            explicit_change_pct=snapshot.get("change_pct"),
+            previous_close_trade_date=snapshot.get(
+                "previous_close_trade_date"
+            ),
+            previous_close_source=snapshot.get("previous_close_source"),
+            previous_close_provider=snapshot.get("previous_close_provider"),
+            previous_close_authority=snapshot.get("previous_close_authority"),
+            previous_close_finalization=snapshot.get(
+                "previous_close_finalization"
+            ),
+        ),
     }
 
     completed_trade_date = index_candidate_date(
@@ -339,6 +658,27 @@ def resolve_taiwan_index_quote_state(
             and completed_trade_date == expected_trade_date
             and str(snapshot.get("completed_daily_finalization") or "")
             in {"final", "corrected"}
+        ),
+        **_candidate_change_projection(
+            value=snapshot.get("completed_daily_close"),
+            previous_close=snapshot.get("completed_daily_previous_close"),
+            explicit_change=snapshot.get("completed_daily_change"),
+            explicit_change_pct=snapshot.get("completed_daily_change_pct"),
+            previous_close_trade_date=snapshot.get(
+                "completed_daily_previous_close_trade_date"
+            ),
+            previous_close_source=snapshot.get(
+                "completed_daily_previous_close_source"
+            ),
+            previous_close_provider=snapshot.get(
+                "completed_daily_previous_close_provider"
+            ),
+            previous_close_authority=snapshot.get(
+                "completed_daily_previous_close_authority"
+            ),
+            previous_close_finalization=snapshot.get(
+                "completed_daily_previous_close_finalization"
+            ),
         ),
     }
 
@@ -385,15 +725,78 @@ def resolve_taiwan_index_quote_state(
                 official_trade_date.isoformat() if official_trade_date else None
             ),
             "source": official_source or None,
-            "provider": snapshot.get("provider"),
+            "provider": snapshot.get("official_close_provider"),
+            "authority": snapshot.get("official_close_authority"),
+            "finalization": snapshot.get("official_close_finalization"),
             "eligible": summary_official_confirmed,
             "confirmation_evidence": (
                 "explicit_official_status"
                 if explicit_official_status in {"confirmed", "official", "final"}
                 else None
             ),
+            **_candidate_change_projection(
+                value=official_price,
+                previous_close=snapshot.get("official_close_previous_close"),
+                explicit_change=snapshot.get("official_close_change"),
+                explicit_change_pct=snapshot.get("official_close_change_pct"),
+                previous_close_trade_date=snapshot.get(
+                    "official_close_previous_close_trade_date"
+                ),
+                previous_close_source=snapshot.get(
+                    "official_close_previous_close_source"
+                ),
+                previous_close_provider=snapshot.get(
+                    "official_close_previous_close_provider"
+                ),
+                previous_close_authority=snapshot.get(
+                    "official_close_previous_close_authority"
+                ),
+                previous_close_finalization=snapshot.get(
+                    "official_close_previous_close_finalization"
+                ),
+            ),
         }
     official_confirmed = bool(official_candidate["eligible"])
+
+    completed_daily_is_official_close = bool(
+        completed_daily_candidate["eligible"]
+        and completed_daily_candidate["official"] is True
+        and str(completed_daily_candidate.get("authority") or "").casefold()
+        in {"exchange", "official_exchange"}
+        and str(completed_daily_candidate.get("release_status") or "").casefold()
+        == "released"
+        and str(completed_daily_candidate.get("finalization") or "").casefold()
+        in {"final", "corrected"}
+    )
+    official_close_from_completed_daily = bool(
+        completed_daily_is_official_close and not official_confirmed
+    )
+    if official_close_from_completed_daily:
+        official_candidate = {
+            "candidate": "official_close",
+            "value": completed_daily_candidate["value"],
+            "raw_value": completed_daily_candidate["value"],
+            "event_time": completed_daily_candidate["event_time"],
+            "trade_date": completed_daily_candidate["trade_date"],
+            "source": completed_daily_candidate["source"],
+            "provider": completed_daily_candidate["provider"],
+            "eligible": True,
+            "confirmation_evidence": "release_qualified_completed_daily",
+            **{
+                key: completed_daily_candidate.get(key)
+                for key in (
+                    "previous_close",
+                    "previous_close_trade_date",
+                    "previous_close_source",
+                    "previous_close_provider",
+                    "previous_close_authority",
+                    "previous_close_finalization",
+                    "change",
+                    "change_pct",
+                )
+            },
+        }
+        official_confirmed = True
 
     warnings: list[str] = []
     candidate_dates = {
@@ -409,7 +812,14 @@ def resolve_taiwan_index_quote_state(
 
     selected_candidate: dict[str, Any] | None = None
     selection_reason = "no_eligible_candidate"
-    if official_confirmed and phase in {
+    if completed_daily_candidate["eligible"] and phase in {
+        "post_close",
+        "post_close_snapshot",
+        "market_closed",
+    } and official_close_from_completed_daily:
+        selected_candidate = completed_daily_candidate
+        selection_reason = "qualified_completed_daily_bar"
+    elif official_confirmed and phase in {
         "post_close",
         "post_close_snapshot",
         "market_closed",
@@ -436,32 +846,41 @@ def resolve_taiwan_index_quote_state(
         eligible = [
             candidate
             for candidate in (
+                official_candidate,
                 intraday_candidate,
                 summary_candidate,
                 completed_daily_candidate,
             )
             if candidate["eligible"]
+            and not (
+                official_close_from_completed_daily
+                and candidate is official_candidate
+            )
         ]
         if eligible:
             selected_candidate = max(
                 eligible,
-                key=lambda candidate: (
-                    index_candidate_datetime(
-                        candidate.get("event_time"),
-                        timezone_name=timezone_name,
-                    )
-                    or datetime.min.replace(tzinfo=ZoneInfo(timezone_name))
+                key=lambda candidate: _candidate_selection_key(
+                    candidate,
+                    timezone_name=timezone_name,
                 ),
             )
-            selection_reason = (
-                "latest_same_trade_date_candidate_pending_confirmation"
-            )
+            selection_reason = _selection_reason(selected_candidate)
 
     closing_auction = phase == "closing_auction"
     post_close_current_day = bool(
         calendar_status.get("is_trading_day") is True
         and phase in {"post_close", "post_close_snapshot", "market_closed"}
     )
+    if (
+        post_close_current_day
+        and selected_candidate is not None
+        and selected_candidate.get("candidate")
+        not in {"official_close", "completed_daily_bar"}
+    ):
+        selection_reason = (
+            "latest_same_trade_date_candidate_pending_confirmation"
+        )
     official_close_status = (
         "confirmed"
         if official_confirmed
@@ -518,17 +937,20 @@ def resolve_taiwan_index_quote_state(
         if isinstance(selected_candidate, dict)
         else None
     )
+    completed_session_phase = phase in {
+        "preopen_pending",
+        "preopen",
+        "post_close",
+        "post_close_snapshot",
+        "market_closed",
+    }
     decision_usable = bool(
         selected_candidate is not None
         and selected_trade_date
         and expected_trade_date is not None
         and selected_trade_date == expected_trade_date.isoformat()
         and (
-            phase not in {
-                "post_close",
-                "post_close_snapshot",
-                "market_closed",
-            }
+            not completed_session_phase
             or (
                 selected_candidate.get("candidate")
                 in {"official_close", "completed_daily_bar"}
@@ -554,9 +976,21 @@ def resolve_taiwan_index_quote_state(
         if isinstance(selected_candidate, dict)
         else None
     )
-    selected_authority = _index_candidate_authority(
-        source=selected_source,
-        provider=selected_provider,
+    explicit_selected_authority = (
+        str(selected_candidate.get("authority") or "").strip().casefold()
+        if isinstance(selected_candidate, dict)
+        else ""
+    )
+    selected_authority = (
+        "official_exchange"
+        if explicit_selected_authority in {"exchange", "official_exchange"}
+        else "derived_proxy"
+        if explicit_selected_authority in {"derived", "derived_proxy"}
+        else explicit_selected_authority
+        or _index_candidate_authority(
+            source=selected_source,
+            provider=selected_provider,
+        )
     )
     selected_finalization = (
         "unknown"
@@ -579,13 +1013,17 @@ def resolve_taiwan_index_quote_state(
     selected_official_close_confirmed = bool(
         selected_finalization == "final"
         and selected_candidate is not None
-        and selected_candidate.get("candidate") == "official_close"
+        and selected_candidate.get("candidate")
+        in {"official_close", "completed_daily_bar"}
         and official_close_status in {"confirmed", "confirmed_latest_session"}
     )
-    selected_provisional_estimate = selected_finalization == "provisional"
+    selected_provisional_estimate = bool(
+        selected_finalization == "provisional"
+        or selected_authority == "derived_proxy"
+    )
     freshness_status = (
         "current"
-        if decision_usable
+        if decision_usable and active_session_phase
         else "stale"
         if phase in {"regular", "regular_live", "closing_auction"}
         and (
@@ -623,6 +1061,46 @@ def resolve_taiwan_index_quote_state(
             else None
         ),
         "selected_trade_date": selected_trade_date,
+        "selected_previous_close": (
+            selected_candidate.get("previous_close")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_previous_close_trade_date": (
+            selected_candidate.get("previous_close_trade_date")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_previous_close_source": (
+            selected_candidate.get("previous_close_source")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_previous_close_provider": (
+            selected_candidate.get("previous_close_provider")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_previous_close_authority": (
+            selected_candidate.get("previous_close_authority")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_previous_close_finalization": (
+            selected_candidate.get("previous_close_finalization")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_change": (
+            selected_candidate.get("change")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        "selected_change_pct": (
+            selected_candidate.get("change_pct")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
         "selection_reason": selection_reason,
         "acquisition_policy": normalized_policy,
     }
@@ -676,6 +1154,24 @@ def resolve_taiwan_index_quote_state(
                 "finalization": resolution_core["selected_finalization"],
                 "semantics": quote_semantics,
                 "decision_usable": decision_usable,
+                "previous_close": resolution_core["selected_previous_close"],
+                "previous_close_trade_date": resolution_core[
+                    "selected_previous_close_trade_date"
+                ],
+                "previous_close_source": resolution_core[
+                    "selected_previous_close_source"
+                ],
+                "previous_close_provider": resolution_core[
+                    "selected_previous_close_provider"
+                ],
+                "previous_close_authority": resolution_core[
+                    "selected_previous_close_authority"
+                ],
+                "previous_close_finalization": resolution_core[
+                    "selected_previous_close_finalization"
+                ],
+                "change": resolution_core["selected_change"],
+                "change_pct": resolution_core["selected_change_pct"],
             }
             if selected_candidate is not None
             else None
@@ -701,12 +1197,216 @@ def resolve_taiwan_index_quote_state(
     }
 
 
+def resolve_taiwan_index_truth(
+    *,
+    intraday: dict[str, Any] | None,
+    index_snapshot: dict[str, Any] | None,
+    calendar_status: dict[str, Any],
+    index_id: str | None = None,
+    acquisition_policy: str = "unspecified",
+) -> ResolvedTaiwanIndexTruth:
+    """Return the validated Taiwan index truth used by all consumers."""
+
+    return ResolvedTaiwanIndexTruth.model_validate(
+        resolve_taiwan_index_quote_state(
+            intraday=intraday,
+            index_snapshot=index_snapshot,
+            calendar_status=calendar_status,
+            index_id=index_id,
+            acquisition_policy=acquisition_policy,
+        )
+    )
+
+
+def project_taiwan_index_headline(
+    index_item: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project one resolved headline, with an explicit bounded compatibility seam."""
+
+    raw_resolution = index_item.get("resolution")
+    validation_limitation: str | None = None
+    try:
+        truth = ResolvedTaiwanIndexTruth.model_validate(raw_resolution)
+        if truth.resolution_version != TAIWAN_INDEX_RESOLUTION_VERSION:
+            validation_limitation = "INDEX_HEADLINE_RESOLUTION_VERSION_UNSUPPORTED"
+            truth = None
+    except ValidationError:
+        truth = None
+        validation_limitation = (
+            "INDEX_HEADLINE_RESOLUTION_INVALID"
+            if raw_resolution is not None
+            else "INDEX_HEADLINE_RESOLUTION_MISSING"
+        )
+
+    if truth is not None:
+        return {
+            "index_id": truth.index_id or str(index_item.get("index_id") or ""),
+            "status": truth.coverage_status,
+            "value": truth.selected_value,
+            "previous_close": truth.selected_previous_close,
+            "change": truth.selected_change,
+            "change_pct": truth.selected_change_pct,
+            "event_time": truth.selected_event_time,
+            "trade_date": truth.selected_trade_date,
+            "source": truth.selected_source,
+            "provider": truth.selected_provider,
+            "selected_candidate": truth.selected_candidate,
+            "authority": truth.selected_authority,
+            "finalization": truth.selected_finalization,
+            "official_source": truth.official_source,
+            "official_close_confirmed": truth.official_close_confirmed,
+            "provisional_estimate": truth.provisional_estimate,
+            "selection_reason": truth.selection_reason,
+            "acquisition_policy": truth.acquisition_policy,
+            "resolution_version": truth.resolution_version,
+            "resolution_id": truth.resolution_id,
+            "official_close_status": truth.official_close_status,
+            "official": truth.official_close_confirmed,
+            "provisional": truth.provisional_estimate,
+            "decision_usable": truth.decision_usable,
+            "coverage_status": truth.coverage_status,
+            "quote_semantics": truth.quote_semantics,
+            "delivery_status": truth.delivery_status,
+            "freshness_status": truth.freshness_status,
+            "warnings": list(truth.warnings),
+            "limitations": [],
+            "compatibility_fallback": False,
+            "compatibility_fallback_reason": None,
+        }
+
+    current_data_core = index_item.get("current_data_core")
+    has_current_data_core = bool(
+        isinstance(current_data_core, dict)
+        and isinstance(current_data_core.get("index"), dict)
+    )
+    current = (
+        current_data_core.get("index")
+        if has_current_data_core
+        else index_item.get("current_observation")
+        if isinstance(index_item.get("current_observation"), dict)
+        else index_item
+        if _number(index_item.get("close")) is not None
+        or _number(index_item.get("value")) is not None
+        else None
+    )
+    if current is None:
+        return None
+    resolved_health = (
+        current.get("resolved_health")
+        if isinstance(current.get("resolved_health"), dict)
+        else {}
+    )
+    source = current.get("source")
+    provider = current.get("provider")
+    change_projection = _candidate_change_projection(
+        value=(
+            current.get("close")
+            if current.get("close") is not None
+            else current.get("value")
+        ),
+        previous_close=current.get("previous_close"),
+        explicit_change=current.get("change"),
+        explicit_change_pct=(
+            current.get("change_pct")
+            if current.get("change_pct") is not None
+            else index_item.get("change_pct")
+        ),
+        previous_close_trade_date=current.get("previous_close_trade_date"),
+        previous_close_source=current.get("previous_close_source"),
+        previous_close_provider=current.get("previous_close_provider"),
+        previous_close_authority=current.get("previous_close_authority"),
+        previous_close_finalization=current.get(
+            "previous_close_finalization"
+        ),
+    )
+    limitation_codes = list(
+        dict.fromkeys(
+            [
+                TAIWAN_INDEX_HEADLINE_COMPATIBILITY_LIMITATION,
+                validation_limitation,
+                *[str(value) for value in current.get("limitations") or []],
+                *[
+                    str(value)
+                    for value in resolved_health.get("limitations") or []
+                ],
+            ]
+        )
+    )
+    limitation_codes = [value for value in limitation_codes if value]
+    return {
+        "index_id": str(current.get("index_id") or index_item.get("index_id") or ""),
+        "status": str(
+            resolved_health.get("status") or current.get("status") or "missing"
+        ),
+        "value": _number(
+            current.get("close")
+            if current.get("close") is not None
+            else current.get("value")
+        ),
+        "previous_close": change_projection["previous_close"],
+        "change": change_projection["change"],
+        "change_pct": change_projection["change_pct"],
+        "event_time": current.get("as_of") or current.get("observed_at"),
+        "trade_date": current.get("trade_date"),
+        "source": source,
+        "provider": provider,
+        "selected_candidate": (
+            "compatibility_current_data_core"
+            if has_current_data_core
+            else "compatibility_index_summary"
+        ),
+        "authority": _index_candidate_authority(
+            source=source,
+            provider=provider,
+        ),
+        "finalization": "unknown",
+        "official_source": bool(current.get("official")),
+        "official_close_confirmed": False,
+        "provisional_estimate": bool(current.get("provisional")),
+        "selection_reason": (
+            "compatibility_current_data_core_fallback"
+            if has_current_data_core
+            else "compatibility_index_summary_fallback"
+        ),
+        "acquisition_policy": str(
+            index_item.get("acquisition_policy") or "cache_only"
+        ),
+        "resolution_version": TAIWAN_INDEX_HEADLINE_COMPATIBILITY_VERSION,
+        "resolution_id": "",
+        "official_close_status": "not_available_yet",
+        "official": False,
+        "provisional": bool(current.get("provisional")),
+        "decision_usable": bool(current.get("decision_usable")),
+        "coverage_status": str(
+            resolved_health.get("status") or current.get("status") or "missing"
+        ),
+        "quote_semantics": (
+            "compatibility_current_data_core"
+            if has_current_data_core
+            else "compatibility_index_summary"
+        ),
+        "delivery_status": str(current.get("status") or "missing"),
+        "freshness_status": str(resolved_health.get("status") or "unknown"),
+        "warnings": limitation_codes,
+        "limitations": limitation_codes,
+        "compatibility_fallback": True,
+        "compatibility_fallback_reason": validation_limitation,
+    }
+
+
 __all__ = [
     "TAIWAN_INDEX_ACQUISITION_POLICIES",
+    "TAIWAN_INDEX_HEADLINE_COMPATIBILITY_LIMITATION",
+    "TAIWAN_INDEX_HEADLINE_COMPATIBILITY_VERSION",
     "TAIWAN_INDEX_RESOLUTION_VERSION",
+    "ResolvedTaiwanIndexTruth",
+    "TaiwanIndexTruthCandidate",
+    "TaiwanIndexTruthObservation",
     "index_candidate_date",
     "index_candidate_datetime",
     "latest_intraday_point",
     "normalize_index_acquisition_policy",
+    "project_taiwan_index_headline",
     "resolve_taiwan_index_quote_state",
+    "resolve_taiwan_index_truth",
 ]

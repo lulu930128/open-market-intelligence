@@ -539,6 +539,7 @@ def acquire_taiwan_public_last_trade_quote(
         descriptors=descriptor_catalog,
         acquisition_port=acquisition or TaiwanPublicQuoteAcquisitionExecutor(),
         transaction_port=TaiwanPublicQuoteTransaction(db),
+        route_resolution_gate=True,
     )
 
 
@@ -568,6 +569,7 @@ def acquire_taiwan_session_close(
         descriptors=descriptor_catalog,
         acquisition_port=acquisition or TaiwanPublicQuoteAcquisitionExecutor(),
         transaction_port=TaiwanPublicQuoteTransaction(db),
+        route_resolution_gate=True,
     )
 
 

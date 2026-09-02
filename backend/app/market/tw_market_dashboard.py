@@ -18,6 +18,7 @@ from app.db.models import (
 )
 from app.market.official_index_platform import read_taiwan_official_index_series
 from app.market.intraday import get_market_intraday_history
+from app.market.index_resolution import project_taiwan_index_headline
 from app.market.indices import get_market_index_summary
 from app.market.trading_calendar import (
     TAIWAN_SESSION_CLOSE_TIME,
@@ -692,146 +693,12 @@ def _build_resolved_indices(
     for raw_item in summary.get("indices") or []:
         if not isinstance(raw_item, dict):
             continue
-        current_data_core = raw_item.get("current_data_core")
-        current_index = (
-            current_data_core.get("index")
-            if isinstance(current_data_core, dict)
-            and isinstance(current_data_core.get("index"), dict)
-            else None
-        )
-        if current_index is not None:
-            resolved_health = (
-                current_index.get("resolved_health")
-                if isinstance(current_index.get("resolved_health"), dict)
-                else {}
-            )
-            provider = current_index.get("provider")
-            source = current_index.get("source")
-            official_source = bool(current_index.get("official"))
+        headline = project_taiwan_index_headline(raw_item)
+        if headline is not None:
             resolved.append(
                 {
-                    "index_id": str(
-                        current_index.get("index_id")
-                        or raw_item.get("index_id")
-                        or ""
-                    ),
+                    **headline,
                     "market": str(raw_item.get("market") or ""),
-                    "status": str(
-                        resolved_health.get("status")
-                        or current_index.get("status")
-                        or "missing"
-                    ),
-                    "value": _number(current_index.get("close")),
-                    "change": _number(current_index.get("change")),
-                    "change_pct": _number(raw_item.get("change_pct")),
-                    "event_time": current_index.get("as_of"),
-                    "trade_date": current_index.get("trade_date"),
-                    "source": source,
-                    "provider": provider,
-                    "selected_candidate": (
-                        "current_session_observation" if provider else None
-                    ),
-                    "authority": (
-                        "official_exchange"
-                        if official_source
-                        else "provider"
-                        if provider
-                        else "unknown"
-                    ),
-                    "finalization": "unknown",
-                    "official_source": official_source,
-                    "official_close_confirmed": False,
-                    "provisional_estimate": bool(
-                        current_index.get("provisional")
-                    ),
-                    "selection_reason": str(
-                        resolved_health.get("selection_reason")
-                        or "no_eligible_candidate"
-                    ),
-                    "acquisition_policy": str(
-                        raw_item.get("acquisition_policy")
-                        or summary.get("acquisition_policy")
-                        or "cache_only"
-                    ),
-                    "resolution_version": str(
-                        resolved_health.get("contract_version") or "unknown"
-                    ),
-                    "resolution_id": "",
-                    "official_close_status": "not_available_yet",
-                    "official": False,
-                    "provisional": True,
-                    "decision_usable": bool(
-                        current_index.get("decision_usable")
-                    ),
-                    "warnings": list(
-                        dict.fromkeys(
-                            str(item)
-                            for item in [
-                                *(current_index.get("limitations") or []),
-                                *(resolved_health.get("limitations") or []),
-                            ]
-                        )
-                    ),
-                }
-            )
-        else:
-            resolution = raw_item.get("resolution")
-            if not isinstance(resolution, dict):
-                continue
-            selected_candidate = resolution.get("selected_candidate")
-            official = bool(resolution.get("official_close_confirmed"))
-            resolved.append(
-                {
-                    "index_id": str(raw_item.get("index_id") or ""),
-                    "market": str(raw_item.get("market") or ""),
-                    "status": str(resolution.get("coverage_status") or "missing"),
-                    "value": _number(resolution.get("selected_value")),
-                    "change": _number(raw_item.get("change")),
-                    "change_pct": _number(raw_item.get("change_pct")),
-                    "event_time": resolution.get("selected_event_time"),
-                    "trade_date": resolution.get("selected_trade_date"),
-                    "source": resolution.get("selected_source"),
-                    "provider": resolution.get("selected_provider"),
-                    "selected_candidate": selected_candidate,
-                    "authority": str(
-                        resolution.get("selected_authority") or "unknown"
-                    ),
-                    "finalization": str(
-                        resolution.get("selected_finalization") or "unknown"
-                    ),
-                    "official_source": bool(resolution.get("official_source")),
-                    "official_close_confirmed": bool(
-                        resolution.get("official_close_confirmed")
-                    ),
-                    "provisional_estimate": bool(
-                        resolution.get("provisional_estimate")
-                    ),
-                    "selection_reason": str(
-                        resolution.get("selection_reason")
-                        or "no_eligible_candidate"
-                    ),
-                    "acquisition_policy": str(
-                        resolution.get("acquisition_policy")
-                        or summary.get("acquisition_policy")
-                        or "cache_only"
-                    ),
-                    "resolution_version": str(
-                        resolution.get("resolution_version")
-                        or summary.get("resolution_version")
-                        or "unknown"
-                    ),
-                    "resolution_id": str(resolution.get("resolution_id") or ""),
-                    "official_close_status": str(
-                        resolution.get("official_close_status")
-                        or "not_available_yet"
-                    ),
-                    "official": official,
-                    "provisional": not official,
-                    "decision_usable": bool(resolution.get("decision_usable")),
-                    "warnings": [
-                        str(warning)
-                        for warning in resolution.get("warnings") or []
-                    ],
                 }
             )
         raw_breadth = raw_item.get("breadth")

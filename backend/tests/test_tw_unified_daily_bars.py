@@ -7,6 +7,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -19,6 +20,7 @@ from app.db.models import (
     SourceRegistry,
     StockMaster,
 )
+from app.jobs.schemas import TaiwanIndexDailyBootstrapJobRequest
 from app.market.official_index_contract import TPEX_INDEX_SOURCE_NAME
 from app.market.providers.tw_index_daily_bars import (
     TaiwanIndexDailyBarAcquisitionExecutor,
@@ -39,9 +41,11 @@ from app.market.tw_bar_service import TaiwanBarService
 from app.market.tw_daily_reconciliation import TaiwanDailyReconciliationTransaction
 from app.market.tw_index_daily_platform import (
     bootstrap_taiex_official_daily_history,
+    bootstrap_tpex_completed_derived_daily_history,
+    plan_tpex_completed_derived_daily_history,
     refresh_taiex_official_daily_bar,
+    refresh_tpex_completed_derived_daily_bar,
 )
-from app.market.tw_index_daily_platform import refresh_tpex_completed_derived_daily_bar
 from app.market.tw_instrument import resolve_taiwan_instrument
 from app.market_data.contracts import (
     AuthorityClass,
@@ -82,7 +86,12 @@ def _tpex_components(
     db: Session,
     *,
     trade_date: date,
-) -> tuple[tuple[BarObservation, ...], tuple[int, ...], tuple[str, ...]]:
+) -> tuple[
+    tuple[BarObservation, ...],
+    BarObservation,
+    tuple[int, ...],
+    tuple[str, ...],
+]:
     source = SourceRegistry(
         source_name=TPEX_OFFICIAL_5S_COMPONENT_SOURCE,
         source_type="api",
@@ -100,7 +109,7 @@ def _tpex_components(
         source_id=source.id,
         fetched_at=datetime.combine(
             trade_date,
-            time(7, 45),
+            time(6, 0),
             tzinfo=timezone.utc,
         ),
         content_hash=content_hash,
@@ -140,8 +149,32 @@ def _tpex_components(
                 finalization=BarFinalization.FINAL,
             )
         )
+    formal_close_at = datetime.combine(trade_date, time(13, 30), tzinfo=TAIWAN_TZ)
+    formal_close = BarObservation(
+        instrument=instrument,
+        lineage=SourceLineage(
+            provider="tpex_index_5s",
+            source=TPEX_OFFICIAL_5S_COMPONENT_SOURCE,
+            authority=AuthorityClass.EXCHANGE,
+            raw_contract_version=TPEX_OFFICIAL_5S_PARSER_VERSION,
+            event_at=formal_close_at,
+            fetched_at=raw.fetched_at.replace(tzinfo=timezone.utc),
+            content_hash=content_hash,
+        ),
+        interval="closing_match",
+        start_at=formal_close_at - timedelta(seconds=5),
+        end_at=formal_close_at,
+        open_price=Decimal("250.75"),
+        high_price=Decimal("250.75"),
+        low_price=Decimal("250.75"),
+        close_price=Decimal("250.75"),
+        volume=None,
+        volume_status="not_applicable",
+        price_basis="raw",
+        finalization=BarFinalization.FINAL,
+    )
     db.commit()
-    return tuple(components), (raw.id,), (content_hash,)
+    return tuple(components), formal_close, (raw.id,), (content_hash,)
 
 
 def test_taiex_official_daily_acquisition_persists_and_reads_same_owner(
@@ -170,7 +203,7 @@ def test_taiex_official_daily_acquisition_persists_and_reads_same_owner(
         instrument_id="TAIEX",
         interval="1d",
         from_time=datetime(2026, 9, 1, tzinfo=TAIWAN_TZ),
-        to_time=datetime(2026, 9, 2, tzinfo=TAIWAN_TZ),
+        to_time=datetime(2026, 9, 1, 23, 59, tzinfo=TAIWAN_TZ),
         requested_at=datetime(2026, 9, 1, 16, 5, tzinfo=TAIWAN_TZ),
     )
     assert [bar.close_price for bar in read.bars] == [Decimal("24250")]
@@ -215,6 +248,8 @@ def test_taiex_history_bootstrap_persists_month_receipt_idempotently(
 
     assert first["observed_sessions"] == 2
     assert first["bars_written"] == 2
+    assert first["postcondition_satisfied"] is True
+    assert first["qualified_bar_count"] == 2
     assert second["bars_written"] == 0
     assert second["bars_unchanged"] == 2
 
@@ -227,9 +262,9 @@ def test_tpex_completed_session_can_materialize_before_official_release(
     event_at = datetime.combine(trade_date, time(9, 0, 5), tzinfo=TAIWAN_TZ)
     session_end = datetime.combine(trade_date, time(13, 30), tzinfo=TAIWAN_TZ)
     while event_at <= session_end:
-        rows.append([event_at.strftime("%H:%M:%S"), "250.25"])
+        rows.append([event_at.strftime("%H:%M:%S"), "410.60"])
         event_at += timedelta(seconds=5)
-    rows.append(["99:99:99", "250.25"])
+    rows.append(["99:99:99", "410.77"])
     payload = json.dumps(
         {
             "stat": "ok",
@@ -249,11 +284,162 @@ def test_tpex_completed_session_can_materialize_before_official_release(
     )
     assert result.receipts_written == 1
     assert result.observations_written == 1
-    assert db.query(RawFetchResult).count() == 1
     row = db.query(MarketDailyPrice).filter_by(stock_id="TPEX").one()
+    assert Decimal(str(row.close_price)) == Decimal("410.77")
+    assert db.query(RawFetchResult).count() == 1
     assert row.raw_result_id is None
     assert row.authority == "derived"
     assert row.official is False
+    assert row.aggregation_version == "tw.tpex.daily.materialize.v2"
+
+
+def test_tpex_history_plan_is_pure_bounded_and_supports_default_daily_window() -> None:
+    sessions = plan_tpex_completed_derived_daily_history(
+        date_from=date(2025, 6, 1),
+        date_to=date(2026, 9, 1),
+    )
+
+    assert len(sessions) == 300
+    assert sessions == tuple(sorted(sessions))
+    assert all(item.weekday() < 5 for item in sessions)
+    with pytest.raises(ValueError, match="between 1 and 300"):
+        plan_tpex_completed_derived_daily_history(
+            date_from=date(2025, 6, 1),
+            date_to=date(2026, 9, 1),
+            max_sessions=301,
+        )
+
+
+def test_tpex_history_bootstrap_rereads_qualified_formal_close_rows(
+    db: Session,
+) -> None:
+    official_closes = {
+        date(2026, 8, 31): "410.77",
+        date(2026, 9, 1): "406.96",
+    }
+    official_source = SourceRegistry(
+        source_name=TPEX_INDEX_SOURCE_NAME,
+        source_type="api",
+        category="market_data",
+        enabled=True,
+        priority=5,
+        parser_type="tpex.official_index.v1",
+        auth_type="none",
+        reliability_level="official",
+    )
+    db.add(official_source)
+    db.flush()
+    official_raw = RawFetchResult(
+        source_id=official_source.id,
+        fetched_at=datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc),
+        content_hash="c" * 64,
+        parser_version="tpex.official_index.v1",
+        raw_text="official-close-stat",
+    )
+    db.add(official_raw)
+    db.flush()
+    db.add(
+        MarketIndexDailyStat(
+            index_id="TPEX",
+            market="TPEX",
+            trade_date=date(2026, 9, 1),
+            source_id=official_source.id,
+            raw_result_id=official_raw.id,
+            close_value=406.96,
+            price_change=-3.81,
+            source="tpex_openapi",
+        )
+    )
+    db.commit()
+
+    def fetcher(trade_date: date) -> _Response:
+        rows: list[list[str]] = []
+        event_at = datetime.combine(trade_date, time(9, 0, 5), tzinfo=TAIWAN_TZ)
+        session_end = datetime.combine(trade_date, time(13, 30), tzinfo=TAIWAN_TZ)
+        while event_at <= session_end:
+            rows.append([event_at.strftime("%H:%M:%S"), "400.00"])
+            event_at += timedelta(seconds=5)
+        rows.append(["99:99:99", official_closes[trade_date]])
+        return _Response(
+            text=json.dumps(
+                {
+                    "stat": "ok",
+                    "date": trade_date.strftime("%Y/%m/%d"),
+                    "tables": [{"fields": ["時間", "櫃買指數"], "data": rows}],
+                },
+                ensure_ascii=False,
+            ),
+            url="https://www.tpex.org.tw/www/zh-tw/indexInfo/miIndex",
+        )
+
+    result = bootstrap_tpex_completed_derived_daily_history(
+        db,
+        date_from=date(2026, 8, 31),
+        date_to=date(2026, 9, 1),
+        max_sessions=2,
+        requested_at=datetime(2026, 9, 1, 16, tzinfo=TAIWAN_TZ),
+        fetcher=fetcher,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert result["status"] == "success"
+    assert result["postcondition_satisfied"] is True
+    assert result["qualified_bar_count"] == 2
+    read = TaiwanBarService(db).read_bars(
+        instrument_id="TPEX",
+        interval="1d",
+        limit=2,
+        include_partial=False,
+        requested_at=datetime.now(TAIWAN_TZ),
+    )
+    assert [bar.close_price for bar in read.bars] == [
+        Decimal("410.77"),
+        Decimal("406.96"),
+    ]
+    assert all(state.technical_eligible for state in read.bar_states)
+    assert read.bar_states[-1].reconciliation_status is TaiwanReconciliationStatus.MATCHED
+    assert db.query(MarketDailyPriceReconciliation).count() == 1
+
+
+def test_tpex_history_bootstrap_postcondition_rereads_the_requested_old_range(
+    db: Session,
+) -> None:
+    trade_date = date(2025, 8, 8)
+
+    def fetcher(requested_date: date) -> _Response:
+        rows: list[list[str]] = []
+        event_at = datetime.combine(requested_date, time(9, 0, 5), tzinfo=TAIWAN_TZ)
+        session_end = datetime.combine(requested_date, time(13, 30), tzinfo=TAIWAN_TZ)
+        while event_at <= session_end:
+            rows.append([event_at.strftime("%H:%M:%S"), "300.00"])
+            event_at += timedelta(seconds=5)
+        rows.append(["99:99:99", "301.25"])
+        return _Response(
+            text=json.dumps(
+                {
+                    "stat": "ok",
+                    "date": requested_date.strftime("%Y/%m/%d"),
+                    "tables": [{"fields": ["時間", "櫃買指數"], "data": rows}],
+                },
+                ensure_ascii=False,
+            ),
+            url="https://www.tpex.org.tw/www/zh-tw/indexInfo/miIndex",
+        )
+
+    result = bootstrap_tpex_completed_derived_daily_history(
+        db,
+        date_from=trade_date,
+        date_to=trade_date,
+        max_sessions=1,
+        requested_at=datetime(2026, 9, 2, 16, tzinfo=TAIWAN_TZ),
+        fetcher=fetcher,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert result["status"] == "success"
+    assert result["postcondition_satisfied"] is True
+    assert result["qualified_bar_count"] == 1
+    assert result["postcondition_latest_trade_date"] == trade_date
 
 
 def test_tpex_completed_daily_retries_transient_http_failure(
@@ -301,10 +487,13 @@ def test_tpex_derived_daily_is_persisted_without_fake_receipt_and_reconciled(
     db: Session,
 ) -> None:
     trade_date = date(2026, 9, 1)
-    components, raw_ids, hashes = _tpex_components(db, trade_date=trade_date)
+    components, formal_close, raw_ids, hashes = _tpex_components(
+        db, trade_date=trade_date
+    )
     raw_count_before = db.query(RawFetchResult).count()
     candidate = materialize_tpex_completed_daily_candidate(
         components,
+        formal_close_component=formal_close,
         component_raw_result_ids=raw_ids,
         component_content_hashes=hashes,
         coverage_complete=True,
@@ -320,8 +509,8 @@ def test_tpex_derived_daily_is_persisted_without_fake_receipt_and_reconciled(
         instrument_id="TPEX",
         interval="1d",
         from_time=datetime(2026, 9, 1, tzinfo=TAIWAN_TZ),
-        to_time=datetime(2026, 9, 2, tzinfo=TAIWAN_TZ),
-        requested_at=datetime(2026, 9, 1, 23, 59, tzinfo=TAIWAN_TZ),
+        to_time=datetime(2026, 9, 1, 23, 59, tzinfo=TAIWAN_TZ),
+        requested_at=datetime.now(TAIWAN_TZ),
     )
     assert before.bars, before.model_dump(mode="json")
     assert before.bars[0].finalization is BarFinalization.FINAL
@@ -379,8 +568,8 @@ def test_tpex_derived_daily_is_persisted_without_fake_receipt_and_reconciled(
         instrument_id="TPEX",
         interval="1d",
         from_time=datetime(2026, 9, 1, tzinfo=TAIWAN_TZ),
-        to_time=datetime(2026, 9, 2, tzinfo=TAIWAN_TZ),
-        requested_at=datetime(2026, 9, 1, 23, 59, tzinfo=TAIWAN_TZ),
+        to_time=datetime(2026, 9, 1, 23, 59, tzinfo=TAIWAN_TZ),
+        requested_at=datetime.now(TAIWAN_TZ),
     )
     numeric_after = (
         after.bars[0].open_price,
@@ -397,11 +586,32 @@ def test_tpex_derived_daily_is_persisted_without_fake_receipt_and_reconciled(
     assert db.query(MarketDailyPriceReconciliation).count() == 1
 
 
+def test_tpex_daily_materialization_rejects_continuous_bar_as_formal_close(
+    db: Session,
+) -> None:
+    components, _formal_close, raw_ids, hashes = _tpex_components(
+        db, trade_date=date(2026, 9, 1)
+    )
+
+    with pytest.raises(ValueError, match="explicit exchange closing match"):
+        materialize_tpex_completed_daily_candidate(
+            components,
+            formal_close_component=components[-1],
+            component_raw_result_ids=raw_ids,
+            component_content_hashes=hashes,
+            coverage_complete=True,
+            as_of=datetime(2026, 9, 1, 14, 0, tzinfo=TAIWAN_TZ),
+        )
+
+
 def test_tpex_official_close_mismatch_never_patches_derived_ohlc(db: Session) -> None:
     trade_date = date(2026, 9, 1)
-    components, raw_ids, hashes = _tpex_components(db, trade_date=trade_date)
+    components, formal_close, raw_ids, hashes = _tpex_components(
+        db, trade_date=trade_date
+    )
     candidate = materialize_tpex_completed_daily_candidate(
         components,
+        formal_close_component=formal_close,
         component_raw_result_ids=raw_ids,
         component_content_hashes=hashes,
         coverage_complete=True,
@@ -455,8 +665,8 @@ def test_tpex_official_close_mismatch_never_patches_derived_ohlc(db: Session) ->
         instrument_id="TPEX",
         interval="1d",
         from_time=datetime(2026, 9, 1, tzinfo=TAIWAN_TZ),
-        to_time=datetime(2026, 9, 2, tzinfo=TAIWAN_TZ),
-        requested_at=datetime(2026, 9, 1, 23, 59, tzinfo=TAIWAN_TZ),
+        to_time=datetime(2026, 9, 1, 23, 59, tzinfo=TAIWAN_TZ),
+        requested_at=datetime.now(TAIWAN_TZ),
     )
     assert read.bar_states[0].technical_eligible is False
     assert read.bar_states[0].reconciliation_status is TaiwanReconciliationStatus.MISMATCHED
@@ -505,6 +715,22 @@ def test_weekly_and_monthly_are_derived_only_from_canonical_daily() -> None:
     assert weekly[0].close_price == Decimal("107")
     assert [bar.start_at.month for bar in monthly] == [8, 9]
     assert all(bar.lineage.authority is AuthorityClass.DERIVED for bar in monthly)
+
+
+def test_taiwan_index_bootstrap_contract_allows_bounded_300_sessions() -> None:
+    request = TaiwanIndexDailyBootstrapJobRequest(
+        date_from=date(2025, 9, 1),
+        date_to=date(2026, 9, 1),
+    )
+    assert request.taiex_max_sessions == 300
+    assert request.tpex_max_sessions == 300
+
+    with pytest.raises(ValidationError):
+        TaiwanIndexDailyBootstrapJobRequest(
+            date_from=date(2025, 9, 1),
+            date_to=date(2026, 9, 1),
+            tpex_max_sessions=301,
+        )
 
 
 def test_continuous_minutes_without_formal_close_remain_provisional(

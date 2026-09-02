@@ -14,6 +14,7 @@ from app.jobs.job_types import (
     TAIWAN_INTRADAY_BAR_BOOTSTRAP_JOB_TYPE,
 )
 from app.market.tw_index_daily_platform import (
+    TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
     bootstrap_taiex_official_daily_history,
     bootstrap_tpex_completed_derived_daily_history,
 )
@@ -138,9 +139,9 @@ def run_taiwan_index_daily_bootstrap_job(
             "status": status,
             "results": results,
         }
-        if status == "failed":
+        if status != "success":
             raise job_service.JobExecutionError(
-                "Taiwan index Base-1d bootstrap failed.",
+                "Taiwan index Base-1d bootstrap did not satisfy its postcondition.",
                 result=payload,
             )
         return payload
@@ -154,8 +155,8 @@ def enqueue_taiwan_index_daily_bootstrap(
     index_ids: list[str] | tuple[str, ...],
     date_from: date,
     date_to: date,
-    taiex_max_sessions: int = 260,
-    tpex_max_sessions: int = 20,
+    taiex_max_sessions: int = TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+    tpex_max_sessions: int = TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
 ) -> tuple[JobRun, bool]:
     normalized = tuple(
         dict.fromkeys(str(value or "").strip().upper() for value in index_ids)
@@ -164,10 +165,18 @@ def enqueue_taiwan_index_daily_bootstrap(
         raise ValueError("Taiwan index bootstrap supports only TAIEX and TPEX")
     if date_from > date_to:
         raise ValueError("Taiwan index bootstrap date_from must not exceed date_to")
-    if not 1 <= taiex_max_sessions <= 260:
-        raise ValueError("taiex_max_sessions must be between 1 and 260")
-    if not 1 <= tpex_max_sessions <= 20:
-        raise ValueError("tpex_max_sessions must be between 1 and 20")
+    if not (
+        1
+        <= taiex_max_sessions
+        <= TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS
+    ):
+        raise ValueError("taiex_max_sessions must be between 1 and 300")
+    if not (
+        1
+        <= tpex_max_sessions
+        <= TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS
+    ):
+        raise ValueError("tpex_max_sessions must be between 1 and 300")
     material = (
         f"ids={','.join(normalized)}|from={date_from}|to={date_to}|"
         f"taiex={taiex_max_sessions}|tpex={tpex_max_sessions}"

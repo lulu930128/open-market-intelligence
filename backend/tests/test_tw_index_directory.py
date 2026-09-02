@@ -254,6 +254,37 @@ def test_directory_staleness_is_visible_without_dropping_items() -> None:
         engine.dispose()
 
 
+def test_recent_fetch_with_old_observation_date_is_stale_after_release() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    post_release = datetime(2026, 9, 1, 13, 45, tzinfo=TAIWAN_TZ)
+    try:
+        TaiwanIndexDirectoryTransaction(db).persist(
+            market="TWSE",
+            items=_items(),
+            fetched_at=post_release,
+            raw_payload=[{"指數": "發行量加權股價指數"}],
+        )
+        payload = TaiwanIndexDirectoryRepository(db).read(
+            market="TWSE",
+            limit=80,
+            requested_at=post_release + timedelta(minutes=1),
+        )
+
+        assert payload["transport_fresh"] is True
+        assert payload["observation_current"] is False
+        assert payload["latest_trade_date"].isoformat() == "2026-08-31"
+        assert payload["expected_trade_date"].isoformat() == "2026-09-01"
+        assert payload["status"] == "stale"
+        assert payload["freshness_status"] == "stale"
+        assert "TW_INDEX_DIRECTORY_OBSERVATION_DATE_STALE" in payload["warnings"]
+    finally:
+        db.close()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_get_directory_is_cache_only_and_never_calls_provider() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)

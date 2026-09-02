@@ -530,6 +530,7 @@ def refresh_taiwan_current_index(
         acquisition_port=acquisition,
         transaction_port=TaiwanCurrentMarketTransaction(db),
         official_first=False,
+        route_resolution_gate=True,
     )
 
 
@@ -582,6 +583,7 @@ def refresh_taiwan_current_breadth(
         descriptors=tuple(descriptors),
         acquisition_port=acquisition,
         transaction_port=TaiwanCurrentMarketTransaction(db),
+        route_resolution_gate=True,
     )
 
 

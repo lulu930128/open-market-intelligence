@@ -12,6 +12,7 @@ from app.jobs import scheduler as job_scheduler
 from app.market import index_parsers, indices
 from app.market.official_index_contract import TWSE_INDEX_SOURCE_NAME
 from app.market.providers import twse_mis_current_breadth, twse_mis_current_index
+from app.market.schemas import MarketOhlcChartRead
 
 
 def make_session() -> Session:
@@ -1712,6 +1713,10 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(index_list["source"], "unavailable")
         self.assertEqual(index_list["status"], "missing")
         self.assertEqual(chart["data_quality"], "missing")
+        self.assertEqual(chart["coverage_status"], "missing")
+        self.assertTrue(chart["bootstrap_recommended"])
+        self.assertEqual(chart["missing_session_count"], 90)
+        self.assertIn("TW_INDEX_HISTORY_INSUFFICIENT", chart["warnings"])
         self.assertEqual(contributions["source"], "tw.daily.ohlcv:TWSE")
 
     def test_index_chart_does_not_treat_market_index_daily_stat_as_ohlc(self) -> None:
@@ -1769,6 +1774,13 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(chart["point_count"], 0)
         self.assertEqual(chart["points"], [])
         self.assertEqual(chart["compatibility_owner"], "TaiwanBarService")
+        outward = MarketOhlcChartRead.model_validate(chart)
+        self.assertEqual(outward.requested_bar_count, 20)
+        self.assertEqual(outward.available_bar_count, 0)
+        self.assertEqual(outward.returned_point_count, 0)
+        self.assertEqual(outward.coverage_status, "missing")
+        self.assertTrue(outward.bootstrap_recommended)
+        self.assertEqual(outward.missing_session_count, 20)
 
     def test_index_intraday_overlays_mis_snapshot_on_yahoo_history(self) -> None:
         yahoo_payload = {

@@ -25,12 +25,14 @@ from app.market.tw_current_market_acquisition import (
 from app.market.tw_current_market_capabilities import (
     TW_CURRENT_BREADTH_CAPABILITY_ID,
     TW_CURRENT_INDEX_CAPABILITY_ID,
+    TW_CURRENT_INDEX_DATASET_ID,
     TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR,
     TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,
     YAHOO_CURRENT_INDEX_DESCRIPTOR,
     current_source_binding,
 )
 from app.market.tw_current_market_platform import (
+    build_taiwan_current_requirement,
     project_taiwan_current_breadth,
     project_taiwan_current_index,
     read_taiwan_current_breadth,
@@ -38,11 +40,14 @@ from app.market.tw_current_market_platform import (
     refresh_taiwan_current_breadth,
     refresh_taiwan_current_index,
 )
+from app.market.tw_current_market_repository import TaiwanCurrentMarketRepository
+from app.market.tw_current_market_transaction import TaiwanCurrentMarketTransaction
 from app.market_data.contracts import (
     DatasetHealthStatus,
     MarketSession,
     ResolvedEvidenceStatus,
 )
+from app.market_data.gateway import MarketDataGateway
 from app.market_data.policies import RealtimePolicy
 
 
@@ -185,11 +190,231 @@ def test_current_index_shared_plan_falls_back_persists_and_rereads() -> None:
         assert db.query(TaiwanCurrentIndexSnapshot).count() == 1
         assert result.resolved.market_index is not None
         assert result.resolved.market_index.lineage.provider == "yahoo_finance_chart"
+        assert result.resolved.health.status is ResolvedEvidenceStatus.PARTIAL
+        assert result.resolved.health.fallback_used is True
         assert result.dataset_health is not None
         assert result.dataset_health.status is DatasetHealthStatus.HEALTHY
         assert projected["close"] == 24_100.0
         assert projected["raw_result_id"]
         assert reread.resolved.market_index is not None
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_index_stale_primary_observation_continues_to_fresh_fallback() -> None:
+    calls: list[str] = []
+    stale_at = NOW - timedelta(minutes=5)
+    mis = CurrentIndexAdapter(
+        _binding("twse_mis", "twse_mis_index_snapshot", TW_CURRENT_INDEX_CAPABILITY_ID),
+        _payload_reader(
+            {
+                "as_of": stale_at.isoformat(),
+                "trade_date": NOW.date().isoformat(),
+                "close": 24_050.0,
+                "previous_close": 24_000.0,
+                "volume": 100,
+            },
+            calls,
+            "mis",
+        ),
+        clock=lambda: NOW,
+    )
+    yahoo = CurrentIndexAdapter(
+        _binding(
+            "yahoo_finance_chart",
+            "yahoo_finance_chart",
+            TW_CURRENT_INDEX_CAPABILITY_ID,
+        ),
+        _payload_reader(
+            {
+                "as_of": NOW.isoformat(),
+                "trade_date": NOW.date().isoformat(),
+                "close": 24_100.0,
+                "previous_close": 24_000.0,
+                "volume": 123,
+            },
+            calls,
+            "yahoo",
+        ),
+        clock=lambda: NOW,
+    )
+    db, engine = _db()
+    try:
+        result = refresh_taiwan_current_index(
+            db,
+            index_id="TAIEX",
+            requested_at=NOW,
+            descriptors=(
+                TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,
+                YAHOO_CURRENT_INDEX_DESCRIPTOR,
+            ),
+            acquisition=TaiwanCurrentIndexAcquisitionExecutor((mis, yahoo)),
+        )
+
+        assert calls == ["mis:TAIEX", "yahoo:TAIEX"]
+        assert result.acquisition.external_calls == 2
+        assert result.persistence.receipts_written == 2
+        assert result.persistence.observations_written == 2
+        assert db.query(TaiwanCurrentIndexSnapshot).count() == 2
+        assert result.resolved.market_index is not None
+        assert result.resolved.market_index.lineage.provider == "yahoo_finance_chart"
+        assert result.resolved.health.status is ResolvedEvidenceStatus.PARTIAL
+        assert result.resolved.health.fallback_used is True
+        assert any(
+            item.startswith("ROUTE_REQUIREMENT_UNSATISFIED:twse_mis:")
+            for item in result.acquisition.limitations
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_index_usable_partial_stops_before_secondary_route() -> None:
+    calls: list[str] = []
+    yahoo_descriptor = YAHOO_CURRENT_INDEX_DESCRIPTOR.model_copy(
+        update={"priority": 10}
+    )
+    mis_descriptor = TWSE_MIS_CURRENT_INDEX_DESCRIPTOR.model_copy(
+        update={"priority": 20}
+    )
+    yahoo = CurrentIndexAdapter(
+        _binding(
+            "yahoo_finance_chart",
+            "yahoo_finance_chart",
+            TW_CURRENT_INDEX_CAPABILITY_ID,
+        ),
+        _payload_reader(
+            {
+                "as_of": NOW.isoformat(),
+                "trade_date": NOW.date().isoformat(),
+                "close": 24_100.0,
+                "previous_close": 24_000.0,
+                "volume": 123,
+            },
+            calls,
+            "yahoo",
+        ),
+        clock=lambda: NOW,
+    )
+    mis = CurrentIndexAdapter(
+        _binding("twse_mis", "twse_mis_index_snapshot", TW_CURRENT_INDEX_CAPABILITY_ID),
+        _payload_reader(
+            {
+                "as_of": NOW.isoformat(),
+                "trade_date": NOW.date().isoformat(),
+                "close": 24_101.0,
+                "previous_close": 24_000.0,
+                "volume": 124,
+            },
+            calls,
+            "mis",
+        ),
+        clock=lambda: NOW,
+    )
+    db, engine = _db()
+    try:
+        result = refresh_taiwan_current_index(
+            db,
+            index_id="TAIEX",
+            requested_at=NOW,
+            descriptors=(yahoo_descriptor, mis_descriptor),
+            acquisition=TaiwanCurrentIndexAcquisitionExecutor((yahoo, mis)),
+        )
+
+        assert calls == ["yahoo:TAIEX"]
+        assert result.resolved.health.status is ResolvedEvidenceStatus.PARTIAL
+        assert result.resolved.health.facts_usable is True
+        assert result.resolved.health.missing_fields == ()
+        assert result.resolved.health.fallback_used is False
+        assert result.persistence.receipts_written == 1
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_index_disallowed_partial_exhausts_routes_truthfully() -> None:
+    calls: list[str] = []
+    yahoo_descriptor = YAHOO_CURRENT_INDEX_DESCRIPTOR.model_copy(
+        update={"priority": 10}
+    )
+    mis_descriptor = TWSE_MIS_CURRENT_INDEX_DESCRIPTOR.model_copy(
+        update={"priority": 20}
+    )
+    yahoo = CurrentIndexAdapter(
+        _binding(
+            "yahoo_finance_chart",
+            "yahoo_finance_chart",
+            TW_CURRENT_INDEX_CAPABILITY_ID,
+        ),
+        _payload_reader(
+            {
+                "as_of": NOW.isoformat(),
+                "trade_date": NOW.date().isoformat(),
+                "close": 24_100.0,
+                "previous_close": 24_000.0,
+                "volume": 123,
+            },
+            calls,
+            "yahoo",
+        ),
+        clock=lambda: NOW,
+    )
+    mis = CurrentIndexAdapter(
+        _binding("twse_mis", "twse_mis_index_snapshot", TW_CURRENT_INDEX_CAPABILITY_ID),
+        _payload_reader(
+            {
+                "as_of": NOW.isoformat(),
+                "trade_date": NOW.date().isoformat(),
+                "close": 24_101.0,
+                "previous_close": 24_000.0,
+                "volume": 124,
+            },
+            calls,
+            "mis",
+        ),
+        clock=lambda: NOW,
+    )
+    requirement = build_taiwan_current_requirement(
+        dataset_id=TW_CURRENT_INDEX_DATASET_ID,
+        capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+        scope_key="TAIEX",
+        requested_at=NOW,
+        policy=RealtimePolicy.PREFER_LIVE,
+        acquiring=True,
+    )
+    requirement = requirement.model_copy(
+        update={
+            "quality": requirement.quality.model_copy(
+                update={"allow_partial": False}
+            )
+        }
+    )
+    db, engine = _db()
+    try:
+        result = MarketDataGateway().resolve_market_index(
+            requirement,
+            reader=TaiwanCurrentMarketRepository(db),
+            descriptors=(yahoo_descriptor, mis_descriptor),
+            acquisition_port=TaiwanCurrentIndexAcquisitionExecutor((yahoo, mis)),
+            transaction_port=TaiwanCurrentMarketTransaction(db),
+            official_first=False,
+            route_resolution_gate=True,
+        )
+
+        assert calls == ["yahoo:TAIEX", "mis:TAIEX"]
+        assert result.resolved.market_index is None
+        assert result.resolved.health.status is ResolvedEvidenceStatus.MISSING
+        assert result.resolved.health.fallback_used is False
+        assert result.persistence.receipts_written == 2
+        assert any(
+            item.startswith("ROUTE_REQUIREMENT_UNSATISFIED:yahoo_finance_chart:")
+            for item in result.acquisition.limitations
+        )
+        assert any(
+            item.startswith("ROUTE_REQUIREMENT_UNSATISFIED:twse_mis:")
+            for item in result.acquisition.limitations
+        )
     finally:
         db.close()
         engine.dispose()
@@ -260,6 +485,60 @@ def test_current_index_repository_keeps_latest_candidate_from_each_provider() ->
         assert result.resolved.market_index is not None
         assert result.resolved.market_index.lineage.provider == "yahoo_finance_chart"
         assert result.resolved.market_index.close_value == 24_500
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_index_recent_window_falls_back_to_historical_cache() -> None:
+    historical_at = NOW - timedelta(days=30)
+    calls: list[str] = []
+    adapter = CurrentIndexAdapter(
+        _binding(
+            "twse_mis",
+            "twse_mis_index_snapshot",
+            TW_CURRENT_INDEX_CAPABILITY_ID,
+        ),
+        _payload_reader(
+            {
+                "as_of": historical_at.isoformat(),
+                "trade_date": historical_at.date().isoformat(),
+                "close": 23_900.0,
+                "previous_close": 23_800.0,
+            },
+            calls,
+            "mis",
+        ),
+        clock=lambda: historical_at,
+    )
+    db, engine = _db()
+    try:
+        refresh_taiwan_current_index(
+            db,
+            index_id="TAIEX",
+            requested_at=historical_at,
+            descriptors=(TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,),
+            acquisition=TaiwanCurrentIndexAcquisitionExecutor((adapter,)),
+        )
+        requirement = build_taiwan_current_requirement(
+            dataset_id=TW_CURRENT_INDEX_DATASET_ID,
+            capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
+            scope_key="TAIEX",
+            requested_at=NOW,
+            policy=RealtimePolicy.CACHE_ONLY,
+            acquiring=False,
+        )
+
+        batch = TaiwanCurrentMarketRepository(db).read_market_index_candidates(
+            requirement
+        )
+
+        assert calls == ["mis:TAIEX"]
+        assert len(batch.candidates) == 1
+        assert (
+            batch.candidates[0].observation.lineage.event_at.date()
+            == historical_at.date()
+        )
     finally:
         db.close()
         engine.dispose()

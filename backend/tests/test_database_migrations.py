@@ -45,6 +45,18 @@ class DatabaseMigrationTests(unittest.TestCase):
             engine = create_engine(database_url)
             try:
                 table_names = set(inspect(engine).get_table_names())
+                current_index_indexes = {
+                    item["name"]
+                    for item in inspect(engine).get_indexes(
+                        "taiwan_current_index_snapshot"
+                    )
+                }
+                current_breadth_indexes = {
+                    item["name"]
+                    for item in inspect(engine).get_indexes(
+                        "taiwan_current_breadth_snapshot"
+                    )
+                }
                 with engine.connect() as connection:
                     resource_instrument_count = connection.execute(
                         text("SELECT COUNT(*) FROM resource_market_instrument")
@@ -60,6 +72,14 @@ class DatabaseMigrationTests(unittest.TestCase):
 
             self.assertIn("alembic_version", table_names)
             self.assertEqual(table_names - {"alembic_version"}, set(Base.metadata.tables))
+            self.assertIn(
+                "ix_tw_current_index_scope_provider_latest",
+                current_index_indexes,
+            )
+            self.assertIn(
+                "ix_tw_current_breadth_scope_provider_latest",
+                current_breadth_indexes,
+            )
             self.assertIn("stock_master", table_names)
             self.assertIn("us_stock_master", table_names)
             self.assertIn("us_daily_price", table_names)

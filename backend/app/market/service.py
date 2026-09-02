@@ -387,6 +387,17 @@ def list_stock_ohlc_chart_data(
         timeframe=timeframe,
         sum_fields=("volume", "trade_value", "transaction_count"),
     )[-bars:]
+    missing_session_count = max(bars - len(base_points), 0)
+    coverage_status = (
+        "missing"
+        if not base_points
+        else "insufficient_history"
+        if missing_session_count
+        else "complete"
+    )
+    coverage_limitations = (
+        ["TW_STOCK_HISTORY_INSUFFICIENT"] if missing_session_count else []
+    )
     freshness_status = (
         "missing"
         if latest_data_date is None
@@ -404,6 +415,17 @@ def list_stock_ohlc_chart_data(
         "requested_bar_count": bars,
         "available_bar_count": len(available_points),
         "returned_point_count": len(points),
+        "earliest_available_trade_date": (
+            available_points[0]["time"] if available_points else None
+        ),
+        "latest_available_trade_date": (
+            available_points[-1]["time"] if available_points else None
+        ),
+        "expected_minimum_bar_count": bars,
+        "missing_session_count": missing_session_count,
+        "coverage_status": coverage_status,
+        "bootstrap_recommended": bool(missing_session_count),
+        "limitations": coverage_limitations,
         "bars": bars,
         "bars_legacy_count": bars,
         "deprecated_fields": ["bars"],

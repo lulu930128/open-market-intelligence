@@ -25,6 +25,7 @@ from app.market.providers.tw_public_quote import (
     TWSE_MIS_QUOTE_PARSER_VERSION,
     quote_observation_from_twse_mis,
 )
+from app.market.public_quote_acquisition import TaiwanPublicQuoteAcquisitionExecutor
 from app.market.public_quote_platform import (
     TaiwanPublicQuoteCandidateReader,
     acquire_taiwan_public_last_trade_quote,
@@ -216,7 +217,9 @@ def test_kgi_quote_persists_raw_lineage_then_gateway_rereads_candidate(
 
     assert result.persistence.committed is True
     assert result.persistence.receipts_written == 1
+    assert result.acquisition.external_calls == 0
     assert result.resolved.health.status is ResolvedEvidenceStatus.SELECTED
+    assert result.resolved.health.fallback_used is False
     assert result.resolved.quote is not None
     assert result.resolved.quote.lineage.provider == KGI_PROVIDER
     assert result.resolved.quote.lineage.source == KGI_SOURCE
@@ -236,6 +239,93 @@ def test_kgi_quote_persists_raw_lineage_then_gateway_rereads_candidate(
     assert row.source_id == source.id
     assert row.raw_result_id == raw.id
     assert row.provider == KGI_PROVIDER
+
+
+def test_quote_transport_failure_falls_back_after_gateway_reread(
+    db: Session,
+) -> None:
+    calls: list[str] = []
+    kgi = KgiRealtimeAcquisitionAdapter(
+        lambda _symbol: KgiRealtimeProviderSnapshot(
+            quote=None,
+            status="disconnected",
+            error="fixture unavailable",
+        ),
+        clock=lambda: NOW,
+    )
+    mis_payload = json.dumps(
+        {
+            "rtcode": "0000",
+            "msgArray": [
+                {
+                    "c": "2330",
+                    "d": "20260826",
+                    "t": "10:00:00",
+                    "z": "1181",
+                    "tv": "1",
+                    "v": "101",
+                    "o": "1170",
+                    "h": "1185",
+                    "l": "1165",
+                    "y": "1170",
+                    "ts": "0",
+                }
+            ],
+        }
+    )
+
+    class Response:
+        status_code = 200
+        text = mis_payload
+        headers = {"content-type": "application/json"}
+        url = "https://example.test/twse-mis"
+
+    mis = TaiwanPublicQuoteAcquisitionExecutor(
+        fetchers={
+            TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR.resource_id: (
+                lambda _route, _instrument: Response()
+            )
+        },
+        clock=lambda: NOW,
+    )
+
+    class CompositeQuoteAcquisition:
+        def acquire_quote_observations(self, requirement, plan):
+            assert len(plan.routes) == 1
+            provider = plan.routes[0].provider_key
+            calls.append(provider)
+            if provider == KGI_PROVIDER:
+                return kgi.acquire_quote_observations(requirement, plan)
+            return mis.acquire_quote_observations(requirement, plan)
+
+    result = acquire_taiwan_public_last_trade_quote(
+        db,
+        stock_id="2330",
+        policy=RealtimePolicy.PREFER_LIVE,
+        requested_at=NOW,
+        descriptors=(
+            KGI_QUOTE_SNAPSHOT_DESCRIPTOR.model_copy(
+                update={"allow_unknown_health": True}
+            ),
+            TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,
+        ),
+        acquisition=CompositeQuoteAcquisition(),
+    )
+
+    assert calls == [KGI_PROVIDER, TWSE_MIS_QUOTE_PROVIDER]
+    assert result.acquisition.providers_attempted == (
+        KGI_PROVIDER,
+        TWSE_MIS_QUOTE_PROVIDER,
+    )
+    assert result.persistence.receipts_written == 1
+    assert result.resolved.quote is not None
+    assert result.resolved.quote.lineage.provider == TWSE_MIS_QUOTE_PROVIDER
+    assert result.resolved.health.status is ResolvedEvidenceStatus.FALLBACK
+    assert result.resolved.health.fallback_used is True
+    assert any(
+        item.startswith(f"ROUTE_REQUIREMENT_UNSATISFIED:{KGI_PROVIDER}:")
+        for item in result.acquisition.limitations
+    )
 
 
 def test_kgi_and_mis_candidates_resolve_deterministically_from_descriptors(

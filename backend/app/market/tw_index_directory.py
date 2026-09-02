@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 import hashlib
 import json
 from typing import Any, Iterable
@@ -16,7 +16,7 @@ from app.db.models import (
     TaiwanMarketIndexDirectoryItem,
     TaiwanMarketIndexDirectorySnapshot,
 )
-from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import TAIWAN_TZ, latest_released_trading_day
 from app.market_data.contracts import AuthorityClass
 
 
@@ -24,6 +24,7 @@ TW_INDEX_DIRECTORY_DATASET_ID = "tw.market_index.directory"
 TW_INDEX_DIRECTORY_CAPABILITY_ID = "market.index.directory"
 TW_INDEX_DIRECTORY_CONTRACT_VERSION = "tw.market_index.directory.v1"
 TW_INDEX_DIRECTORY_STALE_AFTER_SECONDS = 900
+TW_INDEX_DIRECTORY_EXPECTED_RELEASE_TIME = time(13, 40)
 
 
 _SOURCE_CONFIG = {
@@ -75,7 +76,19 @@ def _normalize_item(item: dict[str, Any], *, market: str, rank: int) -> dict[str
     }
 
 
-def _missing_projection(market: str, *, limitation: str) -> dict[str, Any]:
+def _expected_trade_date(requested_at: datetime) -> date:
+    return latest_released_trading_day(
+        release_time=TW_INDEX_DIRECTORY_EXPECTED_RELEASE_TIME,
+        now=requested_at,
+    )
+
+
+def _missing_projection(
+    market: str,
+    *,
+    limitation: str,
+    requested_at: datetime,
+) -> dict[str, Any]:
     return {
         "contract_version": TW_INDEX_DIRECTORY_CONTRACT_VERSION,
         "status": "missing",
@@ -83,6 +96,10 @@ def _missing_projection(market: str, *, limitation: str) -> dict[str, Any]:
         "market": market,
         "source": "unavailable",
         "as_of": None,
+        "latest_trade_date": None,
+        "expected_trade_date": _expected_trade_date(requested_at),
+        "transport_fresh": False,
+        "observation_current": False,
         "count": 0,
         "items": [],
         "warnings": [limitation],
@@ -105,12 +122,14 @@ class TaiwanIndexDirectoryRepository:
             raise ValueError("market must be one of: TWSE, TPEX.")
         if limit <= 0:
             raise ValueError("limit must be greater than 0.")
+        now = requested_at or datetime.now(TAIWAN_TZ)
         bind = self._db.get_bind()
         inspector = inspect(bind)
         if not inspector.has_table(TaiwanMarketIndexDirectorySnapshot.__tablename__):
             return _missing_projection(
                 normalized_market,
                 limitation="TW_INDEX_DIRECTORY_SCHEMA_UNAVAILABLE",
+                requested_at=now,
             )
         snapshot = (
             self._db.query(TaiwanMarketIndexDirectorySnapshot)
@@ -130,6 +149,7 @@ class TaiwanIndexDirectoryRepository:
             return _missing_projection(
                 normalized_market,
                 limitation="TW_INDEX_DIRECTORY_CANONICAL_CACHE_MISSING",
+                requested_at=now,
             )
         items = (
             self._db.query(TaiwanMarketIndexDirectoryItem)
@@ -138,10 +158,18 @@ class TaiwanIndexDirectoryRepository:
             .limit(limit)
             .all()
         )
-        now = requested_at or datetime.now(TAIWAN_TZ)
         fetched_at = _aware_utc(snapshot.fetched_at)
         age_seconds = max((now.astimezone(timezone.utc) - fetched_at).total_seconds(), 0)
-        stale = age_seconds > TW_INDEX_DIRECTORY_STALE_AFTER_SECONDS
+        transport_fresh = age_seconds <= TW_INDEX_DIRECTORY_STALE_AFTER_SECONDS
+        latest_trade_date = max(
+            (item.trade_date for item in items if item.trade_date is not None),
+            default=None,
+        )
+        expected_trade_date = _expected_trade_date(now)
+        observation_current = bool(
+            latest_trade_date is not None
+            and latest_trade_date >= expected_trade_date
+        )
         try:
             decoded_limitations = json.loads(snapshot.limitations_json or "[]")
             limitations = (
@@ -151,16 +179,23 @@ class TaiwanIndexDirectoryRepository:
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             limitations = ["TW_INDEX_DIRECTORY_LIMITATIONS_MALFORMED"]
-        if stale:
+        if not transport_fresh:
             limitations.append("TW_INDEX_DIRECTORY_STALE")
-        status = "stale" if stale else snapshot.observation_state
+        if not observation_current:
+            limitations.append("TW_INDEX_DIRECTORY_OBSERVATION_DATE_STALE")
+        current = transport_fresh and observation_current
+        status = snapshot.observation_state if current else "stale"
         return {
             "contract_version": TW_INDEX_DIRECTORY_CONTRACT_VERSION,
             "status": status,
-            "freshness_status": "stale" if stale else "fresh",
+            "freshness_status": "fresh" if current else "stale",
             "market": normalized_market,
             "source": snapshot.source,
             "as_of": snapshot.fetched_at,
+            "latest_trade_date": latest_trade_date,
+            "expected_trade_date": expected_trade_date,
+            "transport_fresh": transport_fresh,
+            "observation_current": observation_current,
             "count": len(items),
             "items": [
                 {
@@ -338,6 +373,7 @@ __all__ = [
     "TW_INDEX_DIRECTORY_CONTRACT_VERSION",
     "TW_INDEX_DIRECTORY_DATASET_ID",
     "TW_INDEX_DIRECTORY_STALE_AFTER_SECONDS",
+    "TW_INDEX_DIRECTORY_EXPECTED_RELEASE_TIME",
     "TaiwanIndexDirectoryRepository",
     "TaiwanIndexDirectoryTransaction",
     "read_taiwan_index_directory",

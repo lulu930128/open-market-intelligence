@@ -48,6 +48,7 @@ class MarketCalendarMarketStatusRead(BaseModel):
     date: date
     is_trading_day: bool
     phase: str
+    current_session_trade_date: date | None = None
     reason: str
     holiday_name: str | None = None
     previous_trading_day: date
@@ -470,6 +471,13 @@ class MarketOhlcChartRead(BaseModel):
     requested_bar_count: int
     available_bar_count: int
     returned_point_count: int
+    earliest_available_trade_date: date | None = None
+    latest_available_trade_date: date | None = None
+    expected_minimum_bar_count: int
+    missing_session_count: int
+    coverage_status: str
+    bootstrap_recommended: bool
+    limitations: list[str] = Field(default_factory=list)
     bars_legacy_count: int
     deprecated_fields: list[str] = Field(default_factory=list)
     lookback_days: int
@@ -766,6 +774,10 @@ class MarketIndexListRead(BaseModel):
     market: str
     source: str
     as_of: datetime | None = None
+    latest_trade_date: date | None = None
+    expected_trade_date: date | None = None
+    transport_fresh: bool = False
+    observation_current: bool = False
     count: int
     items: list[MarketIndexListItemRead]
     warnings: list[str] = Field(default_factory=list)

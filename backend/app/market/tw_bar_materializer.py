@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_bar_contracts import (
-    TAIWAN_DAILY_MATERIALIZATION_VERSION,
+    TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
     TPEX_DERIVED_DAILY_PROVIDER,
@@ -176,6 +176,7 @@ def materialize_index_minute_candidates(
 def materialize_tpex_completed_daily_candidate(
     components: tuple[BarObservation, ...],
     *,
+    formal_close_component: BarObservation,
     component_raw_result_ids: tuple[int, ...],
     component_content_hashes: tuple[str, ...],
     coverage_complete: bool,
@@ -191,6 +192,16 @@ def materialize_tpex_completed_daily_candidate(
     ):
         raise ValueError(
             "TPEX daily materialization requires one qualified exchange 5s series"
+        )
+    if (
+        formal_close_component.instrument != components[0].instrument
+        or formal_close_component.interval != "closing_match"
+        or formal_close_component.lineage.authority.value != "exchange"
+        or formal_close_component.finalization
+        not in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+    ):
+        raise ValueError(
+            "TPEX daily materialization requires an explicit exchange closing match"
         )
     if not component_raw_result_ids or not component_content_hashes:
         raise ValueError("TPEX daily materialization requires component evidence")
@@ -224,14 +235,14 @@ def materialize_tpex_completed_daily_candidate(
         source_interval=components[0].interval,
         coverage_complete=coverage_complete,
         as_of=as_of,
-        formal_close_component=ordered[-1],
+        formal_close_component=formal_close_component,
     )
     observation = observation.model_copy(
         update={
             "lineage": observation.lineage.model_copy(
                 update={
                     "component_content_hashes": component_content_hashes,
-                    "materialization_version": TAIWAN_DAILY_MATERIALIZATION_VERSION,
+                    "materialization_version": TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
                 }
             )
         }

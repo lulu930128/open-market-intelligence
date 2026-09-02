@@ -3,6 +3,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.market.tw_index_daily_platform import (
+    TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+)
 from app.us_market.intraday_profiles import (
     US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS,
 )
@@ -64,5 +67,13 @@ class TaiwanIndexDailyBootstrapJobRequest(BaseModel):
     index_ids: list[str] = Field(default_factory=lambda: ["TAIEX", "TPEX"], min_length=1, max_length=2)
     date_from: date
     date_to: date
-    taiex_max_sessions: int = Field(default=260, ge=1, le=260)
-    tpex_max_sessions: int = Field(default=20, ge=1, le=20)
+    taiex_max_sessions: int = Field(
+        default=TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+        ge=1,
+        le=TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+    )
+    tpex_max_sessions: int = Field(
+        default=TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+        ge=1,
+        le=TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+    )

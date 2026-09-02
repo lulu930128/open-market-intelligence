@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Base, StockMaster, WatchlistGroup, WatchlistItem
 from app.main import app
 from app.market import indices
+from app.market.index_resolution import resolve_taiwan_index_truth
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.taiwan_industries import normalize_tw_industry_label
 from app.market.tw_intraday_state import persist_taiwan_intraday_stock_states
@@ -330,8 +331,47 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self,
     ) -> None:
         self._seed_preopen_state()
+        truth = resolve_taiwan_index_truth(
+            intraday=None,
+            index_snapshot={
+                "index_id": "TAIEX",
+                "close": 24_321.5,
+                "previous_close": 24_100.0,
+                "time": "2026-08-14",
+                "as_of": "2026-08-14T13:30:00+08:00",
+                "source": "fugle_indices_stream",
+                "provider": "fugle_marketdata",
+                "completed_daily_close": 24_280.0,
+                "completed_daily_trade_date": "2026-08-14",
+                "completed_daily_event_time": "2026-08-14T13:30:00+08:00",
+                "completed_daily_source": "twse_indices_report_mi_5mins_hist",
+                "completed_daily_provider": "twse",
+                "completed_daily_authority": "exchange",
+                "completed_daily_finalization": "final",
+                "completed_daily_official": True,
+                "completed_daily_release_status": "released",
+                "completed_daily_reconciliation_status": "not_applicable",
+                "completed_daily_qualified": True,
+                "completed_daily_previous_close": 24_100.0,
+                "completed_daily_previous_close_trade_date": "2026-08-13",
+                "completed_daily_previous_close_source": "twse_indices_report_mi_5mins_hist",
+                "completed_daily_previous_close_provider": "twse",
+                "completed_daily_previous_close_authority": "exchange",
+                "completed_daily_previous_close_finalization": "final",
+            },
+            calendar_status={
+                "timezone": "Asia/Taipei",
+                "checked_at": "2026-08-14T15:00:00+08:00",
+                "date": "2026-08-14",
+                "is_trading_day": True,
+                "phase": "post_close",
+                "previous_trading_day": "2026-08-13",
+            },
+            index_id="TAIEX",
+            acquisition_policy="cache_only",
+        )
         resolved_summary = {
-            "resolution_version": "tw.index.resolution.v1",
+            "resolution_version": truth.resolution_version,
             "acquisition_policy": "cache_only",
             "warnings": [],
             "indices": [
@@ -391,29 +431,7 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
                         "failed_batch_count": 1,
                         "warnings": ["One MIS batch failed."],
                     },
-                    "resolution": {
-                        "resolution_version": "tw.index.resolution.v1",
-                        "resolution_id": "resolution-1",
-                        "acquisition_policy": "cache_only",
-                        "selected_candidate": "intraday_last_trade",
-                        "selected_value": 24_321.5,
-                        "selected_source": "twse_index_5s_intraday",
-                        "selected_provider": "twse",
-                        "selected_authority": "official_exchange",
-                        "selected_finalization": "intraday",
-                        "official_source": True,
-                        "official_close_confirmed": False,
-                        "provisional_estimate": False,
-                        "selected_event_time": "2026-08-14T09:59:59+08:00",
-                        "selected_trade_date": "2026-08-14",
-                        "selection_reason": (
-                            "active_session_prefers_intraday_last_trade"
-                        ),
-                        "official_close_status": "not_available_yet",
-                        "decision_usable": True,
-                        "coverage_status": "complete",
-                        "warnings": [],
-                    },
+                    "resolution": truth.model_dump(mode="json"),
                 }
             ],
         }
@@ -439,22 +457,26 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         )
         self.assertFalse(legacy_breadth.decision_usable)
         self.assertEqual(len(parsed.resolved_indices), 1)
-        self.assertEqual(parsed.resolved_indices[0].value, 24_321.5)
+        self.assertEqual(parsed.resolved_indices[0].value, 24_280.0)
         self.assertEqual(
             parsed.resolved_indices[0].selected_candidate,
-            "current_session_observation",
+            "completed_daily_bar",
         )
-        self.assertFalse(parsed.resolved_indices[0].official)
+        self.assertTrue(parsed.resolved_indices[0].official)
         self.assertEqual(parsed.resolved_indices[0].provider, "twse")
         self.assertEqual(
             parsed.resolved_indices[0].authority,
             "official_exchange",
         )
-        self.assertEqual(parsed.resolved_indices[0].finalization, "unknown")
+        self.assertEqual(parsed.resolved_indices[0].finalization, "final")
         self.assertTrue(parsed.resolved_indices[0].official_source)
-        self.assertFalse(parsed.resolved_indices[0].official_close_confirmed)
-        self.assertTrue(parsed.resolved_indices[0].provisional_estimate)
+        self.assertTrue(parsed.resolved_indices[0].official_close_confirmed)
+        self.assertFalse(parsed.resolved_indices[0].provisional_estimate)
         self.assertTrue(parsed.resolved_indices[0].decision_usable)
+        self.assertEqual(parsed.resolved_indices[0].resolution_id, truth.resolution_id)
+        self.assertEqual(parsed.resolved_indices[0].previous_close, 24_100.0)
+        self.assertEqual(parsed.resolved_indices[0].change, 180.0)
+        self.assertFalse(parsed.resolved_indices[0].compatibility_fallback)
         resolved_breadth = parsed.resolved_breadth["TWSE"]
         self.assertFalse(resolved_breadth.deprecated)
         self.assertIsNone(resolved_breadth.canonical_ref)

@@ -110,6 +110,7 @@ class TaiwanDashboardResolvedIndexRead(BaseModel):
     market: str
     status: str
     value: float | None = None
+    previous_close: float | None = None
     change: float | None = None
     change_pct: float | None = None
     event_time: datetime | None = None
@@ -135,7 +136,12 @@ class TaiwanDashboardResolvedIndexRead(BaseModel):
     official: bool
     provisional: bool
     decision_usable: bool
+    quote_semantics: str
+    delivery_status: str
+    compatibility_fallback: bool = False
+    compatibility_fallback_reason: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class TaiwanDashboardGroupRead(BaseModel):

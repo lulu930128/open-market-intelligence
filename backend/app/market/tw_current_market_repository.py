@@ -201,17 +201,29 @@ class TaiwanCurrentMarketRepository:
                 ),
                 limitations=("TW_CURRENT_INDEX_SCHEMA_UNAVAILABLE",),
             )
+        recent_cutoff = requirement.request.from_date - timedelta(days=7)
+        provider_query = self._db.query(TaiwanCurrentIndexSnapshot.provider).filter(
+            TaiwanCurrentIndexSnapshot.index_id == target.scope_key
+        )
         providers = (
-            self._db.query(TaiwanCurrentIndexSnapshot.provider)
-            .filter(TaiwanCurrentIndexSnapshot.index_id == target.scope_key)
+            provider_query.filter(
+                TaiwanCurrentIndexSnapshot.trade_date >= recent_cutoff
+            )
             .distinct()
             .order_by(TaiwanCurrentIndexSnapshot.provider.asc())
             .limit(requirement.bounds.max_candidates * 4)
             .all()
         )
+        if not providers:
+            providers = (
+                provider_query.distinct()
+                .order_by(TaiwanCurrentIndexSnapshot.provider.asc())
+                .limit(requirement.bounds.max_candidates * 4)
+                .all()
+            )
         rows = []
         for (provider,) in providers:
-            latest = (
+            latest_query = (
                 self._db.query(
                     TaiwanCurrentIndexSnapshot,
                     RawFetchResult,
@@ -228,12 +240,22 @@ class TaiwanCurrentMarketRepository:
                 )
                 .filter(TaiwanCurrentIndexSnapshot.index_id == target.scope_key)
                 .filter(TaiwanCurrentIndexSnapshot.provider == provider)
+            )
+            latest = (
+                latest_query.filter(
+                    TaiwanCurrentIndexSnapshot.trade_date >= recent_cutoff
+                )
                 .order_by(
                     TaiwanCurrentIndexSnapshot.event_at.desc(),
                     TaiwanCurrentIndexSnapshot.id.desc(),
                 )
                 .first()
             )
+            if latest is None:
+                latest = latest_query.order_by(
+                    TaiwanCurrentIndexSnapshot.event_at.desc(),
+                    TaiwanCurrentIndexSnapshot.id.desc(),
+                ).first()
             if latest is not None:
                 rows.append(latest)
         seen: set[str] = set()
@@ -413,7 +435,8 @@ class TaiwanCurrentMarketRepository:
                 ),
                 limitations=("TW_CURRENT_BREADTH_SCHEMA_UNAVAILABLE",),
             )
-        rows = (
+        recent_cutoff = requirement.request.from_date - timedelta(days=7)
+        row_query = (
             self._db.query(
                 TaiwanCurrentBreadthSnapshot,
                 RawFetchResult,
@@ -423,6 +446,11 @@ class TaiwanCurrentMarketRepository:
             .join(RawFetchResult, RawFetchResult.id == TaiwanCurrentBreadthSnapshot.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == TaiwanCurrentBreadthSnapshot.source_id)
             .filter(TaiwanCurrentBreadthSnapshot.venue == target.scope_key)
+        )
+        rows = (
+            row_query.filter(
+                TaiwanCurrentBreadthSnapshot.trade_date >= recent_cutoff
+            )
             .order_by(
                 TaiwanCurrentBreadthSnapshot.provider.asc(),
                 TaiwanCurrentBreadthSnapshot.event_at.desc(),
@@ -431,6 +459,16 @@ class TaiwanCurrentMarketRepository:
             .limit(requirement.bounds.max_candidates * 4)
             .all()
         )
+        if not rows:
+            rows = (
+                row_query.order_by(
+                    TaiwanCurrentBreadthSnapshot.provider.asc(),
+                    TaiwanCurrentBreadthSnapshot.event_at.desc(),
+                    TaiwanCurrentBreadthSnapshot.id.desc(),
+                )
+                .limit(requirement.bounds.max_candidates * 4)
+                .all()
+            )
         seen: set[str] = set()
         candidates: list[ResolutionCandidate[MarketBreadthObservation]] = []
         rejections: list[CandidateRowRejection] = []

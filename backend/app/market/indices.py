@@ -17,7 +17,7 @@ from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry
 from app.market.index_resolution import (
     TAIWAN_INDEX_RESOLUTION_VERSION,
     normalize_index_acquisition_policy,
-    resolve_taiwan_index_quote_state,
+    resolve_taiwan_index_truth,
 )
 from app.market.official_index_platform import read_taiwan_official_index_series
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
@@ -4360,24 +4360,56 @@ def get_market_index_ohlc_chart_data(
     from_date = points[0]["time"] if points else today
     to_date = points[-1]["time"] if points else today
     freshness = _market_index_chart_freshness(points, timeframe=timeframe)
+    available_bar_count = len(points)
+    missing_session_count = max(bars - available_bar_count, 0)
+    coverage_status = (
+        "complete"
+        if missing_session_count == 0
+        else "insufficient_history"
+        if available_bar_count > 0
+        else "missing"
+    )
+    bootstrap_recommended = bool(
+        timeframe == "daily" and normalized_index_id in {"TAIEX", "TPEX"}
+        and coverage_status != "complete"
+    )
+    coverage_limitations = []
+    if coverage_status != "complete":
+        coverage_limitations.append("TW_INDEX_HISTORY_INSUFFICIENT")
+    if bootstrap_recommended:
+        coverage_limitations.append("TW_INDEX_DAILY_BOOTSTRAP_RECOMMENDED")
     payload = {
         "stock_id": normalized_index_id,
         "timeframe": timeframe,
         "bars": bars,
+        "requested_bar_count": bars,
+        "available_bar_count": available_bar_count,
+        "returned_point_count": available_bar_count,
+        "earliest_available_trade_date": points[0]["time"] if points else None,
+        "latest_available_trade_date": points[-1]["time"] if points else None,
+        "expected_minimum_bar_count": bars,
+        "missing_session_count": missing_session_count,
+        "coverage_status": coverage_status,
+        "bootstrap_recommended": bootstrap_recommended,
+        "limitations": coverage_limitations,
+        "bars_legacy_count": bars,
+        "deprecated_fields": ["bars"],
         "lookback_days": max((to_date - from_date).days, 0),
         "from_date": from_date,
         "to_date": to_date,
         "point_count": len(points),
         "points": points,
         "backfill": {
-            "status": "not_requested",
+            "status": "recommended" if bootstrap_recommended else "not_requested",
             "reason": "read_path_is_side_effect_free",
             "refresh_route": (
                 f"POST /api/market/indices/{normalized_index_id}/ohlc/refresh"
             ),
         },
         "data_quality": (
-            bar_result.history.history_status.value
+            coverage_status
+            if coverage_status != "complete"
+            else bar_result.history.history_status.value
             if bar_result is not None
             else "missing"
         ),
@@ -4386,6 +4418,7 @@ def get_market_index_ohlc_chart_data(
                 (
                     *(bar_result.limitations if bar_result is not None else ()),
                     *(bar_result.warnings if bar_result is not None else ()),
+                    *coverage_limitations,
                 )
             )
         ),
@@ -4723,13 +4756,26 @@ def _attach_summary_index_resolutions(
                 operation="indices.summary_cached_intraday_resolution",
             )
             intraday = None
-        resolution = resolve_taiwan_index_quote_state(
+        resolution = resolve_taiwan_index_truth(
             intraday=intraday,
             index_snapshot=item,
             calendar_status=calendar_status,
             index_id=index_id,
             acquisition_policy=acquisition_policy,
-        )
+        ).model_dump(mode="json")
+        selected = resolution.get("current_observation")
+        if isinstance(selected, dict):
+            item["close"] = selected.get("value")
+            item["previous_close"] = resolution.get("selected_previous_close")
+            item["change"] = resolution.get("selected_change")
+            item["change_pct"] = resolution.get("selected_change_pct")
+            item["time"] = selected.get("trade_date")
+            item["source"] = selected.get("source") or item.get("source")
+            item["as_of"] = selected.get("observed_at") or item.get("as_of")
+        else:
+            item["close"] = None
+            item["change"] = None
+            item["change_pct"] = None
         item.update(
             {
                 "resolution_version": resolution["resolution_version"],
@@ -4755,11 +4801,20 @@ def _attach_summary_index_resolutions(
     }
 
 
-def _attach_completed_data_core_evidence(db: Session, payload: dict) -> dict:
+def _attach_completed_data_core_evidence(
+    db: Session,
+    payload: dict,
+    *,
+    requested_at: datetime | None = None,
+) -> dict:
     from app.market.tw_dashboard_data_core import attach_taiwan_dashboard_data_core
 
     return _with_breadth_status_contract(
-        attach_taiwan_dashboard_data_core(db, payload)
+        attach_taiwan_dashboard_data_core(
+            db,
+            payload,
+            requested_at=requested_at,
+        )
     )
 
 
@@ -4813,13 +4868,18 @@ def _shared_current_market_summary(
             daily_series = TaiwanBarService(db).read_bars(
                 instrument_id=index_id,
                 interval="1d",
-                limit=1,
+                limit=2,
                 include_partial=False,
                 requested_at=now,
             )
             if daily_series.bars:
                 daily_bar = daily_series.bars[-1]
                 daily_state = daily_series.bar_states[-1]
+                previous_daily_bar = (
+                    daily_series.bars[-2]
+                    if len(daily_series.bars) >= 2
+                    else None
+                )
                 completed_daily = {
                     "completed_daily_close": float(daily_bar.close_price),
                     "completed_daily_trade_date": daily_bar.start_at.astimezone(
@@ -4836,6 +4896,36 @@ def _shared_current_market_summary(
                         daily_state.reconciliation_status.value
                     ),
                     "completed_daily_qualified": daily_state.technical_eligible,
+                    "completed_daily_previous_close": (
+                        float(previous_daily_bar.close_price)
+                        if previous_daily_bar is not None
+                        else None
+                    ),
+                    "completed_daily_previous_close_trade_date": (
+                        previous_daily_bar.start_at.astimezone(TAIPEI_TZ).date()
+                        if previous_daily_bar is not None
+                        else None
+                    ),
+                    "completed_daily_previous_close_source": (
+                        previous_daily_bar.lineage.source
+                        if previous_daily_bar is not None
+                        else None
+                    ),
+                    "completed_daily_previous_close_provider": (
+                        previous_daily_bar.lineage.provider
+                        if previous_daily_bar is not None
+                        else None
+                    ),
+                    "completed_daily_previous_close_authority": (
+                        previous_daily_bar.lineage.authority.value
+                        if previous_daily_bar is not None
+                        else None
+                    ),
+                    "completed_daily_previous_close_finalization": (
+                        previous_daily_bar.finalization.value
+                        if previous_daily_bar is not None
+                        else None
+                    ),
                 }
         except Exception as exc:
             observe_provider_fallback(
@@ -4883,19 +4973,47 @@ def _shared_current_market_summary(
                 },
                 **completed_daily,
             }
-        resolution = resolve_taiwan_index_quote_state(
+        items.append(item)
+    payload = _attach_completed_data_core_evidence(
+        db,
+        {
+            "as_of": now,
+            "source": "shared_market_data_core",
+            "indices": items,
+            "cache_status": "canonical_cache",
+            "refresh_recommended": any(item.get("close") is None for item in items),
+            "warnings": list(dict.fromkeys(warnings)),
+            "acquisition_policy": "cache_only",
+        },
+        requested_at=now,
+    )
+    resolved_items: list[dict] = []
+    for raw_item in payload.get("indices") or []:
+        item = dict(raw_item)
+        index_id = str(item.get("index_id") or "").strip().upper()
+        resolution = resolve_taiwan_index_truth(
             intraday=None,
             index_snapshot=item,
             calendar_status=calendar_status,
             index_id=index_id,
             acquisition_policy="cache_only",
-        )
+        ).model_dump(mode="json")
         selected = resolution.get("current_observation")
         if isinstance(selected, dict):
             item["close"] = selected.get("value")
+            item["previous_close"] = resolution.get("selected_previous_close")
+            item["change"] = resolution.get("selected_change")
+            item["change_pct"] = resolution.get("selected_change_pct")
             item["time"] = selected.get("trade_date")
             item["source"] = selected.get("source") or item["source"]
             item["as_of"] = selected.get("observed_at") or item["as_of"]
+        else:
+            item["open"] = None
+            item["high"] = None
+            item["low"] = None
+            item["close"] = None
+            item["change"] = None
+            item["change_pct"] = None
         item["current_observation"] = selected
         item["official_close"] = {
             "status": resolution["official_close_status"],
@@ -4905,18 +5023,14 @@ def _shared_current_market_summary(
         }
         item["decision_usable"] = resolution["decision_usable"]
         item["resolution"] = resolution
-        items.append(item)
-    return _with_breadth_status_contract(
-        {
-            "as_of": now,
-            "source": "shared_market_data_core",
-            "indices": items,
-            "cache_status": "canonical_cache",
-            "refresh_recommended": any(item.get("close") is None for item in items),
-            "warnings": list(dict.fromkeys(warnings)),
-            "acquisition_policy": "cache_only",
-        }
-    )
+        item["resolution_version"] = resolution["resolution_version"]
+        item["resolution_id"] = resolution["resolution_id"]
+        resolved_items.append(item)
+    return {
+        **payload,
+        "resolution_version": TAIWAN_INDEX_RESOLUTION_VERSION,
+        "indices": resolved_items,
+    }
 
 
 def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
@@ -4924,10 +5038,7 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
         logger.warning(
             "Deprecated force_refresh on GET market index summary was ignored; use the explicit POST refresh route."
         )
-    return _attach_completed_data_core_evidence(
-        db,
-        _shared_current_market_summary(db),
-    )
+    return _shared_current_market_summary(db)
 
 
 def refresh_market_index_summary(
@@ -5006,10 +5117,7 @@ def _refresh_current_market_summary(
                     acquisition=breadth_acquisition,
                 )
                 refresh_limitations.extend(breadth_result.limitations)
-        payload = _attach_completed_data_core_evidence(
-            db,
-            _shared_current_market_summary(db, requested_at=now),
-        )
+        payload = _shared_current_market_summary(db, requested_at=now)
         payload["acquisition_policy"] = "prefer_live"
         payload["cache_status"] = (
             "canonical_refresh"

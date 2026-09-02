@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.market.official_breadth_platform import read_taiwan_official_breadth
 from app.market.official_index_platform import read_taiwan_official_index
-from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import TAIWAN_TZ, previous_taiwan_trading_day
 from app.market_data.contracts import ResolvedEvidenceStatus
 from app.market_data.integration_contracts import MarketDataResultV1
 
@@ -72,12 +72,29 @@ def _project_index_component(
         in {ResolvedEvidenceStatus.SELECTED, ResolvedEvidenceStatus.FALLBACK}
         and resolved_index is not None
     ):
+        close_value = _number(resolved_index.close_value)
+        change_value = _number(resolved_index.price_change)
+        previous_close = (
+            float(close_value) - float(change_value)
+            if close_value is not None and change_value is not None
+            else None
+        )
+        previous_trade_date = (
+            previous_taiwan_trading_day(
+                resolved_index.trade_date,
+                include_value=False,
+            )
+            if previous_close is not None
+            else None
+        )
         index_component["observation"] = {
             "index_id": resolved_index.index_id,
             "venue": resolved_index.venue,
             "trade_date": resolved_index.trade_date,
-            "close": _number(resolved_index.close_value),
-            "change": _number(resolved_index.price_change),
+            "close": close_value,
+            "change": change_value,
+            "previous_close": previous_close,
+            "previous_close_trade_date": previous_trade_date,
             "trade_volume": (
                 _number(resolved_index.trade_volume.value)
                 if resolved_index.trade_volume is not None
@@ -284,6 +301,46 @@ def attach_taiwan_dashboard_data_core(
             if completed_index is not None
             else None
         )
+        item["official_close_provider"] = (
+            completed_index.get("lineage", {}).get("provider")
+            if completed_index is not None
+            else None
+        )
+        item["official_close_authority"] = (
+            completed_index.get("lineage", {}).get("authority")
+            if completed_index is not None
+            else None
+        )
+        item["official_close_finalization"] = (
+            completed_index.get("finalization")
+            if completed_index is not None
+            else None
+        )
+        item["official_close_change"] = (
+            completed_index.get("change") if completed_index is not None else None
+        )
+        item["official_close_previous_close"] = (
+            completed_index.get("previous_close")
+            if completed_index is not None
+            else None
+        )
+        item["official_close_previous_close_trade_date"] = (
+            completed_index.get("previous_close_trade_date")
+            if completed_index is not None
+            else None
+        )
+        item["official_close_previous_close_source"] = item[
+            "official_close_source"
+        ]
+        item["official_close_previous_close_provider"] = item[
+            "official_close_provider"
+        ]
+        item["official_close_previous_close_authority"] = item[
+            "official_close_authority"
+        ]
+        item["official_close_previous_close_finalization"] = item[
+            "official_close_finalization"
+        ]
 
         legacy_breadth = item.get("breadth")
         if (

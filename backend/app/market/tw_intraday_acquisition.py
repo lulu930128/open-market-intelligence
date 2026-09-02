@@ -55,6 +55,10 @@ class TaiwanIntradayAcquisitionExecutor:
     ) -> BarAcquisitionResult:
         if plan.requirement != requirement:
             raise ValueError("intraday acquisition plan does not match requirement")
+        if len(plan.routes) > 1:
+            raise ValueError(
+                "intraday acquisition executor accepts one Gateway-controlled route"
+            )
         receipts = []
         health = []
         attempts = []
@@ -65,29 +69,25 @@ class TaiwanIntradayAcquisitionExecutor:
         attempted_statuses: list[AcquisitionStatus] = []
         requested_range_days = self._range_days(requirement)
 
-        for route in plan.routes:
-            if requested_range_days > route.max_range_days:
-                limitations.append(
-                    f"ROUTE_RANGE_EXCEEDED:{route.provider_key}"
-                )
-                continue
+        route = plan.routes[0] if plan.routes else None
+        if route is not None and requested_range_days > route.max_range_days:
+            limitations.append(f"ROUTE_RANGE_EXCEEDED:{route.provider_key}")
+        elif route is not None:
             adapter = self._adapters.get(route.provider_key)
             if adapter is None:
                 limitations.append(
                     f"PROVIDER_ADAPTER_UNAVAILABLE:{route.provider_key}"
                 )
-                continue
-            acquired = adapter.acquire_route(requirement, route)
-            attempted_statuses.append(acquired.summary.status)
-            external_calls += acquired.summary.external_calls
-            providers.extend(acquired.summary.providers_attempted)
-            attempts.extend(acquired.summary.resource_attempts)
-            receipts.extend(acquired.receipts)
-            health.extend(acquired.provider_health)
-            limitations.extend(acquired.summary.limitations)
-            if acquired.observations:
+            else:
+                acquired = adapter.acquire_route(requirement, route)
+                attempted_statuses.append(acquired.summary.status)
+                external_calls += acquired.summary.external_calls
+                providers.extend(acquired.summary.providers_attempted)
+                attempts.extend(acquired.summary.resource_attempts)
+                receipts.extend(acquired.receipts)
+                health.extend(acquired.provider_health)
+                limitations.extend(acquired.summary.limitations)
                 observations = acquired.observations
-                break
 
         attempted = bool(attempts)
         if observations:

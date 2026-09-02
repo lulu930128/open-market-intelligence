@@ -384,6 +384,7 @@ def refresh_taiwan_intraday_bars(
         descriptors=catalog,
         acquisition_port=executor,
         transaction_port=TaiwanIntradayBarTransaction(db),
+        route_resolution_gate=True,
     )
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from functools import partial
 
 from sqlalchemy import func
@@ -14,7 +14,12 @@ from app.market.providers.tw_current_market import CurrentBreadthAdapter, Curren
 from app.market.providers.twse_mis_current_breadth import read_twse_mis_current_breadth
 from app.market.providers.twse_mis_current_index import read_twse_mis_current_index
 from app.market.providers.yahoo_current_index import read_yahoo_current_index
-from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import TAIWAN_TZ, taiwan_presentation_session
+from app.market.tw_bar_materialization_transaction import (
+    TaiwanBarMaterializationTransaction,
+)
+from app.market.tw_bar_materializer import materialize_index_minute_candidates
+from app.market.tw_bar_service import read_taiwan_index_intraday_bars
 from app.market.tw_current_market_acquisition import (
     TaiwanCurrentBreadthAcquisitionExecutor,
     TaiwanCurrentIndexAcquisitionExecutor,
@@ -160,9 +165,44 @@ def refresh_taiwan_current_breadth_operation(
     )
 
 
+def refresh_taiwan_index_intraday_bars_operation(
+    db: Session,
+    *,
+    index_id: str,
+    requested_at: datetime | None = None,
+):
+    """Acquire current index evidence, materialize Base-1m, then reread it."""
+
+    now = requested_at or datetime.now(TAIWAN_TZ)
+    refresh_taiwan_current_index_operation(
+        db,
+        index_id=index_id,
+        requested_at=now,
+    )
+    trade_date = taiwan_presentation_session(now)["trade_date"]
+    if not isinstance(trade_date, date):
+        raise RuntimeError("Taiwan presentation session returned invalid trade date")
+    batch = materialize_index_minute_candidates(
+        db,
+        index_id=index_id,
+        trade_date=trade_date,
+        as_of=now,
+    )
+    if batch.candidates:
+        TaiwanBarMaterializationTransaction(db).persist_materialized_bars(
+            batch.candidates
+        )
+    return read_taiwan_index_intraday_bars(
+        db,
+        index_id=index_id,
+        requested_at=now,
+    )
+
+
 __all__ = [
     "TaiwanRegisteredStockUniverseReader",
     "build_current_market_executors",
     "refresh_taiwan_current_breadth_operation",
     "refresh_taiwan_current_index_operation",
+    "refresh_taiwan_index_intraday_bars_operation",
 ]

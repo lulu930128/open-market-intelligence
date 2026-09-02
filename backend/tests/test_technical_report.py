@@ -1138,8 +1138,13 @@ class TechnicalReportTests(unittest.TestCase):
                             "label": "加權指數",
                             "market": "TWSE",
                             "source": "fugle_indices_stream",
+                            "provider": "fugle_marketdata",
                             "time": date(2026, 3, 20),
+                            "as_of": "2026-03-20T13:20:00+08:00",
                             "close": 18111.0,
+                            "previous_close": 18090.0,
+                            "change": 21.0,
+                            "change_pct": 21.0 / 18090.0 * 100,
                             "current_data_core": {
                                 "index": {
                                     "status": "selected",

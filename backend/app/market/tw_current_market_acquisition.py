@@ -56,6 +56,10 @@ class TaiwanCurrentIndexAcquisitionExecutor:
     ) -> MarketIndexAcquisitionResult:
         if plan.requirement != requirement:
             raise ValueError("current index plan does not match requirement")
+        if len(plan.routes) > 1:
+            raise ValueError(
+                "current index executor accepts one Gateway-controlled route"
+            )
         attempts = []
         providers = []
         receipts = []
@@ -63,7 +67,7 @@ class TaiwanCurrentIndexAcquisitionExecutor:
         limitations: list[str] = []
         observations = ()
         external_calls = 0
-        for route in plan.routes:
+        for route in plan.routes[:1]:
             adapter = self._adapters.get(route.resource_id)
             if adapter is None:
                 limitations.append(f"PROVIDER_ADAPTER_UNAVAILABLE:{route.resource_id}")
@@ -75,9 +79,7 @@ class TaiwanCurrentIndexAcquisitionExecutor:
             receipts.extend(acquired.receipts)
             health.extend(acquired.provider_health)
             limitations.extend(acquired.summary.limitations)
-            if acquired.observations:
-                observations = acquired.observations
-                break
+            observations = acquired.observations
         if not attempts:
             limitations.append("NO_CURRENT_INDEX_ROUTE_EXECUTED")
         return MarketIndexAcquisitionResult(
@@ -107,6 +109,10 @@ class TaiwanCurrentBreadthAcquisitionExecutor:
     ) -> MarketBreadthAcquisitionResult:
         if plan.requirement != requirement:
             raise ValueError("current breadth plan does not match requirement")
+        if len(plan.routes) > 1:
+            raise ValueError(
+                "current breadth executor accepts one Gateway-controlled route"
+            )
         attempts = []
         providers = []
         receipts = []
@@ -114,7 +120,7 @@ class TaiwanCurrentBreadthAcquisitionExecutor:
         limitations: list[str] = []
         observations = ()
         external_calls = 0
-        for route in plan.routes:
+        for route in plan.routes[:1]:
             adapter = self._adapters.get(route.resource_id)
             if adapter is None:
                 limitations.append(f"PROVIDER_ADAPTER_UNAVAILABLE:{route.resource_id}")
@@ -126,9 +132,7 @@ class TaiwanCurrentBreadthAcquisitionExecutor:
             receipts.extend(acquired.receipts)
             health.extend(acquired.provider_health)
             limitations.extend(acquired.summary.limitations)
-            if acquired.observations:
-                observations = acquired.observations
-                break
+            observations = acquired.observations
         if not attempts:
             limitations.append("NO_CURRENT_BREADTH_ROUTE_EXECUTED")
         return MarketBreadthAcquisitionResult(

@@ -40,8 +40,11 @@ TAIWAN_MARKET_HOLIDAYS: dict[int, dict[date, str]] = {
         date(2025, 4, 4): "Children's Day / Tomb Sweeping Day",
         date(2025, 5, 1): "Labor Day",
         date(2025, 5, 30): "Dragon Boat Festival",
+        date(2025, 9, 29): "Teacher's Day compensatory holiday",
         date(2025, 10, 6): "Mid-Autumn Festival",
         date(2025, 10, 10): "National Day",
+        date(2025, 10, 24): "Taiwan Retrocession Day compensatory holiday",
+        date(2025, 12, 25): "Constitution Day",
     },
     2026: {
         date(2026, 1, 1): "New Year's Day",

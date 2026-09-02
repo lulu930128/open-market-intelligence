@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import time as time_module
 from typing import Any, Protocol
@@ -23,7 +23,7 @@ from app.market.providers.tw_index_daily_bars import (
     TAIEX_OFFICIAL_DAILY_DESCRIPTOR,
     TaiwanIndexDailyBarAcquisitionExecutor,
     parse_taiex_official_daily_bars,
-    parse_tpex_official_5s_components,
+    parse_tpex_official_5s_series,
 )
 from app.market.providers import tpex, twse
 from app.market.taiwan_rules import expected_daily_price_date
@@ -33,6 +33,7 @@ from app.market.trading_calendar import (
     previous_taiwan_trading_day,
 )
 from app.market.tw_instrument import resolve_taiwan_instrument
+from app.market.tw_bar_service import TaiwanBarService
 from app.market.tw_bar_contracts import (
     TAIEX_OFFICIAL_DAILY_SOURCE,
     TPEX_DERIVED_DAILY_PROVIDER,
@@ -42,6 +43,7 @@ from app.market.tw_bar_contracts import (
 from app.market.tw_bar_materialization_transaction import (
     TaiwanBarMaterializationTransaction,
 )
+from app.market.tw_daily_reconciliation import TaiwanDailyReconciliationTransaction
 from app.market_data.integration_contracts import (
     AcquisitionResourceAttempt,
     AcquisitionStatus,
@@ -53,6 +55,8 @@ from app.market_data.integration_contracts import (
 )
 from app.market_data.gateway import BarAcquisitionResult
 from app.market_data.policies import DataPurpose
+
+TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS = 300
 
 
 class HttpResponseLike(Protocol):
@@ -136,12 +140,52 @@ def _month_starts(date_from: date, date_to: date) -> tuple[date, ...]:
     return tuple(values)
 
 
+def _bootstrap_postcondition(
+    db: Session,
+    *,
+    index_id: str,
+    date_from: date,
+    date_to: date,
+    required_sessions: int,
+    expected_latest_trade_date: date | None,
+) -> dict[str, Any]:
+    reread_at = datetime.now(TAIWAN_TZ)
+    series = TaiwanBarService(db).read_bars(
+        instrument_id=index_id,
+        interval="1d",
+        from_time=datetime.combine(date_from, time.min, tzinfo=TAIWAN_TZ),
+        to_time=datetime.combine(date_to, time.max, tzinfo=TAIWAN_TZ),
+        limit=max(required_sessions, 1),
+        include_partial=False,
+        requested_at=reread_at,
+    )
+    in_range = tuple(
+        bar
+        for bar in series.bars
+        if date_from <= bar.start_at.astimezone(TAIWAN_TZ).date() <= date_to
+    )
+    dates = tuple(bar.start_at.astimezone(TAIWAN_TZ).date() for bar in in_range)
+    latest_trade_date = max(dates, default=None)
+    satisfied = bool(
+        required_sessions > 0
+        and len(set(dates)) >= required_sessions
+        and latest_trade_date == expected_latest_trade_date
+    )
+    return {
+        "required_session_count": required_sessions,
+        "qualified_bar_count": len(set(dates)),
+        "postcondition_latest_trade_date": latest_trade_date,
+        "postcondition_checked_at": reread_at,
+        "postcondition_satisfied": satisfied,
+    }
+
+
 def bootstrap_taiex_official_daily_history(
     db: Session,
     *,
     date_from: date,
     date_to: date,
-    max_sessions: int = 260,
+    max_sessions: int = TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
     requested_at: datetime | None = None,
     fetcher: TaiexHistoryFetcher | None = None,
 ) -> dict[str, Any]:
@@ -149,10 +193,13 @@ def bootstrap_taiex_official_daily_history(
 
     if date_from > date_to:
         raise ValueError("TAIEX history date_from must not exceed date_to")
-    if max_sessions < 1 or max_sessions > 260:
-        raise ValueError("TAIEX history max_sessions must be between 1 and 260")
+    if (
+        max_sessions < 1
+        or max_sessions > TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS
+    ):
+        raise ValueError("TAIEX history max_sessions must be between 1 and 300")
     if (date_to - date_from).days > 550:
-        raise ValueError("TAIEX history range exceeds the bounded 260-session window")
+        raise ValueError("TAIEX history range exceeds the bounded 300-session window")
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
     if (
         effective_requested_at.tzinfo is None
@@ -160,6 +207,11 @@ def bootstrap_taiex_official_daily_history(
     ):
         raise ValueError("requested_at must be timezone-aware")
     instrument = resolve_taiwan_instrument(db, "TAIEX")
+    planned_sessions = plan_tpex_completed_derived_daily_history(
+        date_from=date_from,
+        date_to=date_to,
+        max_sessions=max_sessions,
+    )
     transaction = TaiwanOfficialDailyTransaction(db)
     receipts_written = bars_written = bars_unchanged = 0
     raw_result_ids: list[int] = []
@@ -259,9 +311,23 @@ def bootstrap_taiex_official_daily_history(
         months_processed.append(month_start.isoformat())
         if len(observed_dates) >= max_sessions:
             break
+    postcondition = _bootstrap_postcondition(
+        db,
+        index_id="TAIEX",
+        date_from=date_from,
+        date_to=date_to,
+        required_sessions=len(planned_sessions),
+        expected_latest_trade_date=(planned_sessions[-1] if planned_sessions else None),
+    )
     return {
         "contract_version": "tw.index_daily.bootstrap.v1",
-        "status": "success" if observed_dates else "failed",
+        "status": (
+            "success"
+            if postcondition["postcondition_satisfied"]
+            else "partial"
+            if observed_dates
+            else "failed"
+        ),
         "index_id": "TAIEX",
         "requested_from": date_from,
         "requested_to": date_to,
@@ -274,6 +340,7 @@ def bootstrap_taiex_official_daily_history(
         "bars_written": bars_written,
         "bars_unchanged": bars_unchanged,
         "raw_result_ids": list(dict.fromkeys(raw_result_ids)),
+        **postcondition,
     }
 
 
@@ -360,20 +427,53 @@ def refresh_tpex_completed_derived_daily_bar(
     )
     if receipt.error_message is not None:
         raise ValueError(receipt.error_message)
-    components = parse_tpex_official_5s_components(
+    parsed = parse_tpex_official_5s_series(
         raw_text,
         instrument=resolve_taiwan_instrument(db, "TPEX"),
         fetched_at=fetched_at,
         content_hash=content_hash,
         expected_trade_date=trade_date,
     )
-    return TaiwanBarMaterializationTransaction(
+    persistence = TaiwanBarMaterializationTransaction(
         db
     ).persist_tpex_completed_daily_acquisition(
         receipt=receipt,
-        components=components,
+        components=parsed.components,
+        formal_close_component=parsed.formal_close_component,
         as_of=effective_requested_at,
     )
+    try:
+        TaiwanDailyReconciliationTransaction(db).reconcile_tpex_daily_stat(
+            trade_date=trade_date
+        )
+    except ValueError as exc:
+        if str(exc) != "TPEX_OFFICIAL_DAILY_STAT_EVIDENCE_MISSING":
+            raise
+    return persistence
+
+
+def plan_tpex_completed_derived_daily_history(
+    *,
+    date_from: date,
+    date_to: date,
+    max_sessions: int = TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+) -> tuple[date, ...]:
+    """Return the bounded completed-session plan without provider I/O or writes."""
+
+    if date_from > date_to:
+        raise ValueError("TPEX history date_from must not exceed date_to")
+    if (
+        max_sessions < 1
+        or max_sessions > TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS
+    ):
+        raise ValueError("TPEX history max_sessions must be between 1 and 300")
+    cursor = previous_taiwan_trading_day(date_to, include_value=True)
+    sessions: list[date] = []
+    while cursor >= date_from and len(sessions) < max_sessions:
+        sessions.append(cursor)
+        cursor = previous_taiwan_trading_day(cursor, include_value=False)
+    sessions.reverse()
+    return tuple(sessions)
 
 
 def bootstrap_tpex_completed_derived_daily_history(
@@ -381,7 +481,7 @@ def bootstrap_tpex_completed_derived_daily_history(
     *,
     date_from: date,
     date_to: date,
-    max_sessions: int = 20,
+    max_sessions: int = TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
     requested_at: datetime | None = None,
     fetcher: TpexDailyFetcher | None = None,
     max_attempts: int = 3,
@@ -390,17 +490,12 @@ def bootstrap_tpex_completed_derived_daily_history(
 ) -> dict[str, Any]:
     """Bounded historical TPEX 5s materialization without synthetic OHLC."""
 
-    if date_from > date_to:
-        raise ValueError("TPEX history date_from must not exceed date_to")
-    if max_sessions < 1 or max_sessions > 20:
-        raise ValueError("TPEX history max_sessions must be between 1 and 20")
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
-    cursor = previous_taiwan_trading_day(date_to, include_value=True)
-    sessions: list[date] = []
-    while cursor >= date_from and len(sessions) < max_sessions:
-        sessions.append(cursor)
-        cursor = previous_taiwan_trading_day(cursor, include_value=False)
-    sessions.reverse()
+    sessions = plan_tpex_completed_derived_daily_history(
+        date_from=date_from,
+        date_to=date_to,
+        max_sessions=max_sessions,
+    )
     results: list[dict[str, Any]] = []
     for trade_date in sessions:
         try:
@@ -434,11 +529,23 @@ def bootstrap_tpex_completed_derived_daily_history(
                 }
             )
     success_count = sum(item["status"] == "success" for item in results)
+    postcondition = _bootstrap_postcondition(
+        db,
+        index_id="TPEX",
+        date_from=date_from,
+        date_to=date_to,
+        required_sessions=len(sessions),
+        expected_latest_trade_date=(sessions[-1] if sessions else None),
+    )
     return {
         "contract_version": "tw.index_daily.bootstrap.v1",
         "status": (
             "success"
-            if results and success_count == len(results)
+            if (
+                results
+                and success_count == len(results)
+                and postcondition["postcondition_satisfied"]
+            )
             else "partial"
             if success_count
             else "failed"
@@ -458,12 +565,15 @@ def bootstrap_tpex_completed_derived_daily_history(
             int(item.get("bars_unchanged") or 0) for item in results
         ),
         "results": results,
+        **postcondition,
     }
 
 
 __all__ = [
+    "TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS",
     "bootstrap_taiex_official_daily_history",
     "bootstrap_tpex_completed_derived_daily_history",
+    "plan_tpex_completed_derived_daily_history",
     "refresh_taiex_official_daily_bar",
     "refresh_tpex_completed_derived_daily_bar",
 ]

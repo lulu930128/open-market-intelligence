@@ -7,6 +7,7 @@ provider intraday data, persists rows, or resolves competing candidates.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import hashlib
@@ -94,15 +95,21 @@ class HttpResponseLike(Protocol):
 RouteFetcher = Callable[[ProviderResourceRouteV2], HttpResponseLike]
 
 
-def parse_tpex_official_5s_components(
+@dataclass(frozen=True)
+class TpexOfficial5sParseResult:
+    components: tuple[BarObservation, ...]
+    formal_close_component: BarObservation
+
+
+def parse_tpex_official_5s_series(
     raw_text: str,
     *,
     instrument: InstrumentKey,
     fetched_at: datetime,
     content_hash: str,
     expected_trade_date: date,
-) -> tuple[BarObservation, ...]:
-    """Parse one complete post-close 5s series without daily aggregation."""
+) -> TpexOfficial5sParseResult:
+    """Parse one complete post-close series and its explicit closing match."""
 
     if instrument != InstrumentKey(
         market=Market.TW,
@@ -132,13 +139,16 @@ def parse_tpex_official_5s_components(
     fields = table["fields"]
     value_index = fields.index("櫃買指數")
     events: list[tuple[datetime, Decimal]] = []
-    closing_summary_observed = False
+    closing_summary_value: Decimal | None = None
     for row in table["data"]:
         if not isinstance(row, list) or len(row) <= value_index:
             continue
         raw_time = str(row[0] or "").strip()
         if raw_time == "99:99:99":
-            closing_summary_observed = as_float(row[value_index]) is not None
+            parsed_value = as_float(row[value_index])
+            closing_summary_value = (
+                Decimal(str(parsed_value)) if parsed_value is not None else None
+            )
             continue
         parts = raw_time.split(":")
         value = as_float(row[value_index])
@@ -155,7 +165,7 @@ def parse_tpex_official_5s_components(
         if time(9, 0) < event_at.timetz().replace(tzinfo=None) <= time(13, 30):
             events.append((event_at, Decimal(str(value))))
     events.sort(key=lambda item: item[0])
-    if not closing_summary_observed:
+    if closing_summary_value is None:
         raise ValueError("TPEX official 5s closing summary is missing")
     expected_first = datetime.combine(expected_trade_date, time(9, 0, 5), tzinfo=TAIWAN_TZ)
     expected_last = datetime.combine(expected_trade_date, time(13, 30), tzinfo=TAIWAN_TZ)
@@ -166,7 +176,7 @@ def parse_tpex_official_5s_components(
         for (current_at, _), (following_at, _) in zip(events, events[1:])
     ):
         raise ValueError("TPEX official 5s session contains a gap")
-    return tuple(
+    components = tuple(
         BarObservation(
             instrument=instrument,
             lineage=SourceLineage(
@@ -192,6 +202,39 @@ def parse_tpex_official_5s_components(
             finalization=BarFinalization.FINAL,
         )
         for event_at, value in events
+    )
+    formal_close_at = datetime.combine(
+        expected_trade_date,
+        time(13, 30),
+        tzinfo=TAIWAN_TZ,
+    )
+    formal_close_component = BarObservation(
+        instrument=instrument,
+        lineage=SourceLineage(
+            provider=tpex.INDEX_5S_PROVIDER,
+            source=TPEX_OFFICIAL_5S_COMPONENT_SOURCE,
+            authority=AuthorityClass.EXCHANGE,
+            raw_contract_version=TPEX_OFFICIAL_5S_PARSER_VERSION,
+            event_at=formal_close_at,
+            received_at=fetched_at,
+            fetched_at=fetched_at,
+            content_hash=content_hash,
+        ),
+        interval="closing_match",
+        start_at=formal_close_at - timedelta(seconds=5),
+        end_at=formal_close_at,
+        open_price=closing_summary_value,
+        high_price=closing_summary_value,
+        low_price=closing_summary_value,
+        close_price=closing_summary_value,
+        volume=None,
+        volume_status="not_applicable",
+        price_basis="raw",
+        finalization=BarFinalization.FINAL,
+    )
+    return TpexOfficial5sParseResult(
+        components=components,
+        formal_close_component=formal_close_component,
     )
 
 
@@ -398,7 +441,8 @@ __all__ = [
     "TAIEX_DAILY_PARSER_VERSION",
     "TAIEX_DAILY_RESOURCE_ID",
     "TAIEX_OFFICIAL_DAILY_DESCRIPTOR",
+    "TpexOfficial5sParseResult",
     "TaiwanIndexDailyBarAcquisitionExecutor",
-    "parse_tpex_official_5s_components",
+    "parse_tpex_official_5s_series",
     "parse_taiex_official_daily_bars",
 ]

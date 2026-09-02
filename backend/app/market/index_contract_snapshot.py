@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session
 from app.ai.market_context.taiwan_projection import _compact_index_quote
 from app.db.models import TaiwanIndexContractSnapshot, utc_now
 from app.market.calendar_status import build_taiwan_calendar_status
-from app.market.index_resolution import resolve_taiwan_index_quote_state
+from app.market.index_resolution import (
+    ResolvedTaiwanIndexTruth,
+    resolve_taiwan_index_truth,
+)
 from app.market.indices import (
     get_market_index_intraday,
     get_market_index_summary,
@@ -163,20 +166,32 @@ def capture_taiwan_index_contract_snapshot(
         intraday = intraday_reader(normalized_index_id)
         summary_payload = summary_call(db, False)
         summary = _summary_row(summary_payload, normalized_index_id)
+        embedded_resolution = summary.get("resolution")
+        truth: ResolvedTaiwanIndexTruth | None = None
+        if isinstance(embedded_resolution, dict):
+            try:
+                truth = ResolvedTaiwanIndexTruth.model_validate(
+                    embedded_resolution
+                )
+            except ValueError:
+                truth = None
+        if truth is None:
+            truth = resolve_taiwan_index_truth(
+                intraday=intraday,
+                index_snapshot=summary,
+                calendar_status=calendar_status,
+                index_id=normalized_index_id,
+                acquisition_policy=str(
+                    intraday.get("acquisition_policy") or "prefer_live"
+                ),
+            )
+        resolution = truth.model_dump(mode="json")
+        summary = {**summary, "resolution": resolution}
         quote = _compact_index_quote(
             index_id=normalized_index_id,
             index_snapshot=summary,
             intraday=intraday,
             calendar_status=calendar_status,
-        )
-        resolution = resolve_taiwan_index_quote_state(
-            intraday=intraday,
-            index_snapshot=summary,
-            calendar_status=calendar_status,
-            index_id=normalized_index_id,
-            acquisition_policy=str(
-                intraday.get("acquisition_policy") or "prefer_live"
-            ),
         )
         payload = {
             "kind": "taiwan_index_contract_snapshot",
