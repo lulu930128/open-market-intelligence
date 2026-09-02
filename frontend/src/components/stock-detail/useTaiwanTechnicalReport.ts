@@ -11,12 +11,10 @@ export function useTaiwanTechnicalReport({
   effectiveTimeframe,
   isIndexProduct,
   stockId,
-  todayUpdatedAt,
 }: {
   effectiveTimeframe: Timeframe;
   isIndexProduct: boolean;
   stockId: string | null;
-  todayUpdatedAt: string | null;
 }) {
   const [report, setReport] = useState<StockTechnicalReportRead | null>(null);
   const activeStockIdRef = useRef(stockId);
@@ -71,7 +69,7 @@ export function useTaiwanTechnicalReport({
       cancelled = true;
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
     };
-  }, [effectiveTimeframe, isIndexProduct, stockId, todayUpdatedAt]);
+  }, [effectiveTimeframe, isIndexProduct, stockId]);
 
   return report;
 }

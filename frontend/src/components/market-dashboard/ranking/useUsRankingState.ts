@@ -25,7 +25,7 @@ type UseUsRankingStateOptions = {
   onError: (kind: UsRankingErrorKind, error: unknown, groupId: number) => void;
 };
 
-const WATCHLIST_INTRADAY_LIMIT = 30;
+const WATCHLIST_CURRENT_QUOTE_LIMIT = 30;
 
 function formatDashboardTime(value: Date) {
   const parts = Object.fromEntries(
@@ -60,6 +60,7 @@ export function useUsRankingState({
   const [rankingRevision, setRankingRevision] = useState(0);
   const [watchlistVersion, setWatchlistVersion] = useState(0);
   const requestSeqRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
   const finalRefreshDateRef = useRef<string | null>(null);
   const freshnessRequestKeysRef = useRef(new Set<string>());
   const initialPreloadQueuedRef = useRef(false);
@@ -85,6 +86,9 @@ export function useUsRankingState({
     ): Promise<USWatchlistRankingRead | null> => {
       const requestSeq = requestSeqRef.current + 1;
       requestSeqRef.current = requestSeq;
+      requestAbortRef.current?.abort();
+      const requestAbort = new AbortController();
+      requestAbortRef.current = requestAbort;
 
       if (!options?.silent) {
         setLoadState("loading");
@@ -104,9 +108,10 @@ export function useUsRankingState({
             enabled_only: true,
             rank_by: currentRankBy,
             sort_order: currentRankBy === "none" ? "asc" : "desc",
-            use_intraday: marketState.isPollingWindow,
-            intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-          }
+            use_current_quote: marketState.isPollingWindow,
+            intraday_limit: WATCHLIST_CURRENT_QUOTE_LIMIT,
+          },
+          { signal: requestAbort.signal }
         );
 
         if (requestSeqRef.current !== requestSeq) return null;
@@ -118,10 +123,15 @@ export function useUsRankingState({
         return rankingData;
       } catch (error) {
         if (requestSeqRef.current !== requestSeq) return null;
+        if (error instanceof DOMException && error.name === "AbortError") return null;
 
         setLoadState("error");
         onErrorRef.current("ranking", error, currentGroupId);
         return null;
+      } finally {
+        if (requestAbortRef.current === requestAbort) {
+          requestAbortRef.current = null;
+        }
       }
     },
     []
@@ -173,6 +183,7 @@ export function useUsRankingState({
 
   const changeRankBy = useCallback((value: UsRankBy) => {
     requestSeqRef.current += 1;
+    requestAbortRef.current?.abort();
     rankByRef.current = value;
     setRankBy(value);
     setRanking(null);
@@ -181,6 +192,7 @@ export function useUsRankingState({
 
   const reset = useCallback(() => {
     requestSeqRef.current += 1;
+    requestAbortRef.current?.abort();
     setRanking(null);
     setLoadState("idle");
   }, []);
@@ -193,6 +205,7 @@ export function useUsRankingState({
   useEffect(() => {
     return () => {
       requestSeqRef.current += 1;
+      requestAbortRef.current?.abort();
     };
   }, []);
 

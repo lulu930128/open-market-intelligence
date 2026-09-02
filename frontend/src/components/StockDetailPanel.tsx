@@ -118,6 +118,7 @@ import type {
   MarketIndexSummary,
   OhlcIntradayOverlay,
   StockIndicatorPoint,
+  TaiwanChartBundleRead,
   TaiwanCorporateEventRead,
   TaiwanStockQuoteDepthPreviewMode,
 } from "@/types/market";
@@ -135,11 +136,7 @@ type Props = {
   stockName: string | null;
   stockMarket?: string | null;
   instrumentType?: string | null;
-  initialChartData?: ChartPoint[];
-  initialChartIntradayOverlay?: OhlcIntradayOverlay | null;
-  initialChartStockId?: string | null;
-  initialChartVolumeUnit?: string | null;
-  initialIndicatorData?: StockIndicatorPoint[];
+  initialChartBundle?: TaiwanChartBundleRead | null;
   watchlistRankingPanel?: ReactNode;
   marketIndexSummary?: MarketIndexSummary | null;
   onChartFocusModeChange?: (active: boolean) => void;
@@ -365,11 +362,7 @@ export default function StockDetailPanel({
   stockName,
   stockMarket = null,
   instrumentType = null,
-  initialChartData = [],
-  initialChartIntradayOverlay = null,
-  initialChartStockId = null,
-  initialChartVolumeUnit = "shares",
-  initialIndicatorData = [],
+  initialChartBundle = null,
   watchlistRankingPanel,
   marketIndexSummary,
   onChartFocusModeChange,
@@ -718,11 +711,7 @@ export default function StockDetailPanel({
     chartFocusMode,
     currentStockInfoMarket,
     effectiveTimeframe,
-    initialChartData,
-    initialChartIntradayOverlay,
-    initialChartStockId,
-    initialChartVolumeUnit,
-    initialIndicatorData,
+    initialChartBundle,
     isIndexProduct,
     professionalTimeframe,
     publishDataStatus: publishDetailDataStatus,
@@ -741,7 +730,6 @@ export default function StockDetailPanel({
     effectiveTimeframe,
     isIndexProduct,
     stockId,
-    todayUpdatedAt,
   });
   const benchmarkLabel =
     benchmarkIndexId === "TPEX"

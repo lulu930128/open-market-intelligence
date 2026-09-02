@@ -19,11 +19,11 @@ import type {
   USWatchlistRankingItemRead,
   USWatchlistRankingRead,
 } from "@/types/market";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
-const WATCHLIST_INTRADAY_LIMIT = 30;
+const WATCHLIST_CURRENT_QUOTE_LIMIT = 30;
 
 type Props = {
   selectedGroupId: number | null;
@@ -81,7 +81,9 @@ function trendClass(value: number | null | undefined) {
 }
 
 function statusLabel(t: TranslationFunction, status: string) {
-  if (status === "intraday") return t("statusLabels.intraday");
+  if (status === "intraday" || status === "current_quote") {
+    return t("statusLabels.intraday");
+  }
   if (status === "extended_hours") return t("usStockDetail.extendedHours.scopes.extended");
   if (status === "ready") return t("statusLabels.ready");
   return rowStatusLabel(t, status);
@@ -108,6 +110,8 @@ export default function USWatchlistRankingPanel({
   const [ranking, setRanking] = useState<USWatchlistRankingRead | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const requestSeqRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
 
   const sortOrder = rankBy === "none" ? "asc" : "desc";
   const rankingDataStatusContextKey = `us:watchlist:${selectedGroupId ?? "all"}:ranking`;
@@ -151,6 +155,11 @@ export default function USWatchlistRankingPanel({
   );
 
   const loadRanking = useCallback(async (options?: { silent?: boolean }) => {
+    const requestSeq = requestSeqRef.current + 1;
+    requestSeqRef.current = requestSeq;
+    requestAbortRef.current?.abort();
+    const requestAbort = new AbortController();
+    requestAbortRef.current = requestAbort;
     if (!options?.silent) {
       setLoadState("loading");
     }
@@ -161,8 +170,8 @@ export default function USWatchlistRankingPanel({
       enabled_only: true,
       rank_by: rankBy,
       sort_order: sortOrder,
-      use_intraday: marketState.isLiveWindow,
-      intraday_limit: WATCHLIST_INTRADAY_LIMIT,
+      use_current_quote: marketState.isLiveWindow,
+      intraday_limit: WATCHLIST_CURRENT_QUOTE_LIMIT,
       intraday_session_scope: marketState.intradaySessionScope,
     };
 
@@ -173,20 +182,32 @@ export default function USWatchlistRankingPanel({
     try {
       const data = await fetchJson<USWatchlistRankingRead>(
         "/api/us-market/watchlists/ranking",
-        params
+        params,
+        { signal: requestAbort.signal }
       );
+      if (requestSeqRef.current !== requestSeq) return;
       setRanking(data);
       setLastUpdatedAt(new Date().toLocaleString("zh-TW", { hour12: false }));
       setLoadState("success");
     } catch (error) {
+      if (requestSeqRef.current !== requestSeq) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
       setRanking(null);
       setLoadState("error");
       publishRankingDataStatus(
         t("dashboard.ranking.usReadError"),
         error instanceof Error ? error.message : t("dashboard.ranking.usReadError")
       );
+    } finally {
+      if (requestAbortRef.current === requestAbort) {
+        requestAbortRef.current = null;
+      }
     }
   }, [publishRankingDataStatus, rankBy, selectedGroupId, sortOrder, t]);
+
+  useEffect(() => {
+    return () => requestAbortRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

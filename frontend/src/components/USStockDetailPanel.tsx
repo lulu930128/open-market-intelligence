@@ -88,6 +88,7 @@ import type {
   USCompanyProfileRead,
   USCorporateActionRead,
   USOhlcChartRead,
+  USResolvedQuoteSnapshot,
   USResourceRefreshResultRead,
   USSecCompanyFactRead,
   USSecFactRefreshResultRead,
@@ -351,18 +352,18 @@ async function fetchOptionalJson<T>(
 }
 
 type USSupplementalData = {
-  factData: USSecCompanyFactRead[];
-  fundamentalData: USSecFundamentalSummaryRead | null;
-  financialData: USSecFinancialContractRead | null;
-  profileData: USCompanyProfileRead | null;
-  actionData: USCorporateActionRead[];
-  eventSummaryData: USCorporateEventSummaryRead | null;
-  eventSummaryError: unknown | null;
-  shortVolumeData: USShortVolumeDailyRead[];
-  insiderData: USSecInsiderTransactionsRead | null;
-  insiderError: unknown | null;
-  institutionalData: USSec13FInstitutionalHoldingsRead | null;
-  institutionalError: unknown | null;
+  factData?: USSecCompanyFactRead[];
+  fundamentalData?: USSecFundamentalSummaryRead | null;
+  financialData?: USSecFinancialContractRead | null;
+  profileData?: USCompanyProfileRead | null;
+  actionData?: USCorporateActionRead[];
+  eventSummaryData?: USCorporateEventSummaryRead | null;
+  eventSummaryError?: unknown | null;
+  shortVolumeData?: USShortVolumeDailyRead[];
+  insiderData?: USSecInsiderTransactionsRead | null;
+  insiderError?: unknown | null;
+  institutionalData?: USSec13FInstitutionalHoldingsRead | null;
+  institutionalError?: unknown | null;
 };
 
 type USIntradayMeta = {
@@ -415,9 +416,19 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     response.current_observation?.price_semantics === "resolved_quote_last_trade"
       ? quoteExpectation
       : barExpectation;
+  const currentSourceStatus = response.current_source_status ?? null;
+  const currentSessionRejected = Boolean(
+    currentSourceStatus?.current_session_expected === true &&
+      currentSourceStatus.current_session_satisfied !== true
+  );
+  const historicalTradeRejected = ["old", "historical"].includes(
+    currentSourceStatus?.trade_recency ?? ""
+  );
   const projectedCurrentPrice =
-    currentExpectation &&
-    !["ready", "stale"].includes(currentExpectation.outcome)
+    currentSessionRejected ||
+    historicalTradeRejected ||
+    (currentExpectation &&
+    !["ready", "stale"].includes(currentExpectation.outcome))
       ? null
       : response.current_observation?.value ?? null;
   return {
@@ -434,7 +445,7 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     ),
     warnings: response.warnings ?? [],
     volumePace: response.volume_pace ?? null,
-    currentSourceStatus: response.current_source_status ?? null,
+    currentSourceStatus,
     barSourceStatus: response.bar_source_status ?? response.source_status ?? null,
     currentPrice: projectedCurrentPrice,
     currentPreviousClose: response.current_observation?.previous_close ?? null,
@@ -454,6 +465,29 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     currentObservedAt: response.current_observation?.observed_at ?? null,
     quoteExpectation,
   };
+}
+
+function currentSessionTrendPoints(response: IntradayTrendResponse) {
+  const coverage = response.session_coverage;
+  if (coverage?.current_session_expected === true) {
+    if (
+      coverage.current_session_satisfied !== true ||
+      !coverage.expected_trade_date ||
+      coverage.trade_date !== coverage.expected_trade_date
+    ) {
+      return [];
+    }
+  } else if (
+    coverage?.current_session_expected === undefined &&
+    ["pre_market", "regular", "after_hours"].includes(
+      response.market_phase ?? ""
+    ) &&
+    response.session_date_relation?.current_session_date &&
+    coverage?.trade_date !== response.session_date_relation.current_session_date
+  ) {
+    return [];
+  }
+  return response.points;
 }
 
 function currentQuoteUnavailableMessageKey(
@@ -580,80 +614,96 @@ function intradaySourcePresentation(
   };
 }
 
-async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalData> {
+async function fetchUsSupplementalData(
+  symbol: string,
+  tab: USFundamentalTab
+): Promise<USSupplementalData> {
   const encodedSymbol = encodeURIComponent(symbol);
-  const [
-    factData,
-    fundamentalData,
-    financialData,
-    profileData,
-    actionData,
-    eventSummaryResult,
-    shortVolumeData,
-    insiderResult,
-    institutionalResult,
-  ] = await Promise.all([
-    fetchJson<USSecCompanyFactRead[]>(
-      `/api/us-market/sec/${encodedSymbol}/facts`,
-      {
+  if (tab === "financials") {
+    const [factData, fundamentalData, financialData] = await Promise.all([
+      fetchJson<USSecCompanyFactRead[]>(`/api/us-market/sec/${encodedSymbol}/facts`, {
         limit: 24,
         offset: 0,
-      }
-    ).catch(() => []),
-    fetchOptionalJson<USSecFundamentalSummaryRead>(
-      `/api/us-market/sec/${encodedSymbol}/fundamentals`
-    ).catch(() => null),
-    fetchOptionalJson<USSecFinancialContractRead>(
-      `/api/us-market/sec/${encodedSymbol}/financials`,
-      { periods: 8 }
-    ).catch(() => null),
-    fetchOptionalJson<USCompanyProfileRead>(
-      `/api/us-market/profiles/${encodedSymbol}`
-    ).catch(() => null),
-    fetchJson<USCorporateActionRead[]>(
-      `/api/us-market/corporate-actions/${encodedSymbol}`,
-      {
-        limit: 8,
+      }).catch(() => []),
+      fetchOptionalJson<USSecFundamentalSummaryRead>(
+        `/api/us-market/sec/${encodedSymbol}/fundamentals`
+      ).catch(() => null),
+      fetchOptionalJson<USSecFinancialContractRead>(
+        `/api/us-market/sec/${encodedSymbol}/financials`,
+        { periods: 8 }
+      ).catch(() => null),
+    ]);
+    return { factData, fundamentalData, financialData };
+  }
+  if (tab === "overview") {
+    const [profileData, actionData, eventSummaryResult] = await Promise.all([
+      fetchOptionalJson<USCompanyProfileRead>(
+        `/api/us-market/profiles/${encodedSymbol}`
+      ).catch(() => null),
+      fetchJson<USCorporateActionRead[]>(
+        `/api/us-market/corporate-actions/${encodedSymbol}`,
+        { limit: 8, offset: 0 }
+      ).catch(() => []),
+      fetchJson<USCorporateEventSummaryRead>(
+        `/api/us-market/corporate-events/${encodedSymbol}/summary`
+      )
+        .then((data) => ({ data, error: null }))
+        .catch((error: unknown) => ({ data: null, error })),
+    ]);
+    return {
+      profileData,
+      actionData,
+      eventSummaryData: eventSummaryResult.data,
+      eventSummaryError: eventSummaryResult.error,
+    };
+  }
+  if (tab === "filings") {
+    const [factData, actionData, eventSummaryResult] = await Promise.all([
+      fetchJson<USSecCompanyFactRead[]>(`/api/us-market/sec/${encodedSymbol}/facts`, {
+        limit: 24,
         offset: 0,
-      }
-    ).catch(() => []),
-    fetchJson<USCorporateEventSummaryRead>(
-      `/api/us-market/corporate-events/${encodedSymbol}/summary`
-    )
-      .then((data) => ({ data, error: null }))
-      .catch((error: unknown) => ({ data: null, error })),
-    fetchJson<USShortVolumeDailyRead[]>(
-      `/api/us-market/short-volume/${encodedSymbol}/history`,
-      {
-        limit: 8,
-        offset: 0,
-      }
-    ).catch(() => []),
-    fetchJson<USSecInsiderTransactionsRead>(
+      }).catch(() => []),
+      fetchJson<USCorporateActionRead[]>(
+        `/api/us-market/corporate-actions/${encodedSymbol}`,
+        { limit: 8, offset: 0 }
+      ).catch(() => []),
+      fetchJson<USCorporateEventSummaryRead>(
+        `/api/us-market/corporate-events/${encodedSymbol}/summary`
+      )
+        .then((data) => ({ data, error: null }))
+        .catch((error: unknown) => ({ data: null, error })),
+    ]);
+    return {
+      factData,
+      actionData,
+      eventSummaryData: eventSummaryResult.data,
+      eventSummaryError: eventSummaryResult.error,
+    };
+  }
+  if (tab === "short") {
+    return {
+      shortVolumeData: await fetchJson<USShortVolumeDailyRead[]>(
+        `/api/us-market/short-volume/${encodedSymbol}/history`,
+        { limit: 8, offset: 0 }
+      ).catch(() => []),
+    };
+  }
+  if (tab === "insider") {
+    const insiderResult = await fetchJson<USSecInsiderTransactionsRead>(
       `/api/us-market/sec/${encodedSymbol}/insider-transactions`,
       { limit: 100 }
     )
       .then((data) => ({ data, error: null }))
-      .catch((error: unknown) => ({ data: null, error })),
-    fetchJson<USSec13FInstitutionalHoldingsRead>(
-      `/api/us-market/sec/${encodedSymbol}/institutional-holdings`,
-      { manager_limit: 100 }
-    )
-      .then((data) => ({ data, error: null }))
-      .catch((error: unknown) => ({ data: null, error })),
-  ]);
-
+      .catch((error: unknown) => ({ data: null, error }));
+    return { insiderData: insiderResult.data, insiderError: insiderResult.error };
+  }
+  const institutionalResult = await fetchJson<USSec13FInstitutionalHoldingsRead>(
+    `/api/us-market/sec/${encodedSymbol}/institutional-holdings`,
+    { manager_limit: 100 }
+  )
+    .then((data) => ({ data, error: null }))
+    .catch((error: unknown) => ({ data: null, error }));
   return {
-    factData,
-    fundamentalData,
-    financialData,
-    profileData,
-    actionData,
-    eventSummaryData: eventSummaryResult.data,
-    eventSummaryError: eventSummaryResult.error,
-    shortVolumeData,
-    insiderData: insiderResult.data,
-    insiderError: insiderResult.error,
     institutionalData: institutionalResult.data,
     institutionalError: institutionalResult.error,
   };
@@ -1001,6 +1051,7 @@ export default function USStockDetailPanel({
   const [activeDataTab, setActiveDataTab] = useState<USFundamentalTab>("financials");
   const [selectedStock, setSelectedStock] = useState<USStockMasterRead | null>(null);
   const [chart, setChart] = useState<USOhlcChartRead | null>(null);
+  const [headlineQuote, setHeadlineQuote] = useState<USResolvedQuoteSnapshot | null>(null);
   const [marketResearch, setMarketResearch] = useState<USMarketResearchRead | null>(null);
   const [professionalIntraday, setProfessionalIntraday] =
     useState<IntradayTrendResponse | null>(null);
@@ -1020,6 +1071,9 @@ export default function USStockDetailPanel({
   const [todaySource, setTodaySource] = useState("unavailable");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
   const [todayIntradayMeta, setTodayIntradayMeta] = useState<USIntradayMeta>(emptyUsIntradayMeta);
+  const [todaySymbol, setTodaySymbol] = useState<string | null>(null);
+  const [todaySessionScope, setTodaySessionScope] =
+    useState<USIntradaySessionScope | null>(null);
   const [intradaySessionScope, setIntradaySessionScope] =
     useState<USIntradaySessionScope>(() => defaultUsIntradaySessionScope());
   const [intradayIndicators, setIntradayIndicators] =
@@ -1037,6 +1091,9 @@ export default function USStockDetailPanel({
   const [refreshingInsiders, setRefreshingInsiders] = useState(false);
   const [successMessage, setSuccessMessage] = useState<SuccessMessage>(null);
   const requestSeq = useRef(0);
+  const chartRequestSeq = useRef(0);
+  const supplementalRequestSeq = useRef(0);
+  const supplementalLoadedKeysRef = useRef(new Set<string>());
   const finalIntradayRefreshDate = useRef<string | null>(null);
   const intradaySourceEventStateRef = useRef<Map<string, string>>(new Map());
   const ohlcCoverageEventStateRef = useRef<Map<string, string>>(new Map());
@@ -1091,19 +1148,35 @@ export default function USStockDetailPanel({
   const chartData = useMemo(() => {
     return chartMatchesSelection ? chart?.points.map(toChartPoint) ?? [] : [];
   }, [chart, chartMatchesSelection]);
-  const visibleTodayTrend = useMemo(
-    () => (chartMatchesSelection ? todayTrend : []),
-    [chartMatchesSelection, todayTrend]
+  const todayMatchesSelection = Boolean(
+    selectedSymbol &&
+      usSymbolKey(todaySymbol) === usSymbolKey(selectedSymbol) &&
+      todaySessionScope === intradaySessionScope
   );
-  const visibleTodayPreviousClose = chartMatchesSelection ? todayPreviousClose : null;
-  const visibleTodayPreviousCloseStatus = chartMatchesSelection
+  const visibleTodayTrend = useMemo(
+    () => (todayMatchesSelection ? todayTrend : []),
+    [todayMatchesSelection, todayTrend]
+  );
+  const visibleTodayPreviousClose = todayMatchesSelection ? todayPreviousClose : null;
+  const visibleTodayPreviousCloseStatus = todayMatchesSelection
     ? todayPreviousCloseStatus
     : "unknown";
-  const visibleTodaySource = chartMatchesSelection ? todaySource : "unavailable";
-  const visibleTodayUpdatedAt = chartMatchesSelection ? todayUpdatedAt : null;
-  const visibleTodayIntradayMeta = chartMatchesSelection
+  const visibleTodaySource = todayMatchesSelection ? todaySource : "unavailable";
+  const visibleTodayUpdatedAt = todayMatchesSelection ? todayUpdatedAt : null;
+  const visibleTodayIntradayMeta = todayMatchesSelection
     ? todayIntradayMeta
     : emptyUsIntradayMeta;
+  const visibleHeadlineQuote =
+    usSymbolKey(headlineQuote?.quote?.symbol) === usSymbolKey(selectedSymbol)
+      ? headlineQuote
+      : null;
+  const headlineQuoteRaw = visibleHeadlineQuote?.quote?.last_trade_price ?? null;
+  const headlineQuotePrice =
+    visibleHeadlineQuote?.facts_usable &&
+    headlineQuoteRaw !== null &&
+    Number.isFinite(Number(headlineQuoteRaw))
+      ? Number(headlineQuoteRaw)
+      : null;
   const professionalIsIntraday = isUsProfessionalIntradayTimeframe(professionalTimeframe);
   const professionalIntradayMatchesSelection = Boolean(
     selectedSymbol &&
@@ -1127,9 +1200,16 @@ export default function USStockDetailPanel({
   const latestPoint = chartData[chartData.length - 1] ?? null;
   const latestProfessionalPoint = professionalChartData[professionalChartData.length - 1] ?? null;
   const displayDate =
-    visibleTodayIntradayMeta.currentObservedAt ?? latestToday?.time ?? latestPoint?.time ?? null;
-  const latestClose = visibleTodayIntradayMeta.currentPrice;
-  const previousClose = visibleTodayIntradayMeta.changeReferencePrice;
+    visibleHeadlineQuote?.quote?.event_at ??
+    visibleHeadlineQuote?.selected_event_at ??
+    visibleTodayIntradayMeta.currentObservedAt ??
+    latestToday?.time ??
+    latestPoint?.time ??
+    null;
+  const latestClose = headlineQuotePrice ?? visibleTodayIntradayMeta.currentPrice;
+  const previousClose =
+    (chart?.previous_close_status === "current" ? chart.previous_close : null) ??
+    visibleTodayIntradayMeta.changeReferencePrice;
   const change =
     latestClose !== null && previousClose !== null
       ? latestClose - previousClose
@@ -1634,348 +1714,237 @@ export default function USStockDetailPanel({
     (item) => item.status === "ready"
   ).length;
 
-  const loadSymbolData = useCallback(
+  const clearSupplementalData = useCallback(() => {
+    setFactRows([]);
+    setFundamentalSummary(null);
+    setFinancialContract(null);
+    setCompanyProfile(null);
+    onCompanyProfileChange?.(null);
+    setCorporateActions([]);
+    setCorporateEventSummary(null);
+    setShortVolumeRows([]);
+    setInsiderTransactions(null);
+    setInstitutionalHoldings(null);
+  }, [onCompanyProfileChange]);
+
+  const loadStockIdentity = useCallback(
+    async (symbol: string, generation: number) => {
+      if (getUsMarketIndexConfig(symbol)) {
+        if (requestSeq.current === generation) setSelectedStock(null);
+        return;
+      }
+      try {
+        const stockData = await fetchJson<USStockMasterRead>(
+          `/api/us-market/stocks/${encodeURIComponent(symbol)}`
+        );
+        if (requestSeq.current === generation) setSelectedStock(stockData);
+      } catch (error) {
+        if (requestSeq.current !== generation) return;
+        setSelectedStock(null);
+        publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
+      }
+    },
+    [publishDetailDataStatus]
+  );
+
+  const loadChartData = useCallback(
     async (symbol: string, nextTimeframe: USChartTimeframe) => {
-      const requestId = requestSeq.current + 1;
-      requestSeq.current = requestId;
+      const generation = requestSeq.current;
+      const requestId = chartRequestSeq.current + 1;
+      chartRequestSeq.current = requestId;
       setLoadState("loading");
-      setFactLoadState("loading");
-      setSuccessMessage(null);
+
+      const historicalTimeframe: USHistoricalTimeframe =
+        nextTimeframe === "today" ? "daily" : nextTimeframe;
+      const indexConfig = getUsMarketIndexConfig(symbol);
+      const requestedBars =
+        indexConfig && nextTimeframe === "today" ? 90 : barsByTimeframe[historicalTimeframe];
+      const outputsize =
+        indexConfig && nextTimeframe !== "today"
+          ? "full"
+          : historicalTimeframe === "monthly"
+            ? "full"
+            : "compact";
 
       try {
-        const indexConfig = getUsMarketIndexConfig(symbol);
-
-        if (indexConfig) {
-          if (nextTimeframe === "today") {
-            const [todayData, dailyChartData] = await Promise.all([
-              fetchUsIntradayTrend(symbol, intradaySessionScope),
-              fetchJson<USOhlcChartRead>(
-                `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
-                {
-                  timeframe: "daily",
-                  bars: 90,
-                  ensure_history: false,
-                  outputsize: "compact",
-                }
-              ),
-            ]);
-
-            if (requestSeq.current !== requestId) return;
-            if (dailyChartData.backfill) onDailyPricesChangedRef.current?.();
-
-            const latestIntradayPoint = todayData.points[todayData.points.length - 1] ?? null;
-            const marketState = getUsMarketRefreshState();
-
-            if (marketState.isAfterClose) {
-              finalIntradayRefreshDate.current = marketState.dateKey;
-            }
-
-            setSelectedStock(null);
-            setChart(dailyChartData);
-            setTodayTrend(todayData.points);
-            setTodayPreviousClose(todayData.previous_close);
-            setTodayPreviousCloseStatus(todayData.previous_close_status ?? "unknown");
-            setTodaySource(todayData.source);
-            setTodayIntradayMeta(intradayMetaFromResponse(todayData));
-            publishIntradaySourceStatus(symbol, todayData);
-            setTodayUpdatedAt(
-              latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
-            );
-            setFactRows([]);
-            setFundamentalSummary(null);
-            setFinancialContract(null);
-            setCompanyProfile(null);
-            onCompanyProfileChange?.(null);
-            setCorporateActions([]);
-            setCorporateEventSummary(null);
-            setShortVolumeRows([]);
-            setInsiderTransactions(null);
-            setInstitutionalHoldings(null);
-            setLoadState("success");
-            setFactLoadState("success");
-            return;
+        const chartDataResponse = await fetchJson<USOhlcChartRead>(
+          `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
+          {
+            timeframe: historicalTimeframe,
+            bars: requestedBars,
+            ensure_history: false,
+            outputsize,
           }
-
-          const [chartDataResponse, currentData] = await Promise.all([
-            fetchJson<USOhlcChartRead>(
-              `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
-              {
-                timeframe: nextTimeframe,
-                bars: barsByTimeframe[nextTimeframe],
-                ensure_history: false,
-                outputsize: "full",
-              }
-            ),
-            fetchUsIntradayTrend(symbol, intradaySessionScope),
-          ]);
-
-          if (requestSeq.current !== requestId) return;
-          if (chartDataResponse.backfill) onDailyPricesChangedRef.current?.();
-
-          setSelectedStock(null);
-          setChart(chartDataResponse);
-          setTodayTrend(currentData.points);
-          setTodayPreviousClose(currentData.previous_close);
-          setTodayPreviousCloseStatus(currentData.previous_close_status ?? "unknown");
-          setTodaySource(currentData.source);
-          setTodayUpdatedAt(currentData.current_observation?.observed_at ?? null);
-          setTodayIntradayMeta(intradayMetaFromResponse(currentData));
-          publishIntradaySourceStatus(symbol, currentData);
-          setFactRows([]);
-          setFundamentalSummary(null);
-          setFinancialContract(null);
-          setCompanyProfile(null);
-          onCompanyProfileChange?.(null);
-          setCorporateActions([]);
-          setCorporateEventSummary(null);
-          setShortVolumeRows([]);
-          setInsiderTransactions(null);
-          setInstitutionalHoldings(null);
-          setLoadState("success");
-          setFactLoadState("success");
+        );
+        if (
+          requestSeq.current !== generation ||
+          chartRequestSeq.current !== requestId
+        ) {
           return;
         }
-
-        if (nextTimeframe === "today") {
-          const [
-            stockData,
-            todayData,
-            dailyChartData,
-          ] = await Promise.all([
-            fetchJson<USStockMasterRead>(
-              `/api/us-market/stocks/${encodeURIComponent(symbol)}`
-            ),
-            fetchUsIntradayTrend(symbol, intradaySessionScope),
-            fetchJson<USOhlcChartRead>(
-              `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
-              {
-                timeframe: "daily",
-                bars: barsByTimeframe.daily,
-                ensure_history: false,
-                outputsize: "compact",
-              }
-            ),
-          ]);
-
-          if (requestSeq.current !== requestId) return;
-          if (dailyChartData.backfill) onDailyPricesChangedRef.current?.();
-
-          const latestIntradayPoint = todayData.points[todayData.points.length - 1] ?? null;
-          const marketState = getUsMarketRefreshState();
-
-          if (marketState.isAfterClose) {
-            finalIntradayRefreshDate.current = marketState.dateKey;
-          }
-
-          setSelectedStock(stockData);
-          setChart(dailyChartData);
-          setTodayTrend(todayData.points);
-          setTodayPreviousClose(todayData.previous_close);
-          setTodayPreviousCloseStatus(todayData.previous_close_status ?? "unknown");
-          setTodaySource(todayData.source);
-          setTodayIntradayMeta(intradayMetaFromResponse(todayData));
-          publishIntradaySourceStatus(symbol, todayData);
-          setTodayUpdatedAt(
-            latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
-          );
-          setFactRows([]);
-          setFundamentalSummary(null);
-          setFinancialContract(null);
-          setCompanyProfile(null);
-          onCompanyProfileChange?.(null);
-          setCorporateActions([]);
-          setCorporateEventSummary(null);
-          setShortVolumeRows([]);
-          setInsiderTransactions(null);
-          setInstitutionalHoldings(null);
-          setLoadState("success");
-          setFactLoadState("loading");
-          void fetchUsSupplementalData(symbol)
-            .then((supplementalData) => {
-              if (requestSeq.current !== requestId) return;
-
-              setFactRows(supplementalData.factData);
-              setFundamentalSummary(supplementalData.fundamentalData);
-              setFinancialContract(supplementalData.financialData);
-              setCompanyProfile(supplementalData.profileData);
-              onCompanyProfileChange?.(supplementalData.profileData);
-              setCorporateActions(supplementalData.actionData);
-              setCorporateEventSummary(supplementalData.eventSummaryData);
-              setShortVolumeRows(supplementalData.shortVolumeData);
-              setInsiderTransactions(supplementalData.insiderData);
-              setInstitutionalHoldings(supplementalData.institutionalData);
-              if (supplementalData.eventSummaryError) {
-                publishDetailDataStatus(
-                  tRef.current("settings.calendar.loadError"),
-                  supplementalData.eventSummaryError
-                );
-              }
-              if (supplementalData.insiderError) {
-                publishDetailDataStatus(
-                  tRef.current("usStockDetail.errors.insiderLoadFailed"),
-                  supplementalData.insiderError
-                );
-              }
-              if (supplementalData.institutionalError) {
-                publishDetailDataStatus(
-                  tRef.current("usStockDetail.institutions.loadFailed"),
-                  supplementalData.institutionalError
-                );
-              }
-              setFactLoadState("success");
-            })
-            .catch((error) => {
-              if (requestSeq.current !== requestId) return;
-              setFactLoadState("error");
-              publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
-            });
-          return;
-        }
-
-        const [stockData, chartDataResponse, currentData] = await Promise.all([
-          fetchJson<USStockMasterRead>(
-            `/api/us-market/stocks/${encodeURIComponent(symbol)}`
-          ),
-          fetchJson<USOhlcChartRead>(
-            `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
-            {
-              timeframe: nextTimeframe,
-              bars: barsByTimeframe[nextTimeframe],
-              ensure_history: false,
-              outputsize: nextTimeframe === "monthly" ? "full" : "compact",
-            }
-          ),
-          fetchUsIntradayTrend(symbol, intradaySessionScope),
-        ]);
-
-        if (requestSeq.current !== requestId) return;
         if (chartDataResponse.backfill) onDailyPricesChangedRef.current?.();
-
-        setSelectedStock(stockData);
         setChart(chartDataResponse);
-        setTodayTrend(currentData.points);
-        setTodayPreviousClose(currentData.previous_close);
-        setTodayPreviousCloseStatus(currentData.previous_close_status ?? "unknown");
-        setTodaySource(currentData.source);
-        setTodayUpdatedAt(currentData.current_observation?.observed_at ?? null);
-        setTodayIntradayMeta(intradayMetaFromResponse(currentData));
-        publishIntradaySourceStatus(symbol, currentData);
-        setFactRows([]);
-        setFundamentalSummary(null);
-        setFinancialContract(null);
-        setCompanyProfile(null);
-        onCompanyProfileChange?.(null);
-        setCorporateActions([]);
-        setCorporateEventSummary(null);
-        setShortVolumeRows([]);
-        setInsiderTransactions(null);
-        setInstitutionalHoldings(null);
         setLoadState("success");
-        setFactLoadState("loading");
-        void fetchUsSupplementalData(symbol)
-          .then((supplementalData) => {
-            if (requestSeq.current !== requestId) return;
-
-            setFactRows(supplementalData.factData);
-            setFundamentalSummary(supplementalData.fundamentalData);
-            setFinancialContract(supplementalData.financialData);
-            setCompanyProfile(supplementalData.profileData);
-            onCompanyProfileChange?.(supplementalData.profileData);
-            setCorporateActions(supplementalData.actionData);
-            setCorporateEventSummary(supplementalData.eventSummaryData);
-            setShortVolumeRows(supplementalData.shortVolumeData);
-            setInsiderTransactions(supplementalData.insiderData);
-            setInstitutionalHoldings(supplementalData.institutionalData);
-            if (supplementalData.eventSummaryError) {
-              publishDetailDataStatus(
-                tRef.current("settings.calendar.loadError"),
-                supplementalData.eventSummaryError
-              );
-            }
-            if (supplementalData.insiderError) {
-              publishDetailDataStatus(
-                tRef.current("usStockDetail.errors.insiderLoadFailed"),
-                supplementalData.insiderError
-              );
-            }
-            if (supplementalData.institutionalError) {
-              publishDetailDataStatus(
-                tRef.current("usStockDetail.institutions.loadFailed"),
-                supplementalData.institutionalError
-              );
-            }
-            setFactLoadState("success");
-          })
-          .catch((error) => {
-            if (requestSeq.current !== requestId) return;
-            setFactLoadState("error");
-            publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
-          });
       } catch (error) {
-        if (requestSeq.current !== requestId) return;
-
-        setSelectedStock(null);
+        if (
+          requestSeq.current !== generation ||
+          chartRequestSeq.current !== requestId
+        ) {
+          return;
+        }
         setChart(null);
-        setTodayTrend([]);
-        setTodayPreviousClose(null);
-        setTodayPreviousCloseStatus("unknown");
-        setTodaySource("unavailable");
-        setTodayUpdatedAt(null);
-        setTodayIntradayMeta(emptyUsIntradayMeta);
-        setFactRows([]);
-        setFundamentalSummary(null);
-        setFinancialContract(null);
-        setCompanyProfile(null);
-        onCompanyProfileChange?.(null);
-        setCorporateActions([]);
-        setCorporateEventSummary(null);
-        setShortVolumeRows([]);
-        setInsiderTransactions(null);
-        setInstitutionalHoldings(null);
         setLoadState("error");
+        publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
+      }
+    },
+    [publishDetailDataStatus]
+  );
+
+  const loadSupplementalData = useCallback(
+    async (symbol: string, generation: number, tab: USFundamentalTab) => {
+      const requestId = supplementalRequestSeq.current + 1;
+      supplementalRequestSeq.current = requestId;
+      const loadKey = `${usSymbolKey(symbol)}:${tab}`;
+      if (getUsMarketIndexConfig(symbol)) {
+        clearSupplementalData();
+        setFactLoadState("success");
+        return;
+      }
+
+      setFactLoadState("loading");
+      try {
+        const supplementalData = await fetchUsSupplementalData(symbol, tab);
+        if (
+          requestSeq.current !== generation ||
+          supplementalRequestSeq.current !== requestId
+        ) {
+          return;
+        }
+        if (supplementalData.factData !== undefined) setFactRows(supplementalData.factData);
+        if (supplementalData.fundamentalData !== undefined) {
+          setFundamentalSummary(supplementalData.fundamentalData);
+        }
+        if (supplementalData.financialData !== undefined) {
+          setFinancialContract(supplementalData.financialData);
+        }
+        if (supplementalData.profileData !== undefined) {
+          setCompanyProfile(supplementalData.profileData);
+          onCompanyProfileChange?.(supplementalData.profileData);
+        }
+        if (supplementalData.actionData !== undefined) {
+          setCorporateActions(supplementalData.actionData);
+        }
+        if (supplementalData.eventSummaryData !== undefined) {
+          setCorporateEventSummary(supplementalData.eventSummaryData);
+        }
+        if (supplementalData.shortVolumeData !== undefined) {
+          setShortVolumeRows(supplementalData.shortVolumeData);
+        }
+        if (supplementalData.insiderData !== undefined) {
+          setInsiderTransactions(supplementalData.insiderData);
+        }
+        if (supplementalData.institutionalData !== undefined) {
+          setInstitutionalHoldings(supplementalData.institutionalData);
+        }
+        if (supplementalData.eventSummaryError) {
+          publishDetailDataStatus(
+            tRef.current("settings.calendar.loadError"),
+            supplementalData.eventSummaryError
+          );
+        }
+        if (supplementalData.insiderError) {
+          publishDetailDataStatus(
+            tRef.current("usStockDetail.errors.insiderLoadFailed"),
+            supplementalData.insiderError
+          );
+        }
+        if (supplementalData.institutionalError) {
+          publishDetailDataStatus(
+            tRef.current("usStockDetail.institutions.loadFailed"),
+            supplementalData.institutionalError
+          );
+        }
+        supplementalLoadedKeysRef.current.add(loadKey);
+        setFactLoadState("success");
+      } catch (error) {
+        if (
+          requestSeq.current !== generation ||
+          supplementalRequestSeq.current !== requestId
+        ) {
+          return;
+        }
+        supplementalLoadedKeysRef.current.delete(loadKey);
         setFactLoadState("error");
         publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
       }
     },
-    [
-      intradaySessionScope,
-      onCompanyProfileChange,
-      publishDetailDataStatus,
-      publishIntradaySourceStatus,
-    ]
+    [clearSupplementalData, onCompanyProfileChange, publishDetailDataStatus]
   );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
+      const generation = requestSeq.current + 1;
+      requestSeq.current = generation;
+      chartRequestSeq.current += 1;
+      supplementalRequestSeq.current += 1;
+      supplementalLoadedKeysRef.current.clear();
+      setSuccessMessage(null);
+      setSelectedStock(null);
+      setChart(null);
+      setHeadlineQuote(null);
+      setTodayTrend([]);
+      setTodayPreviousClose(null);
+      setTodayPreviousCloseStatus("unknown");
+      setTodaySource("unavailable");
+      setTodayUpdatedAt(null);
+      setTodayIntradayMeta(emptyUsIntradayMeta);
+      setTodaySymbol(null);
+      setTodaySessionScope(null);
+      clearSupplementalData();
+
       if (!selectedSymbol) {
-        setSelectedStock(null);
-        setChart(null);
-        setCompanyProfile(null);
-        onCompanyProfileChange?.(null);
-        setCorporateActions([]);
-        setCorporateEventSummary(null);
-        setShortVolumeRows([]);
-        setInsiderTransactions(null);
-        setInstitutionalHoldings(null);
-        setTodayTrend([]);
-        setTodayPreviousClose(null);
-        setTodayPreviousCloseStatus("unknown");
-        setTodaySource("unavailable");
-        setTodayUpdatedAt(null);
-        setTodayIntradayMeta(emptyUsIntradayMeta);
-        setFactRows([]);
-        setFundamentalSummary(null);
-        setFinancialContract(null);
         setLoadState("idle");
         setFactLoadState("idle");
         return;
       }
 
-      void loadSymbolData(selectedSymbol, timeframe);
+      void loadStockIdentity(selectedSymbol, generation);
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [loadSymbolData, onCompanyProfileChange, selectedSymbol, timeframe]);
+  }, [clearSupplementalData, loadStockIdentity, selectedSymbol]);
+
+  useEffect(() => {
+    if (
+      !selectedSymbol ||
+      selectedIndexConfig ||
+      !chartMatchesSelection ||
+      factLoadState === "loading"
+    ) {
+      return;
+    }
+    const loadKey = `${usSymbolKey(selectedSymbol)}:${activeDataTab}`;
+    if (supplementalLoadedKeysRef.current.has(loadKey)) return;
+    const timer = window.setTimeout(() => {
+      void loadSupplementalData(selectedSymbol, requestSeq.current, activeDataTab);
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeDataTab,
+    chartMatchesSelection,
+    factLoadState,
+    loadSupplementalData,
+    selectedIndexConfig,
+    selectedSymbol,
+  ]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (!selectedSymbol) return;
+      void loadChartData(selectedSymbol, timeframe);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadChartData, selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (!selectedSymbol || !chartMatchesSelection || !chart) return;
@@ -2066,7 +2035,55 @@ export default function USStockDetailPanel({
   ]);
 
   useEffect(() => {
-    if (!selectedSymbol || loadState !== "success") return;
+    if (!selectedSymbol) return;
+
+    let cancelled = false;
+    let quoteTimer: number | undefined;
+    let quoteRequestInFlight = false;
+    const symbol = selectedSymbol;
+
+    async function refreshHeadlineQuote() {
+      if (quoteRequestInFlight) return;
+      quoteRequestInFlight = true;
+      try {
+        const snapshot = await fetchJson<USResolvedQuoteSnapshot>(
+          `/api/us-market/quote/${encodeURIComponent(symbol)}`
+        );
+        if (!cancelled) setHeadlineQuote(snapshot);
+      } catch (error) {
+        if (!cancelled) {
+          publishDetailDataStatus(
+            tRef.current("usStockDetail.errors.intradayRefreshFailed"),
+            error
+          );
+        }
+      } finally {
+        quoteRequestInFlight = false;
+      }
+    }
+
+    function scheduleQuoteRefresh() {
+      if (cancelled) return;
+      const marketState = getUsMarketRefreshState();
+      const delay = marketState.isLiveWindow
+        ? US_INTRADAY_REFRESH_MS
+        : Math.min(marketState.msUntilNextPollingStart, 60_000);
+      quoteTimer = window.setTimeout(() => {
+        void refreshHeadlineQuote().finally(scheduleQuoteRefresh);
+      }, delay);
+    }
+
+    quoteTimer = window.setTimeout(() => {
+      void refreshHeadlineQuote().finally(scheduleQuoteRefresh);
+    }, 0);
+    return () => {
+      cancelled = true;
+      if (quoteTimer !== undefined) window.clearTimeout(quoteTimer);
+    };
+  }, [publishDetailDataStatus, selectedSymbol]);
+
+  useEffect(() => {
+    if (!selectedSymbol || timeframe !== "today") return;
 
     let cancelled = false;
     let intradayTimer: number | undefined;
@@ -2089,20 +2106,25 @@ export default function USStockDetailPanel({
 
         if (cancelled) return;
 
-        const latestIntradayPoint = today.points[today.points.length - 1] ?? null;
+        const safeTodayPoints = currentSessionTrendPoints(today);
+        const latestIntradayPoint =
+          safeTodayPoints[safeTodayPoints.length - 1] ?? null;
 
-        if (today.points.length > 0 || today.source_status?.has_usable_data) {
-          setTodayTrend(today.points);
-          setTodayPreviousClose(today.previous_close);
-          setTodayPreviousCloseStatus(today.previous_close_status ?? "unknown");
-          setTodaySource(today.source);
-          setTodayUpdatedAt(
-            latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
-          );
-        }
+        setTodayTrend(safeTodayPoints);
+        setTodayPreviousClose(today.previous_close);
+        setTodayPreviousCloseStatus(today.previous_close_status ?? "unknown");
+        setTodaySource(today.source);
+        setTodayUpdatedAt(
+          latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
+        );
         setTodayIntradayMeta(intradayMetaFromResponse(today));
+        setTodaySymbol(symbol);
+        setTodaySessionScope(intradaySessionScope);
         publishIntradaySourceStatus(symbol, today);
-        setLoadState("success");
+        const marketState = getUsMarketRefreshState();
+        if (marketState.isAfterClose) {
+          finalIntradayRefreshDate.current = marketState.dateKey;
+        }
       } catch (error) {
         if (cancelled) return;
 
@@ -2144,7 +2166,9 @@ export default function USStockDetailPanel({
       );
     }
 
-    scheduleTodayRefresh();
+    intradayTimer = window.setTimeout(() => {
+      void refreshTodayTrend().finally(scheduleTodayRefresh);
+    }, 0);
 
     return () => {
       cancelled = true;
@@ -2152,7 +2176,6 @@ export default function USStockDetailPanel({
     };
   }, [
     intradaySessionScope,
-    loadState,
     publishDetailDataStatus,
     publishIntradaySourceStatus,
     selectedSymbol,
@@ -2611,7 +2634,7 @@ export default function USStockDetailPanel({
           fetched: result.fetched_count,
         }),
       });
-      await loadSymbolData(selectedSymbol, timeframe);
+      await loadSupplementalData(selectedSymbol, requestSeq.current, activeDataTab);
     } catch (error) {
       publishDetailDataStatus(t("usStockDetail.errors.secFactsRefreshFailed"), error);
     } finally {
@@ -2637,7 +2660,7 @@ export default function USStockDetailPanel({
           fetched: result.fetched_count,
         }),
       });
-      await loadSymbolData(selectedSymbol, timeframe);
+      await loadSupplementalData(selectedSymbol, requestSeq.current, "overview");
     } catch (error) {
       publishDetailDataStatus(t("usStockDetail.errors.profileRefreshFailed"), error);
     } finally {
@@ -2663,7 +2686,7 @@ export default function USStockDetailPanel({
           fetched: result.fetched_count,
         }),
       });
-      await loadSymbolData(selectedSymbol, timeframe);
+      await loadSupplementalData(selectedSymbol, requestSeq.current, "filings");
     } catch (error) {
       publishDetailDataStatus(t("usStockDetail.errors.actionsRefreshFailed"), error);
     } finally {

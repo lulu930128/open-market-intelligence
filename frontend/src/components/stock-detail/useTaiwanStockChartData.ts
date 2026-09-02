@@ -37,9 +37,11 @@ const chartBarsByTimeframe: Record<ChartTimeframe, number> = {
   weekly: 520,
   monthly: 132,
 };
+const INDEX_DAILY_CHART_BARS = 300;
 const emptyChartPoints: ChartPoint[] = [];
 const emptyIndicatorPoints: StockIndicatorPoint[] = [];
 const emptyIntradayTrendPoints: IntradayTrendPoint[] = [];
+const TAIWAN_CHART_REFRESH_LIMIT = 8;
 const missingIntradayCapabilities: IntradayTrendCapabilities = {
   supports_volume: false,
   supports_vwap: false,
@@ -59,11 +61,7 @@ type UseTaiwanStockChartDataOptions = {
   chartFocusMode: boolean;
   currentStockInfoMarket: string | null;
   effectiveTimeframe: Timeframe;
-  initialChartData: ChartPoint[];
-  initialChartIntradayOverlay: OhlcIntradayOverlay | null;
-  initialChartStockId: string | null;
-  initialChartVolumeUnit: string | null;
-  initialIndicatorData: StockIndicatorPoint[];
+  initialChartBundle: TaiwanChartBundleRead | null;
   isIndexProduct: boolean;
   professionalTimeframe: ProfessionalTimeframe;
   publishDataStatus: PublishDataStatus;
@@ -218,9 +216,22 @@ function requestInterval(
   return intervalByChartTimeframe[effectiveTimeframe as ChartTimeframe];
 }
 
-function requestLimit(interval: string, effectiveTimeframe: Timeframe) {
+function requestLimit(
+  interval: string,
+  effectiveTimeframe: Timeframe,
+  isIndexProduct: boolean
+) {
   if (interval.endsWith("m") || interval.endsWith("h")) return 5000;
+  if (effectiveTimeframe === "daily" && isIndexProduct) {
+    return INDEX_DAILY_CHART_BARS;
+  }
   return chartBarsByTimeframe[effectiveTimeframe as ChartTimeframe] ?? 500;
+}
+
+function mergeTimedPoints<T extends { time: string }>(current: T[], incoming: T[]) {
+  const merged = new Map(current.map((point) => [point.time, point]));
+  incoming.forEach((point) => merged.set(point.time, point));
+  return [...merged.values()].sort((left, right) => left.time.localeCompare(right.time));
 }
 
 function validateBundle(
@@ -250,6 +261,7 @@ export function useTaiwanStockChartData({
   chartFocusMode,
   currentStockInfoMarket,
   effectiveTimeframe,
+  initialChartBundle,
   isIndexProduct,
   professionalTimeframe,
   publishDataStatus,
@@ -258,7 +270,24 @@ export function useTaiwanStockChartData({
   t,
   todayInterval,
 }: UseTaiwanStockChartDataOptions) {
-  const [dailyState, setDailyState] = useState<DailyChartState | null>(null);
+  const initialDailyState = (() => {
+    if (!initialChartBundle || !stockId) return null;
+    try {
+      validateBundle(initialChartBundle, stockId, "1d");
+      return {
+        chartData: projectTaiwanBarSeries(initialChartBundle.bars),
+        indicatorData: initialChartBundle.technical.points ?? [],
+        intradayOverlay: null,
+        stockId,
+        timeframe: "daily" as const,
+        volumeUnit:
+          initialChartBundle.bars.bars.find((bar) => bar.volume)?.volume?.unit ?? null,
+      } satisfies DailyChartState;
+    } catch {
+      return null;
+    }
+  })();
+  const [dailyState, setDailyState] = useState<DailyChartState | null>(initialDailyState);
   const [benchmarkChartData, setBenchmarkChartData] = useState<ChartPoint[]>([]);
   const [benchmarkChartKey, setBenchmarkChartKey] = useState<string | null>(null);
   const [todayState, setTodayState] = useState<TodayChartState | null>(null);
@@ -269,10 +298,18 @@ export function useTaiwanStockChartData({
     useState<string | null>(null);
   const [professionalIntradayInterval, setProfessionalIntradayInterval] =
     useState<ProfessionalIntradayTimeframe | null>(null);
-  const [loadStateScope, setLoadStateScope] = useState<ScopedLoadState | null>(null);
+  const [loadStateScope, setLoadStateScope] = useState<ScopedLoadState | null>(() =>
+    initialDailyState
+      ? { requestKey: `${initialDailyState.stockId}:daily`, state: "success" }
+      : null
+  );
   const [technicalContract, setTechnicalContract] =
     useState<TaiwanTechnicalCapabilityContract | null>(null);
   const activeStockIdRef = useRef(stockId);
+  const initialBundleRef = useRef({
+    bundle: initialDailyState ? initialChartBundle : null,
+    consumed: false,
+  });
   const tRef = useRef(t);
 
   const benchmarkIndexId =
@@ -341,6 +378,20 @@ export function useTaiwanStockChartData({
     let refreshTimer: number | undefined;
     let requestInFlight = false;
 
+    const hydratedBundle = initialBundleRef.current;
+    if (
+      !hydratedBundle.consumed &&
+      hydratedBundle.bundle &&
+      interval === "1d" &&
+      effectRequestKey === `${effectStockId}:daily`
+    ) {
+      hydratedBundle.consumed = true;
+      setLoadStateScope({ requestKey: effectRequestKey, state: "success" });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     async function loadChart(showLoading: boolean) {
       if (requestInFlight) return;
       requestInFlight = true;
@@ -352,7 +403,9 @@ export function useTaiwanStockChartData({
           `/api/market/chart/${effectStockId}`,
           {
             interval,
-            limit: requestLimit(interval, effectiveTimeframe),
+            limit: showLoading
+              ? requestLimit(interval, effectiveTimeframe, isIndexProduct)
+              : TAIWAN_CHART_REFRESH_LIMIT,
             include_partial: true,
             ma_windows: "5,20,60",
             volume_ma_windows: "5,20",
@@ -364,43 +417,49 @@ export function useTaiwanStockChartData({
         const indicators = bundle.technical.points ?? [];
 
         if (professionalIntraday) {
-          setProfessionalIntradayData(bars);
-          setProfessionalIntradayIndicators(indicators);
+          setProfessionalIntradayData((current) =>
+            showLoading ? bars : mergeTimedPoints(current, bars)
+          );
+          setProfessionalIntradayIndicators((current) =>
+            showLoading ? indicators : mergeTimedPoints(current, indicators)
+          );
           setProfessionalIntradayStockId(effectStockId);
           setProfessionalIntradayInterval(professionalTimeframe);
         } else if (effectiveTimeframe === "today") {
-          const trend = intradayPoints(bars, indicators);
-          const latest = trend[trend.length - 1] ?? null;
+          const incomingTrend = intradayPoints(bars, indicators);
           const quoteSide = bundle.quote_side;
-          setTodayState((previous) => ({
-            capabilities: {
-              ...missingIntradayCapabilities,
-              ...(quoteSide?.capabilities ?? {}),
-              supports_volume:
-                quoteSide?.capabilities?.supports_volume ??
-                bars.some((point) => point.volume !== null),
-            },
-            currentObservation:
-              quoteSide?.current_observation ??
-              (previous?.stockId === effectStockId
-                ? previous.currentObservation
-                : null),
-            previousClose:
-              quoteSide?.previous_close ??
-              (previous?.stockId === effectStockId ? previous.previousClose : null),
-            priceDiagnostics:
-              quoteSide?.price_diagnostics ??
-              (previous?.stockId === effectStockId
-                ? previous.priceDiagnostics
-                : null),
-            source: quoteSide?.source ?? "TaiwanBarService",
-            stockId: effectStockId,
-            tradeDate: quoteSide?.trade_date ?? latest?.time.slice(0, 10) ?? null,
-            trend,
-            updatedAt:
-              quoteSide?.updated_at ?? (latest ? formatDateTime(latest.time) : null),
-            historyStatus: bundle.bars.history.history_status,
-          }));
+          setTodayState((previous) => {
+            const previousMatches = previous?.stockId === effectStockId;
+            const trend =
+              !showLoading && previousMatches
+                ? mergeTimedPoints(previous.trend, incomingTrend)
+                : incomingTrend;
+            const latest = trend[trend.length - 1] ?? null;
+            return {
+              capabilities: {
+                ...missingIntradayCapabilities,
+                ...(quoteSide?.capabilities ?? {}),
+                supports_volume:
+                  quoteSide?.capabilities?.supports_volume ??
+                  bars.some((point) => point.volume !== null),
+              },
+              currentObservation:
+                quoteSide?.current_observation ??
+                (previousMatches ? previous.currentObservation : null),
+              previousClose:
+                quoteSide?.previous_close ?? (previousMatches ? previous.previousClose : null),
+              priceDiagnostics:
+                quoteSide?.price_diagnostics ??
+                (previousMatches ? previous.priceDiagnostics : null),
+              source: quoteSide?.source ?? "TaiwanBarService",
+              stockId: effectStockId,
+              tradeDate: quoteSide?.trade_date ?? latest?.time.slice(0, 10) ?? null,
+              trend,
+              updatedAt:
+                quoteSide?.updated_at ?? (latest ? formatDateTime(latest.time) : null),
+              historyStatus: bundle.bars.history.history_status,
+            };
+          });
         } else {
           setDailyState({
             chartData: bars,
@@ -461,6 +520,7 @@ export function useTaiwanStockChartData({
   }, [
     chartFocusMode,
     effectiveTimeframe,
+    isIndexProduct,
     professionalTimeframe,
     publishDataStatus,
     reloadNonce,
@@ -481,7 +541,10 @@ export function useTaiwanStockChartData({
           `/api/market/bars/${benchmarkIndexId}`,
           {
             interval,
-            limit: chartBarsByTimeframe[timeframe],
+            limit:
+              timeframe === "daily"
+                ? INDEX_DAILY_CHART_BARS
+                : chartBarsByTimeframe[timeframe],
             include_partial: true,
           }
         );

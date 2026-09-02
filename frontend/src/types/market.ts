@@ -977,6 +977,16 @@ export type OhlcChartResponse = {
   stock_id: string;
   timeframe: "daily" | "weekly" | "monthly";
   bars: number;
+  requested_bar_count: number;
+  available_bar_count: number;
+  returned_point_count: number;
+  earliest_available_trade_date: string | null;
+  latest_available_trade_date: string | null;
+  expected_minimum_bar_count: number;
+  missing_session_count: number;
+  coverage_status: "complete" | "insufficient_history" | "missing" | string;
+  bootstrap_recommended: boolean;
+  limitations: string[];
   lookback_days: number;
   from_date: string;
   to_date: string;
@@ -1305,11 +1315,19 @@ export type MarketIndexListItem = {
 };
 
 export type MarketIndexListResponse = {
+  contract_version: string;
+  status: "available" | "partial" | "stale" | "missing" | string;
+  freshness_status: "fresh" | "stale" | "missing" | string;
   market: string;
   source: string;
-  as_of: string;
+  as_of: string | null;
+  latest_trade_date: string | null;
+  expected_trade_date: string | null;
+  transport_fresh: boolean;
+  observation_current: boolean;
   count: number;
   items: MarketIndexListItem[];
+  warnings: string[];
 };
 
 export type MarketIndexContributionItem = {
@@ -1498,6 +1516,10 @@ export type USIntradaySourceStatus = {
   provider_snapshot_freshness?: "fresh" | "stale" | "missing" | "unknown" | string;
   trade_state?: string;
   trade_recency?: "current" | "delayed" | "old" | "historical" | "missing" | "unknown" | string;
+  expected_trade_date?: string | null;
+  event_trade_date?: string | null;
+  current_session_expected?: boolean;
+  current_session_satisfied?: boolean;
   is_fallback: boolean;
   has_usable_data: boolean;
   decision_usable?: boolean;
@@ -1508,6 +1530,11 @@ export type USIntradaySourceStatus = {
 
 export type USIntradaySessionCoverage = {
   trade_date: string | null;
+  expected_trade_date?: string | null;
+  latest_available_trade_date?: string | null;
+  current_session_expected?: boolean;
+  current_session_satisfied?: boolean;
+  selection_reason?: string;
   regular_point_count: number;
   extended_point_count: number;
   has_extended_hours: boolean;
@@ -4106,12 +4133,21 @@ export type USWatchlistRankingItemRead = {
   volume: number | null;
   status: string;
   source: string | null;
+  selected_provider?: string | null;
+  selected_source?: string | null;
+  selected_session?: string | null;
+  selection_reason?: string | null;
+  fallback_used?: boolean;
+  price_basis?: string | null;
   has_extended_hours: boolean;
   intraday_previous_close: number | null;
   intraday_points: Array<{
     time: string;
     price: number;
   }>;
+  current_quote_overlay_applied?: boolean;
+  quote_is_live?: boolean;
+  quote_limitations?: string[];
   error_message: string | null;
 };
 
@@ -4129,6 +4165,11 @@ export type USWatchlistRankingRead = {
   is_current: boolean;
   current_symbol_count: number;
   stale_symbol_count: number;
+  underlying_trade_date?: string | null;
+  coverage_ratio?: number;
+  is_live?: boolean;
+  is_full?: boolean;
+  ranking_semantics?: string;
   results: USWatchlistRankingItemRead[];
 };
 

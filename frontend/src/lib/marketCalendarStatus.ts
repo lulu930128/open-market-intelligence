@@ -44,6 +44,7 @@ export type MarketCalendarMarketStatus = {
   date: string;
   is_trading_day: boolean;
   phase: string;
+  current_session_trade_date?: string | null;
   reason: string;
   holiday_name: string | null;
   previous_trading_day: string;

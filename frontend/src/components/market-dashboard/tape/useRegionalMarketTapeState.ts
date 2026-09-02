@@ -24,7 +24,6 @@ import {
 import {
   US_INTRADAY_REFRESH_MS,
   getUsMarketRefreshState,
-  isUsRegularSessionPoint,
 } from "@/lib/usMarketTime";
 import type {
   IntradayTrendResponse,
@@ -36,6 +35,7 @@ import type {
   KRStockMasterRead,
   USCompanyProfileRead,
   USOhlcChartRead,
+  USResolvedQuoteSnapshot,
 } from "@/types/market";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -58,6 +58,20 @@ export type USMarketTapeSnapshot = {
   pointCount: number;
   asOf: string | null;
   source: "quote" | "intraday" | "daily";
+};
+
+type USMarketTapeReferenceSnapshot = USMarketTapeSnapshot & {
+  ma20: number | null;
+  previousClose: number | null;
+};
+
+type USMarketTapeLiveSnapshot = {
+  symbol: string;
+  close: number | null;
+  previousClose: number | null;
+  volume: number | null;
+  asOf: string | null;
+  source: "quote" | "intraday";
 };
 
 export type JPMarketTapeSnapshot = {
@@ -118,19 +132,6 @@ function averageLastNumbers(
   return validValues.reduce((total, value) => total + value, 0) / validValues.length;
 }
 
-function sumUsIntradayVolume(points: IntradayTrendResponse["points"]) {
-  const regularVolumes = points
-    .filter((point) => isUsRegularSessionPoint(point.time))
-    .map((point) => point.volume)
-    .filter((value): value is number => {
-      return value !== null && value !== undefined && !Number.isNaN(value) && value > 0;
-    });
-
-  if (!regularVolumes.length) return null;
-
-  return regularVolumes.reduce((total, value) => total + value, 0);
-}
-
 function sumJpIntradayVolume(points: IntradayTrendResponse["points"]) {
   const regularVolumes = points
     .filter((point) => isJapanRegularSessionPoint(point.time))
@@ -144,33 +145,21 @@ function sumJpIntradayVolume(points: IntradayTrendResponse["points"]) {
   return regularVolumes.reduce((total, value) => total + value, 0);
 }
 
-async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
-  const [chart, intraday] = await Promise.all([
-    fetchJson<USOhlcChartRead>(
-      `/api/us-market/ohlc/${encodeURIComponent(config.symbol)}`,
-      {
-        timeframe: "daily",
-        bars: 60,
-        ensure_history: false,
-        outputsize: "compact",
-      }
-    ),
-    fetchJson<IntradayTrendResponse>(
-      `/api/us-market/intraday/${encodeURIComponent(config.symbol)}`
-    ).catch(() => null),
-  ]);
+async function fetchUsMarketTapeReferenceSnapshot(config: USMarketIndexConfig) {
+  const chart = await fetchJson<USOhlcChartRead>(
+    `/api/us-market/ohlc/${encodeURIComponent(config.symbol)}`,
+    {
+      timeframe: "daily",
+      bars: 60,
+      ensure_history: false,
+      outputsize: "compact",
+    }
+  );
   const chartPoints = chart.points ?? [];
   const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
   const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
-  const latestIntraday = intraday?.points[intraday.points.length - 1] ?? null;
-  const currentObservation = intraday?.current_observation ?? null;
-  const currentPrice = currentObservation?.value ?? null;
-  const close = currentPrice ?? latestIntraday?.price ?? latestDaily?.close ?? null;
-  const previousClose = currentObservation
-    ? currentObservation.previous_close ?? null
-    : latestIntraday && intraday?.previous_close !== null && intraday?.previous_close !== undefined
-      ? intraday.previous_close
-      : previousDaily?.close ?? null;
+  const close = latestDaily?.close ?? null;
+  const previousClose = previousDaily?.close ?? null;
   const change = close !== null && previousClose !== null ? close - previousClose : null;
   const changePct =
     change !== null && previousClose !== null && previousClose !== 0
@@ -195,18 +184,65 @@ async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
     change,
     changePct,
     priceVsMa20,
-    volume: latestIntraday
-      ? sumUsIntradayVolume(intraday?.points ?? []) ?? latestDaily?.volume ?? null
-      : latestDaily?.volume ?? null,
+    volume: latestDaily?.volume ?? null,
     pointCount: chart.point_count,
-    asOf: currentObservation?.observed_at ?? latestIntraday?.time ?? latestDaily?.time ?? null,
-    source:
-      currentObservation?.price_semantics === "resolved_quote_last_trade"
-        ? "quote"
-        : currentObservation?.price_semantics === "resolved_intraday_bar_close" || latestIntraday
-          ? "intraday"
-          : "daily",
-  } satisfies USMarketTapeSnapshot;
+    asOf: latestDaily?.time ?? null,
+    source: "daily",
+    ma20,
+    previousClose,
+  } satisfies USMarketTapeReferenceSnapshot;
+}
+
+async function fetchUsMarketTapeLiveSnapshot(config: USMarketIndexConfig) {
+  const snapshot = await fetchJson<USResolvedQuoteSnapshot>(
+    `/api/us-market/quote/${encodeURIComponent(config.symbol)}`
+  );
+  const rawClose = snapshot.quote?.last_trade_price ?? null;
+  const parsedClose = rawClose === null ? Number.NaN : Number(rawClose);
+  const close =
+    snapshot.facts_usable && Number.isFinite(parsedClose) ? parsedClose : null;
+  return {
+    symbol: config.symbol,
+    close,
+    // Previous close and volume stay owned by the resolved Daily reference lane.
+    previousClose: null,
+    volume: null,
+    asOf: snapshot.quote?.event_at ?? snapshot.selected_event_at ?? null,
+    source: "quote",
+  } satisfies USMarketTapeLiveSnapshot;
+}
+
+function composeUsMarketTapeSnapshot(
+  reference: USMarketTapeReferenceSnapshot | null,
+  live: USMarketTapeLiveSnapshot | null
+): USMarketTapeSnapshot | null {
+  if (!reference) return null;
+  const close = live?.close ?? reference.close;
+  const previousClose = live?.previousClose ?? reference.previousClose;
+  const change = close !== null && previousClose !== null ? close - previousClose : null;
+  const changePct =
+    change !== null && previousClose !== null && previousClose !== 0
+      ? (change / previousClose) * 100
+      : null;
+  const priceVsMa20 =
+    close !== null && reference.ma20 !== null && reference.ma20 !== 0
+      ? ((close - reference.ma20) / reference.ma20) * 100
+      : null;
+  return {
+    symbol: reference.symbol,
+    displaySymbol: reference.displaySymbol,
+    name: reference.name,
+    exchange: reference.exchange,
+    note: reference.note,
+    close,
+    change,
+    changePct,
+    priceVsMa20,
+    volume: live?.volume ?? reference.volume,
+    pointCount: reference.pointCount,
+    asOf: live?.asOf ?? reference.asOf,
+    source: live?.close !== null && live?.close !== undefined ? live.source : "daily",
+  };
 }
 
 async function fetchJpMarketTapeSnapshot(config: JPMarketIndexConfig) {
@@ -498,14 +534,37 @@ export function useUsMarketTapeState({
     [contextIndex, primaryIndex]
   );
 
-  return usePollingMarketTapeState({
+  const referenceState = usePollingMarketTapeState({
     configs,
     primarySymbol: primaryIndex.symbol,
     contextSymbol: contextIndex.symbol,
-    loadSnapshot: fetchUsMarketTapeSnapshot,
+    loadSnapshot: fetchUsMarketTapeReferenceSnapshot,
+    refreshDelay: regionalDailyRefreshDelay,
+    onError,
+  });
+  const liveState = usePollingMarketTapeState({
+    configs,
+    primarySymbol: primaryIndex.symbol,
+    contextSymbol: contextIndex.symbol,
+    loadSnapshot: fetchUsMarketTapeLiveSnapshot,
     refreshDelay: usRefreshDelay,
     onError,
   });
+  const primarySnapshot = composeUsMarketTapeSnapshot(
+    referenceState.primarySnapshot,
+    liveState.primarySnapshot
+  );
+  const contextSnapshot = composeUsMarketTapeSnapshot(
+    referenceState.contextSnapshot,
+    liveState.contextSnapshot
+  );
+
+  return {
+    primarySnapshot,
+    contextSnapshot,
+    loadState: referenceState.loadState,
+    asOf: latestAsOf(primarySnapshot, contextSnapshot),
+  } satisfies RegionalMarketTapeState<USMarketTapeSnapshot>;
 }
 
 export function useJpMarketTapeState({

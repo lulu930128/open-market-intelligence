@@ -2410,7 +2410,7 @@ type MockOmiApiOptions = {
     | null;
   marketTapeResponder?: (context: {
     market: "tw" | "us" | "jp" | "kr";
-    kind: "summary" | "ohlc" | "intraday" | "breadth";
+    kind: "summary" | "ohlc" | "quote" | "intraday" | "breadth";
     target: string;
     requestNumber: number;
     url: URL;
@@ -2462,7 +2462,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     route: Route,
     url: URL,
     market: "tw" | "us" | "jp" | "kr",
-    kind: "summary" | "ohlc" | "intraday" | "breadth",
+    kind: "summary" | "ohlc" | "quote" | "intraday" | "breadth",
     target: string
   ) {
     const key = `${market}:${kind}:${target}`;
@@ -3026,6 +3026,13 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
       if (await tryFulfillMarketTape(route, url, "us", "ohlc", symbol)) return;
       await fulfillJson(route, usOhlcResponse(symbol));
+      return;
+    }
+
+    if (/\/us-market\/quote\//.test(path)) {
+      const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
+      if (await tryFulfillMarketTape(route, url, "us", "quote", symbol)) return;
+      await fulfillJson(route, usQuoteResponse(symbol));
       return;
     }
 
@@ -3887,6 +3894,43 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
   await page.route("**/api/**", handleOmiApiRoute);
 }
 
+function usQuoteResponse(symbol: string) {
+  return {
+    kind: "resolved_quote_snapshot",
+    schema_version: "omi.us.quote.snapshot.v1",
+    compatibility_schema_versions: [],
+    status: "selected",
+    selected_provider: "playwright.fixture",
+    selected_source: "playwright.fixture.quote",
+    selected_session: "regular",
+    selected_event_at: "2026-06-15T09:30:00-04:00",
+    fallback_used: false,
+    selection_reason: "PLAYWRIGHT_QUOTE_SELECTED",
+    facts_usable: true,
+    research_usable: true,
+    limitations: [],
+    candidates: [],
+    quote: {
+      market: "US",
+      symbol,
+      venue: null,
+      instrument_type: "index",
+      trade_date: "2026-06-15",
+      currency: "USD",
+      state: "available",
+      trade_state: "trade_observed",
+      last_trade_price: "948",
+      open_price: null,
+      high_price: null,
+      low_price: null,
+      previous_close: "940",
+      event_at: "2026-06-15T09:30:00-04:00",
+      received_at: "2026-06-15T13:30:01Z",
+      fetched_at: "2026-06-15T13:30:01Z",
+    },
+  };
+}
+
 test.describe("OMI dashboard smoke", () => {
   test("backend mutation failure remains visible after redirect", async ({ page }) => {
     await mockOmiApi(page, {
@@ -4169,6 +4213,7 @@ test.describe("OMI dashboard smoke", () => {
 
     const detailPanel = page.getByTestId("us-stock-kline-panel");
     await expect(detailPanel).toBeVisible();
+    await expect(detailPanel.getByRole("img")).toBeVisible();
     const todayTimeframe = detailPanel.getByRole("button", { name: "今日", exact: true });
     await expect(async () => {
       await todayTimeframe.click();
@@ -4189,6 +4234,133 @@ test.describe("OMI dashboard smoke", () => {
     await statusToggle.click();
     await expect(sidebar.getByText(new RegExp(timeoutDetail))).toBeVisible();
     await expect(page.getByRole("heading", { name: /^AAPL(?:\s|$)/ })).toBeVisible();
+  });
+
+  test("US detail changes refetch only the resource owned by that control", async ({ page }) => {
+    const requests: string[] = [];
+    page.on("request", (request) => requests.push(request.url()));
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const detailPanel = page.getByTestId("us-stock-kline-panel");
+    await expect(detailPanel.getByRole("img")).toBeVisible();
+    await expect
+      .poll(() =>
+        requests.some((value) =>
+          decodeURIComponent(new URL(value).pathname).endsWith(
+            "/us-market/sec/AAPL/financials"
+          )
+        )
+      )
+      .toBe(true);
+    const initialHiddenTabRequests = requests.filter((value) =>
+      /\/(profiles|corporate-actions|corporate-events|short-volume|insider-transactions|institutional-holdings)(\/|$)/.test(
+        decodeURIComponent(new URL(value).pathname)
+      )
+    );
+    expect(initialHiddenTabRequests).toEqual([]);
+    requests.length = 0;
+
+    const weeklyResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        decodeURIComponent(url.pathname).endsWith("/us-market/ohlc/AAPL") &&
+        url.searchParams.get("timeframe") === "weekly"
+      );
+    });
+    await detailPanel.getByRole("button", { name: "週K", exact: true }).click();
+    await weeklyResponse;
+    await page.waitForTimeout(100);
+
+    const aaplTimeframeRequests = requests.filter((value) =>
+      decodeURIComponent(new URL(value).pathname).includes("/us-market/") &&
+      decodeURIComponent(new URL(value).pathname).includes("AAPL")
+    );
+    expect(
+      aaplTimeframeRequests.filter((value) =>
+        decodeURIComponent(new URL(value).pathname).endsWith("/us-market/ohlc/AAPL")
+      )
+    ).toHaveLength(1);
+    expect(
+      aaplTimeframeRequests.some((value) =>
+        decodeURIComponent(new URL(value).pathname).includes("/us-market/intraday/AAPL")
+      )
+    ).toBe(false);
+    expect(
+      aaplTimeframeRequests.some((value) =>
+        /\/(facts|fundamentals|financials|profiles|corporate-actions|corporate-events|short-volume|insider-transactions|institutional-holdings)(\/|$)/.test(
+          decodeURIComponent(new URL(value).pathname)
+        )
+      )
+    ).toBe(false);
+
+    const todayTimeframe = detailPanel.getByRole("button", { name: "今日", exact: true });
+    await todayTimeframe.click();
+    await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/);
+    requests.length = 0;
+    const allScopeResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        decodeURIComponent(url.pathname).endsWith("/us-market/intraday/AAPL") &&
+        url.searchParams.get("session_scope") === "all"
+      );
+    });
+    await detailPanel.getByRole("button", { name: "全部", exact: true }).click();
+    await allScopeResponse;
+    await page.waitForTimeout(100);
+
+    const aaplScopeRequests = requests.filter((value) =>
+      decodeURIComponent(new URL(value).pathname).includes("AAPL")
+    );
+    expect(
+      aaplScopeRequests.filter((value) =>
+        decodeURIComponent(new URL(value).pathname).endsWith("/us-market/intraday/AAPL")
+      )
+    ).toHaveLength(1);
+    expect(
+      aaplScopeRequests.some((value) =>
+        decodeURIComponent(new URL(value).pathname).endsWith("/us-market/ohlc/AAPL")
+      )
+    ).toBe(false);
+  });
+
+  test("US market tape polls live data without refetching its daily reference", async ({ page }) => {
+    await page.clock.setFixedTime(new Date("2026-07-14T15:00:00Z"));
+    const tapeRequests: string[] = [];
+    page.on("request", (request) => {
+      const path = decodeURIComponent(new URL(request.url()).pathname);
+      if (path.endsWith("/us-market/ohlc/^GSPC") || path.endsWith("/us-market/quote/^GSPC")) {
+        tapeRequests.push(path);
+      }
+    });
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+    });
+    await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
+    const tape = page.getByTestId("market-tape-us");
+    await expect(tape).toHaveAttribute("data-load-state", "success");
+
+    const initialDailyCount = tapeRequests.filter((path) =>
+      path.endsWith("/us-market/ohlc/^GSPC")
+    ).length;
+    const initialLiveCount = tapeRequests.filter((path) =>
+      path.endsWith("/us-market/quote/^GSPC")
+    ).length;
+    await page.waitForTimeout(5_500);
+
+    expect(
+      tapeRequests.filter((path) => path.endsWith("/us-market/ohlc/^GSPC")).length
+    ).toBe(initialDailyCount);
+    expect(
+      tapeRequests.filter((path) => path.endsWith("/us-market/quote/^GSPC")).length
+    ).toBeGreaterThan(initialLiveCount);
   });
 
   test("US Today keeps a missing current quote distinct from the previous close", async ({
@@ -4293,6 +4465,11 @@ test.describe("OMI dashboard smoke", () => {
             has_extended_hours: true,
             session_coverage: {
               trade_date: "2026-08-31",
+              expected_trade_date: "2026-08-31",
+              latest_available_trade_date: "2026-08-31",
+              current_session_expected: true,
+              current_session_satisfied: true,
+              selection_reason: "CURRENT_SESSION_AVAILABLE",
               regular_point_count: 0,
               extended_point_count: 2,
               has_extended_hours: true,
@@ -4361,6 +4538,83 @@ test.describe("OMI dashboard smoke", () => {
 
     await detailPanel.getByRole("button", { name: "日K", exact: true }).click();
     await expect(page.getByTestId("us-stock-header-price")).toHaveText("416.74");
+  });
+
+  test("US Today rejects previous-session cache during an active session", async ({
+    page,
+  }) => {
+    const previousSessionPoints = [
+      {
+        time: "2026-09-01T15:59:00-04:00",
+        price: 416.74,
+        open: 416.7,
+        high: 416.8,
+        low: 416.65,
+        volume: 1000,
+        session: "regular",
+      },
+    ];
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path }) => {
+        if (!path.endsWith("/us-market/intraday/AAPL")) return null;
+        return {
+          body: {
+            ...usIntradayResponse("AAPL"),
+            market_phase: "regular",
+            points: previousSessionPoints,
+            point_count: 1,
+            session_coverage: {
+              trade_date: "2026-09-01",
+              expected_trade_date: "2026-09-02",
+              latest_available_trade_date: "2026-09-01",
+              current_session_expected: true,
+              current_session_satisfied: false,
+              selection_reason: "EXPECTED_CURRENT_SESSION_MISSING",
+              regular_point_count: 0,
+              extended_point_count: 0,
+              has_extended_hours: false,
+              requested_scope: "regular",
+              requested_point_count: 0,
+            },
+            current_source_status: {
+              provider: "yahoo_chart",
+              status: "degraded",
+              freshness_status: "stale",
+              market_phase: "regular",
+              is_live_window: true,
+              as_of: "2026-09-01T15:59:00-04:00",
+              lag_seconds: 64500,
+              trade_recency: "historical",
+              current_session_expected: true,
+              current_session_satisfied: false,
+              is_fallback: false,
+              has_usable_data: true,
+              decision_usable: false,
+              message: "EXPECTED_CURRENT_SESSION_MISSING",
+            },
+            current_observation: {
+              value: 416.74,
+              observed_at: "2026-09-01T15:59:00-04:00",
+              price_semantics: "resolved_intraday_bar_close",
+              freshness_status: "stale",
+              decision_usable: false,
+            },
+          },
+        };
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const detailPanel = page.getByTestId("us-stock-kline-panel");
+    await detailPanel.getByRole("button", { name: "今日", exact: true }).click();
+
+    await expect(detailPanel.getByTestId("intraday-trend-chart")).toHaveCount(0);
+    await expect(page.getByTestId("us-stock-header-price")).not.toHaveText("416.74");
   });
 
   test("US professional indicator menu uses the shared layout and parameter controls", async ({
@@ -8018,6 +8272,25 @@ test.describe("OMI dashboard smoke", () => {
       /omi-sidebar-selected/
     );
     expect(pageErrors).toEqual([]);
+  });
+
+  test("active-market bootstrap restores Taiwan lazily after starting in US", async ({ page }) => {
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+    await expect(page.getByRole("heading", { name: /^AAPL(?:\s|$)/ })).toBeVisible();
+
+    await page.getByRole("link", { name: "台股", exact: true }).click();
+    await expect(page.locator('[data-watchlist-group-id="7"]')).toContainText("科技股");
+    await expect(page.getByRole("heading", { name: "Market Dashboard" })).toBeVisible();
   });
 
   test("Taiwan selection restores the visible instrument with browser history", async ({

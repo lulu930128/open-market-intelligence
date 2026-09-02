@@ -21,11 +21,17 @@ test("Taiwan chart data hook has one Bar/Technical route with no index branch", 
 
   expect(source).toContain("/api/market/chart/${effectStockId}");
   expect(source).toContain("/api/market/bars/${benchmarkIndexId}");
+  expect(source).toContain("INDEX_DAILY_CHART_BARS = 300");
   expect(source).not.toContain("/api/market/indices/");
   expect(source).not.toContain("/api/market/intraday/");
   expect(source).not.toContain("/api/market/ohlc/");
   expect(source).not.toContain("aggregateProfessionalIntradayBars");
   expect(source).not.toContain("aggregateIntradayPoints");
+
+  const pageSource = readFileSync(join(process.cwd(), "src/app/page.tsx"), "utf8");
+  expect(pageSource).toContain(
+    'taiwanIndexProductIds.has(stockId.toUpperCase()) ? "300" : "260"'
+  );
 });
 
 test("Taiwan canonical Bar projection preserves missing quantities", () => {
@@ -125,5 +131,6 @@ test("Taiwan technical report retries after the quote timestamp stops advancing"
   expect(source).toContain("void loadTechnicalReport().finally(scheduleRefresh)");
   expect(source).toContain("window.setTimeout");
   expect(source).toContain("window.clearTimeout");
+  expect(source).not.toContain("todayUpdatedAt");
   expect(source).not.toContain("setReport(null)");
 });

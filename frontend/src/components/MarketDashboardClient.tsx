@@ -102,12 +102,12 @@ import {
   type DataStatusLevel,
   type DataStatusMarket,
 } from "@/lib/dataStatusEvents";
+import { fetchJson } from "@/lib/api";
 import { useRefreshExecutionSettings } from "@/lib/refreshExecutionSettings";
 import { getUsMarketIndexConfig } from "@/lib/usMarketIndices";
 import { getJpMarketIndexConfig } from "@/lib/jpMarketIndices";
 import { usAssetTypeLabel, useT } from "@/i18n";
 import type {
-  ChartPoint,
   JobRunRead,
   JPStockMasterRead,
   JPWatchlistGroupNode,
@@ -118,10 +118,9 @@ import type {
   KRWatchlistItemRead,
   KRWatchlistRankingItemRead,
   MarketIndexSummary,
-  OhlcIntradayOverlay,
   RankingItem,
   RankingResponse,
-  StockIndicatorPoint,
+  TaiwanChartBundleRead,
   TaiwanStockQuoteDepthPreviewMode,
   USCompanyProfileRead,
   USWatchlistGroupNode,
@@ -133,7 +132,7 @@ import type {
   WatchlistRadarMode,
 } from "@/types/market";
 import type { BackendConnectionIssueCode } from "@/types/runtime";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type RankBy = TaiwanRankBy;
@@ -206,11 +205,7 @@ type Props = {
   initialSelectedUsSecurityName: string | null;
   initialSelectedJpSymbol: string | null;
   initialSelectedKrSymbol: string | null;
-  initialChartData: ChartPoint[];
-  initialChartIntradayOverlay: OhlcIntradayOverlay | null;
-  initialChartStockId: string | null;
-  initialChartVolumeUnit: string | null;
-  initialIndicatorData: StockIndicatorPoint[];
+  initialChartBundle: TaiwanChartBundleRead | null;
   initialRankingData: RankingResponse | null;
   initialRadarMode: WatchlistRadarMode;
   initialRadarData: WatchlistGroupRadarRead | null;
@@ -255,11 +250,7 @@ export default function MarketDashboardClient({
   initialSelectedUsSecurityName,
   initialSelectedJpSymbol,
   initialSelectedKrSymbol,
-  initialChartData,
-  initialChartIntradayOverlay,
-  initialChartStockId,
-  initialChartVolumeUnit,
-  initialIndicatorData,
+  initialChartBundle,
   initialRankingData,
   initialRadarMode,
   initialRadarData,
@@ -352,7 +343,53 @@ export default function MarketDashboardClient({
     selectedResourceInstrumentKey,
     dashboardHref,
     pushDashboardUrl,
+    reconcileTaiwanExplorer,
   } = marketSelection;
+
+  useEffect(() => {
+    if (
+      activeMarket !== "tw" ||
+      (watchlistTree.length > 0 && watchlistItems.length > 0)
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    void Promise.all([
+      fetchJson<WatchlistGroupNode[]>("/api/watchlists/tree"),
+      fetchJson<WatchlistItemRead[]>("/api/watchlists/items", {
+        limit: 5000,
+        offset: 0,
+      }),
+    ])
+      .then(([tree, items]) => {
+        if (cancelled) return;
+        setWatchlistTree(tree);
+        setWatchlistItems(items);
+        reconcileTaiwanExplorer(tree, items);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        const title = t("watchlist.messages.readError");
+        emitDashboardDataStatus({
+          market: "tw",
+          title,
+          message: apiErrorMessage(error, title),
+          source: t("dashboard.ranking.listTitle"),
+          contextKey: "tw:watchlist:bootstrap",
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeMarket,
+    reconcileTaiwanExplorer,
+    t,
+    watchlistItems.length,
+    watchlistTree.length,
+  ]);
   useDashboardRuntime({
     activeMarket,
     selectedResourceInstrumentKey,
@@ -1889,11 +1926,7 @@ export default function MarketDashboardClient({
                     stockName={selectedStockName}
                     stockMarket={selectedStockMarket}
                     instrumentType={selectedInstrumentType}
-                    initialChartData={initialChartData}
-                    initialChartIntradayOverlay={initialChartIntradayOverlay}
-                    initialChartStockId={initialChartStockId}
-                    initialChartVolumeUnit={initialChartVolumeUnit}
-                    initialIndicatorData={initialIndicatorData}
+                    initialChartBundle={initialChartBundle}
                     watchlistRankingPanel={rankingPanel}
                     marketIndexSummary={marketIndexSummary}
                     onChartFocusModeChange={setTwChartFocusMode}
