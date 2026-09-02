@@ -620,20 +620,32 @@ async function fetchUsSupplementalData(
 ): Promise<USSupplementalData> {
   const encodedSymbol = encodeURIComponent(symbol);
   if (tab === "financials") {
-    const [factData, fundamentalData, financialData] = await Promise.all([
-      fetchJson<USSecCompanyFactRead[]>(`/api/us-market/sec/${encodedSymbol}/facts`, {
-        limit: 24,
-        offset: 0,
-      }).catch(() => []),
-      fetchOptionalJson<USSecFundamentalSummaryRead>(
-        `/api/us-market/sec/${encodedSymbol}/fundamentals`
-      ).catch(() => null),
-      fetchOptionalJson<USSecFinancialContractRead>(
-        `/api/us-market/sec/${encodedSymbol}/financials`,
-        { periods: 8 }
-      ).catch(() => null),
-    ]);
-    return { factData, fundamentalData, financialData };
+    const [factData, fundamentalData, financialData, eventSummaryResult] =
+      await Promise.all([
+        fetchJson<USSecCompanyFactRead[]>(`/api/us-market/sec/${encodedSymbol}/facts`, {
+          limit: 24,
+          offset: 0,
+        }).catch(() => []),
+        fetchOptionalJson<USSecFundamentalSummaryRead>(
+          `/api/us-market/sec/${encodedSymbol}/fundamentals`
+        ).catch(() => null),
+        fetchOptionalJson<USSecFinancialContractRead>(
+          `/api/us-market/sec/${encodedSymbol}/financials`,
+          { periods: 8 }
+        ).catch(() => null),
+        fetchJson<USCorporateEventSummaryRead>(
+          `/api/us-market/corporate-events/${encodedSymbol}/summary`
+        )
+          .then((data) => ({ data, error: null }))
+          .catch((error: unknown) => ({ data: null, error })),
+      ]);
+    return {
+      factData,
+      fundamentalData,
+      financialData,
+      eventSummaryData: eventSummaryResult.data,
+      eventSummaryError: eventSummaryResult.error,
+    };
   }
   if (tab === "overview") {
     const [profileData, actionData, eventSummaryResult] = await Promise.all([

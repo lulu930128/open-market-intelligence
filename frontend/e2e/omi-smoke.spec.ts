@@ -4153,7 +4153,7 @@ test.describe("OMI dashboard smoke", () => {
     expect(djiOhlc?.url.searchParams.get("provider")).toBeNull();
     expect(
       tapeCalls.some(
-        (call) => call.market === "us" && call.kind === "intraday" && call.target === "^DJI"
+        (call) => call.market === "us" && call.kind === "quote" && call.target === "^DJI"
       )
     ).toBe(true);
   });
@@ -4259,8 +4259,14 @@ test.describe("OMI dashboard smoke", () => {
         )
       )
       .toBe(true);
+    const initialHeaderEventRequests = requests.filter((value) =>
+      decodeURIComponent(new URL(value).pathname).endsWith(
+        "/us-market/corporate-events/AAPL/summary"
+      )
+    );
+    expect(initialHeaderEventRequests).toHaveLength(1);
     const initialHiddenTabRequests = requests.filter((value) =>
-      /\/(profiles|corporate-actions|corporate-events|short-volume|insider-transactions|institutional-holdings)(\/|$)/.test(
+      /\/(profiles|corporate-actions|short-volume|insider-transactions|institutional-holdings)(\/|$)/.test(
         decodeURIComponent(new URL(value).pathname)
       )
     );
@@ -4301,7 +4307,15 @@ test.describe("OMI dashboard smoke", () => {
     ).toBe(false);
 
     const todayTimeframe = detailPanel.getByRole("button", { name: "今日", exact: true });
+    const regularScopeResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        decodeURIComponent(url.pathname).endsWith("/us-market/intraday/AAPL") &&
+        url.searchParams.get("session_scope") === "regular"
+      );
+    });
     await todayTimeframe.click();
+    await regularScopeResponse;
     await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/);
     requests.length = 0;
     const allScopeResponse = page.waitForResponse((response) => {
@@ -4371,6 +4385,24 @@ test.describe("OMI dashboard smoke", () => {
       usWatchlistItems: seededUsWatchlistItems(),
       usRankingRows: seededUsRankingRows(),
       apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/quote/AAPL")) {
+          const quote = usQuoteResponse("AAPL");
+          return {
+            body: {
+              ...quote,
+              status: "missing",
+              facts_usable: false,
+              research_usable: false,
+              quote: {
+                ...quote.quote,
+                state: "missing",
+                trade_state: "no_quote",
+                last_trade_price: null,
+                event_at: null,
+              },
+            },
+          };
+        }
         if (!path.endsWith("/us-market/intraday/AAPL")) return null;
 
         return {
@@ -4448,6 +4480,21 @@ test.describe("OMI dashboard smoke", () => {
       usWatchlistItems: seededUsWatchlistItems(),
       usRankingRows: seededUsRankingRows(),
       apiResponder: ({ path, url }) => {
+        if (path.endsWith("/us-market/quote/AAPL")) {
+          const quote = usQuoteResponse("AAPL");
+          return {
+            body: {
+              ...quote,
+              selected_event_at: "2026-08-31T08:53:00-04:00",
+              quote: {
+                ...quote.quote,
+                last_trade_price: "416.74",
+                previous_close: "417.52",
+                event_at: "2026-08-31T08:53:00-04:00",
+              },
+            },
+          };
+        }
         if (!path.endsWith("/us-market/intraday/AAPL")) return null;
 
         const scope = url.searchParams.get("session_scope") ?? "regular";

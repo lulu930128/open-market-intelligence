@@ -43,7 +43,7 @@ test("Taiwan chart mount hydrates the canonical bundle and polls a recent window
   expect(contents).toContain("initialChartBundle: TaiwanChartBundleRead | null");
   expect(contents).toContain("TAIWAN_CHART_REFRESH_LIMIT = 8");
   expect(contents).toContain("hydratedBundle.consumed = true");
-  expect(contents).toContain("showLoading\n              ? requestLimit");
+  expect(contents).toMatch(/showLoading\s*\? requestLimit/);
   expect(contents).toContain(": TAIWAN_CHART_REFRESH_LIMIT");
   expect(contents).toContain("mergeTimedPoints(previous.trend, incomingTrend)");
   expect(contents).not.toContain("initialChartData:");
