@@ -46,6 +46,20 @@ from app.kr_market.trading_calendar import (
 
 
 class TaiwanTradingCalendarTests(unittest.TestCase):
+    def test_2025_restored_public_holidays_are_not_trading_days(self) -> None:
+        for holiday in (
+            date(2025, 9, 29),
+            date(2025, 10, 24),
+            date(2025, 12, 25),
+        ):
+            with self.subTest(holiday=holiday):
+                self.assertFalse(is_taiwan_trading_day(holiday))
+
+        self.assertEqual(
+            next_taiwan_trading_day(date(2025, 9, 26)),
+            date(2025, 9, 30),
+        )
+
     def test_2026_holidays_are_not_trading_days(self) -> None:
         self.assertFalse(is_taiwan_trading_day(date(2026, 2, 16)))
         self.assertFalse(is_taiwan_trading_day(date(2026, 2, 27)))
@@ -244,6 +258,7 @@ class MarketCalendarStatusTests(unittest.TestCase):
         self.assertEqual(pre_market["session"]["after_hours_close_time"], "20:00")
 
         self.assertEqual(regular["phase"], "regular")
+        self.assertEqual(regular["current_session_trade_date"], "2026-06-18")
         self.assertTrue(regular["session"]["is_polling_window"])
         self.assertFalse(regular["session"]["is_extended_polling_window"])
 
@@ -251,6 +266,20 @@ class MarketCalendarStatusTests(unittest.TestCase):
         self.assertFalse(after_hours["session"]["is_polling_window"])
         self.assertTrue(after_hours["session"]["is_extended_polling_window"])
         self.assertTrue(after_hours["session"]["is_after_close"])
+        self.assertEqual(after_hours["current_session_trade_date"], "2026-06-18")
+
+    def test_us_current_session_date_does_not_change_daily_completion_boundary(self) -> None:
+        timezone = ZoneInfo("America/New_York")
+        status = build_us_calendar_status(
+            now=datetime(2026, 9, 2, 9, 54, tzinfo=timezone),
+        )
+
+        self.assertEqual(status["phase"], "regular")
+        self.assertEqual(status["current_session_trade_date"], "2026-09-02")
+        self.assertEqual(
+            status["release_windows"]["us_daily_price"]["expected_trade_date"],
+            "2026-09-01",
+        )
 
     def test_us_verified_early_close_changes_session_and_release_windows(self) -> None:
         timezone = ZoneInfo("America/New_York")

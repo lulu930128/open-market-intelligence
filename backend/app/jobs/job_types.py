@@ -26,6 +26,9 @@ MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE = "market_data.eod_coverage_reconcile"
 US_OHLC_HISTORY_REPAIR_JOB_TYPE = "us_market.ohlc_history_repair"
 US_PRIORITY_OHLC_RECONCILE_JOB_TYPE = "us_market.priority_ohlc_reconcile"
 US_INTRADAY_MINUTE_REPAIR_JOB_TYPE = "us_market.intraday_minute_repair"
+US_INDEX_INTRADAY_VOLUME_REPAIR_JOB_TYPE = (
+    "us_market.index_intraday_volume_repair"
+)
 US_INDEX_DATA_REPAIR_JOB_TYPE = "us_market.index_data_repair"
 US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE = "us.bootstrap_current_market_cache"
 TAIWAN_INTRADAY_BAR_BOOTSTRAP_JOB_TYPE = "tw.bootstrap_intraday_base_1m"

@@ -12,11 +12,15 @@ from app.us_market.market_data.descriptors import (
 from app.us_market.market_data.adapters import (
     adapt_alpaca_stock_bars_payload,
     adapt_alphavantage_daily_payload,
+    adapt_massive_index_aggregates_payload,
+    adapt_massive_index_snapshot_payload,
     adapt_yahoo_chart_payload,
 )
 from app.us_market.providers.canonical import (
     canonical_alpaca_stock_bars_payload,
     canonical_alphavantage_daily_payload,
+    canonical_massive_index_aggregates_payload,
+    canonical_massive_index_snapshot_payload,
     canonical_yahoo_chart_payload,
 )
 
@@ -52,6 +56,8 @@ def test_integration_manifest_exposes_capability_keyed_us_production_bindings() 
         ("twelve_data", "intraday.bars"),
     }
     assert [item.provider_key for item in manifest.canonical_adapters] == [
+        "massive",
+        "massive",
         "yahoo_chart",
         "alpaca",
         "twelve_data",
@@ -75,7 +81,11 @@ def test_integration_manifest_exposes_capability_keyed_us_production_bindings() 
         ("intraday.bars", "us.intraday.bars", "us.refresh_intraday_bars"),
     }
     assert "ALPACA_DAILY_SUPPORTS_STOCK_AND_ETF_ONLY" in manifest.limitations
-    assert "US_INDEX_DAILY_FALLBACK_REMAINS_YAHOO_ONLY" in manifest.limitations
+    assert (
+        "MASSIVE_INDEX_HISTORY_BEGINS_2023_02_14_YAHOO_RETAINS_DEEP_HISTORY_FALLBACK"
+        in manifest.limitations
+    )
+    assert "MASSIVE_INDEX_CANARY_ONLY_UNTIL_COVERAGE_GATE_PASSES" in manifest.limitations
     assert "alphavantage" not in {
         item.provider_key for item in manifest.provider_descriptors
     }
@@ -108,6 +118,14 @@ def test_new_adapter_entrypoints_are_the_existing_pure_canonical_converters() ->
         is canonical_alphavantage_daily_payload
     )
     assert adapt_alpaca_stock_bars_payload is canonical_alpaca_stock_bars_payload
+    assert (
+        adapt_massive_index_snapshot_payload
+        is canonical_massive_index_snapshot_payload
+    )
+    assert (
+        adapt_massive_index_aggregates_payload
+        is canonical_massive_index_aggregates_payload
+    )
 
 
 def test_new_us_market_data_package_has_no_runtime_or_consumer_dependency() -> None:
@@ -173,6 +191,7 @@ def test_alpaca_and_twelve_provider_modules_own_no_database_or_transaction() -> 
     providers = Path(__file__).parents[1] / "app" / "us_market" / "providers"
     module_paths = (
         providers / "alpaca.py",
+        providers / "massive.py",
         providers / "twelve_data.py",
         providers / "errors.py",
     )
@@ -200,7 +219,7 @@ def test_alpaca_and_twelve_provider_modules_own_no_database_or_transaction() -> 
     assert violations == []
 
 
-def test_twelve_descriptors_are_source_ready_and_capability_advertised() -> None:
+def test_twelve_and_massive_descriptors_are_source_ready_and_advertised() -> None:
     from app.us_market.market_data.descriptors import (
         US_SOURCE_READY_PROVIDER_DESCRIPTORS,
     )
@@ -209,11 +228,23 @@ def test_twelve_descriptors_are_source_ready_and_capability_advertised() -> None
         (item.provider_key, item.capability_id, item.resource_id)
         for item in US_SOURCE_READY_PROVIDER_DESCRIPTORS
     ] == [
+        ("massive", "quote.snapshot", "massive.indices.snapshot"),
+        ("massive", "intraday.bars", "massive.indices.aggregates.1m"),
+        ("massive", "daily.ohlcv", "massive.indices.aggregates.1d"),
         ("twelve_data", "quote.snapshot", "twelve_data.quote"),
         ("twelve_data", "intraday.bars", "twelve_data.intraday"),
     ]
     assert {
         item.capability_id
-        for item in US_MARKET_DATA_INTEGRATION_MANIFEST.provider_descriptors
+        for item in US_MARKET_DATA_INTEGRATION_MANIFEST.source_ready_provider_descriptors
         if item.provider_key == "twelve_data"
     } == {"quote.snapshot", "intraday.bars"}
+    assert {
+        item.capability_id
+        for item in US_MARKET_DATA_INTEGRATION_MANIFEST.source_ready_provider_descriptors
+        if item.provider_key == "massive"
+    } == {"quote.snapshot", "intraday.bars", "daily.ohlcv"}
+    assert "massive" not in {
+        item.provider_key
+        for item in US_MARKET_DATA_INTEGRATION_MANIFEST.provider_descriptors
+    }

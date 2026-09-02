@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.jobs import backfill_tasks
 from app.jobs.job_types import (
+    US_INDEX_INTRADAY_VOLUME_REPAIR_JOB_TYPE,
     US_INTRADAY_MINUTE_REPAIR_JOB_TYPE,
     US_OHLC_HISTORY_REPAIR_JOB_TYPE,
     US_SEC_13F_HISTORY_SYNC_JOB_TYPE,
@@ -40,6 +41,10 @@ from app.us_market.market_truth import (
 from app.us_market.market_truth_contracts import (
     USIntradaySeriesProjection,
     USMarketTruthSnapshot,
+)
+from app.us_market.market_indices import (
+    USMarketIndicesSnapshot,
+    read_us_market_indices,
 )
 from app.us_market.schemas import (
     MacroSeriesObservationRead,
@@ -317,6 +322,32 @@ def _enqueue_us_intraday_minute_repair(
     )
 
 
+def _enqueue_us_index_intraday_volume_repair(
+    *,
+    db: Session,
+    apply: bool,
+    max_rows: int,
+    after_bar_id: int | None,
+) -> dict:
+    request = {
+        "apply": apply,
+        "max_rows": max_rows,
+        "after_bar_id": after_bar_id,
+    }
+    mode = "apply" if apply else "dry-run"
+    cursor = str(after_bar_id) if after_bar_id is not None else "start"
+    return enqueue_serialized_job(
+        db=db,
+        job_type=US_INDEX_INTRADAY_VOLUME_REPAIR_JOB_TYPE,
+        target=f"{mode}:{cursor}",
+        request=request,
+        progress_total=1,
+        message="Queued bounded US index intraday volume repair.",
+        task=backfill_tasks.run_us_index_intraday_volume_repair_job,
+        task_args=(apply, max_rows, after_bar_id),
+    )
+
+
 def _enqueue_us_ohlc_history_repair(
     *,
     db: Session,
@@ -569,6 +600,7 @@ def get_us_watchlist_ranking_api(
     enabled_only: bool = True,
     rank_by: str = Query(default="none", pattern="^(none|change_pct|volume|close)$"),
     sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
+    use_current_quote: bool = False,
     use_intraday: bool = False,
     intraday_limit: int = Query(default=30, ge=1, le=100),
     intraday_session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
@@ -582,6 +614,7 @@ def get_us_watchlist_ranking_api(
             enabled_only=enabled_only,
             rank_by=rank_by,
             sort_order=sort_order,
+            use_current_quote=use_current_quote,
             use_intraday=use_intraday,
             intraday_limit=intraday_limit,
             intraday_session_scope=intraday_session_scope,
@@ -973,6 +1006,27 @@ def repair_us_intraday_minute_integrity_job_api(
     )
 
 
+@router.post(
+    "/maintenance/index-intraday-volume/repair-job",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def repair_us_index_intraday_volume_job_api(
+    apply: bool = False,
+    max_rows: int = Query(default=10_000, ge=1, le=50_000),
+    after_bar_id: int | None = Query(default=None, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Queue one bounded cash-index volume repair batch; dry-run is the default."""
+
+    return _enqueue_us_index_intraday_volume_repair(
+        db=db,
+        apply=apply,
+        max_rows=max_rows,
+        after_bar_id=after_bar_id,
+    )
+
+
 @router.post("/daily/{symbol}/refresh", response_model=USDailyPriceRefreshResultRead)
 def refresh_us_daily_prices(
     symbol: str,
@@ -1113,6 +1167,18 @@ def repair_us_ohlc_history_api(
         adjusted=adjusted,
         max_provider_calls=max_provider_calls,
         force_full=force_full,
+    )
+
+
+@router.get("/indices", response_model=USMarketIndicesSnapshot)
+def get_us_market_indices_api(
+    db: Session = Depends(get_db),
+):
+    """Read the canonical six-index US market aggregate without provider IO."""
+
+    return read_us_market_indices(
+        db,
+        evaluated_at=datetime.now(timezone.utc),
     )
 
 

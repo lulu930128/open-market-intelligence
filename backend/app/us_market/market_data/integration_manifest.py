@@ -10,14 +10,17 @@ from app.market_data.contracts import Market
 from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2
 from app.us_market.market_data.adapters import (
     adapt_alpaca_stock_bars_payload,
+    adapt_massive_index_aggregates_payload,
+    adapt_massive_index_snapshot_payload,
     adapt_twelve_data_intraday_payload,
     adapt_twelve_data_quote_payload,
     adapt_yahoo_chart_payload,
 )
 from app.us_market.market_data.descriptors import (
-    US_DAILY_CANDIDATE_DESCRIPTORS,
+    US_DAILY_PROVIDER_DESCRIPTORS,
     US_INTRADAY_PROVIDER_DESCRIPTORS,
     US_QUOTE_PROVIDER_DESCRIPTORS,
+    US_SOURCE_READY_PROVIDER_DESCRIPTORS,
 )
 from app.us_market.market_data.projection import (
     project_resolved_us_bars,
@@ -46,6 +49,7 @@ class CapabilityIntegrationBinding:
 class USMarketDataIntegrationManifest:
     market: Market
     provider_descriptors: tuple[ProviderCapabilityDescriptorV2, ...]
+    source_ready_provider_descriptors: tuple[ProviderCapabilityDescriptorV2, ...]
     canonical_adapters: tuple[CanonicalAdapterRegistration, ...]
     capability_bindings: tuple[CapabilityIntegrationBinding, ...]
     resolved_projectors: tuple[Callable[..., dict[str, Any]], ...]
@@ -61,13 +65,24 @@ US_MARKET_DATA_INTEGRATION_MANIFEST = USMarketDataIntegrationManifest(
         {
             descriptor.resource_id: descriptor
             for descriptor in (
-                *US_DAILY_CANDIDATE_DESCRIPTORS,
+                *US_DAILY_PROVIDER_DESCRIPTORS,
                 *US_QUOTE_PROVIDER_DESCRIPTORS,
                 *US_INTRADAY_PROVIDER_DESCRIPTORS,
             )
         }.values()
     ),
+    source_ready_provider_descriptors=US_SOURCE_READY_PROVIDER_DESCRIPTORS,
     canonical_adapters=(
+        CanonicalAdapterRegistration(
+            provider_key="massive",
+            capability_ids=("quote.snapshot",),
+            adapter=adapt_massive_index_snapshot_payload,
+        ),
+        CanonicalAdapterRegistration(
+            provider_key="massive",
+            capability_ids=("intraday.bars", "daily.ohlcv"),
+            adapter=adapt_massive_index_aggregates_payload,
+        ),
         CanonicalAdapterRegistration(
             provider_key="yahoo_chart",
             capability_ids=("quote.snapshot", "intraday.bars", "daily.ohlcv"),
@@ -99,7 +114,9 @@ US_MARKET_DATA_INTEGRATION_MANIFEST = USMarketDataIntegrationManifest(
     handoff_gate="US_MARKET_CORE_SOURCE_CHECKPOINT_READY",
     limitations=(
         "ALPACA_DAILY_SUPPORTS_STOCK_AND_ETF_ONLY",
-        "US_INDEX_DAILY_FALLBACK_REMAINS_YAHOO_ONLY",
+        "MASSIVE_INDEX_HISTORY_BEGINS_2023_02_14_YAHOO_RETAINS_DEEP_HISTORY_FALLBACK",
+        "MASSIVE_INDEX_REQUIRES_SIX_SYMBOL_ENTITLEMENT_GATE",
+        "MASSIVE_INDEX_CANARY_ONLY_UNTIL_COVERAGE_GATE_PASSES",
         "US_INTRADAY_MATERIALIZER_FEATURE_OFF_BOUNDED_CANARY_ONLY",
         "US_MATERIALIZER_KEYED_CONCURRENCY_RUNTIME_ACCEPTANCE_PENDING",
         "RUNTIME_ADOPTION_AND_LIVE_PROVIDER_ACCEPTANCE_REMAIN_SEPARATE",

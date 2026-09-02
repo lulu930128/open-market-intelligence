@@ -28,6 +28,7 @@ def us_daily_candidate_issue(
     source: SourceRegistry | None,
     *,
     instrument_type: InstrumentType,
+    registered_providers: tuple[str, ...] = US_DAILY_REGISTERED_PROVIDERS,
 ) -> USDailyEligibilityIssue | None:
     fields = (
         "source_id",
@@ -61,7 +62,7 @@ def us_daily_candidate_issue(
     ):
         return USDailyEligibilityIssue("US_DAILY_LEGACY_COMPAT_LINEAGE_REJECTED")
     provider = str(row.provider or "").strip().lower()
-    if provider not in US_DAILY_REGISTERED_PROVIDERS:
+    if provider not in registered_providers:
         return USDailyEligibilityIssue("US_DAILY_PROVIDER_UNREGISTERED")
     if raw.source_id != row.source_id or raw.source_id != source.id:
         return USDailyEligibilityIssue("US_DAILY_SOURCE_RECEIPT_MISMATCH")

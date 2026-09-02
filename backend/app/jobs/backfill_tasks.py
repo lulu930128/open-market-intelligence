@@ -44,6 +44,7 @@ from app.us_market import ownership_service as us_ownership_service
 from app.us_market.daily_ohlcv_chart import read_us_daily_ohlcv_chart
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 from app.us_market.intraday_maintenance import (
+    repair_us_index_intraday_volume_semantics,
     repair_us_yahoo_intraday_minute_integrity,
 )
 from app.us_market.ohlc_priority import reconcile_us_priority_ohlc
@@ -897,6 +898,34 @@ def run_us_intraday_minute_repair_job(
             audit_manifest_path=audit_manifest_path,
         )
         progress(1, 1, f"{operation} US intraday minute repair completed.")
+        return result
+
+    run_tracked_job(job_id, worker)
+
+
+def run_us_index_intraday_volume_repair_job(
+    job_id: int,
+    apply: bool,
+    max_rows: int,
+    after_bar_id: int | None,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        operation = "Applying" if apply else "Planning"
+        progress(0, 1, f"{operation} bounded US index intraday volume repair.")
+        audit_manifest_path = None
+        if apply:
+            audit_manifest_path = (
+                settings.us_index_intraday_volume_repair_audit_dir
+                / f"job-{job_id}.json"
+            )
+        result = repair_us_index_intraday_volume_semantics(
+            db,
+            apply=apply,
+            max_rows=max_rows,
+            after_bar_id=after_bar_id,
+            audit_manifest_path=audit_manifest_path,
+        )
+        progress(1, 1, f"{operation} US index intraday volume repair completed.")
         return result
 
     run_tracked_job(job_id, worker)

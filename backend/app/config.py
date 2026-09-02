@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     us_intraday_minute_repair_audit_dir: Path = (
         DEFAULT_DB_PATH.parent / "maintenance" / "us-yahoo-intraday"
     )
+    us_index_intraday_volume_repair_audit_dir: Path = (
+        DEFAULT_DB_PATH.parent / "maintenance" / "us-index-volume"
+    )
     us_sec_submissions_cache_path: Path = (
         DEFAULT_DB_PATH.parent / "us_sec_submissions.json"
     )
@@ -371,6 +374,7 @@ class Settings(BaseSettings):
     finmind_token: str | None = None
     alphavantage_api_key: str | None = None
     twelve_data_api_key: str | None = None
+    massive_api_key: str | None = None
     alpaca_api_key_id: str | None = None
     alpaca_api_secret_key: str | None = None
     fred_api_key: str | None = None

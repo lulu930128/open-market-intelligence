@@ -38,7 +38,7 @@ class USMarketServiceBoundaryTests(unittest.TestCase):
     def test_workflow_dependencies_resolve_facade_functions_at_call_time(self) -> None:
         with (
             patch.object(service, "expected_us_daily_price_date") as expected_date,
-            patch.object(service, "_get_us_intraday_overlay") as intraday_overlay,
+            patch.object(service, "_get_us_current_quote_overlay") as quote_overlay,
             patch.object(
                 service,
                 "_refresh_us_watchlist_daily_through_platform",
@@ -48,7 +48,7 @@ class USMarketServiceBoundaryTests(unittest.TestCase):
             dependencies = service._us_watchlist_workflow_dependencies()
 
         self.assertIs(dependencies.expected_daily_price_date, expected_date)
-        self.assertIs(dependencies.intraday_overlay_loader, intraday_overlay)
+        self.assertIs(dependencies.current_quote_overlay_loader, quote_overlay)
         self.assertIs(dependencies.refresh_daily_prices, refresh_daily)
         self.assertIs(dependencies.refresh_sec_facts, refresh_sec)
 

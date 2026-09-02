@@ -73,11 +73,11 @@ class USDailyOhlcvPlatform:
     ) -> None:
         self._db = db
         self._gateway = gateway or MarketDataGateway()
+        self._descriptors = descriptors or US_DAILY_PROVIDER_DESCRIPTORS
         self._reader = USCompletedDailyCandidateReader(USDailyBarRepository(db))
         self._acquisition = acquisition or USDailyOhlcvAcquisitionExecutor()
         self._transaction = transaction or USDailyPriceTransaction(db)
         self._rollout_state = rollout_state
-        self._descriptors = descriptors or US_DAILY_PROVIDER_DESCRIPTORS
 
     def _requirement(
         self,
@@ -186,6 +186,7 @@ class USDailyOhlcvPlatform:
             descriptors=(active_descriptors if allow_acquisition else ()),
             acquisition_port=(self._acquisition if allow_acquisition else None),
             transaction_port=(self._transaction if allow_acquisition else None),
+            route_resolution_gate=allow_acquisition,
         )
         projection = project_resolved_us_daily_bars(result.resolved, max_bars=bars)
         latest_date = (

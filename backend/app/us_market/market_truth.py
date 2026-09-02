@@ -60,9 +60,16 @@ from app.us_market.market_truth_contracts import (
     semantic_fingerprint,
 )
 from app.us_market.session_policy import us_session_for_timestamp
-from app.us_market.temporal_expectedness import USMarketPhase
+from app.us_market.temporal_expectedness import (
+    USCapabilitySessionScope,
+    USMarketPhase,
+    USTradeRecency,
+    evaluate_us_selected_evidence_temporal,
+    select_us_intraday_trade_date,
+)
 from app.us_market.trading_calendar import (
     US_MARKET_TIMEZONE,
+    expected_us_intraday_trade_date,
     previous_us_trading_day,
     us_session_close_time,
 )
@@ -111,6 +118,20 @@ def _selected_freshness(value: ResolvedQuote | ResolvedBarSeries) -> EvidenceFre
     return selected.freshness if selected is not None else EvidenceFreshness.UNKNOWN
 
 
+def _observation_temporal_limitations(
+    *,
+    trade_recency: USTradeRecency,
+    current_session_expected: bool,
+    current_session_satisfied: bool,
+) -> tuple[str, ...]:
+    limitations: list[str] = []
+    if current_session_expected and not current_session_satisfied:
+        limitations.append("LAST_TRADE_NOT_CURRENT_SESSION")
+    if trade_recency is USTradeRecency.OLD:
+        limitations.append("LAST_TRADE_OLD")
+    return tuple(limitations)
+
+
 def _event_at(lineage, *, fallback: datetime) -> datetime:
     return lineage.event_at or lineage.received_at or lineage.fetched_at or fallback
 
@@ -139,6 +160,7 @@ def _quote_observation(
     resolved: ResolvedQuote,
     *,
     evaluated_at: datetime,
+    market_phase: USMarketPhase,
 ) -> USObservation | None:
     quote = resolved.quote
     if (
@@ -153,7 +175,26 @@ def _quote_observation(
         quote.instrument,
         currency=quote.currency,
     )
-    freshness = _selected_freshness(resolved)
+    temporal = evaluate_us_selected_evidence_temporal(
+        now=evaluated_at,
+        market_phase=market_phase,
+        session_scope=USCapabilitySessionScope.ALL,
+        event_at=event_at,
+        fetched_at=quote.lineage.fetched_at or quote.lineage.received_at,
+        selected_freshness=_selected_freshness(resolved),
+    )
+    research_usable = bool(
+        resolved.health.research_usable
+        and temporal.evidence_freshness
+        not in {EvidenceFreshness.STALE, EvidenceFreshness.MISSING}
+        and (
+            not temporal.current_session_expected
+            or (
+                temporal.current_session_satisfied
+                and temporal.trade_recency is not USTradeRecency.OLD
+            )
+        )
+    )
     return USObservation(
         observation_id=_immutable_observation_id(
             prefix="quote",
@@ -173,12 +214,31 @@ def _quote_observation(
         ),
         event_at=event_at,
         fetched_at=_fetched_at(quote.lineage, fallback=evaluated_at),
+        selected_provider=resolved.health.selected_provider or quote.lineage.provider,
+        selected_source=resolved.health.selected_source or quote.lineage.source,
+        selection_reason=resolved.health.selection_reason,
+        fallback_used=resolved.health.fallback_used,
         availability=USMarketTruthAvailability.AVAILABLE,
-        freshness=freshness,
+        freshness=temporal.evidence_freshness,
+        provider_snapshot_freshness=temporal.provider_snapshot_freshness,
+        trade_recency=temporal.trade_recency,
+        current_session_expected=temporal.current_session_expected,
+        current_session_satisfied=temporal.current_session_satisfied,
         expectedness=CapabilityExpectation.EXPECTED,
         display_usable=resolved.health.facts_usable,
-        research_usable=resolved.health.research_usable,
-        limitations=resolved.health.limitations,
+        research_usable=research_usable,
+        limitations=tuple(
+            dict.fromkeys(
+                (
+                    *resolved.health.limitations,
+                    *_observation_temporal_limitations(
+                        trade_recency=temporal.trade_recency,
+                        current_session_expected=temporal.current_session_expected,
+                        current_session_satisfied=temporal.current_session_satisfied,
+                    ),
+                )
+            )
+        ),
     )
 
 
@@ -186,12 +246,33 @@ def _bar_observation(
     resolved: ResolvedBarSeries,
     *,
     evaluated_at: datetime,
+    market_phase: USMarketPhase,
 ) -> USObservation | None:
     if not resolved.bars or not resolved.health.facts_usable:
         return None
     bar = resolved.bars[-1]
     event_at = _event_at(bar.lineage, fallback=bar.end_at)
     price_unit, currency = _price_semantics(bar.instrument, currency="USD")
+    temporal = evaluate_us_selected_evidence_temporal(
+        now=evaluated_at,
+        market_phase=market_phase,
+        session_scope=USCapabilitySessionScope.ALL,
+        event_at=event_at,
+        fetched_at=bar.lineage.fetched_at or bar.lineage.received_at,
+        selected_freshness=_selected_freshness(resolved),
+    )
+    research_usable = bool(
+        resolved.health.research_usable
+        and temporal.evidence_freshness
+        not in {EvidenceFreshness.STALE, EvidenceFreshness.MISSING}
+        and (
+            not temporal.current_session_expected
+            or (
+                temporal.current_session_satisfied
+                and temporal.trade_recency is not USTradeRecency.OLD
+            )
+        )
+    )
     return USObservation(
         observation_id=_immutable_observation_id(
             prefix="bar",
@@ -208,12 +289,31 @@ def _bar_observation(
         session=us_session_for_timestamp(bar.start_at),
         event_at=event_at,
         fetched_at=_fetched_at(bar.lineage, fallback=evaluated_at),
+        selected_provider=resolved.health.selected_provider or bar.lineage.provider,
+        selected_source=resolved.health.selected_source or bar.lineage.source,
+        selection_reason=resolved.health.selection_reason,
+        fallback_used=resolved.health.fallback_used,
         availability=USMarketTruthAvailability.AVAILABLE,
-        freshness=_selected_freshness(resolved),
+        freshness=temporal.evidence_freshness,
+        provider_snapshot_freshness=temporal.provider_snapshot_freshness,
+        trade_recency=temporal.trade_recency,
+        current_session_expected=temporal.current_session_expected,
+        current_session_satisfied=temporal.current_session_satisfied,
         expectedness=CapabilityExpectation.EXPECTED,
         display_usable=resolved.health.facts_usable,
-        research_usable=resolved.health.research_usable,
-        limitations=resolved.health.limitations,
+        research_usable=research_usable,
+        limitations=tuple(
+            dict.fromkeys(
+                (
+                    *resolved.health.limitations,
+                    *_observation_temporal_limitations(
+                        trade_recency=temporal.trade_recency,
+                        current_session_expected=temporal.current_session_expected,
+                        current_session_satisfied=temporal.current_session_satisfied,
+                    ),
+                )
+            )
+        ),
     )
 
 
@@ -557,7 +657,11 @@ def _resolve_role(
     return min(eligible, key=lambda pair: pair[0])[1] if eligible else None
 
 
-def _close_observation(evidence: USCloseEvidence) -> USObservation:
+def _close_observation(
+    evidence: USCloseEvidence,
+    *,
+    health: ResolvedEvidenceHealth,
+) -> USObservation:
     return USObservation(
         observation_id=evidence.observation_id,
         kind=USObservationKind.CLOSE,
@@ -570,6 +674,10 @@ def _close_observation(evidence: USCloseEvidence) -> USObservation:
         session=MarketSession.CLOSED,
         event_at=evidence.event_at,
         fetched_at=evidence.fetched_at,
+        selected_provider=health.selected_provider or evidence.provider,
+        selected_source=health.selected_source or evidence.source,
+        selection_reason=health.selection_reason,
+        fallback_used=health.fallback_used,
         availability=evidence.availability,
         freshness=evidence.freshness,
         expectedness=CapabilityExpectation.NOT_EXPECTED,
@@ -591,6 +699,7 @@ def _select_current(
     observations: Iterable[USObservation],
     *,
     market_phase: USMarketPhase,
+    expected_trade_date: date | None,
 ) -> USObservation | None:
     expected_session = _phase_expected_session(market_phase)
     if expected_session is None:
@@ -599,8 +708,10 @@ def _select_current(
         item
         for item in observations
         if item.session is expected_session
+        and expected_trade_date is not None
+        and item.trade_date == expected_trade_date
+        and item.current_session_satisfied
         and item.availability is USMarketTruthAvailability.AVAILABLE
-        and item.freshness in {EvidenceFreshness.LIVE, EvidenceFreshness.FRESH}
         and item.display_usable
     ]
     return max(candidates, key=lambda item: item.event_at, default=None)
@@ -823,6 +934,10 @@ def _compose_us_market_truth_snapshot(
 
     calendar = build_us_calendar_status(evaluated_at)
     market_phase: USMarketPhase = calendar.get("phase", "market_closed")
+    expected_intraday_trade_date = expected_us_intraday_trade_date(
+        market_phase=market_phase,
+        now=evaluated_at,
+    )
     quote_read = components.quote_read
     bars_read = components.bars_read
     daily_read = components.daily_read
@@ -902,12 +1017,24 @@ def _compose_us_market_truth_snapshot(
     quote_observation = _quote_observation(
         quote_read.result.resolved,
         evaluated_at=evaluated_at,
+        market_phase=market_phase,
     )
     bar_observation = _bar_observation(
         bars_read.result.resolved,
         evaluated_at=evaluated_at,
+        market_phase=market_phase,
     )
-    close_observation = _close_observation(latest_close) if latest_close else None
+    close_health = (
+        daily_read.result.resolved.health
+        if latest_close is not None
+        and latest_close.evidence_kind is USCloseEvidenceKind.COMPLETED_DAILY
+        else bars_read.result.resolved.health
+    )
+    close_observation = (
+        _close_observation(latest_close, health=close_health)
+        if latest_close
+        else None
+    )
     market_observations = tuple(
         item for item in (quote_observation, bar_observation) if item is not None
     )
@@ -919,6 +1046,7 @@ def _compose_us_market_truth_snapshot(
     current_observation = _select_current(
         market_observations,
         market_phase=market_phase,
+        expected_trade_date=expected_intraday_trade_date,
     )
     if market_phase in {"pre_market_pending", "market_closed"}:
         headline_observation = close_observation
@@ -927,7 +1055,9 @@ def _compose_us_market_truth_snapshot(
     elif market_phase == "post_close" and latest_observation is not None:
         headline_observation = latest_observation
     else:
-        headline_observation = close_observation or latest_observation
+        # An older cached Quote/Intraday observation remains available through
+        # ``latest_observation`` but must never become the active-session price.
+        headline_observation = close_observation
 
     purpose_observations = {
         USComparisonPurpose.REGULAR_SESSION_CHANGE: (
@@ -1104,14 +1234,15 @@ def _compose_us_intraday_series_projection(
     if requested_scope not in {"regular", "extended", "all"}:
         raise ValueError("requested_scope must be regular, extended, or all")
     points = tuple(_series_point(bar) for bar in bars.bars)
-    trade_date = (
-        max(
+    date_selection = select_us_intraday_trade_date(
+        (
             point.start_at.astimezone(US_MARKET_TIMEZONE).date()
             for point in points
-        )
-        if points
-        else None
+        ),
+        now=evaluated_at,
+        market_phase=snapshot.market_phase,
     )
+    trade_date = date_selection.selected_trade_date
     current_points = tuple(
         point
         for point in points
@@ -1165,6 +1296,11 @@ def _compose_us_intraday_series_projection(
         or semantic_fingerprint(()),
         instrument=snapshot.instrument,
         trade_date=trade_date,
+        expected_trade_date=date_selection.expected_trade_date,
+        latest_available_trade_date=date_selection.latest_available_trade_date,
+        current_session_expected=date_selection.current_session_expected,
+        current_session_satisfied=date_selection.current_session_satisfied,
+        selection_reason=date_selection.selection_reason,
         interval=interval,
         requested_scope=requested_scope,
         regular_points=regular,

@@ -50,6 +50,7 @@ from app.us_market.market_truth_contracts import (
     build_evidence_revision,
     build_truth_revision,
 )
+from app.us_market.market_truth import _select_current
 
 
 UTC = timezone.utc
@@ -134,25 +135,81 @@ def _observation(
     currency: str = "USD",
     price_basis: str = "raw",
     freshness: EvidenceFreshness = EvidenceFreshness.FRESH,
+    trade_date: date = date(2026, 9, 1),
+    session: MarketSession = MarketSession.PRE_OPEN,
+    current_session_expected: bool = True,
+    current_session_satisfied: bool = True,
+    research_usable: bool = True,
 ) -> USObservation:
     return USObservation(
         observation_id=observation_id,
         kind=USObservationKind.QUOTE,
         instrument=AAPL,
-        trade_date=date(2026, 9, 1),
+        trade_date=trade_date,
         price=Decimal("201"),
         price_unit=PriceUnit.CURRENCY,
         currency=currency,
         price_basis=price_basis,
-        session=MarketSession.PRE_OPEN,
+        session=session,
         event_at=NOW,
         fetched_at=NOW,
+        selected_provider="fixture",
+        selected_source="fixture.quote",
+        selection_reason="FIXTURE_SELECTED",
+        fallback_used=False,
         availability=USMarketTruthAvailability.AVAILABLE,
         freshness=freshness,
+        current_session_expected=current_session_expected,
+        current_session_satisfied=current_session_satisfied,
         expectedness=CapabilityExpectation.EXPECTED,
         display_usable=True,
-        research_usable=True,
+        research_usable=research_usable,
     )
+
+
+def test_market_truth_current_selection_rejects_previous_session_observation() -> None:
+    previous_session = _observation(
+        trade_date=date(2026, 9, 1),
+        session=MarketSession.CONTINUOUS,
+        current_session_satisfied=False,
+    )
+
+    assert (
+        _select_current(
+            (previous_session,),
+            market_phase="regular",
+            expected_trade_date=date(2026, 9, 2),
+        )
+        is None
+    )
+
+
+def test_market_truth_current_selection_accepts_expected_session_date() -> None:
+    current_session = _observation(
+        trade_date=date(2026, 9, 2),
+        session=MarketSession.CONTINUOUS,
+    )
+
+    assert _select_current(
+        (current_session,),
+        market_phase="regular",
+        expected_trade_date=date(2026, 9, 2),
+    ) is current_session
+
+
+def test_market_truth_current_selection_preserves_stale_session_identity() -> None:
+    stale_current_session = _observation(
+        trade_date=date(2026, 9, 2),
+        session=MarketSession.CONTINUOUS,
+        freshness=EvidenceFreshness.STALE,
+        research_usable=False,
+    )
+
+    assert _select_current(
+        (stale_current_session,),
+        market_phase="regular",
+        expected_trade_date=date(2026, 9, 2),
+    ) is stale_current_session
 
 
 def _reference(evidence: USCloseEvidence) -> USComparisonReference:
@@ -171,6 +228,34 @@ def _reference(evidence: USCloseEvidence) -> USComparisonReference:
         research_usable=True,
         reason_code="LATEST_COMPLETED_CLOSE",
     )
+
+
+def test_index_point_reference_is_materialized_without_currency() -> None:
+    instrument = InstrumentKey(
+        market=Market.US,
+        symbol="^GSPC",
+        instrument_type=InstrumentType.INDEX,
+        venue="SP_INDEX",
+    )
+
+    reference = USComparisonReference(
+        reference_id="reference:^GSPC:headline",
+        evidence_id="daily:^GSPC:2026-08-31",
+        purpose=USComparisonPurpose.HEADLINE_CHANGE,
+        instrument=instrument,
+        reference_trade_date=date(2026, 8, 31),
+        price=Decimal("6450"),
+        price_unit=PriceUnit.INDEX_POINT,
+        currency=None,
+        price_basis="raw",
+        calculation_eligible=True,
+        display_usable=True,
+        research_usable=True,
+        reason_code="RESOLVED_CLOSE_REFERENCE",
+    )
+
+    assert reference.currency is None
+    assert reference.calculation_eligible is True
 
 
 def _metric(observation: USObservation, reference: USComparisonReference) -> USChangeMetric:
@@ -445,12 +530,24 @@ def test_snapshot_rejects_incompatible_currency() -> None:
         )
 
 
-def test_snapshot_rejects_stale_current_observation() -> None:
+def test_snapshot_preserves_stale_current_session_observation() -> None:
     evidence = _close()
-    observation = _observation(freshness=EvidenceFreshness.STALE)
+    observation = _observation(
+        freshness=EvidenceFreshness.STALE,
+        research_usable=False,
+    )
 
-    with pytest.raises(ValidationError, match="current observation"):
-        _snapshot(evidence=evidence, observation=observation)
+    snapshot = _snapshot(evidence=evidence, observation=observation)
+
+    assert snapshot.current_observation == observation
+    assert snapshot.current_observation.current_session_satisfied is True
+    assert snapshot.current_observation.freshness is EvidenceFreshness.STALE
+    assert snapshot.current_observation.research_usable is False
+
+
+def test_observation_rejects_stale_research_usability() -> None:
+    with pytest.raises(ValidationError, match="cannot be research usable"):
+        _observation(freshness=EvidenceFreshness.STALE)
 
 
 def test_reconciliation_requires_named_tolerance_policy() -> None:

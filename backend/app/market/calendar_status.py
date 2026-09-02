@@ -49,6 +49,7 @@ from app.us_market.trading_calendar import (
     US_PRE_MARKET_OPEN_TIME,
     US_SESSION_OPEN_TIME,
     expected_us_daily_price_date,
+    expected_us_intraday_trade_date,
     is_us_early_close_day,
     is_us_trading_day,
     next_us_trading_day,
@@ -489,6 +490,16 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         "date": current_date.isoformat(),
         "is_trading_day": is_trading_day,
         "phase": phase,
+        "current_session_trade_date": (
+            current_session_trade_date.isoformat()
+            if (
+                current_session_trade_date := expected_us_intraday_trade_date(
+                    market_phase=phase,
+                    now=local_now,
+                )
+            )
+            else None
+        ),
         "reason": _market_reason(
             value=current_date,
             is_trading_day=is_trading_day,

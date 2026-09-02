@@ -41,6 +41,7 @@ from app.market_data.provider_catalog import DataAcquisitionPlanV2, ProviderReso
 from app.us_market.market_data.descriptors import (
     ALPACA_SIP_DAILY_RESOURCE_ID,
     ALPHAVANTAGE_DAILY_RESOURCE_ID,
+    MASSIVE_INDEX_DAILY_RESOURCE_ID,
     YAHOO_DAILY_RESOURCE_ID,
 )
 from app.us_market.providers.alpaca import fetch_alpaca_stock_bars_payload
@@ -48,9 +49,11 @@ from app.us_market.providers.alphavantage import fetch_alphavantage_daily_payloa
 from app.us_market.providers.canonical import (
     canonical_alpaca_stock_bars_payload,
     canonical_alphavantage_daily_payload,
+    canonical_massive_index_aggregates_payload,
     canonical_yahoo_chart_payload,
 )
 from app.us_market.providers.errors import USProviderDataError
+from app.us_market.providers.massive import fetch_massive_index_aggregates_payload
 from app.us_market.providers.yahoo import fetch_yahoo_chart_payload
 
 
@@ -261,6 +264,25 @@ class USDailyOhlcvAcquisitionExecutor:
                 resource="daily_price_shared_core",
             )
             return USProviderPayload(payload=payload, url=url)
+        if route.resource_id == MASSIVE_INDEX_DAILY_RESOURCE_ID:
+            api_key = str(self._settings.massive_api_key or "").strip()
+            if not api_key:
+                raise USProviderDataError(
+                    provider="massive",
+                    code="MASSIVE_API_KEY_NOT_CONFIGURED",
+                    category="configuration",
+                    message="Massive API key is not configured.",
+                )
+            payload, url = fetch_massive_index_aggregates_payload(
+                symbol=symbol,
+                api_key=api_key,
+                interval="1d",
+                start_at=requirement.request.start_at,
+                end_at=requirement.request.end_at,
+                limit=requirement.request.max_bars,
+                timeout_seconds=route.timeout_seconds,
+            )
+            return USProviderPayload(payload=payload, url=url)
         if route.resource_id == ALPACA_SIP_DAILY_RESOURCE_ID:
             api_key_id = str(self._settings.alpaca_api_key_id or "").strip()
             api_secret_key = str(self._settings.alpaca_api_secret_key or "").strip()
@@ -359,6 +381,13 @@ class USDailyOhlcvAcquisitionExecutor:
                         fetched_at=fetched_at,
                         interval="1d",
                     )
+                elif route.resource_id == MASSIVE_INDEX_DAILY_RESOURCE_ID:
+                    batch = canonical_massive_index_aggregates_payload(
+                        instrument=requirement.target.instrument,
+                        payload=fetched.payload,
+                        fetched_at=fetched_at,
+                        interval="1d",
+                    )
                 elif route.resource_id == ALPACA_SIP_DAILY_RESOURCE_ID:
                     batch = canonical_alpaca_stock_bars_payload(
                         instrument=requirement.target.instrument,
@@ -392,6 +421,8 @@ class USDailyOhlcvAcquisitionExecutor:
                     else (
                         "yahoo.chart.1d"
                         if route.resource_id == YAHOO_DAILY_RESOURCE_ID
+                        else "massive.indices.aggregates.1d"
+                        if route.resource_id == MASSIVE_INDEX_DAILY_RESOURCE_ID
                         else "alpaca.sip.stock_bars.1d"
                         if route.resource_id == ALPACA_SIP_DAILY_RESOURCE_ID
                         else "alphavantage.time_series_daily"
@@ -403,6 +434,8 @@ class USDailyOhlcvAcquisitionExecutor:
                     else (
                         "yahoo.chart.v8"
                         if route.resource_id == YAHOO_DAILY_RESOURCE_ID
+                        else "massive.indices.aggregates.v2"
+                        if route.resource_id == MASSIVE_INDEX_DAILY_RESOURCE_ID
                         else "alpaca.stock_bars.v2"
                         if route.resource_id == ALPACA_SIP_DAILY_RESOURCE_ID
                         else "alphavantage.daily.v1"
@@ -421,6 +454,7 @@ class USDailyOhlcvAcquisitionExecutor:
                         content_hash=content_hash,
                         raw_text=raw_text,
                         parser_version=parser_version,
+                        provider_timeframe=batch.provider_timeframe,
                     )
                 )
                 observations.extend(bars)

@@ -134,6 +134,7 @@ from app.us_market.sec_fundamentals.submissions import (
 )
 from app.us_market.trading_calendar import (
     US_MARKET_TIMEZONE,
+    expected_us_intraday_trade_date,
     is_us_daily_price_finalized,
     previous_us_trading_day,
     us_session_close_time,
@@ -148,7 +149,6 @@ from app.market.ohlc_overlay import (
 from app.market.stock_volume_pace import (
     build_stock_volume_pace,
     intraday_history_needs_bootstrap,
-    latest_market_trade_date_points,
     mutate_market_intraday_history,
     previous_regular_close_from_history,
 )
@@ -167,11 +167,16 @@ from app.us_market.intraday_platform import (
 )
 from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.temporal_expectedness import (
+    US_INTRADAY_DELAYED_AFTER_SECONDS,
+    US_INTRADAY_STALE_AFTER_SECONDS,
     USCapabilityAvailability,
     USCapabilitySessionScope,
     USTradeRecency,
     build_us_capability_expectation,
     build_us_session_date_relation,
+    evaluate_us_selected_evidence_temporal,
+    select_us_intraday_trade_date,
+    us_capability_live_window,
 )
 
 
@@ -255,8 +260,6 @@ US_INTRADAY_CACHE_TTL_SECONDS = 4.75
 _US_INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
 US_INTRADAY_LAST_GOOD_MAX_ENTRIES = 256
 _US_INTRADAY_LAST_GOOD: OrderedDict[str, dict] = OrderedDict()
-US_INTRADAY_DELAYED_AFTER_SECONDS = 120
-US_INTRADAY_STALE_AFTER_SECONDS = 900
 US_CHART_LOOKBACK_MULTIPLIER = {
     "daily": 2,
     "weekly": 8,
@@ -364,11 +367,14 @@ def _remember_us_intraday_last_good(cache_key: str, payload: dict) -> None:
 
 
 def _us_intraday_live_window(*, market_phase: str, session_scope: str) -> bool:
-    if session_scope == "regular":
-        return market_phase == "regular"
-    if session_scope == "extended":
-        return market_phase in {"pre_market", "after_hours"}
-    return market_phase in {"pre_market", "regular", "after_hours"}
+    try:
+        normalized_scope = USCapabilitySessionScope(session_scope)
+    except ValueError:
+        normalized_scope = USCapabilitySessionScope.ALL
+    return us_capability_live_window(
+        market_phase=market_phase,
+        session_scope=normalized_scope,
+    )
 
 
 def _build_us_intraday_source_status(
@@ -488,23 +494,27 @@ def _build_us_resolved_source_status(
         checked_at = checked_at.replace(tzinfo=timezone.utc)
     event_at = _parse_us_evidence_time(selected_event_at)
     fetched_at = _parse_us_evidence_time(selected_fetched_at)
-    lag_seconds = (
-        max(
-            0.0,
-            (
-                checked_at.astimezone(timezone.utc)
-                - event_at.astimezone(timezone.utc)
-            ).total_seconds(),
-        )
-        if event_at is not None
-        else None
-    )
     calendar_status = build_us_calendar_status(checked_at)
     market_phase = str(calendar_status.get("phase") or "market_closed")
-    is_live_window = _us_intraday_live_window(
+    requested_scope = _us_requested_session_scope(session_scope)
+    temporal = evaluate_us_selected_evidence_temporal(
+        now=checked_at,
         market_phase=market_phase,
-        session_scope=session_scope,
+        session_scope=requested_scope,
+        event_at=event_at,
+        fetched_at=fetched_at,
+        selected_freshness=(
+            EvidenceFreshness.STALE
+            if resolved_status == "stale"
+            else EvidenceFreshness.UNKNOWN
+        ),
     )
+    lag_seconds = temporal.event_age_seconds
+    expected_trade_date = temporal.expected_trade_date
+    event_trade_date = temporal.event_trade_date
+    current_session_expected = temporal.current_session_expected
+    current_session_satisfied = temporal.current_session_satisfied
+    is_live_window = temporal.is_live_window
     normalized_limitations = tuple(
         dict.fromkeys(
             str(item)
@@ -513,40 +523,23 @@ def _build_us_resolved_source_status(
         )
     )
     delayed_vendor = "DELAYED_VENDOR_EVIDENCE" in normalized_limitations
-    snapshot_lag_seconds = (
-        max(
-            0.0,
-            (
-                checked_at.astimezone(timezone.utc)
-                - fetched_at.astimezone(timezone.utc)
-            ).total_seconds(),
-        )
-        if fetched_at is not None
-        else None
-    )
+    snapshot_lag_seconds = temporal.provider_snapshot_age_seconds
     if fetched_at is None:
         provider_snapshot_freshness = (
             "missing" if provider in {None, "unresolved"} else "unknown"
         )
-    elif snapshot_lag_seconds is not None and snapshot_lag_seconds <= 300:
-        provider_snapshot_freshness = "fresh"
     else:
-        provider_snapshot_freshness = "stale"
-    if event_at is None:
-        trade_recency = "missing"
-    elif not is_live_window:
-        trade_recency = "historical"
-    elif lag_seconds is not None and lag_seconds > US_INTRADAY_STALE_AFTER_SECONDS:
-        trade_recency = "old"
-    elif lag_seconds is not None and lag_seconds > US_INTRADAY_DELAYED_AFTER_SECONDS:
-        trade_recency = "delayed"
-    else:
-        trade_recency = "current"
+        provider_snapshot_freshness = temporal.provider_snapshot_freshness.value
+    trade_recency = temporal.trade_recency.value
     valid_empty_snapshot = bool(
         provider_snapshot_controls_freshness
         and trade_state == TradeObservationState.AWAITING_FIRST_TRADE.value
         and fetched_at is not None
     )
+    if valid_empty_snapshot and current_session_expected:
+        # A freshly observed valid-empty snapshot satisfies the current-session
+        # quote requirement without fabricating an event trade date or price.
+        current_session_satisfied = True
 
     if valid_empty_snapshot and provider_snapshot_freshness == "fresh":
         status = "ok"
@@ -554,14 +547,9 @@ def _build_us_resolved_source_status(
     elif not facts_usable or event_at is None:
         status = "unavailable"
         freshness_status = "missing"
-    elif (
-        provider_snapshot_controls_freshness
-        and is_live_window
-        and provider_snapshot_freshness == "fresh"
-        and trade_recency == "old"
-    ):
-        status = "ok" if research_usable else "degraded"
-        freshness_status = "current"
+    elif current_session_expected and not current_session_satisfied:
+        status = "degraded"
+        freshness_status = "stale"
     elif resolved_status == "stale" or (
         is_live_window
         and lag_seconds is not None
@@ -603,9 +591,19 @@ def _build_us_resolved_source_status(
         "provider_snapshot_freshness": provider_snapshot_freshness,
         "trade_state": trade_state or "unknown",
         "trade_recency": trade_recency,
+        "expected_trade_date": (
+            expected_trade_date.isoformat() if expected_trade_date else None
+        ),
+        "event_trade_date": event_trade_date.isoformat() if event_trade_date else None,
+        "current_session_expected": current_session_expected,
+        "current_session_satisfied": current_session_satisfied,
         "is_fallback": bool(fallback_used),
         "has_usable_data": bool(facts_usable),
-        "decision_usable": bool(research_usable),
+        "decision_usable": bool(
+            research_usable
+            and freshness_status not in {"stale", "missing", "provider_error"}
+            and (not current_session_expected or current_session_satisfied)
+        ),
         "selection_reason": selection_reason,
         "limitations": list(normalized_limitations),
         "message": selection_reason if status != "ok" else None,
@@ -1894,10 +1892,24 @@ def _project_us_intraday_payload(
     history_points = [
         point for point in result.get("points") or [] if isinstance(point, dict)
     ]
-    current_points = latest_market_trade_date_points(
-        history_points,
-        market_timezone=US_MARKET_TIMEZONE,
+    checked_at = datetime.now(timezone.utc)
+    market_phase = str(
+        build_us_calendar_status(checked_at).get("phase") or "market_closed"
     )
+    date_selection = select_us_intraday_trade_date(
+        (point.get("time") for point in history_points),
+        now=checked_at,
+        market_phase=market_phase,
+    )
+    current_points = [
+        point
+        for point in history_points
+        if date_selection.selected_trade_date is not None
+        and datetime.fromisoformat(str(point["time"]))
+        .astimezone(US_MARKET_TIMEZONE)
+        .date()
+        == date_selection.selected_trade_date
+    ]
     result["points"] = current_points
     result["point_count"] = len(current_points)
     result["regular_point_count"] = sum(
@@ -2481,7 +2493,14 @@ def get_us_intraday_trend(
         quote_source_status: dict | None,
         bar_source_status: dict | None,
         coverage_points: list[dict] | tuple[dict, ...] = (),
+        date_selection=None,
     ) -> dict:
+        if date_selection is None:
+            date_selection = select_us_intraday_trade_date(
+                (),
+                now=now,
+                market_phase=market_phase,
+            )
         aggregated = aggregate_intraday_payload(
             payload,
             interval=interval,
@@ -2505,6 +2524,19 @@ def get_us_intraday_trend(
             )
         aggregated["session_coverage"] = {
             "trade_date": coverage_trade_date,
+            "expected_trade_date": (
+                date_selection.expected_trade_date.isoformat()
+                if date_selection.expected_trade_date
+                else None
+            ),
+            "latest_available_trade_date": (
+                date_selection.latest_available_trade_date.isoformat()
+                if date_selection.latest_available_trade_date
+                else None
+            ),
+            "current_session_expected": date_selection.current_session_expected,
+            "current_session_satisfied": date_selection.current_session_satisfied,
+            "selection_reason": date_selection.selection_reason,
             "regular_point_count": int(coverage.get("regular_point_count") or 0),
             "extended_point_count": int(coverage.get("extended_point_count") or 0),
             "has_extended_hours": bool(coverage.get("has_extended_hours")),
@@ -2715,10 +2747,20 @@ def get_us_intraday_trend(
                 "is_partial": bar.finalization.value == "provisional",
             }
         )
-    all_current_points = latest_market_trade_date_points(
-        history_points,
-        market_timezone=US_MARKET_TIMEZONE,
+    date_selection = select_us_intraday_trade_date(
+        (point.get("time") for point in history_points),
+        now=now,
+        market_phase=market_phase,
     )
+    all_current_points = [
+        point
+        for point in history_points
+        if date_selection.selected_trade_date is not None
+        and datetime.fromisoformat(str(point["time"]))
+        .astimezone(US_MARKET_TIMEZONE)
+        .date()
+        == date_selection.selected_trade_date
+    ]
     current_points = [
         point
         for point in all_current_points
@@ -2766,6 +2808,13 @@ def get_us_intraday_trend(
     quote_is_current_observation = bool(
         quote_price is not None
         and quote_event_at is not None
+        and (
+            not date_selection.current_session_expected
+            or (
+                quote_source_status is not None
+                and quote_source_status.get("current_session_satisfied") is True
+            )
+        )
         and (latest_point_at is None or quote_event_at >= latest_point_at)
     )
     if quote_is_current_observation:
@@ -2883,6 +2932,7 @@ def get_us_intraday_trend(
         quote_source_status=quote_source_status,
         bar_source_status=bar_source_status,
         coverage_points=all_current_points,
+        date_selection=date_selection,
     )
 
 
@@ -3586,7 +3636,7 @@ def _us_watchlist_workflow_dependencies() -> watchlist_workflows.USWatchlistWork
     return watchlist_workflows.USWatchlistWorkflowDependencies(
         expected_daily_price_date=expected_us_daily_price_date,
         resolved_daily_batch_loader=_read_us_watchlist_resolved_daily_batch,
-        intraday_overlay_loader=_get_us_intraday_overlay,
+        current_quote_overlay_loader=_get_us_current_quote_overlay,
         refresh_daily_prices=_refresh_us_watchlist_daily_through_platform,
         ensure_stock=_ensure_us_stock_exists,
         refresh_sec_facts=refresh_us_sec_companyfacts,
@@ -3602,79 +3652,47 @@ def _us_ranking_freshness(rows: list[dict], requested_symbol_count: int) -> dict
         dependencies=_us_watchlist_workflow_dependencies(),
     )
 
-def _get_us_intraday_overlay(
+def _get_us_current_quote_overlay(
     symbol: str,
     *,
     db: Session | None = None,
-    session_scope: str = "regular",
+    now: datetime | None = None,
 ) -> dict | None:
-    intraday = get_us_intraday_trend(
-        symbol=symbol,
-        session_scope=session_scope,
-        db=db,
-    )
-    points = intraday.get("points") or []
-    latest = points[-1] if points else {}
-    quote_snapshot = intraday.get("quote_snapshot") or {}
-    current_observation = intraday.get("current_observation") or {}
-    resolved_current_price = watchlist_workflows._finite_float(
-        current_observation.get("value")
-    )
-    latest_price = (
-        resolved_current_price
-        if resolved_current_price is not None
-        else latest.get("price")
-    )
-    resolved_current_previous_close = watchlist_workflows._finite_float(
-        current_observation.get("previous_close")
-    )
-    previous_close = (
-        resolved_current_previous_close
-        if resolved_current_previous_close is not None
-        else intraday.get("previous_close")
-    )
-
-    if not _valid_number(latest_price):
+    if db is None:
         return None
-
-    change = None
-    change_pct = None
-
-    if _valid_number(previous_close) and previous_close != 0:
-        change = float(latest_price) - float(previous_close)
-        change_pct = (change / float(previous_close)) * 100
-
-    volume = _sum_us_intraday_volume(points)
-
-    if volume is None and _valid_number(latest.get("volume")):
-        volume = int(latest["volume"])
+    requested_at = now or datetime.now(timezone.utc)
+    platform_result = USIntradayMarketPlatform(db).read_quote(
+        symbol=normalize_us_symbol(symbol),
+        now=requested_at,
+    )
+    projection, source_status = _project_us_quote_temporal_contract(
+        platform_result,
+        now=requested_at,
+    )
+    quote = projection.get("quote")
+    if projection.get("facts_usable") is not True or not isinstance(quote, dict):
+        return None
+    latest_price = watchlist_workflows._finite_float(quote.get("last_trade_price"))
+    if latest_price is None:
+        return None
+    selected_session = projection.get("selected_session")
 
     return {
-        "time": current_observation.get("observed_at") or latest.get("time"),
-        "session": (
-            quote_snapshot.get("selected_session")
-            if current_observation.get("price_semantics")
-            == "resolved_quote_last_trade"
-            else latest.get("session")
-        ),
+        "time": quote.get("event_at") or projection.get("selected_event_at"),
+        "session": selected_session,
         "close": float(latest_price),
-        "previous_close": float(previous_close) if _valid_number(previous_close) else None,
-        "change": change,
-        "change_pct": change_pct,
-        "volume": volume,
-        "source": (
-            quote_snapshot.get("selected_source")
-            if current_observation.get("price_semantics")
-            == "resolved_quote_last_trade"
-            else intraday.get("source")
+        # Daily previous-close semantics stay owned by the resolved Daily batch.
+        "previous_close": None,
+        "source": projection.get("selected_source"),
+        "provider": projection.get("selected_provider"),
+        "has_extended_hours": selected_session == "extended",
+        "selection_reason": projection.get("selection_reason"),
+        "fallback_used": bool(projection.get("fallback_used")),
+        "is_live": bool(
+            source_status.get("is_live_window")
+            and source_status.get("decision_usable")
         ),
-        "provider": (
-            current_observation.get("provider")
-            or (intraday.get("source_status") or {}).get("provider")
-        ),
-        "session_scope": intraday.get("session_scope"),
-        "has_extended_hours": bool(intraday.get("has_extended_hours")),
-        "points": _compact_us_intraday_points(points),
+        "limitations": list(projection.get("limitations") or ()),
     }
 
 
@@ -3686,6 +3704,7 @@ def get_us_watchlist_ranking(
     enabled_only: bool = True,
     rank_by: str = "none",
     sort_order: str = "asc",
+    use_current_quote: bool = False,
     use_intraday: bool = False,
     intraday_limit: int = 30,
     intraday_session_scope: str = "regular",
@@ -3698,6 +3717,7 @@ def get_us_watchlist_ranking(
         enabled_only=enabled_only,
         rank_by=rank_by,
         sort_order=sort_order,
+        use_current_quote=use_current_quote,
         use_intraday=use_intraday,
         intraday_limit=intraday_limit,
         intraday_session_scope=intraday_session_scope,

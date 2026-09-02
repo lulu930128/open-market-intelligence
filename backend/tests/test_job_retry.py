@@ -15,6 +15,7 @@ from app.jobs import backfill_tasks
 from app.jobs import service as job_service
 from app.jobs.job_types import (
     US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE,
+    US_INDEX_INTRADAY_VOLUME_REPAIR_JOB_TYPE,
     US_INTRADAY_MINUTE_REPAIR_JOB_TYPE,
 )
 from app.jobs.us_current_market_bootstrap import (
@@ -728,6 +729,38 @@ class JobRetryTests(unittest.TestCase):
 
         self.assertIs(task, backfill_tasks.run_us_intraday_minute_repair_job)
         self.assertEqual(task_args, (False, 120, 2_000, 450))
+        self.assertEqual(retried_request, request)
+
+    def test_retry_config_recreates_bounded_us_index_volume_repair(self) -> None:
+        request = {
+            "apply": False,
+            "max_rows": 5_000,
+            "after_bar_id": 900,
+        }
+        job = SimpleNamespace(
+            id=205,
+            job_type=US_INDEX_INTRADAY_VOLUME_REPAIR_JOB_TYPE,
+            status="error",
+            target="dry-run:900",
+            progress_current=0,
+            progress_total=1,
+            message="Job failed.",
+            error_message="read failed",
+            request_json=json.dumps(request),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, retried_request = _retry_config(job)
+
+        self.assertIs(
+            task,
+            backfill_tasks.run_us_index_intraday_volume_repair_job,
+        )
+        self.assertEqual(task_args, (False, 5_000, 900))
         self.assertEqual(retried_request, request)
 
     def test_retry_config_recreates_bounded_us_current_market_bootstrap(self) -> None:

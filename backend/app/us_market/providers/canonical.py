@@ -25,6 +25,8 @@ from app.market_data.contracts import (
     SourceLineage,
     TradeObservationState,
 )
+from app.market_data.integration_contracts import ProviderTimeframe
+from app.us_market.market_data.massive_symbols import massive_index_provider_symbol
 from app.us_market.trading_calendar import (
     us_session_close_time,
 )
@@ -57,6 +59,7 @@ class CanonicalUSMarketData:
     bars: tuple[BarObservation, ...]
     skipped_bar_count: int = 0
     limitations: tuple[str, ...] = ()
+    provider_timeframe: ProviderTimeframe | None = None
 
     def __post_init__(self) -> None:
         if self.instrument.market is not Market.US:
@@ -275,16 +278,15 @@ def canonical_yahoo_chart_payload(
         )
         open_price, high_price, low_price, close_price = ohlc
         raw_volume = _value(quote.get("volume"), index)
-        daily_index_volume_not_applicable = bool(
-            interval == "1d"
-            and instrument.instrument_type is InstrumentType.INDEX
+        index_volume_not_applicable = (
+            instrument.instrument_type is InstrumentType.INDEX
         )
         parsed_volume = (
             None
-            if daily_index_volume_not_applicable
+            if index_volume_not_applicable
             else _quantity(raw_volume)
         )
-        if interval == "1m":
+        if interval == "1m" and not index_volume_not_applicable:
             normalized_volume, volume_status = normalize_yahoo_intraday_volume(
                 int(parsed_volume.value) if parsed_volume is not None else None,
                 session=(
@@ -317,7 +319,7 @@ def canonical_yahoo_chart_payload(
             volume=parsed_volume,
             volume_status=(
                 "not_applicable"
-                if daily_index_volume_not_applicable
+                if index_volume_not_applicable
                 else "observed"
                 if parsed_volume is not None
                 else "missing"
@@ -347,6 +349,10 @@ def canonical_yahoo_chart_payload(
             (
                 "YAHOO_EXTENDED_VOLUME_ZERO_FILLED",
                 extended_zero_volume_count > 0,
+            ),
+            (
+                "US_INDEX_VOLUME_NOT_APPLICABLE",
+                instrument.instrument_type is InstrumentType.INDEX,
             ),
         )
         if present
@@ -796,11 +802,261 @@ def canonical_twelve_data_intraday_payload(
     )
 
 
+def _massive_unix_datetime(value: Any) -> datetime:
+    try:
+        raw = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Massive payload timestamp is invalid") from exc
+    absolute = abs(raw)
+    divisor = 1_000_000_000 if absolute >= 10**16 else 1_000 if absolute >= 10**11 else 1
+    try:
+        return datetime.fromtimestamp(raw / divisor, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError) as exc:
+        raise ValueError("Massive payload timestamp is out of range") from exc
+
+
+def _massive_timeframe(value: Any) -> ProviderTimeframe:
+    normalized = str(value or "").strip().upper().replace("_", "-")
+    if normalized in {"REAL-TIME", "REALTIME"}:
+        return ProviderTimeframe.REAL_TIME
+    if normalized == "DELAYED":
+        return ProviderTimeframe.DELAYED
+    if normalized in {"END-OF-DAY", "EOD"}:
+        return ProviderTimeframe.END_OF_DAY
+    return ProviderTimeframe.UNKNOWN
+
+
+def _massive_optional_timeframe(value: Any) -> ProviderTimeframe | None:
+    normalized = str(value or "").strip().upper().replace("_", "-")
+    if normalized in {"REAL-TIME", "REALTIME", "DELAYED", "END-OF-DAY", "EOD"}:
+        return _massive_timeframe(normalized)
+    return None
+
+
+def _massive_timeframe_limitations(
+    timeframe: ProviderTimeframe,
+) -> tuple[str, ...]:
+    if timeframe is ProviderTimeframe.REAL_TIME:
+        return ()
+    if timeframe is ProviderTimeframe.DELAYED:
+        return ("MASSIVE_PROVIDER_TIMEFRAME_DELAYED",)
+    if timeframe is ProviderTimeframe.END_OF_DAY:
+        return ("MASSIVE_PROVIDER_TIMEFRAME_END_OF_DAY",)
+    return ("MASSIVE_PROVIDER_TIMEFRAME_UNKNOWN",)
+
+
+def canonical_massive_index_snapshot_payload(
+    *,
+    instrument: InstrumentKey,
+    payload: Mapping[str, Any],
+    fetched_at: datetime,
+    provider_symbol: str | None = None,
+) -> CanonicalUSMarketData:
+    """Convert one Massive index snapshot without IO or persistence."""
+
+    if instrument.market is not Market.US:
+        raise ValueError("Massive adapter requires a US instrument")
+    if instrument.instrument_type is not InstrumentType.INDEX:
+        raise ValueError("Massive Indices supports only canonical index instruments")
+    _require_aware(fetched_at, "fetched_at")
+    expected_symbol = str(
+        provider_symbol or massive_index_provider_symbol(instrument.symbol)
+    ).strip().upper()
+    results = payload.get("results") if isinstance(payload, Mapping) else None
+    rows = (
+        tuple(item for item in results if isinstance(item, Mapping))
+        if isinstance(results, Sequence) and not isinstance(results, (str, bytes))
+        else ()
+    )
+    matched = next(
+        (
+            item
+            for item in rows
+            if str(item.get("ticker") or "").strip().upper() == expected_symbol
+        ),
+        None,
+    )
+    if matched is None:
+        raise ValueError("Massive snapshot payload has no matching index result")
+    if matched.get("error"):
+        raise ValueError("Massive snapshot result is not usable")
+    value = _decimal(matched.get("value"))
+    if value is None or value <= 0:
+        raise ValueError("Massive snapshot has no valid index value")
+    event_at = _massive_unix_datetime(matched.get("last_updated"))
+    timeframe = _massive_timeframe(matched.get("timeframe"))
+    session = matched.get("session")
+    session = session if isinstance(session, Mapping) else {}
+    lineage = _lineage(
+        provider="massive",
+        source="massive.indices.snapshot",
+        event_at=event_at,
+        fetched_at=fetched_at,
+        raw_contract_version="massive.indices.snapshot.v3",
+    )
+    quote = QuoteObservation(
+        instrument=instrument,
+        lineage=lineage,
+        trade_date=event_at.astimezone(US_EASTERN).date(),
+        currency="USD",
+        state=ObservationState.AVAILABLE,
+        trade_state=TradeObservationState.TRADE_OBSERVED,
+        last_trade_price=value,
+        open_price=_decimal(session.get("open")),
+        high_price=_decimal(session.get("high")),
+        low_price=_decimal(session.get("low")),
+        previous_close=_decimal(session.get("previous_close")),
+    )
+    return CanonicalUSMarketData(
+        instrument=instrument,
+        provider="massive",
+        interval="quote",
+        price_basis="raw",
+        snapshot=CanonicalMarketSnapshot(
+            instrument=instrument,
+            session=MarketSessionContext(
+                market=Market.US,
+                session=us_session_for_timestamp(event_at),
+                observed_at=event_at,
+                trade_date=quote.trade_date,
+            ),
+            quote=quote,
+        ),
+        bars=(),
+        limitations=_massive_timeframe_limitations(timeframe),
+        provider_timeframe=timeframe,
+    )
+
+
+def canonical_massive_index_aggregates_payload(
+    *,
+    instrument: InstrumentKey,
+    payload: Mapping[str, Any],
+    fetched_at: datetime,
+    interval: str,
+    provider_symbol: str | None = None,
+) -> CanonicalUSMarketData:
+    """Convert Massive index aggregates into canonical volume-less OHLC bars."""
+
+    if instrument.market is not Market.US:
+        raise ValueError("Massive adapter requires a US instrument")
+    if instrument.instrument_type is not InstrumentType.INDEX:
+        raise ValueError("Massive Indices supports only canonical index instruments")
+    _require_aware(fetched_at, "fetched_at")
+    duration = _INTERVAL_DURATION.get(interval)
+    if interval not in {"1m", "1d"} or duration is None:
+        raise ValueError("Massive index aggregates support only 1m and 1d")
+    expected_symbol = str(
+        provider_symbol or massive_index_provider_symbol(instrument.symbol)
+    ).strip().upper()
+    payload_symbol = str(payload.get("ticker") or expected_symbol).strip().upper()
+    if payload_symbol != expected_symbol:
+        raise ValueError("Massive aggregate ticker does not match the provider symbol")
+    results = payload.get("results")
+    if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
+        raise ValueError("Massive aggregate payload has no results")
+
+    bars: list[BarObservation] = []
+    skipped = 0
+    for row in results:
+        if not isinstance(row, Mapping):
+            skipped += 1
+            continue
+        try:
+            provider_event_at = _massive_unix_datetime(row.get("t"))
+        except ValueError:
+            skipped += 1
+            continue
+        ohlc = _positive_ohlc(
+            row.get("o"),
+            row.get("h"),
+            row.get("l"),
+            row.get("c"),
+        )
+        if ohlc is None:
+            skipped += 1
+            continue
+        if interval == "1d":
+            trade_date = provider_event_at.astimezone(US_EASTERN).date()
+            start_at = datetime.combine(
+                trade_date,
+                time(9, 30),
+                tzinfo=US_EASTERN,
+            )
+            end_at = datetime.combine(
+                trade_date,
+                us_session_close_time(trade_date),
+                tzinfo=US_EASTERN,
+            )
+        else:
+            start_at = provider_event_at.replace(second=0, microsecond=0)
+            end_at = start_at + duration
+        open_price, high_price, low_price, close_price = ohlc
+        bars.append(
+            BarObservation(
+                instrument=instrument,
+                lineage=_lineage(
+                    provider="massive",
+                    source=f"massive.indices.aggregates.{interval}",
+                    event_at=provider_event_at,
+                    fetched_at=fetched_at,
+                    raw_contract_version="massive.indices.aggregates.v2",
+                ),
+                interval=interval,
+                start_at=start_at,
+                end_at=end_at,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=close_price,
+                volume=None,
+                volume_status="not_applicable",
+                price_basis="raw",
+                finalization=(
+                    BarFinalization.FINAL
+                    if fetched_at.astimezone(US_EASTERN) >= end_at
+                    else BarFinalization.PROVISIONAL
+                ),
+            )
+        )
+    bars.sort(key=lambda item: item.start_at)
+    if any(
+        current.start_at == following.start_at
+        for current, following in zip(bars, bars[1:])
+    ):
+        raise ValueError("Massive aggregate payload contains duplicate timestamps")
+    provider_timeframe = _massive_optional_timeframe(payload.get("status"))
+    limitations: list[str] = ["MASSIVE_INDEX_VOLUME_NOT_APPLICABLE"]
+    if provider_timeframe is not None:
+        limitations.extend(_massive_timeframe_limitations(provider_timeframe))
+    if skipped:
+        limitations.append("MALFORMED_BARS_SKIPPED")
+    canonical_bars = tuple(bars)
+    return CanonicalUSMarketData(
+        instrument=instrument,
+        provider="massive",
+        interval=interval,
+        price_basis="raw",
+        snapshot=_snapshot_from_bars(
+            instrument=instrument,
+            bars=canonical_bars,
+            previous_close=None,
+            currency="USD",
+        ),
+        bars=canonical_bars,
+        skipped_bar_count=skipped,
+        limitations=tuple(limitations),
+        provider_timeframe=provider_timeframe,
+    )
+
+
 __all__ = [
     "CanonicalUSMarketData",
     "US_EASTERN",
     "canonical_alpaca_stock_bars_payload",
     "canonical_alphavantage_daily_payload",
+    "canonical_massive_index_aggregates_payload",
+    "canonical_massive_index_snapshot_payload",
     "canonical_twelve_data_intraday_payload",
     "canonical_twelve_data_quote_payload",
     "canonical_yahoo_chart_payload",

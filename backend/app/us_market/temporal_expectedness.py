@@ -7,7 +7,8 @@ availability, provider snapshot freshness, and trade recency stay independent.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Iterable, Literal
 
@@ -27,7 +28,11 @@ from app.us_market.market_data.descriptors import (
     US_QUOTE_PROVIDER_DESCRIPTORS,
 )
 from app.us_market.daily_market_state import expected_us_completed_daily_state
-from app.us_market.trading_calendar import US_MARKET_TIMEZONE, is_us_trading_day
+from app.us_market.trading_calendar import (
+    US_MARKET_TIMEZONE,
+    expected_us_intraday_trade_date,
+    is_us_trading_day,
+)
 
 
 USCapabilityId = Literal["quote.snapshot", "intraday.bars"]
@@ -40,6 +45,85 @@ USMarketPhase = Literal[
     "market_closed",
 ]
 US_SESSION_DATE_RELATION_VERSION = "omi.us.session_date_relation.v1"
+US_INTRADAY_DELAYED_AFTER_SECONDS = 120
+US_INTRADAY_STALE_AFTER_SECONDS = 900
+US_PROVIDER_SNAPSHOT_FRESH_AFTER_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class USIntradayDateSelection:
+    expected_trade_date: date | None
+    latest_available_trade_date: date | None
+    selected_trade_date: date | None
+    current_session_expected: bool
+    current_session_satisfied: bool
+    selection_reason: str
+
+
+@dataclass(frozen=True)
+class USSelectedEvidenceTemporalState:
+    """Pure US temporal assessment for one already-selected observation."""
+
+    expected_trade_date: date | None
+    event_trade_date: date | None
+    current_session_expected: bool
+    current_session_satisfied: bool
+    is_live_window: bool
+    event_age_seconds: float | None
+    provider_snapshot_age_seconds: float | None
+    provider_snapshot_freshness: EvidenceFreshness
+    trade_recency: "USTradeRecency"
+    evidence_freshness: EvidenceFreshness
+
+
+def select_us_intraday_trade_date(
+    available_trade_dates: Iterable[date | datetime | str],
+    *,
+    now: datetime,
+    market_phase: USMarketPhase,
+) -> USIntradayDateSelection:
+    """Select a current-session date without promoting older cache entries."""
+
+    available = tuple(
+        sorted(
+            {
+                parsed
+                for value in available_trade_dates
+                if (parsed := _date_value(value)) is not None
+            }
+        )
+    )
+    latest = available[-1] if available else None
+    expected = expected_us_intraday_trade_date(
+        market_phase=market_phase,
+        now=now,
+    )
+    if expected is not None:
+        satisfied = expected in available
+        return USIntradayDateSelection(
+            expected_trade_date=expected,
+            latest_available_trade_date=latest,
+            selected_trade_date=expected if satisfied else None,
+            current_session_expected=True,
+            current_session_satisfied=satisfied,
+            selection_reason=(
+                "CURRENT_SESSION_AVAILABLE"
+                if satisfied
+                else "EXPECTED_CURRENT_SESSION_MISSING"
+            ),
+        )
+    return USIntradayDateSelection(
+        expected_trade_date=None,
+        latest_available_trade_date=latest,
+        selected_trade_date=latest,
+        current_session_expected=False,
+        current_session_satisfied=False,
+        selection_reason=(
+            "LATEST_AVAILABLE_OFF_SESSION"
+            if latest is not None
+            else "NO_INTRADAY_SESSION_AVAILABLE"
+        ),
+    )
 
 
 def _date_value(value: date | datetime | str | None) -> date | None:
@@ -173,6 +257,138 @@ class USCapabilityExpectationOutcome(str, Enum):
     NOT_APPLICABLE = "not_applicable"
     UNAVAILABLE = "unavailable"
     UNKNOWN = "unknown"
+
+
+def _aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def us_capability_live_window(
+    *,
+    market_phase: USMarketPhase,
+    session_scope: USCapabilitySessionScope,
+) -> bool:
+    if session_scope is USCapabilitySessionScope.REGULAR:
+        return market_phase == "regular"
+    if session_scope is USCapabilitySessionScope.EXTENDED:
+        return market_phase in {"pre_market", "after_hours"}
+    if session_scope is USCapabilitySessionScope.ALL:
+        return market_phase in {"pre_market", "regular", "after_hours"}
+    return False
+
+
+def evaluate_us_selected_evidence_temporal(
+    *,
+    now: datetime,
+    market_phase: USMarketPhase,
+    session_scope: USCapabilitySessionScope,
+    event_at: datetime | None,
+    fetched_at: datetime | None,
+    selected_freshness: EvidenceFreshness = EvidenceFreshness.UNKNOWN,
+) -> USSelectedEvidenceTemporalState:
+    """Evaluate event time separately from provider snapshot receipt time.
+
+    The function is provider-neutral and performs no IO.  A recent fetch cannot
+    make an old market event current; the two freshness axes are preserved.
+    """
+
+    checked_at = _aware_utc(now)
+    if checked_at is None:
+        raise ValueError("now is required")
+    event_time = _aware_utc(event_at)
+    fetched_time = _aware_utc(fetched_at)
+    expected_trade_date = expected_us_intraday_trade_date(
+        market_phase=market_phase,
+        now=checked_at,
+    )
+    event_trade_date = (
+        event_time.astimezone(US_MARKET_TIMEZONE).date()
+        if event_time is not None
+        else None
+    )
+    current_session_expected = expected_trade_date is not None
+    current_session_satisfied = bool(
+        expected_trade_date is not None
+        and event_trade_date == expected_trade_date
+    )
+    is_live_window = us_capability_live_window(
+        market_phase=market_phase,
+        session_scope=session_scope,
+    )
+    event_age_seconds = (
+        max(0.0, (checked_at - event_time).total_seconds())
+        if event_time is not None
+        else None
+    )
+    provider_snapshot_age_seconds = (
+        max(0.0, (checked_at - fetched_time).total_seconds())
+        if fetched_time is not None
+        else None
+    )
+    provider_snapshot_freshness = (
+        EvidenceFreshness.UNKNOWN
+        if fetched_time is None
+        else EvidenceFreshness.FRESH
+        if provider_snapshot_age_seconds is not None
+        and provider_snapshot_age_seconds <= US_PROVIDER_SNAPSHOT_FRESH_AFTER_SECONDS
+        else EvidenceFreshness.STALE
+    )
+
+    if event_time is None:
+        trade_recency = USTradeRecency.MISSING
+        evidence_freshness = EvidenceFreshness.MISSING
+    elif current_session_expected and not current_session_satisfied:
+        trade_recency = USTradeRecency.HISTORICAL
+        evidence_freshness = EvidenceFreshness.STALE
+    elif not is_live_window:
+        trade_recency = USTradeRecency.HISTORICAL
+        evidence_freshness = selected_freshness
+    elif (
+        event_age_seconds is not None
+        and event_age_seconds > US_INTRADAY_STALE_AFTER_SECONDS
+    ):
+        trade_recency = USTradeRecency.OLD
+        evidence_freshness = EvidenceFreshness.STALE
+    elif (
+        event_age_seconds is not None
+        and event_age_seconds > US_INTRADAY_DELAYED_AFTER_SECONDS
+    ):
+        trade_recency = USTradeRecency.DELAYED
+        evidence_freshness = (
+            EvidenceFreshness.STALE
+            if selected_freshness is EvidenceFreshness.STALE
+            else EvidenceFreshness.FRESH
+        )
+    else:
+        trade_recency = USTradeRecency.CURRENT
+        evidence_freshness = (
+            selected_freshness
+            if selected_freshness
+            in {
+                EvidenceFreshness.LIVE,
+                EvidenceFreshness.FRESH,
+                EvidenceFreshness.STALE,
+                EvidenceFreshness.MISSING,
+            }
+            else EvidenceFreshness.FRESH
+        )
+
+    return USSelectedEvidenceTemporalState(
+        expected_trade_date=expected_trade_date,
+        event_trade_date=event_trade_date,
+        current_session_expected=current_session_expected,
+        current_session_satisfied=current_session_satisfied,
+        is_live_window=is_live_window,
+        event_age_seconds=event_age_seconds,
+        provider_snapshot_age_seconds=provider_snapshot_age_seconds,
+        provider_snapshot_freshness=provider_snapshot_freshness,
+        trade_recency=trade_recency,
+        evidence_freshness=evidence_freshness,
+    )
 
 
 class USCapabilityExpectationProjection(CanonicalModel):
@@ -354,22 +570,23 @@ def _derive_outcome(
             "NO_TRADE_OBSERVED",
         )
     if availability is USCapabilityAvailability.AVAILABLE:
-        if (
-            capability_id == "quote.snapshot"
-            and provider_snapshot_freshness
-            in {EvidenceFreshness.FRESH, EvidenceFreshness.LIVE}
-            and trade_recency is USTradeRecency.OLD
-        ):
-            return (
-                USCapabilityExpectationOutcome.READY,
-                True,
-                "LAST_TRADE_OLD_BUT_PROVIDER_CURRENT",
-            )
         if evidence_freshness is EvidenceFreshness.STALE:
             return (
                 USCapabilityExpectationOutcome.STALE,
                 False,
                 "PROVIDER_SNAPSHOT_STALE",
+            )
+        if trade_recency is USTradeRecency.HISTORICAL:
+            return (
+                USCapabilityExpectationOutcome.STALE,
+                False,
+                "LAST_TRADE_NOT_CURRENT_SESSION",
+            )
+        if trade_recency is USTradeRecency.OLD:
+            return (
+                USCapabilityExpectationOutcome.STALE,
+                False,
+                "LAST_TRADE_OLD",
             )
         if trade_state is TradeObservationState.AWAITING_FIRST_TRADE:
             return (
@@ -459,6 +676,9 @@ def build_us_capability_expectation(
 
 
 __all__ = [
+    "US_INTRADAY_DELAYED_AFTER_SECONDS",
+    "US_INTRADAY_STALE_AFTER_SECONDS",
+    "US_PROVIDER_SNAPSHOT_FRESH_AFTER_SECONDS",
     "US_SESSION_DATE_RELATION_VERSION",
     "USCapabilityApplicability",
     "USCapabilityAvailability",
@@ -466,7 +686,10 @@ __all__ = [
     "USCapabilityExpectationProjection",
     "USCapabilitySessionScope",
     "USCapabilitySupportStatus",
+    "USSelectedEvidenceTemporalState",
     "USTradeRecency",
     "build_us_capability_expectation",
     "build_us_session_date_relation",
+    "evaluate_us_selected_evidence_temporal",
+    "us_capability_live_window",
 ]

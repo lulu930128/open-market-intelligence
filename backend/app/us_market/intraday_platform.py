@@ -271,12 +271,12 @@ class USIntradayMarketPlatform:
         self._db = db
         self._gateway = gateway or MarketDataGateway()
         self._acquisition = acquisition or USIntradayAcquisitionExecutor()
+        self._quote_descriptors = quote_descriptors or US_QUOTE_PROVIDER_DESCRIPTORS
+        self._bar_descriptors = bar_descriptors or US_INTRADAY_PROVIDER_DESCRIPTORS
         self._quote_reader = USQuoteRepository(db)
         self._bar_reader = USIntradayBarRepository(db)
         self._quote_transaction = quote_transaction or USQuoteTransaction(db)
         self._bar_transaction = bar_transaction or USIntradayBarTransaction(db)
-        self._quote_descriptors = quote_descriptors or US_QUOTE_PROVIDER_DESCRIPTORS
-        self._bar_descriptors = bar_descriptors or US_INTRADAY_PROVIDER_DESCRIPTORS
 
     @staticmethod
     def _validate_now(now: datetime) -> None:
@@ -423,7 +423,14 @@ class USIntradayMarketPlatform:
         self._validate_now(requested_at)
         identity = resolve_us_instrument_identity(self._db, symbol)
         requirement = self._quote_requirement(identity, now=requested_at, allow_acquisition=True, require_live=require_live, max_provider_calls=max_provider_calls, profile=profile)
-        result = self._gateway.resolve_quote(requirement, reader=self._quote_reader, descriptors=self._quote_descriptors, acquisition_port=self._acquisition, transaction_port=self._quote_transaction)
+        result = self._gateway.resolve_quote(
+            requirement,
+            reader=self._quote_reader,
+            descriptors=self._quote_descriptors,
+            acquisition_port=self._acquisition,
+            transaction_port=self._quote_transaction,
+            route_resolution_gate=True,
+        )
         return self._platform_result(identity=identity, result=result, projection=project_resolved_us_quote(result.resolved), profile=profile)
 
     def read_intraday_bars(self, *, symbol: str, bars: int = 500, now: datetime | None = None, profile: USIntradayOperationProfile = US_RECURRING_INTRADAY_PROFILE) -> USIntradayPlatformResult:
@@ -497,6 +504,7 @@ class USIntradayMarketPlatform:
             acquisition_port=self._acquisition,
             transaction_port=self._bar_transaction,
             acquisition_requirement=acquisition_requirement,
+            route_resolution_gate=True,
         )
         return self._platform_result(identity=identity, result=result, projection=project_resolved_us_bars(result.resolved, max_bars=bars), profile=profile)
 

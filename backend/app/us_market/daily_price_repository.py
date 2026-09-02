@@ -35,10 +35,6 @@ from app.us_market.trading_calendar import us_session_close_time
 
 
 US_EASTERN = ZoneInfo("America/New_York")
-_PRIORITY = {
-    descriptor.provider_key: descriptor.priority
-    for descriptor in US_DAILY_CANDIDATE_DESCRIPTORS
-}
 
 
 def _aware_utc(value: datetime) -> datetime:
@@ -57,10 +53,10 @@ def _fair_budgets(total_rows: int, lane_count: int) -> tuple[int, ...]:
     )
 
 
-def _load_bounded_candidate_rows(rows_query, *, max_rows: int):
+def _load_bounded_candidate_rows(rows_query, *, max_rows: int, priorities):
     """Read fairly across registered providers plus one rejection lane."""
 
-    registered = tuple(_PRIORITY)
+    registered = tuple(priorities)
     lanes = tuple((provider, USDailyPrice.provider == provider) for provider in registered)
     lanes += (
         (
@@ -140,8 +136,17 @@ def _load_bounded_candidate_rows(rows_query, *, max_rows: int):
 class USDailyBarRepository:
     """Read every bounded provider-coherent series without selecting a winner."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        descriptors=US_DAILY_CANDIDATE_DESCRIPTORS,
+    ) -> None:
         self._db = db
+        self._priorities = {
+            descriptor.provider_key: descriptor.priority
+            for descriptor in descriptors
+        }
 
     def load_daily_bars(self, query: DailyBarCandidateQuery) -> DailyBarCandidateRead:
         instrument = query.instrument
@@ -166,7 +171,11 @@ class USDailyBarRepository:
             rows_query = rows_query.filter(
                 RawFetchResult.fetched_at <= _aware_utc(query.available_at)
             )
-        rows = _load_bounded_candidate_rows(rows_query, max_rows=query.max_rows)
+        rows = _load_bounded_candidate_rows(
+            rows_query,
+            max_rows=query.max_rows,
+            priorities=self._priorities,
+        )
 
         bars_by_source: dict[tuple[str, str], list[BarObservation]] = {}
         storage_ids: dict[tuple[str, str], list[int]] = {}
@@ -182,6 +191,7 @@ class USDailyBarRepository:
                 raw,
                 source,
                 instrument_type=instrument.instrument_type,
+                registered_providers=tuple(self._priorities),
             )
             if issue is not None:
                 rejections.append(
@@ -271,7 +281,7 @@ class USDailyBarRepository:
                 provider=provider,
                 source=source,
                 authority=bars[0].lineage.authority,
-                provider_priority=_PRIORITY[provider],
+                provider_priority=self._priorities[provider],
                 bars=tuple(bars),
                 storage_row_ids=tuple(storage_ids[(provider, source)]),
                 raw_result_ids=tuple(raw_ids[(provider, source)]),

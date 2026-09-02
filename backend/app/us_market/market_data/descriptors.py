@@ -20,6 +20,96 @@ ALPACA_SIP_DAILY_RESOURCE_ID = "alpaca.sip.historical.daily"
 ALPHAVANTAGE_DAILY_RESOURCE_ID = "alphavantage.daily"
 TWELVE_QUOTE_RESOURCE_ID = "twelve_data.quote"
 TWELVE_INTRADAY_RESOURCE_ID = "twelve_data.intraday"
+MASSIVE_INDEX_QUOTE_RESOURCE_ID = "massive.indices.snapshot"
+MASSIVE_INDEX_INTRADAY_RESOURCE_ID = "massive.indices.aggregates.1m"
+MASSIVE_INDEX_DAILY_RESOURCE_ID = "massive.indices.aggregates.1d"
+
+MASSIVE_INDEX_QUOTE_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key="massive",
+    market=Market.US,
+    capability_id="quote.snapshot",
+    resource_id=MASSIVE_INDEX_QUOTE_RESOURCE_ID,
+    authority=AuthorityClass.VENDOR,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+    instrument_types=(InstrumentType.INDEX,),
+    supported_sessions=(
+        MarketSession.PRE_OPEN,
+        MarketSession.CONTINUOUS,
+        MarketSession.CLOSING_AUCTION,
+        MarketSession.POST_CLOSE,
+        MarketSession.CLOSED,
+    ),
+    acquisition_modes=(AcquisitionMode.FETCH,),
+    priority=90,
+    can_produce_live=True,
+    max_timeout_seconds=15,
+    max_external_calls_per_attempt=1,
+    max_symbols_per_call=1,
+    max_range_days=1,
+    allow_unknown_health=True,
+    limitations=(
+        "API_KEY_REQUIRED",
+        "MASSIVE_INDICES_ONLY",
+        "PROVIDER_TIMEFRAME_MUST_BE_VERIFIED",
+    ),
+)
+
+MASSIVE_INDEX_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key="massive",
+    market=Market.US,
+    capability_id="intraday.bars",
+    resource_id=MASSIVE_INDEX_INTRADAY_RESOURCE_ID,
+    authority=AuthorityClass.VENDOR,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+    instrument_types=(InstrumentType.INDEX,),
+    intervals=("1m",),
+    supported_sessions=(
+        MarketSession.PRE_OPEN,
+        MarketSession.CONTINUOUS,
+        MarketSession.CLOSING_AUCTION,
+        MarketSession.POST_CLOSE,
+        MarketSession.CLOSED,
+    ),
+    acquisition_modes=(AcquisitionMode.FETCH,),
+    priority=90,
+    can_produce_live=True,
+    max_timeout_seconds=15,
+    max_external_calls_per_attempt=1,
+    max_symbols_per_call=1,
+    max_range_days=5,
+    allow_unknown_health=True,
+    limitations=(
+        "API_KEY_REQUIRED",
+        "MASSIVE_INDICES_ONLY",
+        "MASSIVE_INDEX_VOLUME_NOT_APPLICABLE",
+    ),
+)
+
+MASSIVE_INDEX_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key="massive",
+    market=Market.US,
+    capability_id="daily.ohlcv",
+    resource_id=MASSIVE_INDEX_DAILY_RESOURCE_ID,
+    authority=AuthorityClass.VENDOR,
+    target_kinds=(DescriptorTargetKind.INSTRUMENT,),
+    instrument_types=(InstrumentType.INDEX,),
+    intervals=("1d",),
+    supported_sessions=(MarketSession.CLOSED,),
+    acquisition_modes=(AcquisitionMode.FETCH,),
+    priority=90,
+    can_produce_final=True,
+    max_timeout_seconds=15,
+    max_external_calls_per_attempt=1,
+    max_symbols_per_call=1,
+    max_range_days=3650,
+    allow_unknown_health=True,
+    limitations=(
+        "API_KEY_REQUIRED",
+        "MASSIVE_INDICES_ONLY",
+        "MASSIVE_INDEX_HISTORY_START_2023_02_14",
+        "MASSIVE_INDEX_VOLUME_NOT_APPLICABLE",
+    ),
+)
 
 YAHOO_QUOTE_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     provider_key="yahoo_chart",
@@ -208,6 +298,15 @@ US_DAILY_CANDIDATE_DESCRIPTORS = (
     ALPACA_SIP_DAILY_DESCRIPTOR,
 )
 
+# Registered descriptors include source-ready canary integrations. They are
+# intentionally separate from the active production inventory above: a
+# provider must pass its account-level coverage and entitlement gate before it
+# can participate in normal resolution.
+US_DAILY_REGISTERED_DESCRIPTORS = (
+    MASSIVE_INDEX_DAILY_DESCRIPTOR,
+    *US_DAILY_CANDIDATE_DESCRIPTORS,
+)
+
 
 def us_daily_history_descriptors(
     descriptors: tuple[ProviderCapabilityDescriptorV2, ...] = US_DAILY_PROVIDER_DESCRIPTORS,
@@ -219,7 +318,7 @@ def us_daily_history_descriptors(
     keeps the descriptor-declared Yahoo-first priority.
     """
 
-    preference = {"alpaca": 0, "yahoo_chart": 1}
+    preference = {"alpaca": 0, "yahoo_chart": 1, "massive": 2}
     ordered = sorted(
         descriptors,
         key=lambda item: (
@@ -235,6 +334,9 @@ def us_daily_history_descriptors(
     )
 
 US_SOURCE_READY_PROVIDER_DESCRIPTORS = (
+    MASSIVE_INDEX_QUOTE_DESCRIPTOR,
+    MASSIVE_INDEX_INTRADAY_DESCRIPTOR,
+    MASSIVE_INDEX_DAILY_DESCRIPTOR,
     TWELVE_QUOTE_DESCRIPTOR,
     TWELVE_INTRADAY_DESCRIPTOR,
 )
@@ -249,16 +351,26 @@ US_INTRADAY_PROVIDER_DESCRIPTORS = (
     TWELVE_INTRADAY_DESCRIPTOR,
 )
 
+US_QUOTE_REGISTERED_DESCRIPTORS = (
+    MASSIVE_INDEX_QUOTE_DESCRIPTOR,
+    *US_QUOTE_PROVIDER_DESCRIPTORS,
+)
+
+US_INTRADAY_REGISTERED_DESCRIPTORS = (
+    MASSIVE_INDEX_INTRADAY_DESCRIPTOR,
+    *US_INTRADAY_PROVIDER_DESCRIPTORS,
+)
+
 
 def us_quote_descriptor_for_resource(resource_id: str) -> ProviderCapabilityDescriptorV2:
-    for descriptor in US_QUOTE_PROVIDER_DESCRIPTORS:
+    for descriptor in US_QUOTE_REGISTERED_DESCRIPTORS:
         if descriptor.resource_id == resource_id:
             return descriptor
     raise ValueError(f"unregistered US quote resource: {resource_id}")
 
 
 def us_intraday_descriptor_for_resource(resource_id: str) -> ProviderCapabilityDescriptorV2:
-    for descriptor in US_INTRADAY_PROVIDER_DESCRIPTORS:
+    for descriptor in US_INTRADAY_REGISTERED_DESCRIPTORS:
         if descriptor.resource_id == resource_id:
             return descriptor
     raise ValueError(f"unregistered US intraday resource: {resource_id}")
@@ -267,7 +379,7 @@ def us_intraday_descriptor_for_resource(resource_id: str) -> ProviderCapabilityD
 def us_daily_descriptor_for_resource(
     resource_id: str,
 ) -> ProviderCapabilityDescriptorV2:
-    for descriptor in US_DAILY_CANDIDATE_DESCRIPTORS:
+    for descriptor in US_DAILY_REGISTERED_DESCRIPTORS:
         if descriptor.resource_id == resource_id:
             return descriptor
     raise ValueError(f"unregistered US daily resource: {resource_id}")
@@ -277,7 +389,7 @@ def us_provider_auth_type(provider_key: str) -> str:
     normalized = str(provider_key).strip().lower()
     if normalized == "yahoo_chart":
         return "none"
-    if normalized in {"alpaca", "alphavantage", "twelve_data"}:
+    if normalized in {"alpaca", "alphavantage", "massive", "twelve_data"}:
         return "api_key"
     raise ValueError(f"unregistered US provider auth metadata: {provider_key}")
 
@@ -286,15 +398,24 @@ __all__ = [
     "ALPHAVANTAGE_DAILY_RESOURCE_ID",
     "ALPACA_SIP_DAILY_DESCRIPTOR",
     "ALPACA_SIP_DAILY_RESOURCE_ID",
+    "MASSIVE_INDEX_DAILY_DESCRIPTOR",
+    "MASSIVE_INDEX_DAILY_RESOURCE_ID",
+    "MASSIVE_INDEX_INTRADAY_DESCRIPTOR",
+    "MASSIVE_INDEX_INTRADAY_RESOURCE_ID",
+    "MASSIVE_INDEX_QUOTE_DESCRIPTOR",
+    "MASSIVE_INDEX_QUOTE_RESOURCE_ID",
     "TWELVE_INTRADAY_DESCRIPTOR",
     "TWELVE_INTRADAY_RESOURCE_ID",
     "TWELVE_QUOTE_DESCRIPTOR",
     "TWELVE_QUOTE_RESOURCE_ID",
     "US_INTRADAY_PROVIDER_DESCRIPTORS",
+    "US_INTRADAY_REGISTERED_DESCRIPTORS",
     "US_QUOTE_PROVIDER_DESCRIPTORS",
+    "US_QUOTE_REGISTERED_DESCRIPTORS",
     "US_DAILY_ALPACA_ROLLOUT_DESCRIPTORS",
     "US_DAILY_CANDIDATE_DESCRIPTORS",
     "US_DAILY_PROVIDER_DESCRIPTORS",
+    "US_DAILY_REGISTERED_DESCRIPTORS",
     "US_SOURCE_READY_PROVIDER_DESCRIPTORS",
     "YAHOO_DAILY_DESCRIPTOR",
     "YAHOO_DAILY_RESOURCE_ID",

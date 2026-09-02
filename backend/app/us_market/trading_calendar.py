@@ -226,6 +226,23 @@ def expected_us_daily_price_date(
     return previous_us_trading_day(target_date, include_value=True)
 
 
+def expected_us_intraday_trade_date(
+    *,
+    market_phase: str,
+    now: datetime | None = None,
+) -> date | None:
+    """Return the only trade date eligible as current-session intraday truth.
+
+    Off-session reads intentionally return ``None``.  Those callers may expose
+    a clearly historical latest session, but must not label it as current.
+    """
+
+    if market_phase not in {"pre_market", "regular", "after_hours"}:
+        return None
+    local_date = _as_new_york_datetime(now).date()
+    return local_date if is_us_trading_day(local_date) else None
+
+
 __all__ = [
     "US_DAILY_PRICE_RELEASE_TIME",
     "US_EARLY_CLOSE_DATES_V1",
@@ -239,6 +256,7 @@ __all__ = [
     "US_SESSION_OPEN_TIME",
     "US_SPECIAL_CLOSURE_DATES_V1",
     "expected_us_daily_price_date",
+    "expected_us_intraday_trade_date",
     "is_us_early_close_day",
     "is_us_daily_price_finalized",
     "is_us_trading_day",

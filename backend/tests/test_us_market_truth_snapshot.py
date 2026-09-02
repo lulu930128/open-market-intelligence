@@ -459,7 +459,9 @@ def test_close_boundary_is_preserved_but_not_promoted_to_official(monkeypatch) -
     assert "CLOSE_BOUNDARY_NOT_OFFICIAL" in close_boundary.limitations
 
 
-def test_series_keeps_close_boundary_out_of_regular_points(monkeypatch) -> None:
+def test_series_suppresses_previous_session_bars_during_active_session(
+    monkeypatch,
+) -> None:
     quote, intraday, daily = _fake_components()
 
     class FakeIntradayPlatform:
@@ -505,14 +507,17 @@ def test_series_keeps_close_boundary_out_of_regular_points(monkeypatch) -> None:
     )
 
     assert bundle.series.truth_revision == bundle.snapshot.truth_revision
-    assert bundle.series.scheduled_interval_count == 390
-    assert bundle.series.observed_interval_count == 1
-    assert bundle.series.missing_interval_count == 389
-    assert len(bundle.series.regular_points) == 1
-    assert len(bundle.series.close_boundary_events) == 1
-    assert bundle.series.close_boundary_events[0].start_at == datetime(
-        2026, 8, 31, 20, 0, tzinfo=UTC
-    )
+    assert bundle.series.trade_date is None
+    assert bundle.series.expected_trade_date == date(2026, 9, 1)
+    assert bundle.series.latest_available_trade_date == date(2026, 8, 31)
+    assert bundle.series.current_session_expected is True
+    assert bundle.series.current_session_satisfied is False
+    assert bundle.series.selection_reason == "EXPECTED_CURRENT_SESSION_MISSING"
+    assert bundle.series.scheduled_interval_count == 0
+    assert bundle.series.observed_interval_count == 0
+    assert bundle.series.missing_interval_count == 0
+    assert bundle.series.regular_points == ()
+    assert bundle.series.close_boundary_events == ()
 
 
 @pytest.mark.parametrize(

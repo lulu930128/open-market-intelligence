@@ -922,6 +922,7 @@ def test_us_intraday_minute_repair_aggregates_provisional_ohlc() -> None:
         "low_price": 99.0,
         "close_price": 99.0,
         "trade_volume": 4,
+        "volume_status": "observed",
         "trade_value": None,
     }
 
@@ -1240,7 +1241,8 @@ def test_bootstrap_falls_back_after_first_provider_failure() -> None:
     assert result["status"] == "success"
     assert result["external_call_count"] == 2
     assert result["results"][0]["selected_provider"] == "twelve_data"
-    assert result["results"][0]["resolved_status"] == "selected"
+    assert result["results"][0]["resolved_status"] == "fallback"
+    assert result["results"][0]["fallback_used"] is True
     assert "LATEST_AVAILABLE_STALE_ACCEPTED" not in result["results"][0][
         "postcondition_reasons"
     ]

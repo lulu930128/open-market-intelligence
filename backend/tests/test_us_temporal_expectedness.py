@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.ai.decision_envelope_v4 import _brief_capability_summary
@@ -18,6 +18,8 @@ from app.us_market.temporal_expectedness import (
     USTradeRecency,
     build_us_capability_expectation,
     build_us_session_date_relation,
+    evaluate_us_selected_evidence_temporal,
+    select_us_intraday_trade_date,
 )
 
 
@@ -84,7 +86,7 @@ def test_closed_empty_is_not_expected_instead_of_missing_defect() -> None:
     assert projection.reason_code == "MARKET_CLOSED"
 
 
-def test_fresh_provider_snapshot_with_old_trade_is_not_provider_stale() -> None:
+def test_fresh_provider_snapshot_with_old_trade_is_not_current() -> None:
     projection = _projection(
         phase="pre_market",
         availability=USCapabilityAvailability.AVAILABLE,
@@ -93,9 +95,98 @@ def test_fresh_provider_snapshot_with_old_trade_is_not_provider_stale() -> None:
         trade_recency=USTradeRecency.OLD,
     )
 
-    assert projection.outcome is USCapabilityExpectationOutcome.READY
-    assert projection.requirement_satisfied is True
-    assert projection.reason_code == "LAST_TRADE_OLD_BUT_PROVIDER_CURRENT"
+    assert projection.outcome is USCapabilityExpectationOutcome.STALE
+    assert projection.requirement_satisfied is False
+    assert projection.reason_code == "LAST_TRADE_OLD"
+
+
+def test_selected_evidence_keeps_event_recency_separate_from_fetch_recency() -> None:
+    now = datetime(2026, 9, 2, 11, 0, tzinfo=NEW_YORK)
+    temporal = evaluate_us_selected_evidence_temporal(
+        now=now,
+        market_phase="regular",
+        session_scope=USCapabilitySessionScope.ALL,
+        event_at=now - timedelta(minutes=16),
+        fetched_at=now - timedelta(seconds=5),
+        selected_freshness=EvidenceFreshness.FRESH,
+    )
+
+    assert temporal.current_session_satisfied is True
+    assert temporal.provider_snapshot_freshness is EvidenceFreshness.FRESH
+    assert temporal.trade_recency is USTradeRecency.OLD
+    assert temporal.evidence_freshness is EvidenceFreshness.STALE
+
+
+def test_selected_evidence_accepts_recent_current_session_event() -> None:
+    now = datetime(2026, 9, 2, 11, 0, tzinfo=NEW_YORK)
+    temporal = evaluate_us_selected_evidence_temporal(
+        now=now,
+        market_phase="regular",
+        session_scope=USCapabilitySessionScope.ALL,
+        event_at=now - timedelta(seconds=60),
+        fetched_at=now - timedelta(seconds=5),
+        selected_freshness=EvidenceFreshness.FRESH,
+    )
+
+    assert temporal.current_session_satisfied is True
+    assert temporal.trade_recency is USTradeRecency.CURRENT
+    assert temporal.evidence_freshness is EvidenceFreshness.FRESH
+
+
+def test_selected_evidence_rejects_previous_session_even_when_just_fetched() -> None:
+    now = datetime(2026, 9, 2, 11, 0, tzinfo=NEW_YORK)
+    temporal = evaluate_us_selected_evidence_temporal(
+        now=now,
+        market_phase="regular",
+        session_scope=USCapabilitySessionScope.ALL,
+        event_at=datetime(2026, 9, 1, 15, 59, tzinfo=NEW_YORK),
+        fetched_at=now - timedelta(seconds=5),
+        selected_freshness=EvidenceFreshness.FRESH,
+    )
+
+    assert temporal.current_session_satisfied is False
+    assert temporal.trade_recency is USTradeRecency.HISTORICAL
+    assert temporal.evidence_freshness is EvidenceFreshness.STALE
+
+
+def test_intraday_date_selection_does_not_promote_previous_session() -> None:
+    selection = select_us_intraday_trade_date(
+        [date(2026, 9, 1)],
+        now=datetime(2026, 9, 2, 9, 54, tzinfo=NEW_YORK),
+        market_phase="regular",
+    )
+
+    assert selection.expected_trade_date == date(2026, 9, 2)
+    assert selection.latest_available_trade_date == date(2026, 9, 1)
+    assert selection.selected_trade_date is None
+    assert selection.current_session_expected is True
+    assert selection.current_session_satisfied is False
+    assert selection.selection_reason == "EXPECTED_CURRENT_SESSION_MISSING"
+
+
+def test_intraday_date_selection_prefers_current_session_from_mixed_cache() -> None:
+    selection = select_us_intraday_trade_date(
+        [date(2026, 9, 1), date(2026, 9, 2)],
+        now=datetime(2026, 9, 2, 9, 54, tzinfo=NEW_YORK),
+        market_phase="regular",
+    )
+
+    assert selection.selected_trade_date == date(2026, 9, 2)
+    assert selection.current_session_satisfied is True
+    assert selection.selection_reason == "CURRENT_SESSION_AVAILABLE"
+
+
+def test_intraday_date_selection_allows_latest_historical_off_session() -> None:
+    selection = select_us_intraday_trade_date(
+        [date(2026, 9, 1), date(2026, 9, 2)],
+        now=datetime(2026, 9, 2, 21, 0, tzinfo=NEW_YORK),
+        market_phase="market_closed",
+    )
+
+    assert selection.expected_trade_date is None
+    assert selection.selected_trade_date == date(2026, 9, 2)
+    assert selection.current_session_expected is False
+    assert selection.selection_reason == "LATEST_AVAILABLE_OFF_SESSION"
 
 
 def test_awaiting_first_trade_is_valid_empty() -> None:

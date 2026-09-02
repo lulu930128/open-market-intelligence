@@ -212,6 +212,10 @@ class USIntradaySourceStatusRead(BaseModel):
     provider_snapshot_freshness: str = "unknown"
     trade_state: str = "unknown"
     trade_recency: str = "unknown"
+    expected_trade_date: str | None = None
+    event_trade_date: str | None = None
+    current_session_expected: bool = False
+    current_session_satisfied: bool = False
     is_fallback: bool = False
     has_usable_data: bool = False
     decision_usable: bool = False
@@ -325,6 +329,11 @@ class USIntradayCurrentObservationRead(BaseModel):
 
 class USIntradaySessionCoverageRead(BaseModel):
     trade_date: str | None = None
+    expected_trade_date: str | None = None
+    latest_available_trade_date: str | None = None
+    current_session_expected: bool = False
+    current_session_satisfied: bool = False
+    selection_reason: str = "NO_INTRADAY_SESSION_AVAILABLE"
     regular_point_count: int = 0
     extended_point_count: int = 0
     has_extended_hours: bool = False
@@ -878,6 +887,9 @@ class USWatchlistRankingItemRead(BaseModel):
     has_extended_hours: bool = False
     intraday_previous_close: float | None = None
     intraday_points: list[dict] = Field(default_factory=list)
+    current_quote_overlay_applied: bool = False
+    quote_is_live: bool = False
+    quote_limitations: list[str] = Field(default_factory=list)
     error_message: str | None = None
 
 
@@ -895,4 +907,9 @@ class USWatchlistRankingRead(BaseModel):
     is_current: bool = True
     current_symbol_count: int = 0
     stale_symbol_count: int = 0
+    underlying_trade_date: date | None = None
+    coverage_ratio: float = 0.0
+    is_live: bool = False
+    is_full: bool = False
+    ranking_semantics: str = "resolved_completed_daily_bars"
     results: list[USWatchlistRankingItemRead]

@@ -54,6 +54,28 @@ def test_legacy_us_intraday_no_longer_maps_close_boundary_to_regular() -> None:
     assert "and bar.end_at.astimezone(US_MARKET_TIMEZONE) == session_close_at" in source
 
 
+def test_us_intraday_current_session_date_selection_has_one_shared_owner() -> None:
+    truth = _source("backend/app/us_market/market_truth.py")
+    compatibility = _source("backend/app/us_market/service.py")
+
+    assert "select_us_intraday_trade_date" in truth
+    assert "select_us_intraday_trade_date" in compatibility
+    assert "latest_market_trade_date_points" not in truth
+    assert "latest_market_trade_date_points" not in compatibility
+
+
+def test_us_event_temporal_assessment_has_one_shared_owner() -> None:
+    truth = _source("backend/app/us_market/market_truth.py")
+    compatibility = _source("backend/app/us_market/service.py")
+    temporal_owner = _source("backend/app/us_market/temporal_expectedness.py")
+
+    assert "def evaluate_us_selected_evidence_temporal" in temporal_owner
+    assert "evaluate_us_selected_evidence_temporal" in truth
+    assert "evaluate_us_selected_evidence_temporal" in compatibility
+    assert "US_INTRADAY_DELAYED_AFTER_SECONDS = 120" not in compatibility
+    assert "US_INTRADAY_STALE_AFTER_SECONDS = 900" not in compatibility
+
+
 def test_market_truth_contracts_remain_typed_only() -> None:
     source = _source("backend/app/us_market/market_truth_contracts.py")
 

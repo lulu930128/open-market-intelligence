@@ -34,6 +34,7 @@ from app.us_market.market_data.descriptors import (
     ALPACA_SIP_DAILY_RESOURCE_ID,
     US_DAILY_ALPACA_ROLLOUT_DESCRIPTORS,
     US_DAILY_PROVIDER_DESCRIPTORS,
+    YAHOO_DAILY_DESCRIPTOR,
     YAHOO_DAILY_RESOURCE_ID,
 )
 
@@ -153,7 +154,7 @@ def test_index_daily_volume_can_remain_absent_without_fake_zero(
     raw_volume: int | None,
 ) -> None:
     requirement = _requirement(instrument_type=InstrumentType.INDEX)
-    plan = plan_data_acquisition_v2(requirement, US_DAILY_PROVIDER_DESCRIPTORS)
+    plan = plan_data_acquisition_v2(requirement, (YAHOO_DAILY_DESCRIPTOR,))
     result = USDailyOhlcvAcquisitionExecutor(
         fetchers={
             YAHOO_DAILY_RESOURCE_ID: lambda route, received: USProviderPayload(

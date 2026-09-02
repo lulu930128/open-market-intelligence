@@ -33,6 +33,7 @@ from app.jobs.job_types import (
     WATCHLIST_RADAR_OUTCOME_RECONCILE_JOB_TYPE,
     US_OHLC_HISTORY_REPAIR_JOB_TYPE,
     US_INTRADAY_MINUTE_REPAIR_JOB_TYPE,
+    US_INDEX_INTRADAY_VOLUME_REPAIR_JOB_TYPE,
     US_INDEX_DATA_REPAIR_JOB_TYPE,
     US_CURRENT_MARKET_BOOTSTRAP_JOB_TYPE,
     US_PRIORITY_OHLC_RECONCILE_JOB_TYPE,
@@ -46,6 +47,9 @@ from app.jobs.schemas import (
     TaiwanIndexDailyBootstrapJobRequest,
     TaiwanIntradayBarBootstrapJobRequest,
     USCurrentMarketBootstrapJobRequest,
+)
+from app.market.tw_index_daily_platform import (
+    TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
 )
 from app.stocks.bootstrap import BOOTSTRAP_JOB_TYPE, run_stock_master_bootstrap_job
 from app.us_market.intraday_profiles import (
@@ -115,8 +119,18 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 tuple(_parse_string_list(request.get("index_ids"))),
                 date_from,
                 date_to,
-                int(request.get("taiex_max_sessions", 260)),
-                int(request.get("tpex_max_sessions", 20)),
+                int(
+                    request.get(
+                        "taiex_max_sessions",
+                        TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+                    )
+                ),
+                int(
+                    request.get(
+                        "tpex_max_sessions",
+                        TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS,
+                    )
+                ),
             ),
             request,
         )
@@ -506,6 +520,18 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 int(request.get("max_groups", 200)),
                 int(request.get("max_candidate_rows", 10_000)),
                 int(after_group_id) if after_group_id is not None else None,
+            ),
+            request,
+        )
+
+    if job_type == US_INDEX_INTRADAY_VOLUME_REPAIR_JOB_TYPE:
+        after_bar_id = request.get("after_bar_id")
+        return (
+            backfill_tasks.run_us_index_intraday_volume_repair_job,
+            (
+                bool(request.get("apply", False)),
+                int(request.get("max_rows", 10_000)),
+                int(after_bar_id) if after_bar_id is not None else None,
             ),
             request,
         )

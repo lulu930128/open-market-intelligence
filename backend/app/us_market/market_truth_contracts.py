@@ -28,7 +28,8 @@ from app.market_data.contracts import (
     PriceUnit,
     ResolvedEvidenceHealth,
 )
-from app.us_market.temporal_expectedness import USMarketPhase
+from app.us_market.temporal_expectedness import USMarketPhase, USTradeRecency
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE
 
 
 USPriceBasis = Literal["raw", "adjusted", "provider_default"]
@@ -227,8 +228,16 @@ class USObservation(CanonicalModel):
     session: MarketSession
     event_at: datetime
     fetched_at: datetime
+    selected_provider: str = Field(min_length=1, max_length=64)
+    selected_source: str = Field(min_length=1, max_length=128)
+    selection_reason: str = Field(min_length=1, max_length=256)
+    fallback_used: bool = False
     availability: USMarketTruthAvailability
     freshness: EvidenceFreshness
+    provider_snapshot_freshness: EvidenceFreshness = EvidenceFreshness.UNKNOWN
+    trade_recency: USTradeRecency = USTradeRecency.UNKNOWN
+    current_session_expected: bool = False
+    current_session_satisfied: bool = False
     expectedness: CapabilityExpectation
     display_usable: bool
     research_usable: bool
@@ -252,6 +261,13 @@ class USObservation(CanonicalModel):
             raise ValueError("currency observation requires currency")
         if self.price_unit is PriceUnit.INDEX_POINT and self.currency is not None:
             raise ValueError("index-point observation cannot claim currency")
+        if self.current_session_satisfied and not self.current_session_expected:
+            raise ValueError("satisfied current-session observation must be expected")
+        if (
+            self.freshness in {EvidenceFreshness.STALE, EvidenceFreshness.MISSING}
+            and self.research_usable
+        ):
+            raise ValueError("stale or missing observation cannot be research usable")
         return self
 
 
@@ -298,15 +314,18 @@ class USComparisonReference(CanonicalModel):
             self.reference_trade_date,
             self.price,
             self.price_unit,
-            self.currency,
             self.price_basis,
         )
         if self.calculation_eligible and any(value is None for value in materialized):
             raise ValueError("eligible comparison reference must be materialized")
         if self.evidence_id is None and any(
-            value is not None for value in materialized[1:]
+            value is not None for value in (*materialized[1:], self.currency)
         ):
             raise ValueError("unresolved reference cannot expose partial evidence")
+        if self.price_unit is PriceUnit.CURRENCY and self.currency is None:
+            raise ValueError("currency comparison reference requires currency")
+        if self.price_unit is PriceUnit.INDEX_POINT and self.currency is not None:
+            raise ValueError("index-point comparison reference cannot claim currency")
         if not self.calculation_eligible and self.research_usable:
             raise ValueError("ineligible reference cannot be research usable")
         return self
@@ -474,6 +493,11 @@ class USIntradaySeriesProjection(CanonicalModel):
     intraday_revision: str = Field(min_length=16, max_length=128)
     instrument: InstrumentKey
     trade_date: date | None = None
+    expected_trade_date: date | None = None
+    latest_available_trade_date: date | None = None
+    current_session_expected: bool = False
+    current_session_satisfied: bool = False
+    selection_reason: str = Field(min_length=1, max_length=128)
     interval: str = Field(min_length=1, max_length=16)
     requested_scope: Literal["regular", "extended", "all"]
     regular_points: tuple[USIntradaySeriesPoint, ...] = ()
@@ -496,6 +520,25 @@ class USIntradaySeriesProjection(CanonicalModel):
 
     @model_validator(mode="after")
     def _validate_series_partition(self) -> "USIntradaySeriesProjection":
+        all_points = (
+            *self.regular_points,
+            *self.pre_market_points,
+            *self.after_hours_points,
+            *self.close_boundary_events,
+        )
+        if self.current_session_expected:
+            if self.expected_trade_date is None:
+                raise ValueError("current-session series requires expected trade date")
+            if self.current_session_satisfied:
+                if self.trade_date != self.expected_trade_date:
+                    raise ValueError("satisfied current-session series must select expected date")
+            elif self.trade_date is not None or all_points:
+                raise ValueError("missing current-session series cannot expose historical points")
+        if self.trade_date is not None and any(
+            point.start_at.astimezone(US_MARKET_TIMEZONE).date() != self.trade_date
+            for point in all_points
+        ):
+            raise ValueError("intraday series points must match selected trade date")
         if any(
             point.session is not MarketSession.CONTINUOUS
             for point in self.regular_points
@@ -593,10 +636,9 @@ class USMarketTruthSnapshot(CanonicalModel):
         if self.current_observation is not None and (
             self.current_observation.availability
             is not USMarketTruthAvailability.AVAILABLE
-            or self.current_observation.freshness
-            not in {EvidenceFreshness.LIVE, EvidenceFreshness.FRESH}
+            or not self.current_observation.current_session_satisfied
         ):
-            raise ValueError("current observation must satisfy current availability")
+            raise ValueError("current observation must belong to the current session")
 
         metric_ids: set[str] = set()
         for metric in self.change_metrics:

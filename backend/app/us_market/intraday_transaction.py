@@ -15,7 +15,13 @@ from app.db.models import (
     USQuoteSnapshot,
     utc_now,
 )
-from app.market_data.contracts import BarObservation, Market, Quantity, QuoteObservation
+from app.market_data.contracts import (
+    BarObservation,
+    InstrumentType,
+    Market,
+    Quantity,
+    QuoteObservation,
+)
 from app.market_data.gateway import BarAcquisitionResult, QuoteAcquisitionResult
 from app.market_data.integration_contracts import (
     BarCapabilityRequest,
@@ -176,6 +182,11 @@ class USQuoteTransaction:
                     "high_price": _number(quote.high_price),
                     "low_price": _number(quote.low_price),
                     "previous_close": _number(quote.previous_close),
+                    "provider_timeframe": (
+                        receipt.provider_timeframe.value
+                        if receipt.provider_timeframe is not None
+                        else None
+                    ),
                     "authority": quote.lineage.authority.value,
                     "raw_contract_version": quote.lineage.raw_contract_version,
                     "raw_payload_hash": raw.content_hash,
@@ -250,6 +261,13 @@ class USIntradayBarTransaction:
                 parser = bar.lineage.raw_contract_version or ""
                 if not (parser == receipt.parser_version or parser.startswith(f"{receipt.parser_version}+")):
                     raise ValueError("US intraday parser identity mismatch")
+                if bar.volume_status is None:
+                    raise ValueError("US intraday canonical bar requires volume_status")
+                if bar.instrument.instrument_type is InstrumentType.INDEX:
+                    if bar.volume_status != "not_applicable" or bar.volume is not None:
+                        raise ValueError(
+                            "US index intraday volume must be null and not_applicable"
+                        )
                 incoming = {
                     "provider": receipt.provider,
                     "stock_id": bar.instrument.symbol,
@@ -262,6 +280,7 @@ class USIntradayBarTransaction:
                     "low_price": _number(bar.low_price),
                     "close_price": _number(bar.close_price),
                     "trade_volume": _quantity(bar.volume),
+                    "volume_status": bar.volume_status,
                     "trade_value": int(bar.turnover_value) if bar.turnover_value is not None else None,
                     "source": receipt.source,
                     "source_url": receipt.url,
@@ -298,6 +317,11 @@ class USIntradayBarTransaction:
                 lineage.fetched_at = _utc(receipt.fetched_at)
                 lineage.finalization = bar.finalization.value
                 lineage.source_interval = bar.interval
+                lineage.provider_timeframe = (
+                    receipt.provider_timeframe.value
+                    if receipt.provider_timeframe is not None
+                    else None
+                )
                 lineage.calculation_version = None
                 lineage.component_raw_result_ids_json = None
                 lineage.updated_at = utc_now()

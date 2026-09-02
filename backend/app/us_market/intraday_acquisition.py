@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from app.config import Settings
 from app.market_data.contracts import (
     ConnectionStatus,
+    EntitlementStatus,
     EvidenceFreshness,
     OperationalStatus,
     ProviderResourceHealth,
@@ -28,24 +29,33 @@ from app.market_data.integration_contracts import (
     DataRequirementV2,
     EvidenceTarget,
     InstrumentTarget,
+    ProviderTimeframe,
     RawFetchReceiptV1,
     SnapshotCapabilityRequest,
 )
 from app.market_data.provider_catalog import DataAcquisitionPlanV2, ProviderResourceRouteV2
-from app.market_data.policies import DataPurpose
+from app.market_data.policies import DataPurpose, RealtimePolicy
 from app.us_market.daily_ohlcv_acquisition import _failure_health, _health, _unique
 from app.us_market.market_data.descriptors import (
+    MASSIVE_INDEX_INTRADAY_RESOURCE_ID,
+    MASSIVE_INDEX_QUOTE_RESOURCE_ID,
     TWELVE_INTRADAY_RESOURCE_ID,
     TWELVE_QUOTE_RESOURCE_ID,
     YAHOO_INTRADAY_RESOURCE_ID,
     YAHOO_QUOTE_RESOURCE_ID,
 )
 from app.us_market.providers.canonical import (
+    canonical_massive_index_aggregates_payload,
+    canonical_massive_index_snapshot_payload,
     canonical_twelve_data_intraday_payload,
     canonical_twelve_data_quote_payload,
     canonical_yahoo_chart_payload,
 )
 from app.us_market.providers.errors import USProviderDataError
+from app.us_market.providers.massive import (
+    fetch_massive_index_aggregates_payload,
+    fetch_massive_index_snapshot_payload,
+)
 from app.us_market.providers.twelve_data import (
     fetch_twelve_data_quote_payload,
     fetch_twelve_data_time_series_payload,
@@ -130,6 +140,34 @@ class USIntradayAcquisitionExecutor:
                 include_prepost=True,
                 resource="us_intraday_shared_core",
             )
+        if route.resource_id in {
+            MASSIVE_INDEX_QUOTE_RESOURCE_ID,
+            MASSIVE_INDEX_INTRADAY_RESOURCE_ID,
+        }:
+            api_key = str(self._settings.massive_api_key or "").strip()
+            if not api_key:
+                raise USProviderDataError(
+                    provider="massive",
+                    code="MASSIVE_API_KEY_NOT_CONFIGURED",
+                    category="configuration",
+                    message="Massive API key is not configured.",
+                )
+            if route.resource_id == MASSIVE_INDEX_QUOTE_RESOURCE_ID:
+                return fetch_massive_index_snapshot_payload(
+                    symbol=symbol,
+                    api_key=api_key,
+                    timeout_seconds=route.timeout_seconds,
+                )
+            assert isinstance(requirement.request, BarCapabilityRequest)
+            return fetch_massive_index_aggregates_payload(
+                symbol=symbol,
+                api_key=api_key,
+                interval=requirement.request.interval,
+                start_at=requirement.request.start_at,
+                end_at=requirement.request.end_at,
+                limit=requirement.request.max_bars,
+                timeout_seconds=route.timeout_seconds,
+            )
         api_key = str(self._settings.twelve_data_api_key or "").strip()
         if not api_key:
             raise USProviderDataError(
@@ -183,6 +221,20 @@ class USIntradayAcquisitionExecutor:
                 payload=payload,
                 fetched_at=fetched_at,
             )
+        if route.resource_id == MASSIVE_INDEX_QUOTE_RESOURCE_ID:
+            return canonical_massive_index_snapshot_payload(
+                instrument=requirement.target.instrument,
+                payload=payload,
+                fetched_at=fetched_at,
+            )
+        if route.resource_id == MASSIVE_INDEX_INTRADAY_RESOURCE_ID:
+            assert isinstance(requirement.request, BarCapabilityRequest)
+            return canonical_massive_index_aggregates_payload(
+                instrument=requirement.target.instrument,
+                payload=payload,
+                fetched_at=fetched_at,
+                interval=requirement.request.interval,
+            )
         assert isinstance(requirement.request, BarCapabilityRequest)
         provider_interval = _TWELVE_PROVIDER_INTERVALS.get(
             requirement.request.interval
@@ -220,6 +272,7 @@ class USIntradayAcquisitionExecutor:
             content_hash=content_hash,
             raw_text=raw_text,
             parser_version=parser_version,
+            provider_timeframe=batch.provider_timeframe,
         )
 
     def _execute(self, requirement: DataRequirementV2, plan: DataAcquisitionPlanV2, *, quote: bool):
@@ -271,12 +324,16 @@ class USIntradayAcquisitionExecutor:
                     current = tuple(bounded[-route_limit:]) if route_limit else ()
                 source = (
                     current[0].lineage.source if current else
+                    "massive.indices.snapshot" if route.resource_id == MASSIVE_INDEX_QUOTE_RESOURCE_ID else
+                    f"massive.indices.aggregates.{requirement.request.interval}" if route.resource_id == MASSIVE_INDEX_INTRADAY_RESOURCE_ID else
                     "yahoo.chart.1m" if route.provider_key == "yahoo_chart" else
                     "twelve_data.quote" if quote else
                     f"twelve_data.time_series.{requirement.request.interval}"
                 )
                 parser = (
                     current[0].lineage.raw_contract_version if current else
+                    "massive.indices.snapshot.v3" if route.resource_id == MASSIVE_INDEX_QUOTE_RESOURCE_ID else
+                    "massive.indices.aggregates.v2" if route.resource_id == MASSIVE_INDEX_INTRADAY_RESOURCE_ID else
                     "yahoo.chart.v8" if route.provider_key == "yahoo_chart" else
                     "twelve_data.quote.v1" if quote else
                     "twelve_data.time_series.v1"
@@ -317,7 +374,12 @@ class USIntradayAcquisitionExecutor:
                     current,
                     requirement,
                 )
-                target_satisfied = required_fields_present and (
+                provider_timeframe_unsatisfied = (
+                    quote
+                    and requirement.realtime_policy is RealtimePolicy.REQUIRE_LIVE
+                    and batch.provider_timeframe is not ProviderTimeframe.REAL_TIME
+                )
+                target_satisfied = not provider_timeframe_unsatisfied and required_fields_present and (
                     (snapshot_is_fresh if quote else evidence_is_fresh)
                     or requirement.freshness.evidence_target
                     is EvidenceTarget.LATEST_AVAILABLE
@@ -330,11 +392,16 @@ class USIntradayAcquisitionExecutor:
                     )
                 if not target_satisfied:
                     failures += 1
-                    if not current:
+                    if provider_timeframe_unsatisfied:
+                        limitations.append("MASSIVE_REALTIME_ENTITLEMENT_UNSATISFIED")
+                    elif not current:
                         limitations.append("REQUESTED_EVIDENCE_NOT_OBSERVED")
                     elif not required_fields_present:
                         limitations.append("REQUESTED_EVIDENCE_UNUSABLE")
                 detail_code = (
+                    "MASSIVE_REALTIME_ENTITLEMENT_UNSATISFIED"
+                    if provider_timeframe_unsatisfied
+                    else
                     "US_QUOTE_OBSERVED"
                     if quote and evidence_is_fresh
                     else "US_INTRADAY_OBSERVED"
@@ -367,6 +434,11 @@ class USIntradayAcquisitionExecutor:
                         else EvidenceFreshness.MISSING
                     ),
                     detail_code=detail_code,
+                    entitlement=(
+                        EntitlementStatus.PLAN_RESTRICTED
+                        if provider_timeframe_unsatisfied
+                        else EntitlementStatus.ENTITLED
+                    ),
                 ))
                 if target_satisfied:
                     break

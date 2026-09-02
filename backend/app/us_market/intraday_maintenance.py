@@ -29,11 +29,28 @@ US_YAHOO_INTRADAY_MARKETS = (
     "CBOE_INDEX",
 )
 US_YAHOO_INTRADAY_REPAIR_CONTRACT = "omi.us.intraday_minute_repair.v1"
+US_INDEX_INTRADAY_VOLUME_REPAIR_CONTRACT = "omi.us.index_intraday_volume_repair.v1"
+US_INDEX_INTRADAY_SYMBOLS = (
+    "^GSPC",
+    "^DJI",
+    "^IXIC",
+    "^NDX",
+    "^SOX",
+    "^VIX",
+)
+US_INDEX_INTRADAY_MARKETS = (
+    "US",
+    "SP_INDEX",
+    "DJI_INDEX",
+    "NASDAQ_INDEX",
+    "CBOE_INDEX",
+)
 
 _BAR_MANIFEST_FIELDS = (
     "id", "source_id", "provider", "stock_id", "market", "canonical_market",
     "venue", "instrument_type", "symbol", "interval", "bar_time",
     "open_price", "high_price", "low_price", "close_price", "trade_volume",
+    "volume_status",
     "trade_value", "source", "source_url", "created_at", "updated_at",
 )
 _LINEAGE_MANIFEST_FIELDS = (
@@ -52,6 +69,7 @@ _BAR_VALUE_FIELDS = (
     "low_price",
     "close_price",
     "trade_volume",
+    "volume_status",
     "trade_value",
 )
 
@@ -168,19 +186,30 @@ def _survivor_after_values(
     *,
     canonical_minute: datetime,
 ) -> tuple[str, dict[str, Any]]:
+    index_volume_not_applicable = bool(
+        candidates
+        and candidates[0][0].stock_id in US_INDEX_INTRADAY_SYMBOLS
+        and candidates[0][0].market in US_INDEX_INTRADAY_MARKETS
+    )
     canonical_candidates = [
         bar for bar, _ in candidates if _utc(bar.bar_time) == canonical_minute
     ]
     if canonical_candidates:
         canonical_bar = max(canonical_candidates, key=lambda bar: bar.id)
+        values = {
+            field: getattr(canonical_bar, field)
+            for field in _BAR_VALUE_FIELDS
+        }
+        if index_volume_not_applicable:
+            values.update(
+                trade_volume=None,
+                volume_status="not_applicable",
+            )
         return (
             "canonical_bar",
             {
                 "bar_time": canonical_minute.isoformat(),
-                **{
-                    field: getattr(canonical_bar, field)
-                    for field in _BAR_VALUE_FIELDS
-                },
+                **values,
             },
         )
 
@@ -215,10 +244,228 @@ def _survivor_after_values(
             "high_price": max(high_values) if high_values else None,
             "low_price": min(low_values) if low_values else None,
             "close_price": last_bar.close_price,
-            "trade_volume": max(volume_values) if volume_values else None,
+            "trade_volume": (
+                None
+                if index_volume_not_applicable
+                else max(volume_values) if volume_values else None
+            ),
+            "volume_status": (
+                "not_applicable"
+                if index_volume_not_applicable
+                else last_bar.volume_status
+                or ("observed" if volume_values else "missing")
+            ),
             "trade_value": max(trade_value_values) if trade_value_values else None,
         },
     )
+
+
+def repair_us_index_intraday_volume_semantics(
+    db: Session,
+    *,
+    apply: bool = False,
+    max_rows: int = 10_000,
+    after_bar_id: int | None = None,
+    audit_manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    """Plan or apply one bounded repair batch for canonical US cash-index volume."""
+
+    if max_rows < 1 or max_rows > 50_000:
+        raise ValueError("max_rows must be between 1 and 50000")
+    if after_bar_id is not None and after_bar_id < 0:
+        raise ValueError("after_bar_id must be non-negative")
+    if apply and audit_manifest_path is None:
+        raise ValueError("audit_manifest_path is required when apply is true")
+
+    query = (
+        db.query(MarketIntradayBar)
+        .filter(MarketIntradayBar.stock_id.in_(US_INDEX_INTRADAY_SYMBOLS))
+        .filter(MarketIntradayBar.market.in_(US_INDEX_INTRADAY_MARKETS))
+        .filter(MarketIntradayBar.interval == "1m")
+        .filter(
+            or_(
+                MarketIntradayBar.trade_volume.is_not(None),
+                MarketIntradayBar.volume_status.is_(None),
+                MarketIntradayBar.volume_status != "not_applicable",
+            )
+        )
+    )
+    if after_bar_id is not None:
+        query = query.filter(MarketIntradayBar.id > after_bar_id)
+    rows = query.order_by(MarketIntradayBar.id.asc()).limit(max_rows + 1).all()
+    has_more = len(rows) > max_rows
+    selected = rows[:max_rows]
+    affected_symbols = sorted({row.stock_id for row in selected})
+    next_after_bar_id = selected[-1].id if selected else after_bar_id
+    manifest_rows = [
+        {
+            "bar_id": row.id,
+            "provider": row.provider,
+            "symbol": row.stock_id,
+            "market": row.market,
+            "interval": row.interval,
+            "bar_time": _json_value(row.bar_time),
+            "before": {
+                "trade_volume": row.trade_volume,
+                "volume_status": row.volume_status,
+                "updated_at": _json_value(row.updated_at),
+            },
+            "after": {
+                "trade_volume": None,
+                "volume_status": "not_applicable",
+            },
+        }
+        for row in selected
+    ]
+    manifest = {
+        "contract_version": US_INDEX_INTRADAY_VOLUME_REPAIR_CONTRACT,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "prepared" if apply else "dry_run",
+        "apply_requested": apply,
+        "symbols": list(US_INDEX_INTRADAY_SYMBOLS),
+        "markets": list(US_INDEX_INTRADAY_MARKETS),
+        "interval": "1m",
+        "after_bar_id": after_bar_id,
+        "next_after_bar_id": next_after_bar_id,
+        "max_rows": max_rows,
+        "has_more_rows": has_more,
+        "rows": manifest_rows,
+    }
+    result = {
+        "contract_version": US_INDEX_INTRADAY_VOLUME_REPAIR_CONTRACT,
+        "dry_run": not apply,
+        "status": "partial" if has_more else "complete",
+        "after_bar_id": after_bar_id,
+        "next_after_bar_id": next_after_bar_id,
+        "max_rows": max_rows,
+        "planned_row_count": len(selected),
+        "affected_symbol_count": len(affected_symbols),
+        "affected_symbols": affected_symbols,
+        "has_more_rows": has_more,
+        "writes_performed": 0,
+    }
+    if not apply:
+        return result
+
+    assert audit_manifest_path is not None
+    _write_manifest(audit_manifest_path, manifest)
+    try:
+        repaired = 0
+        for planned in manifest_rows:
+            row = db.get(MarketIntradayBar, int(planned["bar_id"]))
+            if row is None:
+                raise RuntimeError(
+                    "US index volume repair candidate disappeared after manifest preparation."
+                )
+            before = planned["before"]
+            if (
+                row.trade_volume != before["trade_volume"]
+                or row.volume_status != before["volume_status"]
+            ):
+                raise RuntimeError(
+                    "US index volume repair candidate changed after manifest preparation."
+                )
+            row.trade_volume = None
+            row.volume_status = "not_applicable"
+            row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            repaired += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        manifest["status"] = "rolled_back"
+        manifest["failed_at"] = datetime.now(timezone.utc).isoformat()
+        _write_manifest(audit_manifest_path, manifest)
+        raise
+
+    manifest.update(
+        status="applied",
+        applied_at=datetime.now(timezone.utc).isoformat(),
+        repaired_row_count=repaired,
+    )
+    manifest_warning = None
+    try:
+        _write_manifest(audit_manifest_path, manifest)
+    except OSError as exc:
+        manifest_warning = f"Applied DB batch but could not finalize audit manifest: {exc}"
+    return {
+        **result,
+        "dry_run": False,
+        "repaired_row_count": repaired,
+        "audit_manifest_path": str(audit_manifest_path),
+        "audit_manifest_warning": manifest_warning,
+        "writes_performed": repaired,
+    }
+
+
+def rollback_us_index_intraday_volume_repair(
+    db: Session,
+    *,
+    audit_manifest_path: Path,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Validate or restore one applied US index-volume repair manifest."""
+
+    manifest = json.loads(audit_manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("contract_version") != US_INDEX_INTRADAY_VOLUME_REPAIR_CONTRACT:
+        raise ValueError("unsupported US index intraday volume repair manifest")
+    if manifest.get("status") != "applied":
+        raise ValueError("only an applied US index volume repair can be rolled back")
+
+    conflicts: list[dict[str, Any]] = []
+    for planned in manifest.get("rows") or []:
+        row = db.get(MarketIntradayBar, int(planned["bar_id"]))
+        if (
+            row is None
+            or row.trade_volume is not None
+            or row.volume_status != "not_applicable"
+        ):
+            conflicts.append(
+                {"bar_id": int(planned["bar_id"]), "reason": "REPAIRED_ROW_CHANGED"}
+            )
+    if conflicts:
+        return {
+            "contract_version": US_INDEX_INTRADAY_VOLUME_REPAIR_CONTRACT,
+            "dry_run": not apply,
+            "status": "blocked",
+            "conflicts": conflicts[:100],
+            "writes_performed": 0,
+        }
+    if not apply:
+        return {
+            "contract_version": US_INDEX_INTRADAY_VOLUME_REPAIR_CONTRACT,
+            "dry_run": True,
+            "status": "ready",
+            "row_count": len(manifest.get("rows") or []),
+            "writes_performed": 0,
+        }
+
+    restored = 0
+    try:
+        for planned in manifest.get("rows") or []:
+            row = db.get(MarketIntradayBar, int(planned["bar_id"]))
+            if row is None:
+                raise RuntimeError("US index volume repair row disappeared during rollback.")
+            before = planned["before"]
+            row.trade_volume = before["trade_volume"]
+            row.volume_status = before["volume_status"]
+            if before.get("updated_at") is not None:
+                row.updated_at = datetime.fromisoformat(str(before["updated_at"]))
+            restored += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    manifest["status"] = "rolled_back"
+    manifest["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+    _write_manifest(audit_manifest_path, manifest)
+    return {
+        "contract_version": US_INDEX_INTRADAY_VOLUME_REPAIR_CONTRACT,
+        "dry_run": False,
+        "status": "complete",
+        "restored_row_count": restored,
+        "writes_performed": restored,
+    }
 
 
 def repair_us_yahoo_intraday_minute_integrity(
@@ -733,12 +980,17 @@ def prune_expired_us_quote_snapshots(
 
 
 __all__ = [
+    "US_INDEX_INTRADAY_MARKETS",
+    "US_INDEX_INTRADAY_SYMBOLS",
+    "US_INDEX_INTRADAY_VOLUME_REPAIR_CONTRACT",
     "US_QUOTE_RETENTION_DAYS",
     "US_YAHOO_INTRADAY_MARKETS",
     "US_YAHOO_INTRADAY_PROVIDERS",
     "US_YAHOO_INTRADAY_REPAIR_CONTRACT",
     "inspect_us_yahoo_intraday_minute_integrity",
     "prune_expired_us_quote_snapshots",
+    "repair_us_index_intraday_volume_semantics",
     "repair_us_yahoo_intraday_minute_integrity",
+    "rollback_us_index_intraday_volume_repair",
     "rollback_us_yahoo_intraday_minute_repair",
 ]

@@ -47,23 +47,13 @@ from app.market_data.integration_contracts import (
 )
 from app.market_data.resolution import BarSeriesCandidate, ResolutionCandidate
 from app.us_market.market_data.descriptors import (
-    TWELVE_INTRADAY_DESCRIPTOR,
-    TWELVE_QUOTE_DESCRIPTOR,
-    YAHOO_INTRADAY_DESCRIPTOR,
-    YAHOO_QUOTE_DESCRIPTOR,
+    US_INTRADAY_PROVIDER_DESCRIPTORS,
+    US_QUOTE_PROVIDER_DESCRIPTORS,
 )
 from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.trading_calendar import is_us_trading_day, us_session_close_time
 
 
-_QUOTE_DESCRIPTORS = {
-    "yahoo_chart": YAHOO_QUOTE_DESCRIPTOR,
-    "twelve_data": TWELVE_QUOTE_DESCRIPTOR,
-}
-_INTRADAY_DESCRIPTORS = {
-    "yahoo_chart": YAHOO_INTRADAY_DESCRIPTOR,
-    "twelve_data": TWELVE_INTRADAY_DESCRIPTOR,
-}
 US_EASTERN = ZoneInfo("America/New_York")
 
 
@@ -93,7 +83,15 @@ def _interval_delta(interval: str) -> timedelta:
 def _freshness(
     requirement: DataRequirementV2,
     lineage: SourceLineage,
+    *,
+    provider_timeframe: str | None = None,
 ) -> EvidenceFreshness:
+    if str(provider_timeframe or "").strip().lower() in {
+        "delayed",
+        "end_of_day",
+        "unknown",
+    }:
+        return EvidenceFreshness.STALE
     observed_at = freshness_timestamp(lineage, requirement.freshness.basis)
     if observed_at is None:
         return EvidenceFreshness.UNKNOWN
@@ -124,6 +122,17 @@ def _descriptor_applies(
     return True
 
 
+def _provider_timeframe_limitations(value: str | None) -> tuple[str, ...]:
+    normalized = str(value or "").strip().lower()
+    if not normalized or normalized == "real_time":
+        return ()
+    if normalized == "delayed":
+        return ("MASSIVE_PROVIDER_TIMEFRAME_DELAYED",)
+    if normalized == "end_of_day":
+        return ("MASSIVE_PROVIDER_TIMEFRAME_END_OF_DAY",)
+    return ("MASSIVE_PROVIDER_TIMEFRAME_UNKNOWN",)
+
+
 def _fair_budgets(total_rows: int, provider_count: int) -> tuple[int, ...]:
     if provider_count < 1:
         return ()
@@ -151,8 +160,16 @@ def _dataset_health(requirement: DataRequirementV2, *, dataset_id: str, events: 
 
 
 class USQuoteRepository:
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        descriptors=US_QUOTE_PROVIDER_DESCRIPTORS,
+    ) -> None:
         self._db = db
+        self._descriptors = {
+            descriptor.provider_key: descriptor for descriptor in descriptors
+        }
 
     def read_quote_candidates(self, requirement: DataRequirementV2) -> QuoteCandidateBatch:
         if not isinstance(requirement.target, InstrumentTarget) or not isinstance(requirement.request, SnapshotCapabilityRequest) or requirement.request.capability_id != "quote.snapshot" or requirement.target.instrument.market is not Market.US:
@@ -160,7 +177,7 @@ class USQuoteRepository:
         instrument = requirement.target.instrument
         eligible_descriptors = tuple(
             descriptor
-            for descriptor in _QUOTE_DESCRIPTORS.values()
+            for descriptor in self._descriptors.values()
             if _descriptor_applies(
                 descriptor,
                 instrument_type=instrument.instrument_type,
@@ -194,7 +211,7 @@ class USQuoteRepository:
             identity = (row.provider, row.source)
             if identity in seen:
                 continue
-            descriptor = _QUOTE_DESCRIPTORS.get(row.provider)
+            descriptor = self._descriptors.get(row.provider)
             identity_invalid = (
                 row.symbol != instrument.symbol
                 or row.venue != instrument.venue
@@ -252,7 +269,11 @@ class USQuoteRepository:
             except (TypeError, ValueError, ValidationError):
                 rejections.append(CandidateRowRejection(provider=row.provider, source=row.source, storage_row_id=row.id, raw_result_id=row.raw_result_id, event_date=_utc(row.event_at).date(), reason_code="INVALID_CANONICAL_US_QUOTE"))
                 continue
-            freshness = _freshness(requirement, quote.lineage)
+            freshness = _freshness(
+                requirement,
+                quote.lineage,
+                provider_timeframe=row.provider_timeframe,
+            )
             observed_at = freshness_timestamp(quote.lineage, requirement.freshness.basis)
             if observed_at is not None:
                 events.append(_utc(observed_at))
@@ -262,7 +283,16 @@ class USQuoteRepository:
                     freshness=freshness,
                     provider_priority=descriptor.priority,
                     session=us_session_for_timestamp(_utc(row.event_at)),
-                    limitations=descriptor.limitations,
+                    limitations=tuple(
+                        dict.fromkeys(
+                            (
+                                *descriptor.limitations,
+                                *_provider_timeframe_limitations(
+                                    row.provider_timeframe
+                                ),
+                            )
+                        )
+                    ),
                 )
             )
             seen.add(identity)
@@ -281,8 +311,16 @@ class USQuoteRepository:
 
 
 class USIntradayBarRepository:
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        descriptors=US_INTRADAY_PROVIDER_DESCRIPTORS,
+    ) -> None:
         self._db = db
+        self._descriptors = {
+            descriptor.provider_key: descriptor for descriptor in descriptors
+        }
 
     def read_bar_candidates(self, requirement: DataRequirementV2) -> BarCandidateBatch:
         if not isinstance(requirement.target, InstrumentTarget) or not isinstance(requirement.request, BarCapabilityRequest) or requirement.request.capability_id != "intraday.bars" or requirement.target.instrument.market is not Market.US:
@@ -291,7 +329,7 @@ class USIntradayBarRepository:
         instrument = requirement.target.instrument
         eligible_descriptors = tuple(
             descriptor
-            for descriptor in _INTRADAY_DESCRIPTORS.values()
+            for descriptor in self._descriptors.values()
             if _descriptor_applies(
                 descriptor,
                 instrument_type=instrument.instrument_type,
@@ -373,6 +411,7 @@ class USIntradayBarRepository:
             raise ValueError("US intraday repository read exceeded bounds.max_rows")
         by_source: dict[tuple[str, str], list[BarObservation]] = defaultdict(list)
         priorities: dict[tuple[str, str], int] = {}
+        provider_timeframes: dict[tuple[str, str], str | None] = {}
         rejections: list[CandidateRowRejection] = []
         minute_bucket_counts: dict[tuple[str, datetime], int] = defaultdict(int)
         for row, _lineage, _raw, _source in rows:
@@ -390,7 +429,7 @@ class USIntradayBarRepository:
             identity = (row.provider, row.source)
             if len(by_source[identity]) >= request.max_bars:
                 continue
-            descriptor = _INTRADAY_DESCRIPTORS.get(row.provider)
+            descriptor = self._descriptors.get(row.provider)
             identity_invalid = (
                 row.stock_id != instrument.symbol
                 or row.symbol != instrument.symbol
@@ -443,6 +482,26 @@ class USIntradayBarRepository:
                 )
                 continue
             try:
+                canonical_volume = (
+                    None
+                    if instrument.instrument_type is InstrumentType.INDEX
+                    else Quantity(
+                        value=Decimal(row.trade_volume),
+                        unit=QuantityUnit.SHARE,
+                    )
+                    if row.trade_volume is not None
+                    else None
+                )
+                canonical_volume_status = (
+                    "not_applicable"
+                    if instrument.instrument_type is InstrumentType.INDEX
+                    else row.volume_status
+                    or (
+                        "observed"
+                        if row.trade_volume is not None
+                        else "missing"
+                    )
+                )
                 bar = BarObservation(
                     instrument=instrument,
                     lineage=SourceLineage(
@@ -465,8 +524,8 @@ class USIntradayBarRepository:
                     high_price=Decimal(str(row.high_price)),
                     low_price=Decimal(str(row.low_price)),
                     close_price=Decimal(str(row.close_price)),
-                    volume=Quantity(value=Decimal(row.trade_volume), unit=QuantityUnit.SHARE) if row.trade_volume is not None else None,
-                    volume_status="observed" if row.trade_volume is not None else "missing",
+                    volume=canonical_volume,
+                    volume_status=canonical_volume_status,
                     price_basis="raw",
                     turnover_value=Decimal(row.trade_value) if row.trade_value is not None else None,
                     turnover_currency="USD" if row.trade_value is not None else None,
@@ -477,6 +536,7 @@ class USIntradayBarRepository:
                 continue
             by_source[identity].append(bar)
             priorities[identity] = descriptor.priority
+            provider_timeframes[identity] = lineage.provider_timeframe
         candidates: list[BarSeriesCandidate] = []
         events: list[datetime] = []
         for identity, reverse_bars in by_source.items():
@@ -485,14 +545,27 @@ class USIntradayBarRepository:
                 continue
             event_at = bars[-1].lineage.event_at or bars[-1].end_at
             events.append(event_at)
-            descriptor = _INTRADAY_DESCRIPTORS[identity[0]]
+            descriptor = self._descriptors[identity[0]]
             candidates.append(
                 BarSeriesCandidate(
                     bars=bars,
-                    freshness=_freshness(requirement, bars[-1].lineage),
+                    freshness=_freshness(
+                        requirement,
+                        bars[-1].lineage,
+                        provider_timeframe=provider_timeframes.get(identity),
+                    ),
                     provider_priority=priorities[identity],
                     session=us_session_for_timestamp(event_at),
-                    limitations=descriptor.limitations,
+                    limitations=tuple(
+                        dict.fromkeys(
+                            (
+                                *descriptor.limitations,
+                                *_provider_timeframe_limitations(
+                                    provider_timeframes.get(identity)
+                                ),
+                            )
+                        )
+                    ),
                 )
             )
         candidates.sort(key=lambda item: item.provider_priority)
@@ -529,11 +602,13 @@ class USIntradayBarRepository:
 
         if instrument.market is not Market.US:
             raise ValueError("US intraday volume sessions require market=US")
+        if instrument.instrument_type is InstrumentType.INDEX:
+            return ()
         if lookback_days < 1 or lookback_days > 35:
             raise ValueError("US intraday volume lookback must be between 1 and 35 days")
         if max_sessions < 1 or max_sessions > 20:
             raise ValueError("US intraday volume sessions must be between 1 and 20")
-        descriptor = _INTRADAY_DESCRIPTORS.get(provider)
+        descriptor = self._descriptors.get(provider)
         if descriptor is None or not _descriptor_applies(
             descriptor,
             instrument_type=instrument.instrument_type,

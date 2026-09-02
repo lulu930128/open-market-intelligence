@@ -138,7 +138,7 @@ def test_us_product_routes_cannot_expand_provider_selection_surface() -> None:
 def test_frontend_us_market_requests_do_not_choose_a_provider() -> None:
     violations: list[str] = []
     provider_argument = re.compile(
-        r"\bprovider\s*:\s*['\"](?:auto|alpaca|alphavantage|twelve_data|yahoo_chart)['\"]"
+        r"\bprovider\s*:\s*['\"](?:auto|alpaca|alphavantage|massive|twelve_data|yahoo_chart)['\"]"
     )
     for path in (REPO_ROOT / "frontend" / "src").rglob("*.ts*"):
         content = path.read_text(encoding="utf-8-sig")

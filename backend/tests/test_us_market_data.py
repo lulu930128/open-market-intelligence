@@ -2148,7 +2148,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(trend["point_count"], 0)
         self.assertIsNone(trend["previous_close"])
 
-    def test_us_watchlist_ranking_limits_intraday_overlay_attempts(self) -> None:
+    def test_us_watchlist_ranking_limits_current_quote_overlay_without_intraday(self) -> None:
         symbol_records = parse_symbol_directories(
             nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
             other_listed_text=OTHER_LISTED_SAMPLE,
@@ -2167,6 +2167,27 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             self.db,
             USWatchlistItemCreate(group_id=group.id, symbol="IBM"),
         )
+        self.db.add_all(
+            USStockMaster(
+                symbol=f"TEST{index:02d}",
+                security_name=f"Synthetic test symbol {index:02d}",
+                exchange="NASDAQ",
+                asset_type="stock",
+                listing_source="test_fixture",
+            )
+            for index in range(28)
+        )
+        self.db.flush()
+        self.db.add_all(
+            USWatchlistItem(
+                group_id=group.id,
+                symbol=f"TEST{index:02d}",
+                priority=100 + index,
+                enabled=True,
+            )
+            for index in range(28)
+        )
+        self.db.commit()
         upsert_canonical_us_daily_price_records(
             self.db,
             [
@@ -2206,7 +2227,12 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         with patch(
             "app.us_market.service.expected_us_daily_price_date",
             return_value=date(2026, 5, 29),
-        ), patch("app.us_market.service._get_us_intraday_overlay") as mock_overlay:
+        ), patch(
+            "app.us_market.service.get_us_intraday_trend",
+            side_effect=AssertionError("ranking called full intraday trend"),
+        ) as full_intraday, patch(
+            "app.us_market.service._get_us_current_quote_overlay"
+        ) as mock_overlay:
             mock_overlay.return_value = {
                 "time": "2026-06-05T13:45:00-04:00",
                 "session": "regular",
@@ -2216,28 +2242,36 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 "change_pct": 11.0,
                 "volume": 2000,
                 "source": "test_intraday",
+                "provider": "test_quote",
+                "selection_reason": "TEST_CURRENT_QUOTE_SELECTED",
+                "fallback_used": False,
+                "is_live": True,
+                "limitations": [],
                 "has_extended_hours": False,
-                "points": [{"time": "2026-06-05T13:45:00-04:00", "price": 111.0}],
             }
 
             ranking = get_us_watchlist_ranking(
                 self.db,
                 group_id=group.id,
-                use_intraday=True,
-                intraday_limit=1,
+                use_current_quote=True,
+                intraday_limit=30,
             )
 
-        mock_overlay.assert_called_once_with(
-            symbol="AAPL",
-            db=self.db,
-            session_scope="regular",
-        )
+        self.assertEqual(mock_overlay.call_count, 30)
+        full_intraday.assert_not_called()
+        first_quote_call = mock_overlay.call_args_list[0]
+        self.assertEqual(first_quote_call.kwargs["symbol"], "AAPL")
+        self.assertIs(first_quote_call.kwargs["db"], self.db)
+        self.assertIn("now", first_quote_call.kwargs)
+        self.assertEqual(len(ranking["results"]), 30)
         self.assertEqual(ranking["results"][0]["symbol"], "AAPL")
-        self.assertEqual(ranking["results"][0]["status"], "intraday")
+        self.assertEqual(ranking["results"][0]["status"], "current_quote")
         self.assertEqual(ranking["results"][0]["close"], 111.0)
+        self.assertEqual(ranking["results"][0]["intraday_points"], [])
+        self.assertEqual(ranking["ranking_semantics"], "current_quote_overlay")
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
-        self.assertEqual(ranking["results"][1]["status"], "ready")
-        self.assertEqual(ranking["results"][1]["close"], 190.0)
+        self.assertEqual(ranking["results"][1]["status"], "current_quote")
+        self.assertEqual(ranking["results"][1]["close"], 111.0)
 
     def test_expected_us_daily_price_date_uses_new_york_release_time(self) -> None:
         self.assertEqual(

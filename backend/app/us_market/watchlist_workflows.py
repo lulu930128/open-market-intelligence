@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 import time
 
 from sqlalchemy.orm import Session
@@ -20,7 +20,7 @@ ProgressCallback = Callable[[int | None, int | None, str | None], None]
 class USWatchlistWorkflowDependencies:
     expected_daily_price_date: Callable[[], date]
     resolved_daily_batch_loader: Callable[..., dict[str, dict]]
-    intraday_overlay_loader: Callable[..., dict | None]
+    current_quote_overlay_loader: Callable[..., dict | None]
     refresh_daily_prices: Callable[..., dict]
     ensure_stock: Callable[..., USStockMaster]
     refresh_sec_facts: Callable[..., dict]
@@ -88,6 +88,7 @@ def get_us_watchlist_ranking(
     enabled_only: bool = True,
     rank_by: str = "none",
     sort_order: str = "asc",
+    use_current_quote: bool = False,
     use_intraday: bool = False,
     intraday_limit: int = 30,
     intraday_session_scope: str = "regular",
@@ -141,7 +142,9 @@ def get_us_watchlist_ranking(
         .all()
     } if symbols else {}
     rows: list[dict] = []
-    intraday_overlay_attempts = 0
+    current_quote_overlay_attempts = 0
+    overlay_requested = use_current_quote or use_intraday
+    evaluated_at = datetime.now(timezone.utc)
     resolved_daily_by_symbol = dependencies.resolved_daily_batch_loader(
         db=db,
         symbols=symbols,
@@ -213,39 +216,57 @@ def get_us_watchlist_ranking(
             "error_message": None,
         }
 
-        if use_intraday and intraday_overlay_attempts < intraday_limit:
-            intraday_overlay_attempts += 1
-            overlay = dependencies.intraday_overlay_loader(
+        if overlay_requested and current_quote_overlay_attempts < intraday_limit:
+            current_quote_overlay_attempts += 1
+            overlay = dependencies.current_quote_overlay_loader(
                 symbol=symbol,
                 db=db,
-                session_scope=intraday_session_scope,
+                now=evaluated_at,
             )
 
             if overlay is not None:
-                row["intraday_overlay_applied"] = True
+                overlay_previous_close = _finite_float(overlay.get("previous_close"))
+                resolved_previous_close = (
+                    overlay_previous_close
+                    if overlay_previous_close is not None
+                    else previous_close
+                )
+                overlay_close = _finite_float(overlay.get("close"))
+                overlay_change = (
+                    overlay_close - resolved_previous_close
+                    if overlay_close is not None
+                    and resolved_previous_close is not None
+                    else None
+                )
+                overlay_change_pct = (
+                    (overlay_change / resolved_previous_close) * 100
+                    if overlay_change is not None
+                    and resolved_previous_close not in {None, 0}
+                    else None
+                )
+                row["current_quote_overlay_applied"] = True
                 row["time"] = overlay["time"]
                 row["session"] = overlay["session"]
-                row["close"] = overlay["close"]
-                row["previous_close"] = overlay["previous_close"]
-                row["change"] = overlay["change"]
-                row["change_pct"] = overlay["change_pct"]
+                row["close"] = overlay_close
+                row["previous_close"] = resolved_previous_close
+                row["change"] = overlay_change
+                row["change_pct"] = overlay_change_pct
                 row["source"] = overlay["source"]
                 row["selected_provider"] = overlay.get("provider")
                 row["selected_source"] = overlay.get("source")
                 row["selected_session"] = overlay.get("session")
-                row["selection_reason"] = "INTRADAY_OVERLAY_SELECTED"
-                row["fallback_used"] = False
+                row["selection_reason"] = overlay.get("selection_reason")
+                row["fallback_used"] = bool(overlay.get("fallback_used"))
                 row["has_extended_hours"] = overlay["has_extended_hours"]
-                row["intraday_previous_close"] = overlay["previous_close"]
-                row["intraday_points"] = overlay["points"]
-
-                if overlay["volume"] is not None:
-                    row["volume"] = overlay["volume"]
+                row["intraday_previous_close"] = None
+                row["intraday_points"] = []
+                row["quote_is_live"] = bool(overlay.get("is_live"))
+                row["quote_limitations"] = list(overlay.get("limitations") or ())
 
                 row["status"] = (
-                    "intraday"
-                    if overlay.get("session") == "regular"
-                    else "extended_hours"
+                    "current_quote"
+                    if overlay.get("is_live")
+                    else "quote_not_live"
                 )
 
         rows.append(row)
@@ -279,8 +300,11 @@ def get_us_watchlist_ranking(
     requested_symbol_count = len(rows)
     ranked_count = len(rows) - no_data_count
     is_live = bool(
-        use_intraday
-        and any(row.get("intraday_overlay_applied") for row in rows)
+        overlay_requested
+        and any(row.get("quote_is_live") for row in rows)
+    )
+    quote_overlay_applied = any(
+        row.get("current_quote_overlay_applied") for row in rows
     )
 
     return {
@@ -304,8 +328,8 @@ def get_us_watchlist_ranking(
             ranked_count == requested_symbol_count and no_data_count == 0
         ),
         "ranking_semantics": (
-            "live_intraday_rows"
-            if is_live
+            "current_quote_overlay"
+            if quote_overlay_applied
             else "resolved_completed_daily_bars"
         ),
         "results": rows,
