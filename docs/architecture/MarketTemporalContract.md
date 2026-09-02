@@ -89,10 +89,18 @@ availability、evidence freshness、provider snapshot freshness、trade state／
 reason code。`expected_but_missing` 是 derived outcome，不是 primitive expectation。
 
 Quote 的 provider snapshot freshness 以 `fetched_at` 判斷；last trade recency 以
-`event_at` 判斷。Provider 剛回應但最後一筆成交較舊時，允許
-`provider_snapshot_freshness=fresh`、`trade_recency=old` 與
-`LAST_TRADE_OLD_BUT_PROVIDER_CURRENT` 同時成立，不得把 provider 標成 stale。
-Intraday bar freshness 仍以最新 bar event time 判斷。
+`event_at` 判斷。Provider 剛回應不代表舊交易日的成交可成為 current observation；
+active phase 只接受Backend calendar投影的`current_session_trade_date`。若cache只有較早
+交易日，provider snapshot仍可保持`fresh`，但trade recency必須是`historical`、current
+session requirement不滿足，Today series不得回退到latest cached date。Intraday bar
+freshness仍以最新bar event time判斷；off-session才可明示投影latest historical session。
+
+US Quote／Intraday selected evidence 的event recency由
+`evaluate_us_selected_evidence_temporal()`單一pure owner判定，Compatibility service與
+US Market Truth共同消費。Market Truth的`current_observation`只表示observation屬於目前
+expected session；它可以同時是`freshness=stale`、`trade_recency=old`與
+`research_usable=false`。Consumer不得用`current_observation` identity反推freshness或
+decision usability，也不得用recent `fetched_at`覆寫舊`event_at`。
 
 Producer refresh-due 與 consumer stale-after 是兩個不同門檻。US recurring
 Quote／Intraday producer 在 evidence age 達 45 秒時即可 refresh；cache-only consumer

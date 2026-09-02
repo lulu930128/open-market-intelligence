@@ -285,6 +285,66 @@ Registry／debt manifest 是 executable truth；parity test 只驗證 invariant�
 - Source validation：core focused `51 passed / 64 subtests`；affected US regression `205 passed / 64 subtests`，唯一pytest temp-ACL setup error在sandbox外精確重跑為`1 passed`。Architecture checker維持`22 actual / 22 declared`、architecture pytest `28 passed`；safe quick的Backend compileall、Frontend TypeScript與`git diff --check`通過，log為`.tmp/validation/20260901-210807/`。Ruff未安裝，沒有宣稱Ruff通過。
 - Acceptance boundary：本輪Market Truth Core Source已完成；Frontend／AI／MCP、legacy compatibility facade與consumer cutover仍pending。未做provider I/O、production DB write、runtime restart、running runtime adoption、browser Product驗證、commit或push。
 
+## 2026-09-02 Taiwan index Truth convergence Source checkpoint
+
+- Canonical owner：`ResolvedTaiwanIndexTruth`升為`tw.index.resolution.v3`，只組合已解析的current／intraday／completed daily／official-close evidence role，不擁有provider priority、I/O或storage winner selection；selected value、previous close、change與change percentage保留同一semantic lane及reference lineage。REST summary、Dashboard、AI `market.indices`、AI compact quote與index contract snapshot共用同一resolution identity；`current_data_core.index`只保留diagnostic／live snapshot與明示版本、limitation的短期compatibility fallback。
+- Intraday boundary：`tw.market_index.intraday` executable registry與Taiwan dataset catalog改指向`TaiwanBarService`，由Canonical Bar repository、Shared Gateway與既有Resolver產生`tw.bar.series_read.v1`；registered refresh依序acquire current evidence、沿用既有materializer/transaction落Base-1m、再reread Unified Bar。舊current-snapshot minute selector不再是production/registry可達owner，沒有新增provider、cache、table或manager。
+- Finality truth：release-qualified、exchange-authority、final/corrected completed daily evidence可確認official close；未滿足者仍保留pending。Derived／pending-release completed evidence可明示為latest-completed reference，但保留`official_source=false`、`official_close_status=pending`與`provisional_estimate=true`，不把Unknown或provisional偽裝成official。
+- Read-path：current index／breadth repository先查七日近期視窗，沒有資料才回退歷史cache；`20260902_0077`新增符合scope/provider/latest ordering的composite indexes。Read-only source probe由每次27 queries降至21，五次median約1.31秒；production DB尚未apply migration，故不是running runtime latency acceptance。
+- Source validation：本checkpoint既有affected matrix `170 passed / 3 subtests`；headline adoption另通過`254 passed / 12 subtests`、architecture pytest `28 passed`、checker `22 actual / 22 declared`、backend compileall與`git diff --check`。Safe quick（含Frontend TypeScript）通過，log為`.tmp/validation/20260902-213049/`。Current-source cache-only smoke確認TAIEX／TPEX的REST summary、Dashboard及AI在value、previous close、change、source、provider與resolution ID一致，且未走compatibility fallback。Safe backend全量pytest超過420秒上限，wrapper終止child時先遇到Windows access denied，精確中斷wrapper後確認child已結束；此項不得記為pass或assertion failure。
+- Runtime projection：本輪未主動restart，但8400 listener在驗證期間由外部流程換成PID 48892；cache-only GET已回`tw.index.resolution.v3`，TAIEX／TPEX的summary與Dashboard selected fields及resolution ID一致，證明這兩個HTTP projection已載入本次行為。該PID實際executable為`C:\miniconda3\python.exe`，health未暴露project root且command line無法讀取，與預期`.venv` launcher identity不一致，故完整Runtime identity仍未accepted；running AI `market.indices`另只有current-source direct smoke，沒有獨立transport proof。
+- Acceptance boundary：Headline consumer Source accepted，summary／Dashboard runtime behavior accepted但launcher identity pending；未apply production migration、未做provider I/O、正式交易session Live、running AI／MCP transport parity、browser Product、commit或push。260-session historical coverage仍是獨立gate。
+
+## 2026-09-02 US index architecture convergence Source checkpoint
+
+- Phase A：US cash index canonical volume固定為`null`／`not_applicable`；transaction拒絕不合規輸入，repository對legacy rows fail-safe中和且不提供index volume sessions。新增bounded、dry-run-first、audited、reversible repair與tracked job；production SQLite query-only dry-run辨識6746 rows／6 symbols，`writes_performed=0`，尚未apply。
+- Phase B：`app.us_market.market_indices`以單一caller-owned clock組合既有六份US Market Truth，固定`^GSPC`、`^DJI`、`^IXIC`、`^NDX`、`^SOX`、`^VIX`順序並保留selected lineage、freshness、fallback、reference、truth revision與partial/missing。新增cache-only `GET /api/us-market/indices`，`omi.decision.v4` `market.indices`擴充為TW／US且遵守bounded selection。
+- Source validation：A+B targeted regression `95 passed`；US indices／Market Truth／AI capability `121 passed / 12 subtests`；MCP／outward contract `64 passed / 2 subtests`且offline snapshot digest已同步；audited repair rollback精確測試`1 passed`。Safe quick的architecture checker、architecture pytest、compileall、Frontend TypeScript與diff check全數通過，log在`.tmp/validation/20260902-221858/`。
+- Read-only local evidence：query-only aggregate為6/6 complete並保留每項resolved Yahoo lineage；running 8400 OpenAPI尚未包含新indices／repair routes，本輪未restart，故Runtime adoption維持pending。這不代表外部provider live或產品端驗收；Massive維持source-ready canary-only，沒有production promotion。
+
+## 2026-09-02 US intraday current-session date boundary Source checkpoint
+
+- Calendar owner：`build_us_calendar_status()`新增獨立`current_session_trade_date`；active
+  `pre_market／regular／after_hours`只接受紐約當地當日交易日。Completed Daily release
+  規則沒有改動；2026-09-02 09:54 ET的Intraday expected date是09/02，Daily expected
+  completed date仍是09/01。
+- Selection owner：Compatibility intraday與Market Truth series共用
+  `select_us_intraday_trade_date()`。Active session的cache若只有09/01，Today points與
+  `trade_date`為空並明示expected 09/02、latest available 09/01、unsatisfied；mixed cache
+  只選09/02；off-session才允許latest historical。
+- Current truth：Quote provider snapshot freshness與event trade date保持正交。Fresh
+  transport不再把前一交易日last trade升格current；source status回`historical`、
+  `current_session_satisfied=false`、`decision_usable=false`。Market Truth current／headline
+  與legacy `current_observation`同樣拒絕前一session Quote／Bar。
+- Frontend：Today polling只消費Backend date-selection契約，不做browser timezone計算；
+  mismatch／missing會主動清空上一輪chart state並抑制舊current price。Daily／previous
+  close reference仍可獨立顯示。
+- Source validation：boundary targeted matrix `104 passed / 3 subtests`；Frontend
+  `tsc --noEmit`與targeted ESLint通過。未執行browser E2E，未restart runtime、未做provider
+  I/O、production DB mutation、commit或push；Runtime／Live／Product acceptance均pending。
+
+## 2026-09-03 US index temporal／AI final convergence Source checkpoint
+
+- Temporal owner：`temporal_expectedness.py`新增pure selected-evidence assessment，Compatibility service與US Market Truth共用同一event-age、current-session與provider-snapshot判定。Recent `fetched_at`不再能把old／previous-session `event_at`升格current；`current_observation`改為session identity，freshness、trade recency與research usability保持獨立。
+- Market Truth／aggregate：Quote與Bar observation additive保留provider snapshot freshness、trade recency、current-session expected／satisfied。VIX-like today-but-old evidence仍可facts display且保留current-session identity，但`freshness=stale`、`research_usable=false`；`market.indices`六項coverage仍可complete，aggregate `is_current=false`、`decision_usable=false`並帶stale limitation。
+- AI／quality：US Quote compact與`quote.snapshot` default projection保留`source_status`、`session_date_relation`、expected/event trade date及current-session fields。Generic realtime先消費Backend normalized fields，不重算US calendar；valid-empty awaiting-first-trade不再提升previous price。Data Quality只接受typed aligned Quote／completed-Daily relation，真正mismatch仍blocking。MCP offline public contract snapshot已重生。
+- Source evidence：核心temporal／Market Truth／indices／AI矩陣`177 passed / 15 subtests`；compatibility／capability／service矩陣`201 passed / 12 subtests`；architecture pytest `30 passed`，MCP／offline snapshot `34 passed / 2 subtests`，guard維持`22 actual / 22 declared`；Frontend TypeScript與9-file no-write AST compile通過。Active-session production SQLite query-only smoke顯示SOX current／research-usable，VIX current-session identity成立但`trade_recency=old`、`freshness=stale`、`research_usable=false`，aggregate 6/6但not-current／not-decision-usable。Running 8400唯讀對照仍回VIX live／decision-usable且AI quote缺relation／source-status，證明Phase C source尚未被runtime採用；本輪未restart、未provider I/O、未DB write、未commit／push，AI／MCP transport與Product parity仍是獨立gate。
+
+## 2026-09-02 Taiwan index history／directory reconciliation closeout
+
+- Source：TAIEX／TPEX daily history沿用`TaiwanBarService`與既有bounded tracked bootstrap owner；90-bar不足時不再回complete，outward coverage包含requested／available／returned、range、minimum、missing與bootstrap recommendation。TPEX historical materialization固定使用explicit formal-close component，TPEX專用version升為`tw.tpex.daily.materialize.v2`，舊version不再eligible；official daily存在時同一transaction flow會補做reconciliation。GET/read維持cache-only。
+- Calendar／directory：2025年9月29日、10月24日、12月25日依交易所年度休市日程納入Taiwan calendar。Index directory將transport age與observation trade date分開；2026-09-02 live refresh中，TWSE為transport fresh但latest 09/01／expected 09/02，因此投影stale與`TW_INDEX_DIRECTORY_OBSERVATION_DATE_STALE`；TPEX latest／expected均09/02且為fresh。
+- Production data：執行前SQLite backup為`data/backups/open_market_intelligence.before-tw-index-history-reconciliation.20260902.db`，quick check通過且SHA-256為`8013cbfa2de296ffbdc1d62849fb1f1b4904f666897aab7d684d45e8b84e7cd0`。Canonical readback為TAIEX 260／TPEX 260個唯一交易日、2025-08-08至2026-09-02、OHLC 520/520非空且無重複；TPEX 260/260均有v2 component receipt/hash lineage。TPEX 2026-09-01 derived close已由410.60重建為410.77，official reconciliation為matched。
+- Runtime／Product：launcher收斂為本repo、`.venv`、single backend 8400；frontend採用3214並proxy至8400。Tracked jobs `11088`（historical 3-session reread）與`11090`（09/01 reconciliation）均為success／completed且postcondition true。TAIEX／TPEX的90與260 daily readback皆完整，latest為2026-09-02、日期嚴格遞增；canonical chart technical各260 points，兩者MA5／20／60皆非空。Chrome實頁驗收同時確認TAIEX／TPEX顯示`日K · 260 根`與K線／技術指標區塊。
+- Validation：affected Backend matrix `96 passed`，postcondition／calendar focused matrix `33 passed`；architecture checker `22 actual / 22 declared`、architecture pytest `29 passed`；Frontend TypeScript、production build、contract Playwright `6 passed`與live Playwright `2 passed`。早期job `11067`／`11068`與`11079`保留為partial／runtime-adoption／postcondition失敗證據，不作PASS。未commit、未push；外部Fugle／Crypto連線失敗與本次index history acceptance無關。
+
+## 2026-09-03 Taiwan index 300-session history extension
+
+- Source／contract：TAIEX／TPEX canonical Base-1d bootstrap共用單一`TAIWAN_INDEX_DAILY_BOOTSTRAP_MAX_SESSIONS=300`上限；operator schema、retry fallback、validation與Frontend index Daily SSR／client request window同步採用300，一般台股仍維持260。相鄰Stock OHLC cache-only projection同步補齊既有required coverage fields，避免共用response model在非index路徑驗證失敗。GET/read仍為cache-only，沒有新增provider、table、fallback或consumer-owned market semantics。
+- Runtime／data：launcher已採用本repo與root `.venv`，running OpenAPI兩個session上限均為300。Tracked job `11105`在bounded 2025-06-01～2025-08-07窗口寫入TAIEX 40根、TPEX 39根；TPEX 2025-08-06經3次HTTP 520後正確標記partial，沒有冒充成功。單日補跑job `11106` success且postcondition true。Canonical readback為TAIEX／TPEX各300個唯一交易日、2025-06-13至2026-09-02、OHLC 600/600非空；TPEX 300/300均為v2 materialization且具component receipt/hash lineage。
+- Outward／Product：兩個`bars=300` index OHLC response皆為requested／available／returned 300、coverage complete、missing 0；canonical chart bundle各300 bars／300 technical points、history ready，最新MA5／20／60非空。3214實頁驗收確認TAIEX／TPEX皆顯示`日K · 300 根`與K線／技術指標區塊，沒有page error。
+- Validation：Backend affected matrix `112 passed`；architecture pytest `30 passed`、guard `22 actual / 22 declared`；Frontend TypeScript與targeted ESLint通過，contract Playwright `6 passed`，首次contract＋live合跑`8 passed`，final restart後live覆核另`2 passed`；`git diff --check`通過（僅既有CRLF warning）。本checkpoint未commit、未push；job `11105`保留為真實partial證據，完成證據由`11106`與最終canonical reread共同提供。
+
 ## Governance v1 freeze boundary
 
 Architecture Governance v1 自 2026-08-27 起視為 frozen：新增未宣告 violation 必須 fail，stale debt 必須 fail，既有 exact debt 僅在 manifest 精確對應時暫時允許；source violation 移除時必須同步移除 debt entry。
