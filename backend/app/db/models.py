@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     Time,
     UniqueConstraint,
+    desc,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -998,6 +999,7 @@ class MarketIntradayBar(Base):
     low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    volume_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     source: Mapped[str] = mapped_column(String(120), index=True)
@@ -1042,6 +1044,7 @@ class MarketIntradayBarLineage(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     finalization: Mapped[str] = mapped_column(String(30))
     source_interval: Mapped[str] = mapped_column(String(16))
+    provider_timeframe: Mapped[str | None] = mapped_column(String(32), nullable=True)
     calculation_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     component_raw_result_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -2594,6 +2597,14 @@ class TaiwanCurrentIndexSnapshot(Base):
             "event_at",
             name="uq_tw_current_index_provider_source_event",
         ),
+        Index(
+            "ix_tw_current_index_scope_provider_latest",
+            "index_id",
+            "provider",
+            desc("event_at"),
+            desc("id"),
+            "trade_date",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -2698,6 +2709,14 @@ class TaiwanCurrentBreadthSnapshot(Base):
             "venue",
             "event_at",
             name="uq_tw_current_breadth_provider_source_event",
+        ),
+        Index(
+            "ix_tw_current_breadth_scope_provider_latest",
+            "venue",
+            "provider",
+            desc("event_at"),
+            desc("id"),
+            "trade_date",
         ),
     )
 
@@ -4645,6 +4664,7 @@ class USQuoteSnapshot(Base):
     high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     previous_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    provider_timeframe: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     authority: Mapped[str] = mapped_column(String(32))
     raw_contract_version: Mapped[str] = mapped_column(String(96))

@@ -396,6 +396,13 @@ class AcquisitionStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
+class ProviderTimeframe(str, Enum):
+    REAL_TIME = "real_time"
+    DELAYED = "delayed"
+    END_OF_DAY = "end_of_day"
+    UNKNOWN = "unknown"
+
+
 class AcquisitionResourceAttempt(CanonicalModel):
     provider: str = Field(min_length=1, max_length=64)
     resource_id: str = Field(min_length=1, max_length=128)
@@ -458,6 +465,7 @@ class RawFetchReceiptV1(CanonicalModel):
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     raw_text: str | None = Field(default=None, max_length=20_000_000)
     parser_version: str = Field(min_length=1, max_length=64)
+    provider_timeframe: ProviderTimeframe | None = None
     error_message: str | None = Field(default=None, max_length=2048)
 
     @field_validator("fetched_at")

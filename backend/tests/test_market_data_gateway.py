@@ -50,6 +50,7 @@ from app.market_data.integration_contracts import (
     BarCapabilityRequest,
     BarCoverageRequirement,
     DataRequirementV2,
+    EvidenceTarget,
     FreshnessRequirement,
     InstrumentTarget,
     PersistenceSummary,
@@ -228,8 +229,24 @@ class FakeTransaction:
             receipts_written=len(acquisition.receipts),
             observations_written=0 if self._unchanged else len(acquisition.observations),
             observations_unchanged=len(acquisition.observations) if self._unchanged else 0,
-            raw_result_ids=(1,) if acquisition.receipts else (),
+            raw_result_ids=(self.calls,) if acquisition.receipts else (),
         )
+
+
+class RouteAwareBarAcquisition:
+    def __init__(self, results: dict[str, BarAcquisitionResult]) -> None:
+        self._results = results
+        self.calls: list[str] = []
+
+    def acquire_bar_observations(
+        self,
+        _requirement: DataRequirementV2,
+        plan: DataAcquisitionPlanV2,
+    ) -> BarAcquisitionResult:
+        assert len(plan.routes) == 1
+        provider = plan.routes[0].provider_key
+        self.calls.append(provider)
+        return self._results[provider]
 
 
 def _receipt() -> RawFetchReceiptV1:
@@ -244,6 +261,16 @@ def _receipt() -> RawFetchReceiptV1:
         content_hash="a" * 64,
         raw_text="[]",
         parser_version="twse_stock_day_all_v1",
+    )
+
+
+def _route_receipt(provider: str, resource_id: str) -> RawFetchReceiptV1:
+    return _receipt().model_copy(
+        update={
+            "provider": provider,
+            "source": f"{provider}.daily",
+            "resource_id": resource_id,
+        }
     )
 
 
@@ -367,6 +394,209 @@ def test_gateway_centrally_rejects_missing_quality_field_before_cache_satisfacti
     assert any(
         "missing fields" in item for item in result.resolved.health.limitations
     )
+
+
+def test_route_gate_rereads_and_falls_back_when_primary_misses_required_field() -> None:
+    primary_provider = "twse_openapi"
+    secondary_provider = "secondary_daily"
+    secondary_resource = "SECONDARY_STOCK_DAY"
+    base = _requirement(RealtimePolicy.PREFER_LIVE, max_calls=2)
+    requirement = base.model_copy(
+        update={
+            "quality": QualityRequirement(required_fields=("trade_count",)),
+            "bounds": base.bounds.model_copy(
+                update={
+                    "max_provider_attempts": 2,
+                    "max_external_calls": 2,
+                }
+            ),
+        }
+    )
+    primary_bar = _bar(cache_hit=False)
+    secondary_bar = _bar(provider=secondary_provider, cache_hit=False).model_copy(
+        update={"trade_count": 5}
+    )
+    primary_candidate = BarSeriesCandidate(
+        bars=(primary_bar,),
+        freshness=EvidenceFreshness.FRESH,
+        provider_priority=10,
+        session=MarketSession.CLOSED,
+    )
+    secondary_candidate = BarSeriesCandidate(
+        bars=(secondary_bar,),
+        freshness=EvidenceFreshness.FRESH,
+        provider_priority=20,
+        session=MarketSession.CLOSED,
+    )
+    reader = FakeReader(
+        [
+            BarCandidateBatch(dataset_health=_health(DatasetHealthStatus.MISSING)),
+            BarCandidateBatch(
+                candidates=(primary_candidate,),
+                dataset_health=_health(),
+            ),
+            BarCandidateBatch(
+                candidates=(primary_candidate, secondary_candidate),
+                dataset_health=_health(),
+            ),
+        ]
+    )
+    primary_result = BarAcquisitionResult(
+        summary=AcquisitionSummary(
+            attempted=True,
+            status=AcquisitionStatus.COMPLETED,
+            providers_attempted=(primary_provider,),
+            resource_attempts=(_attempt(),),
+            external_calls=1,
+        ),
+        observations=(primary_bar,),
+        receipts=(_route_receipt(primary_provider, "STOCK_DAY_ALL"),),
+    )
+    secondary_result = BarAcquisitionResult(
+        summary=AcquisitionSummary(
+            attempted=True,
+            status=AcquisitionStatus.COMPLETED,
+            providers_attempted=(secondary_provider,),
+            resource_attempts=(
+                AcquisitionResourceAttempt(
+                    provider=secondary_provider,
+                    resource_id=secondary_resource,
+                ),
+            ),
+            external_calls=1,
+        ),
+        observations=(secondary_bar,),
+        receipts=(_route_receipt(secondary_provider, secondary_resource),),
+    )
+    acquisition = RouteAwareBarAcquisition(
+        {
+            primary_provider: primary_result,
+            secondary_provider: secondary_result,
+        }
+    )
+    transaction = FakeTransaction()
+    primary_descriptor = _descriptor().model_copy(update={"priority": 10})
+    secondary_descriptor = _descriptor().model_copy(
+        update={
+            "provider_key": secondary_provider,
+            "resource_id": secondary_resource,
+            "priority": 20,
+        }
+    )
+
+    result = MarketDataGateway().resolve_bars(
+        requirement,
+        reader=reader,
+        descriptors=(primary_descriptor, secondary_descriptor),
+        acquisition_port=acquisition,
+        transaction_port=transaction,
+        route_resolution_gate=True,
+    )
+
+    assert acquisition.calls == [primary_provider, secondary_provider]
+    assert reader.calls == 3
+    assert transaction.calls == 2
+    assert result.acquisition.external_calls == 2
+    assert result.persistence.receipts_written == 2
+    assert result.persistence.observations_written == 2
+    assert result.persistence.raw_result_ids == (1, 2)
+    assert result.resolved.health.status is ResolvedEvidenceStatus.FALLBACK
+    assert result.resolved.health.fallback_used is True
+    assert result.resolved.bars[0].lineage.provider == secondary_provider
+    assert any(
+        item.startswith("ROUTE_REQUIREMENT_UNSATISFIED:twse_openapi:")
+        for item in result.acquisition.limitations
+    )
+
+
+def test_route_gate_accepts_first_usable_latest_available_candidate() -> None:
+    primary_provider = "twse_openapi"
+    secondary_provider = "secondary_daily"
+    secondary_resource = "SECONDARY_STOCK_DAY"
+    base = _requirement(RealtimePolicy.PREFER_LIVE, max_calls=2)
+    requirement = base.model_copy(
+        update={
+            "freshness": base.freshness.model_copy(
+                update={"evidence_target": EvidenceTarget.LATEST_AVAILABLE}
+            ),
+            "bounds": base.bounds.model_copy(
+                update={
+                    "max_provider_attempts": 2,
+                    "max_external_calls": 2,
+                }
+            ),
+        }
+    )
+    stale_bar = _bar(cache_hit=False)
+    reader = FakeReader(
+        [
+            BarCandidateBatch(dataset_health=_health(DatasetHealthStatus.MISSING)),
+            BarCandidateBatch(
+                candidates=(
+                    BarSeriesCandidate(
+                        bars=(stale_bar,),
+                        freshness=EvidenceFreshness.STALE,
+                        provider_priority=10,
+                        session=MarketSession.CLOSED,
+                    ),
+                ),
+                dataset_health=_health(DatasetHealthStatus.STALE),
+            ),
+        ]
+    )
+    primary_result = BarAcquisitionResult(
+        summary=AcquisitionSummary(
+            attempted=True,
+            status=AcquisitionStatus.COMPLETED,
+            providers_attempted=(primary_provider,),
+            resource_attempts=(_attempt(),),
+            external_calls=1,
+        ),
+        observations=(stale_bar,),
+        receipts=(_route_receipt(primary_provider, "STOCK_DAY_ALL"),),
+    )
+    acquisition = RouteAwareBarAcquisition(
+        {
+            primary_provider: primary_result,
+            secondary_provider: BarAcquisitionResult(
+                summary=AcquisitionSummary(
+                    attempted=True,
+                    status=AcquisitionStatus.COMPLETED,
+                    providers_attempted=(secondary_provider,),
+                    resource_attempts=(
+                        AcquisitionResourceAttempt(
+                            provider=secondary_provider,
+                            resource_id=secondary_resource,
+                        ),
+                    ),
+                    external_calls=1,
+                ),
+            ),
+        }
+    )
+    secondary_descriptor = _descriptor().model_copy(
+        update={
+            "provider_key": secondary_provider,
+            "resource_id": secondary_resource,
+            "priority": 20,
+        }
+    )
+    primary_descriptor = _descriptor().model_copy(update={"priority": 10})
+
+    result = MarketDataGateway().resolve_bars(
+        requirement,
+        reader=reader,
+        descriptors=(primary_descriptor, secondary_descriptor),
+        acquisition_port=acquisition,
+        transaction_port=FakeTransaction(),
+        route_resolution_gate=True,
+    )
+
+    assert acquisition.calls == [primary_provider]
+    assert reader.calls == 2
+    assert result.acquisition.external_calls == 1
+    assert result.resolved.health.status is ResolvedEvidenceStatus.STALE
+    assert result.resolved.bars == (stale_bar,)
 
 
 def test_prefer_live_stale_cache_acquires_then_must_reread() -> None:
@@ -532,6 +762,7 @@ def test_transaction_failure_propagates_after_rollback_without_reread() -> None:
             descriptors=(_descriptor(),),
             acquisition_port=acquisition,
             transaction_port=transaction,
+            route_resolution_gate=True,
         )
 
     assert exc_info.value.acquisition.external_calls == 1

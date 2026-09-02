@@ -7,10 +7,10 @@ semantics, or outward presentation formatting.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
-from collections.abc import Iterable
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar, cast
 
 from app.market_data.candidate_repository import CandidateRowRejection
 from app.market_data.contracts import (
@@ -32,6 +32,7 @@ from app.market_data.integration_contracts import (
     DataRequirementV2,
     DatasetCapabilityRequest,
     DatasetTarget,
+    EvidenceTarget,
     InstrumentTarget,
     MarketDataResultV1,
     PersistenceSummary,
@@ -43,6 +44,7 @@ from app.market_data.policies import allows_external_acquisition
 from app.market_data.provider_catalog import (
     DataAcquisitionPlanV2,
     ProviderCapabilityDescriptorV2,
+    ProviderResourceRouteV2,
     plan_data_acquisition_v2,
 )
 from app.market_data.resolution import (
@@ -196,6 +198,34 @@ class MarketBreadthAcquisitionResult:
     observations: tuple[MarketBreadthObservation, ...] = ()
     receipts: tuple[RawFetchReceiptV1, ...] = ()
     provider_health: tuple[ProviderResourceHealth, ...] = ()
+
+
+class _AcquisitionResultLike(Protocol):
+    @property
+    def summary(self) -> AcquisitionSummary: ...
+
+    @property
+    def observations(self) -> tuple[object, ...]: ...
+
+    @property
+    def receipts(self) -> tuple[RawFetchReceiptV1, ...]: ...
+
+    @property
+    def provider_health(self) -> tuple[ProviderResourceHealth, ...]: ...
+
+
+AcquisitionResultT = TypeVar("AcquisitionResultT", bound=_AcquisitionResultLike)
+CandidateBatchT = TypeVar("CandidateBatchT")
+ResolvedResultT = TypeVar("ResolvedResultT")
+
+
+@dataclass(frozen=True, slots=True)
+class _RouteGateOutcome(Generic[CandidateBatchT, ResolvedResultT]):
+    acquisition: AcquisitionSummary
+    persistence: PersistenceSummary
+    final_batch: CandidateBatchT
+    resolved: ResolvedResultT
+    acquisition_health: tuple[ProviderResourceHealth, ...]
 
 
 class BarAcquisitionPort(Protocol):
@@ -401,6 +431,199 @@ def _merge_provider_health(
     return tuple(merged.values())
 
 
+def _single_route_plan(
+    plan: DataAcquisitionPlanV2,
+    route: ProviderResourceRouteV2,
+) -> DataAcquisitionPlanV2:
+    """Project one planned route without changing its requirement or bounds."""
+
+    return DataAcquisitionPlanV2(
+        requirement=plan.requirement,
+        routes=(route,),
+        acquisition_required=True,
+        unfillable=False,
+        subscription_execution=plan.subscription_execution,
+        limitations=plan.limitations,
+    )
+
+
+def _merge_acquisition_summaries(
+    summaries: tuple[AcquisitionSummary, ...],
+    *,
+    requirement_satisfied: bool,
+    observation_count: int,
+    limitations: tuple[str, ...] = (),
+) -> AcquisitionSummary:
+    attempted = any(summary.attempted for summary in summaries)
+    resource_attempts = tuple(
+        attempt for summary in summaries for attempt in summary.resource_attempts
+    )
+    providers_attempted = (
+        tuple(dict.fromkeys(attempt.provider for attempt in resource_attempts))
+        if resource_attempts
+        else tuple(
+            dict.fromkeys(
+                provider
+                for summary in summaries
+                for provider in summary.providers_attempted
+            )
+        )
+    )
+    attempted_statuses = tuple(
+        summary.status for summary in summaries if summary.attempted
+    )
+    if not attempted:
+        status = AcquisitionStatus.NOT_ATTEMPTED
+    elif requirement_satisfied:
+        status = (
+            AcquisitionStatus.PARTIAL
+            if any(item is not AcquisitionStatus.COMPLETED for item in attempted_statuses)
+            else AcquisitionStatus.COMPLETED
+        )
+    elif observation_count or any(
+        item in {AcquisitionStatus.COMPLETED, AcquisitionStatus.PARTIAL}
+        for item in attempted_statuses
+    ):
+        status = AcquisitionStatus.PARTIAL
+    else:
+        status = AcquisitionStatus.FAILED
+    elapsed_values = tuple(
+        summary.elapsed_ms for summary in summaries if summary.elapsed_ms is not None
+    )
+    return AcquisitionSummary(
+        attempted=attempted,
+        status=status,
+        providers_attempted=providers_attempted,
+        resource_attempts=resource_attempts,
+        external_calls=sum(summary.external_calls for summary in summaries),
+        subscriptions_created=sum(
+            summary.subscriptions_created for summary in summaries
+        ),
+        elapsed_ms=sum(elapsed_values) if elapsed_values else None,
+        limitations=_unique(
+            (
+                *(item for summary in summaries for item in summary.limitations),
+                *limitations,
+            )
+        ),
+    )
+
+
+def _merge_persistence_summaries(
+    summaries: tuple[PersistenceSummary, ...],
+    *,
+    acquisition_attempted: bool,
+) -> PersistenceSummary:
+    if not summaries:
+        return _not_persisted(
+            "NO_PERSISTABLE_ACQUISITION_EVIDENCE"
+            if acquisition_attempted
+            else "ACQUISITION_NOT_ATTEMPTED"
+        )
+    return PersistenceSummary(
+        attempted=True,
+        committed=all(summary.committed for summary in summaries),
+        receipts_written=sum(summary.receipts_written for summary in summaries),
+        observations_written=sum(
+            summary.observations_written for summary in summaries
+        ),
+        observations_inserted=sum(
+            summary.observations_inserted for summary in summaries
+        ),
+        observations_updated=sum(
+            summary.observations_updated for summary in summaries
+        ),
+        observations_unchanged=sum(
+            summary.observations_unchanged for summary in summaries
+        ),
+        raw_result_ids=tuple(
+            dict.fromkeys(
+                raw_id for summary in summaries for raw_id in summary.raw_result_ids
+            )
+        ),
+        limitations=_unique(
+            tuple(
+                limitation
+                for summary in summaries
+                for limitation in summary.limitations
+            )
+        ),
+    )
+
+
+def _resolved_evidence_present(resolved: object) -> bool:
+    for field_name in ("quote", "depth", "auction", "breadth", "market_index"):
+        if hasattr(resolved, field_name):
+            return getattr(resolved, field_name) is not None
+    if hasattr(resolved, "bars"):
+        return bool(getattr(resolved, "bars"))
+    return False
+
+
+def _resolved_requirement_satisfied(
+    requirement: DataRequirementV2,
+    resolved: object,
+) -> bool:
+    health = getattr(resolved, "health")
+    evidence_present = _resolved_evidence_present(resolved)
+    satisfied = (
+        _is_satisfied(health.status)
+        or (
+            health.status is ResolvedEvidenceStatus.PARTIAL
+            and requirement.quality.allow_partial
+            and health.facts_usable
+            and not health.missing_fields
+            and evidence_present
+        )
+        or (
+            requirement.freshness.evidence_target is EvidenceTarget.LATEST_AVAILABLE
+            and health.status is ResolvedEvidenceStatus.STALE
+            and health.facts_usable
+            and not health.missing_fields
+            and evidence_present
+        )
+    )
+    if not satisfied:
+        return False
+    if isinstance(requirement.request, BarCapabilityRequest):
+        coverage = requirement.request.coverage
+        if coverage is not None:
+            return len(getattr(resolved, "bars", ())) >= coverage.minimum_bar_count
+    return True
+
+
+def _mark_route_fallback(
+    requirement: DataRequirementV2,
+    resolved: ResolvedResultT,
+) -> ResolvedResultT:
+    health = getattr(resolved, "health")
+    status = (
+        ResolvedEvidenceStatus.FALLBACK
+        if health.status is ResolvedEvidenceStatus.SELECTED
+        else health.status
+    )
+    updated_health = health.model_copy(
+        update={
+            "status": status,
+            "fallback_used": True,
+            "selection_reason": (
+                f"{requirement.realtime_policy.value.upper()}_"
+                f"{status.value.upper()}_AFTER_ROUTE_FALLBACK"
+            ),
+            "limitations": _unique(
+                (
+                    *health.limitations,
+                    "Higher-priority acquisition route did not satisfy the requirement.",
+                )
+            ),
+        }
+    )
+    return cast(
+        ResolvedResultT,
+        resolved.model_copy(update={"health": updated_health}),
+    )
+
+
 class MarketDataGateway:
     def _read(
         self,
@@ -438,7 +661,23 @@ class MarketDataGateway:
             | MarketBreadthAcquisitionResult
         ),
     ) -> None:
-        summary = result.summary
+        MarketDataGateway._validate_acquisition_totals(
+            requirement,
+            plan,
+            summary=result.summary,
+            observation_count=len(result.observations),
+            receipt_count=len(result.receipts),
+        )
+
+    @staticmethod
+    def _validate_acquisition_totals(
+        requirement: DataRequirementV2,
+        plan: DataAcquisitionPlanV2,
+        *,
+        summary: AcquisitionSummary,
+        observation_count: int,
+        receipt_count: int,
+    ) -> None:
         if summary.external_calls > requirement.bounds.max_external_calls:
             raise AcquisitionBudgetExceeded("acquisition exceeded max_external_calls")
         if summary.subscriptions_created > requirement.bounds.max_subscriptions:
@@ -450,13 +689,13 @@ class MarketDataGateway:
             and summary.elapsed_ms > requirement.bounds.timeout_seconds * 1000
         ):
             raise AcquisitionBudgetExceeded("acquisition exceeded timeout_seconds")
-        if len(result.observations) > requirement.bounds.max_rows:
+        if observation_count > requirement.bounds.max_rows:
             raise AcquisitionBudgetExceeded("acquisition exceeded bounds.max_rows")
         receipt_budget = (
             requirement.bounds.max_external_calls
             + requirement.bounds.max_subscriptions
         )
-        if len(result.receipts) > receipt_budget:
+        if receipt_count > receipt_budget:
             raise AcquisitionBudgetExceeded(
                 "receipt count exceeded external-work bounds"
             )
@@ -476,6 +715,116 @@ class MarketDataGateway:
                 "acquisition reported external work without resource attempts"
             )
 
+    def _execute_route_resolution_gate(
+        self,
+        acquisition_requirement: DataRequirementV2,
+        plan: DataAcquisitionPlanV2,
+        *,
+        resolution_requirement: DataRequirementV2 | None = None,
+        initial_batch: CandidateBatchT,
+        initial_resolved: ResolvedResultT,
+        acquire_route: Callable[[DataAcquisitionPlanV2], AcquisitionResultT],
+        persist_route: Callable[[AcquisitionResultT], PersistenceSummary],
+        post_acquisition: Callable[
+            [AcquisitionResultT],
+            tuple[CandidateBatchT, ResolvedResultT],
+        ],
+        label: str,
+    ) -> _RouteGateOutcome[CandidateBatchT, ResolvedResultT]:
+        """Run planned routes until persisted, reread evidence satisfies the request."""
+
+        gate_requirement = resolution_requirement or acquisition_requirement
+        summaries: list[AcquisitionSummary] = []
+        persistence_summaries: list[PersistenceSummary] = []
+        acquisition_health: tuple[ProviderResourceHealth, ...] = ()
+        final_batch = initial_batch
+        resolved = initial_resolved
+        cumulative_observations = 0
+        cumulative_receipts = 0
+        gate_limitations: list[str] = []
+        satisfied = False
+
+        for route_index, route in enumerate(plan.routes):
+            route_plan = _single_route_plan(plan, route)
+            acquired = acquire_route(route_plan)
+            self._validate_acquisition_budget(
+                acquisition_requirement,
+                route_plan,
+                acquired,
+            )
+            summaries.append(acquired.summary)
+            cumulative_observations += len(acquired.observations)
+            cumulative_receipts += len(acquired.receipts)
+            acquisition_health = _merge_provider_health(
+                acquisition_health,
+                acquired.provider_health,
+            )
+            aggregate = _merge_acquisition_summaries(
+                tuple(summaries),
+                requirement_satisfied=False,
+                observation_count=cumulative_observations,
+                limitations=tuple(gate_limitations),
+            )
+            self._validate_acquisition_totals(
+                acquisition_requirement,
+                plan,
+                summary=aggregate,
+                observation_count=cumulative_observations,
+                receipt_count=cumulative_receipts,
+            )
+
+            if acquired.summary.attempted and (
+                acquired.receipts or acquired.observations
+            ):
+                try:
+                    persisted = persist_route(acquired)
+                    self._validate_persistence_result(acquired, persisted)
+                    persistence_summaries.append(persisted)
+                    final_batch, resolved = post_acquisition(acquired)
+                except Exception as exc:
+                    raise PostAcquisitionError(
+                        f"{label} route post-acquisition processing failed: {exc}",
+                        acquisition=aggregate,
+                    ) from exc
+
+                if _resolved_requirement_satisfied(gate_requirement, resolved):
+                    satisfied = True
+                    if route_index > 0:
+                        resolved = _mark_route_fallback(
+                            gate_requirement,
+                            resolved,
+                        )
+                    break
+            gate_limitations.append(
+                f"ROUTE_REQUIREMENT_UNSATISFIED:{route.provider_key}:"
+                f"{route.resource_id}"
+            )
+
+        acquisition = _merge_acquisition_summaries(
+            tuple(summaries),
+            requirement_satisfied=satisfied,
+            observation_count=cumulative_observations,
+            limitations=tuple(gate_limitations),
+        )
+        self._validate_acquisition_totals(
+            acquisition_requirement,
+            plan,
+            summary=acquisition,
+            observation_count=cumulative_observations,
+            receipt_count=cumulative_receipts,
+        )
+        persistence = _merge_persistence_summaries(
+            tuple(persistence_summaries),
+            acquisition_attempted=acquisition.attempted,
+        )
+        return _RouteGateOutcome(
+            acquisition=acquisition,
+            persistence=persistence,
+            final_batch=final_batch,
+            resolved=resolved,
+            acquisition_health=acquisition_health,
+        )
+
     @staticmethod
     def _validate_persistence_result(
         acquisition: (
@@ -483,6 +832,8 @@ class MarketDataGateway:
             | QuoteAcquisitionResult
             | DepthAcquisitionResult
             | AuctionAcquisitionResult
+            | MarketIndexAcquisitionResult
+            | MarketBreadthAcquisitionResult
         ),
         persistence: PersistenceSummary,
     ) -> None:
@@ -507,6 +858,7 @@ class MarketDataGateway:
         acquisition_port: BarAcquisitionPort | None = None,
         transaction_port: BarTransactionPort | None = None,
         acquisition_requirement: DataRequirementV2 | None = None,
+        route_resolution_gate: bool = False,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, InstrumentTarget):
             raise ValueError("bar resolution requires an instrument target")
@@ -571,6 +923,43 @@ class MarketDataGateway:
             elif transaction_port is None:
                 acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
                 persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
+            elif route_resolution_gate:
+                def post_acquisition(
+                    acquired: BarAcquisitionResult,
+                ) -> tuple[BarCandidateBatch, object]:
+                    reread_requirement = _post_acquisition_reread_requirement(
+                        requirement,
+                        acquired.receipts,
+                    )
+                    batch = self._read(reread_requirement, reader)
+                    return batch, self._resolve(reread_requirement, batch)
+
+                gate = self._execute_route_resolution_gate(
+                    acquire_requirement,
+                    plan,
+                    resolution_requirement=requirement,
+                    initial_batch=initial_batch,
+                    initial_resolved=resolved,
+                    acquire_route=lambda route_plan: (
+                        acquisition_port.acquire_bar_observations(
+                            acquire_requirement,
+                            route_plan,
+                        )
+                    ),
+                    persist_route=lambda acquired: (
+                        transaction_port.persist_bar_acquisition(
+                            acquire_requirement,
+                            acquired,
+                        )
+                    ),
+                    post_acquisition=post_acquisition,
+                    label="bar",
+                )
+                acquisition = gate.acquisition
+                persistence = gate.persistence
+                final_batch = gate.final_batch
+                resolved = gate.resolved
+                acquisition_health = gate.acquisition_health
             else:
                 acquired = acquisition_port.acquire_bar_observations(
                     acquire_requirement,
@@ -639,6 +1028,7 @@ class MarketDataGateway:
         descriptors: Iterable[ProviderCapabilityDescriptorV2] = (),
         acquisition_port: QuoteAcquisitionPort | None = None,
         transaction_port: QuoteTransactionPort | None = None,
+        route_resolution_gate: bool = False,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, InstrumentTarget):
             raise ValueError("quote resolution requires an instrument target")
@@ -684,6 +1074,50 @@ class MarketDataGateway:
             elif transaction_port is None:
                 acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
                 persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
+            elif route_resolution_gate:
+                def post_acquisition(
+                    _acquired: QuoteAcquisitionResult,
+                ) -> tuple[QuoteCandidateBatch, object]:
+                    batch = reader.read_quote_candidates(requirement)
+                    if len(batch.candidates) > requirement.bounds.max_candidates:
+                        raise ValueError(
+                            "candidate reader exceeded bounds.max_candidates"
+                        )
+                    return batch, resolve_quote(
+                        batch.candidates,
+                        policy=requirement.realtime_policy,
+                        now=requirement.requested_at,
+                        max_age=timedelta(
+                            seconds=requirement.freshness.max_age_seconds
+                        ),
+                        requirement=requirement,
+                    )
+
+                gate = self._execute_route_resolution_gate(
+                    requirement,
+                    plan,
+                    initial_batch=initial_batch,
+                    initial_resolved=resolved,
+                    acquire_route=lambda route_plan: (
+                        acquisition_port.acquire_quote_observations(
+                            requirement,
+                            route_plan,
+                        )
+                    ),
+                    persist_route=lambda acquired: (
+                        transaction_port.persist_quote_acquisition(
+                            requirement,
+                            acquired,
+                        )
+                    ),
+                    post_acquisition=post_acquisition,
+                    label="quote",
+                )
+                acquisition = gate.acquisition
+                persistence = gate.persistence
+                final_batch = gate.final_batch
+                resolved = gate.resolved
+                acquisition_health = gate.acquisition_health
             else:
                 acquired = acquisition_port.acquire_quote_observations(
                     requirement,
@@ -978,6 +1412,7 @@ class MarketDataGateway:
         descriptors: Iterable[ProviderCapabilityDescriptorV2] = (),
         acquisition_port: MarketBreadthAcquisitionPort | None = None,
         transaction_port: MarketBreadthTransactionPort | None = None,
+        route_resolution_gate: bool = False,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, DatasetTarget):
             raise ValueError("market breadth resolution requires a dataset target")
@@ -1023,6 +1458,50 @@ class MarketDataGateway:
             elif transaction_port is None:
                 acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
                 persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
+            elif route_resolution_gate:
+                def post_acquisition(
+                    _acquired: MarketBreadthAcquisitionResult,
+                ) -> tuple[MarketBreadthCandidateBatch, object]:
+                    batch = reader.read_market_breadth_candidates(requirement)
+                    if len(batch.candidates) > requirement.bounds.max_candidates:
+                        raise ValueError(
+                            "candidate reader exceeded bounds.max_candidates"
+                        )
+                    return batch, resolve_market_breadth(
+                        batch.candidates,
+                        policy=requirement.realtime_policy,
+                        now=requirement.requested_at,
+                        max_age=timedelta(
+                            seconds=requirement.freshness.max_age_seconds
+                        ),
+                        requirement=requirement,
+                    )
+
+                gate = self._execute_route_resolution_gate(
+                    requirement,
+                    plan,
+                    initial_batch=initial_batch,
+                    initial_resolved=resolved,
+                    acquire_route=lambda route_plan: (
+                        acquisition_port.acquire_market_breadth_observations(
+                            requirement,
+                            route_plan,
+                        )
+                    ),
+                    persist_route=lambda acquired: (
+                        transaction_port.persist_market_breadth_acquisition(
+                            requirement,
+                            acquired,
+                        )
+                    ),
+                    post_acquisition=post_acquisition,
+                    label="market breadth",
+                )
+                acquisition = gate.acquisition
+                persistence = gate.persistence
+                final_batch = gate.final_batch
+                resolved = gate.resolved
+                acquisition_health = gate.acquisition_health
             else:
                 acquired = acquisition_port.acquire_market_breadth_observations(
                     requirement,
@@ -1083,6 +1562,7 @@ class MarketDataGateway:
         acquisition_port: MarketIndexAcquisitionPort | None = None,
         transaction_port: MarketIndexTransactionPort | None = None,
         official_first: bool = True,
+        route_resolution_gate: bool = False,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, DatasetTarget):
             raise ValueError("market index resolution requires a dataset target")
@@ -1129,6 +1609,51 @@ class MarketDataGateway:
             elif transaction_port is None:
                 acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
                 persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
+            elif route_resolution_gate:
+                def post_acquisition(
+                    _acquired: MarketIndexAcquisitionResult,
+                ) -> tuple[MarketIndexCandidateBatch, ResolvedMarketIndex]:
+                    batch = reader.read_market_index_candidates(requirement)
+                    if len(batch.candidates) > requirement.bounds.max_candidates:
+                        raise ValueError(
+                            "candidate reader exceeded bounds.max_candidates"
+                        )
+                    return batch, resolve_market_index(
+                        batch.candidates,
+                        policy=requirement.realtime_policy,
+                        now=requirement.requested_at,
+                        max_age=timedelta(
+                            seconds=requirement.freshness.max_age_seconds
+                        ),
+                        requirement=requirement,
+                        official_first=official_first,
+                    )
+
+                gate = self._execute_route_resolution_gate(
+                    requirement,
+                    plan,
+                    initial_batch=initial_batch,
+                    initial_resolved=resolved,
+                    acquire_route=lambda route_plan: (
+                        acquisition_port.acquire_market_index_observations(
+                            requirement,
+                            route_plan,
+                        )
+                    ),
+                    persist_route=lambda acquired: (
+                        transaction_port.persist_market_index_acquisition(
+                            requirement,
+                            acquired,
+                        )
+                    ),
+                    post_acquisition=post_acquisition,
+                    label="market index",
+                )
+                acquisition = gate.acquisition
+                persistence = gate.persistence
+                final_batch = gate.final_batch
+                resolved = gate.resolved
+                acquisition_health = gate.acquisition_health
             else:
                 acquired = acquisition_port.acquire_market_index_observations(
                     requirement,
