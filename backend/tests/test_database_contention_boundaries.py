@@ -10,7 +10,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool, QueuePool
 
-from app.db.models import Base
+from app.db.models import Base, USStockMaster
+from app.db import session as db_session
 from app.db.session import engine as application_engine
 from app.us_market import service as us_market_service
 
@@ -18,6 +19,28 @@ from app.us_market import service as us_market_service
 def test_application_sqlite_engine_does_not_use_bounded_connection_pool() -> None:
     assert application_engine.url.get_backend_name() == "sqlite"
     assert isinstance(application_engine.pool, NullPool)
+
+
+def test_application_sqlite_engine_initializes_wal_only_once_per_process() -> None:
+    executed: list[str] = []
+
+    class FakeCursor:
+        def execute(self, statement: str) -> None:
+            executed.append(statement)
+
+        def close(self) -> None:
+            return None
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+    with patch.object(db_session, "_sqlite_wal_initialized", False):
+        db_session._configure_sqlite_connection(FakeConnection(), None)
+        db_session._configure_sqlite_connection(FakeConnection(), None)
+
+    assert executed.count("PRAGMA busy_timeout=30000") == 2
+    assert executed.count("PRAGMA journal_mode=WAL") == 1
 
 
 def test_us_ohlc_provider_wait_does_not_hold_sqlite_pool_connection() -> None:
@@ -157,6 +180,16 @@ def test_us_intraday_read_is_cache_only_and_releases_sqlite_pool_connection() ->
     symbol = f"POOL{uuid4().hex[:8].upper()}"
 
     try:
+        with Session(engine) as setup_db:
+            setup_db.add(
+                USStockMaster(
+                    symbol=symbol,
+                    security_name="Pool boundary fixture",
+                    exchange="NASDAQ",
+                    asset_type="stock",
+                )
+            )
+            setup_db.commit()
         with patch.object(
             us_market_service,
             "fetch_yahoo_chart_payload",

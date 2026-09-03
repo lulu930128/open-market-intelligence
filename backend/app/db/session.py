@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from threading import Lock
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
@@ -28,12 +29,25 @@ if settings.database_url.startswith("sqlite"):
 engine = create_engine(settings.database_url, **engine_options)
 
 if settings.database_url.startswith("sqlite"):
+    _sqlite_wal_initialization_lock = Lock()
+    _sqlite_wal_initialized = False
+
     @event.listens_for(engine, "connect")
     def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+        global _sqlite_wal_initialized
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA busy_timeout=30000")
-            cursor.execute("PRAGMA journal_mode=WAL")
+            # WAL mode is persistent for a SQLite database.  Reissuing the
+            # mode-changing pragma for every NullPool connection can wait on
+            # an active materializer write transaction and turn a cache-only
+            # read into a multi-second cold request.  Establish it once per
+            # process; every later connection only needs its own busy timeout.
+            if not _sqlite_wal_initialized:
+                with _sqlite_wal_initialization_lock:
+                    if not _sqlite_wal_initialized:
+                        cursor.execute("PRAGMA journal_mode=WAL")
+                        _sqlite_wal_initialized = True
         finally:
             cursor.close()
 
