@@ -941,6 +941,18 @@ export type TaiwanBarSeriesRead = {
   warnings: string[];
 };
 
+export type TaiwanChartBarPoint = TaiwanCanonicalBarPoint & {
+  technical_eligible: boolean;
+};
+
+export type TaiwanChartBarSeriesRead = Omit<
+  TaiwanBarSeriesRead,
+  "bars" | "bar_states"
+> & {
+  contract_version: "tw.bar.chart_series_read.v1" | string;
+  bars: TaiwanChartBarPoint[];
+};
+
 export type TaiwanTechnicalSeriesRead = {
   contract_version: string;
   instrument: TaiwanInstrumentKey;
@@ -949,11 +961,27 @@ export type TaiwanTechnicalSeriesRead = {
   bar_lineage_digest: string;
   bar_state_digest: string;
   bar_series_revision: string;
+  bar_snapshot_revision: string | null;
+  calculation_bar_count: number;
+  decision_bar_count: number;
+  response_point_count: number;
   algorithm_version: string;
   parameter_contract: Record<string, unknown>;
   status: "available" | "partial" | "warming_up" | "missing" | "unavailable";
   warmup: Record<string, Record<string, unknown>>;
   points: StockIndicatorPoint[];
+  current_partial: {
+    contract_version: string;
+    state: "current_partial";
+    bar_time: string;
+    point: StockIndicatorPoint;
+    decision_usable: false;
+    price_based_observation_usable: boolean;
+    volume_based_observation_usable: false;
+    indicator_applicability: Record<string, string>;
+    observation_revision: string;
+    limitations: string[];
+  } | null;
   structures: Record<string, unknown>;
   signals: Record<string, unknown>;
   relative: Record<string, unknown>;
@@ -1119,6 +1147,12 @@ export type MarketIndexSnapshot = {
   low: number | null;
   close: number | null;
   previous_close: number | null;
+  previous_close_trade_date: string | null;
+  previous_close_source: string | null;
+  previous_close_provider: string | null;
+  previous_close_authority: string | null;
+  previous_close_finalization: string | null;
+  previous_close_status: "current" | "stale" | "missing" | "unknown" | string;
   change: number | null;
   change_pct: number | null;
   volume: number | null;
@@ -1746,6 +1780,11 @@ export type IntradayTrendResponse = {
   regular_session_close_provider?: string | null;
   point_count: number;
   points: IntradayTrendPoint[];
+  snapshot_revision?: string | null;
+  snapshot_point_count?: number;
+  base_revision?: string | null;
+  latest_bar_time?: string | null;
+  response_mode?: "full" | "unchanged" | string;
   volume_pace?: StockVolumePace | null;
   quote_snapshot?: USResolvedQuoteSnapshot | null;
   session_date_relation?: USSessionDateRelation | null;
@@ -1954,6 +1993,11 @@ export type TaiwanStockQuoteDepthRead = {
   actual_trade_price_cached?: boolean;
   actual_trade_price_source?: string | null;
   actual_trade_price_as_of?: string | null;
+  last_trade_available?: boolean;
+  last_trade_price?: number | null;
+  last_trade_time?: string | null;
+  last_trade_is_current_session?: boolean;
+  last_trade_before_auction?: boolean;
   quote_semantics?: string;
   delivery_status?: string;
   price_available?: boolean;
