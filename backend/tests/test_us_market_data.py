@@ -468,6 +468,33 @@ class USMarketSourceParsingTests(unittest.TestCase):
         us_market_service._US_INTRADAY_CACHE.clear()
         us_market_service._US_INTRADAY_LAST_GOOD.clear()
 
+    def test_us_intraday_read_cache_survives_five_second_poll_cycles(self) -> None:
+        key = (1, "TSM", "regular", "1m", "regular")
+        payload = {
+            "current_observation": {
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "points": [{"time": datetime.now(timezone.utc).isoformat()}],
+        }
+        with patch("app.us_market.service.time.monotonic", side_effect=(100.0, 115.0)):
+            us_market_service._set_us_intraday_cache(key, payload)
+            cached = us_market_service._get_us_intraday_cache(key)
+
+        self.assertEqual(cached, payload)
+
+    def test_us_intraday_read_cache_never_outlives_current_evidence_boundary(self) -> None:
+        key = (1, "TSM", "regular", "1m", "regular")
+        payload = {
+            "current_observation": {"observed_at": "2020-01-01T00:00:00+00:00"},
+            "current_source_status": {"freshness_status": "current"},
+            "points": [{"time": "2020-01-01T00:00:00+00:00"}],
+        }
+        with patch("app.us_market.service.time.monotonic", side_effect=(100.0, 101.0)):
+            us_market_service._set_us_intraday_cache(key, payload)
+            cached = us_market_service._get_us_intraday_cache(key)
+
+        self.assertIsNone(cached)
+
     def test_normalize_us_symbol_accepts_ui_labels(self) -> None:
         self.assertEqual(normalize_us_symbol("AAPL / Apple"), "AAPL")
         self.assertEqual(normalize_us_symbol("nasdaq:mu"), "MU")
@@ -626,6 +653,15 @@ class USMarketSourceParsingTests(unittest.TestCase):
         Base.metadata.create_all(bind=engine)
         db = Session(engine)
         try:
+            db.add(
+                USStockMaster(
+                    symbol="MU",
+                    exchange="NASDAQ",
+                    asset_type="stock",
+                    is_active=True,
+                )
+            )
+            db.commit()
             with patch.object(
                 us_market_service,
                 "_persist_us_intraday_history",
@@ -765,6 +801,15 @@ class USMarketSourceParsingTests(unittest.TestCase):
         Base.metadata.create_all(bind=engine)
         db = Session(engine)
         try:
+            db.add(
+                USStockMaster(
+                    symbol="MU",
+                    exchange="NASDAQ",
+                    asset_type="stock",
+                    is_active=True,
+                )
+            )
+            db.commit()
             trend = get_us_intraday_trend(symbol="mu", db=db)
         finally:
             db.close()
@@ -998,7 +1043,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             context["data"]["resolved_market_data"]["quote_snapshot"][
                 "schema_version"
             ],
-            "omi.market.quote.snapshot.v1",
+            "omi.market.us_truth_quote_compat.v1",
         )
         self.assertNotIn("_resolved_market_data", context["summary"]["intraday"])
 
@@ -1962,6 +2007,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
     def test_us_intraday_cache_miss_does_not_select_raw_daily_close(self, mock_fetch) -> None:
+        self._add_market_identity("IBM")
         upsert_canonical_us_daily_price_records(
             self.db,
             [
@@ -2017,6 +2063,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self,
         mock_fetch,
     ) -> None:
+        self._add_market_identity("IBM")
         self.db.add(
             USDailyPrice(
                 provider="yahoo_chart",
@@ -2054,6 +2101,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self,
         mock_fetch,
     ) -> None:
+        self._add_market_identity("IBM")
         upsert_canonical_us_daily_price_records(
             self.db,
             [
@@ -2112,6 +2160,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self,
         mock_fetch,
     ) -> None:
+        self._add_market_identity("IBM")
         self.db.add_all(
             [
                 USDailyPrice(

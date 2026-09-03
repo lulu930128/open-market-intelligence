@@ -288,7 +288,10 @@ def _install_fake_components(monkeypatch, components) -> None:
                 result=SimpleNamespace(resolved=quote, limitations=()),
             )
 
-        def read_intraday_bars(self, **kwargs):
+        def latest_intraday_trade_date(self, **kwargs):
+            return date(2026, 8, 31)
+
+        def read_intraday_bars_for_trade_date(self, **kwargs):
             return SimpleNamespace(
                 identity=IDENTITY,
                 result=SimpleNamespace(resolved=intraday, limitations=()),
@@ -331,9 +334,21 @@ def test_snapshot_is_deterministic_and_uses_limited_hint(monkeypatch) -> None:
                 result=SimpleNamespace(resolved=quote, limitations=()),
             )
 
-        def read_intraday_bars(self, *, symbol: str, bars: int, now: datetime):
+        def latest_intraday_trade_date(self, *, symbol: str):
             assert symbol == "AAPL"
-            assert bars == 5000
+            return date(2026, 8, 31)
+
+        def read_intraday_bars_for_trade_date(
+            self,
+            *,
+            symbol: str,
+            trade_date: date,
+            bars: int,
+            now: datetime,
+        ):
+            assert symbol == "AAPL"
+            assert trade_date == date(2026, 9, 1)
+            assert bars == 1000
             read_times.append(now)
             return SimpleNamespace(
                 identity=IDENTITY,
@@ -417,7 +432,10 @@ def test_close_boundary_is_preserved_but_not_promoted_to_official(monkeypatch) -
                 result=SimpleNamespace(resolved=quote, limitations=()),
             )
 
-        def read_intraday_bars(self, **kwargs):
+        def latest_intraday_trade_date(self, **kwargs):
+            return date(2026, 8, 31)
+
+        def read_intraday_bars_for_trade_date(self, **kwargs):
             return SimpleNamespace(
                 identity=IDENTITY,
                 result=SimpleNamespace(resolved=intraday, limitations=()),
@@ -474,7 +492,10 @@ def test_series_suppresses_previous_session_bars_during_active_session(
                 result=SimpleNamespace(resolved=quote, limitations=()),
             )
 
-        def read_intraday_bars(self, **kwargs):
+        def latest_intraday_trade_date(self, **kwargs):
+            return date(2026, 8, 31)
+
+        def read_intraday_bars_for_trade_date(self, **kwargs):
             return SimpleNamespace(
                 identity=IDENTITY,
                 result=SimpleNamespace(resolved=intraday, limitations=()),
@@ -779,7 +800,10 @@ def test_sqlite_bundle_reads_one_wal_generation_under_concurrent_writer(
                 result=SimpleNamespace(resolved=quote, limitations=()),
             )
 
-        def read_intraday_bars(self, **kwargs):
+        def latest_intraday_trade_date(self, **kwargs):
+            return date(2026, 8, 31)
+
+        def read_intraday_bars_for_trade_date(self, **kwargs):
             seen.append(self.db.execute(text("SELECT value FROM generation")).scalar_one())
             return SimpleNamespace(
                 identity=IDENTITY,

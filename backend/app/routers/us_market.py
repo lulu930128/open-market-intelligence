@@ -38,6 +38,10 @@ from app.us_market.market_truth import (
     read_us_intraday_series_projection,
     read_us_market_truth_snapshot,
 )
+from app.us_market.active_equity_targets import (
+    claim_us_active_equity_viewer,
+    release_us_active_equity_viewer,
+)
 from app.us_market.market_truth_contracts import (
     USIntradaySeriesProjection,
     USMarketTruthSnapshot,
@@ -1248,6 +1252,7 @@ def get_us_intraday_trend_api(
     symbol: str,
     session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
     interval: str = Query(default="1m", pattern="^(1m|5m|15m|30m|1h|4h)$"),
+    since_revision: str | None = Query(default=None, pattern="^[0-9a-f]{64}$"),
     db: Session = Depends(get_db),
 ):
     return get_us_intraday_trend(
@@ -1255,7 +1260,36 @@ def get_us_intraday_trend_api(
         session_scope=session_scope,
         interval=interval,
         db=db,
+        since_revision=since_revision,
     )
+
+
+@router.post("/active-equity-viewer/{symbol}", response_model=dict)
+def claim_us_active_equity_viewer_api(
+    symbol: str,
+    owner_id: str = Query(min_length=1, max_length=128),
+    ttl_seconds: int = Query(default=90, ge=45, le=300),
+):
+    """Claim or heartbeat backend producer ownership for one viewed stock."""
+
+    try:
+        return claim_us_active_equity_viewer(
+            symbol=symbol,
+            owner_id=owner_id,
+            ttl_seconds=ttl_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.delete("/active-equity-viewer", response_model=dict)
+def release_us_active_equity_viewer_api(
+    owner_id: str = Query(min_length=1, max_length=128),
+):
+    return {
+        "contract_version": "omi.us.active_equity_viewer_release.v1",
+        "released": release_us_active_equity_viewer(owner_id=owner_id),
+    }
 
 
 @router.post("/source-health/snapshot", response_model=USSourceHealthRead)
@@ -1333,7 +1367,13 @@ def get_us_market_research_api(
     """Read bounded research from cached resolved evidence without provider IO."""
 
     try:
-        return build_us_market_research(db, symbol=symbol, bars=bars)
+        return build_us_market_research(
+            db,
+            symbol=symbol,
+            bars=bars,
+            include_market_coverage=False,
+            include_daily_ohlcv=False,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -390,6 +390,11 @@ class USIntradayTrendRead(BaseModel):
     regular_session_close_time: str | None = None
     point_count: int
     points: list[USIntradayTrendPointRead]
+    snapshot_revision: str
+    snapshot_point_count: int = 0
+    base_revision: str | None = None
+    latest_bar_time: str | None = None
+    response_mode: str = "full"
     volume_unit: str | None = None
     volume_semantics: str | None = None
     volume_status: str = "not_provided"
@@ -403,7 +408,10 @@ class USIntradayTrendRead(BaseModel):
     capability_expectation: dict[str, USCapabilityExpectationRead] = Field(
         default_factory=dict
     )
-    source_status: USIntradaySourceStatusRead
+    source_status: USIntradaySourceStatusRead = Field(
+        description="Deprecated compatibility alias; use bar_source_status.",
+        deprecated=True,
+    )
     source_url: str | None = None
     warnings: list[str] = Field(default_factory=list)
 

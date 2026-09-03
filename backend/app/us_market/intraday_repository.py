@@ -9,8 +9,8 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
-from sqlalchemy import case, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, case, func, or_
+from sqlalchemy.orm import Load, Session
 
 from app.db.models import (
     MarketIntradayBar,
@@ -194,6 +194,15 @@ class USQuoteRepository:
                 continue
             rows.extend(
                 self._db.query(USQuoteSnapshot, RawFetchResult, SourceRegistry)
+                .options(
+                    Load(RawFetchResult).load_only(
+                        RawFetchResult.id,
+                        RawFetchResult.source_id,
+                        RawFetchResult.fetched_at,
+                        RawFetchResult.parser_version,
+                        RawFetchResult.content_hash,
+                    )
+                )
                 .join(RawFetchResult, RawFetchResult.id == USQuoteSnapshot.raw_result_id)
                 .join(SourceRegistry, SourceRegistry.id == USQuoteSnapshot.source_id)
                 .filter(USQuoteSnapshot.symbol == instrument.symbol)
@@ -322,6 +331,113 @@ class USIntradayBarRepository:
             descriptor.provider_key: descriptor for descriptor in descriptors
         }
 
+    def latest_bar_time(
+        self,
+        *,
+        instrument: InstrumentKey,
+        interval: str = "1m",
+    ) -> datetime | None:
+        """Return the latest eligible persisted bar time without loading history."""
+
+        eligible_providers = tuple(
+            descriptor.provider_key
+            for descriptor in self._descriptors.values()
+            if _descriptor_applies(
+                descriptor,
+                instrument_type=instrument.instrument_type,
+                venue=instrument.venue,
+                interval=interval,
+            )
+        )
+        if not eligible_providers:
+            return None
+        latest = (
+            self._db.query(func.max(MarketIntradayBar.bar_time))
+            .join(
+                MarketIntradayBarLineage,
+                MarketIntradayBarLineage.bar_id == MarketIntradayBar.id,
+            )
+            .filter(MarketIntradayBar.stock_id == instrument.symbol)
+            .filter(MarketIntradayBar.market == instrument.venue)
+            .filter(MarketIntradayBar.interval == interval)
+            .filter(MarketIntradayBar.provider.in_(eligible_providers))
+            .scalar()
+        )
+        return _utc(latest) if latest is not None else None
+
+    def _read_provider_rows(
+        self,
+        *,
+        instrument: InstrumentKey,
+        request: BarCapabilityRequest,
+        provider: str,
+        limit: int,
+        before: tuple[datetime, int] | None = None,
+    ):
+        """Read one stable descending provider page.
+
+        The cursor is based on the same immutable ordering columns as the
+        query.  A newly materialized latest bar therefore cannot shift the
+        second page and make an already-read row appear twice.
+        """
+
+        if limit <= 0:
+            return []
+        query = (
+            self._db.query(
+                MarketIntradayBar,
+                MarketIntradayBarLineage,
+                RawFetchResult,
+                SourceRegistry,
+            )
+            .options(
+                Load(RawFetchResult).load_only(
+                    RawFetchResult.id,
+                    RawFetchResult.source_id,
+                    RawFetchResult.fetched_at,
+                    RawFetchResult.parser_version,
+                    RawFetchResult.content_hash,
+                )
+            )
+            .join(
+                MarketIntradayBarLineage,
+                MarketIntradayBarLineage.bar_id == MarketIntradayBar.id,
+            )
+            .join(
+                RawFetchResult,
+                RawFetchResult.id == MarketIntradayBarLineage.raw_result_id,
+            )
+            .join(
+                SourceRegistry,
+                SourceRegistry.id == MarketIntradayBarLineage.source_id,
+            )
+            .filter(MarketIntradayBar.stock_id == instrument.symbol)
+            .filter(MarketIntradayBar.market == instrument.venue)
+            .filter(MarketIntradayBar.provider == provider)
+            .filter(MarketIntradayBar.interval == request.interval)
+            .filter(MarketIntradayBar.bar_time >= request.start_at)
+            .filter(MarketIntradayBar.bar_time <= request.end_at)
+        )
+        if before is not None:
+            before_time, before_id = before
+            query = query.filter(
+                or_(
+                    MarketIntradayBar.bar_time < before_time,
+                    and_(
+                        MarketIntradayBar.bar_time == before_time,
+                        MarketIntradayBar.id < before_id,
+                    ),
+                )
+            )
+        return (
+            query.order_by(
+                MarketIntradayBar.bar_time.desc(),
+                MarketIntradayBar.id.desc(),
+            )
+            .limit(limit)
+            .all()
+        )
+
     def read_bar_candidates(self, requirement: DataRequirementV2) -> BarCandidateBatch:
         if not isinstance(requirement.target, InstrumentTarget) or not isinstance(requirement.request, BarCapabilityRequest) or requirement.request.capability_id != "intraday.bars" or requirement.target.instrument.market is not Market.US:
             raise ValueError("US intraday repository capability mismatch")
@@ -360,51 +476,62 @@ class USIntradayBarRepository:
             request.max_bars * max(len(eligible_descriptors), 1),
         )
 
-        def provider_rows(provider: str, *, offset: int, limit: int):
-            if limit <= 0:
-                return []
-            return (
-                self._db.query(MarketIntradayBar, MarketIntradayBarLineage, RawFetchResult, SourceRegistry)
-                .join(MarketIntradayBarLineage, MarketIntradayBarLineage.bar_id == MarketIntradayBar.id)
-                .join(RawFetchResult, RawFetchResult.id == MarketIntradayBarLineage.raw_result_id)
-                .join(SourceRegistry, SourceRegistry.id == MarketIntradayBarLineage.source_id)
-                .filter(MarketIntradayBar.stock_id == instrument.symbol)
-                .filter(MarketIntradayBar.market == instrument.venue)
-                .filter(MarketIntradayBar.provider == provider)
-                .filter(MarketIntradayBar.interval == request.interval)
-                .filter(MarketIntradayBar.bar_time >= request.start_at)
-                .filter(MarketIntradayBar.bar_time <= request.end_at)
-                .order_by(MarketIntradayBar.bar_time.desc(), MarketIntradayBar.id.desc())
-                .offset(offset)
-                .limit(limit)
-                .all()
-            )
-
         rows = []
+        seen_storage_row_ids: set[int] = set()
+
+        def extend_unique(batch) -> int:
+            added = 0
+            for item in batch:
+                storage_row_id = int(item[0].id)
+                if storage_row_id in seen_storage_row_ids:
+                    continue
+                seen_storage_row_ids.add(storage_row_id)
+                rows.append(item)
+                added += 1
+            return added
+
         read_by_provider: dict[str, int] = {}
+        cursor_by_provider: dict[str, tuple[datetime, int]] = {}
+        exhausted_providers: set[str] = set()
         for descriptor, budget in zip(
             eligible_descriptors,
             _fair_budgets(row_budget, len(eligible_descriptors)),
         ):
-            current = provider_rows(descriptor.provider_key, offset=0, limit=budget)
-            rows.extend(current)
-            read_by_provider[descriptor.provider_key] = len(current)
+            current = self._read_provider_rows(
+                instrument=instrument,
+                request=request,
+                provider=descriptor.provider_key,
+                limit=budget,
+            )
+            read_by_provider[descriptor.provider_key] = extend_unique(current)
+            if len(current) < budget:
+                exhausted_providers.add(descriptor.provider_key)
+            if current:
+                boundary = current[-1][0]
+                cursor_by_provider[descriptor.provider_key] = (
+                    boundary.bar_time,
+                    boundary.id,
+                )
         remaining_budget = row_budget - len(rows)
         if remaining_budget > 0:
             for descriptor in eligible_descriptors:
+                if descriptor.provider_key in exhausted_providers:
+                    continue
                 already_read = read_by_provider.get(descriptor.provider_key, 0)
                 extra_limit = min(
                     remaining_budget,
                     max(0, request.max_bars - already_read),
                 )
-                extra = provider_rows(
-                    descriptor.provider_key,
-                    offset=already_read,
+                extra = self._read_provider_rows(
+                    instrument=instrument,
+                    request=request,
+                    provider=descriptor.provider_key,
                     limit=extra_limit,
+                    before=cursor_by_provider.get(descriptor.provider_key),
                 )
-                rows.extend(extra)
-                read_by_provider[descriptor.provider_key] = already_read + len(extra)
-                remaining_budget -= len(extra)
+                added = extend_unique(extra)
+                read_by_provider[descriptor.provider_key] = already_read + added
+                remaining_budget -= added
                 if remaining_budget <= 0:
                     break
         if len(rows) > requirement.bounds.max_rows:

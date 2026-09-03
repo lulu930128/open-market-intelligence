@@ -8,6 +8,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.jobs import us_intraday_materializer_scheduler as us_scheduler
+from app.us_market import service as us_market_service
 from app.db.models import (
     Base,
     MarketIntradayBar,
@@ -19,7 +21,18 @@ from app.db.models import (
 )
 from app.jobs.us_intraday_materializer_scheduler import (
     add_us_intraday_materializer_jobs,
+    collect_us_active_intraday_bars,
+    collect_us_active_quote_snapshots,
+    collect_us_index_intraday_bars,
+    collect_us_index_quote_snapshots,
     collect_us_intraday_bars,
+    collect_us_quote_snapshots,
+)
+from app.us_market.active_equity_targets import (
+    _clear_us_active_equity_viewers_for_tests,
+    active_us_equity_viewer_symbols,
+    claim_us_active_equity_viewer,
+    release_us_active_equity_viewer,
 )
 from app.market_data.gateway import PostAcquisitionError
 from app.market_data.integration_contracts import AcquisitionStatus, AcquisitionSummary
@@ -197,6 +210,34 @@ def test_us_materializer_universe_preserves_explicit_dynamic_owner() -> None:
     assert universe["symbols"] == ["AAPL", "TSM", "MSFT"]
 
 
+def test_active_equity_viewer_lease_switches_without_using_canary_quota() -> None:
+    _clear_us_active_equity_viewers_for_tests()
+    now = datetime(2026, 9, 3, 14, 0, tzinfo=timezone.utc)
+    try:
+        first = claim_us_active_equity_viewer(
+            symbol="MU",
+            owner_id="test-panel",
+            now=now,
+        )
+        assert active_us_equity_viewer_symbols(now=now) == ("MU",)
+
+        second = claim_us_active_equity_viewer(
+            symbol="NVDA",
+            owner_id="test-panel",
+            now=now + timedelta(seconds=30),
+        )
+        assert second["lease_id"] == first["lease_id"]
+        assert active_us_equity_viewer_symbols(
+            now=now + timedelta(seconds=30)
+        ) == ("NVDA",)
+        assert release_us_active_equity_viewer(owner_id="test-panel") is True
+        assert active_us_equity_viewer_symbols(
+            now=now + timedelta(seconds=31)
+        ) == ()
+    finally:
+        _clear_us_active_equity_viewers_for_tests()
+
+
 def test_us_materializer_skips_weekend_before_opening_database() -> None:
     opened = False
 
@@ -293,6 +334,35 @@ def test_recurring_intraday_profile_replaces_unbounded_five_thousand_bar_fetch()
 
     assert result["status"] == "success"
     assert requested_bars == [600]
+
+
+def test_intraday_materializer_preserves_truthful_read_model_until_publish() -> None:
+    db = _FakeDb()
+    key = (1, "TSM", "regular", "1m", "regular")
+    us_market_service._set_us_intraday_cache(
+        key,
+        {
+            "current_observation": {
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "latest_bar_time": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    class _Platform:
+        def refresh_intraday_bars(self, **_kwargs):
+            return _refresh_result()
+
+    result = materialize_us_intraday_capability(
+        "intraday.bars",
+        configured_symbols="TSM",
+        now=datetime(2026, 8, 28, 15, 0, tzinfo=timezone.utc),
+        session_factory=lambda: db,
+        platform_factory=lambda _db: _Platform(),
+    )
+
+    assert result["status"] == "success"
+    assert us_market_service._get_us_intraday_cache(key) is not None
 
 
 def test_real_platform_result_integrates_with_materializer_contract() -> None:
@@ -935,11 +1005,14 @@ def test_us_materializer_scheduler_registers_three_non_overlapping_owner_jobs(
     monkeypatch.setattr(settings, "enable_us_index_quote_materializer", False)
     monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", True)
+    monkeypatch.setattr(settings, "enable_us_source_health_snapshot_scheduler", False)
     scheduler = _FakeScheduler()
 
     assert add_us_intraday_materializer_jobs(scheduler) is True
     assert [job["id"] for job in scheduler.jobs] == [
+        "us_active_quote_snapshot_materialization",
         "us_quote_snapshot_materialization",
+        "us_active_intraday_bar_materialization",
         "us_intraday_bar_materialization",
         "us_quote_snapshot_retention",
     ]
@@ -948,6 +1021,214 @@ def test_us_materializer_scheduler_registers_three_non_overlapping_owner_jobs(
     assert scheduler.jobs[0]["seconds"] == 60
     assert scheduler.jobs[0]["seconds"] > 45
     assert scheduler.jobs[1]["seconds"] >= 60
+
+
+def test_active_lane_uses_independent_symbols_and_quota(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _materialize(capability, **kwargs):
+        captured["capability"] = capability
+        captured.update(kwargs)
+        return {
+            "status": "success",
+            "requested_count": 1,
+            "refreshed_count": 1,
+            "failed_count": 0,
+            "external_call_count": 1,
+            "duration_ms": 1,
+            "reason": None,
+        }
+
+    _clear_us_active_equity_viewers_for_tests()
+    now = datetime(2026, 9, 3, 14, 0, tzinfo=timezone.utc)
+    try:
+        claim_us_active_equity_viewer(symbol="MU", owner_id="test-panel", now=now)
+        monkeypatch.setattr(
+            "app.jobs.us_intraday_materializer_scheduler.materialize_us_intraday_capability",
+            _materialize,
+        )
+        monkeypatch.setattr(
+            settings,
+            "scheduler_us_active_equity_materializer_max_symbols",
+            2,
+        )
+
+        collect_us_active_intraday_bars(now=now)
+
+        assert captured["configured_symbols"].split(",")[0] == "MU"
+        assert captured["max_symbols"] == 2
+        assert captured["lane_id"] == "equity_active"
+        assert captured["universe_owner"].startswith("active_viewer")
+        assert captured["run_lock"] is not None
+    finally:
+        _clear_us_active_equity_viewers_for_tests()
+
+
+def test_canary_lane_defers_symbols_owned_by_active_viewer(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _materialize(capability, **kwargs):
+        captured["capability"] = capability
+        captured.update(kwargs)
+        return {
+            "status": "success",
+            "requested_count": 1,
+            "refreshed_count": 1,
+            "failed_count": 0,
+            "external_call_count": 1,
+            "duration_ms": 1,
+            "reason": None,
+        }
+
+    _clear_us_active_equity_viewers_for_tests()
+    now = datetime.now(timezone.utc)
+    try:
+        claim_us_active_equity_viewer(symbol="TSM", owner_id="test-panel", now=now)
+        monkeypatch.setattr(
+            "app.jobs.us_intraday_materializer_scheduler.materialize_us_intraday_capability",
+            _materialize,
+        )
+        monkeypatch.setattr(
+            settings,
+            "scheduler_us_intraday_materializer_symbols",
+            "AAPL,TSM",
+        )
+
+        collect_us_intraday_bars(now=now)
+
+        assert captured["configured_symbols"] == "AAPL"
+        assert captured["universe_owner"] == "configuration_canary_minus_active_viewers"
+    finally:
+        _clear_us_active_equity_viewers_for_tests()
+
+
+def test_active_intraday_lane_publishes_cache_only_read_model_after_run(
+    monkeypatch,
+) -> None:
+    scheduled: list[str] = []
+
+    monkeypatch.setattr(
+        "app.jobs.us_intraday_materializer_scheduler.materialize_us_intraday_capability",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "results": [{"symbol": "MU", "status": "success"}],
+        },
+    )
+    monkeypatch.setattr(
+        "app.jobs.us_intraday_materializer_scheduler._schedule_intraday_consumer_read_model",
+        lambda symbol: scheduled.append(symbol) is None,
+    )
+    monkeypatch.setattr(
+        settings,
+        "enable_us_dynamic_equity_materializer_universe",
+        False,
+    )
+
+    result = collect_us_active_intraday_bars(
+        now=datetime(2026, 9, 3, 14, 0, tzinfo=timezone.utc)
+    )
+
+    assert scheduled == ["MU"]
+    assert result["consumer_cache_publish_scheduled_count"] == 1
+    assert result["consumer_cache_publish_deferred_symbols"] == []
+
+
+def test_index_intraday_lane_publishes_cache_only_read_model_after_run(
+    monkeypatch,
+) -> None:
+    scheduled: list[str] = []
+
+    monkeypatch.setattr(
+        "app.jobs.us_intraday_materializer_scheduler.materialize_us_intraday_capability",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "results": [{"symbol": "^GSPC", "status": "success"}],
+            "requested_count": 1,
+            "refreshed_count": 1,
+            "failed_count": 0,
+            "external_call_count": 1,
+            "duration_ms": 1,
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(
+        "app.jobs.us_intraday_materializer_scheduler._schedule_intraday_consumer_read_model",
+        lambda symbol: scheduled.append(symbol) is None,
+    )
+    monkeypatch.setattr(settings, "scheduler_us_index_quote_symbols", "^GSPC")
+    monkeypatch.setattr(settings, "scheduler_us_index_quote_max_symbols", 1)
+    monkeypatch.setattr(settings, "scheduler_us_index_intraday_batch_size", 1)
+    with us_scheduler._INDEX_BATCH_STATE_LOCK:
+        us_scheduler._INDEX_BATCH_OFFSETS["intraday.bars"] = 0
+
+    result = collect_us_index_intraday_bars(
+        now=datetime(2026, 9, 3, 14, 0, tzinfo=timezone.utc)
+    )
+
+    assert scheduled == ["^GSPC"]
+    assert result["consumer_cache_publish_scheduled_count"] == 1
+    assert result["consumer_cache_publish_deferred_symbols"] == []
+
+
+def test_read_model_publishers_are_deduplicated_and_bounded(monkeypatch) -> None:
+    started: list[tuple[str, tuple[str, ...]]] = []
+
+    class _DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            assert daemon is True
+            started.append((name, args))
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(us_scheduler, "Thread", _DeferredThread)
+    with us_scheduler._READ_MODEL_PUBLISH_LOCK:
+        us_scheduler._READ_MODEL_PUBLISH_IN_FLIGHT.clear()
+    try:
+        assert us_scheduler._schedule_intraday_consumer_read_model("TSM") is True
+        assert us_scheduler._schedule_intraday_consumer_read_model("TSM") is False
+        assert us_scheduler._schedule_intraday_consumer_read_model("MU") is True
+        assert us_scheduler._schedule_intraday_consumer_read_model("^GSPC") is True
+        assert us_scheduler._schedule_intraday_consumer_read_model("^SOX") is True
+        assert us_scheduler._schedule_intraday_consumer_read_model("AAPL") is False
+        assert started == [
+            ("us-intraday-read-model-TSM", ("TSM",)),
+            ("us-intraday-read-model-MU", ("MU",)),
+            ("us-intraday-read-model-^GSPC", ("^GSPC",)),
+            ("us-intraday-read-model-^SOX", ("^SOX",)),
+        ]
+    finally:
+        with us_scheduler._READ_MODEL_PUBLISH_LOCK:
+            us_scheduler._READ_MODEL_PUBLISH_IN_FLIGHT.clear()
+
+
+def test_read_model_publisher_bypasses_old_projection_without_provider_io(
+    monkeypatch,
+) -> None:
+    db = _FakeDb()
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(us_scheduler, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        "app.us_market.service.get_us_intraday_trend",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    with us_scheduler._READ_MODEL_PUBLISH_LOCK:
+        us_scheduler._READ_MODEL_PUBLISH_IN_FLIGHT.add("TSM")
+
+    us_scheduler._publish_intraday_consumer_read_model("TSM")
+
+    assert calls == [
+        {
+            "symbol": "TSM",
+            "session_scope": "regular",
+            "interval": "1m",
+            "db": db,
+            "bypass_read_cache": True,
+        }
+    ]
+    assert db.closed is True
+    with us_scheduler._READ_MODEL_PUBLISH_LOCK:
+        assert "TSM" not in us_scheduler._READ_MODEL_PUBLISH_IN_FLIGHT
 
 
 def test_intraday_scheduler_reuses_complete_recurring_profile(
@@ -986,12 +1267,136 @@ def test_intraday_scheduler_reuses_complete_recurring_profile(
     assert profile.consumer_stale_after_seconds == 180
 
 
+def test_scheduler_serializes_within_owner_lane_not_across_owner_lanes(
+    monkeypatch,
+) -> None:
+    locks: dict[str, list[object]] = {}
+
+    def _materialize(capability, **kwargs):
+        locks.setdefault(kwargs["lane_id"], []).append(kwargs["run_lock"])
+        return {
+            "status": "success",
+            "requested_count": 0,
+            "refreshed_count": 0,
+            "failed_count": 0,
+            "external_call_count": 0,
+            "duration_ms": 0,
+            "reason": None,
+        }
+
+    monkeypatch.setattr(
+        "app.jobs.us_intraday_materializer_scheduler.materialize_us_intraday_capability",
+        _materialize,
+    )
+
+    collect_us_active_quote_snapshots()
+    collect_us_quote_snapshots()
+    collect_us_active_intraday_bars()
+    collect_us_intraday_bars()
+    collect_us_index_quote_snapshots()
+    collect_us_index_intraday_bars()
+
+    assert locks["equity_active"][0] is locks["equity_active"][1]
+    assert locks["equity_canary"][0] is locks["equity_canary"][1]
+    assert locks["index_current"][0] is locks["index_current"][1]
+    assert locks["equity_active"][0] is not locks["equity_canary"][0]
+    assert locks["equity_active"][0] is not locks["index_current"][0]
+    assert locks["equity_canary"][0] is not locks["index_current"][0]
+
+
+def test_index_scheduler_rotates_bounded_batches_across_full_universe(
+    monkeypatch,
+) -> None:
+    batches: list[tuple[str, int, int]] = []
+
+    def _materialize(_capability, **kwargs):
+        batches.append(
+            (
+                kwargs["configured_symbols"],
+                kwargs["max_symbols"],
+                kwargs["max_external_calls"],
+            )
+        )
+        return {
+            "status": "success",
+            "requested_count": kwargs["max_symbols"],
+            "refreshed_count": kwargs["max_symbols"],
+            "failed_count": 0,
+            "external_call_count": kwargs["max_symbols"],
+            "duration_ms": 1,
+            "reason": None,
+        }
+
+    monkeypatch.setattr(
+        "app.jobs.us_intraday_materializer_scheduler.materialize_us_intraday_capability",
+        _materialize,
+    )
+    monkeypatch.setattr(
+        settings,
+        "scheduler_us_index_quote_symbols",
+        "^GSPC,^SOX,^DJI,^IXIC,^NDX,^VIX",
+    )
+    monkeypatch.setattr(settings, "scheduler_us_index_quote_max_symbols", 6)
+    monkeypatch.setattr(settings, "scheduler_us_index_intraday_batch_size", 2)
+    with us_scheduler._INDEX_BATCH_STATE_LOCK:
+        us_scheduler._INDEX_BATCH_OFFSETS["intraday.bars"] = 0
+
+    collect_us_index_intraday_bars()
+    collect_us_index_intraday_bars()
+    collect_us_index_intraday_bars()
+
+    assert batches == [
+        ("^GSPC,^SOX", 2, 4),
+        ("^DJI,^IXIC", 2, 4),
+        ("^NDX,^VIX", 2, 4),
+    ]
+
+
+def test_index_scheduler_does_not_advance_a_batch_skipped_by_lane_lock(
+    monkeypatch,
+) -> None:
+    batches: list[str] = []
+
+    def _materialize(_capability, **kwargs):
+        batches.append(kwargs["configured_symbols"])
+        skipped = len(batches) == 1
+        return {
+            "status": "skipped" if skipped else "success",
+            "requested_count": 0 if skipped else kwargs["max_symbols"],
+            "refreshed_count": 0 if skipped else kwargs["max_symbols"],
+            "failed_count": 0,
+            "external_call_count": 0 if skipped else kwargs["max_symbols"],
+            "duration_ms": 1,
+            "reason": "materializer_run_in_flight" if skipped else None,
+        }
+
+    monkeypatch.setattr(
+        "app.jobs.us_intraday_materializer_scheduler.materialize_us_intraday_capability",
+        _materialize,
+    )
+    monkeypatch.setattr(
+        settings,
+        "scheduler_us_index_quote_symbols",
+        "^GSPC,^SOX,^DJI,^IXIC,^NDX,^VIX",
+    )
+    monkeypatch.setattr(settings, "scheduler_us_index_quote_max_symbols", 6)
+    monkeypatch.setattr(settings, "scheduler_us_index_intraday_batch_size", 2)
+    with us_scheduler._INDEX_BATCH_STATE_LOCK:
+        us_scheduler._INDEX_BATCH_OFFSETS["intraday.bars"] = 0
+
+    collect_us_index_intraday_bars()
+    collect_us_index_intraday_bars()
+
+    assert batches == ["^GSPC,^SOX", "^GSPC,^SOX"]
+
+
 def test_quote_retention_registration_is_independent_of_materializer(monkeypatch) -> None:
     monkeypatch.setattr(settings, "enable_scheduler", False)
     monkeypatch.setattr(settings, "enable_us_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_index_quote_materializer", False)
     monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", True)
+    monkeypatch.setattr(settings, "enable_us_source_health_snapshot_scheduler", False)
     scheduler = _FakeScheduler()
 
     assert add_us_intraday_materializer_jobs(scheduler) is True
@@ -1004,6 +1409,7 @@ def test_index_quote_lane_registers_without_equity_intraday_lane(monkeypatch) ->
     monkeypatch.setattr(settings, "enable_us_index_quote_materializer", True)
     monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", False)
+    monkeypatch.setattr(settings, "enable_us_source_health_snapshot_scheduler", False)
     scheduler = _FakeScheduler()
 
     assert add_us_intraday_materializer_jobs(scheduler) is True
@@ -1017,12 +1423,22 @@ def test_index_intraday_lane_registers_without_index_quote_lane(monkeypatch) -> 
     monkeypatch.setattr(settings, "enable_us_index_quote_materializer", False)
     monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", True)
     monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", False)
+    monkeypatch.setattr(settings, "enable_us_source_health_snapshot_scheduler", False)
     scheduler = _FakeScheduler()
 
     assert add_us_intraday_materializer_jobs(scheduler) is True
     assert [job["id"] for job in scheduler.jobs] == [
         "us_index_intraday_bar_materialization"
     ]
+    cycle_count = (
+        settings.scheduler_us_index_quote_max_symbols
+        + settings.scheduler_us_index_intraday_batch_size
+        - 1
+    ) // settings.scheduler_us_index_intraday_batch_size
+    assert scheduler.jobs[0]["seconds"] == (
+        settings.scheduler_us_index_intraday_materializer_interval_seconds
+        // cycle_count
+    )
 
 
 def test_us_materializer_scheduler_noops_when_all_owned_flags_are_disabled(
@@ -1033,6 +1449,7 @@ def test_us_materializer_scheduler_noops_when_all_owned_flags_are_disabled(
     monkeypatch.setattr(settings, "enable_us_index_quote_materializer", False)
     monkeypatch.setattr(settings, "enable_us_index_intraday_materializer", False)
     monkeypatch.setattr(settings, "enable_us_quote_retention_scheduler", False)
+    monkeypatch.setattr(settings, "enable_us_source_health_snapshot_scheduler", False)
     scheduler = _FakeScheduler()
 
     assert add_us_intraday_materializer_jobs(scheduler) is False

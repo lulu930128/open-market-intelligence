@@ -432,6 +432,7 @@ class USMarketTruthComponentStatus(CanonicalModel):
     availability: USMarketTruthAvailability
     reason_code: str = Field(min_length=1, max_length=128)
     resolved_health: ResolvedEvidenceHealth
+    freshness: EvidenceFreshness = EvidenceFreshness.UNKNOWN
     limitations: tuple[str, ...] = ()
 
 
@@ -571,6 +572,8 @@ class USMarketTruthSnapshot(CanonicalModel):
     instrument: InstrumentKey
     market_phase: USMarketPhase
     expectation: CapabilityExpectation
+    quote_observation: USObservation | None = None
+    intraday_observation: USObservation | None = None
     latest_observation: USObservation | None = None
     current_observation: USObservation | None = None
     headline_observation: USObservation | None = None

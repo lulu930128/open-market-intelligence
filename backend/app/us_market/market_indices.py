@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from threading import RLock
+import time
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
+from app.market.calendar_status import build_us_calendar_status
 from app.market_data.contracts import (
     CanonicalModel,
     EvidenceFreshness,
@@ -35,6 +38,9 @@ US_MARKET_INDEX_DEFINITIONS: tuple[tuple[str, str], ...] = (
     ("^VIX", "CBOE Volatility Index"),
 )
 US_MARKET_INDEX_SYMBOLS = tuple(symbol for symbol, _ in US_MARKET_INDEX_DEFINITIONS)
+_US_MARKET_INDICES_CACHE_TTL_SECONDS = 9.75
+_US_MARKET_INDICES_CACHE_LOCK = RLock()
+_US_MARKET_INDICES_CACHE: dict[tuple[int, str], tuple[float, "USMarketIndicesSnapshot"]] = {}
 
 
 class USMarketIndexItem(CanonicalModel):
@@ -365,18 +371,38 @@ def read_us_market_indices(
 ) -> USMarketIndicesSnapshot:
     """Read six canonical Market Truth snapshots without provider IO or writes."""
 
-    snapshots = tuple(
-        read_us_market_truth_snapshot(
-            db,
-            symbol=symbol,
+    bind_identity = id(db.get_bind()) if isinstance(db, Session) else id(db)
+    market_phase = str(
+        build_us_calendar_status(evaluated_at).get("phase") or "market_closed"
+    )
+    cache_key = (bind_identity, market_phase)
+    # The six-symbol aggregate is a frequent shared dashboard dependency. A
+    # short backend-owned cache plus one build lock prevents simultaneous UI,
+    # AI and MCP reads from each recomputing the same canonical components
+    # while materializers are writing. Cached timestamps remain the time of
+    # the actual read and are never relabelled as a newer observation.
+    with _US_MARKET_INDICES_CACHE_LOCK:
+        cached = _US_MARKET_INDICES_CACHE.get(cache_key)
+        if cached is not None:
+            cached_at, cached_snapshot = cached
+            if time.monotonic() - cached_at <= _US_MARKET_INDICES_CACHE_TTL_SECONDS:
+                return cached_snapshot
+            _US_MARKET_INDICES_CACHE.pop(cache_key, None)
+
+        snapshots = tuple(
+            read_us_market_truth_snapshot(
+                db,
+                symbol=symbol,
+                evaluated_at=evaluated_at,
+            )
+            for symbol in US_MARKET_INDEX_SYMBOLS
+        )
+        result = compose_us_market_indices(
+            snapshots=snapshots,
             evaluated_at=evaluated_at,
         )
-        for symbol in US_MARKET_INDEX_SYMBOLS
-    )
-    return compose_us_market_indices(
-        snapshots=snapshots,
-        evaluated_at=evaluated_at,
-    )
+        _US_MARKET_INDICES_CACHE[cache_key] = (time.monotonic(), result)
+        return result
 
 
 __all__ = [

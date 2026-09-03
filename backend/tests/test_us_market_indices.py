@@ -256,6 +256,25 @@ def test_us_market_indices_reader_uses_one_clock_and_six_canonical_truth_reads()
     assert aggregate.count == 6
 
 
+def test_us_market_indices_reader_coalesces_repeated_same_phase_reads() -> None:
+    db = object()
+    snapshots = {
+        symbol: _truth(symbol)
+        for symbol in US_MARKET_INDEX_SYMBOLS
+    }
+
+    with patch.object(
+        market_indices,
+        "read_us_market_truth_snapshot",
+        side_effect=lambda _db, *, symbol, evaluated_at: snapshots[symbol],
+    ) as read:
+        first = read_us_market_indices(db, evaluated_at=NOW)
+        second = read_us_market_indices(db, evaluated_at=NOW)
+
+    assert first is second
+    assert read.call_count == len(US_MARKET_INDEX_SYMBOLS)
+
+
 def test_us_market_indices_module_has_no_provider_or_write_ownership() -> None:
     source = inspect.getsource(market_indices)
 

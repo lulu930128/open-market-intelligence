@@ -250,9 +250,17 @@ def test_massive_intraday_round_trip_preserves_not_applicable_volume() -> None:
     USIntradayBarTransaction(db).persist_bar_acquisition(requirement, acquisition)
     row = db.query(MarketIntradayBar).one()
     lineage = db.query(MarketIntradayBarLineage).one()
+    original_raw_result_id = lineage.raw_result_id
+    repeated = USIntradayBarTransaction(db).persist_bar_acquisition(
+        requirement,
+        acquisition,
+    )
     assert row.trade_volume is None
     assert row.volume_status == "not_applicable"
     assert lineage.provider == "massive"
+    assert repeated.observations_written == 0
+    assert repeated.observations_unchanged == 1
+    assert lineage.raw_result_id == original_raw_result_id
     assert USIntradayBarRepository(db).read_bar_candidates(requirement).candidates == ()
     reread = USIntradayBarRepository(
         db,

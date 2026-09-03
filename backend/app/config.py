@@ -231,6 +231,16 @@ class Settings(BaseSettings):
     enable_us_dynamic_equity_materializer_universe: bool = False
     scheduler_us_intraday_materializer_symbols: str = "AAPL,TSM"
     scheduler_us_intraday_materializer_max_symbols: int = Field(default=2, ge=1, le=20)
+    scheduler_us_active_equity_materializer_symbols: str = ""
+    scheduler_us_active_equity_materializer_max_symbols: int = Field(
+        default=2, ge=1, le=20
+    )
+    scheduler_us_active_equity_materializer_max_provider_calls: int = Field(
+        default=2, ge=1, le=2
+    )
+    scheduler_us_active_equity_materializer_max_external_calls: int = Field(
+        default=4, ge=1, le=40
+    )
     scheduler_us_quote_materializer_interval_seconds: int = Field(
         default=60, ge=60, le=3600
     )
@@ -248,11 +258,12 @@ class Settings(BaseSettings):
     )
     enable_us_index_quote_materializer: bool = False
     enable_us_index_intraday_materializer: bool = False
-    scheduler_us_index_quote_symbols: str = "^GSPC,^DJI,^IXIC,^SOX,^NDX,^VIX"
+    scheduler_us_index_quote_symbols: str = "^GSPC,^SOX,^DJI,^IXIC,^NDX,^VIX"
     scheduler_us_index_quote_max_symbols: int = Field(default=6, ge=1, le=6)
     scheduler_us_index_quote_max_external_calls: int = Field(default=6, ge=1, le=12)
+    scheduler_us_index_quote_batch_size: int = Field(default=2, ge=1, le=6)
     scheduler_us_index_intraday_materializer_interval_seconds: int = Field(
-        default=60, ge=60, le=3600
+        default=120, ge=60, le=3600
     )
     scheduler_us_index_intraday_materializer_bars: int = Field(
         default=600, ge=60, le=1000
@@ -260,7 +271,12 @@ class Settings(BaseSettings):
     scheduler_us_index_intraday_max_external_calls: int = Field(
         default=6, ge=1, le=12
     )
+    scheduler_us_index_intraday_batch_size: int = Field(default=2, ge=1, le=6)
     enable_us_quote_retention_scheduler: bool = False
+    enable_us_source_health_snapshot_scheduler: bool = False
+    scheduler_us_source_health_snapshot_interval_seconds: int = Field(
+        default=300, ge=60, le=3600
+    )
     us_quote_snapshot_retention_days: int = Field(default=30, ge=1, le=365)
     scheduler_us_quote_cleanup_max_rows: int = Field(
         default=10_000, ge=1, le=50_000

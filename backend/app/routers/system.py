@@ -126,9 +126,11 @@ def health_check():
                     ][: settings.scheduler_us_index_quote_max_symbols],
                     "max_symbols": settings.scheduler_us_index_quote_max_symbols,
                     "max_external_calls": settings.scheduler_us_index_quote_max_external_calls,
+                    "quote_batch_size": settings.scheduler_us_index_quote_batch_size,
                     "intraday_interval_seconds": settings.scheduler_us_index_intraday_materializer_interval_seconds,
                     "intraday_bars": settings.scheduler_us_index_intraday_materializer_bars,
                     "intraday_max_external_calls": settings.scheduler_us_index_intraday_max_external_calls,
+                    "intraday_batch_size": settings.scheduler_us_index_intraday_batch_size,
                 },
                 "freshness_contract": {
                     "quote_basis": "fetched_time",

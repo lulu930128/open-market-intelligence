@@ -118,6 +118,11 @@ type USProfessionalIntradayTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h"
 type USProfessionalTimeframe = USProfessionalIntradayTimeframe | USHistoricalTimeframe;
 type USProfessionalChartStyle = ProfessionalChartStyle;
 type CoverageStatus = "ready" | "partial" | "missing" | "loading" | "stale";
+type USTodaySnapshotCacheEntry = {
+  revision: string;
+  points: IntradayTrendPoint[];
+  response: IntradayTrendResponse;
+};
 
 type Props = {
   selectedSymbol: string | null;
@@ -129,6 +134,7 @@ type Props = {
 };
 
 const timeframeOptions: USChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
+const US_TODAY_SNAPSHOT_CACHE_LIMIT = 48;
 const usIntradaySessionScopeOptions: USIntradaySessionScope[] = ["regular", "extended", "all"];
 
 const usProfessionalTimeframeOptions: USProfessionalTimeframe[] = [
@@ -193,11 +199,16 @@ function sessionPhaseLabel(t: TranslationFunction, phase: string | null | undefi
 async function fetchUsIntradayTrend(
   symbol: string,
   sessionScope: USIntradaySessionScope,
-  interval: USProfessionalIntradayTimeframe = "1m"
+  interval: USProfessionalIntradayTimeframe = "1m",
+  sinceRevision?: string | null
 ) {
   return fetchJson<IntradayTrendResponse>(
     `/api/us-market/intraday/${encodeURIComponent(symbol)}`,
-    { session_scope: sessionScope, interval }
+    {
+      session_scope: sessionScope,
+      interval,
+      ...(sinceRevision ? { since_revision: sinceRevision } : {}),
+    }
   );
 }
 
@@ -446,7 +457,7 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     warnings: response.warnings ?? [],
     volumePace: response.volume_pace ?? null,
     currentSourceStatus,
-    barSourceStatus: response.bar_source_status ?? response.source_status ?? null,
+    barSourceStatus: response.bar_source_status ?? null,
     currentPrice: projectedCurrentPrice,
     currentPreviousClose: response.current_observation?.previous_close ?? null,
     currentPreviousCloseTradeDate: response.previous_close_trade_date ?? null,
@@ -566,11 +577,11 @@ function intradaySourcePresentation(
     };
   }
 
-  if (status.status === "ok") return null;
+  if (status.status === "ok" || status.freshness_status === "current") return null;
 
   const minutes = Math.max(1, Math.ceil((status.lag_seconds ?? 0) / 60));
 
-  if (status.freshness_status === "provider_error" && status.is_fallback) {
+  if (status.freshness_status === "provider_error" && status.has_usable_data) {
     return {
       level: "warning",
       title: t("usStockDetail.sourceStatus.providerErrorTitle", { provider }),
@@ -1107,6 +1118,30 @@ export default function USStockDetailPanel({
   const supplementalRequestSeq = useRef(0);
   const supplementalLoadedKeysRef = useRef(new Set<string>());
   const finalIntradayRefreshDate = useRef<string | null>(null);
+  const todayIntradaySnapshotRef = useRef(
+    new Map<string, USTodaySnapshotCacheEntry>()
+  );
+  const timeframeRef = useRef(timeframe);
+  const intradaySessionScopeRef = useRef(intradaySessionScope);
+  const applyCachedTodaySnapshot = useCallback(
+    (
+      symbol: string,
+      sessionScope: USIntradaySessionScope,
+      snapshot: USTodaySnapshotCacheEntry
+    ) => {
+      const latestPoint = snapshot.points[snapshot.points.length - 1] ?? null;
+      setHeadlineQuote(snapshot.response.quote_snapshot ?? null);
+      setTodayTrend(snapshot.points);
+      setTodayPreviousClose(snapshot.response.previous_close);
+      setTodayPreviousCloseStatus(snapshot.response.previous_close_status ?? "unknown");
+      setTodaySource(snapshot.response.source);
+      setTodayUpdatedAt(latestPoint ? formatDateTime(latestPoint.time) : null);
+      setTodayIntradayMeta(intradayMetaFromResponse(snapshot.response));
+      setTodaySymbol(symbol);
+      setTodaySessionScope(sessionScope);
+    },
+    []
+  );
   const intradaySourceEventStateRef = useRef<Map<string, string>>(new Map());
   const ohlcCoverageEventStateRef = useRef<Map<string, string>>(new Map());
   const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
@@ -1116,6 +1151,44 @@ export default function USStockDetailPanel({
   useEffect(() => {
     tRef.current = t;
   }, [t]);
+
+  useEffect(() => {
+    if (!selectedSymbol || getUsMarketIndexConfig(selectedSymbol)) return;
+    // A selection owns a distinct lease.  Reusing one owner across symbols
+    // lets an older asynchronous cleanup delete the newly claimed symbol.
+    const ownerId =
+      typeof globalThis.crypto?.randomUUID === "function"
+        ? globalThis.crypto.randomUUID()
+        : `us-viewer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    let active = true;
+    const claim = () => {
+      void requestJson<Record<string, unknown>>(
+        `/api/us-market/active-equity-viewer/${encodeURIComponent(selectedSymbol)}`,
+        { method: "POST" },
+        { owner_id: ownerId, ttl_seconds: 90 },
+        { timeoutMs: 5_000 }
+      ).catch(() => undefined);
+    };
+    claim();
+    const heartbeat = window.setInterval(() => {
+      if (active) claim();
+    }, 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(heartbeat);
+      void requestJson<Record<string, unknown>>(
+        "/api/us-market/active-equity-viewer",
+        { method: "DELETE", keepalive: true },
+        { owner_id: ownerId },
+        { timeoutMs: 5_000 }
+      ).catch(() => undefined);
+    };
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    timeframeRef.current = timeframe;
+    intradaySessionScopeRef.current = intradaySessionScope;
+  }, [intradaySessionScope, timeframe]);
 
   useEffect(() => {
     onDailyPricesChangedRef.current = onDailyPricesChanged;
@@ -1165,6 +1238,7 @@ export default function USStockDetailPanel({
       usSymbolKey(todaySymbol) === usSymbolKey(selectedSymbol) &&
       todaySessionScope === intradaySessionScope
   );
+  const todayIntradayLoading = timeframe === "today" && !todayMatchesSelection;
   const visibleTodayTrend = useMemo(
     () => (todayMatchesSelection ? todayTrend : []),
     [todayMatchesSelection, todayTrend]
@@ -1386,8 +1460,7 @@ export default function USStockDetailPanel({
     (symbol: string, response: IntradayTrendResponse) => {
       const sourceStatus =
         response.current_source_status ??
-        response.bar_source_status ??
-        response.source_status;
+        response.bar_source_status;
       if (!sourceStatus) return;
 
       const normalizedSymbol = symbol.toUpperCase();
@@ -1459,14 +1532,16 @@ export default function USStockDetailPanel({
         ? t("usStockDetail.loadingMaster")
         : t("usStockDetail.selectStockPrompt");
   const activeIntradaySession = usIntradaySessionConfigForScope(intradaySessionScope);
-  const intradaySessionMetaLine = t("usStockDetail.extendedHours.meta", {
-    phase: sessionPhaseLabel(
-      t,
-      visibleTodayIntradayMeta.sessionPhase ?? visibleTodayIntradayMeta.marketPhase
-    ),
-    regular: visibleTodayIntradayMeta.regularPointCount,
-    extended: visibleTodayIntradayMeta.extendedPointCount,
-  });
+  const intradaySessionMetaLine = todayIntradayLoading
+    ? t("usStockDetail.extendedHours.loadingCache")
+    : t("usStockDetail.extendedHours.meta", {
+        phase: sessionPhaseLabel(
+          t,
+          visibleTodayIntradayMeta.sessionPhase ?? visibleTodayIntradayMeta.marketPhase
+        ),
+        regular: visibleTodayIntradayMeta.regularPointCount,
+        extended: visibleTodayIntradayMeta.extendedPointCount,
+      });
   const intradayCoverageNotice =
     intradaySessionScope === "regular" &&
     chartLoadState === "success" &&
@@ -1900,18 +1975,32 @@ export default function USStockDetailPanel({
       chartRequestSeq.current += 1;
       supplementalRequestSeq.current += 1;
       supplementalLoadedKeysRef.current.clear();
+      const cachedTodaySnapshot =
+        selectedSymbol && timeframeRef.current === "today"
+          ? todayIntradaySnapshotRef.current.get(
+              `${usSymbolKey(selectedSymbol)}:${intradaySessionScopeRef.current}:1m`
+            )
+          : undefined;
       setSuccessMessage(null);
       setSelectedStock(null);
       setChart(null);
-      setHeadlineQuote(null);
-      setTodayTrend([]);
-      setTodayPreviousClose(null);
-      setTodayPreviousCloseStatus("unknown");
-      setTodaySource("unavailable");
-      setTodayUpdatedAt(null);
-      setTodayIntradayMeta(emptyUsIntradayMeta);
-      setTodaySymbol(null);
-      setTodaySessionScope(null);
+      if (cachedTodaySnapshot && selectedSymbol) {
+        applyCachedTodaySnapshot(
+          selectedSymbol,
+          intradaySessionScopeRef.current,
+          cachedTodaySnapshot
+        );
+      } else {
+        setHeadlineQuote(null);
+        setTodayTrend([]);
+        setTodayPreviousClose(null);
+        setTodayPreviousCloseStatus("unknown");
+        setTodaySource("unavailable");
+        setTodayUpdatedAt(null);
+        setTodayIntradayMeta(emptyUsIntradayMeta);
+        setTodaySymbol(null);
+        setTodaySessionScope(null);
+      }
       clearSupplementalData();
 
       if (!selectedSymbol) {
@@ -1924,7 +2013,16 @@ export default function USStockDetailPanel({
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [clearSupplementalData, loadStockIdentity, selectedSymbol]);
+  }, [applyCachedTodaySnapshot, clearSupplementalData, loadStockIdentity, selectedSymbol]);
+
+  useEffect(() => {
+    if (!selectedSymbol || timeframe !== "today") return;
+    const cachedSnapshot = todayIntradaySnapshotRef.current.get(
+      `${usSymbolKey(selectedSymbol)}:${intradaySessionScope}:1m`
+    );
+    if (!cachedSnapshot) return;
+    applyCachedTodaySnapshot(selectedSymbol, intradaySessionScope, cachedSnapshot);
+  }, [applyCachedTodaySnapshot, intradaySessionScope, selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (
@@ -1953,10 +2051,18 @@ export default function USStockDetailPanel({
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (!selectedSymbol) return;
+      if (chartMatchesSelection) return;
+      if (timeframe === "today" && !todayMatchesSelection) return;
       void loadChartData(selectedSymbol, timeframe);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [loadChartData, selectedSymbol, timeframe]);
+  }, [
+    chartMatchesSelection,
+    loadChartData,
+    selectedSymbol,
+    timeframe,
+    todayMatchesSelection,
+  ]);
 
   useEffect(() => {
     if (!selectedSymbol || !chartMatchesSelection || !chart) return;
@@ -2047,7 +2153,7 @@ export default function USStockDetailPanel({
   ]);
 
   useEffect(() => {
-    if (!selectedSymbol) return;
+    if (!selectedSymbol || timeframe === "today") return;
 
     let cancelled = false;
     let quoteTimer: number | undefined;
@@ -2092,7 +2198,7 @@ export default function USStockDetailPanel({
       cancelled = true;
       if (quoteTimer !== undefined) window.clearTimeout(quoteTimer);
     };
-  }, [publishDetailDataStatus, selectedSymbol]);
+  }, [publishDetailDataStatus, selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (!selectedSymbol || timeframe !== "today") return;
@@ -2114,15 +2220,42 @@ export default function USStockDetailPanel({
       intradayRequestInFlight = true;
 
       try {
-        const today = await fetchUsIntradayTrend(symbol, intradaySessionScope);
+        const snapshotKey = `${usSymbolKey(symbol)}:${intradaySessionScope}:1m`;
+        const cachedSnapshot = todayIntradaySnapshotRef.current.get(snapshotKey);
+        const today = await fetchUsIntradayTrend(
+          symbol,
+          intradaySessionScope,
+          "1m",
+          cachedSnapshot?.revision
+        );
 
         if (cancelled) return;
 
-        const safeTodayPoints = currentSessionTrendPoints(today);
+        const safeTodayPoints =
+          today.response_mode === "unchanged" &&
+          cachedSnapshot?.revision === today.snapshot_revision
+            ? cachedSnapshot?.points ?? []
+            : currentSessionTrendPoints(today);
+        if (
+          today.response_mode !== "unchanged" &&
+          today.snapshot_revision
+        ) {
+          const snapshots = todayIntradaySnapshotRef.current;
+          if (!snapshots.has(snapshotKey) && snapshots.size >= US_TODAY_SNAPSHOT_CACHE_LIMIT) {
+            const oldestKey = snapshots.keys().next().value;
+            if (oldestKey) snapshots.delete(oldestKey);
+          }
+          snapshots.set(snapshotKey, {
+            revision: today.snapshot_revision,
+            points: safeTodayPoints,
+            response: today,
+          });
+        }
         const latestIntradayPoint =
           safeTodayPoints[safeTodayPoints.length - 1] ?? null;
 
         setTodayTrend(safeTodayPoints);
+        if (today.quote_snapshot) setHeadlineQuote(today.quote_snapshot);
         setTodayPreviousClose(today.previous_close);
         setTodayPreviousCloseStatus(today.previous_close_status ?? "unknown");
         setTodaySource(today.source);
@@ -2196,7 +2329,11 @@ export default function USStockDetailPanel({
 
   useEffect(() => {
     let cancelled = false;
-    if (!selectedSymbol) {
+    if (
+      !selectedSymbol ||
+      visibleMarketResearch !== null ||
+      (timeframe === "today" && !todayMatchesSelection)
+    ) {
       return;
     }
     const symbol = selectedSymbol;
@@ -2220,7 +2357,13 @@ export default function USStockDetailPanel({
     return () => {
       cancelled = true;
     };
-  }, [publishDetailDataStatus, selectedSymbol]);
+  }, [
+    publishDetailDataStatus,
+    selectedSymbol,
+    timeframe,
+    todayMatchesSelection,
+    visibleMarketResearch,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3841,7 +3984,7 @@ export default function USStockDetailPanel({
             </div>
           ) : null}
 
-          {chartLoadState === "loading" ? (
+          {chartLoadState === "loading" && timeframe !== "today" ? (
             <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
               <StateSurface
                 title={t("usStockDetail.loadingKlineShort")}
@@ -3894,23 +4037,34 @@ export default function USStockDetailPanel({
                   </div>
                 ) : null}
               </div>
-              <IntradayTrendChart
-                points={visibleTodayTrend}
-                previousClose={visibleTodayPreviousClose}
-                label={
-                  selectedIndexConfig
-                    ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
-                    : timeframeLabel(t, timeframe)
-                }
-                source={visibleTodaySource}
-                indicators={intradayIndicators}
-                session={activeIntradaySession}
-                revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${visibleTodayTrend.length}`}
-                refreshIntervalMs={US_INTRADAY_REFRESH_MS}
-                refreshMode="cache_poll"
-                updatedAt={visibleTodayUpdatedAt}
-                priceLimitEnabled={false}
-              />
+              {todayIntradayLoading ? (
+                <div className="border-x border-b border-omi-border-subtle bg-omi-surface p-4">
+                  <StateSurface
+                    title={t("usStockDetail.extendedHours.loadingCache")}
+                    tone="loading"
+                    busy
+                    className="h-[428px]"
+                  />
+                </div>
+              ) : (
+                <IntradayTrendChart
+                  points={visibleTodayTrend}
+                  previousClose={visibleTodayPreviousClose}
+                  label={
+                    selectedIndexConfig
+                      ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
+                      : timeframeLabel(t, timeframe)
+                  }
+                  source={visibleTodaySource}
+                  indicators={intradayIndicators}
+                  session={activeIntradaySession}
+                  revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${visibleTodayTrend.length}`}
+                  refreshIntervalMs={US_INTRADAY_REFRESH_MS}
+                  refreshMode="cache_poll"
+                  updatedAt={visibleTodayUpdatedAt}
+                  priceLimitEnabled={false}
+                />
+              )}
             </>
           ) : chartData.length > 0 ? (
             <StockKLineChart

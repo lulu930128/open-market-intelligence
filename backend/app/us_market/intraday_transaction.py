@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -42,6 +43,24 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("US market lineage timestamp must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _stored_utc(value: datetime) -> datetime:
+    """Restore SQLite's timezone-less UTC storage representation."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _bar_row_matches(row: MarketIntradayBar, incoming: dict[str, object]) -> bool:
+    for key, value in incoming.items():
+        current = getattr(row, key)
+        if key == "bar_time":
+            current = _stored_utc(current)
+        if current != value:
+            return False
+    return True
 
 
 def _number(value: Decimal | None) -> float | None:
@@ -248,6 +267,7 @@ class USIntradayBarTransaction:
                 stored[key] = (source, raw, receipt)
                 raw_ids.append(raw.id)
                 receipts_written += int(created)
+            prepared = []
             for bar in acquisition.observations:
                 if bar.instrument != requirement.target.instrument or bar.instrument.market is not Market.US or bar.interval != requirement.request.interval:
                     raise ValueError("US intraday observation identity mismatch")
@@ -285,27 +305,118 @@ class USIntradayBarTransaction:
                     "source": receipt.source,
                     "source_url": receipt.url,
                 }
-                row = (
-                    self._db.query(MarketIntradayBar)
-                    .filter(MarketIntradayBar.provider == receipt.provider)
-                    .filter(MarketIntradayBar.stock_id == bar.instrument.symbol)
-                    .filter(MarketIntradayBar.interval == bar.interval)
-                    .filter(MarketIntradayBar.bar_time == _utc(bar.start_at))
-                    .first()
+                prepared.append((bar, source, raw, receipt, parser, incoming))
+
+            storage_keys = tuple(
+                (
+                    receipt.provider,
+                    bar.instrument.symbol,
+                    bar.interval,
+                    _utc(bar.start_at),
                 )
-                is_unchanged = row is not None and all(getattr(row, key) == value for key, value in incoming.items())
+                for bar, _source, _raw, receipt, _parser, _incoming in prepared
+            )
+            existing_rows = (
+                self._db.query(MarketIntradayBar)
+                .filter(
+                    tuple_(
+                        MarketIntradayBar.provider,
+                        MarketIntradayBar.stock_id,
+                        MarketIntradayBar.interval,
+                        MarketIntradayBar.bar_time,
+                    ).in_(storage_keys)
+                )
+                .all()
+                if storage_keys
+                else []
+            )
+            rows_by_key = {
+                (
+                    row.provider,
+                    row.stock_id,
+                    row.interval,
+                    _stored_utc(row.bar_time),
+                ): row
+                for row in existing_rows
+            }
+            row_records = []
+            for bar, source, raw, receipt, parser, incoming in prepared:
+                storage_key = (
+                    receipt.provider,
+                    bar.instrument.symbol,
+                    bar.interval,
+                    _utc(bar.start_at),
+                )
+                row = rows_by_key.get(storage_key)
+                is_unchanged = row is not None and _bar_row_matches(row, incoming)
                 if row is None:
                     row = MarketIntradayBar(**incoming)
                     self._db.add(row)
-                    self._db.flush()
-                else:
+                    rows_by_key[storage_key] = row
+                elif not is_unchanged:
                     for key, value in incoming.items():
                         setattr(row, key, value)
                     row.updated_at = utc_now()
-                lineage = self._db.query(MarketIntradayBarLineage).filter(MarketIntradayBarLineage.bar_id == row.id).first()
+                row_records.append(
+                    (bar, source, raw, receipt, parser, row, is_unchanged)
+                )
+
+            # Allocate IDs for all new rows in one flush, then read every
+            # existing lineage in one bounded query.  The prior per-bar lookup
+            # issued two SQL statements per observation and made recurring
+            # 600-bar materialization monopolize the local runtime.
+            if row_records:
+                self._db.flush()
+            lineages_by_bar_id = {
+                lineage.bar_id: lineage
+                for lineage in (
+                    self._db.query(MarketIntradayBarLineage)
+                    .filter(
+                        MarketIntradayBarLineage.bar_id.in_(
+                            [
+                                row.id
+                                for (
+                                    _bar,
+                                    _source,
+                                    _raw,
+                                    _receipt,
+                                    _parser,
+                                    row,
+                                    _unchanged,
+                                ) in row_records
+                            ]
+                        )
+                    )
+                    .all()
+                    if row_records
+                    else []
+                )
+            }
+            for bar, source, raw, receipt, parser, row, is_unchanged in row_records:
+                lineage = lineages_by_bar_id.get(row.id)
+                lineage_compatible = bool(
+                    lineage is not None
+                    and lineage.provider == receipt.provider
+                    and lineage.source == receipt.source
+                    and lineage.source_interval == bar.interval
+                    and lineage.authority == bar.lineage.authority.value
+                    and lineage.raw_contract_version
+                    and (
+                        lineage.raw_contract_version == parser
+                        or lineage.raw_contract_version.startswith(f"{parser}+")
+                    )
+                )
+                if is_unchanged and lineage_compatible:
+                    # An unchanged observation keeps its original immutable
+                    # receipt lineage. Repointing every historical minute to
+                    # the newest fetch is both misleading provenance and a
+                    # large, unnecessary write amplification source.
+                    unchanged += 1
+                    continue
                 if lineage is None:
                     lineage = MarketIntradayBarLineage(bar_id=row.id)
                     self._db.add(lineage)
+                    lineages_by_bar_id[row.id] = lineage
                 lineage.source_id = source.id
                 lineage.raw_result_id = raw.id
                 lineage.provider = receipt.provider
@@ -325,10 +436,7 @@ class USIntradayBarTransaction:
                 lineage.calculation_version = None
                 lineage.component_raw_result_ids_json = None
                 lineage.updated_at = utc_now()
-                if is_unchanged:
-                    unchanged += 1
-                else:
-                    written += 1
+                written += int(not is_unchanged or not lineage_compatible)
             self._db.commit()
         except Exception:
             self._db.rollback()

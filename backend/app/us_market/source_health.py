@@ -48,6 +48,7 @@ from app.us_market.market_data.descriptors import (
 )
 from app.us_market.symbols import US_INDEX_SYMBOLS
 from app.us_market.intraday_profiles import US_RECURRING_INTRADAY_PROFILE
+from app.us_market.active_equity_targets import active_us_equity_viewer_symbols
 from app.us_market.sec_fundamentals.freshness import evaluate_sec_filing_freshness
 from app.us_market.sec_fundamentals.submissions import (
     SEC_SUBMISSIONS_CACHE,
@@ -191,10 +192,14 @@ def _configured_realtime_symbols(
     ordered: dict[str, None] = {}
     configured = (
         settings.scheduler_us_intraday_materializer_symbols,
+        ",".join(active_us_equity_viewer_symbols()),
+        settings.scheduler_us_active_equity_materializer_symbols,
         settings.scheduler_us_index_quote_symbols,
     )
     limits = (
         settings.scheduler_us_intraday_materializer_max_symbols,
+        settings.scheduler_us_active_equity_materializer_max_symbols,
+        settings.scheduler_us_active_equity_materializer_max_symbols,
         settings.scheduler_us_index_quote_max_symbols,
     )
     for raw_symbols, limit in zip(configured, limits, strict=True):
@@ -234,6 +239,7 @@ def _configured_realtime_symbols(
                 ordered[normalized] = None
     max_targets = (
         settings.scheduler_us_intraday_materializer_max_symbols
+        + settings.scheduler_us_active_equity_materializer_max_symbols
         + settings.scheduler_us_index_quote_max_symbols
     )
     return tuple(ordered)[:max_targets]

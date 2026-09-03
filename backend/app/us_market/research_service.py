@@ -103,6 +103,7 @@ def build_us_market_research(
     bars: int = 260,
     now: datetime | None = None,
     include_market_coverage: bool = True,
+    include_daily_ohlcv: bool = True,
 ) -> dict[str, Any]:
     """Build bounded research from cache only; never fetch or persist provider data."""
 
@@ -122,7 +123,14 @@ def build_us_market_research(
             now=resolved_now,
         )
         if include_market_coverage
-        else {}
+        else {
+            "kind": "market_coverage_reference",
+            "schema_version": "omi.us_market.coverage_reference.v1",
+            "status": "unavailable",
+            "snapshot_id": None,
+            "as_of": None,
+            "reason_codes": ["US_MARKET_COVERAGE_SNAPSHOT_UNAVAILABLE"],
+        }
     )
     missing: list[str] = []
     warnings: list[str] = []
@@ -202,7 +210,7 @@ def build_us_market_research(
         "symbol": normalized_symbol,
         "status": indicators["status"],
         "as_of": indicators.get("as_of"),
-        "daily_ohlcv": daily_ohlcv,
+        "daily_ohlcv": daily_ohlcv if include_daily_ohlcv else {},
         "technical_indicators": indicators,
         "technical_structure": structure,
         "corporate_action_coverage": {

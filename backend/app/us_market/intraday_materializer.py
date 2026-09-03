@@ -21,6 +21,7 @@ from app.us_market.intraday_profiles import (
 from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.symbols import US_INDEX_SYMBOLS, normalize_us_symbol
 from app.us_market.trading_calendar import US_MARKET_TIMEZONE, is_us_trading_day
+from app.us_market.active_equity_targets import us_active_equity_viewer_summary
 
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,7 @@ def us_intraday_materializer_runtime_summary() -> dict[str, Any]:
                     {lane for lane, _capability in _RUN_COUNTERS}
                 )
             },
+            "active_equity_viewers": us_active_equity_viewer_summary(),
         }
 
 
@@ -345,6 +347,7 @@ def materialize_us_intraday_capability(
         db = session_factory()
         try:
             platform = platform_factory(db)
+
             for symbol in symbols:
                 provider_calls = 0
                 try:
@@ -435,6 +438,11 @@ def materialize_us_intraday_capability(
                             acquisition_attempted,
                         )
                     )
+                    # A successful intraday producer schedules a cache-only
+                    # read-model publisher after releasing this lane. Keep the
+                    # previous projection available within its truthful
+                    # evidence-age boundary until the publisher atomically
+                    # replaces it; invalidating here creates a cold-read race.
                     external_calls = int(
                         getattr(acquisition, "external_calls", 0) or 0
                     )

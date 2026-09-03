@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from statistics import median
 from zoneinfo import ZoneInfo
 
@@ -319,23 +319,38 @@ class USIntradayMarketPlatform:
         *,
         now: datetime,
         bars: int,
-        history_days: int,
+        history_days: int | None,
         allow_acquisition: bool,
         require_live: bool,
         max_provider_calls: int,
         profile: USIntradayOperationProfile = US_RECURRING_INTRADAY_PROFILE,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
     ) -> DataRequirementV2:
         if bars < 1 or bars > 5000:
             raise ValueError("bars must be between 1 and 5000")
-        if history_days < 1 or history_days > US_INTRADAY_CACHE_HISTORY_DAYS:
-            raise ValueError("history_days exceeds the bounded US intraday cache horizon")
+        if (start_at is None) is not (end_at is None):
+            raise ValueError("start_at and end_at must be provided together")
+        if start_at is None or end_at is None:
+            if history_days is None or history_days < 1 or history_days > US_INTRADAY_CACHE_HISTORY_DAYS:
+                raise ValueError("history_days exceeds the bounded US intraday cache horizon")
+            start_at = now - timedelta(days=history_days)
+            end_at = now + timedelta(minutes=1)
+        elif (
+            start_at.tzinfo is None
+            or start_at.utcoffset() is None
+            or end_at.tzinfo is None
+            or end_at.utcoffset() is None
+            or end_at <= start_at
+        ):
+            raise ValueError("explicit intraday range must be timezone-aware and ordered")
         return DataRequirementV2(
             target=InstrumentTarget(instrument=identity.instrument),
             request=BarCapabilityRequest(
                 capability_id="intraday.bars",
                 interval="1m",
-                start_at=now - timedelta(days=history_days),
-                end_at=now + timedelta(minutes=1),
+                start_at=start_at,
+                end_at=end_at,
                 max_bars=bars,
                 completed_only=False,
                 price_basis="raw",
@@ -449,6 +464,59 @@ class USIntradayMarketPlatform:
         )
         result = self._gateway.resolve_bars(requirement, reader=self._bar_reader)
         return self._platform_result(identity=identity, result=result, projection=project_resolved_us_bars(result.resolved, max_bars=bars), profile=profile)
+
+    def latest_intraday_trade_date(
+        self,
+        *,
+        symbol: str,
+        interval: str = "1m",
+    ) -> date | None:
+        identity = resolve_us_instrument_identity(self._db, symbol)
+        latest = self._bar_reader.latest_bar_time(
+            instrument=identity.instrument,
+            interval=interval,
+        )
+        return latest.astimezone(US_EASTERN).date() if latest is not None else None
+
+    def read_intraday_bars_for_trade_date(
+        self,
+        *,
+        symbol: str,
+        trade_date: date,
+        bars: int = 1000,
+        now: datetime | None = None,
+        profile: USIntradayOperationProfile = US_RECURRING_INTRADAY_PROFILE,
+    ) -> USIntradayPlatformResult:
+        """Read one cache-only US trade date with extended-hours headroom."""
+
+        requested_at = now or datetime.now(timezone.utc)
+        self._validate_now(requested_at)
+        identity = resolve_us_instrument_identity(self._db, symbol)
+        local_start = datetime.combine(trade_date, time.min, tzinfo=US_EASTERN)
+        local_end = datetime.combine(
+            trade_date + timedelta(days=1),
+            time.min,
+            tzinfo=US_EASTERN,
+        )
+        requirement = self._bar_requirement(
+            identity,
+            now=requested_at,
+            bars=bars,
+            history_days=None,
+            allow_acquisition=False,
+            require_live=False,
+            max_provider_calls=0,
+            profile=profile,
+            start_at=local_start.astimezone(timezone.utc),
+            end_at=local_end.astimezone(timezone.utc) - timedelta(microseconds=1),
+        )
+        result = self._gateway.resolve_bars(requirement, reader=self._bar_reader)
+        return self._platform_result(
+            identity=identity,
+            result=result,
+            projection=project_resolved_us_bars(result.resolved, max_bars=bars),
+            profile=profile,
+        )
 
     def read_volume_sessions(
         self,

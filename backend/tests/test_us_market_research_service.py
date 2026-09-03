@@ -118,6 +118,25 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
             )
             assert classification["decision_usable"] is False
             assert "STANDARD_TAXONOMY_NOT_CONFIGURED" in classification["reason_codes"]
+
+            compact = build_us_market_research(
+                db,
+                symbol="AAPL",
+                bars=260,
+                now=datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc),
+                include_market_coverage=False,
+                include_daily_ohlcv=False,
+            )
+            assert compact["daily_ohlcv"] == {}
+            assert compact["technical_indicators"]["bar_count"] == 220
+            assert compact["market_coverage"] == {
+                "kind": "market_coverage_reference",
+                "schema_version": "omi.us_market.coverage_reference.v1",
+                "status": "unavailable",
+                "snapshot_id": None,
+                "as_of": None,
+                "reason_codes": ["US_MARKET_COVERAGE_SNAPSHOT_UNAVAILABLE"],
+            }
     finally:
         engine.dispose()
 

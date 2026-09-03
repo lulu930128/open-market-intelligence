@@ -52,6 +52,7 @@ from app.us_market.intraday_repository import (
     USIntradayVolumeSession,
 )
 from app.us_market.intraday_transaction import _validate_intraday_bar_identity
+from app.us_market.daily_market_state import resolve_us_instrument_identity
 from app.us_market.market_data.descriptors import (
     TWELVE_INTRADAY_DESCRIPTOR,
     TWELVE_INTRADAY_RESOURCE_ID,
@@ -350,12 +351,13 @@ def test_legacy_us_intraday_reader_is_cache_only_by_source_contract() -> None:
     assert "parse_yahoo_intraday_prices" not in source
     assert "_persist_us_intraday_history" not in source
     assert ".commit(" not in source
-    assert "USIntradayMarketPlatform" in source
-    assert ".read_intraday_bars(" in source
+    assert "read_us_market_truth_bundle" in source
+    truth_source = inspect.getsource(us_market_service.read_us_market_truth_bundle)
+    assert "_read_components" in truth_source
     assert "previous_regular_close_from_history" not in source
     assert "bars=30" in previous_close_source
     assert ".read(" in previous_close_source
-    assert ".read_volume_sessions(" in source
+    assert ".read_volume_sessions(" not in source
     router_source = inspect.getsource(us_market_router.get_us_intraday_trend_api)
     assert "refresh_us_" not in router_source
     assert "fetch_" not in router_source
@@ -365,8 +367,8 @@ def test_us_quote_get_remains_cache_only_by_source_contract() -> None:
     service_source = inspect.getsource(us_market_service.get_us_quote_snapshot)
     router_source = inspect.getsource(us_market_router.get_us_quote_snapshot_api)
 
-    assert "USIntradayMarketPlatform" in service_source
-    assert ".read_quote(" in service_source
+    assert "read_us_market_truth_bundle" in service_source
+    assert ".read_quote(" not in service_source
     assert ".refresh_quote(" not in service_source
     assert "fetch_" not in service_source
     assert ".commit(" not in service_source
@@ -916,9 +918,9 @@ def test_newer_persisted_bar_wins_over_older_quote_on_current_observation() -> N
     assert trend["current_observation"]["observed_at"] == trend["points"][-1]["time"]
     assert trend["current_observation"]["provider"] == "yahoo_chart"
     assert trend["current_source_status"]["provider"] == "yahoo_chart"
-    assert trend["current_source_status"]["freshness_status"] == "delayed"
+    assert trend["current_source_status"]["freshness_status"] == "current"
     assert trend["bar_source_status"]["provider"] == "yahoo_chart"
-    assert trend["bar_source_status"]["freshness_status"] == "delayed"
+    assert trend["bar_source_status"]["freshness_status"] == "current"
     assert trend["source_status"] == trend["bar_source_status"]
     assert trend["quote_snapshot"]["selected_provider"] == "twelve_data"
 
@@ -970,15 +972,26 @@ def test_chart_session_scope_does_not_change_headline_or_hide_other_coverage() -
         all_sessions = us_market_service.get_us_intraday_trend(
             symbol="AAPL", session_scope="all", db=db
         )
+        with patch.object(
+            USIntradayMarketPlatform,
+            "read_intraday_bars_for_trade_date",
+            side_effect=AssertionError("unchanged poll rebuilt the intraday series"),
+        ):
+            unchanged = us_market_service.get_us_intraday_trend(
+                symbol="AAPL",
+                session_scope="all",
+                db=db,
+                since_revision=all_sessions["snapshot_revision"],
+            )
 
     assert regular["points"] == []
     assert len(extended["points"]) == 2
     assert len(all_sessions["points"]) == 2
     assert regular["current_observation"] == extended["current_observation"]
     assert extended["current_observation"] == all_sessions["current_observation"]
-    assert regular["current_observation"]["price_semantics"] == (
-        "resolved_intraday_bar_close"
-    )
+    # Market Truth does not promote a pre-market-only observation to the
+    # regular-session current price after the regular session has begun.
+    assert regular["current_observation"] is None
     assert regular["session_coverage"] == {
         "trade_date": "2026-08-31",
         "expected_trade_date": "2026-08-31",
@@ -996,7 +1009,17 @@ def test_chart_session_scope_does_not_change_headline_or_hide_other_coverage() -
     assert regular["extended_point_count"] == 2
     assert extended["session_coverage"]["requested_point_count"] == 2
     assert all_sessions["session_coverage"]["requested_point_count"] == 2
+    assert all_sessions["response_mode"] == "full"
+    assert all_sessions["snapshot_point_count"] == 2
+    assert len(all_sessions["snapshot_revision"]) == 64
+    assert unchanged["response_mode"] == "unchanged"
+    assert unchanged["base_revision"] == all_sessions["snapshot_revision"]
+    assert unchanged["snapshot_revision"] == all_sessions["snapshot_revision"]
+    assert unchanged["snapshot_point_count"] == 2
+    assert unchanged["point_count"] == 0
+    assert unchanged["points"] == []
     USIntradayTrendRead.model_validate(regular)
+    USIntradayTrendRead.model_validate(unchanged)
 
 
 def test_active_session_does_not_project_previous_session_cache_as_today() -> None:
@@ -1545,6 +1568,145 @@ def test_intraday_repository_honors_total_max_rows_without_provider_starvation()
     assert len(sessions) == 1
     assert sessions[0].provider == "yahoo_chart"
     assert 0 < sessions[0].cumulative_volume < sessions[0].total_volume
+
+
+def test_intraday_repository_deduplicates_overlapping_keyset_pages(
+    monkeypatch,
+) -> None:
+    db = _db()
+    now = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
+
+    def yahoo(_route, _requirement):
+        return _yahoo_bars_payload(now, count=300), "https://query1.finance.yahoo.com/v8/finance/chart/AAPL"
+
+    USIntradayMarketPlatform(
+        db,
+        acquisition=USIntradayAcquisitionExecutor(
+            fetchers={YAHOO_INTRADAY_RESOURCE_ID: yahoo},
+            clock=lambda: now,
+        ),
+        bar_descriptors=(YAHOO_INTRADAY_DESCRIPTOR,),
+    ).refresh_intraday_bars(
+        symbol="AAPL",
+        bars=300,
+        now=now,
+        max_provider_calls=1,
+    )
+
+    def twelve(_route, _requirement):
+        return _twelve_bars_payload(now, count=10), "https://api.twelvedata.com/time_series?symbol=AAPL"
+
+    platform = USIntradayMarketPlatform(
+        db,
+        acquisition=USIntradayAcquisitionExecutor(
+            fetchers={TWELVE_INTRADAY_RESOURCE_ID: twelve},
+            clock=lambda: now,
+        ),
+        bar_descriptors=(TWELVE_INTRADAY_DESCRIPTOR,),
+    )
+    platform.refresh_intraday_bars(
+        symbol="AAPL",
+        bars=10,
+        now=now,
+        require_live=True,
+        max_provider_calls=1,
+    )
+    identity = platform.read_intraday_bars(
+        symbol="AAPL",
+        bars=1,
+        now=now,
+    ).identity
+    requirement = platform._bar_requirement(
+        identity,
+        now=now,
+        bars=300,
+        history_days=US_INTRADAY_CACHE_HISTORY_DAYS,
+        allow_acquisition=False,
+        require_live=False,
+        max_provider_calls=0,
+    ).model_copy(
+        update={"bounds": RequestBounds(max_rows=300, max_candidates=8)}
+    )
+    repository = USIntradayBarRepository(db)
+    original_read = repository._read_provider_rows
+    first_yahoo_boundary = None
+    keyset_cursors = []
+
+    def overlapping_page(**kwargs):
+        nonlocal first_yahoo_boundary
+        page = original_read(**kwargs)
+        if kwargs["provider"] != "yahoo_chart":
+            return page
+        if kwargs.get("before") is None and page:
+            first_yahoo_boundary = page[-1]
+            return page
+        keyset_cursors.append(kwargs.get("before"))
+        if first_yahoo_boundary is not None and page:
+            return [first_yahoo_boundary, *page]
+        return page
+
+    monkeypatch.setattr(repository, "_read_provider_rows", overlapping_page)
+
+    batch = repository.read_bar_candidates(requirement)
+
+    assert keyset_cursors and keyset_cursors[0] is not None
+    assert sum(len(candidate.bars) for candidate in batch.candidates) == 300
+    for candidate in batch.candidates:
+        starts = [bar.start_at for bar in candidate.bars]
+        assert starts == sorted(set(starts))
+
+
+def test_intraday_repository_does_not_reread_an_exhausted_provider(
+    monkeypatch,
+) -> None:
+    db = _db()
+    now = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
+    platform = USIntradayMarketPlatform(db)
+    requirement = platform._bar_requirement(
+        resolve_us_instrument_identity(db, "AAPL"),
+        now=now,
+        bars=300,
+        history_days=1,
+        allow_acquisition=False,
+        require_live=False,
+        max_provider_calls=0,
+    )
+    repository = USIntradayBarRepository(db)
+    calls: list[tuple[str, object]] = []
+
+    def empty_provider_page(**kwargs):
+        calls.append((kwargs["provider"], kwargs.get("before")))
+        return []
+
+    monkeypatch.setattr(repository, "_read_provider_rows", empty_provider_page)
+
+    batch = repository.read_bar_candidates(requirement)
+
+    assert batch.candidates == ()
+    assert calls == [("yahoo_chart", None), ("twelve_data", None)]
+
+
+def test_trade_date_read_is_bounded_to_one_eastern_calendar_date() -> None:
+    db = _db()
+    now = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
+    trade_date = now.astimezone(US_EASTERN).date()
+
+    read = USIntradayMarketPlatform(db).read_intraday_bars_for_trade_date(
+        symbol="AAPL",
+        trade_date=trade_date,
+        now=now,
+    )
+
+    request = read.result.requirement.request
+    assert request.max_bars == 1000
+    assert request.start_at.astimezone(US_EASTERN) == datetime.combine(
+        trade_date,
+        time.min,
+        tzinfo=US_EASTERN,
+    )
+    assert request.end_at.astimezone(US_EASTERN).date() == trade_date
+    assert request.end_at.astimezone(US_EASTERN).time() == time(23, 59, 59, 999999)
+    assert read.result.requirement.bounds.max_rows <= 2000
 
 
 def test_intraday_cache_and_provider_acquisition_horizons_are_separate() -> None:

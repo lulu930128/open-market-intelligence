@@ -86,6 +86,7 @@ class _USMarketTruthComponents:
     quote_read: object
     bars_read: object
     daily_read: object
+    latest_intraday_trade_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -867,6 +868,7 @@ def _component_status(
     health: ResolvedEvidenceHealth,
     *,
     materialized: bool,
+    freshness: EvidenceFreshness,
 ) -> USMarketTruthComponentStatus:
     if materialized:
         availability = USMarketTruthAvailability.AVAILABLE
@@ -881,6 +883,7 @@ def _component_status(
         availability=availability,
         reason_code=reason_code,
         resolved_health=health,
+        freshness=freshness,
         limitations=health.limitations,
     )
 
@@ -902,18 +905,52 @@ def _read_components(
     evaluated_at: datetime,
 ) -> _USMarketTruthComponents:
     intraday_platform = USIntradayMarketPlatform(db)
-    return _USMarketTruthComponents(
-        quote_read=intraday_platform.read_quote(symbol=symbol, now=evaluated_at),
-        bars_read=intraday_platform.read_intraday_bars(
+    calendar = build_us_calendar_status(evaluated_at)
+    market_phase: USMarketPhase = calendar.get("phase", "market_closed")
+    expected_trade_date = expected_us_intraday_trade_date(
+        market_phase=market_phase,
+        now=evaluated_at,
+    )
+    latest_trade_date = intraday_platform.latest_intraday_trade_date(
+        symbol=symbol,
+    )
+    target_trade_date = (
+        expected_trade_date
+        if expected_trade_date is not None
+        else latest_trade_date
+        if latest_trade_date is not None
+        else evaluated_at.astimezone(US_MARKET_TIMEZONE).date()
+    )
+    quote_read = intraday_platform.read_quote(symbol=symbol, now=evaluated_at)
+    bars_read = intraday_platform.read_intraday_bars_for_trade_date(
+        symbol=symbol,
+        trade_date=target_trade_date,
+        bars=1000,
+        now=evaluated_at,
+    )
+    if (
+        expected_trade_date is not None
+        and not bars_read.result.resolved.bars
+        and latest_trade_date is not None
+        and latest_trade_date != expected_trade_date
+    ):
+        # Preserve one bounded stale-status observation without projecting a
+        # prior session as Today's series.
+        bars_read = intraday_platform.read_intraday_bars_for_trade_date(
             symbol=symbol,
-            bars=5000,
+            trade_date=latest_trade_date,
+            bars=1,
             now=evaluated_at,
-        ),
+        )
+    return _USMarketTruthComponents(
+        quote_read=quote_read,
+        bars_read=bars_read,
         daily_read=USDailyOhlcvPlatform(db).read(
             symbol=symbol,
             bars=30,
             now=evaluated_at,
         ),
+        latest_intraday_trade_date=latest_trade_date,
     )
 
 
@@ -1164,6 +1201,8 @@ def _compose_us_market_truth_snapshot(
             if _phase_expected_session(market_phase) is None
             else CapabilityExpectation.EXPECTED
         ),
+        quote_observation=quote_observation,
+        intraday_observation=bar_observation,
         latest_observation=latest_observation,
         current_observation=current_observation,
         headline_observation=headline_observation,
@@ -1176,14 +1215,17 @@ def _compose_us_market_truth_snapshot(
             quote=_component_status(
                 quote_read.result.resolved.health,
                 materialized=quote_read.result.resolved.quote is not None,
+                freshness=_selected_freshness(quote_read.result.resolved),
             ),
             intraday=_component_status(
                 bars_read.result.resolved.health,
                 materialized=bool(bars_read.result.resolved.bars),
+                freshness=_selected_freshness(bars_read.result.resolved),
             ),
             daily=_component_status(
                 daily_read.result.resolved.health,
                 materialized=bool(daily_read.result.resolved.bars),
+                freshness=_selected_freshness(daily_read.result.resolved),
             ),
         ),
         limitations=tuple(
@@ -1230,15 +1272,17 @@ def _compose_us_intraday_series_projection(
     bars: ResolvedBarSeries,
     evaluated_at: datetime,
     requested_scope: str,
+    latest_available_trade_date: date | None = None,
 ) -> USIntradaySeriesProjection:
     if requested_scope not in {"regular", "extended", "all"}:
         raise ValueError("requested_scope must be regular, extended, or all")
     points = tuple(_series_point(bar) for bar in bars.bars)
     date_selection = select_us_intraday_trade_date(
-        (
+        tuple(
             point.start_at.astimezone(US_MARKET_TIMEZONE).date()
             for point in points
-        ),
+        )
+        + ((latest_available_trade_date,) if latest_available_trade_date else ()),
         now=evaluated_at,
         market_phase=snapshot.market_phase,
     )
@@ -1375,6 +1419,7 @@ def read_us_market_truth_bundle(
         bars=components.bars_read.result.resolved,
         evaluated_at=evaluated_at,
         requested_scope=requested_scope,
+        latest_available_trade_date=components.latest_intraday_trade_date,
     )
     return USMarketTruthBundle(snapshot=snapshot, series=series)
 
