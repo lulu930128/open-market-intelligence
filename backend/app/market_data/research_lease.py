@@ -623,6 +623,20 @@ class ViewerLeaseCoordinator:
             raise ValueError("viewer lease release identity mismatch")
         return state.model_copy(update={"lease_id": None})
 
+    def binding_identity(self, public_lease_id: str) -> tuple[str, str] | None:
+        """Return provider and symbol without touching the provider lifecycle.
+
+        Market-owned release hooks use this read-only identity to flush already
+        buffered canonical evidence before the provider handle is destroyed.
+        The private provider lease id intentionally remains encapsulated here.
+        """
+
+        with self._lock:
+            binding = self._bindings.get(public_lease_id)
+            if binding is None:
+                return None
+            return binding.provider_key, binding.stock_id
+
     def summary(self) -> ViewerLeaseSummary:
         summaries = tuple(
             self._ports[key].summary()

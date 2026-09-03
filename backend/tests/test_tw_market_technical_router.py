@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -72,6 +73,150 @@ def test_chart_bundle_reads_bars_once_and_calculates_from_same_object(
     assert sum(kind == "bar_read" for kind, _ in calls) == 1
     assert result.bars is bars
     assert result.technical.bar_series_revision == result.series_revision
+
+
+def test_current_session_chart_uses_backend_owned_session_window(
+    monkeypatch,
+) -> None:
+    bars = _bars()
+    calls: list[tuple[str, object]] = []
+
+    class _FakeBarService:
+        def __init__(self, db) -> None:
+            pass
+
+        def read_current_session_bars(self, **kwargs):
+            calls.append(("current_session_read", kwargs))
+            return bars
+
+    class _FakeTechnicalService:
+        def calculate(self, received, **_kwargs):
+            return _technical(received)
+
+    monkeypatch.setattr(tw_chart_service, "TaiwanBarService", _FakeBarService)
+    monkeypatch.setattr(
+        tw_chart_service,
+        "taiwan_current_session_bar_window",
+        lambda _requested_at: (
+            "now",
+            date(2026, 9, 3),
+            "from",
+            "to",
+        ),
+    )
+    monkeypatch.setattr(
+        tw_chart_service,
+        "TaiwanTechnicalService",
+        _FakeTechnicalService,
+    )
+    monkeypatch.setattr(
+        tw_chart_service,
+        "TaiwanChartBundleRead",
+        lambda **values: SimpleNamespace(**values),
+    )
+
+    result = tw_chart_service.TaiwanChartService(object()).read(
+        instrument_id="TAIEX",
+        interval="1m",
+        session_scope=tw_chart_service.TaiwanChartSessionScope.CURRENT_SESSION,
+    )
+
+    assert calls == [
+        (
+            "current_session_read",
+            {
+                "instrument_id": "TAIEX",
+                "interval": "1m",
+                "limit": 500,
+                "include_partial": True,
+                "requested_at": "now",
+            },
+        )
+    ]
+    assert result.session_scope == "current_session"
+    assert result.presentation_trade_date.isoformat() == "2026-09-03"
+
+
+def test_index_chart_uses_resolved_index_quote_side(
+    monkeypatch,
+) -> None:
+    bars = _bars()
+    bars.instrument = SimpleNamespace(
+        symbol="TAIEX",
+        instrument_type=SimpleNamespace(value="index"),
+    )
+    expected_quote_side = {
+        "current_observation": {"value": 46_200.0},
+        "previous_close": 46_000.0,
+    }
+    summary_item = {
+        "index_id": "TAIEX",
+        "resolution": {"resolution_version": "tw.index.resolution.v3"},
+    }
+    summary_calls: list[tuple[object, bool, object]] = []
+
+    class _FakeBarService:
+        def __init__(self, _db) -> None:
+            pass
+
+        def read_current_session_bars(self, **_kwargs):
+            return bars
+
+    class _FakeTechnicalService:
+        def calculate(self, received, **_kwargs):
+            return _technical(received)
+
+    monkeypatch.setattr(tw_chart_service, "TaiwanBarService", _FakeBarService)
+    monkeypatch.setattr(
+        tw_chart_service,
+        "taiwan_current_session_bar_window",
+        lambda _requested_at: (
+            "now",
+            date(2026, 9, 3),
+            "from",
+            "to",
+        ),
+    )
+    monkeypatch.setattr(
+        tw_chart_service,
+        "TaiwanTechnicalService",
+        _FakeTechnicalService,
+    )
+    monkeypatch.setattr(
+        tw_chart_service,
+        "get_market_index_summary",
+        lambda db, force_refresh=False, requested_at=None: (
+            summary_calls.append((db, force_refresh, requested_at)),
+            {"indices": [summary_item]},
+        )[1],
+    )
+    monkeypatch.setattr(
+        tw_chart_service,
+        "project_taiwan_index_quote_side",
+        lambda item: expected_quote_side if item is summary_item else None,
+    )
+    monkeypatch.setattr(
+        tw_chart_service,
+        "read_taiwan_public_quote_projection",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Taiwan index chart must not use the stock quote owner"
+        ),
+    )
+    monkeypatch.setattr(
+        tw_chart_service,
+        "TaiwanChartBundleRead",
+        lambda **values: SimpleNamespace(**values),
+    )
+
+    db = object()
+    result = tw_chart_service.TaiwanChartService(db).read(
+        instrument_id="TAIEX",
+        interval="1m",
+        session_scope=tw_chart_service.TaiwanChartSessionScope.CURRENT_SESSION,
+    )
+
+    assert summary_calls == [(db, False, "now")]
+    assert result.quote_side is expected_quote_side
 
 
 def test_chart_route_delegates_to_chart_service(monkeypatch) -> None:

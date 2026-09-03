@@ -170,7 +170,7 @@ class WatchlistStockLatestSignalsRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
 
-    time: str | date | None = None
+    time: str | date | datetime | None = None
     close: float | None = None
     volume: int | None = None
     change_pct: float | None = None
@@ -205,7 +205,7 @@ class WatchlistRankingItemRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
 
-    time: str | date | None = None
+    time: str | date | datetime | None = None
     close: float | None = None
     volume: int | None = None
     change: float | None = None

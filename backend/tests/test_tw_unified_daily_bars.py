@@ -801,3 +801,73 @@ def test_continuous_minutes_without_formal_close_remain_provisional(
     assert result.bar_states[0].reconciliation_status is TaiwanReconciliationStatus.PENDING
     assert result.bar_states[0].persisted is False
     assert result.bar_states[0].technical_eligible is False
+
+
+def test_overlapping_current_minutes_fail_open_without_breaking_daily_read(
+    db: Session,
+) -> None:
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="台積電",
+            market="TWSE",
+            instrument_type="stock",
+            is_active=True,
+        )
+    )
+    db.commit()
+    instrument = resolve_taiwan_instrument(db, "2330")
+    first_start = datetime(2026, 9, 1, 9, tzinfo=TAIWAN_TZ)
+
+    def component(start_at: datetime, provider: str) -> BarObservation:
+        return BarObservation(
+            instrument=instrument,
+            lineage=SourceLineage(
+                provider=provider,
+                source=f"{provider}.fixture",
+                authority=AuthorityClass.VENDOR,
+                raw_contract_version="fixture.1m.v1",
+                event_at=start_at,
+                content_hash=("a" if provider == "aligned" else "b") * 64,
+            ),
+            interval="1m",
+            start_at=start_at,
+            end_at=start_at + timedelta(minutes=1),
+            open_price=Decimal("100"),
+            high_price=Decimal("101"),
+            low_price=Decimal("99"),
+            close_price=Decimal("100.5"),
+            volume=None,
+            volume_status="missing",
+            price_basis="raw",
+            finalization=BarFinalization.FINAL,
+        )
+
+    minute_bars = (
+        component(first_start, "aligned"),
+        component(first_start + timedelta(seconds=10), "misaligned"),
+    )
+    coverage = observed_trade_coverage(
+        minute_bars,
+        trading_policy_version="fixture.policy.v1",
+    )
+    service = TaiwanBarService(db)
+    service.read_bars = lambda **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        bars=minute_bars,
+        bucket_coverage=coverage,
+        history=SimpleNamespace(requested_coverage_satisfied=False),
+    )
+
+    result = service._read_daily_bars(
+        instrument_id="2330",
+        requested_interval="1d",
+        from_time=datetime(2026, 9, 1, tzinfo=TAIWAN_TZ),
+        to_time=datetime(2026, 9, 1, 10, tzinfo=TAIWAN_TZ),
+        limit=10,
+        include_partial=True,
+        requested_at=datetime(2026, 9, 1, 10, tzinfo=TAIWAN_TZ),
+    )
+
+    assert result.bars == ()
+    assert "TW_CURRENT_SESSION_DAILY_PROJECTION_INVALID" in result.limitations
+    assert "TW_CURRENT_SESSION_DAILY_COMPONENTS_OVERLAP" in result.limitations

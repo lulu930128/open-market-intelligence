@@ -34,6 +34,8 @@ type Props = {
   tradeDate?: string | null;
   currentObservation?: IntradayCurrentObservation | null;
   historyStatus?: string | null;
+  snapshotPhase?: "warming" | "ready" | "degraded";
+  snapshotReasonCodes?: string[];
   canonicalIndicatorAuthority?: "backend" | "presentation";
   interval?: IntradayInterval;
   onIntervalChange?: (interval: IntradayInterval) => void;
@@ -754,6 +756,8 @@ export default function IntradayTrendChart({
   tradeDate,
   currentObservation,
   historyStatus,
+  snapshotPhase = "ready",
+  snapshotReasonCodes = [],
   canonicalIndicatorAuthority = "presentation",
   interval: controlledInterval,
   onIntervalChange,
@@ -832,7 +836,7 @@ export default function IntradayTrendChart({
     };
   }, [activeRevealKey]);
 
-  if (data.length < 2) {
+  if (snapshotPhase === "warming" || data.length < 2) {
     const quoteAvailable =
       currentObservation !== null &&
       currentObservation !== undefined &&
@@ -846,6 +850,8 @@ export default function IntradayTrendChart({
         className="border border-omi-border-subtle bg-omi-surface p-4"
         data-testid="intraday-trend-empty"
         data-rendered-point-count={data.length}
+        data-snapshot-phase={snapshotPhase}
+        data-snapshot-reasons={snapshotReasonCodes.join(",")}
       >
         <StateSurface
           eyebrow={quoteAvailable ? `${quoteLabel} ${formatPrice(currentObservation.value)}` : undefined}
@@ -1130,11 +1136,21 @@ export default function IntradayTrendChart({
       data-testid="intraday-trend-chart"
       data-rendered-point-count={data.length}
       data-volume-rendered={showVolume ? "true" : "false"}
+      data-snapshot-phase={snapshotPhase}
+      data-snapshot-reasons={snapshotReasonCodes.join(",")}
     >
       <div className="flex min-h-16 items-start justify-between gap-4 border-b border-omi-border-subtle px-4 py-3">
         <div>
-          <div className="text-sm font-semibold text-omi-text">
-            {t("stockDetail.intraday.title")}
+          <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-omi-text">
+            <span>{t("stockDetail.intraday.title")}</span>
+            {snapshotPhase === "degraded" ? (
+              <span
+                className="border border-omi-warning/40 bg-omi-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-omi-warning-strong"
+                data-testid="intraday-snapshot-degraded"
+              >
+                {t("stockDetail.intraday.snapshotDegraded")}
+              </span>
+            ) : null}
           </div>
           <div className="mt-1 text-xs text-omi-text-muted">
             {label} · {formatSource(t, source)} ·{" "}

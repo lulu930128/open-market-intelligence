@@ -590,10 +590,28 @@ type TaiwanCanonicalFixturePoint = {
   technical_eligible?: boolean;
 };
 
+type TaiwanSnapshotFixture = {
+  phase?: "warming" | "ready" | "degraded";
+  status?:
+    | "complete_prefix"
+    | "complete_session"
+    | "trailing_window"
+    | "partial_prefix"
+    | "partial_window"
+    | "sparse"
+    | "missing";
+  revision?: string;
+  barCount?: number;
+  availableFrom?: string | null;
+  availableTo?: string | null;
+  reasonCodes?: string[];
+};
+
 function taiwanCanonicalBarSeriesResponse(
   instrumentId: string,
   interval: string,
-  sourcePointsOverride?: readonly TaiwanCanonicalFixturePoint[]
+  sourcePointsOverride?: readonly TaiwanCanonicalFixturePoint[],
+  snapshot: TaiwanSnapshotFixture = {}
 ) {
   const isIndex = instrumentId === "TAIEX" || instrumentId === "TPEX";
   const isIntraday = interval.endsWith("m") || interval.endsWith("h");
@@ -692,6 +710,35 @@ function taiwanCanonicalBarSeriesResponse(
       requested_coverage_satisfied: true,
       limitations: [],
     },
+    current_session_coverage: isIntraday
+      ? {
+          contract_version: "tw.bar.current_session_coverage.v2",
+          trade_date: bars[0]?.start_at.slice(0, 10) ?? "2026-09-03",
+          status: snapshot.status ?? "complete_prefix",
+          snapshot_phase: snapshot.phase ?? "ready",
+          snapshot_revision: snapshot.revision ?? "6".repeat(64),
+          snapshot_bar_count: snapshot.barCount ?? bars.length,
+          snapshot_available_from:
+            snapshot.availableFrom === undefined
+              ? bars[0]?.start_at ?? null
+              : snapshot.availableFrom,
+          snapshot_available_to:
+            snapshot.availableTo === undefined
+              ? bars[bars.length - 1]?.end_at ?? null
+              : snapshot.availableTo,
+          snapshot_reason_codes:
+            snapshot.reasonCodes ?? ["TW_CHART_SNAPSHOT_COMPLETE"],
+          expected_from: bars[0]?.start_at ?? "2026-09-03T09:00:00+08:00",
+          expected_to:
+            bars[bars.length - 1]?.end_at ?? "2026-09-03T09:01:00+08:00",
+          expected_bucket_count: bars.length,
+          observed_bucket_count: bars.length,
+          missing_bucket_count: 0,
+          missing_ranges: [],
+          repair_recommended: false,
+          repair_operation_id: null,
+        }
+      : null,
     identity: {
       series_fingerprint: seriesFingerprint,
       lineage_digest: lineageDigest,
@@ -709,16 +756,25 @@ function taiwanChartBundleResponse(
   options: {
     points?: readonly TaiwanCanonicalFixturePoint[];
     quoteSide?: Record<string, unknown> | null;
+    sessionScope?: "history" | "current_session";
+    snapshot?: TaiwanSnapshotFixture;
   } = {}
 ) {
   const bars = taiwanCanonicalBarSeriesResponse(
     instrumentId,
     interval,
-    options.points
+    options.points,
+    options.snapshot
   );
   const intraday = intradayResponse(instrumentId);
   const isIntraday = interval.endsWith("m") || interval.endsWith("h");
   const isIndex = instrumentId === "TAIEX" || instrumentId === "TPEX";
+  const sessionScope =
+    options.sessionScope ?? (isIntraday ? "current_session" : "history");
+  const presentationTradeDate =
+    sessionScope === "current_session"
+      ? bars.bars[0]?.start_at.slice(0, 10) ?? null
+      : null;
 
   return {
     contract_version: "tw.chart.bundle.v1",
@@ -747,6 +803,8 @@ function taiwanChartBundleResponse(
     lineage_digest: bars.identity.lineage_digest,
     state_digest: bars.identity.state_digest,
     series_revision: bars.identity.series_revision,
+    session_scope: sessionScope,
+    presentation_trade_date: presentationTradeDate,
     quote_side:
       options.quoteSide !== undefined
         ? options.quoteSide
@@ -5391,6 +5449,7 @@ test.describe("OMI dashboard smoke", () => {
   test("TPEX today uses the shared intraday surface without post-close pollution", async ({
     page,
   }) => {
+    const requestedChartSessionScopes: Array<string | null> = [];
     const tpexSummary = marketIndexSummaryResponse(103);
     const tpexIntradayPoints: TaiwanCanonicalFixturePoint[] = [
       {
@@ -5451,6 +5510,11 @@ test.describe("OMI dashboard smoke", () => {
           return { body: ohlcResponse("TPEX") };
         }
         if (path.endsWith("/market/chart/TPEX")) {
+          if ((url.searchParams.get("interval") ?? "1m").endsWith("m")) {
+            requestedChartSessionScopes.push(
+              url.searchParams.get("session_scope")
+            );
+          }
           return {
             body: taiwanChartBundleResponse(
               "TPEX",
@@ -5606,6 +5670,12 @@ test.describe("OMI dashboard smoke", () => {
       "false"
     );
     await expect(page.getByTestId("today-header-price")).toContainText("103");
+    await expect(
+      chart.getByText("昨收", { exact: true }).locator("..").getByText("100", {
+        exact: true,
+      })
+    ).toBeVisible();
+    expect(requestedChartSessionScopes).toContain("current_session");
     expect(await chart.locator("svg *").count()).toBeLessThan(500);
     await expect(chart).toContainText("13:30");
     await expect(chart).not.toContainText("2026/06/14");
@@ -5860,6 +5930,135 @@ test.describe("OMI dashboard smoke", () => {
       "MIS 成交 09:30:00"
     );
     expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan Today recovers a warming tail into one full snapshot without reload", async ({
+    page,
+  }) => {
+    await page.clock.setFixedTime(new Date("2026-06-15T01:30:00.000Z"));
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    const fullPoints: TaiwanCanonicalFixturePoint[] = [
+      ...Array.from({ length: 10 }, (_, index) => ({
+        time: `2026-09-03T09:${String(index).padStart(2, "0")}:00+08:00`,
+        open: 100 + index,
+        high: 101 + index,
+        low: 99 + index,
+        close: 100.5 + index,
+        volume: 100 + index,
+      })),
+      {
+        time: "2026-09-03T13:10:00+08:00",
+        open: 110,
+        high: 111,
+        low: 109,
+        close: 110.5,
+        volume: 120,
+      },
+      {
+        time: "2026-09-03T13:11:00+08:00",
+        open: 111,
+        high: 112,
+        low: 110,
+        close: 111.5,
+        volume: 121,
+      },
+    ];
+    const tailPoints = fullPoints.slice(-2);
+    let intradayRequestCount = 0;
+
+    await mockOmiApi(page, {
+      apiRequests,
+      apiResponder: ({ path, url }) => {
+        if (!path.endsWith("/market/chart/2330")) return null;
+        const interval = url.searchParams.get("interval") ?? "1d";
+        if (interval === "1d") {
+          return { body: taiwanChartBundleResponse("2330", interval) };
+        }
+        intradayRequestCount += 1;
+        if (intradayRequestCount === 1) {
+          return {
+            body: taiwanChartBundleResponse("2330", interval, {
+              points: tailPoints,
+              snapshot: {
+                phase: "warming",
+                status: "trailing_window",
+                revision: "a".repeat(64),
+                barCount: tailPoints.length,
+                availableFrom: tailPoints[0].time,
+                availableTo: "2026-09-03T13:12:00+08:00",
+                reasonCodes: ["TW_CHART_SNAPSHOT_TRAILING_ONLY"],
+              },
+            }),
+          };
+        }
+        if (url.searchParams.get("limit") === "8") {
+          return {
+            body: taiwanChartBundleResponse("2330", interval, {
+              points: tailPoints,
+              snapshot: {
+                phase: "ready",
+                status: "complete_prefix",
+                revision: "b".repeat(64),
+                barCount: fullPoints.length,
+                availableFrom: fullPoints[0].time,
+                availableTo: "2026-09-03T13:12:00+08:00",
+                reasonCodes: ["TW_CHART_SNAPSHOT_COMPLETE"],
+              },
+            }),
+          };
+        }
+        return {
+          body: taiwanChartBundleResponse("2330", interval, {
+            points: fullPoints,
+            snapshot: {
+              phase: "ready",
+              status: "complete_prefix",
+              revision: "b".repeat(64),
+              barCount: fullPoints.length,
+              availableFrom: fullPoints[0].time,
+              availableTo: "2026-09-03T13:12:00+08:00",
+              reasonCodes: ["TW_CHART_SNAPSHOT_COMPLETE"],
+            },
+          }),
+        };
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+    const detailPanel = page.getByTestId("stock-detail-panel");
+    await expect(detailPanel).toHaveAttribute("data-chart-load-state", "success");
+    await expect(detailPanel).toHaveAttribute("data-chart-stock-id", "2330");
+    await page.waitForTimeout(500);
+    await page.getByTestId("timeframe-today").click();
+
+    const surface = page.getByTestId("today-intraday-surface");
+    await expect(surface).toHaveAttribute("data-snapshot-phase", "warming");
+    await expect(surface).toHaveAttribute("data-point-count", "0");
+    await expect(page.getByTestId("intraday-trend-empty")).toContainText(
+      "正在準備今日完整走勢"
+    );
+
+    await expect(surface).toHaveAttribute("data-snapshot-phase", "ready", {
+      timeout: 10_000,
+    });
+    await expect(surface).toHaveAttribute(
+      "data-point-count",
+      String(fullPoints.length)
+    );
+    await expect(surface.getByTestId("intraday-trend-chart")).toBeVisible();
+
+    const intradayLimits = () =>
+      apiRequests
+        .filter(
+          (request) =>
+            request.path.endsWith("/market/chart/2330") &&
+            new URLSearchParams(request.search).get("interval") === "1m"
+        )
+        .map((request) => new URLSearchParams(request.search).get("limit"));
+    expect(intradayLimits().slice(0, 3)).toEqual(["5000", "8", "5000"]);
+    await expect.poll(() => intradayLimits().length, { timeout: 10_000 }).toBeGreaterThanOrEqual(4);
+    expect(intradayLimits().slice(0, 4)).toEqual(["5000", "8", "5000", "8"]);
   });
 
   test("Taiwan quote depth replays only persisted auction snapshots", async ({ page }) => {

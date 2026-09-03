@@ -685,6 +685,41 @@ def _bar_candidate_summaries(
         }:
             eligible = False
             reason_code = "BAR_NOT_FINALIZED"
+        if not eligible and isinstance(requirement.request, BarCapabilityRequest):
+            completed_session = policy is RealtimePolicy.COMPLETED_SESSION
+            current_session_cache = (
+                policy is RealtimePolicy.CACHE_ONLY
+                and not requirement.request.completed_only
+            )
+            prefix_eligible = any(
+                bar.finalization
+                in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+                and requirement.request.start_at <= bar.start_at
+                and bar.end_at <= requirement.request.end_at
+                and (
+                    not current_session_cache
+                    or bar.end_at <= now
+                    and (
+                        bar.lineage.cache_hit
+                        or bar.lineage.authority is AuthorityClass.CACHE
+                    )
+                )
+                and (
+                    not completed_session
+                    or candidate.session
+                    in {MarketSession.POST_CLOSE, MarketSession.CLOSED}
+                )
+                and evaluate_candidate_quality(
+                    bar,
+                    requirement=requirement,
+                    freshness=None,
+                    now=now,
+                ).eligible
+                for bar in candidate.bars[:-1]
+            )
+            if prefix_eligible:
+                eligible = True
+                reason_code = "BAR_PREFIX_PARTIALLY_ELIGIBLE"
         summaries.append(
             CandidateSummary(
                 provider=latest.lineage.provider,
@@ -708,9 +743,15 @@ def _resolve_composed_bar_series(
     max_age: timedelta,
     requirement: DataRequirementV2,
 ) -> ResolvedBarSeries:
-    if policy is not RealtimePolicy.COMPLETED_SESSION:
+    completed_session = policy is RealtimePolicy.COMPLETED_SESSION
+    current_session_cache = (
+        policy is RealtimePolicy.CACHE_ONLY
+        and isinstance(requirement.request, BarCapabilityRequest)
+        and not requirement.request.completed_only
+    )
+    if not completed_session and not current_session_cache:
         raise MarketDataContractError(
-            "timestamp bar-series composition requires completed_session policy"
+            "timestamp bar-series composition requires completed_session or current cache_only policy"
         )
     if not isinstance(requirement.target, InstrumentTarget) or not isinstance(
         requirement.request, BarCapabilityRequest
@@ -732,7 +773,10 @@ def _resolve_composed_bar_series(
     ] = {}
     rejected_quality: list[QualityEvaluation] = []
     for candidate in candidates:
-        if candidate.session not in {MarketSession.POST_CLOSE, MarketSession.CLOSED}:
+        if completed_session and candidate.session not in {
+            MarketSession.POST_CLOSE,
+            MarketSession.CLOSED,
+        }:
             continue
         rank = _bar_candidate_rank(candidate)
         for bar in candidate.bars:
@@ -748,6 +792,20 @@ def _resolve_composed_bar_series(
                 BarFinalization.FINAL,
                 BarFinalization.CORRECTED,
             }:
+                continue
+            if (
+                bar.start_at < requirement.request.start_at
+                or bar.end_at > requirement.request.end_at
+            ):
+                continue
+            if current_session_cache and bar.end_at > now:
+                # The current active minute is provider state, not a finalized
+                # current-session Bar candidate.
+                continue
+            if current_session_cache and not (
+                bar.lineage.cache_hit
+                or bar.lineage.authority is AuthorityClass.CACHE
+            ):
                 continue
             quality = evaluate_candidate_quality(
                 bar,
@@ -776,15 +834,18 @@ def _resolve_composed_bar_series(
                 for limitation in quality.limitations
             )
         )
+        policy_label = (
+            "COMPLETED_SESSION" if completed_session else "CURRENT_SESSION_CACHE"
+        )
         return ResolvedBarSeries(
             health=ResolvedEvidenceHealth(
                 status=ResolvedEvidenceStatus.POLICY_UNSATISFIED,
-                selection_reason="COMPLETED_SESSION_COMPOSITION_NO_ELIGIBLE_BAR",
+                selection_reason=f"{policy_label}_COMPOSITION_NO_ELIGIBLE_BAR",
                 missing_fields=missing_fields,
                 facts_usable=False,
                 research_usable=False,
                 limitations=(
-                    "No bar satisfied the completed-session composition policy.",
+                    "No bar satisfied the timestamp composition policy.",
                     *limitations,
                 ),
             ),
@@ -874,7 +935,13 @@ def _resolve_composed_bar_series(
     contributing_sources = tuple(
         dict.fromkeys(candidate.bars[0].lineage.source for candidate in selected_candidates)
     )
-    composition_limitations: list[str] = []
+    composition_limitations = list(
+        dict.fromkeys(
+            limitation
+            for candidate in selected_candidates
+            for limitation in candidate.limitations
+        )
+    )
     if len(selected_candidates) > 1:
         composition_limitations.append(
             "BAR_SERIES_COMPOSED_FROM_MULTIPLE_CANDIDATES"
@@ -899,6 +966,9 @@ def _resolve_composed_bar_series(
         status = ResolvedEvidenceStatus.SELECTED
     unique_contributor = selected_candidates[0] if len(selected_candidates) == 1 else None
     unique_lineage = unique_contributor.bars[0].lineage if unique_contributor else None
+    policy_label = (
+        "COMPLETED_SESSION" if completed_session else "CURRENT_SESSION_CACHE"
+    )
     health_limitations = tuple(
         dict.fromkeys(
             (
@@ -909,6 +979,7 @@ def _resolve_composed_bar_series(
                     if status is ResolvedEvidenceStatus.STALE
                     else ()
                 ),
+                *composition_limitations,
                 *selected_quality.limitations,
             )
         )
@@ -919,16 +990,18 @@ def _resolve_composed_bar_series(
             status=status,
             selected_provider=(unique_lineage.provider if unique_lineage else None),
             selected_source=(unique_lineage.source if unique_lineage else None),
-            selected_session=MarketSession.CLOSED,
+            selected_session=(
+                MarketSession.CLOSED if completed_session else requirement.session
+            ),
             selected_event_at=_observation_time(latest),
             fallback_used=False,
             selection_reason=(
-                "COMPLETED_SESSION_COMPOSED_WITH_CONFLICTS"
+                f"{policy_label}_COMPOSED_WITH_CONFLICTS"
                 if conflict_bucket_count
                 else (
-                    "COMPLETED_SESSION_COMPOSED_BY_TIMESTAMP"
+                    f"{policy_label}_COMPOSED_BY_TIMESTAMP"
                     if len(selected_candidates) > 1
-                    else "COMPLETED_SESSION_SINGLE_CONTRIBUTOR"
+                    else f"{policy_label}_SINGLE_CONTRIBUTOR"
                 )
             ),
             missing_fields=selected_quality.missing_fields,

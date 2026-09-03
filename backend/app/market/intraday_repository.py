@@ -237,6 +237,7 @@ class TaiwanIntradayBarRepository:
         rows = self._rows(requirement)
         by_provider: dict[tuple[str, str], list[BarObservation]] = defaultdict(list)
         priorities: dict[tuple[str, str], int] = {}
+        limitations_by_provider: dict[tuple[str, str], tuple[str, ...]] = {}
         rejections: list[CandidateRowRejection] = []
         accepted_counts: dict[tuple[str, str], int] = defaultdict(int)
         for row, lineage_row, raw, source in rows:
@@ -311,6 +312,18 @@ class TaiwanIntradayBarRepository:
                 )
                 continue
             start_at = _as_taipei(row.bar_time)
+            if start_at.second != 0 or start_at.microsecond != 0:
+                rejections.append(
+                    CandidateRowRejection(
+                        provider=row.provider,
+                        source=row.source,
+                        storage_row_id=row.id,
+                        raw_result_id=(raw.id if raw is not None else None),
+                        event_date=start_at.date(),
+                        reason_code="INTRADAY_BUCKET_NOT_MINUTE_ALIGNED",
+                    )
+                )
+                continue
             try:
                 bar = BarObservation(
                     instrument=target.instrument,
@@ -393,15 +406,17 @@ class TaiwanIntradayBarRepository:
                 )
                 continue
             by_provider[identity].append(bar)
-            priorities[identity] = (
-                binding.descriptor.priority
+            descriptor = (
+                binding.descriptor
                 if binding is not None
                 else current_source_binding(
                     provider=row.provider,
                     source=row.source,
                     capability_id=TW_CURRENT_INDEX_CAPABILITY_ID,
-                ).descriptor.priority
+                ).descriptor
             )
+            priorities[identity] = descriptor.priority
+            limitations_by_provider[identity] = descriptor.limitations
             accepted_counts[identity] += 1
 
         candidates: list[BarSeriesCandidate] = []
@@ -431,6 +446,7 @@ class TaiwanIntradayBarRepository:
                     freshness=freshness,
                     provider_priority=priorities[identity],
                     session=requirement.session,
+                    limitations=limitations_by_provider[identity],
                 )
             )
         candidates.sort(key=lambda item: item.provider_priority)

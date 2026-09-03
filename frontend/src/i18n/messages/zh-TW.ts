@@ -1893,8 +1893,9 @@ export const zhTW = {
     },
     intraday: {
       insufficient: "今日走勢資料不足",
-      historyWarming: "1 分 K 尚未建立完整",
-      historyWarmingDescription: "報價可用；canonical intraday history 狀態：{status}。",
+      historyWarming: "正在準備今日完整走勢…",
+      historyWarmingDescription: "即時報價仍可使用；今日走勢完成後會自動顯示，不需要重新整理。狀態：{status}。",
+      snapshotDegraded: "走勢部分可用",
       latestCompletedPrice: "最近完成交易日",
       currentPrice: "目前成交價",
       title: "今日走勢 / 成交量",

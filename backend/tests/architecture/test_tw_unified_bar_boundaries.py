@@ -47,6 +47,8 @@ def test_taiwan_chart_quote_side_uses_canonical_public_quote_owner() -> None:
     source = _source("backend/app/market/tw_chart_service.py")
 
     assert "read_taiwan_public_quote_projection" in source
+    assert "project_taiwan_index_quote_side" in source
+    assert "get_market_index_summary" in source
     assert "get_intraday_trend" not in source
 
 

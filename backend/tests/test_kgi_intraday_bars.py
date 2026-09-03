@@ -44,8 +44,8 @@ def test_kgi_buffer_materializes_only_closed_minutes_with_canonical_lineage() ->
         "stock_id": "2330",
         "minute_kbars": [
             {
-                "event_id": "kbar:2330:202608311000:1",
-                "event_time": "2026-08-31T10:00:00+08:00",
+                "event_id": "kbar:2330:202608311001:1",
+                "event_time": "2026-08-31T10:01:00+08:00",
                 "received_at": "2026-08-31T10:01:01+08:00",
                 "open": 2395,
                 "high": 2400,
@@ -55,8 +55,8 @@ def test_kgi_buffer_materializes_only_closed_minutes_with_canonical_lineage() ->
                 "total_amount": 28_776_000,
             },
             {
-                "event_id": "kbar:2330:202608311002:1",
-                "event_time": "2026-08-31T10:02:00+08:00",
+                "event_id": "kbar:2330:202608311003:1",
+                "event_time": "2026-08-31T10:03:00+08:00",
                 "received_at": "2026-08-31T10:02:20+08:00",
                 "open": 2398,
                 "high": 2401,
@@ -75,7 +75,17 @@ def test_kgi_buffer_materializes_only_closed_minutes_with_canonical_lineage() ->
     assert observation.finalization is BarFinalization.FINAL
     assert observation.lineage.provider == "kgi_superpy"
     assert observation.lineage.source == "kgi_superpy_minute_kbars"
+    assert observation.start_at == datetime(2026, 8, 31, 10, 0, tzinfo=TAIPEI)
+    assert observation.end_at == datetime(2026, 8, 31, 10, 1, tzinfo=TAIPEI)
+    assert observation.lineage.event_at == observation.end_at
     assert int(observation.volume.value) == 12_000
+    assert observation.turnover_value is None
+    assert "KGI_PROVIDER_BUCKET_END_NORMALIZED_TO_CANONICAL_START" in (
+        acquisition.summary.limitations
+    )
+    assert "KGI_CUMULATIVE_TOTAL_AMOUNT_NOT_PROJECTED_AS_MINUTE_TURNOVER" in (
+        acquisition.summary.limitations
+    )
 
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -125,7 +135,7 @@ def test_kgi_closing_auction_rows_do_not_enter_continuous_minute_bars() -> None:
             "stock_id": "2330",
             "minute_kbars": [
                 {
-                    "event_time": "2026-09-01T13:24:00+08:00",
+                    "event_time": "2026-09-01T13:25:00+08:00",
                     "received_at": "2026-09-01T13:25:01+08:00",
                     "open": 100,
                     "high": 101,
@@ -135,7 +145,7 @@ def test_kgi_closing_auction_rows_do_not_enter_continuous_minute_bars() -> None:
                     "total_amount": 100000,
                 },
                 {
-                    "event_time": "2026-09-01T13:27:00+08:00",
+                    "event_time": "2026-09-01T13:28:00+08:00",
                     "received_at": "2026-09-01T13:28:01+08:00",
                     "open": 100,
                     "high": 101,

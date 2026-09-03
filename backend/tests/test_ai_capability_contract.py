@@ -25,6 +25,7 @@ class AiCapabilityContractTests(unittest.TestCase):
         payload: dict,
         returned_count: int = 1,
         requested_limit: int | None = None,
+        market: str = "US",
     ) -> dict:
         manifest_item = {
             "capability": capability,
@@ -41,7 +42,10 @@ class AiCapabilityContractTests(unittest.TestCase):
             canonical={
                 "ok": True,
                 "request_status": "completed",
-                "target": {"type": "us_stock", "market": "US"},
+                "target": {
+                    "type": "tw_stock" if market == "TW" else "us_stock",
+                    "market": market,
+                },
                 "status": {"readiness": {"decision_required": True}},
                 "evidence": {},
             },
@@ -52,6 +56,91 @@ class AiCapabilityContractTests(unittest.TestCase):
             scope_type="stock",
         )
         return quality["capabilities"][capability]
+
+    def test_current_session_intraday_blocks_cross_date_series(self) -> None:
+        item = self._quality_item(
+            capability="intraday.bars",
+            market="TW",
+            payload={
+                "status": "current",
+                "session_scope": "current_session",
+                "expected_trade_date": "2026-09-03",
+                "interval": "1m",
+                "point_count": 4,
+                "volume_unit": "shares",
+                "provider": "fugle_marketdata",
+                "source": "fugle.intraday.1m",
+                "indices": [
+                    {
+                        "index_id": "TAIEX",
+                        "points": [
+                            {"time": "2026-09-03T09:00:00+08:00", "price": 102},
+                            {"time": "2026-09-03T09:01:00+08:00", "price": 103},
+                        ],
+                    },
+                    {
+                        "index_id": "TPEX",
+                        "points": [
+                            {"time": "2026-09-02T13:30:00+08:00", "price": 100},
+                            {"time": "2026-09-03T09:01:00+08:00", "price": 101},
+                        ],
+                    },
+                ],
+                "quality": {
+                    "status": "current",
+                    "facts_usable": True,
+                    "decision_usable": True,
+                },
+            },
+        )
+
+        self.assertEqual(item["coverage_status"], "partial")
+        self.assertEqual(item["current_session_identity"]["status"], "mismatch")
+        self.assertEqual(
+            item["current_session_identity"]["unexpected_trade_dates"],
+            ["2026-09-02"],
+        )
+        self.assertIn(
+            "CURRENT_SESSION_SERIES_DATE_MISMATCH",
+            item["reason_codes"],
+        )
+        self.assertFalse(item["decision_usable"])
+        self.assertFalse(item["intraday_research_usable"])
+
+    def test_historical_intraday_allows_expected_cross_session_boundary(self) -> None:
+        item = self._quality_item(
+            capability="intraday.bars",
+            market="TW",
+            payload={
+                "status": "current",
+                "session_scope": "history",
+                "interval": "1m",
+                "point_count": 4,
+                "volume_unit": "shares",
+                "provider": "fugle_marketdata",
+                "source": "fugle.intraday.1m",
+                "points": [
+                    {"time": "2026-09-02T13:29:00+08:00", "price": 100},
+                    {"time": "2026-09-02T13:30:00+08:00", "price": 101},
+                    {"time": "2026-09-03T09:00:00+08:00", "price": 102},
+                    {"time": "2026-09-03T09:01:00+08:00", "price": 103},
+                ],
+                "quality": {
+                    "status": "current",
+                    "facts_usable": True,
+                    "decision_usable": True,
+                },
+            },
+        )
+
+        self.assertEqual(
+            item["current_session_identity"]["status"],
+            "not_applicable",
+        )
+        self.assertNotIn(
+            "CURRENT_SESSION_SERIES_DATE_MISMATCH",
+            item["reason_codes"],
+        )
 
     def test_payload_semantic_missing_caps_generic_quality(self) -> None:
         item = self._quality_item(

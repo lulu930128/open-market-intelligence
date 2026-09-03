@@ -177,6 +177,54 @@ def _daily_bar(provider: str, day: int, close: str) -> BarObservation:
     )
 
 
+def _current_minute_bar(
+    provider: str,
+    minute: int,
+    close: str,
+) -> BarObservation:
+    start = NOW.replace(hour=9, minute=minute, second=0, microsecond=0)
+    return BarObservation(
+        instrument=_instrument(),
+        lineage=_lineage(provider, cache_hit=True),
+        interval="1m",
+        start_at=start,
+        end_at=start + timedelta(minutes=1),
+        open_price=Decimal(close) - 1,
+        high_price=Decimal(close) + 1,
+        low_price=Decimal(close) - 2,
+        close_price=Decimal(close),
+        volume=Quantity(value=1000, unit=QuantityUnit.SHARE),
+        volume_status="observed",
+        price_basis="raw",
+        finalization=BarFinalization.FINAL,
+    )
+
+
+def _current_bar_requirement() -> DataRequirementV2:
+    return DataRequirementV2(
+        target=InstrumentTarget(instrument=_instrument()),
+        request=BarCapabilityRequest(
+            capability_id="bars.ohlcv.intraday",
+            interval="1m",
+            start_at=NOW.replace(hour=9, minute=0, second=0, microsecond=0),
+            end_at=NOW + timedelta(minutes=1),
+            max_bars=10,
+            completed_only=False,
+            price_basis="raw",
+            series_resolution=BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP,
+        ),
+        purpose=DataPurpose.VIEWER,
+        realtime_policy=RealtimePolicy.CACHE_ONLY,
+        session=MarketSession.CONTINUOUS,
+        requested_at=NOW,
+        freshness=FreshnessRequirement(max_age_seconds=300),
+        quality=QualityRequirement(
+            required_fields=("open_price", "high_price", "low_price", "close_price"),
+        ),
+        bounds=RequestBounds(max_rows=10),
+    )
+
+
 def test_public_policy_vocabulary_remains_backward_compatible() -> None:
     assert PUBLIC_REALTIME_POLICIES == {
         "cache_only",
@@ -651,6 +699,81 @@ def test_completed_bar_composition_fills_history_and_reports_conflicts() -> None
     assert result.composition.conflict_bucket_count == 2
     assert "BAR_SERIES_COMPOSED_FROM_MULTIPLE_CANDIDATES" in result.composition.limitations
     assert "BAR_SERIES_SAME_TIMESTAMP_CONFLICT_RESOLVED" in result.composition.limitations
+
+
+def test_current_cache_composition_keeps_baseline_and_overlays_closed_live_tail() -> None:
+    baseline = BarSeriesCandidate(
+        bars=tuple(
+            _current_minute_bar("nstock", minute, str(100 + minute))
+            for minute in range(5)
+        ),
+        freshness=EvidenceFreshness.FRESH,
+        provider_priority=20,
+        session=MarketSession.CONTINUOUS,
+    )
+    live_tail = BarSeriesCandidate(
+        bars=tuple(
+            _current_minute_bar("kgi", minute, str(200 + minute))
+            for minute in range(3, 6)
+        ),
+        freshness=EvidenceFreshness.FRESH,
+        provider_priority=5,
+        session=MarketSession.CONTINUOUS,
+    )
+
+    result = resolve_bar_series(
+        [live_tail, baseline],
+        policy=RealtimePolicy.CACHE_ONLY,
+        now=NOW,
+        max_age=timedelta(minutes=5),
+        requirement=_current_bar_requirement(),
+    )
+
+    assert [bar.start_at.minute for bar in result.bars] == [0, 1, 2, 3, 4]
+    assert [bar.lineage.provider for bar in result.bars] == [
+        "nstock",
+        "nstock",
+        "nstock",
+        "kgi",
+        "kgi",
+    ]
+    assert result.health.selected_provider is None
+    assert result.composition.filled_bucket_count == 3
+    assert result.composition.conflict_bucket_count == 2
+    assert result.health.selected_session is MarketSession.CONTINUOUS
+
+
+def test_current_composition_keeps_valid_prefix_when_latest_bar_is_hard_invalid() -> None:
+    valid = tuple(
+        _current_minute_bar("provider", minute, str(100 + minute))
+        for minute in range(4)
+    )
+    latest = _current_minute_bar("provider", 4, "104")
+    latest = latest.model_copy(
+        update={
+            "lineage": latest.lineage.model_copy(
+                update={"event_at": NOW + timedelta(minutes=10)}
+            )
+        }
+    )
+    candidate = BarSeriesCandidate(
+        bars=(*valid, latest),
+        freshness=EvidenceFreshness.FRESH,
+        provider_priority=5,
+        session=MarketSession.CONTINUOUS,
+    )
+
+    result = resolve_bar_series(
+        [candidate],
+        policy=RealtimePolicy.CACHE_ONLY,
+        now=NOW,
+        max_age=timedelta(minutes=5),
+        requirement=_current_bar_requirement(),
+    )
+
+    assert [bar.start_at.minute for bar in result.bars] == [0, 1, 2, 3]
+    assert result.candidates[0].eligible is True
+    assert result.candidates[0].reason_code == "BAR_PREFIX_PARTIALLY_ELIGIBLE"
 
 
 def test_candidate_summaries_are_bounded_and_never_include_raw_payloads() -> None:

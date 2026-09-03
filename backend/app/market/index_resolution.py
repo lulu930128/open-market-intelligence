@@ -546,6 +546,8 @@ def resolve_taiwan_index_quote_state(
                 if latest_point
                 and latest_point.get("previous_close") is not None
                 else (intraday or {}).get("previous_close")
+                if (intraday or {}).get("previous_close") is not None
+                else snapshot.get("previous_close")
             ),
             explicit_change=(intraday or {}).get("change"),
             explicit_change_pct=(intraday or {}).get("change_pct"),
@@ -1394,6 +1396,120 @@ def project_taiwan_index_headline(
     }
 
 
+def project_taiwan_index_quote_side(
+    index_item: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project resolved index truth into the shared intraday quote-side shape."""
+
+    headline = project_taiwan_index_headline(index_item)
+    if headline is None:
+        return None
+
+    value = _number(headline.get("value"))
+    previous_close = _number(headline.get("previous_close"))
+    event_time = headline.get("event_time")
+    source = str(headline.get("source") or "") or None
+    provider = str(headline.get("provider") or "") or None
+    selected_candidate = str(headline.get("selected_candidate") or "")
+    limitations = list(
+        dict.fromkeys(
+            [
+                *(
+                    str(item)
+                    for item in headline.get("limitations") or []
+                    if item
+                ),
+                *(
+                    str(item)
+                    for item in headline.get("warnings") or []
+                    if item
+                ),
+            ]
+        )
+    )
+    raw_resolution = (
+        index_item.get("resolution")
+        if isinstance(index_item.get("resolution"), dict)
+        else {}
+    )
+    selected_age_seconds = next(
+        (
+            candidate.get("age_seconds")
+            for candidate in raw_resolution.get("candidates") or []
+            if isinstance(candidate, dict)
+            and candidate.get("candidate") == selected_candidate
+        ),
+        None,
+    )
+    current_trade_available = bool(
+        value is not None and selected_candidate == "intraday_last_trade"
+    )
+    current_observation = (
+        {
+            "value": value,
+            "observed_at": event_time,
+            "confirmed_at": None,
+            "price_semantics": headline.get("quote_semantics") or "unavailable",
+            "provider": provider,
+            "source": source,
+            "status": headline.get("freshness_status") or "unknown",
+            "is_fallback": bool(headline.get("compatibility_fallback")),
+            "limitations": limitations,
+            "previous_close": previous_close,
+            "previous_close_trade_date": raw_resolution.get(
+                "selected_previous_close_trade_date"
+            ),
+            "previous_close_source": raw_resolution.get(
+                "selected_previous_close_source"
+            ),
+            "previous_close_provider": raw_resolution.get(
+                "selected_previous_close_provider"
+            ),
+            "previous_close_status": (
+                "current" if previous_close is not None else "missing"
+            ),
+            "freshness_status": headline.get("freshness_status") or "unknown",
+            "decision_usable": bool(headline.get("decision_usable")),
+        }
+        if value is not None
+        else None
+    )
+    return {
+        "current_observation": current_observation,
+        "previous_close": previous_close,
+        "price_diagnostics": {
+            "history_price_source": None,
+            "latest_history_time": None,
+            "latest_history_price": None,
+            "latest_actual_trade_time": event_time,
+            "latest_actual_trade_price": value,
+            "current_price_source": source,
+            "lag_seconds": selected_age_seconds,
+            "current_trade_available": current_trade_available,
+            "current_trade_unavailable_reason": (
+                None
+                if current_trade_available
+                else "canonical_index_current_trade_unavailable"
+            ),
+            "current_price_applied_to_history": False,
+        },
+        "capabilities": {
+            "supports_volume": False,
+            "supports_vwap": False,
+            "supports_price_limit": False,
+            "supports_quote_depth": False,
+        },
+        "source": source,
+        "trade_date": headline.get("trade_date"),
+        "updated_at": event_time,
+        "resolution_version": headline.get("resolution_version"),
+        "resolution_id": headline.get("resolution_id"),
+        "selected_candidate": headline.get("selected_candidate"),
+        "quote_semantics": headline.get("quote_semantics"),
+        "limitations": limitations,
+    }
+
+
 __all__ = [
     "TAIWAN_INDEX_ACQUISITION_POLICIES",
     "TAIWAN_INDEX_HEADLINE_COMPATIBILITY_LIMITATION",
@@ -1407,6 +1523,7 @@ __all__ = [
     "latest_intraday_point",
     "normalize_index_acquisition_policy",
     "project_taiwan_index_headline",
+    "project_taiwan_index_quote_side",
     "resolve_taiwan_index_quote_state",
     "resolve_taiwan_index_truth",
 ]

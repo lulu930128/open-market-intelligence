@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -126,6 +126,12 @@ class TaiwanIntradayBarTransaction:
             raise ValueError("TW_BASE_BAR_INTERVAL_REQUIRED")
         if observation.interval != requirement.request.interval:
             raise ValueError("intraday observation interval mismatch")
+        if (
+            observation.start_at.second != 0
+            or observation.start_at.microsecond != 0
+            or observation.end_at - observation.start_at != timedelta(minutes=1)
+        ):
+            raise ValueError("Taiwan canonical 1m bar is not minute-grid aligned")
         if (
             observation.lineage.provider != receipt.provider
             or observation.lineage.source != receipt.source

@@ -7,7 +7,12 @@ import {
   projectBackendIntradayPoints,
 } from "@/components/IntradayTrendChart";
 import { formatChartDate } from "@/components/chart/lightweight-chart/drawingModel";
-import { projectTaiwanBarSeries } from "@/components/stock-detail/useTaiwanStockChartData";
+import {
+  isTodayPresentationCacheEligible,
+  projectTaiwanBarSeries,
+  shouldRecoverTodayFullSnapshot,
+  snapshotPhaseForCoverage,
+} from "@/components/stock-detail/useTaiwanStockChartData";
 import type { IntradayTrendPoint, TaiwanBarSeriesRead } from "@/types/market";
 
 test("Taiwan chart data hook has one Bar/Technical route with no index branch", () => {
@@ -24,6 +29,8 @@ test("Taiwan chart data hook has one Bar/Technical route with no index branch", 
   expect(source).toContain("INDEX_DAILY_CHART_BARS = 300");
   expect(source).not.toContain("/api/market/indices/");
   expect(source).not.toContain("/api/market/intraday/");
+  expect(source).not.toContain("requestJson");
+  expect(source).not.toContain("fetchJson<MarketIntradayChartRead>");
   expect(source).not.toContain("/api/market/ohlc/");
   expect(source).not.toContain("aggregateProfessionalIntradayBars");
   expect(source).not.toContain("aggregateIntradayPoints");
@@ -32,6 +39,109 @@ test("Taiwan chart data hook has one Bar/Technical route with no index branch", 
   expect(pageSource).toContain(
     'taiwanIndexProductIds.has(stockId.toUpperCase()) ? "300" : "260"'
   );
+});
+
+test("Today presentation cache is bounded and never owns dataset repair", () => {
+  const source = readFileSync(
+    join(
+      process.cwd(),
+      "src/components/stock-detail/useTaiwanStockChartData.ts"
+    ),
+    "utf8"
+  );
+
+  expect(source).toContain("TODAY_PRESENTATION_CACHE_MAX_SYMBOLS = 10");
+  expect(source).toContain("todayPresentationCacheRef");
+  expect(source).toContain("setTodayState(cachedTodayState)");
+  expect(source).toContain('getMarketCalendarStatusSnapshot("tw")');
+  expect(source).toContain("entry.state.tradeDate === expectedTradeDate");
+  expect(source).not.toContain("repair_recommended");
+  expect(source).not.toContain("minimum_bar_count");
+  expect(source).not.toContain("history/refresh");
+});
+
+test("Today legacy coverage fallback only promotes complete snapshots", () => {
+  expect(snapshotPhaseForCoverage("complete_prefix")).toBe("ready");
+  expect(snapshotPhaseForCoverage("complete_session")).toBe("ready");
+  expect(snapshotPhaseForCoverage("partial_prefix")).toBe("warming");
+  expect(snapshotPhaseForCoverage("sparse")).toBe("warming");
+  expect(snapshotPhaseForCoverage("trailing_window")).toBe("warming");
+  expect(snapshotPhaseForCoverage("partial_window")).toBe("warming");
+  expect(snapshotPhaseForCoverage("missing")).toBe("warming");
+});
+
+test("Today presentation cache rejects warming and short snapshots", () => {
+  const point = {
+    time: "2026-09-03T09:00:00+08:00",
+    price: 100,
+    volume: 10,
+  } as IntradayTrendPoint;
+
+  expect(
+    isTodayPresentationCacheEligible({
+      snapshotPhase: "warming",
+      tradeDate: "2026-09-03",
+      trend: [point, { ...point, time: "2026-09-03T09:01:00+08:00" }],
+    })
+  ).toBe(false);
+  expect(
+    isTodayPresentationCacheEligible({
+      snapshotPhase: "ready",
+      tradeDate: "2026-09-03",
+      trend: [point],
+    })
+  ).toBe(false);
+  expect(
+    isTodayPresentationCacheEligible({
+      snapshotPhase: "degraded",
+      tradeDate: "2026-09-03",
+      trend: [point, { ...point, time: "2026-09-03T09:01:00+08:00" }],
+    })
+  ).toBe(true);
+});
+
+test("Today delta requests recover exactly when the canonical snapshot expands", () => {
+  const readySnapshot = {
+    phase: "ready" as const,
+    revision: "b".repeat(64),
+    barCount: 5,
+    availableFrom: "2026-09-03T09:00:00+08:00",
+    availableTo: "2026-09-03T09:05:00+08:00",
+    reasonCodes: ["TW_CHART_SNAPSHOT_COMPLETE"],
+  };
+
+  expect(
+    shouldRecoverTodayFullSnapshot({
+      fullSnapshot: false,
+      mergedPointCount: 2,
+      next: readySnapshot,
+      previous: {
+        snapshotPhase: "warming",
+        snapshotRevision: "a".repeat(64),
+        snapshotAvailableFrom: "2026-09-03T13:10:00+08:00",
+      },
+    })
+  ).toBe(true);
+  expect(
+    shouldRecoverTodayFullSnapshot({
+      fullSnapshot: false,
+      mergedPointCount: 5,
+      next: readySnapshot,
+      previous: {
+        snapshotPhase: "ready",
+        snapshotRevision: readySnapshot.revision,
+        snapshotAvailableFrom: readySnapshot.availableFrom,
+      },
+    })
+  ).toBe(false);
+  expect(
+    shouldRecoverTodayFullSnapshot({
+      fullSnapshot: true,
+      mergedPointCount: 5,
+      next: readySnapshot,
+      previous: null,
+    })
+  ).toBe(false);
 });
 
 test("Taiwan canonical Bar projection preserves missing quantities", () => {

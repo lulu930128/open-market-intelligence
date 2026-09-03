@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,19 @@ from app.market.tw_index_daily_platform import (
     bootstrap_taiex_official_daily_history,
     bootstrap_tpex_completed_derived_daily_history,
 )
+from app.market.trading_calendar import (
+    TAIWAN_TZ,
+    is_taiwan_trading_day,
+    taiwan_market_session_phase,
+)
+from app.market.tw_bar_contracts import TaiwanCurrentSessionSnapshotPhase
+from app.market.tw_bar_service import TaiwanBarService
 from app.market.tw_intraday_platform import bootstrap_taiwan_intraday_bars
+
+
+# Collapse rapid switch-away/return commands without suppressing a later retry
+# when a completed job still left the canonical snapshot in WARMING.
+TAIWAN_VIEWER_WARMUP_SUCCESS_REUSE_SECONDS = 15
 
 
 def _normalize_symbols(symbols: list[str] | tuple[str, ...]) -> tuple[str, ...]:
@@ -64,6 +76,7 @@ def enqueue_taiwan_intraday_bar_bootstrap(
     *,
     symbols: list[str] | tuple[str, ...] = (),
     max_symbols: int = 10,
+    reuse_success_within_seconds: float = 0,
 ) -> tuple[JobRun, bool]:
     if max_symbols < 1 or max_symbols > 10:
         raise ValueError("Taiwan intraday bootstrap max_symbols must be between 1 and 10")
@@ -91,6 +104,42 @@ def enqueue_taiwan_intraday_bar_bootstrap(
         message="Queued bounded Taiwan Base-1m bootstrap.",
         task=run_taiwan_intraday_bar_bootstrap_job,
         task_args=(normalized, max_symbols),
+        reuse_success_within_seconds=reuse_success_within_seconds,
+    )
+
+
+def enqueue_taiwan_intraday_viewer_warmup(
+    db: Session,
+    stock_id: str,
+    requested_at: datetime,
+) -> tuple[JobRun | None, bool]:
+    """Signal one bounded baseline warmup from a viewer command boundary."""
+
+    if requested_at.tzinfo is None or requested_at.utcoffset() is None:
+        raise ValueError("Taiwan viewer warmup requested_at must be timezone-aware")
+    local_now = requested_at.astimezone(TAIWAN_TZ)
+    if not is_taiwan_trading_day(local_now.date()) or taiwan_market_session_phase(
+        local_now
+    ) not in {"regular", "closing_auction"}:
+        return None, False
+
+    coverage = TaiwanBarService(db).read_current_session_bars(
+        instrument_id=stock_id,
+        interval="1m",
+        limit=1,
+        requested_at=local_now,
+    ).current_session_coverage
+    if (
+        coverage is None
+        or coverage.snapshot_phase is not TaiwanCurrentSessionSnapshotPhase.WARMING
+    ):
+        return None, False
+
+    return enqueue_taiwan_intraday_bar_bootstrap(
+        db,
+        symbols=[stock_id],
+        max_symbols=1,
+        reuse_success_within_seconds=TAIWAN_VIEWER_WARMUP_SUCCESS_REUSE_SECONDS,
     )
 
 
@@ -213,8 +262,10 @@ def enqueue_taiwan_index_daily_bootstrap(
         ),
     )
 __all__ = [
+    "TAIWAN_VIEWER_WARMUP_SUCCESS_REUSE_SECONDS",
     "enqueue_taiwan_index_daily_bootstrap",
     "enqueue_taiwan_intraday_bar_bootstrap",
+    "enqueue_taiwan_intraday_viewer_warmup",
     "run_taiwan_index_daily_bootstrap_job",
     "run_taiwan_intraday_bar_bootstrap_job",
 ]

@@ -113,6 +113,7 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
             "time": "2026-08-13",
             "as_of": "2026-08-13T13:30:00+08:00",
             "close": 24_000.0,
+            "previous_close": 24_000.0,
             "source": "market_index_daily_stat",
         }
 
@@ -140,6 +141,8 @@ class TaiwanIndexResolutionTests(unittest.TestCase):
         self.assertEqual(first["selected_candidate"], "intraday_last_trade")
         self.assertEqual(first["selected_trade_date"], "2026-08-14")
         self.assertEqual(first["selected_value"], 24_321.5)
+        self.assertEqual(first["selected_previous_close"], 24_000.0)
+        self.assertEqual(first["selected_change"], 321.5)
         self.assertTrue(first["decision_usable"])
         self.assertEqual(first["freshness_status"], "current")
         self.assertEqual(first["resolution_id"], repeated["resolution_id"])

@@ -15,6 +15,7 @@ from app.market.index_resolution import (
     TAIWAN_INDEX_HEADLINE_COMPATIBILITY_VERSION,
     ResolvedTaiwanIndexTruth,
     project_taiwan_index_headline,
+    project_taiwan_index_quote_side,
     resolve_taiwan_index_truth,
 )
 from app.market.tw_dataset_catalog import TW_DATASET_CATALOG
@@ -215,6 +216,34 @@ def test_shared_headline_projection_keeps_one_selected_lane() -> None:
     assert headline["source"] == "twse_mi_5mins_hist"
     assert headline["resolution_id"] == truth.resolution_id
     assert headline["compatibility_fallback"] is False
+
+
+def test_index_quote_side_projects_the_same_resolved_lane() -> None:
+    truth = resolve_taiwan_index_truth(
+        intraday=None,
+        index_snapshot=_snapshot(),
+        calendar_status=_calendar(),
+        index_id="TAIEX",
+        acquisition_policy="cache_only",
+    )
+    quote_side = project_taiwan_index_quote_side(
+        {
+            **_snapshot(),
+            "resolution": truth.model_dump(mode="json"),
+        }
+    )
+
+    assert quote_side is not None
+    assert quote_side["current_observation"]["value"] == 46_164.72
+    assert quote_side["previous_close"] == 45_900.0
+    assert quote_side["source"] == "twse_mi_5mins_hist"
+    assert quote_side["resolution_id"] == truth.resolution_id
+    assert quote_side["capabilities"] == {
+        "supports_volume": False,
+        "supports_vwap": False,
+        "supports_price_limit": False,
+        "supports_quote_depth": False,
+    }
 
 
 def test_headline_compatibility_fallback_is_explicit_and_never_official() -> None:
@@ -436,6 +465,18 @@ def test_production_index_consumers_do_not_call_legacy_truth_resolver() -> None:
         }
         assert "resolve_taiwan_index_quote_state" not in called_names
         assert "resolve_taiwan_index_truth(" in source
+        assert "read_taiwan_index_minute_series" not in source
+
+    summary_source = (
+        REPO_ROOT / "backend/app/market/indices.py"
+    ).read_text(encoding="utf-8")
+    ai_source = (
+        REPO_ROOT / "backend/app/ai/market_context/taiwan_market.py"
+    ).read_text(encoding="utf-8")
+    assert "read_taiwan_index_intraday_bars(" in summary_source
+    assert "intraday=intraday" in summary_source
+    assert "dependencies.read_taiwan_index_intraday_bars(" in ai_source
+    assert 'session_scope="current_session"' in ai_source
 
 
 def test_registered_index_refresh_materializes_then_rereads_unified_bars(

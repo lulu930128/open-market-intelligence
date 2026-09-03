@@ -13,6 +13,7 @@ from app.db.models import Base, StockMaster
 from app.market.tw_realtime_lease_platform import (
     _sync_canonical_snapshot,
     acquire_taiwan_realtime_quote_lease,
+    release_taiwan_realtime_quote_lease,
 )
 from app.market.tw_realtime_capabilities import KGI_QUOTE_SNAPSHOT_DESCRIPTOR
 from app.market_data.contracts import (
@@ -510,6 +511,15 @@ def test_taiwan_platform_preserves_public_shape_with_neutral_coordinator() -> No
         ports={"kgi_superpy": port},
         id_factory=lambda: "public-platform-token",
     )
+    warmup_calls: list[tuple[Session, str, datetime]] = []
+
+    def enqueue_baseline_warmup(
+        warmup_db: Session,
+        stock_id: str,
+        requested_at: datetime,
+    ) -> None:
+        warmup_calls.append((warmup_db, stock_id, requested_at))
+
     try:
         state = acquire_taiwan_realtime_quote_lease(
             db,
@@ -517,7 +527,10 @@ def test_taiwan_platform_preserves_public_shape_with_neutral_coordinator() -> No
             owner_kind="frontend_viewer",
             requested_at=NOW,
             coordinator=coordinator,
+            baseline_warmup_enqueuer=enqueue_baseline_warmup,
         )
+
+        assert warmup_calls == [(db, "2330", NOW)]
     finally:
         db.close()
         engine.dispose()
@@ -526,6 +539,101 @@ def test_taiwan_platform_preserves_public_shape_with_neutral_coordinator() -> No
     assert state.stock_id == "2330"
     assert state.provider == "kgi_superpy"
     assert state.owner_kind == "frontend_viewer"
+
+
+def test_non_frontend_lease_does_not_signal_viewer_baseline_warmup() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="台積電",
+            market="TWSE",
+            instrument_type="stock",
+        )
+    )
+    db.commit()
+    port = FakeViewerPort("kgi_superpy")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(KGI_QUOTE_SNAPSHOT_DESCRIPTOR,),
+        ports={"kgi_superpy": port},
+        id_factory=lambda: "non-frontend-token",
+    )
+    warmup_calls: list[str] = []
+    try:
+        state = acquire_taiwan_realtime_quote_lease(
+            db,
+            stock_id="2330",
+            owner_kind="acceptance_probe",
+            requested_at=NOW,
+            coordinator=coordinator,
+            baseline_warmup_enqueuer=(
+                lambda _db, stock_id, _requested_at: warmup_calls.append(stock_id)
+            ),
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+    assert state.lease_id == "non-frontend-token"
+    assert warmup_calls == []
+
+
+def test_kgi_release_flushes_closed_bar_buffer_before_provider_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="台積電",
+            market="TWSE",
+            instrument_type="stock",
+        )
+    )
+    db.commit()
+    port = FakeViewerPort("kgi_superpy")
+    coordinator = ViewerLeaseCoordinator(
+        descriptors=(KGI_QUOTE_SNAPSHOT_DESCRIPTOR,),
+        ports={"kgi_superpy": port},
+        id_factory=lambda: "public-release-flush-token",
+    )
+    acquired = acquire_taiwan_realtime_quote_lease(
+        db,
+        stock_id="2330",
+        owner_kind="frontend_viewer",
+        requested_at=NOW,
+        coordinator=coordinator,
+    )
+    assert acquired.lease_id is not None
+    calls: list[tuple[str, datetime]] = []
+
+    def sync_bars(_db, *, stock_id: str, requested_at: datetime) -> None:
+        calls.append((stock_id, requested_at))
+        assert port.release_ids == []
+
+    monkeypatch.setattr(
+        "app.market.tw_realtime_lease_platform._sync_kgi_minute_bars",
+        sync_bars,
+    )
+
+    try:
+        released = release_taiwan_realtime_quote_lease(
+            db,
+            acquired.lease_id,
+            requested_at=NOW,
+            coordinator=coordinator,
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+    assert calls == [("2330", NOW)]
+    assert released is not None and released.status == "released"
+    assert port.release_ids == ["inner-1"]
 
 
 def test_close_resolution_sync_persists_quote_without_depth_or_auction(

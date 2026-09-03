@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from collections.abc import Callable
+import logging
+from datetime import datetime
 from threading import Lock
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.market.providers.kgi_canonical import KGI_PROVIDER
-from app.market.providers.kgi_intraday_bars import kgi_minute_kbar_acquisition
+from app.market.providers.kgi_intraday_bars import (
+    kgi_minute_kbar_acquisition,
+    kgi_minute_kbar_bucket_bounds,
+)
 from app.market.providers.kgi_realtime_lease import KgiRealtimeQuoteLeasePort
 from app.market.providers.fugle_realtime_lease import FugleRealtimeQuoteLeasePort
 from app.market.providers.fugle_realtime_runtime import get_fugle_realtime_runtime
@@ -48,6 +53,11 @@ from app.market_data.research_lease import (
     ViewerLeaseOwnerKind,
     ViewerLeaseState,
 )
+
+
+logger = logging.getLogger(__name__)
+
+TaiwanBaselineWarmupEnqueuer = Callable[[Session, str, datetime], object]
 
 
 def _instrument(db: Session, stock_id: str) -> InstrumentKey:
@@ -189,14 +199,12 @@ def _sync_kgi_minute_bars(
     ]
     finalized_rows: list[dict] = []
     for row in rows:
-        value = row.get("event_time")
-        try:
-            start_at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError:
+        value = row.get("provider_event_time") or row.get("event_time")
+        bounds = kgi_minute_kbar_bucket_bounds(value)
+        if bounds is None:
             continue
-        if start_at.tzinfo is None or start_at.utcoffset() is None:
-            start_at = start_at.replace(tzinfo=TAIWAN_TZ)
-        if requested_at >= start_at + timedelta(minutes=1):
+        _start_at, end_at = bounds
+        if requested_at >= end_at:
             finalized_rows.append(row)
     if not finalized_rows:
         return
@@ -277,6 +285,27 @@ def _sync_if_live(
     return state
 
 
+def _signal_viewer_baseline_warmup(
+    db: Session,
+    state: ViewerLeaseState,
+    *,
+    requested_at: datetime,
+    owner_kind: ViewerLeaseOwnerKind,
+    enqueuer: TaiwanBaselineWarmupEnqueuer | None,
+) -> ViewerLeaseState:
+    if owner_kind != "frontend_viewer" or enqueuer is None:
+        return state
+    try:
+        enqueuer(db, state.stock_id, requested_at)
+    except Exception as exc:
+        logger.warning(
+            "Taiwan viewer baseline warmup signal failed stock_id=%s: %s",
+            state.stock_id,
+            exc,
+        )
+    return state
+
+
 def acquire_taiwan_realtime_quote_lease(
     db: Session,
     *,
@@ -284,6 +313,7 @@ def acquire_taiwan_realtime_quote_lease(
     owner_kind: ViewerLeaseOwnerKind = "frontend_viewer",
     requested_at: datetime | None = None,
     coordinator: ViewerLeaseCoordinator | None = None,
+    baseline_warmup_enqueuer: TaiwanBaselineWarmupEnqueuer | None = None,
 ) -> ViewerLeaseState:
     instrument = _instrument(db, stock_id)
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
@@ -307,13 +337,25 @@ def acquire_taiwan_realtime_quote_lease(
         requirement,
         owner_kind=owner_kind,
     )
+
+    def finish(state: ViewerLeaseState) -> ViewerLeaseState:
+        return _signal_viewer_baseline_warmup(
+            db,
+            state,
+            requested_at=effective_requested_at,
+            owner_kind=owner_kind,
+            enqueuer=baseline_warmup_enqueuer,
+        )
+
     if result.lease is not None:
         if coordinator is not None:
-            return result.lease
-        return _sync_if_live(
-            db,
-            result.lease,
-            requested_at=effective_requested_at,
+            return finish(result.lease)
+        return finish(
+            _sync_if_live(
+                db,
+                result.lease,
+                requested_at=effective_requested_at,
+            )
         )
     fallback_error: str | None = None
     if requirement.session in MIS_ORDER_BOOK_DESCRIPTOR.supported_sessions:
@@ -326,36 +368,41 @@ def acquire_taiwan_realtime_quote_lease(
         except Exception as exc:
             fallback_error = f"MIS_DEPTH_FALLBACK_FAILED:{type(exc).__name__}"
         else:
-            return ViewerLeaseState(
-                stock_id=instrument.symbol,
-                provider=(
-                    result.selected_provider
-                    or KGI_QUOTE_SNAPSHOT_DESCRIPTOR.provider_key
-                ),
-                owner_kind=owner_kind,
-                status="degraded",
-                fallback_source=MIS_SOURCE,
-                message=(
-                    "broker即時租約目前不可用；已完成一次有界TWSE MIS五檔備援更新。"
-                ),
-                error=result.detail_code,
+            return finish(
+                ViewerLeaseState(
+                    stock_id=instrument.symbol,
+                    provider=(
+                        result.selected_provider
+                        or KGI_QUOTE_SNAPSHOT_DESCRIPTOR.provider_key
+                    ),
+                    owner_kind=owner_kind,
+                    status="degraded",
+                    fallback_source=MIS_SOURCE,
+                    message=(
+                        "broker即時租約目前不可用；已完成一次有界TWSE MIS五檔備援更新。"
+                    ),
+                    error=result.detail_code,
+                )
             )
-    return ViewerLeaseState(
-        stock_id=instrument.symbol,
-        provider=result.selected_provider or KGI_QUOTE_SNAPSHOT_DESCRIPTOR.provider_key,
-        owner_kind=owner_kind,
-        status="unavailable",
-        fallback_source=MIS_SOURCE,
-        message=(
-            "即時行情租約目前不可用；行情維持既有resolved cache。"
-            if fallback_error is None
-            else "即時行情租約與TWSE MIS五檔備援目前皆不可用。"
-        ),
-        error=(
-            result.detail_code
-            if fallback_error is None
-            else f"{result.detail_code}:{fallback_error}"
-        ),
+    return finish(
+        ViewerLeaseState(
+            stock_id=instrument.symbol,
+            provider=result.selected_provider
+            or KGI_QUOTE_SNAPSHOT_DESCRIPTOR.provider_key,
+            owner_kind=owner_kind,
+            status="unavailable",
+            fallback_source=MIS_SOURCE,
+            message=(
+                "即時行情租約目前不可用；行情維持既有resolved cache。"
+                if fallback_error is None
+                else "即時行情租約與TWSE MIS五檔備援目前皆不可用。"
+            ),
+            error=(
+                result.detail_code
+                if fallback_error is None
+                else f"{result.detail_code}:{fallback_error}"
+            ),
+        )
     )
 
 
@@ -376,11 +423,32 @@ def heartbeat_taiwan_realtime_quote_lease(
 
 
 def release_taiwan_realtime_quote_lease(
+    db: Session,
     lease_id: str,
     *,
+    requested_at: datetime | None = None,
     coordinator: ViewerLeaseCoordinator | None = None,
 ) -> ViewerLeaseState | None:
-    return (coordinator or _TAIWAN_REALTIME_VIEWER_LEASES).release(lease_id)
+    effective_coordinator = coordinator or _TAIWAN_REALTIME_VIEWER_LEASES
+    identity = effective_coordinator.binding_identity(lease_id)
+    if identity is not None and identity[0] == KGI_PROVIDER:
+        # A user can switch symbols between the periodic heartbeat and the next
+        # materialization. Flush all already-closed KGI buckets while the
+        # subscription buffer still exists; provider release remains guaranteed
+        # even when this best-effort persistence step fails.
+        try:
+            _sync_kgi_minute_bars(
+                db,
+                stock_id=identity[1],
+                requested_at=requested_at or datetime.now(TAIWAN_TZ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "KGI_RELEASE_FINAL_BAR_FLUSH_FAILED stock_id=%s error=%s",
+                identity[1],
+                type(exc).__name__,
+            )
+    return effective_coordinator.release(lease_id)
 
 
 def summarize_taiwan_realtime_quote_leases(

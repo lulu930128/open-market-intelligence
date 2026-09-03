@@ -27,6 +27,7 @@ from app.market.tw_intraday_capabilities import (
     NSTOCK_INTRADAY_DESCRIPTOR,
     TW_INTRADAY_DESCRIPTORS,
     YAHOO_INTRADAY_DESCRIPTOR,
+    YAHOO_INTRADAY_PARSER_VERSION,
 )
 from app.market.tw_intraday_platform import (
     bootstrap_taiwan_intraday_bars,
@@ -144,8 +145,8 @@ def _nstock_payload() -> str:
     )
 
 
-def _yahoo_payload(now: datetime) -> str:
-    current_minute = now.replace(second=0, microsecond=0)
+def _yahoo_payload(now: datetime, *, seconds_offset: int = 0) -> str:
+    current_minute = now.replace(second=seconds_offset, microsecond=0)
     timestamps = [
         int((current_minute - timedelta(minutes=1)).timestamp()),
         int(current_minute.timestamp()),
@@ -173,6 +174,47 @@ def _yahoo_payload(now: datetime) -> str:
                 "error": None,
             }
         }
+    )
+
+
+def test_yahoo_seconds_offset_is_normalized_to_minute_grid_with_raw_lineage() -> None:
+    now = datetime(2026, 8, 26, 10, 1, 30, tzinfo=TAIPEI)
+    requirement = build_taiwan_intraday_requirement(
+        instrument=_instrument(),
+        interval="1m",
+        range_value="1d",
+        policy=RealtimePolicy.PREFER_LIVE,
+        requested_at=now,
+        acquiring=True,
+    )
+    adapter = YahooIntradayAdapter(
+        lambda *_args: IntradayProviderPayload(
+            raw_text=_yahoo_payload(now, seconds_offset=10),
+            status="available",
+            url="https://example.test/yahoo",
+            status_code=200,
+            content_type="application/json",
+        ),
+        clock=lambda: now,
+    )
+    plan = plan_data_acquisition_v2(requirement, (YAHOO_INTRADAY_DESCRIPTOR,))
+
+    acquired = adapter.acquire_route(requirement, plan.routes[0])
+
+    assert acquired.observations, acquired.receipts[0].error_message
+    assert all(
+        bar.start_at.second == 0 and bar.start_at.microsecond == 0
+        for bar in acquired.observations
+    )
+    assert all(
+        bar.end_at - bar.start_at == timedelta(minutes=1)
+        for bar in acquired.observations
+    )
+    assert acquired.observations[0].lineage.event_at is not None
+    assert acquired.observations[0].lineage.event_at.second == 10
+    assert (
+        acquired.observations[0].lineage.raw_contract_version
+        == YAHOO_INTRADAY_PARSER_VERSION
     )
 
 
@@ -529,15 +571,14 @@ def test_cache_only_history_and_trend_do_not_call_provider_or_commit(monkeypatch
             for statement in raw_receipt_selects
         )
         assert history["read_policy"] == "cache_only"
-        assert history["point_count"] == 2
+        assert history["point_count"] == 1
+        assert history["finalized_bar_count"] == 1
         assert history["refreshed_count"] == 0
         public_history = MarketIntradayChartRead.model_validate(history)
         assert public_history.points[0].finalized is True
         assert public_history.points[0].indicator_eligible is True
         assert public_history.points[0].bar_type == "regular_interval"
         assert public_history.points[0].price_semantics == "intraday_bar_close"
-        assert public_history.points[1].finalized is False
-        assert public_history.points[1].indicator_eligible is False
     finally:
         db.close()
         engine.dispose()

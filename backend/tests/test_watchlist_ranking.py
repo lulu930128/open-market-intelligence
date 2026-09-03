@@ -3,7 +3,10 @@ import unittest
 from unittest.mock import ANY, patch
 
 from app.watchlists import ranking_service
-from app.watchlists.schemas import WatchlistGroupRankingRead
+from app.watchlists.schemas import (
+    WatchlistGroupRankingBatchRead,
+    WatchlistGroupRankingRead,
+)
 
 
 class WatchlistRankingLimitStatusTests(unittest.TestCase):
@@ -189,7 +192,7 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
         seen_stock_ids: list[str] = []
 
         def fake_signal_result(*, stock_id: str, **_: object):
-            seen_stock_ids.append(stock_id)
+                seen_stock_ids.append(stock_id)
             return {
                 "time": "2026-06-08",
                 "close": 100.0,
@@ -239,6 +242,15 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["rank"], 2)
         self.assertEqual(result["results"][0]["stock_id"], "2330")
         self.assertEqual(result["results"][0]["indicator_snapshot"]["atr"]["atr14"], 2.5)
+
+        result["results"][0]["time"] = datetime(2026, 6, 8, 9, 1)
+        serialized = WatchlistGroupRankingBatchRead.model_validate(result).model_dump(
+            mode="json"
+        )
+        self.assertEqual(
+            serialized["results"][0]["time"],
+            "2026-06-08T09:01:00",
+        )
 
     def test_ranking_batch_applies_intraday_limit_across_offsets(self):
         items = [

@@ -22,7 +22,12 @@ FUGLE_INTRADAY_PARSER_VERSION = "fugle.websocket.candles.v1"
 KGI_INTRADAY_PROVIDER = "kgi_superpy"
 KGI_INTRADAY_SOURCE = "kgi_superpy_minute_kbars"
 KGI_INTRADAY_RESOURCE_ID = "tw.kgi.minute_kbars.stream"
-KGI_INTRADAY_PARSER_VERSION = "kgi.superpy.minute_kbars.v1"
+# v1 treated the provider callback timestamp as the canonical bucket start and
+# projected ``total_amount`` as minute turnover. Production overlap against
+# NStock showed the timestamp identifies the bucket end, while KGI documents
+# ``total_amount`` as cumulative. v2 intentionally makes old v1 rows fail the
+# repository binding check instead of silently mixing shifted and corrected bars.
+KGI_INTRADAY_PARSER_VERSION = "kgi.superpy.minute_kbars.v2"
 
 NSTOCK_INTRADAY_PROVIDER = "nstock"
 NSTOCK_INTRADAY_SOURCE = "nstock_minute_stock_data"
@@ -32,7 +37,13 @@ NSTOCK_INTRADAY_PARSER_VERSION = "nstock.minute-stock-data.v1"
 YAHOO_INTRADAY_PROVIDER = "yahoo_finance_chart"
 YAHOO_INTRADAY_SOURCE = "yahoo_finance_chart"
 YAHOO_INTRADAY_RESOURCE_ID = "tw.yahoo.chart.intraday"
-YAHOO_INTRADAY_PARSER_VERSION = "yahoo.chart.v8.intraday.v1"
+# v1 trusted Yahoo's epoch timestamp as an exact canonical minute boundary.
+# Production payloads can carry a stable seconds offset (for example 09:01:10),
+# which overlaps exchange-aligned NStock/KGI bars after composition. v2 keeps
+# that raw provider timestamp in lineage and canonicalizes the bucket itself to
+# the Taiwan minute grid. Persisted v1 rows therefore fail closed at the
+# repository binding instead of being silently reinterpreted.
+YAHOO_INTRADAY_PARSER_VERSION = "yahoo.chart.v8.intraday.v2"
 
 
 NSTOCK_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
@@ -114,6 +125,8 @@ KGI_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
         "ACTIVE_KGI_LEASE_REQUIRED",
         "MATERIALIZED_FROM_BOUNDED_STREAM_BUFFER",
         "BROKER_AUTHORITY",
+        "PROVIDER_BUCKET_END_NORMALIZED_TO_CANONICAL_START",
+        "PROVIDER_TOTAL_AMOUNT_CUMULATIVE_NOT_MINUTE_TURNOVER",
     ),
 )
 
@@ -141,6 +154,8 @@ YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
         "VENDOR_DELAY_POSSIBLE",
         "PROVIDER_DEFAULT_ADJUSTMENT",
         "BASE_1M_ONLY",
+        "PROVIDER_TIMESTAMP_NORMALIZED_TO_MINUTE_GRID",
+        "PROVIDER_RAW_TIMESTAMP_PRESERVED_IN_LINEAGE",
     ),
 )
 

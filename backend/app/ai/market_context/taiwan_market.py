@@ -57,6 +57,7 @@ class MarketService(Protocol):
 class TaiwanMarketDependencies:
     market_service: MarketService
     read_taiwan_bars: Callable[..., Any]
+    read_taiwan_index_intraday_bars: Callable[..., Any]
     get_market_index_summary: Callable[..., dict[str, Any]]
     read_cross_market_context: Callable[..., dict[str, Any]]
     read_market_chips_context: Callable[..., dict[str, Any]]
@@ -282,17 +283,33 @@ def _market_index_intraday_pack(
 
     rows: list[dict[str, Any]] = []
     local_warnings: list[str] = []
+    try:
+        index_summary = dependencies.get_market_index_summary(
+            db,
+            force_refresh=False,
+        )
+    except Exception as exc:
+        index_summary = {}
+        message = f"Taiwan resolved index context unavailable: {exc}"
+        warnings.append(message)
+        local_warnings.append(message)
+    index_snapshots = {
+        str(item.get("index_id") or "").strip().upper(): item
+        for item in index_summary.get("indices") or []
+        if isinstance(item, dict)
+    }
     _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "market_index_intraday"})
     for index_id in index_ids:
         try:
-            bar_series = dependencies.read_taiwan_bars(
+            bar_series = dependencies.read_taiwan_index_intraday_bars(
                 db=db,
-                instrument_id=index_id,
-                interval="1m",
-                limit=point_limit,
-                include_partial=True,
+                index_id=index_id,
+                requested_at=dependencies.now(),
             )
-            intraday = project_taiwan_bar_series(bar_series)
+            intraday = project_taiwan_bar_series(
+                bar_series,
+                session_scope="current_session",
+            )
         except Exception as exc:
             message = f"{index_id} index intraday unavailable: {exc}"
             warnings.append(message)
@@ -308,7 +325,7 @@ def _market_index_intraday_pack(
         )
         quote = _compact_index_quote(
             index_id=index_id,
-            index_snapshot=None,
+            index_snapshot=index_snapshots.get(index_id),
             intraday=intraday,
         )
         rows.append(
@@ -365,6 +382,17 @@ def _market_index_intraday_pack(
         all_requested_returned
         and live_index_count == requested_count
     )
+    expected_trade_dates = {
+        str(intraday_bars.get("expected_trade_date"))
+        for row in rows
+        if isinstance((intraday_bars := row.get("intraday_bars")), dict)
+        and intraday_bars.get("expected_trade_date")
+    }
+    expected_trade_date = (
+        next(iter(expected_trade_dates))
+        if len(expected_trade_dates) == 1
+        else None
+    )
 
     def _consensus(key: str) -> str | None:
         values = {
@@ -402,6 +430,8 @@ def _market_index_intraday_pack(
     return {
         "kind": "market_index_intraday_pack",
         "enabled": True,
+        "session_scope": "current_session",
+        "expected_trade_date": expected_trade_date,
         "payload_level": payload_level,
         "bar_limit": point_limit,
         "index_ids": index_ids,

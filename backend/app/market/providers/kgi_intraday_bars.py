@@ -43,6 +43,12 @@ from app.market_data.integration_contracts import (
 
 
 KGI_MINUTE_KBAR_STREAM_URL = "kgi-superpy://stream/minute-kbars"
+KGI_MINUTE_KBAR_TIMESTAMP_SEMANTICS = (
+    "provider_bucket_end_normalized_to_canonical_start"
+)
+KGI_MINUTE_KBAR_TOTAL_AMOUNT_SEMANTICS = (
+    "provider_cumulative_not_minute_turnover"
+)
 
 
 def _datetime(value: object) -> datetime | None:
@@ -88,6 +94,24 @@ def _volume(value: object) -> Quantity | None:
     )
 
 
+def kgi_minute_kbar_bucket_bounds(
+    value: object,
+) -> tuple[datetime, datetime] | None:
+    """Return canonical [start, end) for KGI's end-labelled 1m callback.
+
+    KGI's public documentation names the field only as the KBar datetime. OMI
+    production overlap on 2026-09-03 repeatedly showed callback 10:47 matching
+    the NStock 10:46 bucket, and the same one-minute relation for later rows.
+    Keep this provider defect explicit and versioned; it is not a generic
+    timezone or all-provider adjustment.
+    """
+
+    provider_bucket_end = _datetime(value)
+    if provider_bucket_end is None:
+        return None
+    return provider_bucket_end - timedelta(minutes=1), provider_bucket_end
+
+
 def kgi_minute_kbar_acquisition(
     stream: dict[str, Any],
     requirement: DataRequirementV2,
@@ -130,19 +154,23 @@ def kgi_minute_kbar_acquisition(
     content_hash = sha256(raw_text.encode("utf-8")).hexdigest()
     observations: list[BarObservation] = []
     for row in rows:
-        start_at = _datetime(row.get("event_time"))
+        bounds = kgi_minute_kbar_bucket_bounds(
+            row.get("provider_event_time") or row.get("event_time")
+        )
         received_at = _datetime(row.get("received_at"))
         prices = {
             key: _decimal(row.get(key), positive=True)
             for key in ("open", "high", "low", "close")
         }
         if (
-            start_at is None
+            bounds is None
             or received_at is None
             or any(value is None for value in prices.values())
-            or not (
-                requirement.request.start_at <= start_at <= requirement.request.end_at
-            )
+        ):
+            continue
+        start_at, end_at = bounds
+        if not (
+            requirement.request.start_at <= start_at < requirement.request.end_at
         ):
             continue
         from app.market.tw_instrument_trading_policy import (
@@ -150,13 +178,11 @@ def kgi_minute_kbar_acquisition(
         )
         if not is_taiwan_continuous_time_bar_start(start_at):
             continue
-        end_at = start_at + timedelta(minutes=1)
         if requirement.requested_at < end_at:
-            # The active minute remains provider state only until its interval
-            # has closed; canonical persistence never rewrites it by wall clock.
+            # KGI labels this callback with the bucket end. Until that instant,
+            # the minute remains provider state and cannot be persisted FINAL.
             continue
         volume = _volume(row.get("volume_lots"))
-        turnover = _decimal(row.get("total_amount"))
         observations.append(
             BarObservation(
                 instrument=requirement.target.instrument,
@@ -165,7 +191,9 @@ def kgi_minute_kbar_acquisition(
                     source=KGI_INTRADAY_SOURCE,
                     authority=AuthorityClass.BROKER,
                     raw_contract_version=KGI_INTRADAY_PARSER_VERSION,
-                    event_at=start_at,
+                    # Preserve the provider evidence time (bucket end) while
+                    # start_at/end_at carry canonical interval identity.
+                    event_at=end_at,
                     received_at=received_at,
                     fetched_at=requirement.requested_at,
                     content_hash=content_hash,
@@ -180,8 +208,10 @@ def kgi_minute_kbar_acquisition(
                 volume=volume,
                 volume_status="observed" if volume is not None else "missing",
                 price_basis="raw",
-                turnover_value=turnover,
-                turnover_currency="TWD" if turnover is not None else None,
+                # KGI documents total_amount as cumulative turnover. It stays
+                # in the raw receipt and must not masquerade as minute turnover.
+                turnover_value=None,
+                turnover_currency=None,
                 finalization=BarFinalization.FINAL,
             )
         )
@@ -216,7 +246,11 @@ def kgi_minute_kbar_acquisition(
             resource_attempts=(attempt,),
             external_calls=0,
             subscriptions_created=0,
-            limitations=("MATERIALIZED_FROM_EXISTING_SUBSCRIPTION",),
+            limitations=(
+                "MATERIALIZED_FROM_EXISTING_SUBSCRIPTION",
+                "KGI_PROVIDER_BUCKET_END_NORMALIZED_TO_CANONICAL_START",
+                "KGI_CUMULATIVE_TOTAL_AMOUNT_NOT_PROJECTED_AS_MINUTE_TURNOVER",
+            ),
         ),
         observations=tuple(observations),
         receipts=(receipt,),
@@ -238,4 +272,9 @@ def kgi_minute_kbar_acquisition(
     )
 
 
-__all__ = ["kgi_minute_kbar_acquisition"]
+__all__ = [
+    "KGI_MINUTE_KBAR_TIMESTAMP_SEMANTICS",
+    "KGI_MINUTE_KBAR_TOTAL_AMOUNT_SEMANTICS",
+    "kgi_minute_kbar_acquisition",
+    "kgi_minute_kbar_bucket_bounds",
+]

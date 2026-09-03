@@ -21,6 +21,7 @@ from app.market.trading_calendar import (
 )
 from app.market.tw_bar_aggregation import (
     TAIWAN_BAR_AGGREGATION_VERSION,
+    TaiwanDailyMaterializationComponentsOverlapError,
     aggregate_completed_session_to_1d,
     aggregate_daily_1d,
     aggregate_intraday_1m,
@@ -32,10 +33,16 @@ from app.market.tw_bar_contracts import (
     TAIWAN_HISTORY_SLO_CALENDAR_DAYS,
     TAIWAN_DAILY_INTERVALS,
     TAIWAN_INTRADAY_INTERVALS,
+    BarBucketCoverage,
+    BarBucketCoverageStatus,
     TaiwanBarSeriesRead,
     TaiwanBarOutwardState,
     TaiwanHistoryCoverage,
     TaiwanHistoryStatus,
+    TaiwanCurrentSessionCoverage,
+    TaiwanCurrentSessionCoverageStatus,
+    TaiwanCurrentSessionSnapshotPhase,
+    TaiwanMissingBarRange,
     TaiwanReconciliationStatus,
     TaiwanReleaseStatus,
     TaiwanSessionResolutionManifest,
@@ -50,7 +57,10 @@ from app.market.tw_instrument_trading_policy import (
     is_taiwan_continuous_time_bar_start,
     resolve_taiwan_instrument_trading_policy,
 )
-from app.market.tw_intraday_capabilities import TW_INTRADAY_BARS_CAPABILITY_ID
+from app.market.tw_intraday_capabilities import (
+    TW_INTRADAY_BARS_CAPABILITY_ID,
+    TW_INTRADAY_DESCRIPTORS,
+)
 from app.market_data.contracts import (
     AuthorityClass,
     InstrumentType,
@@ -115,11 +125,20 @@ def _session_requirement(
         TAIWAN_SESSION_OPEN_TIME,
         tzinfo=TAIWAN_TZ,
     )
-    end_at = datetime.combine(
+    formal_end_at = datetime.combine(
         trade_date,
         TAIWAN_SESSION_CLOSE_TIME,
         tzinfo=TAIWAN_TZ,
     )
+    end_at = formal_end_at
+    if current_session:
+        # Current-session finalized Bars stop at the latest fully elapsed
+        # minute. Keep the request valid before the first minute closes.
+        latest_closed_boundary = requested_at.replace(second=0, microsecond=0)
+        end_at = min(
+            formal_end_at,
+            max(start_at + timedelta(minutes=1), latest_closed_boundary),
+        )
     policy = (
         RealtimePolicy.CACHE_ONLY
         if current_session
@@ -139,11 +158,7 @@ def _session_requirement(
                 if instrument.instrument_type is InstrumentType.INDEX
                 else "provider_default"
             ),
-            series_resolution=(
-                BarSeriesResolutionMode.SINGLE_CANDIDATE
-                if current_session
-                else BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP
-            ),
+            series_resolution=BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP,
         ),
         purpose=DataPurpose.VIEWER,
         realtime_policy=policy,
@@ -161,7 +176,12 @@ def _session_requirement(
             require_canonical_lineage=True,
             allow_partial=True,
         ),
-        bounds=RequestBounds(max_candidates=3, max_rows=500),
+        # The executable catalog owns provider inventory. A copied literal of
+        # three silently discarded Yahoo whenever all four providers existed.
+        bounds=RequestBounds(
+            max_candidates=len(TW_INTRADAY_DESCRIPTORS),
+            max_rows=500,
+        ),
     )
 
 
@@ -169,11 +189,210 @@ def _candidate_id(provider: str, source: str) -> str:
     return f"{provider}:{source}"
 
 
+def _missing_ranges(
+    coverage: tuple[BarBucketCoverage, ...],
+) -> tuple[TaiwanMissingBarRange, ...]:
+    missing = tuple(
+        item
+        for item in coverage
+        if item.expected_by_trading_policy
+        and item.status is BarBucketCoverageStatus.MISSING_EVIDENCE
+    )
+    if not missing:
+        return ()
+    ranges: list[TaiwanMissingBarRange] = []
+    start = missing[0].bucket_start
+    end = missing[0].bucket_end
+    count = 1
+    for item in missing[1:]:
+        if item.bucket_start == end:
+            end = item.bucket_end
+            count += 1
+            continue
+        ranges.append(
+            TaiwanMissingBarRange(start_at=start, end_at=end, bucket_count=count)
+        )
+        start = item.bucket_start
+        end = item.bucket_end
+        count = 1
+    ranges.append(TaiwanMissingBarRange(start_at=start, end_at=end, bucket_count=count))
+    return tuple(ranges)
+
+
+def _current_session_snapshot_phase(
+    status: TaiwanCurrentSessionCoverageStatus,
+    *,
+    expected_bucket_count: int,
+    observed_bucket_count: int,
+    missing_bucket_count: int,
+) -> tuple[TaiwanCurrentSessionSnapshotPhase, str]:
+    if status in {
+        TaiwanCurrentSessionCoverageStatus.COMPLETE_PREFIX,
+        TaiwanCurrentSessionCoverageStatus.COMPLETE_SESSION,
+    }:
+        return (
+            TaiwanCurrentSessionSnapshotPhase.READY,
+            "TW_CHART_SNAPSHOT_COMPLETE",
+        )
+    if status is TaiwanCurrentSessionCoverageStatus.PARTIAL_PREFIX:
+        return (
+            TaiwanCurrentSessionSnapshotPhase.DEGRADED,
+            "TW_CHART_SNAPSHOT_PARTIAL_PREFIX",
+        )
+    if status is TaiwanCurrentSessionCoverageStatus.SPARSE:
+        sparse_gap_limit = max(3, (expected_bucket_count + 19) // 20)
+        sparse_is_displayable = bool(
+            expected_bucket_count
+            and observed_bucket_count >= 2
+            and observed_bucket_count * 5 >= expected_bucket_count * 4
+            and missing_bucket_count <= sparse_gap_limit
+        )
+        if not sparse_is_displayable:
+            return (
+                TaiwanCurrentSessionSnapshotPhase.WARMING,
+                "TW_CHART_SNAPSHOT_SPARSE_EXCESSIVE_GAPS",
+            )
+        return (
+            TaiwanCurrentSessionSnapshotPhase.DEGRADED,
+            "TW_CHART_SNAPSHOT_SPARSE",
+        )
+    if status is TaiwanCurrentSessionCoverageStatus.TRAILING_WINDOW:
+        return (
+            TaiwanCurrentSessionSnapshotPhase.WARMING,
+            "TW_CHART_SNAPSHOT_TRAILING_ONLY",
+        )
+    if status is TaiwanCurrentSessionCoverageStatus.PARTIAL_WINDOW:
+        return (
+            TaiwanCurrentSessionSnapshotPhase.WARMING,
+            "TW_CHART_SNAPSHOT_PARTIAL_WINDOW",
+        )
+    return (
+        TaiwanCurrentSessionSnapshotPhase.WARMING,
+        "TW_CHART_SNAPSHOT_MISSING",
+    )
+
+
+def _current_session_coverage(
+    coverage: tuple[BarBucketCoverage, ...],
+    *,
+    instrument,
+    snapshot_bars,
+    trade_date: date,
+    instrument_type: InstrumentType,
+) -> TaiwanCurrentSessionCoverage:
+    expected = tuple(item for item in coverage if item.expected_by_trading_policy)
+    observed = tuple(
+        item
+        for item in expected
+        if item.status
+        in {
+            BarBucketCoverageStatus.OBSERVED_TRADE,
+            BarBucketCoverageStatus.VERIFIED_NO_TRADE,
+        }
+    )
+    missing_ranges = _missing_ranges(coverage)
+    missing_count = sum(item.bucket_count for item in missing_ranges)
+    starts = {item.bucket_start for item in observed}
+    first_covered = bool(expected and expected[0].bucket_start in starts)
+    last_covered = bool(expected and expected[-1].bucket_start in starts)
+    status = (
+        TaiwanCurrentSessionCoverageStatus.MISSING
+        if expected and not observed
+        else TaiwanCurrentSessionCoverageStatus.COMPLETE_PREFIX
+        if expected and missing_count == 0
+        else TaiwanCurrentSessionCoverageStatus.SPARSE
+        if first_covered and last_covered
+        else TaiwanCurrentSessionCoverageStatus.TRAILING_WINDOW
+        if not first_covered and last_covered
+        else TaiwanCurrentSessionCoverageStatus.PARTIAL_PREFIX
+        if first_covered
+        else TaiwanCurrentSessionCoverageStatus.PARTIAL_WINDOW
+        if expected
+        else TaiwanCurrentSessionCoverageStatus.MISSING
+    )
+    repair_recommended = bool(
+        missing_count
+        and instrument_type in {InstrumentType.STOCK, InstrumentType.ETF}
+    )
+    snapshot_phase, snapshot_reason = _current_session_snapshot_phase(
+        status,
+        expected_bucket_count=len(expected),
+        observed_bucket_count=len(observed),
+        missing_bucket_count=missing_count,
+    )
+    snapshot_identity = build_taiwan_bar_series_identity(
+        instrument=instrument,
+        requested_interval="1m",
+        base_interval="1m",
+        bars=snapshot_bars,
+        coverage=coverage,
+        aggregation_version=None,
+        state={"scope": "current_session_snapshot"},
+    )
+    snapshot_available_from = snapshot_bars[0].start_at if snapshot_bars else None
+    snapshot_available_to = snapshot_bars[-1].end_at if snapshot_bars else None
+    expected_from = (
+        expected[0].bucket_start
+        if expected
+        else datetime.combine(trade_date, TAIWAN_SESSION_OPEN_TIME, tzinfo=TAIWAN_TZ)
+    )
+    expected_to = expected[-1].bucket_end if expected else expected_from
+    return TaiwanCurrentSessionCoverage(
+        trade_date=trade_date,
+        status=status,
+        snapshot_phase=snapshot_phase,
+        snapshot_revision=snapshot_identity.series_revision,
+        snapshot_bar_count=len(snapshot_bars),
+        snapshot_available_from=snapshot_available_from,
+        snapshot_available_to=snapshot_available_to,
+        snapshot_reason_codes=(snapshot_reason,),
+        expected_from=expected_from,
+        expected_to=expected_to,
+        expected_bucket_count=len(expected),
+        observed_bucket_count=len(observed),
+        missing_bucket_count=missing_count,
+        missing_ranges=missing_ranges,
+        repair_recommended=repair_recommended,
+        repair_operation_id=(
+            "tw.refresh_intraday_bars"
+            if repair_recommended
+            else None
+        ),
+    )
+
+
 class TaiwanBarService:
     """Read resolved Base Bars, then derive requested intervals in Backend."""
 
     def __init__(self, db: Session) -> None:
         self._db = db
+
+    def read_current_session_bars(
+        self,
+        *,
+        instrument_id: str,
+        interval: str = "1m",
+        limit: int = 5000,
+        include_partial: bool = True,
+        requested_at: datetime | None = None,
+    ) -> TaiwanBarSeriesRead:
+        """Read only the Backend-owned Taiwan presentation session."""
+
+        requested_interval = normalize_taiwan_bar_interval(interval)
+        if requested_interval not in TAIWAN_INTRADAY_INTERVALS:
+            raise ValueError("current_session requires a Taiwan intraday interval")
+        local_now, _trade_date, from_time, to_time = taiwan_current_session_bar_window(
+            requested_at
+        )
+        return self.read_bars(
+            instrument_id=instrument_id,
+            interval=requested_interval,
+            from_time=from_time,
+            to_time=to_time,
+            limit=limit,
+            include_partial=include_partial,
+            requested_at=local_now,
+        )
 
     def read_bars(
         self,
@@ -240,6 +459,7 @@ class TaiwanBarService:
         if not trading_policy.market_semantics_usable:
             limitations.extend(trading_policy.reason_codes)
         covered_sessions = 0
+        current_coverage: TaiwanCurrentSessionCoverage | None = None
         for trade_date in trade_dates:
             current_session = bool(
                 current_observing and trade_date == presentation_date
@@ -276,16 +496,24 @@ class TaiwanBarService:
             )
             base_coverage.extend(session_coverage)
 
-            selected_candidate_id = None
-            if current_session and session_bars:
-                selected_candidate_id = _candidate_id(
-                    session_bars[0].lineage.provider,
-                    session_bars[0].lineage.source,
+            if current_session:
+                current_coverage = _current_session_coverage(
+                    session_coverage,
+                    instrument=instrument,
+                    snapshot_bars=session_bars,
+                    trade_date=trade_date,
+                    instrument_type=instrument.instrument_type,
                 )
+                if current_coverage.repair_recommended:
+                    limitations.append(
+                        "TW_CURRENT_SESSION_BASELINE_REPAIR_RECOMMENDED"
+                    )
+
             contributors = tuple(
-                _candidate_id(item.provider, item.source)
-                for item in result.resolved.candidates
-                if item.eligible
+                dict.fromkeys(
+                    _candidate_id(item.lineage.provider, item.lineage.source)
+                    for item in session_bars
+                )
             )
             missing_count = sum(
                 item.status.value == "missing_evidence" for item in session_coverage
@@ -297,17 +525,29 @@ class TaiwanBarService:
                 if missing_count or not trading_policy.market_semantics_usable
                 else TaiwanHistoryStatus.READY
             )
+            rejected_candidate_reasons: dict[str, list[str]] = {}
+            for item in result.resolved.candidates:
+                if item.eligible:
+                    continue
+                rejected_candidate_reasons.setdefault(
+                    _candidate_id(item.provider, item.source),
+                    [],
+                ).append(item.reason_code)
+            for item in result.candidate_rejections:
+                rejected_candidate_reasons.setdefault(
+                    _candidate_id(item.provider, item.source),
+                    [],
+                ).append(item.reason_code)
             manifests.append(
                 TaiwanSessionResolutionManifest(
                     trade_date=trade_date,
                     resolution_mode=requirement.request.series_resolution,
                     current_session=current_session,
-                    selected_candidate_id=selected_candidate_id,
+                    selected_candidate_id=None,
                     contributor_candidate_ids=contributors,
                     rejected_candidate_reasons={
-                        _candidate_id(item.provider, item.source): (item.reason_code,)
-                        for item in result.resolved.candidates
-                        if not item.eligible
+                        candidate_id: tuple(dict.fromkeys(reasons))
+                        for candidate_id, reasons in rejected_candidate_reasons.items()
                     },
                     filled_bucket_count=result.resolved.composition.filled_bucket_count,
                     conflict_bucket_count=result.resolved.composition.conflict_bucket_count,
@@ -333,17 +573,40 @@ class TaiwanBarService:
             )
             aggregation_version = TAIWAN_BAR_AGGREGATION_VERSION
 
-        outward_bars = tuple(
+        snapshot_bars = tuple(
             item
             for item in outward_bars
             if item.start_at < requested_to and item.end_at > requested_from
             and (include_partial or item.finalization.value != "provisional")
-        )[-limit:]
+        )
         outward_coverage = tuple(
             item
             for item in outward_coverage
             if item.bucket_start < requested_to and item.bucket_end > requested_from
         )
+        if current_coverage is not None:
+            snapshot_identity = build_taiwan_bar_series_identity(
+                instrument=instrument,
+                requested_interval=requested_interval,
+                base_interval="1m",
+                bars=snapshot_bars,
+                coverage=outward_coverage,
+                aggregation_version=aggregation_version,
+                state={"scope": "current_session_snapshot"},
+            )
+            current_coverage = current_coverage.model_copy(
+                update={
+                    "snapshot_revision": snapshot_identity.series_revision,
+                    "snapshot_bar_count": len(snapshot_bars),
+                    "snapshot_available_from": (
+                        snapshot_bars[0].start_at if snapshot_bars else None
+                    ),
+                    "snapshot_available_to": (
+                        snapshot_bars[-1].end_at if snapshot_bars else None
+                    ),
+                }
+            )
+        outward_bars = snapshot_bars[-limit:]
         available_from = outward_bars[0].start_at if outward_bars else None
         available_to = outward_bars[-1].end_at if outward_bars else None
         requested_session_count = len(trade_dates)
@@ -427,6 +690,7 @@ class TaiwanBarService:
             bucket_coverage=outward_coverage,
             history=history,
             session_resolution=tuple(manifests),
+            current_session_coverage=current_coverage,
             identity=identity,
             limitations=tuple(dict.fromkeys((*limitations, *history_limitations))),
         )
@@ -504,6 +768,7 @@ class TaiwanBarService:
         if not isinstance(result.resolved, ResolvedBarSeries):
             raise RuntimeError("Taiwan daily gateway returned non-Bar payload")
         base_bars = list(result.resolved.bars)
+        projection_limitations: list[str] = []
         metadata = repository.outward_state_metadata(
             tuple(
                 item.lineage.observation_id
@@ -579,29 +844,38 @@ class TaiwanBarService:
                 )
             )
             if current_1m.bars:
-                projection = aggregate_completed_session_to_1d(
-                    current_1m.bars,
-                    output_provider="omi_taiwan_bar_service",
-                    output_source="tw.current_session.daily_projection",
-                    source_interval="1m",
-                    coverage_complete=coverage_complete,
-                    as_of=now,
-                    formal_close_component=None,
-                )
-                base_bars.append(projection)
-                base_states.append(
-                    TaiwanBarOutwardState(
-                        start_at=projection.start_at,
-                        finalization=projection.finalization,
-                        authority=AuthorityClass.DERIVED,
-                        official=False,
-                        release_status=TaiwanReleaseStatus.PENDING_RELEASE,
-                        reconciliation_status=TaiwanReconciliationStatus.PENDING,
-                        persisted=False,
+                try:
+                    projection = aggregate_completed_session_to_1d(
+                        current_1m.bars,
+                        output_provider="omi_taiwan_bar_service",
+                        output_source="tw.current_session.daily_projection",
                         source_interval="1m",
-                        technical_eligible=False,
+                        coverage_complete=coverage_complete,
+                        as_of=now,
+                        formal_close_component=None,
                     )
-                )
+                except TaiwanDailyMaterializationComponentsOverlapError:
+                    projection_limitations.extend(
+                        (
+                            "TW_CURRENT_SESSION_DAILY_PROJECTION_INVALID",
+                            "TW_CURRENT_SESSION_DAILY_COMPONENTS_OVERLAP",
+                        )
+                    )
+                else:
+                    base_bars.append(projection)
+                    base_states.append(
+                        TaiwanBarOutwardState(
+                            start_at=projection.start_at,
+                            finalization=projection.finalization,
+                            authority=AuthorityClass.DERIVED,
+                            official=False,
+                            release_status=TaiwanReleaseStatus.PENDING_RELEASE,
+                            reconciliation_status=TaiwanReconciliationStatus.PENDING,
+                            persisted=False,
+                            source_interval="1m",
+                            technical_eligible=False,
+                        )
+                    )
 
         paired = sorted(zip(base_bars, base_states), key=lambda item: item[0].start_at)
         ordered_base = tuple(item[0] for item in paired)
@@ -708,6 +982,7 @@ class TaiwanBarService:
                     (
                         *result.limitations,
                         *history.limitations,
+                        *projection_limitations,
                         *(
                             ("TW_DAILY_RECONCILIATION_MISMATCH",)
                             if any(
@@ -731,6 +1006,19 @@ def read_taiwan_index_intraday_bars(
 ) -> TaiwanBarSeriesRead:
     """Read one Taiwan index 1m series through the unified Bar owner."""
 
+    return TaiwanBarService(db).read_current_session_bars(
+        instrument_id=index_id,
+        interval="1m",
+        limit=500,
+        requested_at=requested_at,
+    )
+
+
+def taiwan_current_session_bar_window(
+    requested_at: datetime | None = None,
+) -> tuple[datetime, date, datetime, datetime]:
+    """Resolve the one presentation-session time window used by all consumers."""
+
     local_now = _aware_taipei(requested_at or datetime.now(TAIWAN_TZ))
     presentation = taiwan_presentation_session(local_now)
     trade_date = presentation["trade_date"]
@@ -753,14 +1041,7 @@ def read_taiwan_index_intraday_bars(
     )
     if to_time <= from_time:
         to_time = from_time + timedelta(minutes=1)
-    return TaiwanBarService(db).read_bars(
-        instrument_id=index_id,
-        interval="1m",
-        from_time=from_time,
-        to_time=to_time,
-        limit=500,
-        requested_at=local_now,
-    )
+    return local_now, trade_date, from_time, to_time
 
 
 def project_taiwan_index_intraday_bars(
@@ -768,11 +1049,33 @@ def project_taiwan_index_intraday_bars(
 ) -> dict[str, object]:
     """Project the canonical Bar contract without re-resolving providers."""
 
-    return series.model_dump(mode="json")
+    payload = series.model_dump(mode="json")
+    latest = series.bars[-1] if series.bars else None
+    trade_dates = tuple(item.trade_date for item in series.session_resolution)
+    return {
+        **payload,
+        "kind": "taiwan_index_intraday_bars",
+        "trade_date": trade_dates[0].isoformat() if len(trade_dates) == 1 else None,
+        "provider": latest.lineage.provider if latest is not None else None,
+        "source": latest.lineage.source if latest is not None else None,
+        "points": [
+            {
+                "time": bar.start_at.isoformat(),
+                "bar_time": bar.start_at.isoformat(),
+                "event_time": bar.end_at.isoformat(),
+                "price": float(bar.close_price),
+                "close": float(bar.close_price),
+                "provider": bar.lineage.provider,
+                "source": bar.lineage.source,
+            }
+            for bar in series.bars
+        ],
+    }
 
 
 __all__ = [
     "TaiwanBarService",
     "project_taiwan_index_intraday_bars",
     "read_taiwan_index_intraday_bars",
+    "taiwan_current_session_bar_window",
 ]

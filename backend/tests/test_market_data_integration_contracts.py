@@ -127,7 +127,7 @@ def test_bar_coverage_is_explicit_and_does_not_repurpose_max_bars() -> None:
         )
 
 
-def test_timestamp_composition_is_explicit_and_completed_session_only() -> None:
+def test_timestamp_composition_allows_completed_or_current_cache_only() -> None:
     composed_request = _bar_request().model_copy(
         update={"series_resolution": BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP}
     )
@@ -137,15 +137,36 @@ def test_timestamp_composition_is_explicit_and_completed_session_only() -> None:
         is BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP
     )
 
-    with pytest.raises(ValidationError, match="requires completed_session"):
+    current_cache_request = composed_request.model_copy(
+        update={"completed_only": False}
+    )
+    current_cache = _requirement(
+        request=current_cache_request,
+        realtime_policy=RealtimePolicy.CACHE_ONLY,
+        session=MarketSession.CONTINUOUS,
+    )
+    assert (
+        current_cache.request.series_resolution
+        is BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP
+    )
+
+    with pytest.raises(ValidationError, match="requires cache_only or completed_session"):
         _requirement(
-            request=composed_request,
+            request=current_cache_request,
             realtime_policy=RealtimePolicy.PREFER_LIVE,
+            session=MarketSession.CONTINUOUS,
             bounds=RequestBounds(
                 max_rows=10,
                 max_provider_attempts=1,
                 max_external_calls=1,
             ),
+        )
+
+    with pytest.raises(ValidationError, match="cannot require a completed session"):
+        _requirement(
+            request=composed_request,
+            realtime_policy=RealtimePolicy.CACHE_ONLY,
+            session=MarketSession.CONTINUOUS,
         )
 
 

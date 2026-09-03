@@ -700,6 +700,8 @@ export default function StockDetailPanel({
       todayHistoryStatus,
       todayPreviousClose,
       todayPriceDiagnostics,
+      todaySnapshotPhase,
+      todaySnapshotReasonCodes,
       todaySource,
       todayStockId,
       todayTradeDate,
@@ -1715,6 +1717,7 @@ export default function StockDetailPanel({
             <div
               data-testid="today-intraday-surface"
               data-point-count={todayTrend.length}
+              data-snapshot-phase={todaySnapshotPhase}
             >
               <IntradayTrendChart
                 points={todayTrend}
@@ -1730,6 +1733,8 @@ export default function StockDetailPanel({
                 tradeDate={todayTradeDate}
                 currentObservation={todayCurrentObservation}
                 historyStatus={todayHistoryStatus}
+                snapshotPhase={todaySnapshotPhase}
+                snapshotReasonCodes={todaySnapshotReasonCodes}
                 canonicalIndicatorAuthority="backend"
                 interval={todayBarInterval}
                 onIntervalChange={setTodayBarInterval}

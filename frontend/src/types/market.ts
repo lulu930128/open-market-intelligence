@@ -901,6 +901,36 @@ export type TaiwanBarSeriesRead = {
     requested_coverage_satisfied: boolean;
     limitations: string[];
   };
+  current_session_coverage?: {
+    contract_version: string;
+    trade_date: string;
+    snapshot_phase?: "warming" | "ready" | "degraded";
+    snapshot_revision?: string;
+    snapshot_bar_count?: number;
+    snapshot_available_from?: string | null;
+    snapshot_available_to?: string | null;
+    snapshot_reason_codes?: string[];
+    status:
+      | "complete_prefix"
+      | "complete_session"
+      | "trailing_window"
+      | "partial_prefix"
+      | "partial_window"
+      | "sparse"
+      | "missing";
+    expected_from: string;
+    expected_to: string;
+    expected_bucket_count: number;
+    observed_bucket_count: number;
+    missing_bucket_count: number;
+    missing_ranges: Array<{
+      start_at: string;
+      end_at: string;
+      bucket_count: number;
+    }>;
+    repair_recommended: boolean;
+    repair_operation_id: string | null;
+  } | null;
   identity: {
     series_fingerprint: string;
     lineage_digest: string;
@@ -940,6 +970,8 @@ export type TaiwanChartBundleRead = {
   lineage_digest: string;
   state_digest: string;
   series_revision: string;
+  session_scope: "history" | "current_session";
+  presentation_trade_date: string | null;
   quote_side?: {
     current_observation: IntradayCurrentObservation | null;
     previous_close: number | null;
@@ -1992,6 +2024,9 @@ export type TaiwanRealtimeMinuteKBarRead = {
   event_id: string;
   sequence: number;
   event_time: string;
+  provider_event_time?: string | null;
+  canonical_start_at?: string | null;
+  timestamp_semantics?: string | null;
   received_at: string;
   timeframe_minutes: number;
   open: number | null;
@@ -2001,6 +2036,7 @@ export type TaiwanRealtimeMinuteKBarRead = {
   volume_lots: number | null;
   average_price: number | null;
   total_amount: number | null;
+  total_amount_semantics?: string | null;
 };
 
 export type TaiwanRealtimeDepthMetricsRead = {

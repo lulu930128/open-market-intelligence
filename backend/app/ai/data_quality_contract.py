@@ -223,6 +223,76 @@ def _temporal_summary(value: Any) -> dict[str, Any]:
     }
 
 
+def _current_session_identity_summary(value: Any) -> dict[str, Any]:
+    scopes = {
+        str(raw_value or "").strip().lower()
+        for _, raw_value in _iter_values(value, keys={"session_scope"})
+        if str(raw_value or "").strip()
+    }
+    if "current_session" not in scopes:
+        return {
+            "status": "not_applicable",
+            "expected_trade_date": None,
+            "observed_trade_dates": [],
+            "unexpected_trade_dates": [],
+            "satisfied": True,
+        }
+
+    expected_dates = {
+        parsed.date().isoformat()
+        for _, raw_value in _iter_values(value, keys={"expected_trade_date"})
+        if (parsed := _parse_datetime(raw_value)) is not None
+    }
+    def collect_observed_dates(item: Any, *, depth: int = 0) -> set[str]:
+        if depth > 6:
+            return set()
+        dates: set[str] = set()
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if key in {"points", "bars"} and isinstance(child, list):
+                    dates.update(
+                        timestamp.date().isoformat()
+                        for point in child[:500]
+                        if isinstance(point, dict)
+                        and (timestamp := _point_time(point)) is not None
+                    )
+                elif isinstance(child, (dict, list)):
+                    dates.update(
+                        collect_observed_dates(child, depth=depth + 1)
+                    )
+        elif isinstance(item, list):
+            for child in item[:50]:
+                if isinstance(child, (dict, list)):
+                    dates.update(
+                        collect_observed_dates(child, depth=depth + 1)
+                    )
+        return dates
+
+    observed_dates = collect_observed_dates(value)
+    expected_trade_date = (
+        next(iter(expected_dates)) if len(expected_dates) == 1 else None
+    )
+    unexpected_dates = sorted(
+        observed_dates - ({expected_trade_date} if expected_trade_date else set())
+    )
+    satisfied = bool(expected_trade_date and not unexpected_dates)
+    return {
+        "status": (
+            "matched"
+            if satisfied
+            else "expected_trade_date_missing"
+            if not expected_dates
+            else "expected_trade_date_ambiguous"
+            if len(expected_dates) > 1
+            else "mismatch"
+        ),
+        "expected_trade_date": expected_trade_date,
+        "observed_trade_dates": sorted(observed_dates),
+        "unexpected_trade_dates": unexpected_dates,
+        "satisfied": satisfied,
+    }
+
+
 def _unit_summary(value: Any) -> dict[str, Any]:
     declared_unit_values = _iter_values(value, keys=UNIT_KEYS)
     units = {
@@ -1296,6 +1366,7 @@ def _quality_for_capability(
         contradiction_codes.append("applicability_sources_disagree")
 
     temporal = _temporal_summary(payload)
+    current_session_identity = _current_session_identity_summary(payload)
     units = _unit_summary(payload)
     continuity = (
         _continuity_summary(payload, market=market)
@@ -1319,6 +1390,13 @@ def _quality_for_capability(
     )
     if explicitly_unavailable:
         coverage_status = "missing"
+    current_session_limited = bool(
+        capability_id == "intraday.bars"
+        and current_session_identity["status"] != "not_applicable"
+        and current_session_identity["satisfied"] is not True
+    )
+    if current_session_limited and coverage_status == "complete":
+        coverage_status = "partial"
     continuity_limited = continuity.get("status") not in {
         "continuous",
         "not_applicable",
@@ -1381,6 +1459,7 @@ def _quality_for_capability(
     decision_usable = bool(
         status_class == "ready"
         and not continuity_limited
+        and not current_session_limited
         and coverage_status == "complete"
         and not units["missing_volume_unit"]
     )
@@ -1451,6 +1530,7 @@ def _quality_for_capability(
             )
             else capability_id == "intraday.bars"
             and facts_usable
+            and not current_session_limited
             and freshness_status in {"current", "delayed"}
         )
     )
@@ -1473,6 +1553,8 @@ def _quality_for_capability(
     if semantic_payload_empty:
         issues.append("semantic_payload_empty")
     issues.extend(str(value) for value in continuity.get("issues") or [])
+    if current_session_limited:
+        issues.append("CURRENT_SESSION_SERIES_DATE_MISMATCH")
     if coverage_status == "insufficient_history":
         issues.append("insufficient_history")
     if units["missing_volume_unit"]:
@@ -1551,6 +1633,7 @@ def _quality_for_capability(
         "decision_usable": decision_usable,
         "payload_included": payload_included,
         "temporal": temporal,
+        "current_session_identity": current_session_identity,
         "units": units,
         "continuity": continuity,
         "status_evidence": candidates,

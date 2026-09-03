@@ -73,13 +73,25 @@ def test_not_applicable_is_not_expected_missing_evidence() -> None:
         )
 
 
-def test_current_session_resolution_is_single_candidate() -> None:
-    with pytest.raises(ValidationError, match="SINGLE_CANDIDATE"):
+def test_current_session_resolution_is_timestamp_composed() -> None:
+    manifest = TaiwanSessionResolutionManifest(
+        trade_date=date(2026, 9, 1),
+        resolution_mode=BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP,
+        current_session=True,
+        contributor_candidate_ids=("kgi", "nstock"),
+        coverage_status=TaiwanHistoryStatus.PARTIAL,
+    )
+
+    assert manifest.selected_candidate_id is None
+    assert manifest.contributor_candidate_ids == ("kgi", "nstock")
+
+    with pytest.raises(ValidationError, match="COMPOSE_BY_TIMESTAMP"):
         TaiwanSessionResolutionManifest(
             trade_date=date(2026, 9, 1),
-            resolution_mode=BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP,
+            resolution_mode=BarSeriesResolutionMode.SINGLE_CANDIDATE,
             current_session=True,
-            contributor_candidate_ids=("kgi", "fugle"),
+            selected_candidate_id="kgi",
+            contributor_candidate_ids=("kgi",),
             coverage_status=TaiwanHistoryStatus.PARTIAL,
         )
 

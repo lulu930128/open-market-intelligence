@@ -1894,9 +1894,10 @@ export const enUS = {
     },
     intraday: {
       insufficient: "Not enough intraday trend data",
-      historyWarming: "1-minute bars are still warming up",
+      historyWarming: "Preparing the complete intraday trend…",
       historyWarmingDescription:
-        "The quote is available; canonical intraday history status: {status}.",
+        "Live quotes remain available. The complete trend will appear automatically; no reload is needed. Status: {status}.",
+      snapshotDegraded: "Partial trend",
       latestCompletedPrice: "Latest completed session",
       currentPrice: "Current trade",
       title: "Intraday Trend / Volume",

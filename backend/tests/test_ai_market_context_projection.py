@@ -988,7 +988,7 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             taiwan_market,
             "_compact_index_quote",
             side_effect=child_quotes,
-        ), patch.object(
+        ) as compact_index_quote, patch.object(
             taiwan_market,
             "_compact_single_intraday_series",
             return_value={
@@ -1002,7 +1002,16 @@ class AIMarketContextProjectionTests(unittest.TestCase):
             pack = taiwan_market._market_index_intraday_pack(
                 db=None,
                 dependencies=SimpleNamespace(
-                    read_taiwan_bars=lambda **_kwargs: object()
+                    read_taiwan_index_intraday_bars=lambda **_kwargs: object(),
+                    get_market_index_summary=lambda *_args, **_kwargs: {
+                        "indices": [
+                            {"index_id": "TAIEX", "previous_close": 23_900.0},
+                            {"index_id": "TPEX", "previous_close": 340.0},
+                        ]
+                    },
+                    now=lambda: datetime.fromisoformat(
+                        "2026-07-31T09:01:00+08:00"
+                    ),
                 ),
                 include_intraday=True,
                 market_data_params={"index_ids": ["TAIEX", "TPEX"]},
@@ -1018,6 +1027,18 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(pack["market_status"], "open")
         self.assertEqual(pack["current_session_phase"], "regular")
         self.assertEqual(pack["event_time"], "2026-07-31T09:00:50+08:00")
+        self.assertEqual(
+            compact_index_quote.call_args_list[0].kwargs["index_snapshot"][
+                "previous_close"
+            ],
+            23_900.0,
+        )
+        self.assertEqual(
+            compact_index_quote.call_args_list[1].kwargs["index_snapshot"][
+                "previous_close"
+            ],
+            340.0,
+        )
         classified = realtime_contract.classify_observation(
             pack,
             market="TW",

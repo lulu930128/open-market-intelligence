@@ -1325,6 +1325,10 @@ export const jaJP = {
     intraday: {
       ...zhTW.stockDetail.intraday,
       insufficient: "今日の推移データ不足",
+      historyWarming: "本日の完全な値動きを準備しています…",
+      historyWarmingDescription:
+        "リアルタイム気配値は利用できます。準備が完了すると自動表示され、再読み込みは不要です。状態：{status}。",
+      snapshotDegraded: "一部データ",
       title: "今日の推移 / 出来高",
       pointCount: "{count} 点",
       refreshEvery: "ザラ場は {seconds} 秒ごとに更新",

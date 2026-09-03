@@ -2348,6 +2348,8 @@ def _compact_single_intraday_series(
         "source": payload.get("source"),
         "point_count": payload.get("point_count") if payload.get("point_count") is not None else len(points),
         "trade_date": payload.get("trade_date"),
+        "session_scope": payload.get("session_scope"),
+        "expected_trade_date": payload.get("expected_trade_date"),
         "coverage_status": payload.get("coverage_status"),
         "series_coverage": payload.get("series_coverage"),
         "is_partial": payload.get("is_partial"),
@@ -2404,6 +2406,9 @@ def _compact_single_intraday_series(
         "effective_interval": effective_interval,
         "interval_status": interval_status,
         "range": "1d",
+        "session_scope": payload.get("session_scope"),
+        "expected_trade_date": payload.get("expected_trade_date"),
+        "trade_date": payload.get("trade_date"),
         "payload_level": payload_level,
         "bar_limit": point_limit,
         "series": {

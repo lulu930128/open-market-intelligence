@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.market.technical_parameters import get_technical_analysis_parameters
 from app.market.tw_bar_service import TaiwanBarService
-from app.market.tw_chart_service import TaiwanChartBundleRead, TaiwanChartService
+from app.market.tw_chart_service import (
+    TaiwanChartBundleRead,
+    TaiwanChartService,
+    TaiwanChartSessionScope,
+)
 from app.market.tw_technical_service import (
     BarSeriesRevisionConflict,
     TaiwanTechnicalSeriesRead,
@@ -107,6 +111,7 @@ def get_taiwan_chart_bundle(
     include_partial: bool = True,
     ma_windows: str | None = None,
     volume_ma_windows: str | None = None,
+    session_scope: TaiwanChartSessionScope = TaiwanChartSessionScope.HISTORY,
     db: Session = Depends(get_db),
 ):
     try:
@@ -122,6 +127,7 @@ def get_taiwan_chart_bundle(
             limit=limit,
             include_partial=include_partial,
             parameters=parameters,
+            session_scope=session_scope,
         )
     except HTTPException:
         raise

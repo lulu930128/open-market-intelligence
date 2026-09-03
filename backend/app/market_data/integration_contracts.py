@@ -267,10 +267,23 @@ class DataRequirementV2(CanonicalModel):
             if (
                 self.request.series_resolution
                 is BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP
-                and self.realtime_policy is not RealtimePolicy.COMPLETED_SESSION
+                and self.realtime_policy
+                not in {
+                    RealtimePolicy.CACHE_ONLY,
+                    RealtimePolicy.COMPLETED_SESSION,
+                }
             ):
                 raise ValueError(
-                    "compose_by_timestamp currently requires completed_session policy"
+                    "compose_by_timestamp requires cache_only or completed_session policy"
+                )
+            if (
+                self.request.series_resolution
+                is BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP
+                and self.realtime_policy is RealtimePolicy.CACHE_ONLY
+                and self.request.completed_only
+            ):
+                raise ValueError(
+                    "cache_only timestamp composition cannot require a completed session"
                 )
         return self
 

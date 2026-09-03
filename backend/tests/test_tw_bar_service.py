@@ -22,6 +22,12 @@ from app.market.tw_intraday_capabilities import (
     KGI_INTRADAY_PARSER_VERSION,
     KGI_INTRADAY_PROVIDER,
     KGI_INTRADAY_SOURCE,
+    NSTOCK_INTRADAY_PARSER_VERSION,
+    NSTOCK_INTRADAY_PROVIDER,
+    NSTOCK_INTRADAY_SOURCE,
+    YAHOO_INTRADAY_PARSER_VERSION,
+    YAHOO_INTRADAY_PROVIDER,
+    YAHOO_INTRADAY_SOURCE,
 )
 
 
@@ -53,6 +59,8 @@ def _seed_session(
     parser_version: str,
     authority: str,
     minutes: int = 5,
+    start_minute: int = 0,
+    start_second: int = 0,
 ) -> None:
     source = db.query(SourceRegistry).filter_by(source_name=source_name).first()
     if source is None:
@@ -70,7 +78,7 @@ def _seed_session(
         db.flush()
     fetched_at = (
         datetime.combine(trade_date, time(9, 0), TAIPEI)
-        + timedelta(minutes=minutes, seconds=1)
+        + timedelta(minutes=start_minute + minutes, seconds=1)
     ).astimezone(timezone.utc)
     raw = RawFetchResult(
         source_id=source.id,
@@ -85,7 +93,8 @@ def _seed_session(
     db.flush()
     for minute in range(minutes):
         start = datetime.combine(trade_date, time(9, 0), TAIPEI) + timedelta(
-            minutes=minute
+            minutes=start_minute + minute,
+            seconds=start_second,
         )
         bar = MarketIntradayBar(
             source_id=source.id,
@@ -162,9 +171,10 @@ def test_multisession_read_resolves_each_session_then_derives_one_series() -> No
             date(2026, 9, 1),
         ]
         assert result.session_resolution[0].resolution_mode.value == "compose_by_timestamp"
-        assert result.session_resolution[1].resolution_mode.value == "single_candidate"
-        assert result.session_resolution[1].selected_candidate_id == (
-            f"{FUGLE_INTRADAY_PROVIDER}:{FUGLE_INTRADAY_SOURCE}"
+        assert result.session_resolution[1].resolution_mode.value == "compose_by_timestamp"
+        assert result.session_resolution[1].selected_candidate_id is None
+        assert result.session_resolution[1].contributor_candidate_ids == (
+            f"{FUGLE_INTRADAY_PROVIDER}:{FUGLE_INTRADAY_SOURCE}",
         )
         assert len(result.bars) == 2
         assert result.bars[0].start_at.date() == date(2026, 8, 31)
@@ -172,6 +182,308 @@ def test_multisession_read_resolves_each_session_then_derives_one_series() -> No
         assert result.derived is True
         assert result.base_interval == "1m"
         assert result.identity.series_revision
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_session_read_excludes_previous_session() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 8, 31),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version=KGI_INTRADAY_PARSER_VERSION,
+            authority="broker",
+        )
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=FUGLE_INTRADAY_PROVIDER,
+            source_name=FUGLE_INTRADAY_SOURCE,
+            parser_version=FUGLE_INTRADAY_PARSER_VERSION,
+            authority="vendor",
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+
+        assert {item.start_at.date() for item in result.bars} == {
+            date(2026, 9, 1)
+        }
+        assert [item.trade_date for item in result.session_resolution] == [
+            date(2026, 9, 1)
+        ]
+        assert result.history.requested_from == datetime(
+            2026, 9, 1, 9, 0, tzinfo=TAIPEI
+        )
+        assert result.history.requested_to == datetime(
+            2026, 9, 1, 9, 5, tzinfo=TAIPEI
+        )
+        assert result.current_session_coverage is not None
+        assert result.current_session_coverage.status.value == "complete_prefix"
+        assert result.current_session_coverage.snapshot_phase.value == "ready"
+        assert result.current_session_coverage.snapshot_bar_count == 5
+        assert result.current_session_coverage.snapshot_available_from == datetime(
+            2026, 9, 1, 9, 0, tzinfo=TAIPEI
+        )
+        assert result.current_session_coverage.snapshot_available_to == datetime(
+            2026, 9, 1, 9, 5, tzinfo=TAIPEI
+        )
+        assert result.current_session_coverage.repair_recommended is False
+
+        delta = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            limit=2,
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+        assert len(delta.bars) == 2
+        assert delta.current_session_coverage is not None
+        assert (
+            delta.current_session_coverage.snapshot_revision
+            == result.current_session_coverage.snapshot_revision
+        )
+        assert delta.current_session_coverage.snapshot_bar_count == 5
+        assert delta.identity.series_revision != result.identity.series_revision
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_session_composes_baseline_with_kgi_tail_per_timestamp() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=NSTOCK_INTRADAY_PROVIDER,
+            source_name=NSTOCK_INTRADAY_SOURCE,
+            parser_version=NSTOCK_INTRADAY_PARSER_VERSION,
+            authority="vendor",
+            minutes=5,
+        )
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version=KGI_INTRADAY_PARSER_VERSION,
+            authority="broker",
+            minutes=2,
+            start_minute=3,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+
+        assert [item.start_at.minute for item in result.bars] == [0, 1, 2, 3, 4]
+        assert [item.lineage.provider for item in result.bars] == [
+            NSTOCK_INTRADAY_PROVIDER,
+            NSTOCK_INTRADAY_PROVIDER,
+            NSTOCK_INTRADAY_PROVIDER,
+            KGI_INTRADAY_PROVIDER,
+            KGI_INTRADAY_PROVIDER,
+        ]
+        manifest = result.session_resolution[0]
+        assert manifest.conflict_bucket_count == 2
+        assert manifest.contributor_candidate_ids == (
+            f"{NSTOCK_INTRADAY_PROVIDER}:{NSTOCK_INTRADAY_SOURCE}",
+            f"{KGI_INTRADAY_PROVIDER}:{KGI_INTRADAY_SOURCE}",
+        )
+        assert (
+            "PROVIDER_BUCKET_END_NORMALIZED_TO_CANONICAL_START"
+            in result.limitations
+        )
+        assert (
+            "PROVIDER_TOTAL_AMOUNT_CUMULATIVE_NOT_MINUTE_TURNOVER"
+            in result.limitations
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_session_trailing_only_snapshot_remains_warming() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version=KGI_INTRADAY_PARSER_VERSION,
+            authority="broker",
+            minutes=2,
+            start_minute=3,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+
+        coverage = result.current_session_coverage
+        assert coverage is not None
+        assert coverage.status.value == "trailing_window"
+        assert coverage.snapshot_phase.value == "warming"
+        assert coverage.snapshot_reason_codes == (
+            "TW_CHART_SNAPSHOT_TRAILING_ONLY",
+        )
+        assert coverage.snapshot_bar_count == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_session_sparse_snapshot_is_visible_as_degraded() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=NSTOCK_INTRADAY_PROVIDER,
+            source_name=NSTOCK_INTRADAY_SOURCE,
+            parser_version=NSTOCK_INTRADAY_PARSER_VERSION,
+            authority="vendor",
+            minutes=2,
+        )
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version=KGI_INTRADAY_PARSER_VERSION,
+            authority="broker",
+            minutes=2,
+            start_minute=3,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+
+        coverage = result.current_session_coverage
+        assert coverage is not None
+        assert coverage.status.value == "sparse"
+        assert coverage.snapshot_phase.value == "degraded"
+        assert coverage.snapshot_reason_codes == (
+            "TW_CHART_SNAPSHOT_SPARSE",
+        )
+        assert coverage.snapshot_bar_count == 4
+        assert coverage.missing_bucket_count == 1
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_session_sparse_snapshot_with_excessive_gaps_stays_warming() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=NSTOCK_INTRADAY_PROVIDER,
+            source_name=NSTOCK_INTRADAY_SOURCE,
+            parser_version=NSTOCK_INTRADAY_PARSER_VERSION,
+            authority="vendor",
+            minutes=1,
+        )
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version=KGI_INTRADAY_PARSER_VERSION,
+            authority="broker",
+            minutes=1,
+            start_minute=4,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+
+        coverage = result.current_session_coverage
+        assert coverage is not None
+        assert coverage.status.value == "sparse"
+        assert coverage.snapshot_phase.value == "warming"
+        assert coverage.snapshot_reason_codes == (
+            "TW_CHART_SNAPSHOT_SPARSE_EXCESSIVE_GAPS",
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_legacy_kgi_start_labeled_parser_rows_are_not_current_truth() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version="kgi.superpy.minute_kbars.v1",
+            authority="broker",
+            minutes=5,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+
+        assert result.bars == ()
+        assert result.current_session_coverage is not None
+        assert result.current_session_coverage.status.value == "missing"
+        assert result.current_session_coverage.repair_recommended is True
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_misaligned_persisted_intraday_rows_fail_closed() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=YAHOO_INTRADAY_PROVIDER,
+            source_name=YAHOO_INTRADAY_SOURCE,
+            parser_version=YAHOO_INTRADAY_PARSER_VERSION,
+            authority="vendor",
+            minutes=2,
+            start_second=10,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+
+        assert result.bars == ()
+        manifest = result.session_resolution[0]
+        assert manifest.rejected_candidate_reasons == {
+            f"{YAHOO_INTRADAY_PROVIDER}:{YAHOO_INTRADAY_SOURCE}": (
+                "INTRADAY_BUCKET_NOT_MINUTE_ALIGNED",
+            )
+        }, manifest.model_dump()
     finally:
         db.close()
         engine.dispose()

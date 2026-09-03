@@ -1036,6 +1036,9 @@ class TaiwanRealtimeMinuteKBarRead(BaseModel):
     event_id: str
     sequence: int
     event_time: datetime
+    provider_event_time: datetime | None = None
+    canonical_start_at: datetime | None = None
+    timestamp_semantics: str | None = None
     received_at: datetime
     timeframe_minutes: int
     open: float | None = None
@@ -1045,6 +1048,7 @@ class TaiwanRealtimeMinuteKBarRead(BaseModel):
     volume_lots: int | None = None
     average_price: float | None = None
     total_amount: float | None = None
+    total_amount_semantics: str | None = None
 
 
 class TaiwanRealtimeDepthMetricsRead(BaseModel):

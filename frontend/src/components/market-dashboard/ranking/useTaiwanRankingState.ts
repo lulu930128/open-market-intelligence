@@ -77,24 +77,6 @@ function shouldUseIntraday(marketState: TaiwanMarketRefreshState) {
   );
 }
 
-function getDailyReleaseCheckDelay() {
-  const marketState = getTaiwanMarketRefreshState();
-  const dailyRelease =
-    getMarketCalendarStatusSnapshot("tw")?.release_windows.market_daily_price;
-  const releaseDelay = marketState.isDailyPriceReleased
-    ? msUntilIsoTime(dailyRelease?.next_release_at)
-    : msUntilIsoTime(dailyRelease?.release_at);
-  const fallbackDelay = marketState.isDailyPriceReleased
-    ? marketState.msUntilNextPollingStart
-    : 60_000;
-  const delay = releaseDelay ?? fallbackDelay;
-
-  return Math.min(
-    Math.max(delay, WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS),
-    WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS
-  );
-}
-
 function formatDashboardTime(value: Date) {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-CA", {
@@ -129,7 +111,6 @@ export function useTaiwanRankingState({
   );
   const [trendPending, setTrendPending] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
-  const [rankingRevision, setRankingRevision] = useState(0);
   const requestSeqRef = useRef(0);
   const trendTimerRef = useRef<number | undefined>(undefined);
   const finalRefreshDateRef = useRef<string | null>(null);
@@ -269,7 +250,6 @@ export function useTaiwanRankingState({
 
               setLastUpdatedAt(formatDashboardTime(new Date()));
               setLoadState("success");
-              setRankingRevision((revision) => revision + 1);
               if (deferTrendData) {
                 scheduleTrendData(requestSeq, completeRanking);
               }
@@ -298,7 +278,6 @@ export function useTaiwanRankingState({
         setTrendPending(false);
         setLastUpdatedAt(formatDashboardTime(new Date()));
         setLoadState("success");
-        setRankingRevision((revision) => revision + 1);
         ensureCompanionLoadQueued();
         return rankingData;
       } catch (error) {
@@ -451,6 +430,43 @@ export function useTaiwanRankingState({
     };
   }, [active, groupId, load, rankBy]);
 
+  return {
+    state: {
+      rankBy,
+      ranking,
+      loadState,
+      trendPending,
+      lastUpdatedAt,
+    },
+    actions: {
+      changeRankBy,
+      load,
+      reset,
+      refreshDailyPrices,
+    },
+  };
+}
+function getDailyReleaseCheckDelay() {
+  const marketState = getTaiwanMarketRefreshState();
+  const dailyRelease =
+    getMarketCalendarStatusSnapshot("tw")?.release_windows.market_daily_price;
+  const releaseDelay = marketState.isDailyPriceReleased
+    ? msUntilIsoTime(dailyRelease?.next_release_at)
+    : msUntilIsoTime(dailyRelease?.release_at);
+  const fallbackDelay = marketState.isDailyPriceReleased
+    ? marketState.msUntilNextPollingStart
+    : 60_000;
+  const delay = releaseDelay ?? fallbackDelay;
+
+  return Math.min(
+    Math.max(delay, WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS),
+    WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS
+  );
+}
+
+  const [rankingRevision, setRankingRevision] = useState(0);
+              setRankingRevision((revision) => revision + 1);
+        setRankingRevision((revision) => revision + 1);
   useEffect(() => {
     if (!active || groupId === null) return;
 
@@ -531,20 +547,3 @@ export function useTaiwanRankingState({
     ranking?.target_trade_date,
     refreshDailyPrices,
   ]);
-
-  return {
-    state: {
-      rankBy,
-      ranking,
-      loadState,
-      trendPending,
-      lastUpdatedAt,
-    },
-    actions: {
-      changeRankBy,
-      load,
-      reset,
-      refreshDailyPrices,
-    },
-  };
-}

@@ -38,7 +38,10 @@ from app.market.tw_corporate_events import (
 from app.market.tw_company_profile import read_taiwan_company_profile
 from app.market.technical_report import build_stock_technical_report
 from app.market.technical_evidence import build_tw_stock_technical_evidence
-from app.market.tw_bar_service import TaiwanBarService
+from app.market.tw_bar_service import (
+    TaiwanBarService,
+    read_taiwan_index_intraday_bars,
+)
 from app.market.tw_chart_service import TaiwanChartService
 from app.market.indices import (
     get_market_index_contributions,
@@ -68,6 +71,19 @@ def _read_taiwan_bars(*, db: Session, instrument_id: str, interval: str, **kwarg
     return TaiwanBarService(db).read_bars(
         instrument_id=instrument_id,
         interval=interval,
+        **kwargs,
+    )
+
+
+def _read_taiwan_index_intraday_bars(
+    *,
+    db: Session,
+    index_id: str,
+    **kwargs,
+):
+    return read_taiwan_index_intraday_bars(
+        db,
+        index_id=index_id,
         **kwargs,
     )
 
@@ -354,6 +370,7 @@ def read_market_overview(
         dependencies=taiwan_market.TaiwanMarketDependencies(
             market_service=market_service,
             read_taiwan_bars=_read_taiwan_bars,
+            read_taiwan_index_intraday_bars=_read_taiwan_index_intraday_bars,
             get_market_index_summary=get_market_index_summary,
             read_cross_market_context=tw_cross_market.read_tw_cross_market_context,
             read_market_chips_context=tw_market_chips.read_tw_market_chips_context,

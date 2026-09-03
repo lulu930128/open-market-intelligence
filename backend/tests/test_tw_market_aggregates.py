@@ -126,6 +126,7 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
         values = {
             "market_service": SimpleNamespace(),
             "read_taiwan_bars": Mock(),
+            "read_taiwan_index_intraday_bars": Mock(),
             "get_market_index_summary": Mock(),
             "read_cross_market_context": Mock(),
             "read_market_chips_context": Mock(),

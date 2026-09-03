@@ -44,6 +44,10 @@ _TARGET_MINUTES = {
 }
 
 
+class TaiwanDailyMaterializationComponentsOverlapError(ValueError):
+    """Component intervals overlap and cannot form one truthful daily Bar."""
+
+
 def _local(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Taiwan aggregation requires timezone-aware timestamps")
@@ -306,7 +310,9 @@ def aggregate_completed_session_to_1d(
         current.end_at > following.start_at
         for current, following in zip(ordered, ordered[1:])
     ):
-        raise ValueError("daily materialization components overlap")
+        raise TaiwanDailyMaterializationComponentsOverlapError(
+            "daily materialization components overlap"
+        )
     start_at, end_at = _session_bounds(trade_date)
     qualified_formal_close = bool(
         formal_close_component is not None
@@ -621,6 +627,7 @@ def aggregate_intraday_1m(
 
 __all__ = [
     "TAIWAN_BAR_AGGREGATION_VERSION",
+    "TaiwanDailyMaterializationComponentsOverlapError",
     "aggregate_completed_session_to_1d",
     "aggregate_daily_1d",
     "aggregate_intraday_1m",

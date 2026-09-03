@@ -922,6 +922,22 @@ class KgiSuperPyQuoteTests(unittest.TestCase):
         self.assertEqual(len(payload["recent_trades"]), 1)
         self.assertEqual(len(payload["minute_kbars"]), 1)
         self.assertEqual(payload["minute_kbars"][0]["close"], 2400)
+        self.assertEqual(
+            payload["minute_kbars"][0]["provider_event_time"],
+            event_time.isoformat(),
+        )
+        self.assertEqual(
+            payload["minute_kbars"][0]["canonical_start_at"],
+            (event_time - timedelta(minutes=1)).isoformat(),
+        )
+        self.assertEqual(
+            payload["minute_kbars"][0]["timestamp_semantics"],
+            "provider_bucket_end_normalized_to_canonical_start",
+        )
+        self.assertEqual(
+            payload["minute_kbars"][0]["total_amount_semantics"],
+            "provider_cumulative_not_minute_turnover",
+        )
         self.assertEqual(payload["capability_status"]["minute_kbars"], "available")
 
     def test_released_stream_diagnostics_are_retained_but_not_current(self) -> None:

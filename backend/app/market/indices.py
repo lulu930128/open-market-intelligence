@@ -63,7 +63,11 @@ from app.market.tw_market_breadth_contract import (
     TW_MARKET_BREADTH_VERSION,
     taiwan_breadth_market_session,
 )
-from app.market.tw_bar_service import TaiwanBarService
+from app.market.tw_bar_service import (
+    TaiwanBarService,
+    project_taiwan_index_intraday_bars,
+    read_taiwan_index_intraday_bars,
+)
 from app.observability.provider_fallback import observe_provider_fallback
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
@@ -4725,82 +4729,6 @@ def _market_index_summary(
     return payload
 
 
-def _attach_summary_index_resolutions(
-    db: Session,
-    payload: dict,
-    *,
-    acquisition_policy: str,
-) -> dict:
-    from app.market.taiwan_index_minute import read_taiwan_index_minute_series
-    # Import lazily to avoid the calendar_status -> market_chips -> indices cycle.
-    from app.market.calendar_status import build_taiwan_calendar_status
-
-    calendar_status = build_taiwan_calendar_status()
-    resolved_items: list[dict] = []
-    for raw_item in payload.get("indices") or []:
-        if not isinstance(raw_item, dict):
-            continue
-        item = dict(raw_item)
-        index_id = str(item.get("index_id") or "").strip().upper()
-        if index_id not in INDEX_CONFIG_BY_ID:
-            resolved_items.append(item)
-            continue
-        try:
-            intraday = read_taiwan_index_minute_series(
-                db,
-                index_id=index_id,
-            )
-        except Exception as exc:
-            observe_provider_fallback(
-                exc,
-                operation="indices.summary_cached_intraday_resolution",
-            )
-            intraday = None
-        resolution = resolve_taiwan_index_truth(
-            intraday=intraday,
-            index_snapshot=item,
-            calendar_status=calendar_status,
-            index_id=index_id,
-            acquisition_policy=acquisition_policy,
-        ).model_dump(mode="json")
-        selected = resolution.get("current_observation")
-        if isinstance(selected, dict):
-            item["close"] = selected.get("value")
-            item["previous_close"] = resolution.get("selected_previous_close")
-            item["change"] = resolution.get("selected_change")
-            item["change_pct"] = resolution.get("selected_change_pct")
-            item["time"] = selected.get("trade_date")
-            item["source"] = selected.get("source") or item.get("source")
-            item["as_of"] = selected.get("observed_at") or item.get("as_of")
-        else:
-            item["close"] = None
-            item["change"] = None
-            item["change_pct"] = None
-        item.update(
-            {
-                "resolution_version": resolution["resolution_version"],
-                "resolution_id": resolution["resolution_id"],
-                "acquisition_policy": acquisition_policy,
-                "current_observation": resolution["current_observation"],
-                "official_close": {
-                    "status": resolution["official_close_status"],
-                    "value": resolution["official_close_price"],
-                    "trade_date": resolution["official_close_trade_date"],
-                    "source": resolution["official_close_source"],
-                },
-                "decision_usable": resolution["decision_usable"],
-                "resolution": resolution,
-            }
-        )
-        resolved_items.append(item)
-    return {
-        **payload,
-        "resolution_version": TAIWAN_INDEX_RESOLUTION_VERSION,
-        "acquisition_policy": acquisition_policy,
-        "indices": resolved_items,
-    }
-
-
 def _attach_completed_data_core_evidence(
     db: Session,
     payload: dict,
@@ -4991,8 +4919,22 @@ def _shared_current_market_summary(
     for raw_item in payload.get("indices") or []:
         item = dict(raw_item)
         index_id = str(item.get("index_id") or "").strip().upper()
+        try:
+            intraday = project_taiwan_index_intraday_bars(
+                read_taiwan_index_intraday_bars(
+                    db,
+                    index_id=index_id,
+                    requested_at=now,
+                )
+            )
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="indices.summary_canonical_intraday_resolution",
+            )
+            intraday = None
         resolution = resolve_taiwan_index_truth(
-            intraday=None,
+            intraday=intraday,
             index_snapshot=item,
             calendar_status=calendar_status,
             index_id=index_id,
@@ -5033,12 +4975,17 @@ def _shared_current_market_summary(
     }
 
 
-def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
+def get_market_index_summary(
+    db: Session,
+    force_refresh: bool = False,
+    *,
+    requested_at: datetime | None = None,
+) -> dict:
     if force_refresh:
         logger.warning(
             "Deprecated force_refresh on GET market index summary was ignored; use the explicit POST refresh route."
         )
-    return _shared_current_market_summary(db)
+    return _shared_current_market_summary(db, requested_at=requested_at)
 
 
 def refresh_market_index_summary(

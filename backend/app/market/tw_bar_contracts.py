@@ -64,6 +64,22 @@ class TaiwanHistoryStatus(str, Enum):
     MISSING = "missing"
 
 
+class TaiwanCurrentSessionCoverageStatus(str, Enum):
+    COMPLETE_PREFIX = "complete_prefix"
+    COMPLETE_SESSION = "complete_session"
+    TRAILING_WINDOW = "trailing_window"
+    PARTIAL_PREFIX = "partial_prefix"
+    PARTIAL_WINDOW = "partial_window"
+    SPARSE = "sparse"
+    MISSING = "missing"
+
+
+class TaiwanCurrentSessionSnapshotPhase(str, Enum):
+    WARMING = "warming"
+    READY = "ready"
+    DEGRADED = "degraded"
+
+
 class TaiwanReleaseStatus(str, Enum):
     PENDING_RELEASE = "pending_release"
     RELEASED = "released"
@@ -123,7 +139,7 @@ class BarBucketCoverage(CanonicalModel):
 
 
 class TaiwanSessionResolutionManifest(CanonicalModel):
-    contract_version: str = "tw.bar.session_resolution.v1"
+    contract_version: str = "tw.bar.session_resolution.v2"
     trade_date: date
     resolution_mode: BarSeriesResolutionMode
     current_session: bool
@@ -137,13 +153,80 @@ class TaiwanSessionResolutionManifest(CanonicalModel):
     @model_validator(mode="after")
     def _validate_resolution_mode(self) -> TaiwanSessionResolutionManifest:
         if self.current_session:
-            if self.resolution_mode is not BarSeriesResolutionMode.SINGLE_CANDIDATE:
-                raise ValueError("current Taiwan session must use SINGLE_CANDIDATE")
-            if (
-                self.coverage_status is not TaiwanHistoryStatus.MISSING
-                and not self.selected_candidate_id
-            ):
-                raise ValueError("current Taiwan session requires selected_candidate_id")
+            if self.resolution_mode is not BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP:
+                raise ValueError(
+                    "current Taiwan session must use COMPOSE_BY_TIMESTAMP"
+                )
+            if self.selected_candidate_id is not None:
+                raise ValueError(
+                    "composed current Taiwan session cannot expose one selected candidate"
+                )
+        return self
+
+
+class TaiwanMissingBarRange(CanonicalModel):
+    start_at: datetime
+    end_at: datetime
+    bucket_count: int = Field(ge=1, le=500)
+
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def _require_aware_range_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("missing range timestamps must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> TaiwanMissingBarRange:
+        if self.end_at <= self.start_at:
+            raise ValueError("missing range end_at must be after start_at")
+        return self
+
+
+class TaiwanCurrentSessionCoverage(CanonicalModel):
+    contract_version: str = "tw.bar.current_session_coverage.v2"
+    trade_date: date
+    status: TaiwanCurrentSessionCoverageStatus
+    snapshot_phase: TaiwanCurrentSessionSnapshotPhase
+    snapshot_revision: str = Field(min_length=64, max_length=64)
+    snapshot_bar_count: int = Field(ge=0, le=5000)
+    snapshot_available_from: datetime | None = None
+    snapshot_available_to: datetime | None = None
+    snapshot_reason_codes: tuple[str, ...] = ()
+    expected_from: datetime
+    expected_to: datetime
+    expected_bucket_count: int = Field(ge=0, le=500)
+    observed_bucket_count: int = Field(ge=0, le=500)
+    missing_bucket_count: int = Field(ge=0, le=500)
+    missing_ranges: tuple[TaiwanMissingBarRange, ...] = Field(
+        default=(), max_length=32
+    )
+    repair_recommended: bool = False
+    repair_operation_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> TaiwanCurrentSessionCoverage:
+        if self.expected_to < self.expected_from:
+            raise ValueError("current-session expected_to cannot precede expected_from")
+        if self.observed_bucket_count + self.missing_bucket_count != self.expected_bucket_count:
+            raise ValueError("current-session coverage counts must partition expected buckets")
+        if self.repair_recommended != bool(self.repair_operation_id):
+            raise ValueError("repair recommendation requires an operation id")
+        if self.missing_bucket_count == 0 and self.missing_ranges:
+            raise ValueError("complete coverage cannot expose missing ranges")
+        if self.snapshot_bar_count == 0:
+            if self.snapshot_available_from is not None or self.snapshot_available_to is not None:
+                raise ValueError("empty snapshot cannot expose available bounds")
+        else:
+            if self.snapshot_available_from is None or self.snapshot_available_to is None:
+                raise ValueError("non-empty snapshot requires available bounds")
+            if self.snapshot_available_to <= self.snapshot_available_from:
+                raise ValueError("snapshot available_to must follow available_from")
+        for value in (self.snapshot_available_from, self.snapshot_available_to):
+            if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+                raise ValueError("snapshot bounds must be timezone-aware")
+        if not self.snapshot_reason_codes:
+            raise ValueError("snapshot phase requires at least one reason code")
         return self
 
 
@@ -255,6 +338,7 @@ class TaiwanBarSeriesRead(CanonicalModel):
     bucket_coverage: tuple[BarBucketCoverage | TaiwanDerivedBucketCoverage, ...] = ()
     history: TaiwanHistoryCoverage
     session_resolution: tuple[TaiwanSessionResolutionManifest, ...] = ()
+    current_session_coverage: TaiwanCurrentSessionCoverage | None = None
     identity: TaiwanBarSeriesIdentity
     limitations: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -320,6 +404,10 @@ __all__ = [
     "TPEX_OFFICIAL_5S_PARSER_VERSION",
     "TaiwanHistoryCoverage",
     "TaiwanHistoryStatus",
+    "TaiwanCurrentSessionCoverage",
+    "TaiwanCurrentSessionCoverageStatus",
+    "TaiwanCurrentSessionSnapshotPhase",
+    "TaiwanMissingBarRange",
     "TaiwanBarSeriesIdentity",
     "TaiwanBarSeriesRead",
     "TaiwanDerivedBucketCoverage",

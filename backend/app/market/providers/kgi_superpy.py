@@ -3,7 +3,7 @@ from __future__ import annotations
 import atexit
 from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -899,6 +899,8 @@ class KgiSuperPyQuoteManager:
         event_time = self._event_time_iso(raw_datetime, kbar=True)
         if event_time is None:
             return
+        provider_bucket_end = datetime.fromisoformat(event_time)
+        canonical_start_at = provider_bucket_end - timedelta(minutes=1)
         received_at = self._received_at(kbar.get("received_at"))
         with self._lock:
             event_date = event_time[:10]
@@ -912,7 +914,15 @@ class KgiSuperPyQuoteManager:
             record = {
                 "event_id": f"kbar:{symbol}:{raw_datetime}:1",
                 "sequence": sequence,
+                # KGI's 1m callback is end-labelled in production evidence.
+                # Keep both timestamps visible so diagnostics never hide the
+                # provider-specific one-minute normalization.
                 "event_time": event_time,
+                "provider_event_time": event_time,
+                "canonical_start_at": canonical_start_at.isoformat(),
+                "timestamp_semantics": (
+                    "provider_bucket_end_normalized_to_canonical_start"
+                ),
                 "received_at": received_at,
                 "timeframe_minutes": 1,
                 "open": self._number(kbar.get("open")),
@@ -922,6 +932,9 @@ class KgiSuperPyQuoteManager:
                 "volume_lots": self._integer(kbar.get("volume")),
                 "average_price": self._number(kbar.get("avg_price")),
                 "total_amount": self._number(kbar.get("total_amount")),
+                "total_amount_semantics": (
+                    "provider_cumulative_not_minute_turnover"
+                ),
             }
             bars = self._minute_kbars.setdefault(
                 symbol,

@@ -577,7 +577,11 @@ class YahooIntradayAdapter:
                         )
                         if prices is None:
                             continue
-                        start_at = datetime.fromtimestamp(int(timestamp), tz=provider_tz)
+                        provider_time = datetime.fromtimestamp(
+                            int(timestamp),
+                            tz=provider_tz,
+                        )
+                        start_at = provider_time.replace(second=0, microsecond=0)
                         if not (
                             requirement.request.start_at <= start_at <= requirement.request.end_at
                         ):
@@ -594,7 +598,7 @@ class YahooIntradayAdapter:
                                     provider=YAHOO_INTRADAY_PROVIDER,
                                     source=YAHOO_INTRADAY_SOURCE,
                                     parser_version=YAHOO_INTRADAY_PARSER_VERSION,
-                                    event_at=start_at,
+                                    event_at=provider_time,
                                     fetched_at=fetched_at,
                                     content_hash=content_hash,
                                 ),

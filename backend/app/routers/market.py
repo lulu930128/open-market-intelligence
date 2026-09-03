@@ -29,6 +29,7 @@ from app.market.taiwan_rules import (
 from app.db.models import StockMaster
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
+from app.jobs.taiwan_bar_bootstrap import enqueue_taiwan_intraday_viewer_warmup
 from app.jobs.schemas import JobRunRead
 from app.settings.refresh_execution import (
     resolve_market_refresh_interval_seconds,
@@ -1279,6 +1280,7 @@ def create_realtime_quote_lease(
         db,
         stock_id=stock_id,
         owner_kind=request.owner_kind,
+        baseline_warmup_enqueuer=enqueue_taiwan_intraday_viewer_warmup,
     )
 
 
@@ -1303,8 +1305,11 @@ def heartbeat_realtime_quote_lease(
     "/realtime-quote-leases/{lease_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-def delete_realtime_quote_lease(lease_id: str):
-    release_taiwan_realtime_quote_lease(lease_id)
+def delete_realtime_quote_lease(
+    lease_id: str,
+    db: Session = Depends(get_db),
+):
+    release_taiwan_realtime_quote_lease(db, lease_id)
     return None
 
 

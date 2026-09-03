@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead
 from app.market.tw_chart_service import TaiwanChartBundleRead
 
 
-def project_taiwan_bar_series(series: TaiwanBarSeriesRead) -> dict[str, Any]:
+def _single_session_trade_date(series: TaiwanBarSeriesRead) -> date | None:
+    trade_dates = tuple(item.trade_date for item in series.session_resolution)
+    return trade_dates[0] if len(trade_dates) == 1 else None
+
+
+def project_taiwan_bar_series(
+    series: TaiwanBarSeriesRead,
+    *,
+    session_scope: str | None = None,
+) -> dict[str, Any]:
     states = {item.start_at: item for item in series.bar_states}
     points: list[dict[str, Any]] = []
     for bar in series.bars:
@@ -53,7 +63,7 @@ def project_taiwan_bar_series(series: TaiwanBarSeriesRead) -> dict[str, Any]:
             }
         )
     latest = series.bars[-1] if series.bars else None
-    return {
+    payload = {
         "kind": "taiwan_bar_series",
         "stock_id": series.instrument.symbol,
         "instrument": series.instrument.model_dump(mode="json"),
@@ -83,6 +93,20 @@ def project_taiwan_bar_series(series: TaiwanBarSeriesRead) -> dict[str, Any]:
         "series_revision": series.identity.series_revision,
         "warnings": [*series.warnings, *series.limitations],
     }
+    if session_scope is not None:
+        trade_date = _single_session_trade_date(series)
+        payload.update(
+            {
+                "session_scope": session_scope,
+                "expected_trade_date": (
+                    trade_date.isoformat() if trade_date is not None else None
+                ),
+                "trade_date": (
+                    trade_date.isoformat() if trade_date is not None else None
+                ),
+            }
+        )
+    return payload
 
 
 def project_taiwan_chart_bundle(bundle: TaiwanChartBundleRead) -> dict[str, Any]:
