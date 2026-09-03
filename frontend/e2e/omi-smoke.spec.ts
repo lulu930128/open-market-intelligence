@@ -780,13 +780,17 @@ function taiwanChartBundleResponse(
     contract_version: "tw.chart.bundle.v1",
     bars,
     technical: {
-      contract_version: "tw.technical.series.v1",
+      contract_version: "tw.technical.series.v2",
       instrument: bars.instrument,
       interval,
       bar_series_fingerprint: bars.identity.series_fingerprint,
       bar_lineage_digest: bars.identity.lineage_digest,
       bar_state_digest: bars.identity.state_digest,
       bar_series_revision: bars.identity.series_revision,
+      bar_snapshot_revision:
+        bars.current_session_coverage?.snapshot_revision ?? null,
+      calculation_bar_count: bars.bars.length,
+      response_point_count: 0,
       algorithm_version: "tw.technical.indicators.v4",
       parameter_contract: {},
       status: "warming_up",
@@ -4292,6 +4296,39 @@ test.describe("OMI dashboard smoke", () => {
     await statusToggle.click();
     await expect(sidebar.getByText(new RegExp(timeoutDetail))).toBeVisible();
     await expect(page.getByRole("heading", { name: /^AAPL(?:\s|$)/ })).toBeVisible();
+  });
+
+  test("US Today keeps pending coverage unknown until the intraday response arrives", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path }) =>
+        path.endsWith("/us-market/intraday/AAPL")
+          ? { body: usIntradayResponse("AAPL"), delayMs: 2_000 }
+          : null,
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const detailPanel = page.getByTestId("us-stock-kline-panel");
+    await expect(detailPanel.getByRole("img")).toBeVisible();
+    await detailPanel.getByRole("button", { name: "今日", exact: true }).click();
+
+    await expect(detailPanel).toContainText("讀取目前時段的本機快取中");
+    await expect(detailPanel).not.toContainText("regular 0 / extended 0");
+    await expect(detailPanel.getByTestId("intraday-trend-chart")).toHaveCount(0);
+
+    await expect(detailPanel).toContainText("盤中 · regular 2 / extended 0", {
+      timeout: 5_000,
+    });
+    await expect(detailPanel.getByTestId("intraday-trend-chart")).toHaveAttribute(
+      "data-rendered-point-count",
+      "2"
+    );
   });
 
   test("US detail changes refetch only the resource owned by that control", async ({ page }) => {
