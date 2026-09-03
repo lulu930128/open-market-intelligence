@@ -17,6 +17,7 @@ export function StockDetailDisclosure({
   description,
   eyebrow,
   id,
+  onOpen,
   summaryClassName = "",
   testId,
   title,
@@ -28,6 +29,7 @@ export function StockDetailDisclosure({
   description?: ReactNode;
   eyebrow?: ReactNode;
   id?: string;
+  onOpen?: () => void;
   summaryClassName?: string;
   testId?: string;
   title: ReactNode;
@@ -38,6 +40,9 @@ export function StockDetailDisclosure({
       id={id}
       className={`group/section-disclosure ${className}`}
       data-testid={testId}
+      onToggle={(event) => {
+        if (event.currentTarget.open) onOpen?.();
+      }}
     >
       <summary
         className={`flex cursor-pointer list-none items-center justify-between gap-3 outline-none transition hover:bg-omi-surface-subtle focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden ${summaryClassName}`}

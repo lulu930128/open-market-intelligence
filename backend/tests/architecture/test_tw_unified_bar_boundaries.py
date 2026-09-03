@@ -52,6 +52,15 @@ def test_taiwan_chart_quote_side_uses_canonical_public_quote_owner() -> None:
     assert "get_intraday_trend" not in source
 
 
+def test_taiwan_watchlist_intraday_overlay_uses_unified_bar_owner() -> None:
+    source = _source("backend/app/watchlists/ranking_service.py")
+
+    assert "TaiwanBarService" in source
+    assert "read_current_session_bars" in source
+    assert "get_intraday_trend" not in source
+    assert "tw_intraday_platform" not in source
+
+
 def test_taiwan_mcp_tools_remain_backend_http_relays() -> None:
     source = _source("agents/omi_mcp_server/server.py")
 

@@ -8,10 +8,11 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
+from app.market.trading_calendar import previous_taiwan_trading_day
 from app.market_data.contracts import CanonicalModel
 
 
-TAIWAN_INDEX_RESOLUTION_VERSION = "tw.index.resolution.v3"
+TAIWAN_INDEX_RESOLUTION_VERSION = "tw.index.resolution.v4"
 TAIWAN_INDEX_HEADLINE_COMPATIBILITY_VERSION = (
     "compatibility.current_data_core.v1"
 )
@@ -28,6 +29,12 @@ TaiwanIndexCandidateKind = Literal[
     "index_summary",
     "completed_daily_bar",
     "official_close",
+]
+TaiwanIndexPreviousCloseStatus = Literal[
+    "current",
+    "stale",
+    "missing",
+    "unknown",
 ]
 
 
@@ -74,6 +81,7 @@ class TaiwanIndexTruthObservation(CanonicalModel):
     previous_close_provider: str | None = None
     previous_close_authority: str | None = None
     previous_close_finalization: str | None = None
+    previous_close_status: TaiwanIndexPreviousCloseStatus
     change: float | int | None = None
     change_pct: float | int | None = None
 
@@ -109,6 +117,7 @@ class ResolvedTaiwanIndexTruth(CanonicalModel):
     selected_previous_close_provider: str | None = None
     selected_previous_close_authority: str | None = None
     selected_previous_close_finalization: str | None = None
+    selected_previous_close_status: TaiwanIndexPreviousCloseStatus
     selected_change: float | int | None = None
     selected_change_pct: float | int | None = None
     selection_reason: str
@@ -263,6 +272,32 @@ def _candidate_change_projection(
         "change": selected_change,
         "change_pct": selected_change_pct,
     }
+
+
+def _previous_close_status(
+    *,
+    selected_trade_date: Any,
+    previous_close: Any,
+    previous_close_trade_date: Any,
+    timezone_name: str,
+) -> TaiwanIndexPreviousCloseStatus:
+    if _number(previous_close) is None:
+        return "missing"
+    selected_date = index_candidate_date(
+        selected_trade_date,
+        timezone_name=timezone_name,
+    )
+    reference_date = index_candidate_date(
+        previous_close_trade_date,
+        timezone_name=timezone_name,
+    )
+    if selected_date is None or reference_date is None:
+        return "unknown"
+    expected_reference_date = previous_taiwan_trading_day(
+        selected_date,
+        include_value=False,
+    )
+    return "current" if reference_date == expected_reference_date else "stale"
 
 
 def _resolution_id(payload: dict[str, Any]) -> str:
@@ -1036,6 +1071,24 @@ def resolve_taiwan_index_quote_state(
         if selected_candidate is not None
         else "missing"
     )
+    selected_previous_close_status = _previous_close_status(
+        selected_trade_date=selected_trade_date,
+        previous_close=(
+            selected_candidate.get("previous_close")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        previous_close_trade_date=(
+            selected_candidate.get("previous_close_trade_date")
+            if isinstance(selected_candidate, dict)
+            else None
+        ),
+        timezone_name=timezone_name,
+    )
+    if selected_previous_close_status == "stale":
+        warnings.append("Taiwan index previous close is not from the expected prior trading day.")
+    elif selected_previous_close_status == "unknown" and selected_candidate is not None:
+        warnings.append("Taiwan index previous close lineage date is unavailable.")
     resolution_core = {
         "version": TAIWAN_INDEX_RESOLUTION_VERSION,
         "index_id": str(index_id or snapshot.get("index_id") or "").upper()
@@ -1093,6 +1146,7 @@ def resolve_taiwan_index_quote_state(
             if isinstance(selected_candidate, dict)
             else None
         ),
+        "selected_previous_close_status": selected_previous_close_status,
         "selected_change": (
             selected_candidate.get("change")
             if isinstance(selected_candidate, dict)
@@ -1171,6 +1225,9 @@ def resolve_taiwan_index_quote_state(
                 ],
                 "previous_close_finalization": resolution_core[
                     "selected_previous_close_finalization"
+                ],
+                "previous_close_status": resolution_core[
+                    "selected_previous_close_status"
                 ],
                 "change": resolution_core["selected_change"],
                 "change_pct": resolution_core["selected_change_pct"],
@@ -1465,9 +1522,9 @@ def project_taiwan_index_quote_side(
             "previous_close_provider": raw_resolution.get(
                 "selected_previous_close_provider"
             ),
-            "previous_close_status": (
-                "current" if previous_close is not None else "missing"
-            ),
+            "previous_close_status": raw_resolution.get(
+                "selected_previous_close_status"
+            ) or "unknown",
             "freshness_status": headline.get("freshness_status") or "unknown",
             "decision_usable": bool(headline.get("decision_usable")),
         }

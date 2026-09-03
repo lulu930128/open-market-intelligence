@@ -3,7 +3,6 @@
 import { fetchJson } from "@/lib/api";
 import { useT } from "@/i18n";
 import { emitDataStatusEvent } from "@/lib/dataStatusEvents";
-import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import { TAIWAN_MARKET_CHIP_REFRESH_EVENT } from "@/lib/taiwanMarketTime";
 import type {
   MarketChipDaily,
@@ -20,11 +19,13 @@ export function useTaiwanDetailContext({
   indexId,
   indexMarket,
   isIndexProduct,
+  overnightEnabled,
   stockId,
 }: {
   indexId: string | null;
   indexMarket: string | null;
   isIndexProduct: boolean;
+  overnightEnabled: boolean;
   stockId: string | null;
 }) {
   const t = useT();
@@ -44,7 +45,7 @@ export function useTaiwanDetailContext({
   const stocksWithPublishedOvernightIssue = useRef(new Set<string>());
 
   useEffect(() => {
-    if (!stockId || isIndexProduct) return;
+    if (!overnightEnabled || !stockId || isIndexProduct) return;
 
     const controller = new AbortController();
     const requestedStockId = stockId;
@@ -88,80 +89,19 @@ export function useTaiwanDetailContext({
           initial.stock_name ? ` ${initial.stock_name}` : ""
         }`;
         const decision = initial.refresh_decision;
-        if (!decision?.should_execute) {
-          if (
-            (decision?.cooldown_source_count ?? 0) > 0 &&
-            !controller.signal.aborted
-          ) {
-            stocksWithPublishedOvernightIssue.current.add(requestedStockId);
-            publishStatus(
-              "warning",
-              t("stockDetail.dataViews.overnight.refreshWarningTitle"),
-              t("stockDetail.dataViews.overnight.refreshDeferredMessage"),
-              contextLabel
-            );
-          }
-          return;
-        }
-
-        try {
-          const maxSymbols = Math.max(
-            1,
-            Math.min(8, decision.planned_source_count ?? 1)
-          );
-          const job = await requestBackfillJob(
-            "/api/market/cross-market/refresh",
-            { method: "POST" },
-            {
-              stock_ids: requestedStockId,
-              max_symbols: maxSymbols,
-              max_runtime_seconds: 120,
-            },
-            { intervalMs: 1000, timeoutMs: 150000 }
-          );
-          if (controller.signal.aborted) return;
-
-          const resultStatus = getJobResultStatus(job);
-          if (resultStatus === "failed" || resultStatus === "partial") {
-            stocksWithPublishedOvernightIssue.current.add(requestedStockId);
-            publishStatus(
-              "warning",
-              t("stockDetail.dataViews.overnight.refreshWarningTitle"),
-              job.error_message ||
-                job.message ||
-                t("stockDetail.dataViews.overnight.refreshWarningFallback"),
-              contextLabel
-            );
-          }
-
-          const refreshed = await fetchJson<OvernightImpactRead | null>(
-            `/api/market/overnight-impact/${requestedStockId}`,
-            { refresh: false },
-            { signal: controller.signal }
-          );
-          if (controller.signal.aborted) return;
-          if (!refreshed) return;
-          setOvernightImpact(refreshed);
-          if (
-            !refreshed.refresh_decision?.should_execute &&
-            stocksWithPublishedOvernightIssue.current.delete(requestedStockId)
-          ) {
-            publishStatus(
-              "success",
-              t("stockDetail.dataViews.overnight.refreshRecoveredTitle"),
-              t("stockDetail.dataViews.overnight.refreshRecoveredMessage"),
-              contextLabel
-            );
-          }
-        } catch (error) {
-          if (controller.signal.aborted) return;
+        if (decision?.should_execute || (decision?.cooldown_source_count ?? 0) > 0) {
           stocksWithPublishedOvernightIssue.current.add(requestedStockId);
           publishStatus(
-            "error",
-            t("stockDetail.dataViews.overnight.refreshErrorTitle"),
-            error instanceof Error
-              ? error.message
-              : t("stockDetail.dataViews.overnight.refreshErrorMessage"),
+            "warning",
+            t("stockDetail.dataViews.overnight.refreshWarningTitle"),
+            t("stockDetail.dataViews.overnight.refreshDeferredMessage"),
+            contextLabel
+          );
+        } else if (stocksWithPublishedOvernightIssue.current.delete(requestedStockId)) {
+          publishStatus(
+            "success",
+            t("stockDetail.dataViews.overnight.refreshRecoveredTitle"),
+            t("stockDetail.dataViews.overnight.refreshRecoveredMessage"),
             contextLabel
           );
         }
@@ -183,7 +123,7 @@ export function useTaiwanDetailContext({
 
     void loadOvernightImpact();
     return () => controller.abort();
-  }, [isIndexProduct, stockId, t]);
+  }, [isIndexProduct, overnightEnabled, stockId, t]);
 
   useEffect(() => {
     if (!isIndexProduct || !indexMarket) return;

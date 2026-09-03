@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
@@ -14,6 +17,7 @@ from app.db.models import (
     StockMaster,
 )
 from app.market.tw_bar_contracts import TaiwanHistoryStatus
+from app.market import tw_bar_service as tw_bar_service_module
 from app.market.tw_bar_service import TaiwanBarService
 from app.market.tw_intraday_capabilities import (
     FUGLE_INTRADAY_PARSER_VERSION,
@@ -29,9 +33,78 @@ from app.market.tw_intraday_capabilities import (
     YAHOO_INTRADAY_PROVIDER,
     YAHOO_INTRADAY_SOURCE,
 )
+from app.market_data.contracts import (
+    AuthorityClass,
+    InstrumentKey,
+    InstrumentType,
+    Market,
+    Quantity,
+    QuantityUnit,
+    QuoteObservation,
+    SourceLineage,
+    TradeObservationState,
+)
 
 
 TAIPEI = timezone(timedelta(hours=8))
+
+
+def test_qualified_formal_close_component_preserves_close_without_making_1m_bar() -> None:
+    trade_date = date(2026, 9, 3)
+    close_at = datetime.combine(trade_date, time(13, 30), tzinfo=TAIPEI)
+    requested_at = datetime.combine(trade_date, time(13, 34), tzinfo=TAIPEI)
+    instrument = InstrumentKey(
+        market=Market.TW,
+        symbol="2330",
+        instrument_type=InstrumentType.STOCK,
+        venue="TWSE",
+    )
+    quote = QuoteObservation(
+        instrument=instrument,
+        lineage=SourceLineage(
+            provider="twse_mis",
+            source="twse_mis_quote_depth",
+            authority=AuthorityClass.EXCHANGE,
+            raw_contract_version="test.v1",
+            event_at=close_at,
+            fetched_at=requested_at,
+            content_hash="formal-close",
+        ),
+        trade_date=trade_date,
+        trade_state=TradeObservationState.TRADE_OBSERVED,
+        last_trade_price=Decimal("2390"),
+        last_trade_quantity=Quantity(
+            value=Decimal("1000"),
+            unit=QuantityUnit.SHARE,
+        ),
+    )
+    result = SimpleNamespace(resolved=SimpleNamespace(quote=quote))
+
+    with (
+        patch.object(
+            tw_bar_service_module,
+            "read_taiwan_session_close",
+            return_value=result,
+        ),
+        patch.object(
+            tw_bar_service_module,
+            "project_taiwan_session_close",
+            return_value={"available": True},
+        ),
+    ):
+        component = tw_bar_service_module._qualified_formal_close_component(
+            object(),
+            instrument=instrument,
+            trade_date=trade_date,
+            requested_at=requested_at,
+        )
+
+    assert component is not None
+    assert component.interval == "closing_match"
+    assert component.end_at == close_at
+    assert component.close_price == Decimal("2390")
+    assert component.volume is not None
+    assert component.volume.value == Decimal("1000")
 
 
 def _db() -> tuple[Session, object]:
@@ -207,7 +280,8 @@ def test_current_session_read_excludes_previous_session() -> None:
             authority="vendor",
         )
 
-        result = TaiwanBarService(db).read_current_session_bars(
+        service = TaiwanBarService(db)
+        result = service.read_current_session_bars(
             instrument_id="2330",
             interval="1m",
             requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
@@ -237,6 +311,14 @@ def test_current_session_read_excludes_previous_session() -> None:
         )
         assert result.current_session_coverage.repair_recommended is False
 
+        recent_snapshot_queries: list[str] = []
+        event.listen(
+            engine,
+            "before_cursor_execute",
+            lambda _conn, _cursor, statement, _parameters, _context, _many: (
+                recent_snapshot_queries.append(statement)
+            ),
+        )
         delta = TaiwanBarService(db).read_current_session_bars(
             instrument_id="2330",
             interval="1m",
@@ -251,6 +333,63 @@ def test_current_session_read_excludes_previous_session() -> None:
         )
         assert delta.current_session_coverage.snapshot_bar_count == 5
         assert delta.identity.series_revision != result.identity.series_revision
+        assert recent_snapshot_queries == []
+
+        exact_snapshot_queries: list[str] = []
+        event.listen(
+            engine,
+            "before_cursor_execute",
+            lambda _conn, _cursor, statement, _parameters, _context, _many: (
+                exact_snapshot_queries.append(statement)
+            ),
+        )
+        exact_snapshot = service.read_current_session_snapshot_by_revision(
+            instrument_id="2330",
+            interval="1m",
+            expected_snapshot_revision=(
+                delta.current_session_coverage.snapshot_revision
+            ),
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+        assert len(exact_snapshot.bars) == 5
+        assert (
+            exact_snapshot.identity.series_revision
+            == result.identity.series_revision
+        )
+        assert exact_snapshot_queries == []
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_session_read_keeps_coverage_and_clamps_window_after_close() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version=KGI_INTRADAY_PARSER_VERSION,
+            authority="broker",
+            minutes=5,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 20, 0, tzinfo=TAIPEI),
+        )
+
+        assert result.history.requested_from == datetime(
+            2026, 9, 1, 9, 0, tzinfo=TAIPEI
+        )
+        assert result.history.requested_to == datetime(
+            2026, 9, 1, 13, 31, tzinfo=TAIPEI
+        )
+        assert result.current_session_coverage is not None
+        assert result.current_session_coverage.snapshot_bar_count == 5
+        assert result.session_resolution[0].current_session is True
     finally:
         db.close()
         engine.dispose()
@@ -340,6 +479,38 @@ def test_current_session_trailing_only_snapshot_remains_warming() -> None:
             "TW_CHART_SNAPSHOT_TRAILING_ONLY",
         )
         assert coverage.snapshot_bar_count == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_session_mostly_complete_trailing_window_is_degraded() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version=KGI_INTRADAY_PARSER_VERSION,
+            authority="broker",
+            minutes=4,
+            start_minute=1,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI),
+        )
+
+        coverage = result.current_session_coverage
+        assert coverage is not None
+        assert coverage.status.value == "trailing_window"
+        assert coverage.snapshot_phase.value == "degraded"
+        assert coverage.snapshot_reason_codes == (
+            "TW_CHART_SNAPSHOT_TRAILING_WINDOW",
+        )
     finally:
         db.close()
         engine.dispose()

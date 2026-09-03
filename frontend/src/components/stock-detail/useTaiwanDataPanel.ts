@@ -48,6 +48,10 @@ const institutionalLookbackDays = 100;
 const institutionalHistoryLimit = 120;
 const revenueHistoryLimit = 120;
 const financialHistoryLimit = 40;
+// One TWSE shareholding week usually contains 15 holder brackets.  This keeps
+// the presentation window bounded to at most 156 weeks without changing the
+// canonical retention policy.
+const shareholdingHistoryLimit = 2_400;
 
 function dataPanelCacheKey(stockId: string, tab: DataPanelTab, branchDays = 1) {
   return tab === "branch" ? `${stockId}:${tab}:${branchDays}` : `${stockId}:${tab}`;
@@ -193,6 +197,7 @@ export function useTaiwanDataPanel({
     autoRefreshEnabled ?? resolvedIncludeFundamentals;
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     let refreshTimer: number | undefined;
 
@@ -239,7 +244,7 @@ export function useTaiwanDataPanel({
         window.clearTimeout(refreshTimer);
       }
     };
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
     activeStockIdRef.current = stockId;
@@ -269,7 +274,7 @@ export function useTaiwanDataPanel({
     resolvedKeysRef.current.clear();
     branchSummaryCacheRef.current.clear();
 
-    if (!enabled || !stockId || isIndexProduct) {
+    if (!stockId || isIndexProduct) {
       const timer = window.setTimeout(() => {
         setInstitutional(null);
         setInstitutionalHistory([]);
@@ -309,6 +314,8 @@ export function useTaiwanDataPanel({
       setFinancialMetricHistory([]);
       setFinancialContract(null);
       setStockInfo(null);
+      setActiveDataTab("chips");
+      activeDataTabRef.current = "chips";
       setDataPanelLoading(null);
       setDataPanelMessage(null);
       setBranchDays(1);
@@ -316,49 +323,13 @@ export function useTaiwanDataPanel({
 
     async function loadBasicDetail() {
       try {
-        const [institutionalData, marginData, initialRevenueData, stockData] =
-          await Promise.all([
-            fetchOptional<InstitutionalTradeDailyRead>(
-              `/api/market/institutional/${requestedStockId}/latest`,
-              { ensure_daily: false }
-            ),
-            fetchOptional<MarginTradingDailyRead>(
-              `/api/market/margin/${requestedStockId}/latest`,
-              { ensure_daily: false }
-            ),
-            includeFundamentals === true
-              ? fetchOptional<MonthlyRevenueRead>(
-                  `/api/market/revenue/${requestedStockId}/latest`,
-                  { ensure_latest: false }
-                )
-              : Promise.resolve(null),
-            fetchOptional<StockMasterRead>(`/api/stocks/${requestedStockId}`),
-          ]);
+        const stockData = await fetchOptional<StockMasterRead>(
+          `/api/stocks/${requestedStockId}`
+        );
         if (cancelled) return;
-
-        const resolvedStockDataInstrumentType =
-          stockData?.instrument_type?.trim().toLowerCase() ?? "unknown";
-        const resolvedRevenueData =
-          includeFundamentals === null &&
-          resolvedStockDataInstrumentType !== "" &&
-          resolvedStockDataInstrumentType !== "unknown" &&
-          resolvedStockDataInstrumentType !== "etf"
-            ? await fetchOptional<MonthlyRevenueRead>(
-                `/api/market/revenue/${requestedStockId}/latest`,
-                { ensure_latest: false }
-              )
-            : initialRevenueData;
-        if (cancelled) return;
-
-        setInstitutional(institutionalData);
-        setMargin(marginData);
-        setMonthlyRevenue(resolvedRevenueData);
         setStockInfo(stockData);
       } catch {
         if (cancelled) return;
-        setInstitutional(null);
-        setMargin(null);
-        setMonthlyRevenue(null);
         setStockInfo(null);
       }
     }
@@ -368,7 +339,7 @@ export function useTaiwanDataPanel({
       cancelled = true;
       window.clearTimeout(resetTimer);
     };
-  }, [enabled, includeFundamentals, isIndexProduct, stockId]);
+  }, [isIndexProduct, stockId]);
 
   function dataTabHasCurrentData(tab: DataPanelTab, targetStockId = stockId) {
     if (!targetStockId) return false;
@@ -530,7 +501,7 @@ export function useTaiwanDataPanel({
           ),
           fetchJson<ShareholdingDistributionWeeklyRead[]>(
             `/api/market/shareholding/${targetStockId}/history`,
-            { limit: 12_000, ensure_history: false }
+            { limit: shareholdingHistoryLimit, ensure_history: false }
           ),
           fetchJson<MarginTradingDailyRead[]>(
             `/api/market/margin/${targetStockId}/history`,

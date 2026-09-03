@@ -2179,6 +2179,15 @@ def _compact_intraday_history(
         "truncated": len(points) > len(compact_points),
         "coverage_status": coverage_status,
         "series_coverage": series_coverage,
+        "session_scope": history.get("session_scope"),
+        "expected_trade_date": _json_value(history.get("expected_trade_date")),
+        "observed_trade_dates": list(history.get("observed_trade_dates") or []),
+        "freshness_status": history.get("freshness_status"),
+        "freshness": (
+            dict(history.get("freshness"))
+            if isinstance(history.get("freshness"), dict)
+            else None
+        ),
         "is_partial": bool(history.get("is_partial")),
         "synthetic": bool(history.get("synthetic")),
         "synthetic_semantics": history.get("synthetic_semantics"),
@@ -2350,6 +2359,7 @@ def _compact_single_intraday_series(
         "trade_date": payload.get("trade_date"),
         "session_scope": payload.get("session_scope"),
         "expected_trade_date": payload.get("expected_trade_date"),
+        "observed_trade_dates": list(payload.get("observed_trade_dates") or []),
         "coverage_status": payload.get("coverage_status"),
         "series_coverage": payload.get("series_coverage"),
         "is_partial": payload.get("is_partial"),

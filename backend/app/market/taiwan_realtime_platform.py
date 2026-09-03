@@ -33,6 +33,7 @@ from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
     taiwan_market_session,
+    taiwan_presentation_session,
 )
 from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_health
 from app.market.tw_realtime_capabilities import (
@@ -207,16 +208,27 @@ class TaiwanDepthCandidateReader:
         repository: TaiwanDepthRepository,
         *,
         provider_health: Iterable[ProviderResourceHealth] = (),
+        closing_snapshot: bool = False,
     ) -> None:
         self._repository = repository
         self._provider_health = tuple(provider_health)
+        self._closing_snapshot = closing_snapshot
 
     def read_depth_candidates(self, requirement: DataRequirementV2) -> DepthCandidateBatch:
         if not isinstance(requirement.target, InstrumentTarget):
             raise ValueError("depth reader requires instrument target")
+        expected_date = taiwan_presentation_session(
+            requirement.requested_at
+        )["trade_date"]
+        closeout_sessions = (
+            MarketSession.CLOSING_AUCTION,
+            MarketSession.CLOSE_RESOLUTION,
+        )
         reads = self._repository.load_candidates(
             requirement.target.instrument,
             max_candidates=requirement.bounds.max_candidates,
+            trade_date=expected_date if self._closing_snapshot else None,
+            allowed_sessions=closeout_sessions if self._closing_snapshot else None,
         )
         candidates: list[ResolutionCandidate] = []
         health: list[ProviderResourceHealth] = list(self._provider_health)
@@ -246,7 +258,6 @@ class TaiwanDepthCandidateReader:
                 continue
             event_at = read.observation.lineage.event_at
             assert event_at is not None
-            expected_date = requirement.requested_at.astimezone(TAIWAN_TZ).date()
             event_date = event_at.astimezone(TAIWAN_TZ).date()
             if event_date != expected_date:
                 limitations.append("TW_DEPTH_EVENT_DATE_MISMATCH")
@@ -267,7 +278,11 @@ class TaiwanDepthCandidateReader:
                         )
                     )
                 continue
-            freshness = _freshness(requirement, event_at)
+            freshness = (
+                EvidenceFreshness.FRESH
+                if self._closing_snapshot
+                else _freshness(requirement, event_at)
+            )
             event_times.append(event_at)
             freshness_values.append(freshness)
             candidates.append(
@@ -292,6 +307,8 @@ class TaiwanDepthCandidateReader:
                 requirement,
                 dataset_id=TW_ORDER_BOOK_DATASET_ID,
                 eligible=(
+                    self._closing_snapshot
+                    or (
                     is_taiwan_trading_day(
                         requirement.requested_at.astimezone(TAIWAN_TZ).date()
                     )
@@ -303,6 +320,7 @@ class TaiwanDepthCandidateReader:
                         MarketSession.CLOSING_AUCTION,
                         MarketSession.CLOSE_RESOLUTION,
                     }
+                    )
                 ),
                 event_times=event_times,
                 freshness_values=freshness_values,
@@ -441,6 +459,7 @@ def read_taiwan_depth(
     stock_id: str,
     requested_at: datetime | None = None,
     session: MarketSession | None = None,
+    closing_snapshot: bool = False,
 ) -> MarketDataResultV1:
     now = requested_at or datetime.now(TAIWAN_TZ)
     requirement = build_taiwan_realtime_requirement(
@@ -452,7 +471,10 @@ def read_taiwan_depth(
     )
     return MarketDataGateway().resolve_depth(
         requirement,
-        reader=TaiwanDepthCandidateReader(TaiwanDepthRepository(db)),
+        reader=TaiwanDepthCandidateReader(
+            TaiwanDepthRepository(db),
+            closing_snapshot=closing_snapshot,
+        ),
     )
 
 

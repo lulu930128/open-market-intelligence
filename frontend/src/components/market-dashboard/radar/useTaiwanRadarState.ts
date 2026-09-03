@@ -1,6 +1,6 @@
 "use client";
 
-import { fetchJson } from "@/lib/api";
+import { ApiError, fetchJson } from "@/lib/api";
 import { requestBackfillJob } from "@/lib/jobs";
 import { getTaiwanMarketRefreshState } from "@/lib/taiwanMarketTime";
 import type {
@@ -32,15 +32,9 @@ const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_RADAR_MAX_RESULTS = 20;
 const WATCHLIST_RADAR_OUTCOME_ITEM_LIMIT = 200;
 const WATCHLIST_RADAR_TIMEOUT_MS = 60_000;
+const WATCHLIST_RADAR_INITIAL_DELAY_MS = 180;
+const WATCHLIST_RADAR_ENHANCEMENT_MS = 60_000;
 const WATCHLIST_RADAR_RECONCILE_TIMEOUT_MS = 120_000;
-const WATCHLIST_ANALYSIS_PARAMS = {
-  include_children: true,
-  enabled_only: true,
-  ma_windows: "5,20,60",
-  volume_ma_windows: "5,20",
-  volume_ratio_threshold: 1.5,
-};
-
 function shouldUseIntraday() {
   const marketState = getTaiwanMarketRefreshState();
   return (
@@ -52,18 +46,19 @@ function shouldUseIntraday() {
 function radarParams(
   mode: WatchlistRadarMode,
   useIntraday: boolean,
-  preferSnapshot = true
+  preferSnapshot = true,
+  snapshotOnly = false
 ) {
   return {
-    // Closed-session reads should match the backend's default calculation contract so
-    // the saved daily snapshot can satisfy the request without recomputing the group.
-    ...(useIntraday ? WATCHLIST_ANALYSIS_PARAMS : {}),
+    include_children: true,
+    enabled_only: true,
     mode,
     max_results: WATCHLIST_RADAR_MAX_RESULTS,
     calculation_limit: 100,
     use_intraday: useIntraday,
     intraday_limit: WATCHLIST_INTRADAY_LIMIT,
     prefer_snapshot: preferSnapshot,
+    snapshot_only: snapshotOnly,
     version: "v2",
   };
 }
@@ -300,6 +295,7 @@ export function useTaiwanRadarState({
         silent?: boolean;
         useIntraday?: boolean;
         preferSnapshot?: boolean;
+        snapshotOnly?: boolean;
         reservedRequestSeq?: number;
         statePrepared?: boolean;
       }
@@ -324,15 +320,34 @@ export function useTaiwanRadarState({
       }
 
       try {
-        const radarData = await fetchJson<WatchlistGroupRadarRead>(
-          `/api/watchlists/groups/${currentGroupId}/radar`,
-          radarParams(
-            currentMode,
-            options?.useIntraday ?? shouldUseIntraday(),
-            options?.preferSnapshot ?? true
-          ),
-          { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
-        );
+        const useIntraday = options?.useIntraday ?? shouldUseIntraday();
+        const snapshotOnly = options?.snapshotOnly ?? false;
+        let radarData: WatchlistGroupRadarRead;
+        try {
+          radarData = await fetchJson<WatchlistGroupRadarRead>(
+            `/api/watchlists/groups/${currentGroupId}/radar`,
+            radarParams(
+              currentMode,
+              useIntraday,
+              options?.preferSnapshot ?? true,
+              snapshotOnly
+            ),
+            { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
+          );
+        } catch (error) {
+          if (!(snapshotOnly && error instanceof ApiError && error.status === 404)) {
+            throw error;
+          }
+          if (radarRequestSeqRef.current !== requestSeq) return null;
+
+          if (!options?.silent) {
+            setRadar(null);
+            setOutcomeSummary(null);
+            setOutcomeLoadState("idle");
+          }
+          setLoadState("idle");
+          return null;
+        }
 
         if (radarRequestSeqRef.current !== requestSeq) return null;
 
@@ -368,44 +383,6 @@ export function useTaiwanRadarState({
     [loadOutcome]
   );
 
-  const prepareCompanionLoad = useCallback(
-    ({
-      groupId: currentGroupId,
-      silent,
-      useIntraday,
-      preferSnapshot,
-    }: {
-      groupId: number;
-      silent: boolean;
-      useIntraday: boolean;
-      preferSnapshot?: boolean;
-    }) => {
-      const reservedRequestSeq = radarRequestSeqRef.current + 1;
-      radarRequestSeqRef.current = reservedRequestSeq;
-      let loadPromise: Promise<WatchlistGroupRadarRead | null> | null = null;
-
-      if (!silent) {
-        outcomeRequestSeqRef.current += 1;
-        setLoadState("loading");
-        setOutcomeLoadState("loading");
-        setOutcomeSummary(null);
-      }
-
-      return () => {
-        if (loadPromise) return;
-        loadPromise = load(currentGroupId, {
-          mode: modeRef.current,
-          silent,
-          useIntraday,
-          preferSnapshot,
-          reservedRequestSeq,
-          statePrepared: true,
-        });
-      };
-    },
-    [load]
-  );
-
   const changeMode = useCallback(
     (value: WatchlistRadarMode) => {
       radarRequestSeqRef.current += 1;
@@ -415,11 +392,9 @@ export function useTaiwanRadarState({
       clearOutcomeHistory();
 
       const currentGroupId = groupIdRef.current;
-      if (currentGroupId !== null) {
-        void load(currentGroupId, { mode: value });
-      }
+      if (currentGroupId !== null) setLoadState("loading");
     },
-    [clearOutcomeHistory, load]
+    [clearOutcomeHistory]
   );
 
   const openOutcomeHistory = useCallback(() => {
@@ -493,7 +468,6 @@ export function useTaiwanRadarState({
   useEffect(() => {
     if (!active || routeMode === null || routeMode === modeRef.current) return;
 
-    const groupChanged = previousGroupIdRef.current !== groupId;
     radarRequestSeqRef.current += 1;
     outcomeRequestSeqRef.current += 1;
     const syncTimer = window.setTimeout(() => {
@@ -501,13 +475,10 @@ export function useTaiwanRadarState({
       setMode(routeMode);
       clearOutcomeHistory();
 
-      if (!groupChanged && groupId !== null) {
-        void load(groupId, { mode: routeMode });
-      }
     }, 0);
 
     return () => window.clearTimeout(syncTimer);
-  }, [active, clearOutcomeHistory, groupId, load, routeMode]);
+  }, [active, clearOutcomeHistory, groupId, routeMode]);
 
   useEffect(() => {
     if (previousGroupIdRef.current === groupId) return;
@@ -519,6 +490,45 @@ export function useTaiwanRadarState({
 
     return () => window.clearTimeout(resetTimer);
   }, [groupId, reset]);
+
+  useEffect(() => {
+    if (!active || groupId === null) return;
+
+    const currentGroupId = groupId;
+    const currentMode = mode;
+    let disposed = false;
+    let enhancementTimer: number | undefined;
+
+    function scheduleEnhancement() {
+      if (disposed || !shouldUseIntraday()) return;
+      enhancementTimer = window.setTimeout(() => {
+        void load(currentGroupId, {
+          mode: currentMode,
+          silent: true,
+          useIntraday: true,
+          preferSnapshot: false,
+          snapshotOnly: false,
+        }).finally(scheduleEnhancement);
+      }, WATCHLIST_RADAR_ENHANCEMENT_MS);
+    }
+
+    const initialTimer = window.setTimeout(() => {
+      void load(currentGroupId, {
+        mode: currentMode,
+        useIntraday: false,
+        preferSnapshot: true,
+        snapshotOnly: true,
+      }).finally(scheduleEnhancement);
+    }, WATCHLIST_RADAR_INITIAL_DELAY_MS);
+
+    return () => {
+      disposed = true;
+      window.clearTimeout(initialTimer);
+      if (enhancementTimer !== undefined) {
+        window.clearTimeout(enhancementTimer);
+      }
+    };
+  }, [active, groupId, load, mode]);
 
   useEffect(() => {
     return () => {
@@ -549,7 +559,6 @@ export function useTaiwanRadarState({
       closeOutcomeHistory,
       load,
       openOutcomeHistory,
-      prepareCompanionLoad,
       reconcileOutcomeHistory,
       reset,
       selectOutcomeSnapshot,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -263,6 +263,8 @@ class TaiwanDepthRepository(_RealtimeRepository):
         instrument: InstrumentKey,
         *,
         max_candidates: int,
+        trade_date: date | None = None,
+        allowed_sessions: tuple[MarketSession, ...] | None = None,
     ) -> tuple[PersistedDepthRead, ...]:
         self._validate_target(instrument)
         if not 1 <= max_candidates <= 8:
@@ -272,6 +274,23 @@ class TaiwanDepthRepository(_RealtimeRepository):
             .filter(TaiwanStockDepthSnapshot.stock_id == instrument.symbol)
             .filter(TaiwanStockDepthSnapshot.market == instrument.venue)
         )
+        if trade_date is not None:
+            session_start = datetime.combine(
+                trade_date,
+                datetime.min.time(),
+                tzinfo=TAIWAN_TZ,
+            ).astimezone(timezone.utc)
+            session_end = session_start + timedelta(days=1)
+            base_query = base_query.filter(
+                TaiwanStockDepthSnapshot.event_at >= session_start,
+                TaiwanStockDepthSnapshot.event_at < session_end,
+            )
+        if allowed_sessions:
+            base_query = base_query.filter(
+                TaiwanStockDepthSnapshot.market_session.in_(
+                    tuple(session.value for session in allowed_sessions)
+                )
+            )
         rows: list[TaiwanStockDepthSnapshot] = []
         for binding in sorted(
             (

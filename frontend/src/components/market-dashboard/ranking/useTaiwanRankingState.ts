@@ -7,11 +7,6 @@ import {
 import { fetchJson } from "@/lib/api";
 import { requestBackfillJob } from "@/lib/jobs";
 import {
-  getMarketCalendarStatusSnapshot,
-  msUntilIsoTime,
-  refreshMarketCalendarStatus,
-} from "@/lib/marketCalendarStatus";
-import {
   getRefreshExecutionSeconds,
   type RefreshExecutionSettingsRead,
 } from "@/lib/refreshExecutionSettings";
@@ -36,19 +31,11 @@ export type TaiwanRankBy =
   | "margin_balance_change_pct";
 export type TaiwanRankingErrorKind = "ranking" | "daily-refresh";
 
-type PrepareCompanionLoad = (input: {
-  groupId: number;
-  silent: boolean;
-  useIntraday: boolean;
-  preferSnapshot?: boolean;
-}) => () => void;
-
 type UseTaiwanRankingStateOptions = {
   active: boolean;
   groupId: number | null;
   initialRanking: RankingResponse | null;
   refreshExecutionSettings: RefreshExecutionSettingsRead | null;
-  prepareCompanionLoad: PrepareCompanionLoad;
   onError: (
     kind: TaiwanRankingErrorKind,
     error: unknown,
@@ -58,16 +45,7 @@ type UseTaiwanRankingStateOptions = {
 
 const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_RANKING_BATCH_SIZE = 20;
-const WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS = 5_000;
-const WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS = 300_000;
-const WATCHLIST_ANALYSIS_PARAMS = {
-  include_children: true,
-  enabled_only: true,
-  ma_windows: "5,20,60",
-  volume_ma_windows: "5,20",
-  volume_ratio_threshold: 1.5,
-};
-
+const WATCHLIST_RANKING_ROW_REVEAL_MS = 24;
 type TaiwanMarketRefreshState = ReturnType<typeof getTaiwanMarketRefreshState>;
 
 function shouldUseIntraday(marketState: TaiwanMarketRefreshState) {
@@ -101,7 +79,6 @@ export function useTaiwanRankingState({
   groupId,
   initialRanking,
   refreshExecutionSettings,
-  prepareCompanionLoad,
   onError,
 }: UseTaiwanRankingStateOptions) {
   const [rankBy, setRankBy] = useState<TaiwanRankBy>("none");
@@ -118,16 +95,14 @@ export function useTaiwanRankingState({
   const activeGroupIdRef = useRef(groupId);
   const rankByRef = useRef(rankBy);
   const refreshExecutionSettingsRef = useRef(refreshExecutionSettings);
-  const prepareCompanionLoadRef = useRef(prepareCompanionLoad);
   const onErrorRef = useRef(onError);
 
   useEffect(() => {
     activeGroupIdRef.current = groupId;
     rankByRef.current = rankBy;
     refreshExecutionSettingsRef.current = refreshExecutionSettings;
-    prepareCompanionLoadRef.current = prepareCompanionLoad;
     onErrorRef.current = onError;
-  }, [groupId, onError, prepareCompanionLoad, rankBy, refreshExecutionSettings]);
+  }, [groupId, onError, rankBy, refreshExecutionSettings]);
 
   const clearTrendTimer = useCallback(() => {
     if (trendTimerRef.current === undefined) return;
@@ -155,31 +130,12 @@ export function useTaiwanRankingState({
     async (
       currentGroupId: number,
       currentRankBy = rankByRef.current,
-      options?: { silent?: boolean; preferCompanionSnapshot?: boolean }
+      options?: { silent?: boolean }
     ) => {
       const requestSeq = requestSeqRef.current + 1;
       requestSeqRef.current = requestSeq;
       const marketState = getTaiwanMarketRefreshState();
       const useIntraday = shouldUseIntraday(marketState);
-      const queueCompanionLoad = prepareCompanionLoadRef.current({
-        groupId: currentGroupId,
-        silent: Boolean(options?.silent),
-        useIntraday,
-        preferSnapshot: options?.preferCompanionSnapshot,
-      });
-      let companionLoadQueued = false;
-
-      function ensureCompanionLoadQueued() {
-        if (companionLoadQueued) return;
-        companionLoadQueued = true;
-        queueCompanionLoad();
-      }
-
-      // The closed-session Radar is a cheap snapshot read, so expose it without
-      // waiting for the first ranking batch to finish.
-      if (!useIntraday) {
-        ensureCompanionLoadQueued();
-      }
 
       if (!options?.silent) {
         setLoadState("loading");
@@ -204,7 +160,8 @@ export function useTaiwanRankingState({
             const batch = await fetchJson<RankingBatchResponse>(
               `/api/watchlists/groups/${currentGroupId}/rankings/latest-batch`,
               {
-                ...WATCHLIST_ANALYSIS_PARAMS,
+                include_children: true,
+                enabled_only: true,
                 rank_by: "watchlist",
                 sort_order: "asc",
                 limit: 100,
@@ -217,25 +174,50 @@ export function useTaiwanRankingState({
 
             if (requestSeqRef.current !== requestSeq) return null;
 
-            loadedRows = mergeRankingBatchRows(loadedRows, batch.results);
             currentStockCount += batch.current_stock_count;
             staleStockCount += batch.stale_stock_count;
             noDataCount += batch.no_data_count;
             errorCount += batch.error_count;
 
-            const nextRanking = buildProgressiveRankingResponse({
-              batch,
-              rows: loadedRows,
-              currentStockCount,
-              staleStockCount,
-              noDataCount,
-              errorCount,
-              complete: !batch.has_more,
-              deferTrendData,
-            });
-
-            setRanking(nextRanking);
-            ensureCompanionLoadQueued();
+            if (batch.results.length === 0) {
+              setRanking(
+                buildProgressiveRankingResponse({
+                  batch,
+                  rows: loadedRows,
+                  currentStockCount,
+                  staleStockCount,
+                  noDataCount,
+                  errorCount,
+                  complete: !batch.has_more,
+                  deferTrendData,
+                })
+              );
+            } else {
+              for (const [rowIndex, row] of batch.results.entries()) {
+                loadedRows = mergeRankingBatchRows(loadedRows, [row]);
+                setRanking(
+                  buildProgressiveRankingResponse({
+                    batch,
+                    rows: loadedRows,
+                    currentStockCount,
+                    staleStockCount,
+                    noDataCount,
+                    errorCount,
+                    complete: false,
+                    deferTrendData,
+                  })
+                );
+                if (
+                  !options?.silent &&
+                  rowIndex < batch.results.length - 1
+                ) {
+                  await new Promise<void>((resolve) => {
+                    window.setTimeout(resolve, WATCHLIST_RANKING_ROW_REVEAL_MS);
+                  });
+                  if (requestSeqRef.current !== requestSeq) return null;
+                }
+              }
+            }
 
             if (!batch.has_more || batch.requested_stock_count === 0) {
               const completeRanking = buildProgressiveRankingResponse({
@@ -263,7 +245,8 @@ export function useTaiwanRankingState({
         const rankingData = await fetchJson<RankingResponse>(
           `/api/watchlists/groups/${currentGroupId}/rankings/latest`,
           {
-            ...WATCHLIST_ANALYSIS_PARAMS,
+            include_children: true,
+            enabled_only: true,
             rank_by: currentRankBy,
             sort_order: "desc",
             limit: 100,
@@ -278,7 +261,6 @@ export function useTaiwanRankingState({
         setTrendPending(false);
         setLastUpdatedAt(formatDashboardTime(new Date()));
         setLoadState("success");
-        ensureCompanionLoadQueued();
         return rankingData;
       } catch (error) {
         if (requestSeqRef.current !== requestSeq) return null;
@@ -330,7 +312,6 @@ export function useTaiwanRankingState({
         if (activeGroupIdRef.current === currentGroupId) {
           await load(currentGroupId, currentRankBy, {
             silent: true,
-            preferCompanionSnapshot: false,
           });
         }
       } catch (error) {
@@ -446,104 +427,3 @@ export function useTaiwanRankingState({
     },
   };
 }
-function getDailyReleaseCheckDelay() {
-  const marketState = getTaiwanMarketRefreshState();
-  const dailyRelease =
-    getMarketCalendarStatusSnapshot("tw")?.release_windows.market_daily_price;
-  const releaseDelay = marketState.isDailyPriceReleased
-    ? msUntilIsoTime(dailyRelease?.next_release_at)
-    : msUntilIsoTime(dailyRelease?.release_at);
-  const fallbackDelay = marketState.isDailyPriceReleased
-    ? marketState.msUntilNextPollingStart
-    : 60_000;
-  const delay = releaseDelay ?? fallbackDelay;
-
-  return Math.min(
-    Math.max(delay, WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS),
-    WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS
-  );
-}
-
-  const [rankingRevision, setRankingRevision] = useState(0);
-              setRankingRevision((revision) => revision + 1);
-        setRankingRevision((revision) => revision + 1);
-  useEffect(() => {
-    if (!active || groupId === null) return;
-
-    const currentGroupId = groupId;
-    let disposed = false;
-    let refreshTimer: number | undefined;
-    let wasDailyPriceReleased =
-      getTaiwanMarketRefreshState().isDailyPriceReleased;
-
-    function clearRefreshTimer() {
-      if (refreshTimer === undefined) return;
-      window.clearTimeout(refreshTimer);
-      refreshTimer = undefined;
-    }
-
-    function scheduleReleaseCheck(delay = getDailyReleaseCheckDelay()) {
-      if (disposed) return;
-
-      refreshTimer = window.setTimeout(() => {
-        void checkDailyPriceRelease().finally(() => {
-          if (!disposed) scheduleReleaseCheck();
-        });
-      }, delay);
-    }
-
-    async function checkDailyPriceRelease() {
-      try {
-        await refreshMarketCalendarStatus("tw");
-      } catch (error) {
-        console.warn("Taiwan calendar status refresh failed.", error);
-      }
-
-      if (disposed) return;
-
-      const isDailyPriceReleased =
-        getTaiwanMarketRefreshState().isDailyPriceReleased;
-      const releaseBecameReady =
-        !wasDailyPriceReleased && isDailyPriceReleased;
-      wasDailyPriceReleased = isDailyPriceReleased;
-
-      if (releaseBecameReady) {
-        await refreshDailyPrices(currentGroupId, rankBy);
-      }
-    }
-
-    scheduleReleaseCheck(0);
-
-    return () => {
-      disposed = true;
-      clearRefreshTimer();
-    };
-  }, [active, groupId, rankBy, refreshDailyPrices]);
-
-  useEffect(() => {
-    if (
-      !active ||
-      groupId === null ||
-      loadState !== "success" ||
-      ranking?.is_current !== false
-    ) {
-      return;
-    }
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshDailyPrices(groupId, rankBy);
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-  }, [
-    active,
-    groupId,
-    loadState,
-    rankBy,
-    rankingRevision,
-    ranking?.is_current,
-    ranking?.target_trade_date,
-    refreshDailyPrices,
-  ]);

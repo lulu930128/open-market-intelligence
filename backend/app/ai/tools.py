@@ -42,7 +42,9 @@ from app.market.tw_bar_service import (
     TaiwanBarService,
     read_taiwan_index_intraday_bars,
 )
+from app.market.tw_bar_contracts import TaiwanBarSessionScope
 from app.market.tw_chart_service import TaiwanChartService
+from app.market.tw_technical_service import TaiwanTechnicalService
 from app.market.indices import (
     get_market_index_contributions,
     get_market_index_summary,
@@ -68,7 +70,16 @@ _has_payload_value = _market_payload_contract.has_payload_value
 
 
 def _read_taiwan_bars(*, db: Session, instrument_id: str, interval: str, **kwargs):
-    return TaiwanBarService(db).read_bars(
+    service = TaiwanBarService(db)
+    session_scope = kwargs.pop("session_scope", None)
+    if session_scope is not None:
+        return service.read_scoped_bars(
+            instrument_id=instrument_id,
+            interval=interval,
+            session_scope=TaiwanBarSessionScope(session_scope),
+            **kwargs,
+        )
+    return service.read_bars(
         instrument_id=instrument_id,
         interval=interval,
         **kwargs,
@@ -94,6 +105,10 @@ def _read_taiwan_chart(*, db: Session, instrument_id: str, interval: str, **kwar
         interval=interval,
         **kwargs,
     )
+
+
+def _calculate_taiwan_technical(bars):
+    return TaiwanTechnicalService().calculate(bars)
 
 def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
     return tool_catalog.list_ai_tools(include_internal=include_internal)
@@ -409,6 +424,8 @@ def read_tw_index_context(
             get_latest_market_chip_daily=get_latest_market_chip_daily,
             get_market_index_contributions=get_market_index_contributions,
             read_taiwan_chart=_read_taiwan_chart,
+            read_taiwan_index_intraday_bars=_read_taiwan_index_intraday_bars,
+            calculate_taiwan_technical=_calculate_taiwan_technical,
             get_market_index_summary=get_market_index_summary,
             now=_now,
         ),

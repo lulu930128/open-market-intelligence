@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.market import tw_chart_service
+from app.market.tw_bar_contracts import TaiwanBarSessionScope
 from app.routers import tw_market_technical
 
 
@@ -17,7 +18,8 @@ def _bars(revision: str = "a" * 64):
             lineage_digest="c" * 64,
             state_digest="d" * 64,
             series_revision=revision,
-        )
+        ),
+        current_session_coverage=None,
     )
 
 
@@ -259,7 +261,7 @@ def test_separate_technical_route_returns_typed_revision_conflict(
         def __init__(self, db) -> None:
             pass
 
-        def read_bars(self, **kwargs):
+        def read_scoped_bars(self, **kwargs):
             return bars
 
     monkeypatch.setattr(tw_market_technical, "TaiwanBarService", _FakeBarService)
@@ -275,12 +277,146 @@ def test_separate_technical_route_returns_typed_revision_conflict(
             expected_series_revision="0" * 64,
             ma_windows=None,
             volume_ma_windows=None,
+            session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
             db=object(),
         )
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["code"] == "BAR_SERIES_REVISION_CONFLICT"
     assert exc_info.value.detail["current_series_revision"] == "f" * 64
+
+
+def test_separate_technical_route_forwards_same_session_scope(monkeypatch) -> None:
+    bars = _bars()
+    calls: list[dict[str, object]] = []
+
+    class _FakeBarService:
+        def __init__(self, _db) -> None:
+            pass
+
+        def read_scoped_bars(self, **kwargs):
+            calls.append(kwargs)
+            return bars
+
+    class _FakeTechnicalService:
+        def calculate(self, received, **_kwargs):
+            return _technical(received)
+
+    monkeypatch.setattr(tw_market_technical, "TaiwanBarService", _FakeBarService)
+    monkeypatch.setattr(
+        tw_market_technical,
+        "TaiwanTechnicalService",
+        _FakeTechnicalService,
+    )
+
+    result = tw_market_technical.get_taiwan_technical_series(
+        instrument_id="2330",
+        interval="1m",
+        from_time=None,
+        to_time=None,
+        limit=5000,
+        include_partial=True,
+        expected_series_revision=bars.identity.series_revision,
+        ma_windows=None,
+        volume_ma_windows=None,
+        session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
+        db=object(),
+    )
+
+    assert result.bar_series_revision == bars.identity.series_revision
+    assert calls[0]["session_scope"] is TaiwanBarSessionScope.CURRENT_SESSION
+
+
+def test_current_session_snapshot_pin_uses_full_calculation_window(
+    monkeypatch,
+) -> None:
+    bars = _bars(revision="e" * 64)
+    bars.current_session_coverage = SimpleNamespace(snapshot_revision="f" * 64)
+    bar_calls: list[dict[str, object]] = []
+    technical_calls: list[dict[str, object]] = []
+
+    class _FakeBarService:
+        def __init__(self, _db) -> None:
+            pass
+
+        def read_current_session_snapshot_by_revision(self, **kwargs):
+            bar_calls.append(kwargs)
+            return bars
+
+    class _FakeTechnicalService:
+        def calculate(self, received, **kwargs):
+            assert received is bars
+            technical_calls.append(kwargs)
+            return SimpleNamespace(
+                bar_series_revision=received.identity.series_revision,
+                bar_snapshot_revision=received.current_session_coverage.snapshot_revision,
+            )
+
+    monkeypatch.setattr(tw_market_technical, "TaiwanBarService", _FakeBarService)
+    monkeypatch.setattr(
+        tw_market_technical,
+        "TaiwanTechnicalService",
+        _FakeTechnicalService,
+    )
+
+    result = tw_market_technical.get_taiwan_technical_series(
+        instrument_id="2330",
+        interval="1m",
+        from_time=None,
+        to_time=None,
+        limit=8,
+        include_partial=True,
+        expected_snapshot_revision="f" * 64,
+        ma_windows="5,20,60",
+        volume_ma_windows="5,20",
+        session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
+        db=object(),
+    )
+
+    assert result.bar_snapshot_revision == "f" * 64
+    assert bar_calls[0]["expected_snapshot_revision"] == "f" * 64
+    assert "limit" not in bar_calls[0]
+    assert technical_calls[0]["expected_series_revision"] is None
+    assert technical_calls[0]["expected_snapshot_revision"] == "f" * 64
+    assert technical_calls[0]["response_limit"] == 8
+
+
+def test_current_session_snapshot_revision_conflict_is_typed(
+    monkeypatch,
+) -> None:
+    bars = _bars(revision="e" * 64)
+    bars.current_session_coverage = SimpleNamespace(snapshot_revision="f" * 64)
+
+    class _FakeBarService:
+        def __init__(self, _db) -> None:
+            pass
+
+        def read_current_session_snapshot_by_revision(self, **_kwargs):
+            return bars
+
+    monkeypatch.setattr(tw_market_technical, "TaiwanBarService", _FakeBarService)
+
+    with pytest.raises(HTTPException) as exc_info:
+        tw_market_technical.get_taiwan_technical_series(
+            instrument_id="2330",
+            interval="1m",
+            from_time=None,
+            to_time=None,
+            limit=8,
+            include_partial=True,
+            expected_snapshot_revision="0" * 64,
+            ma_windows=None,
+            volume_ma_windows=None,
+            session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
+            db=object(),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {
+        "code": "BAR_SNAPSHOT_REVISION_CONFLICT",
+        "expected_snapshot_revision": "0" * 64,
+        "current_snapshot_revision": "f" * 64,
+    }
 
 
 def test_technical_contract_route_is_pure(monkeypatch) -> None:

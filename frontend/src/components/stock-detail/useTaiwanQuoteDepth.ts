@@ -531,8 +531,10 @@ export function useTaiwanQuoteDepth({
       }, quoteDepthRefreshDelayMs(depth));
     }
 
-    void load(true).then(scheduleRefresh);
-    void loadReplay();
+    void load(true).then((depth) => {
+      scheduleRefresh(depth);
+      void loadReplay();
+    });
 
     return () => {
       cancelled = true;

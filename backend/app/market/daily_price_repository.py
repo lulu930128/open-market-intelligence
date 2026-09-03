@@ -697,6 +697,7 @@ class TaiwanOfficialDailyBarRepository:
         trade_date: date,
         include_etf: bool = False,
         venue: str | None = None,
+        symbols: tuple[str, ...] | None = None,
         max_rows: int = 5000,
     ) -> TaiwanOfficialDailyUniverseRead:
         """Load an exact completed-session universe through official lineage.
@@ -712,6 +713,15 @@ class TaiwanOfficialDailyBarRepository:
         normalized_venue = str(venue or "").strip().upper() or None
         if normalized_venue not in {None, "TWSE", "TPEX"}:
             raise ValueError("Taiwan universe venue must be TWSE or TPEX")
+        normalized_symbols = tuple(
+            dict.fromkeys(
+                value.strip().upper()
+                for value in (symbols or ())
+                if value and value.strip()
+            )
+        )
+        if len(normalized_symbols) > 500:
+            raise ValueError("Taiwan bounded universe symbols cannot exceed 500")
         source_to_binding = {
             binding.source_name: binding
             for bindings in _SOURCES_BY_VENUE.values()
@@ -729,6 +739,15 @@ class TaiwanOfficialDailyBarRepository:
         if normalized_venue is not None:
             universe_query = universe_query.filter(
                 func.upper(StockMaster.market) == normalized_venue
+            )
+        if symbols is not None:
+            if not normalized_symbols:
+                return TaiwanOfficialDailyUniverseRead(
+                    trade_date=trade_date,
+                    limitations=("REQUESTED_STOCK_UNIVERSE_EMPTY",),
+                )
+            universe_query = universe_query.filter(
+                StockMaster.stock_id.in_(normalized_symbols)
             )
         universe_rows = (
             universe_query.order_by(StockMaster.stock_id.asc())

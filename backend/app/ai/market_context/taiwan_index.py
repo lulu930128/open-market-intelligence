@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.ai import technical_analysis
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
-from app.ai.market_context.taiwan_bar_projection import project_taiwan_chart_bundle
+from app.ai.market_context.taiwan_bar_projection import (
+    project_taiwan_bar_series,
+    project_taiwan_chart_bundle,
+)
 from app.ai.market_context.taiwan_projection import (
     _build_tw_index_compact_evidence,
     _json_value,
@@ -31,6 +34,8 @@ class TaiwanIndexDependencies:
     get_latest_market_chip_daily: Callable[..., Any]
     get_market_index_contributions: Callable[..., list[Any]]
     read_taiwan_chart: Callable[..., Any]
+    read_taiwan_index_intraday_bars: Callable[..., Any]
+    calculate_taiwan_technical: Callable[..., Any]
     get_market_index_summary: Callable[..., Any]
     now: Callable[[], datetime]
 
@@ -107,21 +112,25 @@ def read_tw_index_context(
     normalized_horizon = normalize_analysis_horizon(analysis_horizon)
     if include_intraday or normalized_horizon == "intraday":
         try:
-            bundle = dependencies.read_taiwan_chart(
+            intraday_series = dependencies.read_taiwan_index_intraday_bars(
                 db=db,
-                instrument_id=normalized_index_id,
-                interval="1m",
-                limit=500,
-                include_partial=True,
+                index_id=normalized_index_id,
+                requested_at=dependencies.now(),
             )
-            intraday = project_taiwan_chart_bundle(bundle)
-            intraday_points = list(bundle.technical.points)
+            intraday = project_taiwan_bar_series(
+                intraday_series,
+                session_scope="current_session",
+            )
+            intraday_technical = dependencies.calculate_taiwan_technical(
+                intraday_series
+            )
+            intraday_points = list(intraday_technical.points)
             technical_reports["today"] = {
                 "kind": "tw_index_backend_technical_series",
                 "timeframe": "today",
-                "algorithm_version": bundle.technical.algorithm_version,
-                "bar_series_revision": bundle.series_revision,
-                "status": bundle.technical.status.value,
+                "algorithm_version": intraday_technical.algorithm_version,
+                "bar_series_revision": intraday_series.identity.series_revision,
+                "status": intraday_technical.status.value,
                 "score": None,
                 "confidence": None,
                 "data": {
@@ -130,7 +139,7 @@ def read_tw_index_context(
                     else None
                 },
                 "missing": [] if intraday_points else ["technical.series"],
-                "warnings": list(bundle.technical.warnings),
+                "warnings": list(intraday_technical.warnings),
             }
             if not intraday_points:
                 missing.append("market_index_intraday")

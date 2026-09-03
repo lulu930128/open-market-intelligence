@@ -207,10 +207,35 @@ class TaiwanPublicQuoteCandidateReader:
             raise ValueError("public quote requires snapshot capability")
         if requirement.request.capability_id != TW_PUBLIC_LAST_TRADE_CAPABILITY_ID:
             raise ValueError("public quote capability mismatch")
+        expected_trade_date = taiwan_presentation_session(
+            requirement.requested_at
+        )["trade_date"]
         stored_reads = self._repository.load_quote_candidates(
             requirement.target.instrument,
             max_candidates=requirement.bounds.max_candidates,
+            trade_date=expected_trade_date if self._session_close else None,
+            allowed_sessions=(
+                (
+                    MarketSession.CLOSING_AUCTION,
+                    MarketSession.CLOSE_RESOLUTION,
+                    MarketSession.POST_CLOSE,
+                )
+                if self._session_close
+                else None
+            ),
         )
+        if self._session_close and not any(
+            stored.observation is not None for stored in stored_reads
+        ):
+            # Keep the closeout role filter ahead of the candidate bound.  If
+            # no role-compatible row exists, retain one same-day row for
+            # typed rejection diagnostics instead of reporting a blind miss.
+            stored_reads = self._repository.load_quote_candidates(
+                requirement.target.instrument,
+                max_candidates=requirement.bounds.max_candidates,
+                trade_date=expected_trade_date,
+                allowed_sessions=None,
+            )
         limitations = [
             limitation
             for stored in stored_reads
@@ -220,9 +245,6 @@ class TaiwanPublicQuoteCandidateReader:
         rejections: list[CandidateRowRejection] = []
         provider_health: list[ProviderResourceHealth] = []
         freshness_values: list[EvidenceFreshness] = []
-        expected_trade_date = taiwan_presentation_session(
-            requirement.requested_at
-        )["trade_date"]
         partial = False
         latest_dates = [
             stored.observation.trade_date
@@ -294,6 +316,7 @@ class TaiwanPublicQuoteCandidateReader:
                     observation.lineage.authority.value == "exchange"
                 )
                 closeout_session = stored.market_session in {
+                    MarketSession.CLOSING_AUCTION,
                     MarketSession.CLOSE_RESOLUTION,
                     MarketSession.POST_CLOSE,
                 }
@@ -318,20 +341,29 @@ class TaiwanPublicQuoteCandidateReader:
                     freshness = EvidenceFreshness.FRESH
                 elif self._session_close:
                     freshness = EvidenceFreshness.STALE
-                    limitations.append(
-                        "SESSION_CLOSE_AUTHORITY_UNVERIFIED"
-                        if not exchange_authority
-                        else "SESSION_CLOSE_CONTROL_SESSION_INVALID"
-                        if not closeout_session
-                        else "SESSION_CLOSE_EVENT_TIME_INVALID"
-                        if not legal_session_event
-                        else (
+                    if not exchange_authority:
+                        limitations.append(
+                            "SESSION_CLOSE_AUTHORITY_UNVERIFIED"
+                        )
+                    if not closeout_session:
+                        limitations.append(
+                            "SESSION_CLOSE_CONTROL_SESSION_INVALID"
+                        )
+                    if not legal_session_event:
+                        limitations.append(
+                            "SESSION_CLOSE_EVENT_TIME_INVALID"
+                        )
+                    if (
+                        exchange_authority
+                        and closeout_session
+                        and legal_session_event
+                    ):
+                        limitations.append(
                             "SESSION_CLOSE_RESOLVING"
                             if stored.market_session
                             is MarketSession.CLOSE_RESOLUTION
                             else "SESSION_CLOSE_CONFIRMATION_MISSING"
                         )
-                    )
                 elif (
                     requirement.session in _ACTIVE_SESSIONS
                     and same_trade_date

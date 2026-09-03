@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import json
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -154,12 +154,12 @@ def test_index_event_read_paginates_each_source_and_preserves_late_tail() -> Non
         engine.dispose()
 
 
-def test_index_materializes_source_candidates_then_shared_resolver_selects_one() -> None:
+def test_index_materializes_candidates_then_shared_resolver_composes_timestamps() -> None:
     db, engine = _db()
     try:
         # Exchange has 09:00 and 09:02; vendor has 09:01 and 09:02. If a
-        # pre-resolver minute-hop existed the outward series would contain all
-        # three minutes. SINGLE_CANDIDATE must instead select one whole source.
+        # provider-side minute-hop existed, the persisted candidates would lose
+        # their independent lineage. The shared resolver composes timestamps.
         for provider, source, minutes in (
             ("twse_mis", "twse_mis_index_snapshot", (0, 2)),
             ("fugle_marketdata", "fugle_indices_stream", (1, 2)),
@@ -230,21 +230,42 @@ def test_index_materializes_source_candidates_then_shared_resolver_selects_one()
             for row in db.query(MarketIntradayBarLineage).all()
         )
 
+        read_statements: list[str] = []
+
+        def capture_read(
+            _connection,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            read_statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture_read)
         outward = TaiwanBarService(db).read_bars(
             instrument_id="TAIEX",
             interval="1m",
             from_time=datetime(2026, 9, 1, 9, 0, tzinfo=TAIWAN_TZ),
             to_time=datetime(2026, 9, 1, 9, 4, tzinfo=TAIWAN_TZ),
-            requested_at=datetime(2026, 9, 1, 9, 3, tzinfo=TAIWAN_TZ),
+            requested_at=datetime(2026, 9, 1, 14, 0, tzinfo=TAIWAN_TZ),
         )
+        event.remove(engine, "before_cursor_execute", capture_read)
 
-        assert [bar.start_at.minute for bar in outward.bars] == [1, 2]
+        assert [bar.start_at.minute for bar in outward.bars] == [0, 1, 2]
         assert {
             (bar.lineage.provider, bar.lineage.source) for bar in outward.bars
-        } == {("fugle_marketdata", "fugle_indices_stream")}
-        assert outward.session_resolution[0].selected_candidate_id == (
-            "fugle_marketdata:fugle_indices_stream"
-        )
+        } == {
+            ("fugle_marketdata", "fugle_indices_stream"),
+            ("twse_mis", "twse_mis_index_snapshot"),
+        }
+        assert outward.session_resolution[0].selected_candidate_id is None
+        component_receipt_reads = [
+            statement
+            for statement in read_statements
+            if "FROM raw_fetch_result" in statement
+        ]
+        assert len(component_receipt_reads) <= 1
     finally:
         db.close()
         engine.dispose()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from enum import Enum
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -12,7 +11,7 @@ from app.market.index_resolution import project_taiwan_index_quote_side
 from app.market.indices import get_market_index_summary
 from app.market.public_quote_platform import read_taiwan_public_quote_projection
 from app.market.technical_parameters import TechnicalAnalysisParameters
-from app.market.tw_bar_contracts import TaiwanBarSeriesRead
+from app.market.tw_bar_contracts import TaiwanBarSeriesRead, TaiwanBarSessionScope
 from app.market.tw_bar_service import (
     TaiwanBarService,
     taiwan_current_session_bar_window,
@@ -24,9 +23,7 @@ from app.market.tw_technical_service import (
 from app.market_data.contracts import CanonicalModel
 
 
-class TaiwanChartSessionScope(str, Enum):
-    HISTORY = "history"
-    CURRENT_SESSION = "current_session"
+TaiwanChartSessionScope = TaiwanBarSessionScope
 
 
 class TaiwanChartBundleRead(CanonicalModel):
@@ -60,11 +57,11 @@ class TaiwanChartService:
         parameters: TechnicalAnalysisParameters | None = None,
         expected_series_revision: str | None = None,
         requested_at: datetime | None = None,
-        session_scope: TaiwanChartSessionScope = TaiwanChartSessionScope.HISTORY,
+        session_scope: TaiwanBarSessionScope = TaiwanBarSessionScope.HISTORY,
     ) -> TaiwanChartBundleRead:
         presentation_trade_date: date | None = None
         bar_service = TaiwanBarService(self._db)
-        if session_scope is TaiwanChartSessionScope.CURRENT_SESSION:
+        if session_scope is TaiwanBarSessionScope.CURRENT_SESSION:
             if from_time is not None or to_time is not None:
                 raise ValueError(
                     "current_session chart scope cannot be combined with from/to"

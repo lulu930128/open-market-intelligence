@@ -10,7 +10,6 @@ import type {
   KRWatchlistGroupNode,
   KRWatchlistItemRead,
   MarketIndexSummary,
-  TaiwanChartBundleRead,
   TaiwanStockQuoteDepthPreviewMode,
   USWatchlistGroupNode,
   USWatchlistItemRead,
@@ -21,7 +20,6 @@ import type {
 import type { BackendConnectionIssueCode } from "@/types/runtime";
 
 const futuresProductIds = new Set(["TXF", "MXF", "TMF"]);
-const taiwanIndexProductIds = new Set(["TAIEX", "TPEX"]);
 
 function firstSearchParam(
   params: Record<string, string | string[] | undefined> | undefined,
@@ -38,17 +36,6 @@ function normalizeQuoteDepthPreviewMode(
   if (value === "preopen" || value === "live") return value;
 
   return null;
-}
-
-function taiwanChartPath(stockId: string) {
-  const params = new URLSearchParams({
-    interval: "1d",
-    limit: taiwanIndexProductIds.has(stockId.toUpperCase()) ? "300" : "260",
-    include_partial: "true",
-    ma_windows: "5,20,60",
-    volume_ma_windows: "5,20",
-  });
-  return `/api/market/chart/${encodeURIComponent(stockId)}?${params.toString()}`;
 }
 
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
@@ -165,7 +152,6 @@ export default async function Page({
     initialJpWatchlistItems,
     initialKrWatchlistTree,
     initialKrWatchlistItems,
-    initialChartBundle,
   ] = await Promise.all([
     initialMarket === "tw"
       ? fetchInitial<WatchlistGroupNode[]>("/api/watchlists/tree", [])
@@ -203,12 +189,6 @@ export default async function Page({
           []
         )
       : Promise.resolve<KRWatchlistItemRead[]>([]),
-    initialMarket === "tw" && initialSelectedStockId
-      ? fetchInitial<TaiwanChartBundleRead | null>(
-          taiwanChartPath(initialSelectedStockId),
-          null
-        )
-      : Promise.resolve<TaiwanChartBundleRead | null>(null),
   ]);
   const selectedStockItem =
     initialSelectedStockId === null
@@ -247,7 +227,6 @@ export default async function Page({
       initialSelectedUsSecurityName={selectedUsItem?.security_name ?? null}
       initialSelectedJpSymbol={initialSelectedJpSymbol}
       initialSelectedKrSymbol={initialSelectedKrSymbol}
-      initialChartBundle={initialChartBundle}
       initialRankingData={null}
       initialRadarMode={initialRadarMode}
       initialRadarData={initialRadarData}

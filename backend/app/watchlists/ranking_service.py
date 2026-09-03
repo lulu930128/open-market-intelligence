@@ -11,8 +11,8 @@ from app.db.models import (
     StockMaster,
 )
 from app.market.calendar_status import expected_taiwan_trade_date
-from app.market.intraday import get_intraday_trend
 from app.market.signal_service import calculate_latest_stock_signals
+from app.market.tw_bar_service import TaiwanBarService
 from app.market.technical_structure import (
     MOVING_AVERAGE_SIGNAL_LABELS,
     PRICE_MOVING_AVERAGE_SIGNAL_KEYS,
@@ -291,15 +291,34 @@ def _get_unique_watchlist_items(
 
 
 def _get_intraday_overlay(db: Session, stock_id: str) -> dict | None:
-    intraday = get_intraday_trend(db=db, stock_id=stock_id)
-    points = intraday.get("points") or []
+    service = TaiwanBarService(db)
+    series = service.read_current_session_bars(
+        instrument_id=stock_id,
+        interval="1m",
+        limit=500,
+    )
+    points = [
+        {
+            "time": bar.start_at.isoformat(),
+            "price": float(bar.close_price),
+            "volume": int(bar.volume.value) if bar.volume is not None else None,
+        }
+        for bar in series.bars
+    ]
 
     if not points:
         return None
 
     latest = points[-1]
     latest_price = latest.get("price")
-    previous_close = intraday.get("previous_close")
+    expected_date = expected_daily_price_date()
+    completed = service.read_latest_completed_bars_batch(
+        instrument_ids=(stock_id,),
+        bars_per_instrument=2,
+        through_date=expected_date,
+    ).get(stock_id, ())
+    prior_daily = [bar for bar in completed if bar.start_at.date() < expected_date]
+    previous_close = prior_daily[-1].close_price if prior_daily else None
 
     if not _valid_number(latest_price):
         return None
@@ -325,7 +344,7 @@ def _get_intraday_overlay(db: Session, stock_id: str) -> dict | None:
         "previous_close": float(previous_close) if _valid_number(previous_close) else None,
         "limit_status": _limit_status_from_change_pct(change_pct),
         "points": _compact_intraday_points(points),
-        "source": intraday.get("source"),
+        "source": series.bars[-1].lineage.source,
     }
 
 
@@ -926,6 +945,122 @@ def _build_watchlist_ranking_rows(
     return rows
 
 
+def _build_watchlist_order_rows(
+    db: Session,
+    items: list[dict],
+    *,
+    use_intraday: bool,
+    intraday_limit: int,
+) -> list[dict]:
+    """Build the default watchlist surface without running signal analysis."""
+
+    rows: list[dict] = []
+    batch_error: str | None = None
+    try:
+        bars_by_stock = TaiwanBarService(db).read_latest_completed_bars_batch(
+            instrument_ids=tuple(str(item["stock_id"]) for item in items),
+            bars_per_instrument=2,
+            through_date=expected_daily_price_date(),
+        )
+    except Exception as exc:
+        bars_by_stock = {}
+        batch_error = str(exc)
+    for item in items:
+        stock_id = item["stock_id"]
+        stock_name = item.get("stock_name")
+        try:
+            if batch_error is not None:
+                raise RuntimeError(batch_error)
+            bars = bars_by_stock.get(str(stock_id), ())
+            latest = bars[-1] if bars else None
+            previous = bars[-2] if len(bars) > 1 else None
+            close = float(latest.close_price) if latest is not None else None
+            previous_close = (
+                float(previous.close_price) if previous is not None else None
+            )
+            change = (
+                close - previous_close
+                if close is not None and previous_close is not None
+                else None
+            )
+            change_pct = (
+                change / previous_close * 100
+                if change is not None and previous_close not in {None, 0}
+                else None
+            )
+            volume = (
+                int(latest.volume.value)
+                if latest is not None and latest.volume is not None
+                else None
+            )
+            rows.append(
+                {
+                    "rank": 0,
+                    "stock_id": stock_id,
+                    "stock_name": stock_name,
+                    "time": latest.start_at.isoformat() if latest is not None else None,
+                    "close": close,
+                    "volume": volume,
+                    "change": change,
+                    "previous_close": previous_close,
+                    "change_pct": change_pct,
+                    "limit_status": _limit_status_from_change_pct(change_pct),
+                    "score": 0,
+                    "market_rank": None,
+                    "rank_value": None,
+                    "rank_trade_date": None,
+                    "status": "ready" if latest is not None else "no_data",
+                    "signal_count": 0,
+                    "signal_keys": [],
+                    "signal_details": [],
+                    "primary_signal_key": None,
+                    "primary_signal_label": None,
+                    "indicator_snapshot": {},
+                    "context_snapshot": {},
+                    "intraday_previous_close": None,
+                    "intraday_points": [],
+                    "error_message": None,
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "rank": 0,
+                    "stock_id": stock_id,
+                    "stock_name": stock_name,
+                    "time": None,
+                    "close": None,
+                    "volume": None,
+                    "change": None,
+                    "previous_close": None,
+                    "change_pct": None,
+                    "limit_status": None,
+                    "score": 0,
+                    "market_rank": None,
+                    "rank_value": None,
+                    "rank_trade_date": None,
+                    "status": "error",
+                    "signal_count": 0,
+                    "signal_keys": [],
+                    "signal_details": [],
+                    "primary_signal_key": None,
+                    "primary_signal_label": None,
+                    "indicator_snapshot": {},
+                    "context_snapshot": {},
+                    "intraday_previous_close": None,
+                    "intraday_points": [],
+                    "error_message": str(exc),
+                }
+            )
+
+    if use_intraday:
+        for row in _intraday_candidate_rows(rows, intraday_limit):
+            overlay = _get_intraday_overlay(db=db, stock_id=str(row["stock_id"]))
+            if overlay is not None:
+                _apply_intraday_overlay_to_row(row, overlay)
+    return rows
+
+
 def get_watchlist_group_latest_ranking(
     db: Session,
     group_id: int,
@@ -962,16 +1097,25 @@ def get_watchlist_group_latest_ranking(
         include_children=include_children,
         enabled_only=enabled_only,
     )
-    rows = _build_watchlist_ranking_rows(
-        db=db,
-        items=unique_items,
-        ma_windows=ma_windows,
-        volume_ma_windows=volume_ma_windows,
-        limit=limit,
-        volume_ratio_threshold=volume_ratio_threshold,
-        use_intraday=use_intraday,
-        intraday_limit=intraday_limit,
-        intraday_overlay_cache=intraday_overlay_cache,
+    rows = (
+        _build_watchlist_order_rows(
+            db,
+            unique_items,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
+        )
+        if rank_by == "watchlist"
+        else _build_watchlist_ranking_rows(
+            db=db,
+            items=unique_items,
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+            limit=limit,
+            volume_ratio_threshold=volume_ratio_threshold,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
+            intraday_overlay_cache=intraday_overlay_cache,
+        )
     )
 
     no_data_count = sum(1 for row in rows if row["status"] == "no_data")
@@ -1150,13 +1294,9 @@ def get_watchlist_group_latest_ranking_batch(
     total_stock_count = len(unique_items)
     batch_items = unique_items[offset : offset + batch_size]
     batch_intraday_limit = max(0, int(intraday_limit) - offset)
-    rows = _build_watchlist_ranking_rows(
-        db=db,
-        items=batch_items,
-        ma_windows=ma_windows,
-        volume_ma_windows=volume_ma_windows,
-        limit=limit,
-        volume_ratio_threshold=volume_ratio_threshold,
+    rows = _build_watchlist_order_rows(
+        db,
+        batch_items,
         use_intraday=use_intraday,
         intraday_limit=batch_intraday_limit,
     )

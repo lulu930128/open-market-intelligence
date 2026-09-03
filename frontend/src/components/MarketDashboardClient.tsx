@@ -120,7 +120,6 @@ import type {
   MarketIndexSummary,
   RankingItem,
   RankingResponse,
-  TaiwanChartBundleRead,
   TaiwanStockQuoteDepthPreviewMode,
   USCompanyProfileRead,
   USWatchlistGroupNode,
@@ -205,7 +204,6 @@ type Props = {
   initialSelectedUsSecurityName: string | null;
   initialSelectedJpSymbol: string | null;
   initialSelectedKrSymbol: string | null;
-  initialChartBundle: TaiwanChartBundleRead | null;
   initialRankingData: RankingResponse | null;
   initialRadarMode: WatchlistRadarMode;
   initialRadarData: WatchlistGroupRadarRead | null;
@@ -250,7 +248,6 @@ export default function MarketDashboardClient({
   initialSelectedUsSecurityName,
   initialSelectedJpSymbol,
   initialSelectedKrSymbol,
-  initialChartBundle,
   initialRankingData,
   initialRadarMode,
   initialRadarData,
@@ -519,7 +516,6 @@ export default function MarketDashboardClient({
     groupId: activeGroupId,
     initialRanking: initialRankingData,
     refreshExecutionSettings,
-    prepareCompanionLoad: taiwanRadarActions.prepareCompanionLoad,
     onError: handleTaiwanRankingError,
   });
   const loadDashboard = taiwanRankingActions.load;
@@ -577,7 +573,6 @@ export default function MarketDashboardClient({
     if (activeGroupId === null) return;
     void loadDashboard(activeGroupId, rankBy, {
       silent: true,
-      preferCompanionSnapshot: false,
     });
   }, [activeGroupId, loadDashboard, rankBy]);
   const refreshUsOverviewAfterDetailUpdate = useCallback(() => {
@@ -1926,7 +1921,6 @@ export default function MarketDashboardClient({
                     stockName={selectedStockName}
                     stockMarket={selectedStockMarket}
                     instrumentType={selectedInstrumentType}
-                    initialChartBundle={initialChartBundle}
                     watchlistRankingPanel={rankingPanel}
                     marketIndexSummary={marketIndexSummary}
                     onChartFocusModeChange={setTwChartFocusMode}

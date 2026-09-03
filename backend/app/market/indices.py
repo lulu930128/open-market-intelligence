@@ -2798,57 +2798,6 @@ def _merge_index_intraday_snapshot(base: dict, snapshot: dict) -> dict:
     return merged
 
 
-def _index_intraday_fallback_from_list(config: dict) -> dict | None:
-    if config["market"] == "TPEX":
-        items = _fetch_tpex_index_list()
-        source = "tpex_openapi_daily_trading_index"
-    else:
-        items = _fetch_twse_index_list()
-        source = "twse_openapi_mi_index"
-
-    item = items[0] if items else None
-
-    if item is None or item.get("close") is None:
-        return None
-
-    close = item["close"]
-    change = item.get("change")
-    previous_close = (
-        close - change
-        if close is not None and change is not None
-        else None
-    )
-    trade_date = item.get("trade_date") or taiwan_presentation_session(
-        datetime.now(TAIPEI_TZ)
-    )["trade_date"]
-    point_time = datetime.combine(trade_date, time(13, 30), tzinfo=TAIPEI_TZ)
-
-    return {
-        "stock_id": config["index_id"],
-        "symbol": config["symbol"],
-        "source": source,
-        "provider": source,
-        "interval": "snapshot",
-        "trade_date": trade_date.isoformat(),
-        "coverage_status": "single_official_close_snapshot",
-        "is_partial": True,
-        "volume_unit": None,
-        "volume_semantics": "not_provided_for_cash_index",
-        "previous_close": previous_close,
-        "point_count": 1,
-        "points": [
-            {
-                "time": point_time.isoformat(),
-                "price": close,
-                "volume": None,
-                "open": close,
-                "high": close,
-                "low": close,
-            }
-        ],
-    }
-
-
 def _unavailable_index(config: dict, error: Exception) -> dict:
     return {
         "index_id": config["index_id"],
@@ -4764,6 +4713,7 @@ def _shared_current_market_summary(
     calendar_status = build_taiwan_calendar_status(now=now)
     items: list[dict] = []
     warnings: list[str] = []
+    completed_session_ohlc: dict[str, dict[str, object]] = {}
     for config in INDEX_CONFIGS:
         index_id = str(config["index_id"])
         venue = str(config["market"])
@@ -4855,6 +4805,15 @@ def _shared_current_market_summary(
                         else None
                     ),
                 }
+                completed_session_ohlc[index_id] = {
+                    "trade_date": daily_bar.start_at.astimezone(TAIPEI_TZ)
+                    .date()
+                    .isoformat(),
+                    "open": float(daily_bar.open_price),
+                    "high": float(daily_bar.high_price),
+                    "low": float(daily_bar.low_price),
+                    "close": float(daily_bar.close_price),
+                }
         except Exception as exc:
             observe_provider_fallback(
                 exc,
@@ -4874,9 +4833,9 @@ def _shared_current_market_summary(
                 "source": current.get("source") or "unavailable",
                 "as_of": current.get("as_of"),
                 "time": current.get("trade_date"),
-                "open": close,
-                "high": close,
-                "low": close,
+                "open": None,
+                "high": None,
+                "low": None,
                 "close": close,
                 "previous_close": previous_close,
                 "change": change,
@@ -4942,8 +4901,64 @@ def _shared_current_market_summary(
         ).model_dump(mode="json")
         selected = resolution.get("current_observation")
         if isinstance(selected, dict):
-            item["close"] = selected.get("value")
+            selected_close = _as_float(selected.get("value"))
+            selected_trade_date = str(selected.get("trade_date") or "")
+            selected_ohlc: dict[str, object] | None = None
+            selected_candidate = resolution.get("selected_candidate")
+            if selected_candidate in {"completed_daily_bar", "official_close"}:
+                candidate_ohlc = completed_session_ohlc.get(index_id)
+                if (
+                    candidate_ohlc is not None
+                    and candidate_ohlc.get("trade_date") == selected_trade_date
+                    and selected_close is not None
+                    and _as_float(candidate_ohlc.get("close")) == selected_close
+                ):
+                    selected_ohlc = candidate_ohlc
+            elif selected_candidate == "intraday_last_trade" and isinstance(
+                intraday, dict
+            ):
+                session_bars = [
+                    bar
+                    for bar in intraday.get("bars", [])
+                    if isinstance(bar, dict)
+                    and str(bar.get("start_at") or "").startswith(selected_trade_date)
+                ]
+                if session_bars and selected_close is not None:
+                    intraday_close = _as_float(session_bars[-1].get("close_price"))
+                    if intraday_close == selected_close:
+                        opens = [_as_float(bar.get("open_price")) for bar in session_bars]
+                        highs = [_as_float(bar.get("high_price")) for bar in session_bars]
+                        lows = [_as_float(bar.get("low_price")) for bar in session_bars]
+                        if all(value is not None for value in (*opens, *highs, *lows)):
+                            selected_ohlc = {
+                                "open": opens[0],
+                                "high": max(value for value in highs if value is not None),
+                                "low": min(value for value in lows if value is not None),
+                                "close": selected_close,
+                            }
+            item["open"] = selected_ohlc.get("open") if selected_ohlc else None
+            item["high"] = selected_ohlc.get("high") if selected_ohlc else None
+            item["low"] = selected_ohlc.get("low") if selected_ohlc else None
+            item["close"] = selected_close
             item["previous_close"] = resolution.get("selected_previous_close")
+            item["previous_close_trade_date"] = resolution.get(
+                "selected_previous_close_trade_date"
+            )
+            item["previous_close_source"] = resolution.get(
+                "selected_previous_close_source"
+            )
+            item["previous_close_provider"] = resolution.get(
+                "selected_previous_close_provider"
+            )
+            item["previous_close_authority"] = resolution.get(
+                "selected_previous_close_authority"
+            )
+            item["previous_close_finalization"] = resolution.get(
+                "selected_previous_close_finalization"
+            )
+            item["previous_close_status"] = resolution.get(
+                "selected_previous_close_status"
+            )
             item["change"] = resolution.get("selected_change")
             item["change_pct"] = resolution.get("selected_change_pct")
             item["time"] = selected.get("trade_date")
@@ -4954,6 +4969,13 @@ def _shared_current_market_summary(
             item["high"] = None
             item["low"] = None
             item["close"] = None
+            item["previous_close"] = None
+            item["previous_close_trade_date"] = None
+            item["previous_close_source"] = None
+            item["previous_close_provider"] = None
+            item["previous_close_authority"] = None
+            item["previous_close_finalization"] = None
+            item["previous_close_status"] = "missing"
             item["change"] = None
             item["change_pct"] = None
         item["current_observation"] = selected

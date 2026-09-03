@@ -27,9 +27,10 @@ import type {
   OhlcIntradayOverlay,
   StockIndicatorPoint,
   TaiwanBarSeriesRead,
+  TaiwanChartBarSeriesRead,
   TaiwanCanonicalBarPoint,
-  TaiwanChartBundleRead,
   TaiwanTechnicalCapabilityContract,
+  TaiwanTechnicalSeriesRead,
 } from "@/types/market";
 import { useEffect, useRef, useState } from "react";
 
@@ -43,6 +44,8 @@ const emptyChartPoints: ChartPoint[] = [];
 const emptyIndicatorPoints: StockIndicatorPoint[] = [];
 const emptyIntradayTrendPoints: IntradayTrendPoint[] = [];
 const TAIWAN_CHART_REFRESH_LIMIT = 8;
+const TAIWAN_CHART_REFRESH_MIN_MS = 15_000;
+const TAIWAN_CHART_REFRESH_MAX_MS = 60_000;
 const TODAY_PRESENTATION_CACHE_MAX_SYMBOLS = 10;
 const TODAY_PRESENTATION_CACHE_TTL_MS = 15 * 60 * 1000;
 const TODAY_WARMING_RETRY_DELAYS_MS = [1_000, 2_000, 3_000, 5_000] as const;
@@ -65,7 +68,6 @@ type UseTaiwanStockChartDataOptions = {
   chartFocusMode: boolean;
   currentStockInfoMarket: string | null;
   effectiveTimeframe: Timeframe;
-  initialChartBundle: TaiwanChartBundleRead | null;
   isIndexProduct: boolean;
   professionalTimeframe: ProfessionalTimeframe;
   publishDataStatus: PublishDataStatus;
@@ -158,16 +160,16 @@ export function isTodayPresentationCacheEligible(
 }
 
 function todaySnapshotMetadata(
-  bundle: TaiwanChartBundleRead,
+  series: TaiwanRenderableBarSeries,
   {
     fullSnapshot,
     returnedBarCount,
   }: { fullSnapshot: boolean; returnedBarCount: number }
 ): TodaySnapshotMetadata {
-  const coverage = bundle.bars.current_session_coverage;
+  const coverage = series.current_session_coverage;
   const phase = coverage?.snapshot_phase ?? snapshotPhaseForCoverage(coverage?.status);
-  const first = bundle.bars.bars[0] ?? null;
-  const last = bundle.bars.bars[bundle.bars.bars.length - 1] ?? null;
+  const first = series.bars[0] ?? null;
+  const last = series.bars[series.bars.length - 1] ?? null;
   return {
     phase,
     revision: coverage?.snapshot_revision ?? null,
@@ -187,11 +189,13 @@ function todaySnapshotMetadata(
 export function shouldRecoverTodayFullSnapshot({
   fullSnapshot,
   mergedPointCount,
+  returnedPointCount,
   next,
   previous,
 }: {
   fullSnapshot: boolean;
   mergedPointCount: number;
+  returnedPointCount: number;
   next: TodaySnapshotMetadata;
   previous: Pick<
     TodayChartState,
@@ -201,6 +205,14 @@ export function shouldRecoverTodayFullSnapshot({
   if (fullSnapshot || next.phase === "warming") return false;
   if (!previous || previous.snapshotPhase === "warming") return true;
   if (next.barCount !== null && mergedPointCount < next.barCount) return true;
+  if (
+    next.revision &&
+    previous.snapshotRevision &&
+    next.revision !== previous.snapshotRevision &&
+    (next.barCount === null || returnedPointCount < next.barCount)
+  ) {
+    return true;
+  }
   return Boolean(
     next.revision &&
       previous.snapshotRevision &&
@@ -266,6 +278,8 @@ function numberOrNull(value: number | string | null | undefined) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+type TaiwanRenderableBarSeries = TaiwanBarSeriesRead | TaiwanChartBarSeriesRead;
+
 function chartPoint(bar: TaiwanCanonicalBarPoint, technicalEligible: boolean): ChartPoint {
   return {
     time: bar.start_at,
@@ -286,9 +300,11 @@ function chartPoint(bar: TaiwanCanonicalBarPoint, technicalEligible: boolean): C
   };
 }
 
-export function projectTaiwanBarSeries(series: TaiwanBarSeriesRead): ChartPoint[] {
+export function projectTaiwanBarSeries(series: TaiwanRenderableBarSeries): ChartPoint[] {
   const states = new Map(
-    series.bar_states.map((state) => [state.start_at, state.technical_eligible])
+    "bar_states" in series
+      ? series.bar_states.map((state) => [state.start_at, state.technical_eligible])
+      : series.bars.map((bar) => [bar.start_at, bar.technical_eligible])
   );
   return series.bars
     .map((bar) => chartPoint(bar, states.get(bar.start_at) !== false))
@@ -296,12 +312,13 @@ export function projectTaiwanBarSeries(series: TaiwanBarSeriesRead): ChartPoint[
 }
 
 function intradayPoints(
-  bars: ChartPoint[],
+  bars: Array<ChartPoint | IntradayTrendPoint>,
   technical: StockIndicatorPoint[]
 ): IntradayTrendPoint[] {
   const indicatorByTime = new Map(technical.map((point) => [point.time, point]));
   return bars.flatMap((point) => {
-    if (point.close === null) return [];
+    const close = point.close ?? ("price" in point ? point.price : null);
+    if (close === null || close === undefined) return [];
     const indicator = indicatorByTime.get(point.time);
     const contract = indicator?.parameter_contract ?? {};
     const emaFast = numberOrNull(
@@ -316,7 +333,7 @@ function intradayPoints(
     return [
       {
         ...point,
-        price: point.close,
+        price: close,
         volume: point.volume,
         ema_fast: numberOrNull(
           emaFast === null ? null : indicator?.ema?.[`ema${emaFast}`]
@@ -384,40 +401,74 @@ function requestLimit(
   return chartBarsByTimeframe[effectiveTimeframe as ChartTimeframe] ?? 500;
 }
 
+function chartRefreshIntervalMs(interval: string) {
+  const unit = interval.endsWith("h") ? 60 : 1;
+  const rawValue = Number(interval.slice(0, -1));
+  const bucketMs = Number.isFinite(rawValue)
+    ? rawValue * unit * 60_000
+    : TAIWAN_CHART_REFRESH_MAX_MS;
+  return Math.max(
+    TAIWAN_INTRADAY_REFRESH_MS,
+    TAIWAN_CHART_REFRESH_MIN_MS,
+    Math.min(Math.floor(bucketMs / 4), TAIWAN_CHART_REFRESH_MAX_MS)
+  );
+}
+
 function mergeTimedPoints<T extends { time: string }>(current: T[], incoming: T[]) {
   const merged = new Map(current.map((point) => [point.time, point]));
   incoming.forEach((point) => merged.set(point.time, point));
   return [...merged.values()].sort((left, right) => left.time.localeCompare(right.time));
 }
 
-function validateBundle(
-  bundle: TaiwanChartBundleRead,
+function validateBars(
+  bars: TaiwanRenderableBarSeries,
   instrumentId: string,
   interval: string
 ) {
   if (
-    bundle.bars.instrument.symbol !== instrumentId ||
-    bundle.technical.instrument.symbol !== instrumentId ||
-    bundle.bars.requested_interval !== interval ||
-    bundle.technical.interval !== interval
+    bars.instrument.symbol !== instrumentId ||
+    bars.requested_interval !== interval
   ) {
-    throw new Error("Taiwan chart response identity mismatch");
+    throw new Error("Taiwan Bar response identity mismatch");
   }
-  const revisions = [
-    bundle.series_revision,
-    bundle.bars.identity.series_revision,
-    bundle.technical.bar_series_revision,
-  ];
-  if (!revisions.every((revision) => revision === revisions[0])) {
-    throw new Error("Taiwan chart response revision mismatch");
+}
+
+function validateTechnical(
+  technical: TaiwanTechnicalSeriesRead,
+  bars: TaiwanRenderableBarSeries,
+  instrumentId: string,
+  interval: string,
+  expectedRevision: string,
+  snapshotPinned: boolean
+) {
+  if (
+    technical.instrument.symbol !== instrumentId ||
+    technical.interval !== interval
+  ) {
+    throw new Error("Taiwan technical response identity mismatch");
   }
+  const returnedRevision = snapshotPinned
+    ? technical.bar_snapshot_revision
+    : technical.bar_series_revision;
+  if (returnedRevision !== expectedRevision) {
+    throw new Error("Taiwan technical response revision mismatch");
+  }
+}
+
+function technicalConsistencyRevision(
+  bars: TaiwanRenderableBarSeries,
+  currentSession: boolean
+) {
+  if (currentSession) {
+    return bars.current_session_coverage?.snapshot_revision ?? null;
+  }
+  return bars.identity.series_revision;
 }
 
 export function useTaiwanStockChartData({
   chartFocusMode,
   currentStockInfoMarket,
   effectiveTimeframe,
-  initialChartBundle,
   isIndexProduct,
   professionalTimeframe,
   publishDataStatus,
@@ -426,24 +477,7 @@ export function useTaiwanStockChartData({
   t,
   todayInterval,
 }: UseTaiwanStockChartDataOptions) {
-  const initialDailyState = (() => {
-    if (!initialChartBundle || !stockId) return null;
-    try {
-      validateBundle(initialChartBundle, stockId, "1d");
-      return {
-        chartData: projectTaiwanBarSeries(initialChartBundle.bars),
-        indicatorData: initialChartBundle.technical.points ?? [],
-        intradayOverlay: null,
-        stockId,
-        timeframe: "daily" as const,
-        volumeUnit:
-          initialChartBundle.bars.bars.find((bar) => bar.volume)?.volume?.unit ?? null,
-      } satisfies DailyChartState;
-    } catch {
-      return null;
-    }
-  })();
-  const [dailyState, setDailyState] = useState<DailyChartState | null>(initialDailyState);
+  const [dailyState, setDailyState] = useState<DailyChartState | null>(null);
   const [benchmarkChartData, setBenchmarkChartData] = useState<ChartPoint[]>([]);
   const [benchmarkChartKey, setBenchmarkChartKey] = useState<string | null>(null);
   const [todayState, setTodayState] = useState<TodayChartState | null>(null);
@@ -454,13 +488,15 @@ export function useTaiwanStockChartData({
     useState<string | null>(null);
   const [professionalIntradayInterval, setProfessionalIntradayInterval] =
     useState<ProfessionalIntradayTimeframe | null>(null);
-  const [loadStateScope, setLoadStateScope] = useState<ScopedLoadState | null>(() =>
-    initialDailyState
-      ? { requestKey: `${initialDailyState.stockId}:daily`, state: "success" }
-      : null
-  );
+  const [loadStateScope, setLoadStateScope] = useState<ScopedLoadState | null>(null);
+  const [technicalLoadStateScope, setTechnicalLoadStateScope] =
+    useState<ScopedLoadState | null>(null);
   const [technicalContract, setTechnicalContract] =
     useState<TaiwanTechnicalCapabilityContract | null>(null);
+  const [technicalParameterScope, setTechnicalParameterScope] = useState<{
+    requestKey: string;
+    contract: Record<string, unknown>;
+  } | null>(null);
   const activeStockIdRef = useRef(stockId);
   const todayPresentationCacheRef = useRef(
     new Map<string, TodayPresentationCacheEntry>()
@@ -506,6 +542,8 @@ export function useTaiwanStockChartData({
       setProfessionalIntradayData([]);
       setProfessionalIntradayIndicators([]);
       setLoadStateScope(null);
+      setTechnicalLoadStateScope(null);
+      setTechnicalParameterScope(null);
     }, 0);
     return () => window.clearTimeout(timer);
   }, [stockId]);
@@ -546,21 +584,164 @@ export function useTaiwanStockChartData({
     let cancelled = false;
     let refreshTimer: number | undefined;
     let requestInFlight = false;
+    let technicalRequestInFlight = false;
+    let technicalRevisionInFlight: string | null = null;
+    let lastSuccessfulTechnicalRevision: string | null = null;
+    let latestBarRevision: string | null = null;
+    let exactFullSnapshotRevision: string | null = null;
+    let pendingTechnicalBars: TaiwanRenderableBarSeries | null = null;
     let currentTodaySnapshot = cachedTodayState;
     let warmingRetryIndex = 0;
 
-    const hydratedBundle = initialBundleRef.current;
-    if (
-      !hydratedBundle.consumed &&
-      hydratedBundle.bundle &&
-      interval === "1d" &&
-      effectRequestKey === `${effectStockId}:daily`
-    ) {
-      hydratedBundle.consumed = true;
-      setLoadStateScope({ requestKey: effectRequestKey, state: "success" });
-      return () => {
-        cancelled = true;
+    function requestParams(fullSnapshot: boolean) {
+      return {
+        interval,
+        limit: fullSnapshot
+          ? requestLimit(interval, effectiveTimeframe, isIndexProduct)
+          : TAIWAN_CHART_REFRESH_LIMIT,
+        include_partial: true,
+        ...(effectiveTimeframe === "today"
+          ? { session_scope: "current_session" }
+          : {}),
       };
+    }
+
+    async function loadTechnical(
+      bars: TaiwanRenderableBarSeries,
+      fullSnapshot: boolean
+    ) {
+      const snapshotPinned = effectiveTimeframe === "today";
+      const expectedRevision = technicalConsistencyRevision(
+        bars,
+        snapshotPinned
+      );
+      if (!expectedRevision) {
+        setTechnicalLoadStateScope({
+          requestKey: effectRequestKey,
+          state: "error",
+        });
+        publishDataStatus({
+          title: tRef.current("stockDetail.errors.dataLoad"),
+          message: "Taiwan technical request is missing its consistency revision",
+          source: "技術指標",
+        });
+        return;
+      }
+      if (lastSuccessfulTechnicalRevision === expectedRevision) return;
+      if (technicalRequestInFlight) {
+        if (technicalRevisionInFlight !== expectedRevision) {
+          pendingTechnicalBars = bars;
+        }
+        return;
+      }
+      technicalRequestInFlight = true;
+      technicalRevisionInFlight = expectedRevision;
+      setTechnicalLoadStateScope({
+        requestKey: effectRequestKey,
+        state: "loading",
+      });
+      try {
+        const technical = await fetchJson<TaiwanTechnicalSeriesRead>(
+          `/api/market/technical/${effectStockId}/series`,
+          {
+            ...requestParams(fullSnapshot),
+            ...(snapshotPinned
+              ? { expected_snapshot_revision: expectedRevision }
+              : { expected_series_revision: expectedRevision }),
+          }
+        );
+        if (cancelled || activeStockIdRef.current !== effectStockId) return;
+        validateTechnical(
+          technical,
+          bars,
+          effectStockId,
+          interval,
+          expectedRevision,
+          snapshotPinned
+        );
+        if (latestBarRevision !== expectedRevision) return;
+        lastSuccessfulTechnicalRevision = expectedRevision;
+        setTechnicalParameterScope({
+          requestKey: effectRequestKey,
+          contract: technical.parameter_contract ?? {},
+        });
+        const finalizedIndicators = technical.points ?? [];
+        const currentPartialIndicator = technical.current_partial?.point ?? null;
+        const indicators = currentPartialIndicator
+          ? mergeTimedPoints(finalizedIndicators, [currentPartialIndicator])
+          : finalizedIndicators;
+        if (professionalIntraday) {
+          setProfessionalIntradayIndicators(indicators);
+        } else if (effectiveTimeframe === "today") {
+          setTodayState((previous) => {
+            if (
+              previous?.stockId !== effectStockId ||
+              previous.interval !== interval
+            ) {
+              return previous;
+            }
+            const next = {
+              ...previous,
+              trend: intradayPoints(previous.trend, indicators),
+            };
+            rememberTodayPresentation(todayPresentationCacheRef.current, next);
+            currentTodaySnapshot = next;
+            return next;
+          });
+        } else {
+          setDailyState((previous) =>
+            previous?.stockId === effectStockId &&
+            previous.timeframe === effectiveTimeframe
+              ? { ...previous, indicatorData: indicators }
+              : previous
+          );
+        }
+        setTechnicalLoadStateScope({
+          requestKey: effectRequestKey,
+          state: "success",
+        });
+        const warnings = [
+          ...(technical.warnings ?? []),
+          ...(technical.limitations ?? []),
+        ];
+        if (warnings.length) {
+          publishDataStatus({
+            level: "warning",
+            title: timeframeLabel(tRef.current, effectiveTimeframe),
+            message: [...new Set(warnings)].join("；"),
+            source: "TaiwanTechnicalService",
+          });
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setTechnicalLoadStateScope({
+          requestKey: effectRequestKey,
+          state: "error",
+        });
+        publishDataStatus({
+          title: tRef.current("stockDetail.errors.dataLoad"),
+          message:
+            error instanceof Error
+              ? error.message
+              : tRef.current("stockDetail.errors.dataLoad"),
+          source: "技術指標",
+        });
+      } finally {
+        technicalRequestInFlight = false;
+        technicalRevisionInFlight = null;
+        const pending = pendingTechnicalBars;
+        pendingTechnicalBars = null;
+        if (
+          !cancelled &&
+          pending &&
+          technicalConsistencyRevision(
+            pending,
+            effectiveTimeframe === "today"
+          ) !== lastSuccessfulTechnicalRevision
+        ) {
+          void loadTechnical(pending, false);
+        }
+      }
     }
 
     async function loadChart(showLoading: boolean, fullSnapshot = showLoading) {
@@ -568,65 +749,64 @@ export function useTaiwanStockChartData({
       requestInFlight = true;
       let needsFullRecovery = false;
       let responseSnapshotPhase: TodaySnapshotPhase | null = null;
+      const requestedExactRevision = fullSnapshot
+        ? exactFullSnapshotRevision
+        : null;
       if (showLoading) {
         setLoadStateScope({ requestKey: effectRequestKey, state: "loading" });
       }
       try {
-        const bundle = await fetchJson<TaiwanChartBundleRead>(
-          `/api/market/chart/${effectStockId}`,
+        const series = await fetchJson<TaiwanChartBarSeriesRead>(
+          `/api/market/bars/${effectStockId}/chart`,
           {
-            interval,
-            limit: fullSnapshot
-              ? requestLimit(interval, effectiveTimeframe, isIndexProduct)
-              : TAIWAN_CHART_REFRESH_LIMIT,
-            include_partial: true,
-            ma_windows: "5,20,60",
-            volume_ma_windows: "5,20",
-            ...(effectiveTimeframe === "today"
-              ? { session_scope: "current_session" }
+            ...requestParams(fullSnapshot),
+            ...(requestedExactRevision
+              ? { expected_snapshot_revision: requestedExactRevision }
               : {}),
           }
         );
         if (cancelled || activeStockIdRef.current !== effectStockId) return;
-        validateBundle(bundle, effectStockId, interval);
-        if (
-          effectiveTimeframe === "today" &&
-          (bundle.session_scope !== "current_session" ||
-            !bundle.presentation_trade_date)
-        ) {
+        validateBars(series, effectStockId, interval);
+        latestBarRevision = technicalConsistencyRevision(
+          series,
+          effectiveTimeframe === "today"
+        );
+        const presentationTradeDate =
+          series.current_session_coverage?.trade_date ?? null;
+        if (effectiveTimeframe === "today" && !presentationTradeDate) {
           throw new Error("Taiwan Today chart response is missing current-session identity");
         }
-        const bars = projectTaiwanBarSeries(bundle.bars);
+        if (
+          requestedExactRevision &&
+          series.current_session_coverage?.snapshot_revision !== requestedExactRevision
+        ) {
+          throw new Error("Taiwan Today exact snapshot response revision mismatch");
+        }
+        const bars = projectTaiwanBarSeries(series);
         if (
           effectiveTimeframe === "today" &&
           bars.some(
             (point) =>
-              point.time.slice(0, 10) !== bundle.presentation_trade_date
+              point.time.slice(0, 10) !== presentationTradeDate
           )
         ) {
           throw new Error("Taiwan Today chart response contains another trade date");
         }
-        const indicators = bundle.technical.points ?? [];
 
         if (professionalIntraday) {
           setProfessionalIntradayData((current) =>
             showLoading ? bars : mergeTimedPoints(current, bars)
           );
-          setProfessionalIntradayIndicators((current) =>
-            showLoading ? indicators : mergeTimedPoints(current, indicators)
-          );
+          if (showLoading) setProfessionalIntradayIndicators([]);
           setProfessionalIntradayStockId(effectStockId);
           setProfessionalIntradayInterval(professionalTimeframe);
         } else if (effectiveTimeframe === "today") {
-          const incomingTrend = intradayPoints(bars, indicators);
-          const quoteSide = bundle.quote_side;
-          const snapshot = todaySnapshotMetadata(bundle, {
+          const incomingTrend = intradayPoints(bars, []);
+          const snapshot = todaySnapshotMetadata(series, {
             fullSnapshot,
             returnedBarCount: bars.length,
           });
           responseSnapshotPhase = snapshot.phase;
-          const presentationTradeDate =
-            bundle.presentation_trade_date ?? quoteSide?.trade_date ?? null;
           const previous = currentTodaySnapshot;
           const previousMatches =
             previous?.stockId === effectStockId &&
@@ -638,9 +818,15 @@ export function useTaiwanStockChartData({
           needsFullRecovery = shouldRecoverTodayFullSnapshot({
             fullSnapshot,
             mergedPointCount: mergedTrend.length,
+            returnedPointCount: incomingTrend.length,
             next: snapshot,
             previous: previousMatches ? previous : null,
           });
+          if (needsFullRecovery) {
+            exactFullSnapshotRevision = snapshot.revision;
+          } else if (fullSnapshot) {
+            exactFullSnapshotRevision = null;
+          }
           const preserveDisplayablePrevious = Boolean(
             previousMatches &&
               previous.snapshotPhase !== "warming" &&
@@ -658,27 +844,21 @@ export function useTaiwanStockChartData({
           const nextState: TodayChartState = {
             capabilities: {
               ...missingIntradayCapabilities,
-              ...(quoteSide?.capabilities ?? {}),
-              supports_volume:
-                quoteSide?.capabilities?.supports_volume ??
-                bars.some((point) => point.volume !== null),
+              supports_volume: bars.some((point) => point.volume !== null),
             },
-            currentObservation:
-              quoteSide?.current_observation ??
-              (previousMatches ? previous?.currentObservation ?? null : null),
-            previousClose:
-              quoteSide?.previous_close ??
-              (previousMatches ? previous?.previousClose ?? null : null),
-            priceDiagnostics:
-              quoteSide?.price_diagnostics ??
-              (previousMatches ? previous?.priceDiagnostics ?? null : null),
-            source: quoteSide?.source ?? "TaiwanBarService",
+            currentObservation: previousMatches
+              ? previous?.currentObservation ?? null
+              : null,
+            previousClose: previousMatches ? previous?.previousClose ?? null : null,
+            priceDiagnostics: previousMatches
+              ? previous?.priceDiagnostics ?? null
+              : null,
+            source: "TaiwanBarService",
             stockId: effectStockId,
             tradeDate: presentationTradeDate,
             trend,
-            updatedAt:
-              quoteSide?.updated_at ?? (latest ? formatDateTime(latest.time) : null),
-            historyStatus: bundle.bars.history.history_status,
+            updatedAt: latest ? formatDateTime(latest.time) : null,
+            historyStatus: series.history.history_status,
             interval,
             snapshotPhase: preserveDisplayablePrevious
               ? previous?.snapshotPhase ?? "warming"
@@ -717,30 +897,35 @@ export function useTaiwanStockChartData({
         } else {
           setDailyState({
             chartData: bars,
-            indicatorData: indicators,
+            indicatorData: [],
             intradayOverlay: null,
             stockId: effectStockId,
             timeframe: effectiveTimeframe as ChartTimeframe,
-            volumeUnit: bundle.bars.bars.find((bar) => bar.volume)?.volume?.unit ?? null,
+            volumeUnit: series.bars.find((bar) => bar.volume)?.volume?.unit ?? null,
           });
         }
         setLoadStateScope({ requestKey: effectRequestKey, state: "success" });
+        if (
+          effectiveTimeframe !== "today" ||
+          (!needsFullRecovery && responseSnapshotPhase !== "warming")
+        ) {
+          void loadTechnical(series, fullSnapshot);
+        }
         const warnings = [
-          ...(bundle.bars.warnings ?? []),
-          ...(bundle.bars.limitations ?? []),
-          ...(bundle.technical.warnings ?? []),
-          ...(bundle.technical.limitations ?? []),
+          ...(series.warnings ?? []),
+          ...(series.limitations ?? []),
         ];
         if (warnings.length) {
           publishDataStatus({
             level: "warning",
             title: timeframeLabel(tRef.current, effectiveTimeframe),
             message: [...new Set(warnings)].join("；"),
-            source: "TaiwanBarService / TaiwanTechnicalService",
+            source: "TaiwanBarService",
           });
         }
       } catch (error) {
         if (cancelled) return;
+        if (requestedExactRevision) exactFullSnapshotRevision = null;
         setLoadStateScope({ requestKey: effectRequestKey, state: "error" });
         publishDataStatus({
           title: tRef.current("stockDetail.errors.dataLoad"),
@@ -748,7 +933,7 @@ export function useTaiwanStockChartData({
             error instanceof Error
               ? error.message
               : tRef.current("stockDetail.errors.dataLoad"),
-          source: "K 線 / 技術指標",
+          source: "K 線",
         });
       } finally {
         requestInFlight = false;
@@ -781,7 +966,7 @@ export function useTaiwanStockChartData({
       if (cancelled || (!professionalIntraday && effectiveTimeframe !== "today")) return;
       const marketState = getTaiwanMarketRefreshState();
       const delay = marketState.isPollingWindow
-        ? TAIWAN_INTRADAY_REFRESH_MS
+        ? chartRefreshIntervalMs(interval)
         : Math.min(marketState.msUntilNextPollingStart, 60_000);
       scheduleChartRequest(delay, false);
     }
@@ -811,8 +996,8 @@ export function useTaiwanStockChartData({
 
     async function loadBenchmark() {
       try {
-        const bars = await fetchJson<TaiwanBarSeriesRead>(
-          `/api/market/bars/${benchmarkIndexId}`,
+        const bars = await fetchJson<TaiwanChartBarSeriesRead>(
+          `/api/market/bars/${benchmarkIndexId}/chart`,
           {
             interval,
             limit:
@@ -857,6 +1042,17 @@ export function useTaiwanStockChartData({
       : loadStateScope?.requestKey === currentRequestKey
         ? loadStateScope.state
         : "loading";
+  const technicalLoadState: LoadState =
+    currentRequestKey === null
+      ? "idle"
+      : technicalLoadStateScope?.requestKey === currentRequestKey
+        ? technicalLoadStateScope.state
+        : "loading";
+  const technicalParameterContract =
+    currentRequestKey !== null &&
+    technicalParameterScope?.requestKey === currentRequestKey
+      ? technicalParameterScope.contract
+      : null;
 
   return {
     state: {
@@ -888,10 +1084,8 @@ export function useTaiwanStockChartData({
       todayTrend: currentTodayState?.trend ?? emptyIntradayTrendPoints,
       todayUpdatedAt: currentTodayState?.updatedAt ?? null,
       technicalContract,
+      technicalParameterContract,
+      technicalLoadState,
     },
   };
 }
-  const initialBundleRef = useRef({
-    bundle: initialDailyState ? initialChartBundle : null,
-    consumed: false,
-  });

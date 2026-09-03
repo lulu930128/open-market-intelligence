@@ -25,11 +25,13 @@ from app.market.tw_intraday_platform import (
     read_taiwan_intraday_bars,
 )
 from app.market_data.contracts import (
-    MarketSession,
     ResolvedEvidenceStatus,
     TradeObservationState,
 )
-from app.market_data.integration_contracts import MarketDataResultV1
+from app.market_data.integration_contracts import (
+    FreshnessBasis,
+    MarketDataResultV1,
+)
 from app.observability.provider_fallback import observe_provider_fallback
 
 
@@ -917,8 +919,9 @@ def _apply_platform_quote_contract(
     )
     completed_session_close = bool(
         current_trade_available
-        and health is not None
-        and health.selected_session is MarketSession.POST_CLOSE
+        and quote_result is not None
+        and quote_result.requirement.freshness.basis
+        is FreshnessBasis.COMPLETED_SESSION_DATE
     )
     confirmed_at = (
         max(

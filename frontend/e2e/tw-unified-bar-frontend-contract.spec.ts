@@ -15,7 +15,7 @@ import {
 } from "@/components/stock-detail/useTaiwanStockChartData";
 import type { IntradayTrendPoint, TaiwanBarSeriesRead } from "@/types/market";
 
-test("Taiwan chart data hook has one Bar/Technical route with no index branch", () => {
+test("Taiwan chart data hook reads Bars first and Technical by revision", () => {
   const source = readFileSync(
     join(
       process.cwd(),
@@ -24,7 +24,11 @@ test("Taiwan chart data hook has one Bar/Technical route with no index branch", 
     "utf8"
   );
 
-  expect(source).toContain("/api/market/chart/${effectStockId}");
+  expect(source).toContain("/api/market/bars/${effectStockId}");
+  expect(source).toContain("/api/market/technical/${effectStockId}/series");
+  expect(source).toContain("expected_snapshot_revision: expectedRevision");
+  expect(source).toContain("expected_series_revision: expectedRevision");
+  expect(source).toContain("bars.current_session_coverage?.snapshot_revision");
   expect(source).toContain("/api/market/bars/${benchmarkIndexId}");
   expect(source).toContain("INDEX_DAILY_CHART_BARS = 300");
   expect(source).not.toContain("/api/market/indices/");
@@ -34,11 +38,11 @@ test("Taiwan chart data hook has one Bar/Technical route with no index branch", 
   expect(source).not.toContain("/api/market/ohlc/");
   expect(source).not.toContain("aggregateProfessionalIntradayBars");
   expect(source).not.toContain("aggregateIntradayPoints");
+  expect(source).not.toContain("/api/market/chart/${effectStockId}");
 
   const pageSource = readFileSync(join(process.cwd(), "src/app/page.tsx"), "utf8");
-  expect(pageSource).toContain(
-    'taiwanIndexProductIds.has(stockId.toUpperCase()) ? "300" : "260"'
-  );
+  expect(pageSource).not.toContain("initialChartBundle");
+  expect(pageSource).not.toContain("/api/market/chart/");
 });
 
 test("Today presentation cache is bounded and never owns dataset repair", () => {
@@ -100,7 +104,7 @@ test("Today presentation cache rejects warming and short snapshots", () => {
   ).toBe(true);
 });
 
-test("Today delta requests recover exactly when the canonical snapshot expands", () => {
+test("Today window requests recover when the canonical snapshot change is ambiguous", () => {
   const readySnapshot = {
     phase: "ready" as const,
     revision: "b".repeat(64),
@@ -114,6 +118,7 @@ test("Today delta requests recover exactly when the canonical snapshot expands",
     shouldRecoverTodayFullSnapshot({
       fullSnapshot: false,
       mergedPointCount: 2,
+      returnedPointCount: 2,
       next: readySnapshot,
       previous: {
         snapshotPhase: "warming",
@@ -126,6 +131,7 @@ test("Today delta requests recover exactly when the canonical snapshot expands",
     shouldRecoverTodayFullSnapshot({
       fullSnapshot: false,
       mergedPointCount: 5,
+      returnedPointCount: 2,
       next: readySnapshot,
       previous: {
         snapshotPhase: "ready",
@@ -138,10 +144,25 @@ test("Today delta requests recover exactly when the canonical snapshot expands",
     shouldRecoverTodayFullSnapshot({
       fullSnapshot: true,
       mergedPointCount: 5,
+      returnedPointCount: 5,
       next: readySnapshot,
       previous: null,
     })
   ).toBe(false);
+
+  expect(
+    shouldRecoverTodayFullSnapshot({
+      fullSnapshot: false,
+      mergedPointCount: 5,
+      returnedPointCount: 2,
+      next: { ...readySnapshot, revision: "c".repeat(64) },
+      previous: {
+        snapshotPhase: "ready",
+        snapshotRevision: readySnapshot.revision,
+        snapshotAvailableFrom: readySnapshot.availableFrom,
+      },
+    })
+  ).toBe(true);
 });
 
 test("Taiwan canonical Bar projection preserves missing quantities", () => {

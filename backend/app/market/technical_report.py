@@ -411,15 +411,15 @@ def _current_partial_daily_indicator(
         series,
         parameters=parameters,
     )
-    if not technical.points:
+    if technical.current_partial is None:
         return None
-    calculated = dict(technical.points[-1])
+    calculated = dict(technical.current_partial.point)
     return {
         **calculated,
         "open": float(latest_bar.open_price),
         "high": float(latest_bar.high_price),
         "low": float(latest_bar.low_price),
-        "bar_status": latest_state.finalization.value,
+        "bar_status": "current_partial",
         "session_close_finalization": latest_state.finalization.value,
         "official_daily_confirmed": False,
         "event_time": latest_bar.end_at,
@@ -427,10 +427,12 @@ def _current_partial_daily_indicator(
         "volume_semantics": "canonical_bar_interval_quantity",
         "bar_series_revision": series.identity.series_revision,
         "indicator_semantics": {
-            "price_based": "backend_bar_projection",
-            "range_based": "backend_bar_projection",
-            "volume_based": "backend_bar_projection",
+            "price_based": "provisional_observation",
+            "range_based": "provisional_observation",
+            "volume_based": "not_applicable_missing_final_volume",
         },
+        "indicator_applicability": technical.current_partial.indicator_applicability,
+        "observation_revision": technical.current_partial.observation_revision,
         "decision_usable": False,
         "volume_based_decision_usable": False,
         "warnings": [
@@ -977,6 +979,7 @@ def _build_today_report(
     db: Session,
     stock_id: str,
     include_intraday: bool,
+    include_volume_pace: bool = True,
     intraday_override: dict[str, Any] | None = None,
     parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
@@ -1331,8 +1334,11 @@ def _build_today_report(
             stock_id=stock_id,
             current_points=points,
         )
-        if series_coverage is None
-        or series_coverage.get("current_cumulative_volume_complete") is True
+        if include_volume_pace
+        and (
+            series_coverage is None
+            or series_coverage.get("current_cumulative_volume_complete") is True
+        )
         else {
             "kind": "tw_stock_same_time_volume_pace",
             "stock_id": stock_id,
@@ -1347,6 +1353,21 @@ def _build_today_report(
             "warnings": [
                 "Current intraday series does not cover the full regular session; volume pace is unavailable."
             ],
+            "series_coverage": series_coverage,
+        }
+        if include_volume_pace
+        else {
+            "kind": "tw_stock_same_time_volume_pace",
+            "stock_id": stock_id,
+            "status": "not_requested",
+            "as_of": latest_point.get("time"),
+            "trade_date": _json_value(market_session.get("date")),
+            "comparison_minute": None,
+            "current_cumulative_volume": None,
+            "same_time_baseline_5d": {"sample_days": 0, "pace_ratio": None},
+            "same_time_baseline_20d": {"sample_days": 0, "pace_ratio": None},
+            "calculation_basis": "omitted_from_core_technical_read",
+            "warnings": [],
             "series_coverage": series_coverage,
         }
     )
@@ -1380,9 +1401,9 @@ def _build_today_report(
     )
     volume_pace_5d = volume_pace.get("same_time_baseline_5d") or {}
     volume_pace_ratio = volume_pace_5d.get("pace_ratio")
-    if volume_pace.get("status") != "ready":
+    if include_volume_pace and volume_pace.get("status") != "ready":
         warnings.extend(str(item) for item in volume_pace.get("warnings") or [] if item)
-    if not _finite(volume_pace_ratio):
+    if include_volume_pace and not _finite(volume_pace_ratio):
         missing.append("intraday_volume.same_time_baseline_5d")
     ma20 = _indicator_value(ma, technical_parameters.ma_medium_key, "ma20")
     price_vs_ma20 = _pct_change(latest_price, ma20)
@@ -1468,22 +1489,34 @@ def _build_today_report(
                 basis="latest price vs opening price",
                 source=str(intraday.get("source") or "intraday"),
             ),
-            _row(
-                key="volume_pace",
-                label="量能速度",
-                description=_volume_pace_description(volume_pace),
-                value=volume_pace_ratio,
-                display_value=(
-                    "累積中" if not _finite(volume_pace_ratio) else _fmt_ratio(volume_pace_ratio)
-                ),
-                direction=None,
-                tone=(
-                    "warning"
-                    if _finite(volume_pace_ratio) and volume_pace_ratio >= 1.5
-                    else "neutral"
-                ),
-                basis=str(volume_pace.get("calculation_basis") or "same-time volume history unavailable"),
-                source="market_intraday_bar+market_daily_price",
+            *(
+                [
+                    _row(
+                        key="volume_pace",
+                        label="量能速度",
+                        description=_volume_pace_description(volume_pace),
+                        value=volume_pace_ratio,
+                        display_value=(
+                            "累積中"
+                            if not _finite(volume_pace_ratio)
+                            else _fmt_ratio(volume_pace_ratio)
+                        ),
+                        direction=None,
+                        tone=(
+                            "warning"
+                            if _finite(volume_pace_ratio)
+                            and volume_pace_ratio >= 1.5
+                            else "neutral"
+                        ),
+                        basis=str(
+                            volume_pace.get("calculation_basis")
+                            or "same-time volume history unavailable"
+                        ),
+                        source="market_intraday_bar+market_daily_price",
+                    )
+                ]
+                if include_volume_pace
+                else []
             ),
             _row(
                 key="daily_background",
@@ -1630,6 +1663,7 @@ def _build_today_report(
                 "volume_vs_daily_average_pct": volume_vs_daily_average_pct,
                 "volume_vs_daily_average_role": "context_only_not_intraday_pace",
                 "volume_pace": volume_pace,
+                "volume_pace_requested": include_volume_pace,
             },
             "daily_background": indicator,
             "current_partial_indicator": current_partial_indicator,
@@ -2261,6 +2295,7 @@ def build_stock_technical_report(
     stock_id: str,
     timeframe: str = "daily",
     include_intraday: bool = True,
+    include_volume_pace: bool = True,
     intraday_override: dict[str, Any] | None = None,
     to_date: date | None = None,
 ) -> dict[str, Any]:
@@ -2278,6 +2313,7 @@ def build_stock_technical_report(
                 db=db,
                 stock_id=normalized_stock_id,
                 include_intraday=include_intraday,
+                include_volume_pace=include_volume_pace,
                 intraday_override=intraday_override,
                 parameters=technical_parameters,
             )

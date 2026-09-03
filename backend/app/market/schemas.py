@@ -597,6 +597,12 @@ class MarketIndexSnapshotRead(BaseModel):
     low: float | None = None
     close: float | None = None
     previous_close: float | None = None
+    previous_close_trade_date: date | None = None
+    previous_close_source: str | None = None
+    previous_close_provider: str | None = None
+    previous_close_authority: str | None = None
+    previous_close_finalization: str | None = None
+    previous_close_status: str = "missing"
     change: float | None = None
     change_pct: float | None = None
     volume: int | None = None

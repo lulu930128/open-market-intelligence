@@ -241,6 +241,19 @@ def taiwan_market_session(now: datetime) -> MarketSession:
     return taiwan_market_session_from_phase(taiwan_market_session_phase(now))
 
 
+def taiwan_evidence_session(event_at: datetime) -> MarketSession:
+    """Classify one observation by event time, never by request time.
+
+    Market clock and evidence finalization are separate axes.  An exchange
+    closing match stamped exactly 13:30 remains closing-auction evidence; the
+    following reconciliation window is close resolution.
+    """
+
+    if event_at.tzinfo is None or event_at.utcoffset() is None:
+        raise ValueError("Taiwan evidence timestamps must be timezone-aware")
+    return taiwan_market_session(event_at)
+
+
 def taiwan_session_is_auction(value: object) -> bool:
     normalized = normalize_taiwan_session_phase(value)
     return normalized in {
@@ -301,6 +314,7 @@ __all__ = [
     "normalize_taiwan_session_phase",
     "previous_taiwan_trading_day",
     "taiwan_market_session",
+    "taiwan_evidence_session",
     "taiwan_market_session_from_phase",
     "taiwan_market_session_phase",
     "taiwan_market_holiday_name",

@@ -10,7 +10,12 @@ from app.market.tw_chart_service import TaiwanChartBundleRead
 
 
 def _single_session_trade_date(series: TaiwanBarSeriesRead) -> date | None:
-    trade_dates = tuple(item.trade_date for item in series.session_resolution)
+    current_session_coverage = getattr(series, "current_session_coverage", None)
+    if current_session_coverage is not None:
+        return current_session_coverage.trade_date
+    trade_dates = tuple(
+        item.trade_date for item in getattr(series, "session_resolution", ())
+    )
     return trade_dates[0] if len(trade_dates) == 1 else None
 
 
@@ -63,6 +68,7 @@ def project_taiwan_bar_series(
             }
         )
     latest = series.bars[-1] if series.bars else None
+    observed_trade_dates = sorted({bar.start_at.date().isoformat() for bar in series.bars})
     payload = {
         "kind": "taiwan_bar_series",
         "stock_id": series.instrument.symbol,
@@ -91,19 +97,51 @@ def project_taiwan_bar_series(
         "lineage_digest": series.identity.lineage_digest,
         "state_digest": series.identity.state_digest,
         "series_revision": series.identity.series_revision,
+        "observed_trade_dates": observed_trade_dates,
         "warnings": [*series.warnings, *series.limitations],
     }
     if session_scope is not None:
         trade_date = _single_session_trade_date(series)
+        expected_trade_date = trade_date.isoformat() if trade_date is not None else None
+        unexpected_trade_dates = sorted(
+            set(observed_trade_dates)
+            - ({expected_trade_date} if expected_trade_date is not None else set())
+        )
+        current_session_coverage = getattr(series, "current_session_coverage", None)
+        snapshot_phase = (
+            current_session_coverage.snapshot_phase.value
+            if current_session_coverage is not None
+            else None
+        )
+        freshness_status = (
+            "missing"
+            if not points
+            else "current"
+            if expected_trade_date is not None
+            and not unexpected_trade_dates
+            and snapshot_phase == "ready"
+            else "partial"
+        )
         payload.update(
             {
                 "session_scope": session_scope,
-                "expected_trade_date": (
-                    trade_date.isoformat() if trade_date is not None else None
-                ),
-                "trade_date": (
-                    trade_date.isoformat() if trade_date is not None else None
-                ),
+                "expected_trade_date": expected_trade_date,
+                "trade_date": expected_trade_date,
+                "freshness_status": freshness_status,
+                "freshness": {
+                    "status": freshness_status,
+                    "is_current": freshness_status == "current",
+                    "expected_trade_date": expected_trade_date,
+                    "latest_trade_date": observed_trade_dates[-1] if observed_trade_dates else None,
+                    "observed_trade_dates": observed_trade_dates,
+                    "unexpected_trade_dates": unexpected_trade_dates,
+                    "snapshot_phase": snapshot_phase,
+                    "coverage_status": (
+                        current_session_coverage.status.value
+                        if current_session_coverage is not None
+                        else series.history.history_status.value
+                    ),
+                },
             }
         )
     return payload

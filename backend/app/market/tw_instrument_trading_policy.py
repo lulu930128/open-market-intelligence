@@ -148,7 +148,14 @@ def resolve_taiwan_auction_applicability(
     disposition: Mapping[str, Any] | None,
 ) -> TaiwanAuctionApplicability:
     trading_policy = resolve_taiwan_instrument_trading_policy(disposition)
-    if session in {MarketSession.PRE_OPEN, MarketSession.OPENING_AUCTION}:
+    if session is MarketSession.PRE_OPEN:
+        return TaiwanAuctionApplicability(
+            applicable=False,
+            auction_type=None,
+            trading_policy=trading_policy,
+            reason_codes=("OPENING_AUCTION_NOT_STARTED",),
+        )
+    if session is MarketSession.OPENING_AUCTION:
         return TaiwanAuctionApplicability(
             applicable=True,
             auction_type=AuctionType.OPENING,

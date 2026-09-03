@@ -3146,6 +3146,7 @@ export const zhTW = {
     extendedHours: {
       title: "美股盤前 / 盤後",
       meta: "{phase} · regular {regular} / extended {extended}",
+      loadingCache: "讀取目前時段的本機快取中",
       noExtendedData: "目前沒有盤前或盤後分鐘資料；可切換盤中查看可用資料。",
       cacheOnlyPolicy: "此畫面只讀本機快取；行情由背景更新服務負責取得。",
       regularMissingExtendedAvailable:

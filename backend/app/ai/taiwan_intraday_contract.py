@@ -207,6 +207,51 @@ def resolve_taiwan_current_price(
     raw_quote = _mapping(quote)
     raw_intraday = _mapping(intraday_bars)
     quote_trade_date = raw_quote.get("trade_date")
+    headline_price = _positive_number(raw_quote.get("headline_price"))
+    headline_trade_date = raw_quote.get("headline_trade_date") or quote_trade_date
+    headline_current_session = _same_session(
+        observation_date=headline_trade_date,
+        current_session_date=current_session_date,
+    )
+    if (
+        headline_price is not None
+        and raw_quote.get("headline_decision_usable") is True
+        and headline_current_session
+    ):
+        headline_basis = str(raw_quote.get("headline_basis") or "resolved_headline")
+        event_time = (
+            raw_quote.get("headline_event_time")
+            or raw_quote.get("event_time")
+            or raw_quote.get("provider_event_time")
+            or raw_quote.get("quote_time")
+        )
+        return {
+            "kind": "resolved_current_price",
+            "version": CURRENT_PRICE_CONTRACT_VERSION,
+            "value": headline_price,
+            "source_kind": headline_basis,
+            "source": raw_quote.get("headline_source") or raw_quote.get("source"),
+            "provider": raw_quote.get("provider"),
+            "semantics": (
+                raw_quote.get("quote_semantics")
+                or raw_quote.get("headline_finalization")
+                or headline_basis
+            ),
+            "event_time": _iso(event_time),
+            "trade_date": _iso(headline_trade_date or event_time),
+            "age_seconds": _age_seconds(
+                checked_at=checked_at,
+                event_time=event_time,
+            ),
+            "confidence": "high",
+            "is_estimate": False,
+            "is_current_session": True,
+            "fallback_reason": None,
+            "reference_price": _positive_number(
+                raw_quote.get("headline_reference_price")
+                or raw_quote.get("previous_close")
+            ),
+        }
     quote_price = _positive_number(
         raw_quote.get("last_trade_price")
         if raw_quote.get("last_trade_price") is not None

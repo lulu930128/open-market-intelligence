@@ -123,14 +123,32 @@ function LevelCard({
 
 export default function NextSessionPlanPanel({
   loadState,
+  onDemand,
   plan,
 }: {
   loadState: LoadState;
+  onDemand?: () => void;
   plan: TaiwanNextSessionPlanRead | null;
 }) {
   const t = useT();
 
-  if (loadState === "idle") return null;
+  if (loadState === "idle") {
+    return (
+      <section className="mt-3 border-t border-omi-border-subtle pt-3">
+        <StockDetailDisclosure
+          testId="tw-next-session-plan-disclosure"
+          eyebrow={t("stockDetail.dataViews.nextSessionPlan.eyebrow")}
+          title={t("stockDetail.dataViews.nextSessionPlan.title")}
+          description={t("stockDetail.dataViews.nextSessionPlan.description")}
+          summaryClassName="px-1 py-1.5"
+          contentClassName="pt-3"
+          onOpen={onDemand}
+        >
+          <div />
+        </StockDetailDisclosure>
+      </section>
+    );
+  }
 
   return (
     <section

@@ -228,6 +228,22 @@ def test_depth_candidate_read_is_provider_fair_before_total_bound(db: Session) -
         MIS_ORDER_BOOK_DESCRIPTOR.provider_key,
     }
 
+    mis_row = db.query(TaiwanStockDepthSnapshot).filter_by(
+        provider=MIS_ORDER_BOOK_DESCRIPTOR.provider_key
+    ).one()
+    mis_row.market_session = "close_resolution"
+    mis_row.event_at = datetime(2026, 8, 26, 13, 30, tzinfo=TAIPEI)
+    db.commit()
+    closing_reads = TaiwanDepthRepository(db).load_candidates(
+        _instrument(),
+        max_candidates=2,
+        trade_date=NOW.date(),
+        allowed_sessions=(MarketSession.CLOSE_RESOLUTION,),
+    )
+
+    assert len(closing_reads) == 1
+    assert closing_reads[0].provider == MIS_ORDER_BOOK_DESCRIPTOR.provider_key
+
 
 def test_trial_auction_stays_provisional_and_never_becomes_quote(db: Session) -> None:
     result = acquire_taiwan_auction(
@@ -479,3 +495,38 @@ def test_depth_transaction_rolls_back_receipt_when_lineage_mismatches(
     assert db.query(SourceRegistry).count() == 0
     assert db.query(RawFetchResult).count() == 0
     assert db.query(TaiwanStockDepthSnapshot).count() == 0
+
+
+def test_depth_transaction_persists_event_session_instead_of_request_session(
+    db: Session,
+) -> None:
+    requirement = build_taiwan_realtime_requirement(
+        instrument=_instrument(),
+        capability_id=TW_ORDER_BOOK_CAPABILITY_ID,
+        policy=RealtimePolicy.REQUIRE_LIVE,
+        requested_at=NOW,
+        session=MarketSession.CONTINUOUS,
+        bounds=RequestBounds(
+            max_provider_attempts=1,
+            max_external_calls=0,
+            max_subscriptions=1,
+            max_candidates=1,
+            max_rows=1,
+        ),
+    )
+    plan = plan_data_acquisition_v2(
+        requirement,
+        (KGI_ORDER_BOOK_DESCRIPTOR,),
+        (_health(KGI_ORDER_BOOK_DESCRIPTOR.capability_id),),
+    )
+    acquired = _adapter().acquire_depth_observations(requirement, plan)
+    request_session_changed = requirement.model_copy(
+        update={"session": MarketSession.OPENING_AUCTION}
+    )
+
+    TaiwanDepthTransaction(db).persist_depth_acquisition(
+        request_session_changed,
+        acquired,
+    )
+
+    assert db.query(TaiwanStockDepthSnapshot).one().market_session == "continuous"

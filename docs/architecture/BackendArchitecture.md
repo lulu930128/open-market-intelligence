@@ -346,7 +346,7 @@ completed session truth。
 
 - Chart、legacy daily routes、valuation、next-session、ADR、volume pace、technical、chips、derivatives、Radar outcome/automation/backtest、index contribution與stock market-cap使用resolved daily series／universe或market-owned freshness projection。
 - Taiwan index headline由market-owned typed resolution統一選擇：active session可選current observation，post-close可選qualified completed-session evidence；REST summary、Dashboard與AI只投影同一resolution identity、selected lineage與change reference，不共用raw latest-row heuristic或自行重選provider。
-- Taiwan index headline compatibility seam由`app.market.index_resolution.project_taiwan_index_headline`擁有，只服務尚未帶有效`tw.index.resolution.v3`的legacy cached summary，consumer scope限Dashboard與AI `market.indices`。Fallback必須使用`compatibility.current_data_core.v1`、保留`INDEX_HEADLINE_COMPATIBILITY_FALLBACK` limitation且不得確認official close；當production summary一律提供有效v3、runtime parity證明fallback為零，並由malformed／missing resolution negative tests鎖定fail-visible行為後移除。
+- Taiwan index headline compatibility seam由`app.market.index_resolution.project_taiwan_index_headline`擁有，只服務尚未帶有效`tw.index.resolution.v4`的legacy cached summary，consumer scope限Dashboard與AI `market.indices`。Fallback必須使用`compatibility.current_data_core.v1`、保留`INDEX_HEADLINE_COMPATIBILITY_FALLBACK` limitation且不得確認official close；當production summary一律提供有效v4、runtime parity證明fallback為零，並由malformed／missing resolution negative tests鎖定fail-visible行為後移除。
 - Official breadth從同一canonical daily universe聚合，並額外要求component receipt coherence；不另列TWSE/TPEX provider winner。
 - Completed-session stock sector／ranking由同一次canonical snapshot同時取得selected rows、active-stock denominator與TWSE／TPEX coverage counts；AI層不得另查第二份universe或把ETF列入stock aggregate。
 - Official index exact/series由`official_index_platform`經`MarketDataGateway`與Resolver讀取；series可以bounded preload，但每一session仍經相同resolution policy。
@@ -533,6 +533,17 @@ Refreshable capability 另要求：
 ### Frontend
 
 只呈現 backend contract 與發出 viewer intent。
+
+台股 surface 的 current request lifecycle 採 demand-driven owner：
+
+- Chart 先讀 canonical Bars 並立即繪製；Technical series 以同一 `session_scope` 非同步補強。History pin response-local `series_revision`；Current Session pin limit-independent `current_session_coverage.snapshot_revision`。Technical 的 calculation window 必須完整，response `limit` 只能裁切回傳 points，不得縮短 MA／VWAP warmup 或重選 session/provider。
+- Technical report 與 Chart loading/error state 分離；volume pace 是明示 opt-in 的延後成本，預設 detail technical request 不等待它。
+- Ranking 與 Radar 各自擁有 request lifecycle。Watchlist 順序先讀輕量 canonical snapshot；Radar 先讀 persisted snapshot，只有 active surface 才做後續 cache-only enhancement。
+- Ranking／Radar 的 current-session price overlay 只讀 `TaiwanBarService` Unified Bar；不得回接 legacy `get_intraday_trend`／`tw_intraday_platform`。Radar persisted snapshot 404 應結束初始 loading 且不顯示錯誤；cache-only current computation 只能由既有 60 秒 enhancement lifecycle 延後執行，避免與個股 Chart critical path 競爭，且不得 refresh、enqueue 或寫入。MA／volume-MA／threshold defaults 由 Backend settings owner 解析，Frontend 不固定覆寫。
+- Secondary detail、data panel 與 overnight context 由 viewport／展開需求啟動；未 demanded 的 surface 不建立 request。
+- GET/read path 只做 cache-only revalidation。stale、partial、release-ready 或 missing 只能揭露狀態，不得由 `useEffect` 自動轉成 refresh／backfill POST；provider command 必須是明示使用者動作或 Backend scheduler owner。
+
+上述 lifecycle 是 consumer cutover contract，不改變 freshness、session、resolution、repair 與 provider routing 的 Backend ownership。
 
 ### MCP
 

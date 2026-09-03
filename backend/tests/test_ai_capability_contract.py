@@ -25,6 +25,9 @@ class AiCapabilityContractTests(unittest.TestCase):
         payload: dict,
         returned_count: int = 1,
         requested_limit: int | None = None,
+        canonical_available_count: int | None = None,
+        truncated: bool = False,
+        canonical_coverage_status: str | None = None,
         market: str = "US",
     ) -> dict:
         manifest_item = {
@@ -34,7 +37,12 @@ class AiCapabilityContractTests(unittest.TestCase):
             "required": True,
             "status": "available",
             "returned_count": returned_count,
+            "truncated": truncated,
         }
+        if canonical_available_count is not None:
+            manifest_item["canonical_available_count"] = canonical_available_count
+        if canonical_coverage_status is not None:
+            manifest_item["coverage_status"] = canonical_coverage_status
         if requested_limit is not None:
             manifest_item["requested_limit"] = requested_limit
             manifest_item["effective_limit"] = requested_limit
@@ -56,6 +64,106 @@ class AiCapabilityContractTests(unittest.TestCase):
             scope_type="stock",
         )
         return quality["capabilities"][capability]
+
+    def test_truncated_projection_does_not_demote_canonical_intraday_coverage(
+        self,
+    ) -> None:
+        base_payload = {
+            "status": "current",
+            "freshness": {"status": "current"},
+            "coverage_status": "complete",
+            "trade_date": "2026-09-03",
+            "point_count": 456,
+            "volume_unit": "shares",
+            "provider": "yahoo_chart",
+            "source": "yahoo.chart.1m",
+            "points": [
+                {
+                    "time": f"2026-09-03T14:{minute:02d}:00+00:00",
+                    "price": 410.0 + minute,
+                    "volume": 1000,
+                }
+                for minute in range(5)
+            ],
+            "quality": {
+                "status": "current",
+                "facts_usable": True,
+                "decision_usable": True,
+            },
+        }
+
+        full = self._quality_item(
+            capability="intraday.bars",
+            payload={
+                **base_payload,
+                "points": [
+                    {
+                        "time": f"2026-09-03T14:{minute:02d}:00+00:00",
+                        "price": 410.0 + minute,
+                        "volume": 1000,
+                    }
+                    for minute in range(20)
+                ],
+            },
+            returned_count=20,
+            requested_limit=20,
+            canonical_available_count=456,
+            canonical_coverage_status="complete",
+        )
+        truncated = self._quality_item(
+            capability="intraday.bars",
+            payload=base_payload,
+            returned_count=5,
+            requested_limit=20,
+            canonical_available_count=456,
+            truncated=True,
+            canonical_coverage_status="complete",
+        )
+
+        self.assertEqual(full["canonical_dataset_coverage"], "complete")
+        self.assertEqual(truncated["canonical_dataset_coverage"], "complete")
+        self.assertEqual(full["consumer_projection_coverage"], "truncated")
+        self.assertEqual(truncated["consumer_projection_coverage"], "truncated")
+        self.assertEqual(full["freshness_status"], truncated["freshness_status"])
+        self.assertEqual(full["decision_usable"], truncated["decision_usable"])
+        self.assertNotIn("insufficient_history", truncated["issues"])
+
+    def test_true_stale_intraday_is_not_upgraded_by_projection_coverage(self) -> None:
+        item = self._quality_item(
+            capability="intraday.bars",
+            payload={
+                "status": "stale",
+                "freshness": {"status": "stale"},
+                "coverage_status": "complete",
+                "trade_date": "2026-09-02",
+                "point_count": 456,
+                "volume_unit": "shares",
+                "provider": "yahoo_chart",
+                "source": "yahoo.chart.1m",
+                "points": [
+                    {
+                        "time": "2026-09-02T19:59:00+00:00",
+                        "price": 121.0,
+                        "volume": 1000,
+                    }
+                ],
+                "quality": {
+                    "status": "stale",
+                    "facts_usable": True,
+                    "decision_usable": False,
+                },
+            },
+            returned_count=1,
+            requested_limit=5,
+            canonical_available_count=456,
+            truncated=True,
+            canonical_coverage_status="complete",
+        )
+
+        self.assertEqual(item["freshness_status"], "stale")
+        self.assertEqual(item["canonical_dataset_coverage"], "complete")
+        self.assertEqual(item["consumer_projection_coverage"], "truncated")
+        self.assertFalse(item["decision_usable"])
 
     def test_current_session_intraday_blocks_cross_date_series(self) -> None:
         item = self._quality_item(
@@ -141,6 +249,39 @@ class AiCapabilityContractTests(unittest.TestCase):
             "CURRENT_SESSION_SERIES_DATE_MISMATCH",
             item["reason_codes"],
         )
+
+    def test_current_session_identity_uses_pre_compaction_observed_dates(self) -> None:
+        item = self._quality_item(
+            capability="intraday.bars",
+            market="TW",
+            payload={
+                "status": "current",
+                "session_scope": "current_session",
+                "expected_trade_date": "2026-09-03",
+                "observed_trade_dates": ["2026-09-02", "2026-09-03"],
+                "interval": "1m",
+                "point_count": 2,
+                "volume_unit": "shares",
+                "provider": "fugle_marketdata",
+                "source": "fugle.intraday.1m",
+                "points": [
+                    {"time": "2026-09-03T09:01:00+08:00", "price": 103},
+                ],
+                "quality": {
+                    "status": "current",
+                    "facts_usable": True,
+                    "decision_usable": True,
+                },
+            },
+            returned_count=1,
+        )
+
+        self.assertEqual(item["current_session_identity"]["status"], "mismatch")
+        self.assertEqual(
+            item["current_session_identity"]["unexpected_trade_dates"],
+            ["2026-09-02"],
+        )
+        self.assertFalse(item["decision_usable"])
 
     def test_payload_semantic_missing_caps_generic_quality(self) -> None:
         item = self._quality_item(
@@ -3152,6 +3293,31 @@ class AiCapabilityContractTests(unittest.TestCase):
             plan.selection["inference_policy"],
             "explicit_selection_locked",
         )
+
+    def test_explicit_intraday_selection_uses_focused_reader_for_general_intent(
+        self,
+    ) -> None:
+        payload = AiAskRequest(
+            question="讀取這檔股票指定的盤中證據。",
+            contract_version="omi.decision.v4",
+            target={"type": "tw_stock", "id": "2330"},
+            mode="data_only",
+            output="evidence_only",
+            selection={"include": ["intraday.bars"]},
+        )
+
+        plan = query_plan.build_query_plan(
+            payload=payload,
+            scope_type="stock",
+            question_intent="general",
+            effective_mode="data_only",
+            target_market="TW",
+        )
+
+        self.assertEqual(plan.reader_profile, "quote_only")
+        self.assertIn("read_taiwan_bars", plan.required_readers)
+        self.assertIn("build_stock_technical_report", plan.excluded_readers)
+        self.assertIn("get_broker_branch_trade_summary", plan.excluded_readers)
 
     def test_natural_regulation_question_uses_event_only_capabilities(self) -> None:
         question = "2330 是否為處置股？請說明撮合間隔與交易限制。"

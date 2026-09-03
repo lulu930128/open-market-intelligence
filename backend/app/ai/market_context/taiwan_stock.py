@@ -321,6 +321,8 @@ def _compact_intraday_bars(
         else {}
     )
     cached_fallback_allowed = params.get("fallback_to_cached") is not False
+    requested_trade_date = parse_market_trade_date(params.get("trade_date"))
+    current_session_scope = requested_trade_date is None
     # The Taiwan Bar owner reads resolved canonical cache only. AI never
     # triggers acquisition or chooses a provider.
     refresh_allowed = False
@@ -350,8 +352,23 @@ def _compact_intraday_bars(
                 interval=interval,
                 limit=point_limit,
                 include_partial=True,
+                **(
+                    {
+                        "session_scope": "current_session",
+                        "requested_at": _contract_datetime(
+                            calendar_status.get("checked_at")
+                            if isinstance(calendar_status, dict)
+                            else None
+                        ),
+                    }
+                    if current_session_scope
+                    else {}
+                ),
             )
-            history = project_taiwan_bar_series(bar_series)
+            history = project_taiwan_bar_series(
+                bar_series,
+                session_scope=("current_session" if current_session_scope else None),
+            )
             compact_history = _compact_intraday_history(history, point_limit=point_limit)
             series[interval] = compact_history
             warnings.extend(str(item) for item in compact_history.get("warnings") or [])
@@ -380,6 +397,17 @@ def _compact_intraday_bars(
         "range": "1d",
         "payload_level": payload_level,
         "bar_limit": point_limit,
+        "session_scope": "current_session" if current_session_scope else "history",
+        "expected_trade_date": (
+            (series.get(intervals[0]) or {}).get("expected_trade_date")
+            if current_session_scope
+            else None
+        ),
+        "trade_date": (
+            (series.get(intervals[0]) or {}).get("trade_date")
+            if len(intervals) == 1
+            else None
+        ),
         "series": series,
         "warnings": warnings,
     }
@@ -870,6 +898,7 @@ def _apply_taiwan_current_price_contract(
     if resolved.get("value") is not None:
         quote["latest_price"] = resolved["value"]
         quote["price"] = resolved["value"]
+        quote["last_price"] = resolved["value"]
         quote["trade_date"] = (
             resolved_trade_date or provider_trade_date
         )
@@ -1455,12 +1484,23 @@ def read_stock_quote_context(
         if intraday_requested
         else "not_requested"
     )
+    selected_intraday = intraday_series.get("1m") or {}
+    intraday_freshness = (
+        dict(selected_intraday.get("freshness"))
+        if isinstance(selected_intraday.get("freshness"), dict)
+        else {
+            "status": intraday_domain_status,
+            "is_current": intraday_domain_status == "current",
+            "expected_trade_date": selected_intraday.get("expected_trade_date"),
+            "latest_trade_date": selected_intraday.get("trade_date"),
+        }
+    )
     compact_status = (
         "missing"
         if latest_daily is None and quote_freshness.get("status") in {None, "missing", "unavailable"}
         else "partial"
         if quote_freshness.get("status") in {"cached", "stale", "unavailable", "source_unavailable"}
-        or intraday_domain_status in {"delayed", "stale", "missing", "unavailable"}
+        or intraday_domain_status in {"partial", "delayed", "stale", "missing", "unavailable"}
         else "ready"
     )
     compact = {
@@ -1489,6 +1529,16 @@ def read_stock_quote_context(
                 **quote_freshness,
                 "dataset": "quote",
             },
+            **(
+                {
+                    "intraday.bars": {
+                        **intraday_freshness,
+                        "dataset": "tw.intraday.bars",
+                    }
+                }
+                if intraday_requested
+                else {}
+            ),
             **_quote_component_freshness_rows(quote),
         },
         "slots": slots,

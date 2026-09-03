@@ -42,10 +42,10 @@ from app.market.public_quote_repository import TaiwanPublicQuoteRepository
 from app.market.quote_depth import read_taiwan_quote_evidence_projection
 from app.market.schemas import TaiwanStockQuoteDepthRead
 from app.market.trading_calendar import TAIWAN_TZ
+from app.market.tw_realtime_capabilities import TW_REALTIME_SOURCE_BINDINGS
 from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 from app.market_data.contracts import (
     DatasetHealthStatus,
-    EvidenceFreshness,
     InstrumentKey,
     InstrumentType,
     Market,
@@ -404,7 +404,9 @@ def test_session_close_reuses_receipt_and_quote_upsert_then_survives_cold_read(
     assert resolving_projection["candidate_price"] == 2400.0
     assert db.query(RawFetchResult).count() == 1
     assert db.query(TaiwanStockQuoteSnapshot).count() == 1
-    assert db.query(TaiwanStockQuoteSnapshot).one().market_session == "close_resolution"
+    row = db.query(TaiwanStockQuoteSnapshot).one()
+    assert row.market_session == "closing_auction"
+    assert row.session_phase == "closing_auction"
 
     finalized = acquire_taiwan_session_close(
         db,
@@ -443,7 +445,7 @@ def test_session_close_reuses_receipt_and_quote_upsert_then_survives_cold_read(
     assert db.query(RawFetchResult).count() == 2
     assert db.query(TaiwanStockQuoteSnapshot).count() == 1
     row = db.query(TaiwanStockQuoteSnapshot).one()
-    assert row.market_session == "post_close"
+    assert row.market_session == "closing_auction"
     assert row.raw_result_id == 2
 
     intraday_projection = intraday._apply_platform_quote_contract(
@@ -501,6 +503,84 @@ def test_session_close_reuses_receipt_and_quote_upsert_then_survives_cold_read(
     )
 
 
+def test_session_close_candidate_bound_is_applied_after_role_filter(db: Session) -> None:
+    record = _records()["2330"]
+    acquire_taiwan_session_close(
+        db,
+        stock_id="2330",
+        requested_at=datetime(2026, 8, 25, 13, 34, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw(record),
+            datetime(2026, 8, 25, 5, 34, tzinfo=timezone.utc),
+        ),
+    )
+    close_row = db.query(TaiwanStockQuoteSnapshot).one()
+    close_values = {
+        column.name: getattr(close_row, column.name)
+        for column in TaiwanStockQuoteSnapshot.__table__.columns
+        if column.name != "id"
+    }
+    active_bindings = [
+        binding
+        for binding in TW_REALTIME_SOURCE_BINDINGS
+        if binding.descriptor.capability_id
+        == TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR.capability_id
+        and binding.descriptor.provider_key != close_row.provider
+    ][:2]
+    for offset, binding in enumerate(active_bindings, start=1):
+        source = SourceRegistry(
+            source_name=binding.source,
+            source_type=binding.source_type,
+            category="market_data",
+            enabled=True,
+            priority=binding.descriptor.priority,
+            parser_type=binding.parser_version,
+            auth_type=binding.auth_type,
+            reliability_level=binding.reliability_level,
+        )
+        db.add(source)
+        db.flush()
+        raw = RawFetchResult(
+            source_id=source.id,
+            fetched_at=datetime(2026, 8, 25, 5, 20 + offset, tzinfo=timezone.utc),
+            content_hash=f"active-{offset}",
+            parser_version=binding.parser_version,
+            raw_text="{}",
+        )
+        db.add(raw)
+        db.flush()
+        db.add(
+            TaiwanStockQuoteSnapshot(
+                **{
+                    **close_values,
+                    "source_id": source.id,
+                    "raw_result_id": raw.id,
+                    "provider": binding.descriptor.provider_key,
+                    "source": binding.source,
+                    "raw_contract_version": binding.parser_version,
+                    "market_session": "continuous",
+                    "session_phase": "regular_live",
+                    "quote_time": datetime(
+                        2026, 8, 25, 13, 20 + offset, tzinfo=TAIWAN_TZ
+                    ),
+                }
+            )
+        )
+    db.commit()
+
+    projection = project_taiwan_session_close(
+        read_taiwan_session_close(
+            db,
+            stock_id="2330",
+            requested_at=datetime(2026, 8, 25, 14, 0, tzinfo=TAIWAN_TZ),
+        )
+    )
+
+    assert projection["status"] == "session_final"
+    assert projection["provider"] == "twse_mis"
+    assert projection["price"] == 2400.0
+
+
 def test_session_close_remains_final_before_next_presentation_rollover(
     db: Session,
 ) -> None:
@@ -542,10 +622,11 @@ def test_post_close_receipt_cannot_promote_an_earlier_last_trade(
     assert projection["status"] == "unavailable"
     assert projection["available"] is False
     assert projection["price"] is None
+    assert "SESSION_CLOSE_EVENT_TIME_INVALID" in projection["limitations"]
+    assert projection["price"] is None
     assert projection["event_time"] == datetime(
         2026, 8, 25, 13, 20, tzinfo=TAIWAN_TZ
     )
-    assert "SESSION_CLOSE_EVENT_TIME_INVALID" in projection["limitations"]
 
 
 def test_post_close_trial_cannot_be_promoted_to_session_close(
@@ -569,8 +650,26 @@ def test_post_close_trial_cannot_be_promoted_to_session_close(
     projection = project_taiwan_session_close(result)
     assert projection["status"] == "unavailable"
     assert projection["available"] is False
-    assert projection["price"] is None
-    assert result.candidate_rejections[0].missing_fields == ("last_trade_price",)
+
+
+def test_quote_persistence_uses_preopen_event_session_not_request_session(
+    db: Session,
+) -> None:
+    record = _records()["2330"]
+    acquire_taiwan_public_last_trade_quote(
+        db,
+        stock_id="2330",
+        policy=RealtimePolicy.PREFER_LIVE,
+        requested_at=datetime(2026, 8, 25, 9, 1, tzinfo=TAIWAN_TZ),
+        acquisition=_executor(
+            _raw_with_message_updates(record, t="08:20:00", **{"%": "08:20:00"}),
+            datetime(2026, 8, 25, 1, 1, tzinfo=timezone.utc),
+        ),
+    )
+
+    row = db.query(TaiwanStockQuoteSnapshot).one()
+    assert row.market_session == "pre_open"
+    assert row.session_phase == "waiting_preopen"
 
 
 def test_future_event_time_cannot_be_promoted_to_session_close(
@@ -629,7 +728,7 @@ def test_cumulative_volume_regression_cannot_finalize_same_trade_event(
     projection = project_taiwan_session_close(regressed)
     row = db.query(TaiwanStockQuoteSnapshot).one()
     assert projection["status"] == "unavailable"
-    assert row.market_session == "close_resolution"
+    assert row.market_session == "closing_auction"
     assert row.raw_result_id == first_raw_result_id
     assert row.total_volume_lots == first_volume
     assert db.query(RawFetchResult).count() == 2

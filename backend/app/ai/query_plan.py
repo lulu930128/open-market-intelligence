@@ -1116,10 +1116,31 @@ def build_query_plan(
         }
         and "company.profile" in selected_capability_set
     )
+    quote_intraday_only_selection = bool(
+        scope_type == "stock"
+        and has_explicit_capability_selection
+        and selected_capability_set
+        & {
+            "quote.snapshot",
+            "quote.session_close",
+            "quote.official_close",
+            "intraday.bars",
+        }
+        and selected_capability_set
+        <= {
+            "target.identity",
+            "quote.snapshot",
+            "quote.session_close",
+            "quote.official_close",
+            "intraday.bars",
+            "data.freshness",
+        }
+    )
     if (
         scope_type == "stock"
         and (
             profile_only_selection
+            or quote_intraday_only_selection
             or (
                 question_intent == "quote"
                 and _is_pure_fast_path(
@@ -1184,7 +1205,7 @@ def build_query_plan(
             matched_positive_terms=positive_terms,
             matched_negative_terms=negative_terms,
             capability_selection_mode=capability_selection_mode,
-            selected_action_reason="Quote intent uses the bounded Taiwan quote/intraday read path and excludes unrelated refresh domains.",
+            selected_action_reason="Selected Taiwan quote/intraday evidence uses the bounded reader path and excludes unrelated refresh domains.",
             requested_provider=requested_provider,
             strict_provider=strict_provider,
             selection=selection,

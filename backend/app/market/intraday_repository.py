@@ -172,6 +172,7 @@ class TaiwanIntradayBarRepository:
         row: MarketIntradayBar,
         lineage: MarketIntradayBarLineage,
         source: SourceRegistry,
+        component_rows_by_id: dict[int, RawFetchResult],
     ) -> tuple[str, tuple[str, ...]] | None:
         if (
             row.instrument_type != InstrumentType.INDEX.value
@@ -204,15 +205,11 @@ class TaiwanIntradayBarRepository:
             return None
         if not component_ids or len(component_ids) != len(set(component_ids)):
             return None
-        component_rows = (
-            self._db.query(RawFetchResult)
-            .filter(RawFetchResult.id.in_(component_ids))
-            .all()
+        ordered = tuple(
+            component_rows_by_id.get(component_id) for component_id in component_ids
         )
-        by_id = {item.id: item for item in component_rows}
-        if len(by_id) != len(component_ids):
+        if any(item is None for item in ordered):
             return None
-        ordered = tuple(by_id[value] for value in component_ids)
         if any(
             item.source_id != source.id
             or item.parser_version != binding.parser_version
@@ -232,9 +229,60 @@ class TaiwanIntradayBarRepository:
         ).hexdigest()
         return digest, hashes
 
+    def _load_materialized_component_rows(
+        self,
+        rows: list[
+            tuple[
+                MarketIntradayBar,
+                MarketIntradayBarLineage,
+                RawFetchResult | None,
+                SourceRegistry,
+            ]
+        ],
+    ) -> dict[int, RawFetchResult]:
+        """Batch-load component receipts used by materialized index Bars.
+
+        A full index session contains roughly 265 Bars.  Loading the component
+        receipt inside the per-Bar loop turns one cache read into hundreds of
+        SQL statements.  Keep the same validation while reading bounded chunks
+        once per repository call.
+        """
+
+        component_ids: set[int] = set()
+        for row, lineage, _raw, _source in rows:
+            if (
+                row.instrument_type != InstrumentType.INDEX.value
+                or lineage.raw_result_id is not None
+                or lineage.calculation_version
+                != TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION
+                or lineage.raw_contract_version != TAIWAN_INDEX_MINUTE_RAW_CONTRACT
+            ):
+                continue
+            try:
+                parsed = json.loads(lineage.component_raw_result_ids_json or "[]")
+                values = tuple(int(value) for value in parsed)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if values and len(values) == len(set(values)):
+                component_ids.update(values)
+
+        by_id: dict[int, RawFetchResult] = {}
+        ordered_ids = sorted(component_ids)
+        for offset in range(0, len(ordered_ids), 500):
+            batch = ordered_ids[offset : offset + 500]
+            component_rows = (
+                self._db.query(RawFetchResult)
+                .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
+                .filter(RawFetchResult.id.in_(batch))
+                .all()
+            )
+            by_id.update({item.id: item for item in component_rows})
+        return by_id
+
     def read_bar_candidates(self, requirement: DataRequirementV2) -> BarCandidateBatch:
         target, request = self._validate(requirement)
         rows = self._rows(requirement)
+        component_rows_by_id = self._load_materialized_component_rows(rows)
         by_provider: dict[tuple[str, str], list[BarObservation]] = defaultdict(list)
         priorities: dict[tuple[str, str], int] = {}
         limitations_by_provider: dict[tuple[str, str], tuple[str, ...]] = {}
@@ -248,6 +296,7 @@ class TaiwanIntradayBarRepository:
                 row=row,
                 lineage=lineage_row,
                 source=source,
+                component_rows_by_id=component_rows_by_id,
             )
             materialized_hash = (
                 materialized_lineage[0]

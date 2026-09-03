@@ -640,6 +640,50 @@ class QueryPlanContractTests(unittest.TestCase):
         self.assertEqual(resolved["source_kind"], "previous_close_reference")
         self.assertEqual(resolved["reference_price"], 2420.0)
 
+    def test_official_headline_is_not_overwritten_by_last_trade(self) -> None:
+        quote = {
+            "source": "twse_daily_trading",
+            "provider": "twse_openapi",
+            "trade_date": "2026-09-03",
+            "headline_price": 589.0,
+            "headline_reference_price": 590.0,
+            "headline_trade_date": "2026-09-03",
+            "headline_event_time": "2026-09-03T15:15:00+08:00",
+            "headline_basis": "official_close",
+            "headline_finalization": "official_daily_confirmed",
+            "headline_source": "twse_daily_ohlcv",
+            "headline_decision_usable": True,
+            "quote_semantics": "official_close",
+            "last_trade_price": 592.0,
+            "last_trade_time": "2026-09-03T13:30:00+08:00",
+            "last_trade_available": True,
+            "last_trade_is_current_session": True,
+            "previous_close": 590.0,
+        }
+
+        resolved = taiwan_stock._apply_taiwan_current_price_contract(
+            quote=quote,
+            intraday_bars={},
+            latest_daily=SimpleNamespace(
+                trade_date=date(2026, 9, 3),
+                close_price=589.0,
+            ),
+            calendar_status={
+                "date": "2026-09-03",
+                "previous_trading_day": "2026-09-02",
+                "is_trading_day": True,
+                "phase": "post_close",
+            },
+            checked_at=datetime(2026, 9, 3, 15, 20, tzinfo=timezone(timedelta(hours=8))),
+        )
+
+        self.assertEqual(resolved["source_kind"], "official_close")
+        self.assertEqual(resolved["value"], 589.0)
+        self.assertEqual(quote["price"], 589.0)
+        self.assertEqual(quote["latest_price"], 589.0)
+        self.assertEqual(quote["last_price"], 589.0)
+        self.assertEqual(quote["last_trade_price"], 592.0)
+
     def test_broker_branch_reader_does_not_load_fundamental_or_technical_domains(self) -> None:
         stock = SimpleNamespace(stock_id="2330", stock_name="台積電", market="TWSE")
         stock_service = SimpleNamespace(
@@ -752,6 +796,52 @@ class QueryPlanContractTests(unittest.TestCase):
             self.assertEqual(response["reasoning_steps"], [])
             self.assertFalse(response["query_plan"]["external_refresh_allowed"])
             self.assertEqual(response["diagnostics"]["level"], "debug")
+        finally:
+            db.close()
+
+    def test_explicit_intraday_selection_executes_focused_quote_reader(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="讀取這檔股票指定的盤中證據。",
+                contract_version="omi.decision.v4",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="data_only",
+                output="evidence_only",
+                selection={"include": ["intraday.bars"]},
+                payload_level="compact",
+            )
+            freshness_result = {
+                "scope_profile": "quote_only",
+                "is_current": True,
+                "refresh_recommended": False,
+                "missing": [],
+                "warnings": [],
+            }
+            with (
+                patch.object(
+                    ai_ask.freshness,
+                    "check_stock_daily_price_freshness",
+                    return_value=freshness_result,
+                ),
+                patch.object(
+                    ai_ask.tools,
+                    "read_stock_quote_context",
+                    return_value=quote_context(),
+                ) as quote_reader,
+                patch.object(
+                    ai_ask.tools,
+                    "read_stock_context",
+                    side_effect=AssertionError("full stock reader must not run"),
+                ) as full_reader,
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            quote_reader.assert_called_once()
+            full_reader.assert_not_called()
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["action"], "omi.read_stock_quote")
         finally:
             db.close()
 

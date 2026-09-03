@@ -115,11 +115,13 @@ import { timeframeLabel, useT, type TranslationFunction } from "@/i18n";
 import { TAIWAN_INTRADAY_REFRESH_MS } from "@/lib/taiwanMarketTime";
 import type {
   ChartPoint,
+  IntradayCurrentObservation,
+  IntradayPriceDiagnostics,
   MarketIndexSummary,
   OhlcIntradayOverlay,
   StockIndicatorPoint,
-  TaiwanChartBundleRead,
   TaiwanCorporateEventRead,
+  TaiwanStockQuoteDepthRead,
   TaiwanStockQuoteDepthPreviewMode,
 } from "@/types/market";
 import {
@@ -136,7 +138,6 @@ type Props = {
   stockName: string | null;
   stockMarket?: string | null;
   instrumentType?: string | null;
-  initialChartBundle?: TaiwanChartBundleRead | null;
   watchlistRankingPanel?: ReactNode;
   marketIndexSummary?: MarketIndexSummary | null;
   onChartFocusModeChange?: (active: boolean) => void;
@@ -155,6 +156,103 @@ function taiwanChartDateGranularity(
 
 const emptyChartPoints: ChartPoint[] = [];
 const emptyIndicatorPoints: StockIndicatorPoint[] = [];
+
+function quoteDepthCurrentObservation(
+  quoteDepth: TaiwanStockQuoteDepthRead | null
+): IntradayCurrentObservation | null {
+  const value = quoteDepth?.headline_price ?? quoteDepth?.last_price ?? null;
+  if (!quoteDepth || !finiteNumber(value)) return null;
+  return {
+    value,
+    observed_at: quoteDepth.headline_event_time ?? quoteDepth.quote_time,
+    confirmed_at: quoteDepth.fetched_at,
+    price_semantics:
+      quoteDepth.observation_semantics ??
+      quoteDepth.headline_basis ??
+      quoteDepth.quote_semantics ??
+      "canonical_quote_projection",
+    provider: quoteDepth.provider,
+    source: quoteDepth.headline_source ?? quoteDepth.source,
+    status: quoteDepth.delivery_status ?? quoteDepth.freshness.status,
+    is_fallback: quoteDepth.fallback_used === true,
+    previous_close: quoteDepth.previous_close,
+    freshness_status: quoteDepth.freshness.status,
+    decision_usable: quoteDepth.headline_decision_usable === true,
+  };
+}
+
+function quoteDepthPriceDiagnostics(
+  quoteDepth: TaiwanStockQuoteDepthRead | null
+): IntradayPriceDiagnostics | null {
+  const currentPrice = quoteDepth?.headline_price ?? quoteDepth?.last_price ?? null;
+  const actualTradePrice = quoteDepth?.last_trade_price ?? null;
+  if (!quoteDepth || !finiteNumber(currentPrice)) return null;
+  return {
+    history_price_source: null,
+    latest_history_time: null,
+    latest_history_price: null,
+    latest_actual_trade_time:
+      quoteDepth.actual_trade_occurred === true
+        ? quoteDepth.actual_trade_price_as_of ?? quoteDepth.quote_time
+        : null,
+    latest_actual_trade_price:
+      quoteDepth.actual_trade_occurred === true && finiteNumber(actualTradePrice)
+        ? actualTradePrice
+        : null,
+    current_price_source:
+      quoteDepth.actual_trade_price_source ??
+      quoteDepth.headline_source ??
+      quoteDepth.source,
+    lag_seconds: quoteDepth.freshness.age_seconds,
+    current_trade_available:
+      quoteDepth.actual_trade_occurred === true && finiteNumber(actualTradePrice),
+    current_trade_unavailable_reason:
+      quoteDepth.actual_trade_occurred === true && finiteNumber(actualTradePrice)
+        ? null
+        : quoteDepth.actual_trade_reason_code ??
+          quoteDepth.observation_reason_code ??
+          "TW_CURRENT_TRADE_UNAVAILABLE",
+    current_price_applied_to_history: false,
+  };
+}
+
+function useSurfaceDemand(rootMargin = "0px", resetKey?: string | null) {
+  const [node, setNode] = useState<HTMLElement | null>(null);
+  const [demandState, setDemandState] = useState({
+    demanded: false,
+    resetKey,
+  });
+  const demanded =
+    demandState.resetKey === resetKey && demandState.demanded;
+  const demand = useCallback(
+    () => setDemandState({ demanded: true, resetKey }),
+    [resetKey]
+  );
+
+  useEffect(() => {
+    if (!node || demanded) return;
+    if (typeof IntersectionObserver === "undefined") {
+      const fallbackTimer = window.setTimeout(demand, 0);
+      return () => window.clearTimeout(fallbackTimer);
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        demand();
+        observer.disconnect();
+      },
+      { rootMargin }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [demand, demanded, node, rootMargin]);
+
+  return {
+    demand,
+    demanded,
+    surfaceRef: setNode,
+  };
+}
 
 function normalizeIsoDate(value: string | null | undefined) {
   return value ? value.slice(0, 10) : null;
@@ -362,7 +460,6 @@ export default function StockDetailPanel({
   stockName,
   stockMarket = null,
   instrumentType = null,
-  initialChartBundle = null,
   watchlistRankingPanel,
   marketIndexSummary,
   onChartFocusModeChange,
@@ -403,6 +500,8 @@ export default function StockDetailPanel({
   const [revenueView, setRevenueView] = useState<RevenueView>("monthly");
   const [revenueYear, setRevenueYear] = useState<number | null>(null);
   const [earningsView, setEarningsView] = useState<EarningsView>("quarterly");
+  const [nextSessionDemanded, setNextSessionDemanded] = useState(false);
+  const [overnightDemanded, setOvernightDemanded] = useState(false);
   const [etfDataTabSelection, setEtfDataTabSelection] = useState<{
     stockId: string;
     tab: DataPanelSurfaceTab;
@@ -420,6 +519,15 @@ export default function StockDetailPanel({
       : "etf";
   const indexId = indexProduct?.indexId ?? null;
   const indexMarket = indexProduct?.market ?? null;
+  const {
+    demanded: secondarySurfaceDemanded,
+    surfaceRef: secondarySurfaceRef,
+  } = useSurfaceDemand();
+  const {
+    demand: demandDataSurface,
+    demanded: dataSurfaceDemanded,
+    surfaceRef: dataSurfaceRef,
+  } = useSurfaceDemand("0px", stockId);
   const {
     quoteDepth,
     quoteReplay,
@@ -457,6 +565,7 @@ export default function StockDetailPanel({
       setBranchDays,
     },
   } = useTaiwanDataPanel({
+    enabled: dataSurfaceDemanded,
     autoRefreshEnabled: requestedInstrumentTypeResolved
       ? !requestedIsEtfProduct || requestedEtfDataTab !== "etf"
       : null,
@@ -485,6 +594,7 @@ export default function StockDetailPanel({
   const activeDataSurfaceTab = isEtfProduct ? selectedEtfDataTab : activeDataTab;
   const selectDataSurfaceTab = useCallback(
     (tab: DataPanelSurfaceTab) => {
+      demandDataSurface();
       if (isEtfProduct) {
         if (!stockId) return;
         setEtfDataTabSelection({ stockId, tab });
@@ -493,7 +603,7 @@ export default function StockDetailPanel({
         selectDataTab(tab);
       }
     },
-    [isEtfProduct, selectDataTab, stockId]
+    [demandDataSurface, isEtfProduct, selectDataTab, stockId]
   );
   const {
     indexContributionLoadState,
@@ -508,13 +618,14 @@ export default function StockDetailPanel({
     indexId,
     indexMarket,
     isIndexProduct,
+    overnightEnabled: overnightDemanded,
     stockId,
   });
   const {
     loadState: nextSessionPlanLoadState,
     plan: nextSessionPlan,
   } = useTaiwanNextSessionPlan({
-    enabled: !isIndexProduct && !isEtfProduct,
+    enabled: nextSessionDemanded && !isIndexProduct && !isEtfProduct,
     stockId,
     stockName,
   });
@@ -708,12 +819,12 @@ export default function StockDetailPanel({
       todayTrend,
       todayUpdatedAt,
       technicalContract,
+      technicalParameterContract,
     },
   } = useTaiwanStockChartData({
     chartFocusMode,
     currentStockInfoMarket,
     effectiveTimeframe,
-    initialChartBundle,
     isIndexProduct,
     professionalTimeframe,
     publishDataStatus: publishDetailDataStatus,
@@ -723,12 +834,17 @@ export default function StockDetailPanel({
     todayInterval: todayBarInterval,
   });
   const canonicalIndicatorParameters = useMemo(() => {
-    const defaults = technicalContract?.parameter_contract.defaults;
+    const defaults =
+      technicalParameterContract ?? technicalContract?.parameter_contract.defaults;
     return defaults
       ? backendOwnedIndicatorParameters(indicatorParameters, defaults)
       : indicatorParameters;
-  }, [indicatorParameters, technicalContract]);
-  const backendTechnicalReport = useTaiwanTechnicalReport({
+  }, [indicatorParameters, technicalContract, technicalParameterContract]);
+  const {
+    loadState: technicalReportLoadState,
+    report: backendTechnicalReport,
+  } = useTaiwanTechnicalReport({
+    enabled: secondarySurfaceDemanded,
     effectiveTimeframe,
     isIndexProduct,
     stockId,
@@ -866,8 +982,21 @@ export default function StockDetailPanel({
   const chartPreviousClose = chartOverlayPreviousClose ?? previousChart?.close ?? null;
   const canUseFocusedKLine = currentChartReady && chartDataForTimeframe.length > 0;
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
-  const latestTodayDisplayPrice = finiteNumber(todayCurrentObservation?.value)
-    ? todayCurrentObservation.value
+  const selectedQuoteDepth = quoteDepth?.stock_id === stockId ? quoteDepth : null;
+  const resolvedTodayCurrentObservation =
+    todayCurrentObservation ?? quoteDepthCurrentObservation(selectedQuoteDepth);
+  const resolvedTodayPreviousClose =
+    todayPreviousClose ?? selectedQuoteDepth?.previous_close ?? null;
+  const resolvedTodayPriceDiagnostics =
+    todayPriceDiagnostics ?? quoteDepthPriceDiagnostics(selectedQuoteDepth);
+  const resolvedTodaySource =
+    selectedQuoteDepth?.headline_source ?? selectedQuoteDepth?.source ?? todaySource;
+  const resolvedTodayUpdatedAt =
+    selectedQuoteDepth?.headline_event_time ??
+    selectedQuoteDepth?.quote_time ??
+    todayUpdatedAt;
+  const latestTodayDisplayPrice = finiteNumber(resolvedTodayCurrentObservation?.value)
+    ? resolvedTodayCurrentObservation.value
     : latestToday?.price ?? null;
   const officialCompletedClose =
     quoteDepth?.official_close_available === true &&
@@ -997,7 +1126,7 @@ export default function StockDetailPanel({
     latestDailyCurrentIndicator?.change !== undefined
       ? latestDailyCurrentIndicator.close - latestDailyCurrentIndicator.change
       : null;
-  const todayReferenceClose = todayPreviousClose ?? dailyPreviousClose;
+  const todayReferenceClose = resolvedTodayPreviousClose ?? dailyPreviousClose;
   const chartChangePct =
     latestChart?.close !== null &&
     latestChart?.close !== undefined &&
@@ -1013,6 +1142,25 @@ export default function StockDetailPanel({
     chartPreviousClose !== undefined
       ? latestChart.close - chartPreviousClose
       : null;
+  const marketIndicesById = useMemo(() => {
+    return new Map(
+      (marketIndexSummary?.indices ?? []).map((index) => [index.index_id, index])
+    );
+  }, [marketIndexSummary]);
+  const taiexIndex = marketIndicesById.get("TAIEX") ?? null;
+  const tpexIndex = marketIndicesById.get("TPEX") ?? null;
+  const selectedIndexSnapshot =
+    indexProduct?.indexId === "TPEX" ? tpexIndex : taiexIndex;
+  const canonicalIndexHeadline =
+    isIndexProduct && selectedIndexSnapshot
+      ? {
+          close: finiteNumber(selectedIndexSnapshot.close) ? selectedIndexSnapshot.close : null,
+          change: finiteNumber(selectedIndexSnapshot.change) ? selectedIndexSnapshot.change : null,
+          changePct: finiteNumber(selectedIndexSnapshot.change_pct)
+            ? selectedIndexSnapshot.change_pct
+            : null,
+        }
+      : null;
   const todayHeadlineValues = resolveTodayHeadlineValues({
     backendPrice: quoteDepth?.headline_price,
     backendChange: quoteDepth?.headline_change,
@@ -1026,17 +1174,23 @@ export default function StockDetailPanel({
   const todayHeadlineChange: number | null = todayHeadlineValues[1];
   const todayHeadlineChangePct: number | null = todayHeadlineValues[2];
   const latestClose: number | null =
-    effectiveTimeframe === "today"
+    canonicalIndexHeadline !== null
+      ? canonicalIndexHeadline.close
+      : effectiveTimeframe === "today"
       ? todayHeadlinePrice
       : completedSessionHeadline ?? latestCurrentIndicator?.close ?? latestChart?.close ?? null;
   const latestChange: number | null =
-    effectiveTimeframe === "today"
+    canonicalIndexHeadline !== null
+      ? canonicalIndexHeadline.change
+      : effectiveTimeframe === "today"
       ? todayHeadlineChange
       : completedSessionHeadline !== null && finiteNumber(quoteDepth?.previous_close)
         ? completedSessionHeadline - quoteDepth.previous_close
       : latestCurrentIndicator?.change ?? chartChange;
   const latestChangePct: number | null =
-    effectiveTimeframe === "today"
+    canonicalIndexHeadline !== null
+      ? canonicalIndexHeadline.changePct
+      : effectiveTimeframe === "today"
       ? todayHeadlineChangePct
       : completedSessionHeadline !== null &&
           finiteNumber(quoteDepth?.previous_close) &&
@@ -1070,8 +1224,8 @@ export default function StockDetailPanel({
   const priceVsMa20: number | null = null;
   const volumeRatioPct: number | null = null;
   const displayTime =
-    effectiveTimeframe === "today" && todayCurrentObservation?.observed_at
-      ? formatDateTime(todayCurrentObservation.observed_at)
+    effectiveTimeframe === "today" && resolvedTodayCurrentObservation?.observed_at
+      ? formatDateTime(resolvedTodayCurrentObservation.observed_at)
       : effectiveTimeframe === "today" && latestToday
         ? formatDateTime(latestToday.time)
       : effectiveTimeframe === "today"
@@ -1079,15 +1233,6 @@ export default function StockDetailPanel({
         : chartTimeLabelFormatter(
             latestCurrentIndicator?.time ?? latestChart?.time ?? "-"
           );
-  const marketIndicesById = useMemo(() => {
-    return new Map(
-      (marketIndexSummary?.indices ?? []).map((index) => [index.index_id, index])
-    );
-  }, [marketIndexSummary]);
-  const taiexIndex = marketIndicesById.get("TAIEX") ?? null;
-  const tpexIndex = marketIndicesById.get("TPEX") ?? null;
-  const selectedIndexSnapshot =
-    indexProduct?.indexId === "TPEX" ? tpexIndex : taiexIndex;
   const primaryMarketIndex =
     indexProduct?.indexId === "TPEX" || stockInfo?.market === "TPEX"
       ? tpexIndex
@@ -1245,7 +1390,7 @@ export default function StockDetailPanel({
     effectiveTimeframe === "today" ? todayTrend.length > 0 : currentChartReady;
   const showTechnicalLoading =
     !isIndexProduct &&
-    loadState === "loading" &&
+    technicalReportLoadState === "loading" &&
     !technicalSourceReady &&
     backendTechnicalReportView === null;
 
@@ -1721,17 +1866,17 @@ export default function StockDetailPanel({
             >
               <IntradayTrendChart
                 points={todayTrend}
-                previousClose={todayPreviousClose}
+                previousClose={resolvedTodayPreviousClose}
                 label={timeframeLabel(t, effectiveTimeframe)}
-                source={todaySource}
+                source={resolvedTodaySource}
                 indicators={todayIntradayIndicators}
                 revealKey={`${stockId}:${effectiveTimeframe}`}
                 refreshIntervalMs={TAIWAN_INTRADAY_REFRESH_MS}
-                updatedAt={todayUpdatedAt}
+                updatedAt={resolvedTodayUpdatedAt}
                 priceLimitEnabled={todayCapabilities.supports_price_limit}
-                priceDiagnostics={todayPriceDiagnostics}
+                priceDiagnostics={resolvedTodayPriceDiagnostics}
                 tradeDate={todayTradeDate}
-                currentObservation={todayCurrentObservation}
+                currentObservation={resolvedTodayCurrentObservation}
                 historyStatus={todayHistoryStatus}
                 snapshotPhase={todaySnapshotPhase}
                 snapshotReasonCodes={todaySnapshotReasonCodes}
@@ -1831,7 +1976,6 @@ export default function StockDetailPanel({
             timeframe={effectiveTimeframe}
             latestChart={latestChart}
             todayStats={todayStats}
-            todayPreviousClose={todayPreviousClose}
             marketChip={marketChip}
             marketChipLoadState={marketChipLoadState}
             contributions={indexContributions}
@@ -1844,6 +1988,7 @@ export default function StockDetailPanel({
 
       {!chartFocusMode ? (
       <aside
+        ref={secondarySurfaceRef}
         id="tw-stock-technical-panel"
         data-testid="stock-detail-secondary-panel"
         data-current-state-status={technicalReport.currentStateStatus ?? "unknown"}
@@ -2163,10 +2308,12 @@ export default function StockDetailPanel({
                   <NextSessionPlanPanel
                     plan={nextSessionPlan}
                     loadState={nextSessionPlanLoadState}
+                    onDemand={() => setNextSessionDemanded(true)}
                   />
                   <OvernightImpactPanel
                     report={displayOvernightImpact}
                     loadState={displayOvernightImpactLoadState}
+                    onDemand={() => setOvernightDemanded(true)}
                   />
                 </>
               ) : (
@@ -2188,11 +2335,13 @@ export default function StockDetailPanel({
                   <NextSessionPlanPanel
                     plan={nextSessionPlan}
                     loadState={nextSessionPlanLoadState}
+                    onDemand={() => setNextSessionDemanded(true)}
                   />
 
                   <OvernightImpactPanel
                     report={displayOvernightImpact}
                     loadState={displayOvernightImpactLoadState}
+                    onDemand={() => setOvernightDemanded(true)}
                   />
 
                   <div className="mt-3 border-t border-omi-border-subtle pt-3">
@@ -2226,6 +2375,7 @@ export default function StockDetailPanel({
 
         {!isIndexProduct ? (
           <div
+            ref={dataSurfaceRef}
             id={STOCK_DETAIL_DATA_PANEL_ID}
             className="border-t border-omi-border-subtle bg-omi-surface"
             data-testid={STOCK_DETAIL_DATA_PANEL_ID}

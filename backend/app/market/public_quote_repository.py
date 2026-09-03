@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -260,6 +260,8 @@ class TaiwanPublicQuoteRepository:
         instrument: InstrumentKey,
         *,
         max_candidates: int = 8,
+        trade_date: date | None = None,
+        allowed_sessions: tuple[MarketSession, ...] | None = None,
     ) -> tuple[PersistedPublicQuoteRead, ...]:
         if instrument.market is not Market.TW:
             raise ValueError("Taiwan public quote repository requires market=TW")
@@ -272,6 +274,16 @@ class TaiwanPublicQuoteRepository:
             .filter(TaiwanStockQuoteSnapshot.stock_id == instrument.symbol)
             .filter(TaiwanStockQuoteSnapshot.market == instrument.venue)
         )
+        if trade_date is not None:
+            base_query = base_query.filter(
+                TaiwanStockQuoteSnapshot.trade_date == trade_date
+            )
+        if allowed_sessions:
+            base_query = base_query.filter(
+                TaiwanStockQuoteSnapshot.market_session.in_(
+                    tuple(session.value for session in allowed_sessions)
+                )
+            )
         quote_bindings = sorted(
             (
                 binding

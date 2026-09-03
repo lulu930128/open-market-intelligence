@@ -135,7 +135,8 @@ Derived label 必須保留其 constituent fields；consumer 不得只收到單�
 14:00 後、official daily 尚未發布：
 
 ```text
-market_session = post_close
+request_market_session = post_close
+observation.market_session = closing_auction
 session_close.status = session_final
 session_close.authority = exchange
 official_daily.release_status = pending_release
@@ -145,7 +146,8 @@ reconciliation.status = pending
 Official daily 到達後：
 
 ```text
-market_session = post_close
+request_market_session = post_close
+observation.market_session = closing_auction
 session_close.status = session_final
 official_daily.release_status = released
 official_daily.finalization = final
@@ -154,6 +156,13 @@ reconciliation.status = matched | mismatched
 ```
 
 Official daily 的到達不應把 session-close observation 從 `session_final` 改成另一種跨軸狀態；兩份 evidence 與 comparison result 應分別保存。
+
+Quote／depth／auction persistence 的 `market_session` 一律由 observation
+`event_at` 經 Taiwan calendar owner 分類，不得沿用 acquisition request 的 session。
+因此 08:20 evidence 保存為 `pre_open`，不是 09:01 request 的 `continuous`；13:30:00
+closing match 保存為 `closing_auction`，13:33 後的 request 則是控制面
+`close_resolution`／`post_close`。`pre_open` 只是開盤集合競價前等待階段，只有
+`opening_auction` 才可投影 opening-auction applicability。
 
 Today／intraday history若需要在13:30顯示completed-session close，必須新增projection event，而不是製造或回寫一根成交bar：
 

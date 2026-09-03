@@ -249,7 +249,13 @@ def _current_session_identity_summary(value: Any) -> dict[str, Any]:
         dates: set[str] = set()
         if isinstance(item, dict):
             for key, child in item.items():
-                if key in {"points", "bars"} and isinstance(child, list):
+                if key == "observed_trade_dates" and isinstance(child, list):
+                    dates.update(
+                        parsed.date().isoformat()
+                        for raw_date in child[:500]
+                        if (parsed := _parse_datetime(raw_date)) is not None
+                    )
+                elif key in {"points", "bars"} and isinstance(child, list):
                     dates.update(
                         timestamp.date().isoformat()
                         for point in child[:500]
@@ -992,27 +998,39 @@ def _canonical_coverage_status(
             keys={"coverage_status"},
         )
     )
+    manifest_explicit = _normalized_status(manifest_item.get("coverage_status"))
     if capability_id in {"daily.ohlcv", "intraday.bars"}:
-        requested_limit = manifest_item.get("requested_limit")
-        effective_limit = manifest_item.get("effective_limit")
         returned_count = manifest_item.get("returned_count")
         if not isinstance(returned_count, int) or isinstance(returned_count, bool):
             returned_count = 0
-        target_count = (
-            requested_limit
-            if isinstance(requested_limit, int)
-            and not isinstance(requested_limit, bool)
-            and requested_limit > 0
-            else effective_limit
-            if isinstance(effective_limit, int)
-            and not isinstance(effective_limit, bool)
-            and effective_limit > 0
-            else None
+        canonical_count = manifest_item.get("canonical_available_count")
+        if not isinstance(canonical_count, int) or isinstance(canonical_count, bool):
+            canonical_count = None
+
+        # Upstream canonical coverage is authoritative.  Projection limits and
+        # byte trimming describe only the consumer payload and may not demote
+        # otherwise complete evidence.
+        canonical_explicit = next(
+            (
+                value
+                for value in (manifest_explicit, explicit)
+                if value
+                in {
+                    "complete",
+                    "partial",
+                    "missing",
+                    "insufficient_history",
+                    "valid_empty",
+                }
+            ),
+            None,
         )
-        if returned_count <= 0:
+        if canonical_explicit is not None:
+            return canonical_explicit
+        if canonical_count is not None and canonical_count <= 0:
             return "valid_empty" if explicit == "valid_empty" else "missing"
-        if target_count is not None and returned_count < target_count:
-            return "insufficient_history"
+        if canonical_count is None and returned_count <= 0:
+            return "valid_empty" if explicit == "valid_empty" else "missing"
         if continuity.get("status") not in {"continuous", "not_applicable"}:
             return "partial"
         return "complete"
@@ -1031,6 +1049,29 @@ def _canonical_coverage_status(
         except (TypeError, ValueError):
             pass
     return "complete" if payload_included else "unknown"
+
+
+def _projection_coverage_status(
+    *,
+    manifest_item: dict[str, Any],
+    payload_included: bool,
+) -> str:
+    """Describe selection/trimming without changing canonical truth status."""
+
+    if not payload_included:
+        return "missing"
+    returned_count = manifest_item.get("returned_count")
+    canonical_count = manifest_item.get("canonical_available_count")
+    if (
+        manifest_item.get("truncated") is True
+        or isinstance(canonical_count, int)
+        and not isinstance(canonical_count, bool)
+        and isinstance(returned_count, int)
+        and not isinstance(returned_count, bool)
+        and returned_count < canonical_count
+    ):
+        return "truncated"
+    return "complete"
 
 
 def _canonical_reason_codes(
@@ -1388,6 +1429,10 @@ def _quality_for_capability(
         payload_included=payload_included,
         continuity=continuity,
     )
+    projection_coverage_status = _projection_coverage_status(
+        manifest_item=item,
+        payload_included=payload_included,
+    )
     if explicitly_unavailable:
         coverage_status = "missing"
     current_session_limited = bool(
@@ -1616,6 +1661,8 @@ def _quality_for_capability(
         "freshness_status": freshness_status,
         "release_status": release_status,
         "coverage_status": coverage_status,
+        "canonical_dataset_coverage": coverage_status,
+        "consumer_projection_coverage": projection_coverage_status,
         "usability_status": usability_status,
         "availability": availability_status,
         "freshness": (

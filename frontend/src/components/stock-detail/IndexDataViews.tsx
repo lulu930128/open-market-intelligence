@@ -243,7 +243,6 @@ export function IndexDetailDataPanel({
   timeframe,
   latestChart,
   todayStats,
-  todayPreviousClose,
   marketChip,
   marketChipLoadState,
   contributions,
@@ -253,7 +252,6 @@ export function IndexDetailDataPanel({
   timeframe: Timeframe;
   latestChart: ChartPoint | null;
   todayStats: ReturnType<typeof summarizeIntradayPoints>;
-  todayPreviousClose: number | null;
   marketChip: MarketChipDaily | null;
   marketChipLoadState: LoadState;
   contributions: MarketIndexContributionResponse | null;
@@ -272,7 +270,8 @@ export function IndexDetailDataPanel({
   const low = isToday
     ? todayStats.low ?? index?.low ?? latestChart?.low ?? null
     : latestChart?.low ?? index?.low ?? null;
-  const reference = todayPreviousClose ?? index?.previous_close ?? null;
+  const reference =
+    index?.previous_close_status === "current" ? index.previous_close : null;
   const tradeValue = index?.trade_value ?? breadth?.trade_value ?? latestChart?.trade_value ?? null;
   const estimatedTradeValue = index?.estimated_trade_value ?? tradeValue;
   const breadthScopeLabel = taiwanBreadthScopeLabel(index, t);

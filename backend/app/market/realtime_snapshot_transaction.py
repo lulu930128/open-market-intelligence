@@ -18,6 +18,7 @@ from app.market.tw_realtime_capabilities import (
     TW_ORDER_BOOK_CAPABILITY_ID,
     realtime_source_binding,
 )
+from app.market.trading_calendar import TAIWAN_TZ, taiwan_evidence_session
 from app.market_data.contracts import (
     AuctionObservation,
     DepthLevel,
@@ -237,7 +238,6 @@ class TaiwanDepthTransaction(_RealtimeTransactionOwner):
         requirement: DataRequirementV2,
         observation: DepthObservation,
         *,
-        session: str,
         source: SourceRegistry,
         raw: RawFetchResult,
         receipt: RawFetchReceiptV1,
@@ -247,6 +247,7 @@ class TaiwanDepthTransaction(_RealtimeTransactionOwner):
             observation,
             receipt,
         )
+        evidence_session = taiwan_evidence_session(event_at)
         self._stock_exists(observation.instrument.symbol)
         row = (
             self._db.query(TaiwanStockDepthSnapshot)
@@ -262,7 +263,7 @@ class TaiwanDepthTransaction(_RealtimeTransactionOwner):
             "market": observation.instrument.venue,
             "received_at": _as_utc(received_at),
             "fetched_at": _as_utc(receipt.fetched_at),
-            "market_session": session,
+            "market_session": evidence_session.value,
             "observation_state": observation.state.value,
             "depth_capability": observation.capability.value,
             "raw_contract_version": observation.lineage.raw_contract_version,
@@ -358,7 +359,6 @@ class TaiwanDepthTransaction(_RealtimeTransactionOwner):
                 if self._upsert(
                     requirement,
                     observation,
-                    session=requirement.session.value,
                     source=source,
                     raw=raw,
                     receipt=receipt,
@@ -407,6 +407,7 @@ class TaiwanAuctionTransaction(_RealtimeTransactionOwner):
             observation,
             receipt,
         )
+        evidence_session = taiwan_evidence_session(event_at)
         self._stock_exists(observation.instrument.symbol)
         indicative = _quantity_values(observation.indicative_quantity)
         incoming: dict[str, object | None] = {
@@ -414,10 +415,10 @@ class TaiwanAuctionTransaction(_RealtimeTransactionOwner):
             "raw_result_id": raw.id,
             "source": receipt.source,
             "market": observation.instrument.venue,
-            "trade_date": event_at.date(),
+            "trade_date": event_at.astimezone(TAIWAN_TZ).date(),
             "received_at": _as_utc(received_at),
             "fetched_at": _as_utc(receipt.fetched_at),
-            "market_session": requirement.session.value,
+            "market_session": evidence_session.value,
             "observation_state": observation.state.value,
             "indicative_price": observation.indicative_price,
             "indicative_quantity_value": indicative["value"],

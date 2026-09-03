@@ -71,6 +71,17 @@ def test_continuous_unknown_disposition_fails_closed_but_market_auctions_do_not(
     assert opening.auction_type is AuctionType.OPENING
 
 
+def test_preopen_waiting_is_not_opening_auction_applicable() -> None:
+    waiting = resolve_taiwan_auction_applicability(
+        session=MarketSession.PRE_OPEN,
+        disposition={"cache_status": "current", "is_active": False},
+    )
+
+    assert waiting.applicable is False
+    assert waiting.auction_type is None
+    assert waiting.reason_codes == ("OPENING_AUCTION_NOT_STARTED",)
+
+
 def test_close_resolution_is_explicitly_non_auction() -> None:
     applicability = resolve_taiwan_auction_applicability(
         session=MarketSession.CLOSE_RESOLUTION,

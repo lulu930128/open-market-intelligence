@@ -20,6 +20,7 @@ from app.market.tw_public_quote_contract import (
     exchange_channel_for_quote,
 )
 from app.market.tw_realtime_capabilities import realtime_source_binding
+from app.market.trading_calendar import taiwan_evidence_session
 from app.market_data.contracts import (
     Market,
     MarketSession,
@@ -38,7 +39,7 @@ from app.market_data.integration_contracts import (
 
 
 _LEGACY_SESSION_PHASE = {
-    MarketSession.PRE_OPEN: "preopen_auction",
+    MarketSession.PRE_OPEN: "waiting_preopen",
     MarketSession.OPENING_AUCTION: "preopen_auction",
     MarketSession.CONTINUOUS: "regular_live",
     MarketSession.CLOSING_AUCTION: "closing_auction",
@@ -163,7 +164,6 @@ class TaiwanPublicQuoteTransaction:
         self,
         observation: QuoteObservation,
         *,
-        session: MarketSession,
         source: SourceRegistry,
         raw: RawFetchResult,
         receipt: RawFetchReceiptV1,
@@ -172,6 +172,7 @@ class TaiwanPublicQuoteTransaction:
             raise ValueError("Taiwan public quote transaction requires market=TW")
         if observation.lineage.event_at is None or observation.trade_date is None:
             raise ValueError("Taiwan public quote requires event time and trade date")
+        evidence_session = taiwan_evidence_session(observation.lineage.event_at)
         if observation.lineage.provider != receipt.provider:
             raise ValueError("quote observation provider does not match receipt")
         if observation.lineage.source != receipt.source:
@@ -211,7 +212,7 @@ class TaiwanPublicQuoteTransaction:
             "market": observation.instrument.venue,
             "stock_name": stock.stock_name,
             "exchange_channel": exchange_channel_for_quote(observation.instrument),
-            "session_phase": _LEGACY_SESSION_PHASE[session],
+            "session_phase": _LEGACY_SESSION_PHASE[evidence_session],
             "trade_date": observation.trade_date,
             "open_price": (
                 float(observation.open_price)
@@ -239,7 +240,7 @@ class TaiwanPublicQuoteTransaction:
             "raw_payload_json": receipt.raw_text,
             "received_at": _as_utc(received_at),
             "observation_state": observation.state.value,
-            "market_session": session.value,
+            "market_session": evidence_session.value,
             "trade_state": observation.trade_state.value,
             "raw_contract_version": observation.lineage.raw_contract_version,
             "fetched_at": _as_utc(receipt.fetched_at),
@@ -387,7 +388,6 @@ class TaiwanPublicQuoteTransaction:
                 source, raw, receipt = matched
                 was_unchanged, upsert_limitation = self._upsert(
                     observation,
-                    session=requirement.session,
                     source=source,
                     raw=raw,
                     receipt=receipt,

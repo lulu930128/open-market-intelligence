@@ -6335,6 +6335,29 @@ def _projected_returned_count(value: Any, *, included: bool) -> int:
     return 1
 
 
+def _canonical_available_count(value: Any, *, included: bool) -> int | None:
+    """Return the pre-projection series size when the producer supplied it.
+
+    ``returned_count`` belongs to the consumer projection.  It must never be
+    reused as canonical dataset coverage because field/row limits intentionally
+    make the outward payload smaller than the available canonical evidence.
+    """
+
+    if not included or not isinstance(value, dict):
+        return None
+    for key in (
+        "point_count",
+        "snapshot_point_count",
+        "available_bar_count",
+        "available_count",
+        "total_count",
+    ):
+        count = value.get(key)
+        if isinstance(count, int) and not isinstance(count, bool):
+            return max(0, count)
+    return None
+
+
 def build_manifest(
     *,
     canonical: dict[str, Any],
@@ -6436,6 +6459,10 @@ def build_manifest(
             else spec.default_limit,
         )
         returned_count = _projected_returned_count(
+            projected_value,
+            included=included,
+        )
+        canonical_available_count = _canonical_available_count(
             projected_value,
             included=included,
         )
@@ -6575,6 +6602,7 @@ def build_manifest(
                 "requested_limit": requested_limit,
                 "effective_limit": effective_limit,
                 "returned_count": returned_count,
+                "canonical_available_count": canonical_available_count,
                 "truncated": payload_truncated,
                 "quality_issues": list(
                     capability_quality.get("issues") or []

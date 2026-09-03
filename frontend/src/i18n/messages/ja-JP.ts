@@ -2175,6 +2175,7 @@ export const jaJP = {
     extendedHours: {
       title: "米国株プレ / アフター",
       meta: "{phase} · regular {regular} / extended {extended}",
+      loadingCache: "現在の取引時間帯のローカルキャッシュを読み込み中",
       noExtendedData:
         "プレ/アフターの分足はまだありません。通常時間に切り替えると利用可能なデータを確認できます。",
       cacheOnlyPolicy:

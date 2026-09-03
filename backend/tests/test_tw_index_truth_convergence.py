@@ -93,6 +93,9 @@ def test_resolved_truth_confirms_release_qualified_completed_daily_close() -> No
     assert truth.selected_change == pytest.approx(264.72)
     assert truth.selected_change_pct == pytest.approx(264.72 / 45_900 * 100)
     assert truth.selected_previous_close_source == "twse_mi_5mins_hist"
+    assert truth.selected_previous_close_status == "current"
+    assert truth.current_observation is not None
+    assert truth.current_observation.previous_close_status == "current"
 
 
 def test_tpex_official_close_rolls_over_previous_close_without_derived_mix() -> None:
@@ -144,6 +147,24 @@ def test_tpex_official_close_rolls_over_previous_close_without_derived_mix() -> 
     assert truth.selected_authority == "official_exchange"
     assert truth.selected_finalization == "final"
     assert truth.official_close_confirmed is True
+    assert truth.selected_previous_close_status == "current"
+
+
+def test_previous_close_with_unexpected_trade_date_is_fail_visible() -> None:
+    snapshot = _snapshot()
+    snapshot["completed_daily_previous_close_trade_date"] = "2026-08-28"
+
+    truth = resolve_taiwan_index_truth(
+        intraday=None,
+        index_snapshot=snapshot,
+        calendar_status=_calendar(),
+        index_id="TAIEX",
+        acquisition_policy="cache_only",
+    )
+
+    assert truth.selected_previous_close == 45_900.0
+    assert truth.selected_previous_close_status == "stale"
+    assert any("expected prior trading day" in warning for warning in truth.warnings)
 
 
 def test_ai_projection_reuses_embedded_truth_when_current_core_conflicts() -> None:

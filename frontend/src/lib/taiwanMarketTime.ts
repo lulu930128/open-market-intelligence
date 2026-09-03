@@ -6,6 +6,7 @@ import {
 export const TAIWAN_INTRADAY_REFRESH_MS = 5_000;
 export const TAIWAN_PREOPEN_MINUTES = 8 * 60 + 30;
 export const TAIWAN_SESSION_START_MINUTES = 9 * 60;
+export const TAIWAN_REGULAR_SESSION_END_MINUTES = 13 * 60 + 25;
 export const TAIWAN_SESSION_END_MINUTES = 13 * 60 + 30;
 export const TAIWAN_MARKET_CHIP_REFRESH_EVENT = "omi:market-chip-refreshed";
 
@@ -159,6 +160,6 @@ export function isTaiwanRegularSessionPoint(value: string | Date) {
   return (
     minutes !== null &&
     minutes >= TAIWAN_SESSION_START_MINUTES &&
-    minutes <= TAIWAN_SESSION_END_MINUTES
+    minutes < TAIWAN_REGULAR_SESSION_END_MINUTES
   );
 }

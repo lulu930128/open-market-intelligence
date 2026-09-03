@@ -1489,6 +1489,7 @@ def get_stock_technical_report(
     stock_id: str,
     timeframe: str = Query(default="daily", pattern="^(today|daily|weekly|monthly)$"),
     include_intraday: bool = True,
+    include_volume_pace: bool = True,
     db: Session = Depends(get_db),
 ):
     try:
@@ -1497,6 +1498,7 @@ def get_stock_technical_report(
             stock_id=stock_id,
             timeframe=timeframe,
             include_intraday=include_intraday,
+            include_volume_pace=include_volume_pace,
         )
     except ValueError as exc:
         raise HTTPException(

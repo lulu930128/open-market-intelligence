@@ -905,6 +905,14 @@ class TechnicalReportTests(unittest.TestCase):
                     state_digest="c" * 64,
                     series_revision="d" * 64,
                 ),
+                session_resolution=(
+                    SimpleNamespace(trade_date=date(2026, 3, 21)),
+                ),
+                current_session_coverage=SimpleNamespace(
+                    trade_date=date(2026, 3, 21),
+                    snapshot_phase=SimpleNamespace(value="ready"),
+                    status=SimpleNamespace(value="complete_session"),
+                ),
                 warnings=(),
                 limitations=(),
             )
@@ -997,6 +1005,15 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(set(compact["intraday_bars"]["series"].keys()), {"1m"})
         self.assertEqual(compact["intraday_bars"]["series"]["1m"]["returned_point_count"], 2)
         self.assertEqual(compact["intraday_bars"]["series"]["1m"]["latest"]["close"], 181.5)
+        self.assertEqual(compact["intraday_bars"]["session_scope"], "current_session")
+        self.assertEqual(
+            compact["intraday_bars"]["series"]["1m"]["expected_trade_date"],
+            "2026-03-21",
+        )
+        self.assertEqual(
+            compact["freshness_by_capability"]["intraday.bars"]["status"],
+            "current",
+        )
         self.assertEqual(compact["freshness_by_domain"]["quote"]["status"], "live")
         self.assertEqual(compact["slots"]["quote"]["status"], "ready")
         self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
@@ -1005,6 +1022,13 @@ class TechnicalReportTests(unittest.TestCase):
             any(ref["name"] == "market_intraday_bar" for ref in compact["source_refs"])
         )
         self.assertNotIn("refresh", bar_reader.call_args.kwargs)
+        self.assertEqual(
+            bar_reader.call_args.kwargs["session_scope"],
+            "current_session",
+        )
+        requested_at = bar_reader.call_args.kwargs["requested_at"]
+        self.assertIsInstance(requested_at, datetime)
+        self.assertIsNotNone(requested_at.tzinfo)
 
     def test_tw_index_context_compact_intraday_respects_payload_level(self) -> None:
         daily_points = [
@@ -1099,6 +1123,9 @@ class TechnicalReportTests(unittest.TestCase):
                     state_digest="c" * 64,
                     series_revision=revision,
                 ),
+                session_resolution=(
+                    SimpleNamespace(trade_date=date(2026, 3, 20)),
+                ),
                 warnings=(),
                 limitations=(),
             )
@@ -1129,6 +1156,20 @@ class TechnicalReportTests(unittest.TestCase):
 
         with (
             patch("app.ai.tools._read_taiwan_chart", side_effect=chart_bundle),
+            patch(
+                "app.ai.tools._read_taiwan_index_intraday_bars",
+                side_effect=lambda *, index_id, **_kwargs: chart_bundle(
+                    instrument_id=index_id,
+                    interval="1m",
+                ).bars,
+            ),
+            patch(
+                "app.ai.tools._calculate_taiwan_technical",
+                side_effect=lambda bars: chart_bundle(
+                    instrument_id=bars.instrument.symbol,
+                    interval="1m",
+                ).technical,
+            ),
             patch(
                 "app.ai.tools.get_market_index_summary",
                 return_value={
@@ -1202,6 +1243,9 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(series["returned_point_count"], 1)
         self.assertEqual(len(series["points"]), 1)
         self.assertEqual(series["latest"]["price"], 18111.0)
+        self.assertEqual(series["session_scope"], "current_session")
+        self.assertEqual(series["expected_trade_date"], "2026-03-20")
+        self.assertEqual(series["observed_trade_dates"], ["2026-03-20"])
         self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
         self.assertEqual(compact["slots"]["intraday"]["payload_level"], "summary")
         self.assertEqual(compact["slots"]["chips_flows"]["status"], "missing")
@@ -1607,6 +1651,57 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertIn("同時段量比 5日 1.50× / 20日 1.20×", row["description"])
         self.assertNotIn("20日均量占比", row["description"])
         self.assertEqual(report["data"]["intraday"]["volume_pace"]["status"], "ready")
+
+    def test_today_core_report_does_not_read_volume_pace_when_omitted(self) -> None:
+        points = [
+            {
+                "time": "2026-03-23T10:05:00+08:00",
+                "price": 181.0,
+                "volume": 1_000,
+                "open": 181.0,
+                "high": 182.0,
+                "low": 180.0,
+            }
+        ]
+
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 10, 5, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report._canonical_intraday_payload",
+                return_value={
+                    "stock_id": "2330",
+                    "symbol": "2330",
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "point_count": len(points),
+                    "points": points,
+                },
+            ),
+            patch(
+                "app.market.technical_report.build_tw_stock_volume_pace"
+            ) as volume_pace_reader,
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+                include_volume_pace=False,
+            )
+
+        volume_pace_reader.assert_not_called()
+        self.assertFalse(
+            any(item["key"] == "volume_pace" for item in report["rows"])
+        )
+        self.assertEqual(
+            report["data"]["intraday"]["volume_pace"]["status"],
+            "not_requested",
+        )
+        self.assertFalse(report["data"]["intraday"]["volume_pace_requested"])
+        self.assertNotIn("intraday_volume.same_time_baseline_5d", report["missing"])
 
 
 if __name__ == "__main__":

@@ -511,6 +511,11 @@ def test_market_universe_returns_stock_only_rows_and_matching_coverage(
         trade_date=trade_date,
         include_etf=True,
     )
+    bounded = TaiwanOfficialDailyBarRepository(db).load_market_universe(
+        trade_date=trade_date,
+        include_etf=True,
+        symbols=("6488",),
+    )
     snapshot = read_market_daily_snapshot(
         db,
         trade_date=trade_date,
@@ -534,6 +539,9 @@ def test_market_universe_returns_stock_only_rows_and_matching_coverage(
         "TWSE": 2,
         "TPEX": 1,
     }
+    assert [bar.instrument.symbol for bar in bounded.bars] == ["6488"]
+    assert bounded.universe_count == 1
+    assert bounded.rows_examined == 1
 
 
 def test_query_rejects_unbounded_or_inverted_ranges() -> None:

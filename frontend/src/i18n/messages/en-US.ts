@@ -2887,6 +2887,7 @@ export const enUS = {
     extendedHours: {
       title: "US pre-market / after-hours",
       meta: "{phase} · regular {regular} / extended {extended}",
+      loadingCache: "Loading the current-session local cache",
       noExtendedData:
         "No pre-market or after-hours minute data is available; switch to Regular to view available data.",
       cacheOnlyPolicy:

@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from types import SimpleNamespace
 import unittest
 from unittest.mock import ANY, patch
 
@@ -10,6 +11,56 @@ from app.watchlists.schemas import (
 
 
 class WatchlistRankingLimitStatusTests(unittest.TestCase):
+    def test_intraday_overlay_reads_unified_bar_owner(self):
+        class _FakeBarService:
+            def __init__(self, _db) -> None:
+                pass
+
+            def read_current_session_bars(self, **_: object):
+                return SimpleNamespace(
+                    bars=(
+                        SimpleNamespace(
+                            start_at=datetime(2026, 6, 8, 9, 0),
+                            close_price=101.0,
+                            volume=SimpleNamespace(value=100),
+                            lineage=SimpleNamespace(source="tw_bar_series"),
+                        ),
+                        SimpleNamespace(
+                            start_at=datetime(2026, 6, 8, 9, 1),
+                            close_price=102.0,
+                            volume=SimpleNamespace(value=200),
+                            lineage=SimpleNamespace(source="tw_bar_series"),
+                        ),
+                    )
+                )
+
+            def read_latest_completed_bars_batch(self, **_: object):
+                return {
+                    "2330": (
+                        SimpleNamespace(
+                            start_at=datetime(2026, 6, 5, 13, 30),
+                            close_price=100.0,
+                        ),
+                    )
+                }
+
+        with (
+            patch.object(ranking_service, "TaiwanBarService", _FakeBarService),
+            patch.object(
+                ranking_service,
+                "expected_daily_price_date",
+                return_value=date(2026, 6, 8),
+            ),
+        ):
+            overlay = ranking_service._get_intraday_overlay(object(), "2330")
+
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        self.assertEqual(overlay["close"], 102.0)
+        self.assertEqual(overlay["previous_close"], 100.0)
+        self.assertEqual(overlay["volume"], 300)
+        self.assertEqual(overlay["source"], "tw_bar_series")
+
     def test_primary_signal_uses_structural_priority_instead_of_emit_order(self):
         primary = ranking_service._pick_primary_signal(
             [
@@ -191,19 +242,29 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
         ]
         seen_stock_ids: list[str] = []
 
-        def fake_signal_result(*, stock_id: str, **_: object):
-                seen_stock_ids.append(stock_id)
-            return {
-                "time": "2026-06-08",
-                "close": 100.0,
-                "volume": 1000,
-                "change": 1.0,
-                "change_pct": 1.0,
-                "score": 7,
-                "status": "ready",
-                "signals": [{"key": "above_ma20", "label": "站上 MA20"}],
-                "indicator_snapshot": {"atr": {"atr14": 2.5}},
-            }
+        class _FakeBarService:
+            def __init__(self, _db) -> None:
+                pass
+
+            def read_latest_completed_bars_batch(
+                self, *, instrument_ids: tuple[str, ...], **_: object
+            ):
+                seen_stock_ids.extend(instrument_ids)
+                return {
+                    stock_id: (
+                        SimpleNamespace(
+                            start_at=datetime(2026, 6, 7, 13, 30),
+                            close_price=99.0,
+                            volume=SimpleNamespace(value=900),
+                        ),
+                        SimpleNamespace(
+                            start_at=datetime(2026, 6, 8, 13, 30),
+                            close_price=100.0,
+                            volume=SimpleNamespace(value=1000),
+                        ),
+                    )
+                    for stock_id in instrument_ids
+                }
 
         with (
             patch.object(ranking_service.watchlist_service, "get_group", return_value={}),
@@ -217,11 +278,10 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
                 "list_items",
                 return_value=items,
             ),
+            patch.object(ranking_service, "TaiwanBarService", _FakeBarService),
             patch.object(
-                ranking_service,
-                "calculate_latest_stock_signals",
-                side_effect=fake_signal_result,
-            ),
+                ranking_service, "calculate_latest_stock_signals"
+            ) as signal_reader,
             patch.object(
                 ranking_service,
                 "expected_daily_price_date",
@@ -236,12 +296,13 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
             )
 
         self.assertEqual(seen_stock_ids, ["2330"])
+        signal_reader.assert_not_called()
         self.assertEqual(result["total_stock_count"], 3)
         self.assertEqual(result["requested_stock_count"], 1)
         self.assertTrue(result["has_more"])
         self.assertEqual(result["results"][0]["rank"], 2)
         self.assertEqual(result["results"][0]["stock_id"], "2330")
-        self.assertEqual(result["results"][0]["indicator_snapshot"]["atr"]["atr14"], 2.5)
+        self.assertEqual(result["results"][0]["indicator_snapshot"], {})
 
         result["results"][0]["time"] = datetime(2026, 6, 8, 9, 1)
         serialized = WatchlistGroupRankingBatchRead.model_validate(result).model_dump(
@@ -257,17 +318,26 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
             {"stock_id": str(1000 + index), "stock_name": f"Stock {index}"}
             for index in range(40)
         ]
-        signal_result = {
-            "time": "2026-06-08",
-            "close": 100.0,
-            "volume": 1000,
-            "change": 0.0,
-            "change_pct": 0.0,
-            "score": 0,
-            "status": "ready",
-            "signals": [],
-            "indicator_snapshot": {},
-        }
+        class _FakeBarService:
+            def __init__(self, _db) -> None:
+                pass
+
+            def read_latest_completed_bars_batch(
+                self, *, instrument_ids: tuple[str, ...], **_kwargs
+            ):
+                bars = (
+                        SimpleNamespace(
+                            start_at=datetime(2026, 6, 7, 13, 30),
+                            close_price=100.0,
+                            volume=SimpleNamespace(value=1000),
+                        ),
+                        SimpleNamespace(
+                            start_at=datetime(2026, 6, 8, 13, 30),
+                            close_price=100.0,
+                            volume=SimpleNamespace(value=1000),
+                        ),
+                    )
+                return {stock_id: bars for stock_id in instrument_ids}
 
         with (
             patch.object(ranking_service.watchlist_service, "get_group", return_value={}),
@@ -281,12 +351,10 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
                 "list_items",
                 return_value=items,
             ),
+            patch.object(ranking_service, "TaiwanBarService", _FakeBarService),
             patch.object(
-                ranking_service,
-                "calculate_latest_stock_signals",
-                return_value=signal_result,
-            ),
-            patch.object(ranking_service, "_market_context_by_stock", return_value={}),
+                ranking_service, "calculate_latest_stock_signals"
+            ) as signal_reader,
             patch.object(
                 ranking_service,
                 "_get_intraday_overlay",
@@ -317,6 +385,7 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
 
         self.assertEqual(len(first_result["results"]), 6)
         self.assertEqual(len(second_result["results"]), 3)
+        signal_reader.assert_not_called()
         self.assertEqual(
             [call.kwargs["stock_id"] for call in get_overlay.call_args_list],
             ["1027", "1028", "1029"],

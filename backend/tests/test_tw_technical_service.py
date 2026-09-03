@@ -131,6 +131,85 @@ def _series(*, technical_eligible: bool = True) -> TaiwanBarSeriesRead:
     )
 
 
+def _series_with_current_partial(
+    *,
+    close_adjustment: Decimal = Decimal("0"),
+) -> TaiwanBarSeriesRead:
+    completed = _series()
+    previous = completed.bars[-1]
+    bar_start = previous.start_at + timedelta(days=1)
+    close = previous.close_price + Decimal("2") + close_adjustment
+    partial = BarObservation(
+        instrument=INSTRUMENT,
+        lineage=SourceLineage(
+            provider="omi_taiwan_bar_service",
+            source="tw.current_session.daily_projection",
+            authority=AuthorityClass.DERIVED,
+            raw_contract_version="tw.current_session.daily_projection.v1",
+            event_at=bar_start + timedelta(hours=13, minutes=30),
+            received_at=bar_start + timedelta(hours=13, minutes=31),
+            fetched_at=bar_start + timedelta(hours=13, minutes=31),
+            content_hash=f"partial-{close}",
+        ),
+        interval="1d",
+        start_at=bar_start,
+        end_at=bar_start + timedelta(days=1),
+        open_price=previous.close_price,
+        high_price=max(previous.close_price, close),
+        low_price=min(previous.close_price, close),
+        close_price=close,
+        volume=None,
+        volume_status="missing",
+        price_basis="raw",
+        turnover_value=None,
+        turnover_currency=None,
+        trade_count=None,
+        finalization=BarFinalization.PROVISIONAL,
+    )
+    partial_state = TaiwanBarOutwardState(
+        start_at=partial.start_at,
+        finalization=BarFinalization.PROVISIONAL,
+        authority=AuthorityClass.DERIVED,
+        official=False,
+        release_status=TaiwanReleaseStatus.PENDING_RELEASE,
+        reconciliation_status=TaiwanReconciliationStatus.PENDING,
+        persisted=False,
+        source_interval="1m",
+        technical_eligible=False,
+    )
+    bars = (*completed.bars, partial)
+    states = (*completed.bar_states, partial_state)
+    coverage = observed_trade_coverage(
+        bars,
+        trading_policy_version="tw.trading_policy.daily.v1",
+    )
+    identity = build_taiwan_bar_series_identity(
+        instrument=INSTRUMENT,
+        requested_interval="1d",
+        base_interval="1d",
+        bars=bars,
+        coverage=coverage,
+        aggregation_version=None,
+        state={"current_partial": str(close)},
+    )
+    return completed.model_copy(
+        update={
+            "bars": bars,
+            "bar_states": states,
+            "bucket_coverage": coverage,
+            "history": completed.history.model_copy(
+                update={
+                    "requested_to": partial.end_at,
+                    "available_to": partial.end_at,
+                    "requested_session_count": len(bars),
+                    "covered_session_count": len(bars),
+                }
+            ),
+            "identity": identity,
+        }
+    )
+
+
 def test_technical_uses_exact_bar_series_identity_and_backend_math() -> None:
     bars = _series()
 
@@ -161,6 +240,19 @@ def test_technical_uses_exact_bar_series_identity_and_backend_math() -> None:
     assert result.points[-1]["obv"] is not None
 
 
+def test_response_limit_does_not_shrink_technical_calculation_window() -> None:
+    bars = _series()
+
+    result = TaiwanTechnicalService().calculate(bars, response_limit=8)
+
+    assert result.calculation_bar_count == 80
+    assert result.response_point_count == 8
+    assert len(result.points) == 8
+    assert result.warmup["ma"]["available_bars"] == 80
+    assert result.warmup["ma"]["status"] == "ready"
+    assert result.points[-1]["ma"]["ma60"] is not None
+
+
 def test_revision_pin_mismatch_fails_closed() -> None:
     bars = _series()
 
@@ -179,6 +271,46 @@ def test_ineligible_bar_state_returns_unavailable_without_local_fallback() -> No
     assert result.status is TaiwanTechnicalStatus.UNAVAILABLE
     assert result.points == ()
     assert "TW_TECHNICAL_BAR_STATE_NOT_ELIGIBLE" in result.limitations
+
+
+def test_terminal_current_partial_preserves_finalized_decision_points() -> None:
+    result = TaiwanTechnicalService().calculate(_series_with_current_partial())
+
+    assert result.status is TaiwanTechnicalStatus.PARTIAL
+    assert result.calculation_bar_count == 81
+    assert result.decision_bar_count == 80
+    assert len(result.points) == 80
+    assert result.points[-1]["ma"]["ma60"] is not None
+    assert result.current_partial is not None
+    assert result.current_partial.decision_usable is False
+    assert result.current_partial.price_based_observation_usable is True
+    assert result.current_partial.volume_based_observation_usable is False
+    assert result.current_partial.point["ma"]["ma60"] is not None
+    assert result.current_partial.point["volume_ma"] is None
+    assert result.current_partial.point["pvo"] is None
+    assert result.current_partial.point["mfi"] is None
+    assert result.current_partial.point["obv"] is None
+    assert (
+        result.current_partial.indicator_applicability["pvo"]
+        == "not_applicable_missing_final_volume"
+    )
+
+
+def test_current_partial_changes_observation_not_finalized_decision_revision() -> None:
+    first = TaiwanTechnicalService().calculate(
+        _series_with_current_partial(close_adjustment=Decimal("0"))
+    )
+    second = TaiwanTechnicalService().calculate(
+        _series_with_current_partial(close_adjustment=Decimal("1"))
+    )
+
+    assert first.technical_revision == second.technical_revision
+    assert first.current_partial is not None
+    assert second.current_partial is not None
+    assert (
+        first.current_partial.observation_revision
+        != second.current_partial.observation_revision
+    )
 
 
 def test_capability_and_parameter_contract_are_backend_owned() -> None:

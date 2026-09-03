@@ -776,15 +776,33 @@ function FxFlowContextStrip({
 }
 
 export function OvernightImpactPanel({
+  onDemand,
   report,
   loadState,
 }: {
+  onDemand?: () => void;
   report: OvernightImpactRead | null;
   loadState: LoadState;
 }) {
   const t = useT();
 
-  if (loadState === "idle") return null;
+  if (loadState === "idle") {
+    return (
+      <section className="mt-3 border-t border-omi-border-subtle pt-3">
+        <StockDetailDisclosure
+          testId="tw-overnight-impact-disclosure"
+          eyebrow={t("stockDetail.dataViews.overnight.eyebrow")}
+          title={t("stockDetail.dataViews.overnight.insufficientTitle")}
+          description={t("stockDetail.dataViews.overnight.insufficientDescription")}
+          summaryClassName="px-1 py-1.5"
+          contentClassName="pt-3"
+          onOpen={onDemand}
+        >
+          <div />
+        </StockDetailDisclosure>
+      </section>
+    );
+  }
 
   if (loadState === "loading") {
     return (

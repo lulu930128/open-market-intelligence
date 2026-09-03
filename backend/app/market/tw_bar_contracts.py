@@ -8,6 +8,7 @@ here so consumers cannot recreate them.
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -19,6 +20,7 @@ from app.market_data.contracts import (
     BarObservation,
     CanonicalModel,
     InstrumentKey,
+    Quantity,
 )
 from app.market_data.integration_contracts import BarSeriesResolutionMode
 
@@ -62,6 +64,11 @@ class TaiwanHistoryStatus(str, Enum):
     WARMING_UP = "warming_up"
     PARTIAL = "partial"
     MISSING = "missing"
+
+
+class TaiwanBarSessionScope(str, Enum):
+    HISTORY = "history"
+    CURRENT_SESSION = "current_session"
 
 
 class TaiwanCurrentSessionCoverageStatus(str, Enum):
@@ -356,6 +363,82 @@ class TaiwanBarSeriesRead(CanonicalModel):
             raise ValueError("bar_states identity must match bars")
         return self
 
+
+class TaiwanChartBarPoint(CanonicalModel):
+    """Bounded Bar projection for chart presentation.
+
+    Provider lineage, per-bucket coverage and resolution manifests stay on the
+    canonical Bar read.  A chart only needs numeric Bar truth plus the aligned
+    technical-eligibility bit; returning the full evidence graph for every
+    minute makes the initial Today render needlessly expensive.
+    """
+
+    interval: str
+    start_at: datetime
+    end_at: datetime
+    open_price: Decimal
+    high_price: Decimal
+    low_price: Decimal
+    close_price: Decimal
+    volume: Quantity | None = None
+    turnover_value: Decimal | None = None
+    trade_count: int | None = Field(default=None, ge=0)
+    finalization: BarFinalization
+    technical_eligible: bool
+
+
+class TaiwanChartBarSeriesRead(CanonicalModel):
+    """Consumer-specific chart projection with canonical revision metadata."""
+
+    contract_version: str = "tw.bar.chart_series_read.v1"
+    instrument: InstrumentKey
+    requested_interval: str
+    base_interval: str
+    derived: bool
+    aggregation_version: str | None = None
+    bars: tuple[TaiwanChartBarPoint, ...] = ()
+    history: TaiwanHistoryCoverage
+    current_session_coverage: TaiwanCurrentSessionCoverage | None = None
+    identity: TaiwanBarSeriesIdentity
+    limitations: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+def project_taiwan_chart_bar_series(
+    series: TaiwanBarSeriesRead,
+) -> TaiwanChartBarSeriesRead:
+    """Project an already-resolved series without re-reading market data."""
+
+    return TaiwanChartBarSeriesRead(
+        instrument=series.instrument,
+        requested_interval=series.requested_interval,
+        base_interval=series.base_interval,
+        derived=series.derived,
+        aggregation_version=series.aggregation_version,
+        bars=tuple(
+            TaiwanChartBarPoint(
+                interval=bar.interval,
+                start_at=bar.start_at,
+                end_at=bar.end_at,
+                open_price=bar.open_price,
+                high_price=bar.high_price,
+                low_price=bar.low_price,
+                close_price=bar.close_price,
+                volume=bar.volume,
+                turnover_value=bar.turnover_value,
+                trade_count=bar.trade_count,
+                finalization=bar.finalization,
+                technical_eligible=state.technical_eligible,
+            )
+            for bar, state in zip(series.bars, series.bar_states, strict=True)
+        ),
+        history=series.history,
+        current_session_coverage=series.current_session_coverage,
+        identity=series.identity,
+        limitations=series.limitations,
+        warnings=series.warnings,
+    )
+
     @model_validator(mode="after")
     def _validate_intervals(self) -> TaiwanBarSeriesRead:
         requested = normalize_taiwan_bar_interval(self.requested_interval)
@@ -410,6 +493,7 @@ __all__ = [
     "TaiwanMissingBarRange",
     "TaiwanBarSeriesIdentity",
     "TaiwanBarSeriesRead",
+    "TaiwanBarSessionScope",
     "TaiwanDerivedBucketCoverage",
     "TaiwanDerivedBucketCoverageStatus",
     "TaiwanReconciliationStatus",

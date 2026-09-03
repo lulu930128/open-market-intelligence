@@ -199,6 +199,8 @@ def read_taiwan_quote_evidence_bundle(
         stock_id=stock_id,
         requested_at=now,
         session=quote.requirement.session,
+        closing_snapshot=quote.requirement.session
+        in {MarketSession.POST_CLOSE, MarketSession.CLOSED},
     )
     auction = read_taiwan_auction(
         db,

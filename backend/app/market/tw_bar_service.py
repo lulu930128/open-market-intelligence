@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import date, datetime, time, timedelta
+from threading import Lock
+from time import monotonic
 
 from sqlalchemy.orm import Session
 
@@ -10,6 +13,10 @@ from app.market.daily_ohlcv_platform import build_taiwan_daily_cache_requirement
 from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReader
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market.intraday_repository import TaiwanIntradayBarRepository
+from app.market.public_quote_platform import (
+    project_taiwan_session_close,
+    read_taiwan_session_close,
+)
 from app.market.trading_calendar import (
     TAIWAN_SESSION_CLOSE_TIME,
     TAIWAN_SESSION_OPEN_TIME,
@@ -36,6 +43,7 @@ from app.market.tw_bar_contracts import (
     BarBucketCoverage,
     BarBucketCoverageStatus,
     TaiwanBarSeriesRead,
+    TaiwanBarSessionScope,
     TaiwanBarOutwardState,
     TaiwanHistoryCoverage,
     TaiwanHistoryStatus,
@@ -63,6 +71,9 @@ from app.market.tw_intraday_capabilities import (
 )
 from app.market_data.contracts import (
     AuthorityClass,
+    BarFinalization,
+    BarObservation,
+    InstrumentKey,
     InstrumentType,
     MarketSession,
     ResolvedBarSeries,
@@ -79,6 +90,72 @@ from app.market_data.integration_contracts import (
     RequestBounds,
 )
 from app.market_data.policies import DataPurpose, RealtimePolicy
+
+
+_CURRENT_SESSION_SNAPSHOT_CACHE_MAX_ENTRIES = 64
+_current_session_snapshot_cache: OrderedDict[
+    tuple[object, str, str, bool, str],
+    TaiwanBarSeriesRead,
+] = OrderedDict()
+_current_session_snapshot_cache_lock = Lock()
+_CURRENT_SESSION_RECENT_CACHE_MAX_ENTRIES = 64
+_CURRENT_SESSION_RECENT_LIVE_TTL_SECONDS = 1.0
+_CURRENT_SESSION_RECENT_OFF_SESSION_TTL_SECONDS = 15.0
+_current_session_recent_cache: OrderedDict[
+    tuple[object, str, str, bool, date, datetime],
+    tuple[float, TaiwanBarSeriesRead],
+] = OrderedDict()
+
+
+def _current_session_response_window(
+    series: TaiwanBarSeriesRead,
+    *,
+    limit: int,
+) -> TaiwanBarSeriesRead:
+    """Project a response window without changing full-snapshot metadata."""
+
+    if limit < 1 or limit > 5000:
+        raise ValueError("limit must be between 1 and 5000")
+    if len(series.bars) <= limit:
+        return series
+    bars = series.bars[-limit:]
+    bar_states = series.bar_states[-limit:]
+    history = series.history.model_copy(
+        update={
+            "available_from": bars[0].start_at,
+            "available_to": bars[-1].end_at,
+        }
+    )
+    identity = build_taiwan_bar_series_identity(
+        instrument=series.instrument,
+        requested_interval=series.requested_interval,
+        base_interval=series.base_interval,
+        bars=bars,
+        coverage=series.bucket_coverage,
+        aggregation_version=series.aggregation_version,
+        state={
+            "history_status": history.history_status.value,
+            "requested_coverage_satisfied": history.requested_coverage_satisfied,
+            "session_resolution": [
+                {
+                    "trade_date": item.trade_date.isoformat(),
+                    "resolution_mode": item.resolution_mode.value,
+                    "coverage_status": item.coverage_status.value,
+                    "filled_bucket_count": item.filled_bucket_count,
+                    "conflict_bucket_count": item.conflict_bucket_count,
+                }
+                for item in series.session_resolution
+            ],
+        },
+    )
+    return series.model_copy(
+        update={
+            "bars": bars,
+            "bar_states": bar_states,
+            "history": history,
+            "identity": identity,
+        }
+    )
 
 
 def _aware_taipei(value: datetime) -> datetime:
@@ -111,6 +188,64 @@ def _default_start(requested_interval: str, requested_at: datetime) -> datetime:
         return datetime.combine(first, time.min, tzinfo=TAIWAN_TZ)
     days = TAIWAN_HISTORY_SLO_CALENDAR_DAYS[requested_interval]
     return local_now - timedelta(days=days)
+
+
+def _qualified_formal_close_component(
+    db: Session,
+    *,
+    instrument: InstrumentKey,
+    trade_date: date,
+    requested_at: datetime,
+) -> BarObservation | None:
+    """Project a confirmed cache-only session close into daily Bar math.
+
+    This remains event evidence rather than a synthetic 1m Bar or official EOD.
+    The session-close reader owns date, authority, trade and confirmation gates.
+    """
+
+    if instrument.instrument_type not in {InstrumentType.STOCK, InstrumentType.ETF}:
+        return None
+    try:
+        result = read_taiwan_session_close(
+            db,
+            stock_id=instrument.symbol,
+            requested_at=requested_at,
+        )
+        projection = project_taiwan_session_close(result)
+    except ValueError:
+        return None
+    quote = result.resolved.quote
+    event_at = quote.lineage.event_at if quote is not None else None
+    formal_close_at = datetime.combine(
+        trade_date,
+        TAIWAN_SESSION_CLOSE_TIME,
+        tzinfo=TAIWAN_TZ,
+    )
+    if (
+        projection.get("available") is not True
+        or quote is None
+        or quote.instrument != instrument
+        or quote.lineage.authority is not AuthorityClass.EXCHANGE
+        or event_at is None
+        or event_at.astimezone(TAIWAN_TZ) != formal_close_at
+        or quote.last_trade_price is None
+    ):
+        return None
+    return BarObservation(
+        instrument=instrument,
+        lineage=quote.lineage,
+        interval="closing_match",
+        start_at=formal_close_at - timedelta(seconds=5),
+        end_at=formal_close_at,
+        open_price=quote.last_trade_price,
+        high_price=quote.last_trade_price,
+        low_price=quote.last_trade_price,
+        close_price=quote.last_trade_price,
+        volume=quote.last_trade_quantity,
+        volume_status=("observed" if quote.last_trade_quantity is not None else "missing"),
+        price_basis="raw",
+        finalization=BarFinalization.FINAL,
+    )
 
 
 def _session_requirement(
@@ -226,6 +361,13 @@ def _current_session_snapshot_phase(
     observed_bucket_count: int,
     missing_bucket_count: int,
 ) -> tuple[TaiwanCurrentSessionSnapshotPhase, str]:
+    sparse_gap_limit = max(3, (expected_bucket_count + 19) // 20)
+    mostly_complete = bool(
+        expected_bucket_count
+        and observed_bucket_count >= 2
+        and observed_bucket_count * 5 >= expected_bucket_count * 4
+        and missing_bucket_count <= sparse_gap_limit
+    )
     if status in {
         TaiwanCurrentSessionCoverageStatus.COMPLETE_PREFIX,
         TaiwanCurrentSessionCoverageStatus.COMPLETE_SESSION,
@@ -240,14 +382,7 @@ def _current_session_snapshot_phase(
             "TW_CHART_SNAPSHOT_PARTIAL_PREFIX",
         )
     if status is TaiwanCurrentSessionCoverageStatus.SPARSE:
-        sparse_gap_limit = max(3, (expected_bucket_count + 19) // 20)
-        sparse_is_displayable = bool(
-            expected_bucket_count
-            and observed_bucket_count >= 2
-            and observed_bucket_count * 5 >= expected_bucket_count * 4
-            and missing_bucket_count <= sparse_gap_limit
-        )
-        if not sparse_is_displayable:
+        if not mostly_complete:
             return (
                 TaiwanCurrentSessionSnapshotPhase.WARMING,
                 "TW_CHART_SNAPSHOT_SPARSE_EXCESSIVE_GAPS",
@@ -257,6 +392,11 @@ def _current_session_snapshot_phase(
             "TW_CHART_SNAPSHOT_SPARSE",
         )
     if status is TaiwanCurrentSessionCoverageStatus.TRAILING_WINDOW:
+        if mostly_complete:
+            return (
+                TaiwanCurrentSessionSnapshotPhase.DEGRADED,
+                "TW_CHART_SNAPSHOT_TRAILING_WINDOW",
+            )
         return (
             TaiwanCurrentSessionSnapshotPhase.WARMING,
             "TW_CHART_SNAPSHOT_TRAILING_ONLY",
@@ -367,6 +507,190 @@ class TaiwanBarService:
     def __init__(self, db: Session) -> None:
         self._db = db
 
+    def _remember_current_session_snapshot(
+        self,
+        series: TaiwanBarSeriesRead,
+        *,
+        include_partial: bool,
+        trade_date: date,
+        requested_to: datetime,
+    ) -> None:
+        coverage = series.current_session_coverage
+        if coverage is None:
+            return
+        key = (
+            self._db.get_bind(),
+            series.instrument.symbol,
+            series.requested_interval,
+            include_partial,
+            coverage.snapshot_revision,
+        )
+        with _current_session_snapshot_cache_lock:
+            _current_session_snapshot_cache.pop(key, None)
+            _current_session_snapshot_cache[key] = series
+            while (
+                len(_current_session_snapshot_cache)
+                > _CURRENT_SESSION_SNAPSHOT_CACHE_MAX_ENTRIES
+            ):
+                _current_session_snapshot_cache.popitem(last=False)
+            recent_key = (
+                self._db.get_bind(),
+                series.instrument.symbol,
+                series.requested_interval,
+                include_partial,
+                trade_date,
+                requested_to,
+            )
+            _current_session_recent_cache.pop(recent_key, None)
+            _current_session_recent_cache[recent_key] = (monotonic(), series)
+            while (
+                len(_current_session_recent_cache)
+                > _CURRENT_SESSION_RECENT_CACHE_MAX_ENTRIES
+            ):
+                _current_session_recent_cache.popitem(last=False)
+
+    def _recent_current_session_snapshot(
+        self,
+        *,
+        instrument_id: str,
+        interval: str,
+        include_partial: bool,
+        trade_date: date,
+        requested_to: datetime,
+        local_now: datetime,
+    ) -> TaiwanBarSeriesRead | None:
+        live_session = bool(
+            local_now.date() == trade_date
+            and (8, 45) <= (local_now.hour, local_now.minute) <= (13, 45)
+        )
+        ttl = (
+            _CURRENT_SESSION_RECENT_LIVE_TTL_SECONDS
+            if live_session
+            else _CURRENT_SESSION_RECENT_OFF_SESSION_TTL_SECONDS
+        )
+        key = (
+            self._db.get_bind(),
+            instrument_id,
+            interval,
+            include_partial,
+            trade_date,
+            requested_to,
+        )
+        with _current_session_snapshot_cache_lock:
+            entry = _current_session_recent_cache.get(key)
+            if entry is None:
+                return None
+            cached_at, series = entry
+            if monotonic() - cached_at > ttl:
+                _current_session_recent_cache.pop(key, None)
+                return None
+            _current_session_recent_cache.move_to_end(key)
+            return series
+
+    def read_current_session_snapshot_by_revision(
+        self,
+        *,
+        instrument_id: str,
+        interval: str,
+        expected_snapshot_revision: str,
+        limit: int = 5000,
+        include_partial: bool = True,
+        requested_at: datetime | None = None,
+    ) -> TaiwanBarSeriesRead:
+        """Reuse the exact full snapshot previously returned to a consumer.
+
+        A miss falls back to a canonical cache-only read. The caller still
+        performs the revision conflict check, so this cache cannot turn a
+        changed snapshot into a successful match.
+        """
+
+        requested_interval = normalize_taiwan_bar_interval(interval)
+        bind = self._db.get_bind()
+        with _current_session_snapshot_cache_lock:
+            matching_key = next(
+                (
+                    key
+                    for key in reversed(_current_session_snapshot_cache)
+                    if key[0] is bind
+                    and key[1] == instrument_id
+                    and key[2] == requested_interval
+                    and key[3] is include_partial
+                    and key[4] == expected_snapshot_revision
+                ),
+                None,
+            )
+            if matching_key is not None:
+                cached = _current_session_snapshot_cache.pop(matching_key)
+                _current_session_snapshot_cache[matching_key] = cached
+                return _current_session_response_window(cached, limit=limit)
+        return self.read_current_session_bars(
+            instrument_id=instrument_id,
+            interval=requested_interval,
+            limit=limit,
+            include_partial=include_partial,
+            requested_at=requested_at,
+        )
+
+    def read_latest_completed_bars_batch(
+        self,
+        *,
+        instrument_ids: tuple[str, ...],
+        bars_per_instrument: int = 2,
+        through_date: date | None = None,
+        requested_at: datetime | None = None,
+    ) -> dict[str, tuple[BarObservation, ...]]:
+        """Read a bounded multi-symbol completed-daily projection.
+
+        The official daily repository applies the canonical source, release,
+        OHLC and deterministic provider gates once per session. Missing symbols
+        stay missing; this read never fetches or repairs data.
+        """
+
+        if bars_per_instrument < 1 or bars_per_instrument > 5:
+            raise ValueError("bars_per_instrument must be between 1 and 5")
+        symbols = tuple(
+            dict.fromkeys(
+                value.strip().upper()
+                for value in instrument_ids
+                if value and value.strip()
+            )
+        )
+        if len(symbols) > 100:
+            raise ValueError("batch Taiwan Bar read cannot exceed 100 instruments")
+        if not symbols:
+            return {}
+        now = _aware_taipei(requested_at or datetime.now(TAIWAN_TZ))
+        cursor_date = previous_taiwan_trading_day(
+            through_date or now.date(),
+            include_value=True,
+        )
+        repository = TaiwanOfficialDailyBarRepository(self._db, available_at=now)
+        collected: dict[str, list[BarObservation]] = {
+            symbol: [] for symbol in symbols
+        }
+        max_session_reads = bars_per_instrument + 5
+        for _ in range(max_session_reads):
+            universe = repository.load_market_universe(
+                trade_date=cursor_date,
+                include_etf=True,
+                symbols=symbols,
+                max_rows=max(128, len(symbols) * 4),
+            )
+            for bar in universe.bars:
+                target = collected.get(bar.instrument.symbol)
+                if target is not None and len(target) < bars_per_instrument:
+                    target.append(bar)
+            if all(len(items) >= bars_per_instrument for items in collected.values()):
+                break
+            cursor_date = previous_taiwan_trading_day(
+                cursor_date,
+                include_value=False,
+            )
+        return {
+            symbol: tuple(sorted(items, key=lambda item: item.start_at))
+            for symbol, items in collected.items()
+        }
+
     def read_current_session_bars(
         self,
         *,
@@ -379,19 +703,75 @@ class TaiwanBarService:
         """Read only the Backend-owned Taiwan presentation session."""
 
         requested_interval = normalize_taiwan_bar_interval(interval)
+        if limit < 1 or limit > 5000:
+            raise ValueError("limit must be between 1 and 5000")
         if requested_interval not in TAIWAN_INTRADAY_INTERVALS:
             raise ValueError("current_session requires a Taiwan intraday interval")
-        local_now, _trade_date, from_time, to_time = taiwan_current_session_bar_window(
+        local_now, trade_date, from_time, to_time = taiwan_current_session_bar_window(
             requested_at
         )
-        return self.read_bars(
+        cached = self._recent_current_session_snapshot(
+            instrument_id=instrument_id,
+            interval=requested_interval,
+            include_partial=include_partial,
+            trade_date=trade_date,
+            requested_to=to_time,
+            local_now=local_now,
+        )
+        if cached is not None:
+            return _current_session_response_window(cached, limit=limit)
+        full_snapshot = self.read_bars(
             instrument_id=instrument_id,
             interval=requested_interval,
             from_time=from_time,
             to_time=to_time,
-            limit=limit,
+            limit=5000,
             include_partial=include_partial,
             requested_at=local_now,
+            _session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
+        )
+        self._remember_current_session_snapshot(
+            full_snapshot,
+            include_partial=include_partial,
+            trade_date=trade_date,
+            requested_to=to_time,
+        )
+        return _current_session_response_window(full_snapshot, limit=limit)
+
+    def read_scoped_bars(
+        self,
+        *,
+        instrument_id: str,
+        interval: str,
+        from_time: datetime | None = None,
+        to_time: datetime | None = None,
+        limit: int = 5000,
+        include_partial: bool = True,
+        requested_at: datetime | None = None,
+        session_scope: TaiwanBarSessionScope = TaiwanBarSessionScope.HISTORY,
+    ) -> TaiwanBarSeriesRead:
+        """Read a Backend-owned Bar scope without consumer-side date policy."""
+
+        if session_scope is TaiwanBarSessionScope.CURRENT_SESSION:
+            if from_time is not None or to_time is not None:
+                raise ValueError(
+                    "current_session bar scope cannot be combined with from/to"
+                )
+            return self.read_current_session_bars(
+                instrument_id=instrument_id,
+                interval=interval,
+                limit=limit,
+                include_partial=include_partial,
+                requested_at=requested_at,
+            )
+        return self.read_bars(
+            instrument_id=instrument_id,
+            interval=interval,
+            from_time=from_time,
+            to_time=to_time,
+            limit=limit,
+            include_partial=include_partial,
+            requested_at=requested_at,
         )
 
     def read_bars(
@@ -404,6 +784,7 @@ class TaiwanBarService:
         limit: int = 5000,
         include_partial: bool = True,
         requested_at: datetime | None = None,
+        _session_scope: TaiwanBarSessionScope = TaiwanBarSessionScope.HISTORY,
     ) -> TaiwanBarSeriesRead:
         requested_interval = normalize_taiwan_bar_interval(interval)
         if limit < 1 or limit > 5000:
@@ -462,7 +843,11 @@ class TaiwanBarService:
         current_coverage: TaiwanCurrentSessionCoverage | None = None
         for trade_date in trade_dates:
             current_session = bool(
-                current_observing and trade_date == presentation_date
+                trade_date == presentation_date
+                and (
+                    _session_scope is TaiwanBarSessionScope.CURRENT_SESSION
+                    or current_observing
+                )
             )
             requirement = _session_requirement(
                 instrument=instrument,
@@ -845,6 +1230,12 @@ class TaiwanBarService:
             )
             if current_1m.bars:
                 try:
+                    formal_close_component = _qualified_formal_close_component(
+                        self._db,
+                        instrument=instrument,
+                        trade_date=current_date,
+                        requested_at=now,
+                    )
                     projection = aggregate_completed_session_to_1d(
                         current_1m.bars,
                         output_provider="omi_taiwan_bar_service",
@@ -852,7 +1243,7 @@ class TaiwanBarService:
                         source_interval="1m",
                         coverage_complete=coverage_complete,
                         as_of=now,
-                        formal_close_component=None,
+                        formal_close_component=formal_close_component,
                     )
                 except TaiwanDailyMaterializationComponentsOverlapError:
                     projection_limitations.extend(
@@ -1029,16 +1420,12 @@ def taiwan_current_session_bar_window(
         TAIWAN_SESSION_OPEN_TIME,
         tzinfo=TAIWAN_TZ,
     )
-    to_time = (
-        local_now
-        if trade_date == local_now.date()
-        else datetime.combine(
-            trade_date,
-            TAIWAN_SESSION_CLOSE_TIME,
-            tzinfo=TAIWAN_TZ,
-        )
-        + timedelta(minutes=1)
-    )
+    session_end = datetime.combine(
+        trade_date,
+        TAIWAN_SESSION_CLOSE_TIME,
+        tzinfo=TAIWAN_TZ,
+    ) + timedelta(minutes=1)
+    to_time = min(local_now, session_end) if trade_date == local_now.date() else session_end
     if to_time <= from_time:
         to_time = from_time + timedelta(minutes=1)
     return local_now, trade_date, from_time, to_time

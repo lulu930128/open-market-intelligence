@@ -2754,7 +2754,8 @@ def start_scheduler() -> Any | None:
         max(int(settings.scheduler_market_chip_refresh_retry_delay_minutes), 1),
     )
     logger.info(
-        "Taiwan intraday bar scheduler enabled=%s interval=%ss max_symbols=%s.",
+        "Taiwan intraday bar scheduler enabled=%s interval=%ss max_symbols=%s; "
+        "close-tail retries=13:25/13:30/13:33.",
         taiwan_intraday_bar_scheduler_enabled,
         max(int(settings.scheduler_taiwan_intraday_bar_interval_seconds), 60),
         max(int(settings.scheduler_taiwan_intraday_bar_max_symbols), 1),
