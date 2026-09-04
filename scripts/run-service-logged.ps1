@@ -33,7 +33,24 @@ function Write-ServiceLog {
     }
 
     $line = "{0} [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
-    Add-Content -LiteralPath (Get-ServiceLogPath) -Value $line -Encoding UTF8
+    $logPath = Get-ServiceLogPath
+    $maxWriteAttempts = 20
+
+    for ($attempt = 1; $attempt -le $maxWriteAttempts; $attempt += 1) {
+        try {
+            Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+            return
+        }
+        catch [System.IO.IOException] {
+            if ($attempt -ge $maxWriteAttempts) {
+                throw
+            }
+
+            # The child process appends to the same log through cmd.exe. On
+            # Windows, opening that redirect and Add-Content can briefly race.
+            Start-Sleep -Milliseconds 50
+        }
+    }
 }
 
 function ConvertTo-ProcessArgument {
