@@ -12,7 +12,8 @@ export function isBackendAuthoritativeIndicator(
 ) {
   return Boolean(
     point?.calculation_role === "backend_authoritative" &&
-      point.algorithm_version?.startsWith("tw.technical.indicators.") &&
+      (point.algorithm_version?.startsWith("omi.research.technical.") ||
+        point.algorithm_version?.startsWith("tw.technical.indicators.")) &&
       point.price_basis
   );
 }

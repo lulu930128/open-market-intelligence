@@ -25,6 +25,11 @@ import {
   US_INTRADAY_REFRESH_MS,
   getUsMarketRefreshState,
 } from "@/lib/usMarketTime";
+import {
+  projectUSMarketTapeSnapshot,
+  type USMarketTapeReferenceSnapshot,
+  type USMarketTapeSnapshot,
+} from "@/components/market-dashboard/tape/usMarketTapeCanonicalProjection";
 import type {
   IntradayTrendResponse,
   JPMarketOverviewRead,
@@ -34,8 +39,9 @@ import type {
   KRMarketBreadthRead,
   KRStockMasterRead,
   USCompanyProfileRead,
+  USMarketIndexItemRead,
+  USMarketIndicesSnapshotRead,
   USOhlcChartRead,
-  USResolvedQuoteSnapshot,
 } from "@/types/market";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -44,35 +50,7 @@ import type { DashboardLoadState } from "@/components/market-dashboard/dashboard
 type MarketTapeConfig = { symbol: string };
 type MarketTapeSnapshot = { symbol: string; asOf: string | null };
 
-export type USMarketTapeSnapshot = {
-  symbol: string;
-  displaySymbol: string;
-  name: string;
-  exchange: string;
-  note: string;
-  close: number | null;
-  change: number | null;
-  changePct: number | null;
-  priceVsMa20: number | null;
-  volume: number | null;
-  pointCount: number;
-  asOf: string | null;
-  source: "quote" | "intraday" | "daily";
-};
-
-type USMarketTapeReferenceSnapshot = USMarketTapeSnapshot & {
-  ma20: number | null;
-  previousClose: number | null;
-};
-
-type USMarketTapeLiveSnapshot = {
-  symbol: string;
-  close: number | null;
-  previousClose: number | null;
-  volume: number | null;
-  asOf: string | null;
-  source: "quote" | "intraday";
-};
+export type { USMarketTapeSnapshot };
 
 export type JPMarketTapeSnapshot = {
   symbol: string;
@@ -190,59 +168,9 @@ async function fetchUsMarketTapeReferenceSnapshot(config: USMarketIndexConfig) {
     source: "daily",
     ma20,
     previousClose,
+    referenceTradeDate: previousDaily?.time ?? null,
+    truthRevision: null,
   } satisfies USMarketTapeReferenceSnapshot;
-}
-
-async function fetchUsMarketTapeLiveSnapshot(config: USMarketIndexConfig) {
-  const snapshot = await fetchJson<USResolvedQuoteSnapshot>(
-    `/api/us-market/quote/${encodeURIComponent(config.symbol)}`
-  );
-  const rawClose = snapshot.quote?.last_trade_price ?? null;
-  const parsedClose = rawClose === null ? Number.NaN : Number(rawClose);
-  const close =
-    snapshot.facts_usable && Number.isFinite(parsedClose) ? parsedClose : null;
-  return {
-    symbol: config.symbol,
-    close,
-    // Previous close and volume stay owned by the resolved Daily reference lane.
-    previousClose: null,
-    volume: null,
-    asOf: snapshot.quote?.event_at ?? snapshot.selected_event_at ?? null,
-    source: "quote",
-  } satisfies USMarketTapeLiveSnapshot;
-}
-
-function composeUsMarketTapeSnapshot(
-  reference: USMarketTapeReferenceSnapshot | null,
-  live: USMarketTapeLiveSnapshot | null
-): USMarketTapeSnapshot | null {
-  if (!reference) return null;
-  const close = live?.close ?? reference.close;
-  const previousClose = live?.previousClose ?? reference.previousClose;
-  const change = close !== null && previousClose !== null ? close - previousClose : null;
-  const changePct =
-    change !== null && previousClose !== null && previousClose !== 0
-      ? (change / previousClose) * 100
-      : null;
-  const priceVsMa20 =
-    close !== null && reference.ma20 !== null && reference.ma20 !== 0
-      ? ((close - reference.ma20) / reference.ma20) * 100
-      : null;
-  return {
-    symbol: reference.symbol,
-    displaySymbol: reference.displaySymbol,
-    name: reference.name,
-    exchange: reference.exchange,
-    note: reference.note,
-    close,
-    change,
-    changePct,
-    priceVsMa20,
-    volume: live?.volume ?? reference.volume,
-    pointCount: reference.pointCount,
-    asOf: live?.asOf ?? reference.asOf,
-    source: live?.close !== null && live?.close !== undefined ? live.source : "daily",
-  };
 }
 
 async function fetchJpMarketTapeSnapshot(config: JPMarketIndexConfig) {
@@ -487,11 +415,90 @@ function usePollingMarketTapeState<
   } satisfies RegionalMarketTapeState<Snapshot>;
 }
 
+function useUsMarketHeadlineItems({
+  configs,
+  onError,
+}: {
+  configs: USMarketIndexConfig[];
+  onError: (error: unknown) => void;
+}) {
+  const [items, setItems] = useState<Record<string, USMarketIndexItemRead>>({});
+  const onErrorRef = useRef(onError);
+
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    let requestInFlight = false;
+    let authoritativeMarketSession: string | null = null;
+
+    async function loadHeadlineItems() {
+      if (requestInFlight) return;
+      requestInFlight = true;
+
+      try {
+        const snapshot = await fetchJson<USMarketIndicesSnapshotRead>(
+          "/api/us-market/indices"
+        );
+        if (cancelled) return;
+        authoritativeMarketSession = snapshot.market_session;
+
+        const requestedSymbols = new Set(
+          configs.map((config) => config.symbol.trim().toUpperCase())
+        );
+        const nextItems = Object.fromEntries(
+          snapshot.items
+            .filter((item) =>
+              requestedSymbols.has(item.canonical_symbol.trim().toUpperCase())
+            )
+            .map((item) => [item.canonical_symbol.trim().toUpperCase(), item])
+        );
+        setItems(nextItems);
+      } catch (error) {
+        if (!cancelled) onErrorRef.current(error);
+      } finally {
+        requestInFlight = false;
+      }
+    }
+
+    function scheduleRefresh() {
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        void loadHeadlineItems().finally(scheduleRefresh);
+      }, usHeadlineRefreshDelay(authoritativeMarketSession));
+    }
+
+    void loadHeadlineItems().finally(scheduleRefresh);
+
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [configs]);
+
+  return items;
+}
+
 function usRefreshDelay() {
   const marketState = getUsMarketRefreshState();
   return marketState.isPollingWindow
     ? US_INTRADAY_REFRESH_MS
     : Math.min(marketState.msUntilNextPollingStart, 60_000);
+}
+
+function usHeadlineRefreshDelay(authoritativeMarketSession: string | null) {
+  const normalizedSession = authoritativeMarketSession?.trim().toLowerCase();
+  if (
+    normalizedSession === "pre_market" ||
+    normalizedSession === "regular" ||
+    normalizedSession === "after_hours"
+  ) {
+    return US_INTRADAY_REFRESH_MS;
+  }
+  return usRefreshDelay();
 }
 
 function regionalDailyRefreshDelay() {
@@ -542,21 +549,14 @@ export function useUsMarketTapeState({
     refreshDelay: regionalDailyRefreshDelay,
     onError,
   });
-  const liveState = usePollingMarketTapeState({
-    configs,
-    primarySymbol: primaryIndex.symbol,
-    contextSymbol: contextIndex.symbol,
-    loadSnapshot: fetchUsMarketTapeLiveSnapshot,
-    refreshDelay: usRefreshDelay,
-    onError,
-  });
-  const primarySnapshot = composeUsMarketTapeSnapshot(
+  const headlineItems = useUsMarketHeadlineItems({ configs, onError });
+  const primarySnapshot = projectUSMarketTapeSnapshot(
     referenceState.primarySnapshot,
-    liveState.primarySnapshot
+    headlineItems[primaryIndex.symbol.toUpperCase()] ?? null
   );
-  const contextSnapshot = composeUsMarketTapeSnapshot(
+  const contextSnapshot = projectUSMarketTapeSnapshot(
     referenceState.contextSnapshot,
-    liveState.contextSnapshot
+    headlineItems[contextIndex.symbol.toUpperCase()] ?? null
   );
 
   return {

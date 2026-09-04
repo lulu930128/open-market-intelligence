@@ -1327,7 +1327,7 @@ export const jaJP = {
       insufficient: "今日の推移データ不足",
       historyWarming: "本日の完全な値動きを準備しています…",
       historyWarmingDescription:
-        "リアルタイム気配値は利用できます。準備が完了すると自動表示され、再読み込みは不要です。状態：{status}。",
+        "リアルタイム気配値は利用できます。値動きは読み込み中で、準備が完了すると自動表示されます。再読み込みは不要です。",
       snapshotDegraded: "一部データ",
       title: "今日の推移 / 出来高",
       pointCount: "{count} 点",

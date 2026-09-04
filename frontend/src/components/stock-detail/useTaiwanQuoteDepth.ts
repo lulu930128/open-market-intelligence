@@ -389,6 +389,11 @@ export function useTaiwanQuoteDepth({
         })
       );
       eventSource = source;
+      // A proxy can keep an EventSource connection open before forwarding its
+      // first snapshot.  Keep the cache-only snapshot fallback active until an
+      // SSE snapshot is actually accepted so the UI does not remain in a
+      // permanent loading state while provider observations already exist.
+      startFallbackPolling();
       source.addEventListener("snapshot", (event) => {
         if (source !== eventSource) return;
         try {
@@ -465,6 +470,7 @@ export function useTaiwanQuoteDepth({
     const requestedStockId = stockId;
 
     async function loadReplay() {
+      if (cancelled || activeStockIdRef.current !== requestedStockId) return;
       setQuoteReplay(null);
       setReplayLoadState("loading");
       try {

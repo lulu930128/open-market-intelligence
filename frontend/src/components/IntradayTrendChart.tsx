@@ -447,7 +447,7 @@ export function aggregateIntradayPoints(
   session: IntradaySessionConfig,
   tradeDate?: string | null
 ) {
-  const regularPoints = points.filter((point) => {
+  const displayPoints = points.filter((point) => {
     const displayEligible =
       point.display_eligible !== null && point.display_eligible !== undefined
         ? point.display_eligible
@@ -455,31 +455,32 @@ export function aggregateIntradayPoints(
     return (
       validNumber(point.price) &&
       (!tradeDate || point.time.slice(0, 10) === tradeDate) &&
-      session.isRegularSessionPoint(point.time) &&
       point.bar_type !== "post_close_summary" &&
       displayEligible
     );
   });
+  const isCloseMarker = (point: IntradayTrendPoint) =>
+    point.bar_type === "official_close_marker" ||
+    point.bar_type === "session_close_marker";
+  const regularPoints = displayPoints.filter(
+    (point) =>
+      session.isRegularSessionPoint(point.time) ||
+      point.bar_type === "closing_auction"
+  );
+  const closeMarkers = displayPoints.filter(isCloseMarker);
 
   if (interval === 1) {
-    return regularPoints.map((point) => ({
-      ...point,
-      open: point.open ?? point.price,
-      high: point.high ?? point.price,
-      low: point.low ?? point.price,
-    }));
+    return [...regularPoints, ...closeMarkers]
+      .sort((left, right) => new Date(left.time).getTime() - new Date(right.time).getTime())
+      .map((point) => ({
+        ...point,
+        open: point.open ?? point.price,
+        high: point.high ?? point.price,
+        low: point.low ?? point.price,
+      }));
   }
 
-  const closeMarkers = regularPoints.filter(
-    (point) =>
-      point.bar_type === "official_close_marker" ||
-      point.bar_type === "session_close_marker"
-  );
-  const intervalPoints = regularPoints.filter(
-    (point) =>
-      point.bar_type !== "official_close_marker" &&
-      point.bar_type !== "session_close_marker"
-  );
+  const intervalPoints = regularPoints.filter((point) => !isCloseMarker(point));
 
   const buckets = new Map<number, IntradayTrendPoint[]>();
 
@@ -755,7 +756,6 @@ export default function IntradayTrendChart({
   priceDiagnostics,
   tradeDate,
   currentObservation,
-  historyStatus,
   snapshotPhase = "ready",
   snapshotReasonCodes = [],
   canonicalIndicatorAuthority = "presentation",
@@ -862,9 +862,7 @@ export default function IntradayTrendChart({
           }
           description={
             quoteAvailable
-              ? t("stockDetail.intraday.historyWarmingDescription", {
-                  status: historyStatus ?? "warming_up",
-                })
+              ? t("stockDetail.intraday.historyWarmingDescription")
               : undefined
           }
           tone={quoteAvailable ? "info" : "empty"}

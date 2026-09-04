@@ -158,8 +158,10 @@ test("Taiwan secondary surfaces stay cache-only until demanded", () => {
   expect(panel).not.toContain(
     "quoteDepth.actual_trade_occurred === true ? currentPrice : null"
   );
+  expect(panel).toContain("todayPreviousClose ??");
+  expect(panel).toContain("selectedQuoteDepth?.previous_close ??");
   expect(panel).toContain(
-    "todayPreviousClose ?? selectedQuoteDepth?.previous_close ?? null"
+    "isIndexProduct ? selectedIndexSnapshot?.previous_close ?? null : null"
   );
   expect(overnight).toContain("{ refresh: false }");
   expect(overnight).not.toContain("requestBackfillJob");
@@ -226,9 +228,9 @@ test("US detail chart, intraday, and supplemental resources have separate owners
   expect(contents).toContain("since_revision: sinceRevision");
   expect(contents).toContain('today.response_mode === "unchanged"');
   expect(contents).toContain("snapshots.set(snapshotKey");
-  expect(contents).toContain("applyCachedTodaySnapshot(selectedSymbol, intradaySessionScope, cachedSnapshot)");
+  expect(contents).toContain("todayIntervalRef.current,");
   expect(contents).toContain("US_TODAY_SNAPSHOT_CACHE_LIMIT = 48");
-  expect(contents).toContain("if (today.quote_snapshot) setHeadlineQuote(today.quote_snapshot)");
+  expect(contents).toContain("applyHeadlineQuote(symbol, today.quote_snapshot, quoteGeneration)");
   expect(contents).toContain(
     'status.freshness_status === "provider_error" && status.has_usable_data'
   );
@@ -243,31 +245,45 @@ test("US detail chart, intraday, and supplemental resources have separate owners
   expect(contents).not.toContain("response.bar_source_status ?? response.source_status");
   expect(contents).toContain('if (timeframe === "today" && !todayMatchesSelection) return;');
   expect(contents).toContain("visibleMarketResearch !== null ||");
+  expect(contents).toContain("canonicalIndicatorAuthority=\"backend\"");
+  expect(contents).toContain("indicatorData={technicalIndicatorSeries}");
+  expect(contents).toContain("indicatorData={professionalIndicatorData}");
+  expect(contents).toContain("interval={todayInterval}");
+  expect(contents).toContain("onIntervalChange={setTodayInterval}");
+  expect(contents).toContain("{ bars: 260, timeframe: researchTimeframe }");
+  expect(contents).not.toContain('canonicalIndicatorAuthority="presentation"');
   expect(contents).not.toContain("intradaySessionScope,\n      onCompanyProfileChange");
 });
 
-test("US market tape keeps daily reference and live polling on separate cadences", () => {
+test("US market tape keeps Daily analytics separate from canonical headline polling", () => {
   const contents = source(
     "src/components/market-dashboard/tape/useRegionalMarketTapeState.ts"
   );
   const referenceLoader = section(
     contents,
     "async function fetchUsMarketTapeReferenceSnapshot",
-    "async function fetchUsMarketTapeLiveSnapshot"
+    "async function fetchJpMarketTapeSnapshot"
   );
-  const liveLoader = section(
+  const headlineLoader = section(
     contents,
-    "async function fetchUsMarketTapeLiveSnapshot",
-    "function composeUsMarketTapeSnapshot"
+    "function useUsMarketHeadlineItems",
+    "function usRefreshDelay"
   );
 
   expect(referenceLoader).toContain("/api/us-market/ohlc/");
   expect(referenceLoader).not.toContain("/api/us-market/intraday/");
-  expect(liveLoader).toContain("/api/us-market/quote/");
-  expect(liveLoader).not.toContain("/api/us-market/intraday/");
-  expect(liveLoader).not.toContain("/api/us-market/ohlc/");
+  expect(headlineLoader).toContain('"/api/us-market/indices"');
+  expect(headlineLoader).not.toContain("/api/us-market/quote/");
+  expect(headlineLoader).not.toContain("/api/us-market/ohlc/");
   expect(contents).toContain("refreshDelay: regionalDailyRefreshDelay");
-  expect(contents).toContain("refreshDelay: usRefreshDelay");
+  expect(headlineLoader).toContain(
+    "authoritativeMarketSession = snapshot.market_session"
+  );
+  expect(headlineLoader).toContain(
+    "usHeadlineRefreshDelay(authoritativeMarketSession)"
+  );
+  expect(contents).not.toContain("fetchUsMarketTapeLiveSnapshot");
+  expect(contents).not.toContain("composeUsMarketTapeSnapshot");
 });
 
 test("US ranking requests current quotes without full-intraday fan-out", () => {
@@ -282,4 +298,19 @@ test("US ranking requests current quotes without full-intraday fan-out", () => {
   expect(legacyPanel).toContain("use_current_quote: marketState.isLiveWindow");
   expect(legacyPanel).not.toContain("use_intraday: marketState.isLiveWindow");
   expect(legacyPanel).toContain("requestAbortRef.current?.abort()");
+});
+
+test("US local calendar fallback is display-only and polling fails closed", () => {
+  const contents = source("src/lib/usMarketTime.ts");
+  const fallback = section(
+    contents,
+    "const isTradingDay = isUsWeekday(parts);",
+    "export function getUsIntradayXRatio"
+  );
+
+  expect(fallback).toContain("calendarAuthoritative: false");
+  expect(fallback).toContain("isPollingWindow: false");
+  expect(fallback).toContain("isExtendedPollingWindow: false");
+  expect(fallback).toContain("isLiveWindow: false");
+  expect(fallback).toContain("isAfterClose: false");
 });

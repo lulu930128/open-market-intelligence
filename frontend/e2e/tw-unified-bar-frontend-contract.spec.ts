@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 
 import {
+  aggregateIntradayPoints,
   projectBackendIntradayPoints,
+  taiwanIntradaySession,
 } from "@/components/IntradayTrendChart";
 import { formatChartDate } from "@/components/chart/lightweight-chart/drawingModel";
 import {
@@ -13,7 +15,11 @@ import {
   shouldRecoverTodayFullSnapshot,
   snapshotPhaseForCoverage,
 } from "@/components/stock-detail/useTaiwanStockChartData";
-import type { IntradayTrendPoint, TaiwanBarSeriesRead } from "@/types/market";
+import type {
+  IntradayTrendPoint,
+  TaiwanBarSeriesRead,
+  TaiwanChartBarSeriesRead,
+} from "@/types/market";
 
 test("Taiwan chart data hook reads Bars first and Technical by revision", () => {
   const source = readFileSync(
@@ -198,6 +204,57 @@ test("Taiwan canonical Bar projection preserves missing quantities", () => {
   expect(point.is_partial).toBe(true);
 });
 
+test("Taiwan formal close presentation event survives Today filtering without indicator use", () => {
+  const series = {
+    bar_states: [],
+    bars: [],
+    presentation_events: [
+      {
+        contract_version: "tw.bar.chart_presentation_event.v1",
+        event_type: "session_close_marker",
+        event_at: "2026-09-04T13:30:00+08:00",
+        price: "588",
+        price_semantics: "session_close",
+        market_session: "closing_auction",
+        finalization: "final",
+        authority: "exchange",
+        official: false,
+        provider: "twse_mis",
+        source: "twse_mis_public_quote",
+        volume: null,
+        display_eligible: true,
+        technical_eligible: false,
+      },
+    ],
+  } as unknown as TaiwanChartBarSeriesRead;
+
+  const marker = projectTaiwanBarSeries(series)[0];
+  const markerTrend = {
+    ...marker,
+    price: marker.close,
+  } as IntradayTrendPoint;
+  expect(marker.time).toBe("2026-09-04T13:30:00+08:00");
+  expect(marker.close).toBe(588);
+  expect(marker.bar_type).toBe("session_close_marker");
+  expect(marker.indicator_eligible).toBe(false);
+  expect(
+    aggregateIntradayPoints(
+      [markerTrend],
+      1,
+      taiwanIntradaySession,
+      "2026-09-04"
+    )
+  ).toHaveLength(1);
+  expect(
+    aggregateIntradayPoints(
+      [markerTrend],
+      5,
+      taiwanIntradaySession,
+      "2026-09-04"
+    )[0].bar_type
+  ).toBe("session_close_marker");
+});
+
 test("Taiwan backend-authoritative intraday projection does not calculate fallback", () => {
   const point: IntradayTrendPoint = {
     time: "2026-09-01T09:00:00+08:00",
@@ -247,6 +304,10 @@ test("Today empty state keeps quote and canonical history as separate states", (
   expect(source).toContain("currentObservation");
   expect(source).toContain("historyStatus");
   expect(source).toContain("stockDetail.intraday.historyWarming");
+  expect(source).toContain(
+    't("stockDetail.intraday.historyWarmingDescription")'
+  );
+  expect(source).not.toContain("status: historyStatus");
 });
 
 test("Taiwan technical report retries after the quote timestamp stops advancing", () => {

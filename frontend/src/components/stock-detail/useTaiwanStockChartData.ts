@@ -306,9 +306,36 @@ export function projectTaiwanBarSeries(series: TaiwanRenderableBarSeries): Chart
       ? series.bar_states.map((state) => [state.start_at, state.technical_eligible])
       : series.bars.map((bar) => [bar.start_at, bar.technical_eligible])
   );
-  return series.bars
+  const bars = series.bars
     .map((bar) => chartPoint(bar, states.get(bar.start_at) !== false))
     .sort((left, right) => left.time.localeCompare(right.time));
+  if (!("presentation_events" in series)) return bars;
+  const events = series.presentation_events.flatMap((event) => {
+    const price = numberOrNull(event.price);
+    if (price === null || event.display_eligible !== true) return [];
+    return [{
+      time: event.event_at,
+      open: price,
+      high: price,
+      low: price,
+      close: price,
+      volume: numberOrNull(event.volume?.value),
+      trade_value: null,
+      transaction_count: null,
+      finalization: event.finalization,
+      finalized: true,
+      is_partial: false,
+      display_eligible: true,
+      indicator_eligible: false,
+      price_semantics: event.price_semantics,
+      bar_type: event.event_type,
+      session: event.market_session,
+      provider: event.provider,
+      source: event.source,
+      synthetic: false,
+    } satisfies ChartPoint];
+  });
+  return [...bars, ...events].sort((left, right) => left.time.localeCompare(right.time));
 }
 
 function intradayPoints(
@@ -322,13 +349,19 @@ function intradayPoints(
     const indicator = indicatorByTime.get(point.time);
     const contract = indicator?.parameter_contract ?? {};
     const emaFast = numberOrNull(
-      Array.isArray(contract.macd_fast) ? null : contract.macd_fast
+      typeof contract.macd_fast === "boolean" || Array.isArray(contract.macd_fast)
+        ? null
+        : contract.macd_fast
     );
     const emaSlow = numberOrNull(
-      Array.isArray(contract.macd_slow) ? null : contract.macd_slow
+      typeof contract.macd_slow === "boolean" || Array.isArray(contract.macd_slow)
+        ? null
+        : contract.macd_slow
     );
     const rsiPeriod = numberOrNull(
-      Array.isArray(contract.rsi_period) ? null : contract.rsi_period
+      typeof contract.rsi_period === "boolean" || Array.isArray(contract.rsi_period)
+        ? null
+        : contract.rsi_period
     );
     return [
       {
@@ -804,7 +837,7 @@ export function useTaiwanStockChartData({
           const incomingTrend = intradayPoints(bars, []);
           const snapshot = todaySnapshotMetadata(series, {
             fullSnapshot,
-            returnedBarCount: bars.length,
+            returnedBarCount: series.bars.length,
           });
           responseSnapshotPhase = snapshot.phase;
           const previous = currentTodaySnapshot;

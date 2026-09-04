@@ -822,7 +822,10 @@ export type ChartPoint = {
   indicator_eligible?: boolean | null;
   price_semantics?: string | null;
   synthetic?: boolean;
+  session?: string;
   session_phase?: string | null;
+  provider?: string | null;
+  source?: string | null;
   gap_reason?: string | null;
   evidence_trade_date?: string | null;
   evidence_finalization?: string | null;
@@ -945,12 +948,30 @@ export type TaiwanChartBarPoint = TaiwanCanonicalBarPoint & {
   technical_eligible: boolean;
 };
 
+export type TaiwanChartPresentationEvent = {
+  contract_version: "tw.bar.chart_presentation_event.v1" | string;
+  event_type: "session_close_marker" | string;
+  event_at: string;
+  price: number | string;
+  price_semantics: string;
+  market_session: string;
+  finalization: "final" | "corrected" | string;
+  authority: string;
+  official: boolean;
+  provider: string;
+  source: string;
+  volume: TaiwanCanonicalQuantity | null;
+  display_eligible: boolean;
+  technical_eligible: false;
+};
+
 export type TaiwanChartBarSeriesRead = Omit<
   TaiwanBarSeriesRead,
   "bars" | "bar_states"
 > & {
   contract_version: "tw.bar.chart_series_read.v1" | string;
   bars: TaiwanChartBarPoint[];
+  presentation_events: TaiwanChartPresentationEvent[];
 };
 
 export type TaiwanTechnicalSeriesRead = {
@@ -1418,6 +1439,30 @@ export type MarketIndexContributionResponse = {
   index_close: number | null;
   index_change: number | null;
   total_market_value: number | null;
+  component_universe_count: number;
+  covered_component_count: number;
+  coverage_ratio: number | null;
+  estimated_total_contribution_points: number | null;
+  actual_index_change_points: number | null;
+  residual_points: number | null;
+  residual_pct: number | null;
+  reconciliation_status: string;
+  confidence: string;
+  status: string;
+  availability_status: string;
+  is_complete: boolean;
+  decision_usable: boolean;
+  current_for_requested_session: boolean;
+  reason_codes: string[];
+  quality: {
+    owner?: string;
+    expected_trade_date?: string | null;
+    observed_trade_date?: string | null;
+    minimum_coverage_ratio?: number;
+    coverage_ratio?: number | null;
+    reconciliation_status?: string;
+    confidence?: string;
+  };
   positive: MarketIndexContributionItem[];
   negative: MarketIndexContributionItem[];
 };
@@ -1481,6 +1526,12 @@ export type IntradayTrendPoint = {
   macd_histogram_value?: number | null;
   vwap_value?: number | null;
   twap_value?: number | null;
+  technical_algorithm_version?: string | null;
+  price_basis?: string | null;
+  calculation_role?: string | null;
+  bar_status?: string | null;
+  decision_usable?: boolean;
+  volume_based_decision_usable?: boolean;
 };
 
 export type IntradayPriceDiagnostics = {
@@ -1698,6 +1749,63 @@ export type USResolvedQuoteSnapshot = {
   session_date_relation?: USSessionDateRelation | null;
 };
 
+export type USMarketIndexItemRead = {
+  contract_version: "omi.market.us_index_item.v1" | string;
+  canonical_symbol: string;
+  label: string;
+  instrument_type: "index";
+  value: number | string | null;
+  previous_close: number | string | null;
+  change: number | string | null;
+  change_pct: number | string | null;
+  trade_date: string | null;
+  event_at: string | null;
+  observation_kind: string | null;
+  comparison_purpose: "headline_change" | string;
+  reference_trade_date: string | null;
+  reference_kind: string | null;
+  selected_provider: string | null;
+  selected_source: string | null;
+  selection_reason: string;
+  fallback_used: boolean;
+  freshness_status: string;
+  provider_snapshot_freshness: string;
+  trade_recency: string;
+  current_for_requested_session: boolean;
+  facts_usable: boolean;
+  decision_usable: boolean;
+  truth_revision: string;
+  observation_id: string | null;
+  limitations: string[];
+};
+
+export type USMarketIndicesSnapshotRead = {
+  contract_version: "omi.market.us_indices.v1" | string;
+  kind: "us_market_indices";
+  market: "US";
+  status: "ready" | "partial" | "missing";
+  evaluated_at: string;
+  as_of: string | null;
+  oldest_as_of: string | null;
+  newest_as_of: string | null;
+  mixed_as_of: boolean;
+  mixed_trade_dates: boolean;
+  market_session: string;
+  current_for_requested_session: boolean;
+  is_current: boolean;
+  is_complete: boolean;
+  coverage_status: "complete" | "partial" | "missing";
+  count: number;
+  expected_count: 6;
+  facts_usable: boolean;
+  decision_usable: boolean;
+  observation_mix: string[];
+  items: USMarketIndexItemRead[];
+  source: string;
+  missing: string[];
+  warnings: string[];
+};
+
 export type TaiwanIntradaySeriesCoverage = {
   status: "complete_prefix" | "complete_session" | "trailing_window" | "partial_prefix" | "partial_window" | "sparse" | "missing" | string;
   trade_date?: string | null;
@@ -1736,6 +1844,8 @@ export type IntradayTrendResponse = {
   projection_event_count?: number;
   aggregation_method?: string | null;
   bar_finalization_status?: string | null;
+  technical_algorithm_version?: string | null;
+  technical_parameter_contract?: Record<string, number | boolean | string>;
   trade_date?: string | null;
   coverage_status?: string | null;
   session_scope?: string;
@@ -2754,7 +2864,7 @@ export type StockIndicatorPoint = {
   algorithm_version?: string | null;
   price_basis?: string | null;
   calculation_role?: string | null;
-  parameter_contract?: Record<string, number | number[] | string | null>;
+  parameter_contract?: Record<string, number | number[] | string | boolean | null>;
   bar_status?: string | null;
   session_close_finalization?: string | null;
   official_daily_confirmed?: boolean;
@@ -3831,6 +3941,7 @@ export type USTechnicalIndicatorsRead = {
     price_vs_ma20_pct?: number | null;
     volume_vs_ma20_pct?: number | null;
   };
+  series: StockIndicatorPoint[];
   quality: USTechnicalQualityRead;
 };
 
@@ -3855,6 +3966,7 @@ export type USMarketResearchRead = {
   schema_version: string;
   market: "US" | string;
   symbol: string;
+  timeframe: "daily" | "weekly" | "monthly" | string;
   status: string;
   as_of: string | null;
   technical_indicators: USTechnicalIndicatorsRead;

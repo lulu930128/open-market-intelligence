@@ -1896,7 +1896,7 @@ export const enUS = {
       insufficient: "Not enough intraday trend data",
       historyWarming: "Preparing the complete intraday trend…",
       historyWarmingDescription:
-        "Live quotes remain available. The complete trend will appear automatically; no reload is needed. Status: {status}.",
+        "Live quotes remain available. The complete trend is still loading and will appear automatically; no reload is needed.",
       snapshotDegraded: "Partial trend",
       latestCompletedPrice: "Latest completed session",
       currentPrice: "Current trade",

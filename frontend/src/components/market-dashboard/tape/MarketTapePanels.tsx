@@ -288,7 +288,12 @@ function USMarketTapeCard({
   const t = useT();
 
   return (
-    <div className="bg-omi-surface px-4 py-3">
+    <div
+      className="bg-omi-surface px-4 py-3"
+      data-symbol={snapshot?.symbol ?? ""}
+      data-reference-trade-date={snapshot?.referenceTradeDate ?? ""}
+      data-truth-revision={snapshot?.truthRevision ?? ""}
+    >
       <div className="flex items-start justify-between gap-4">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">

@@ -5,6 +5,7 @@ import IntradayTrendChart, {
   intradayIndicatorOptions,
   type IntradayIndicatorKey,
   type IntradayIndicatorSettings,
+  type IntradayInterval,
   type IntradaySessionConfig,
 } from "@/components/IntradayTrendChart";
 import { StateSurface } from "@/components/LoadingPlaceholders";
@@ -25,6 +26,11 @@ import TechnicalIndicatorMenu, {
   indicatorTemplates,
   type IndicatorTemplateKey,
 } from "@/components/stock-detail/TechnicalIndicatorMenu";
+import {
+  projectUSCurrentSessionHeadline,
+  projectUSIntradayIndicatorPoint,
+  selectMonotonicUSHeadlineQuote,
+} from "@/components/stock-detail/usStockDetailCanonicalProjection";
 import USFundamentalWorkspace, {
   type USFundamentalTab,
 } from "@/components/us-stock-detail/USFundamentalWorkspace";
@@ -81,6 +87,7 @@ import type {
   ChartDrawingSnapshotRead,
   IntradayTrendPoint,
   IntradayTrendResponse,
+  StockIndicatorPoint,
   StockVolumePace,
   USCapabilityExpectation,
   USIntradaySourceStatus,
@@ -388,11 +395,10 @@ type USIntradayMeta = {
   currentSourceStatus: USIntradaySourceStatus | null;
   barSourceStatus: USIntradaySourceStatus | null;
   currentPrice: number | null;
-  currentPreviousClose: number | null;
-  currentPreviousCloseTradeDate: string | null;
   changeReferencePrice: number | null;
   changeReferenceTradeDate: string | null;
   changeReferenceType: string | null;
+  changeReferenceStatus: string | null;
   currentObservedAt: string | null;
   quoteExpectation: USCapabilityExpectation | null;
 };
@@ -408,11 +414,10 @@ const emptyUsIntradayMeta: USIntradayMeta = {
   currentSourceStatus: null,
   barSourceStatus: null,
   currentPrice: null,
-  currentPreviousClose: null,
-  currentPreviousCloseTradeDate: null,
   changeReferencePrice: null,
   changeReferenceTradeDate: null,
   changeReferenceType: null,
+  changeReferenceStatus: null,
   currentObservedAt: null,
   quoteExpectation: null,
 };
@@ -459,8 +464,6 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     currentSourceStatus,
     barSourceStatus: response.bar_source_status ?? null,
     currentPrice: projectedCurrentPrice,
-    currentPreviousClose: response.current_observation?.previous_close ?? null,
-    currentPreviousCloseTradeDate: response.previous_close_trade_date ?? null,
     changeReferencePrice:
       response.current_observation?.change_reference_price ??
       response.change_reference_price ??
@@ -472,6 +475,10 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     changeReferenceType:
       response.current_observation?.change_reference_type ??
       response.change_reference_type ??
+      null,
+    changeReferenceStatus:
+      response.current_observation?.change_reference_status ??
+      response.change_reference_status ??
       null,
     currentObservedAt: response.current_observation?.observed_at ?? null,
     quoteExpectation,
@@ -1088,9 +1095,6 @@ export default function USStockDetailPanel({
   const [institutionalHoldings, setInstitutionalHoldings] =
     useState<USSec13FInstitutionalHoldingsRead | null>(null);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
-  const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
-  const [todayPreviousCloseStatus, setTodayPreviousCloseStatus] =
-    useState<string>("unknown");
   const [todaySource, setTodaySource] = useState("unavailable");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
   const [todayIntradayMeta, setTodayIntradayMeta] = useState<USIntradayMeta>(emptyUsIntradayMeta);
@@ -1099,6 +1103,8 @@ export default function USStockDetailPanel({
     useState<USIntradaySessionScope | null>(null);
   const [intradaySessionScope, setIntradaySessionScope] =
     useState<USIntradaySessionScope>(() => defaultUsIntradaySessionScope());
+  const [todayInterval, setTodayInterval] = useState<IntradayInterval>(1);
+  const [todayEffectiveInterval, setTodayEffectiveInterval] = useState<string | null>(null);
   const [intradayIndicators, setIntradayIndicators] =
     useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
   const [factRows, setFactRows] = useState<USSecCompanyFactRead[]>([]);
@@ -1121,26 +1127,59 @@ export default function USStockDetailPanel({
   const todayIntradaySnapshotRef = useRef(
     new Map<string, USTodaySnapshotCacheEntry>()
   );
+  const headlineQuoteRef = useRef<USResolvedQuoteSnapshot | null>(null);
+  const headlineQuoteRequestGenerationRef = useRef(0);
+  const acceptedHeadlineQuoteGenerationRef = useRef(0);
   const timeframeRef = useRef(timeframe);
   const intradaySessionScopeRef = useRef(intradaySessionScope);
+  const todayIntervalRef = useRef(todayInterval);
+  const applyHeadlineQuote = useCallback(
+    (
+      symbol: string,
+      candidate: USResolvedQuoteSnapshot | null,
+      candidateGeneration: number
+    ) => {
+      const selected = selectMonotonicUSHeadlineQuote(
+        headlineQuoteRef.current,
+        candidate,
+        {
+          expectedSymbol: symbol,
+          currentGeneration: acceptedHeadlineQuoteGenerationRef.current,
+          candidateGeneration,
+        }
+      );
+      headlineQuoteRef.current = selected.snapshot;
+      acceptedHeadlineQuoteGenerationRef.current = selected.acceptedGeneration;
+      setHeadlineQuote(selected.snapshot);
+    },
+    []
+  );
   const applyCachedTodaySnapshot = useCallback(
     (
       symbol: string,
       sessionScope: USIntradaySessionScope,
+      interval: IntradayInterval,
       snapshot: USTodaySnapshotCacheEntry
     ) => {
       const latestPoint = snapshot.points[snapshot.points.length - 1] ?? null;
-      setHeadlineQuote(snapshot.response.quote_snapshot ?? null);
+      const quoteGeneration = headlineQuoteRequestGenerationRef.current + 1;
+      headlineQuoteRequestGenerationRef.current = quoteGeneration;
+      applyHeadlineQuote(
+        symbol,
+        snapshot.response.quote_snapshot ?? null,
+        quoteGeneration
+      );
       setTodayTrend(snapshot.points);
-      setTodayPreviousClose(snapshot.response.previous_close);
-      setTodayPreviousCloseStatus(snapshot.response.previous_close_status ?? "unknown");
       setTodaySource(snapshot.response.source);
       setTodayUpdatedAt(latestPoint ? formatDateTime(latestPoint.time) : null);
       setTodayIntradayMeta(intradayMetaFromResponse(snapshot.response));
       setTodaySymbol(symbol);
       setTodaySessionScope(sessionScope);
+      setTodayEffectiveInterval(
+        snapshot.response.effective_interval ?? `${interval}m`
+      );
     },
-    []
+    [applyHeadlineQuote]
   );
   const intradaySourceEventStateRef = useRef<Map<string, string>>(new Map());
   const ohlcCoverageEventStateRef = useRef<Map<string, string>>(new Map());
@@ -1188,7 +1227,8 @@ export default function USStockDetailPanel({
   useEffect(() => {
     timeframeRef.current = timeframe;
     intradaySessionScopeRef.current = intradaySessionScope;
-  }, [intradaySessionScope, timeframe]);
+    todayIntervalRef.current = todayInterval;
+  }, [intradaySessionScope, timeframe, todayInterval]);
 
   useEffect(() => {
     onDailyPricesChangedRef.current = onDailyPricesChanged;
@@ -1236,17 +1276,14 @@ export default function USStockDetailPanel({
   const todayMatchesSelection = Boolean(
     selectedSymbol &&
       usSymbolKey(todaySymbol) === usSymbolKey(selectedSymbol) &&
-      todaySessionScope === intradaySessionScope
+      todaySessionScope === intradaySessionScope &&
+      todayEffectiveInterval === `${todayInterval}m`
   );
   const todayIntradayLoading = timeframe === "today" && !todayMatchesSelection;
   const visibleTodayTrend = useMemo(
     () => (todayMatchesSelection ? todayTrend : []),
     [todayMatchesSelection, todayTrend]
   );
-  const visibleTodayPreviousClose = todayMatchesSelection ? todayPreviousClose : null;
-  const visibleTodayPreviousCloseStatus = todayMatchesSelection
-    ? todayPreviousCloseStatus
-    : "unknown";
   const visibleTodaySource = todayMatchesSelection ? todaySource : "unavailable";
   const visibleTodayUpdatedAt = todayMatchesSelection ? todayUpdatedAt : null;
   const visibleTodayIntradayMeta = todayMatchesSelection
@@ -1292,35 +1329,37 @@ export default function USStockDetailPanel({
     latestToday?.time ??
     latestPoint?.time ??
     null;
-  const latestClose = headlineQuotePrice ?? visibleTodayIntradayMeta.currentPrice;
-  const previousClose =
-    (chart?.previous_close_status === "current" ? chart.previous_close : null) ??
-    visibleTodayIntradayMeta.changeReferencePrice;
-  const change =
-    latestClose !== null && previousClose !== null
-      ? latestClose - previousClose
-      : null;
-  const changePct =
-    change !== null && previousClose !== null && previousClose !== 0
-      ? (change / previousClose) * 100
-      : null;
+  const currentSessionHeadline = projectUSCurrentSessionHeadline({
+    currentObservationPrice: visibleTodayIntradayMeta.currentPrice,
+    quotePrice: headlineQuotePrice,
+    changeReferencePrice: visibleTodayIntradayMeta.changeReferencePrice,
+    changeReferenceTradeDate: visibleTodayIntradayMeta.changeReferenceTradeDate,
+    changeReferenceType: visibleTodayIntradayMeta.changeReferenceType,
+    changeReferenceStatus: visibleTodayIntradayMeta.changeReferenceStatus,
+  });
+  const latestClose = currentSessionHeadline.latestPrice;
+  const change = currentSessionHeadline.change;
+  const changePct = currentSessionHeadline.changePct;
   const currentQuoteUnavailable = latestClose === null;
-  const todayHistoricalReferencePrice =
-    visibleTodayIntradayMeta.changeReferencePrice ??
-    visibleTodayIntradayMeta.currentPreviousClose ??
-    (visibleTodayPreviousCloseStatus === "current"
-      ? visibleTodayPreviousClose
-      : null);
+  const todayHistoricalReferencePrice = currentSessionHeadline.referencePrice;
   const todayPreviousCloseReferenceDate =
-    visibleTodayIntradayMeta.changeReferenceTradeDate ??
-    visibleTodayIntradayMeta.currentPreviousCloseTradeDate ??
-    latestPoint?.time ??
-    null;
+    currentSessionHeadline.referenceTradeDate;
+  const researchTimeframe: USHistoricalTimeframe =
+    chartFocusMode && !professionalIsIntraday
+      ? (professionalTimeframe as USHistoricalTimeframe)
+      : timeframe === "today"
+        ? "daily"
+        : timeframe;
   const visibleMarketResearch =
-    usSymbolKey(marketResearch?.symbol) === usSymbolKey(selectedSymbol)
+    usSymbolKey(marketResearch?.symbol) === usSymbolKey(selectedSymbol) &&
+    marketResearch?.timeframe === researchTimeframe
       ? marketResearch
       : null;
   const technicalIndicators = visibleMarketResearch?.technical_indicators ?? null;
+  const technicalIndicatorSeries = useMemo(
+    () => technicalIndicators?.series ?? [],
+    [technicalIndicators]
+  );
   const technicalStructure = visibleMarketResearch?.technical_structure ?? null;
   const technicalCurrent = technicalIndicators?.current ?? null;
   const technicalMovingAverages = technicalCurrent?.moving_averages ?? {};
@@ -1340,6 +1379,22 @@ export default function USStockDetailPanel({
           : "usStockDetail.technicalStates.insufficient";
   const technicalTitle = t(technicalTitleKey);
   const technicalQuality = technicalIndicators?.quality ?? null;
+  const professionalIndicatorData = useMemo<StockIndicatorPoint[]>(
+    () =>
+      professionalIsIntraday
+        ? professionalIntradayMatchesSelection
+          ? professionalIntraday?.points.map((point) =>
+              projectUSIntradayIndicatorPoint(point, professionalIntraday)
+            ) ?? []
+          : []
+        : technicalIndicatorSeries,
+    [
+      professionalIntraday,
+      professionalIntradayMatchesSelection,
+      professionalIsIntraday,
+      technicalIndicatorSeries,
+    ]
+  );
   const latestShortVolume = shortVolumeRows[0] ?? null;
   const latestFactFiledDate = latestDate(factRows.map((fact) => fact.filed_date));
   const latestActionDate = latestDate(corporateActions.map((action) => action.event_date));
@@ -1978,7 +2033,7 @@ export default function USStockDetailPanel({
       const cachedTodaySnapshot =
         selectedSymbol && timeframeRef.current === "today"
           ? todayIntradaySnapshotRef.current.get(
-              `${usSymbolKey(selectedSymbol)}:${intradaySessionScopeRef.current}:1m`
+              `${usSymbolKey(selectedSymbol)}:${intradaySessionScopeRef.current}:${todayIntervalRef.current}m`
             )
           : undefined;
       setSuccessMessage(null);
@@ -1988,18 +2043,22 @@ export default function USStockDetailPanel({
         applyCachedTodaySnapshot(
           selectedSymbol,
           intradaySessionScopeRef.current,
+          todayIntervalRef.current,
           cachedTodaySnapshot
         );
       } else {
+        headlineQuoteRequestGenerationRef.current += 1;
+        acceptedHeadlineQuoteGenerationRef.current =
+          headlineQuoteRequestGenerationRef.current;
+        headlineQuoteRef.current = null;
         setHeadlineQuote(null);
         setTodayTrend([]);
-        setTodayPreviousClose(null);
-        setTodayPreviousCloseStatus("unknown");
         setTodaySource("unavailable");
         setTodayUpdatedAt(null);
         setTodayIntradayMeta(emptyUsIntradayMeta);
         setTodaySymbol(null);
         setTodaySessionScope(null);
+        setTodayEffectiveInterval(null);
       }
       clearSupplementalData();
 
@@ -2018,11 +2077,22 @@ export default function USStockDetailPanel({
   useEffect(() => {
     if (!selectedSymbol || timeframe !== "today") return;
     const cachedSnapshot = todayIntradaySnapshotRef.current.get(
-      `${usSymbolKey(selectedSymbol)}:${intradaySessionScope}:1m`
+      `${usSymbolKey(selectedSymbol)}:${intradaySessionScope}:${todayInterval}m`
     );
     if (!cachedSnapshot) return;
-    applyCachedTodaySnapshot(selectedSymbol, intradaySessionScope, cachedSnapshot);
-  }, [applyCachedTodaySnapshot, intradaySessionScope, selectedSymbol, timeframe]);
+    applyCachedTodaySnapshot(
+      selectedSymbol,
+      intradaySessionScope,
+      todayInterval,
+      cachedSnapshot
+    );
+  }, [
+    applyCachedTodaySnapshot,
+    intradaySessionScope,
+    selectedSymbol,
+    timeframe,
+    todayInterval,
+  ]);
 
   useEffect(() => {
     if (
@@ -2163,11 +2233,13 @@ export default function USStockDetailPanel({
     async function refreshHeadlineQuote() {
       if (quoteRequestInFlight) return;
       quoteRequestInFlight = true;
+      const quoteGeneration = headlineQuoteRequestGenerationRef.current + 1;
+      headlineQuoteRequestGenerationRef.current = quoteGeneration;
       try {
         const snapshot = await fetchJson<USResolvedQuoteSnapshot>(
           `/api/us-market/quote/${encodeURIComponent(symbol)}`
         );
-        if (!cancelled) setHeadlineQuote(snapshot);
+        if (!cancelled) applyHeadlineQuote(symbol, snapshot, quoteGeneration);
       } catch (error) {
         if (!cancelled) {
           publishDetailDataStatus(
@@ -2198,7 +2270,7 @@ export default function USStockDetailPanel({
       cancelled = true;
       if (quoteTimer !== undefined) window.clearTimeout(quoteTimer);
     };
-  }, [publishDetailDataStatus, selectedSymbol, timeframe]);
+  }, [applyHeadlineQuote, publishDetailDataStatus, selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (!selectedSymbol || timeframe !== "today") return;
@@ -2218,14 +2290,17 @@ export default function USStockDetailPanel({
     async function refreshTodayTrend() {
       if (intradayRequestInFlight) return;
       intradayRequestInFlight = true;
+      const quoteGeneration = headlineQuoteRequestGenerationRef.current + 1;
+      headlineQuoteRequestGenerationRef.current = quoteGeneration;
 
       try {
-        const snapshotKey = `${usSymbolKey(symbol)}:${intradaySessionScope}:1m`;
+        const requestedInterval = `${todayInterval}m` as USProfessionalIntradayTimeframe;
+        const snapshotKey = `${usSymbolKey(symbol)}:${intradaySessionScope}:${requestedInterval}`;
         const cachedSnapshot = todayIntradaySnapshotRef.current.get(snapshotKey);
         const today = await fetchUsIntradayTrend(
           symbol,
           intradaySessionScope,
-          "1m",
+          requestedInterval,
           cachedSnapshot?.revision
         );
 
@@ -2255,9 +2330,9 @@ export default function USStockDetailPanel({
           safeTodayPoints[safeTodayPoints.length - 1] ?? null;
 
         setTodayTrend(safeTodayPoints);
-        if (today.quote_snapshot) setHeadlineQuote(today.quote_snapshot);
-        setTodayPreviousClose(today.previous_close);
-        setTodayPreviousCloseStatus(today.previous_close_status ?? "unknown");
+        if (today.quote_snapshot) {
+          applyHeadlineQuote(symbol, today.quote_snapshot, quoteGeneration);
+        }
         setTodaySource(today.source);
         setTodayUpdatedAt(
           latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
@@ -2265,6 +2340,7 @@ export default function USStockDetailPanel({
         setTodayIntradayMeta(intradayMetaFromResponse(today));
         setTodaySymbol(symbol);
         setTodaySessionScope(intradaySessionScope);
+        setTodayEffectiveInterval(today.effective_interval ?? requestedInterval);
         publishIntradaySourceStatus(symbol, today);
         const marketState = getUsMarketRefreshState();
         if (marketState.isAfterClose) {
@@ -2320,10 +2396,12 @@ export default function USStockDetailPanel({
       clearIntradayTimer();
     };
   }, [
+    applyHeadlineQuote,
     intradaySessionScope,
     publishDetailDataStatus,
     publishIntradaySourceStatus,
     selectedSymbol,
+    todayInterval,
     timeframe,
   ]);
 
@@ -2340,7 +2418,7 @@ export default function USStockDetailPanel({
 
     void fetchJson<USMarketResearchRead>(
       `/api/us-market/research/${encodeURIComponent(symbol)}`,
-      { bars: 260 }
+      { bars: 260, timeframe: researchTimeframe }
     )
       .then((research) => {
         if (cancelled) return;
@@ -2360,6 +2438,7 @@ export default function USStockDetailPanel({
   }, [
     publishDetailDataStatus,
     selectedSymbol,
+    researchTimeframe,
     timeframe,
     todayMatchesSelection,
     visibleMarketResearch,
@@ -3748,6 +3827,8 @@ export default function USStockDetailPanel({
               </div>
             }
             chartData={professionalChartData}
+            indicatorData={professionalIndicatorData}
+            canonicalIndicatorAuthority="backend"
             label={professionalTimeframeLabel}
             timeMode={professionalIsIntraday ? "intraday" : "date"}
             showMovingAverages={chartIndicators.ma}
@@ -3883,7 +3964,12 @@ export default function USStockDetailPanel({
                   ) : null}
                 </div>
               ) : (
-                <div className={`text-sm font-bold ${valueTone(changePct)}`}>
+                <div
+                  data-testid="us-stock-header-change"
+                  data-reference-trade-date={todayPreviousCloseReferenceDate ?? ""}
+                  data-reference-type={currentSessionHeadline.referenceType ?? ""}
+                  className={`text-sm font-bold ${valueTone(changePct)}`}
+                >
                   {formatNumber(change)} / {formatPct(changePct)}
                 </div>
               )}
@@ -4047,28 +4133,39 @@ export default function USStockDetailPanel({
                   />
                 </div>
               ) : (
-                <IntradayTrendChart
-                  points={visibleTodayTrend}
-                  previousClose={visibleTodayPreviousClose}
-                  label={
-                    selectedIndexConfig
-                      ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
-                      : timeframeLabel(t, timeframe)
-                  }
-                  source={visibleTodaySource}
-                  indicators={intradayIndicators}
-                  session={activeIntradaySession}
-                  revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${visibleTodayTrend.length}`}
-                  refreshIntervalMs={US_INTRADAY_REFRESH_MS}
-                  refreshMode="cache_poll"
-                  updatedAt={visibleTodayUpdatedAt}
-                  priceLimitEnabled={false}
-                />
+                <div
+                  data-testid="us-today-chart-reference"
+                  data-reference-price={todayHistoricalReferencePrice ?? ""}
+                  data-reference-trade-date={todayPreviousCloseReferenceDate ?? ""}
+                >
+                  <IntradayTrendChart
+                    points={visibleTodayTrend}
+                    previousClose={todayHistoricalReferencePrice}
+                    label={
+                      selectedIndexConfig
+                        ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
+                        : timeframeLabel(t, timeframe)
+                    }
+                    source={visibleTodaySource}
+                    indicators={intradayIndicators}
+                    session={activeIntradaySession}
+                    revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${visibleTodayTrend.length}`}
+                    refreshIntervalMs={US_INTRADAY_REFRESH_MS}
+                    refreshMode="cache_poll"
+                    updatedAt={visibleTodayUpdatedAt}
+                    priceLimitEnabled={false}
+                    canonicalIndicatorAuthority="backend"
+                    interval={todayInterval}
+                    onIntervalChange={setTodayInterval}
+                  />
+                </div>
               )}
             </>
           ) : chartData.length > 0 ? (
             <StockKLineChart
               chartData={chartData}
+              indicatorData={technicalIndicatorSeries}
+              canonicalIndicatorAuthority="backend"
               label={selectedDisplaySymbol}
               indicators={chartIndicators}
               indicatorParameters={indicatorParameters}

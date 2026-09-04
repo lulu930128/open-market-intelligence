@@ -48,6 +48,7 @@ export type MarketCalendarMarketStatus = {
   reason: string;
   holiday_name: string | null;
   previous_trading_day: string;
+  previous_completed_trading_day?: string | null;
   next_trading_day: string;
   session: MarketCalendarSession;
   presentation_session?: MarketCalendarPresentationSession | null;

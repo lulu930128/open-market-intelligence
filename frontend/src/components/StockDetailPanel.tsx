@@ -981,12 +981,23 @@ export default function StockDetailPanel({
       : null;
   const chartPreviousClose = chartOverlayPreviousClose ?? previousChart?.close ?? null;
   const canUseFocusedKLine = currentChartReady && chartDataForTimeframe.length > 0;
+  const marketIndicesById = useMemo(() => {
+    return new Map(
+      (marketIndexSummary?.indices ?? []).map((index) => [index.index_id, index])
+    );
+  }, [marketIndexSummary]);
+  const taiexIndex = marketIndicesById.get("TAIEX") ?? null;
+  const tpexIndex = marketIndicesById.get("TPEX") ?? null;
+  const selectedIndexSnapshot =
+    indexProduct?.indexId === "TPEX" ? tpexIndex : taiexIndex;
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
   const selectedQuoteDepth = quoteDepth?.stock_id === stockId ? quoteDepth : null;
   const resolvedTodayCurrentObservation =
     todayCurrentObservation ?? quoteDepthCurrentObservation(selectedQuoteDepth);
   const resolvedTodayPreviousClose =
-    todayPreviousClose ?? selectedQuoteDepth?.previous_close ?? null;
+    todayPreviousClose ??
+    selectedQuoteDepth?.previous_close ??
+    (isIndexProduct ? selectedIndexSnapshot?.previous_close ?? null : null);
   const resolvedTodayPriceDiagnostics =
     todayPriceDiagnostics ?? quoteDepthPriceDiagnostics(selectedQuoteDepth);
   const resolvedTodaySource =
@@ -1142,15 +1153,6 @@ export default function StockDetailPanel({
     chartPreviousClose !== undefined
       ? latestChart.close - chartPreviousClose
       : null;
-  const marketIndicesById = useMemo(() => {
-    return new Map(
-      (marketIndexSummary?.indices ?? []).map((index) => [index.index_id, index])
-    );
-  }, [marketIndexSummary]);
-  const taiexIndex = marketIndicesById.get("TAIEX") ?? null;
-  const tpexIndex = marketIndicesById.get("TPEX") ?? null;
-  const selectedIndexSnapshot =
-    indexProduct?.indexId === "TPEX" ? tpexIndex : taiexIndex;
   const canonicalIndexHeadline =
     isIndexProduct && selectedIndexSnapshot
       ? {

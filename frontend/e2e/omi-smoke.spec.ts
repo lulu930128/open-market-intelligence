@@ -750,7 +750,7 @@ function taiwanCanonicalBarSeriesResponse(
   };
 }
 
-function taiwanChartBundleResponse(
+function taiwanChartSeriesResponse(
   instrumentId: string,
   interval: string,
   options: {
@@ -760,76 +760,28 @@ function taiwanChartBundleResponse(
     snapshot?: TaiwanSnapshotFixture;
   } = {}
 ) {
-  const bars = taiwanCanonicalBarSeriesResponse(
+  const series = taiwanCanonicalBarSeriesResponse(
     instrumentId,
     interval,
     options.points,
     options.snapshot
   );
-  const intraday = intradayResponse(instrumentId);
   const isIntraday = interval.endsWith("m") || interval.endsWith("h");
-  const isIndex = instrumentId === "TAIEX" || instrumentId === "TPEX";
-  const sessionScope =
-    options.sessionScope ?? (isIntraday ? "current_session" : "history");
-  const presentationTradeDate =
-    sessionScope === "current_session"
-      ? bars.bars[0]?.start_at.slice(0, 10) ?? null
-      : null;
+  const technicalEligibility = new Map(
+    series.bar_states.map((state) => [state.start_at, state.technical_eligible])
+  );
 
   return {
-    contract_version: "tw.chart.bundle.v1",
-    bars,
-    technical: {
-      contract_version: "tw.technical.series.v2",
-      instrument: bars.instrument,
-      interval,
-      bar_series_fingerprint: bars.identity.series_fingerprint,
-      bar_lineage_digest: bars.identity.lineage_digest,
-      bar_state_digest: bars.identity.state_digest,
-      bar_series_revision: bars.identity.series_revision,
-      bar_snapshot_revision:
-        bars.current_session_coverage?.snapshot_revision ?? null,
-      calculation_bar_count: bars.bars.length,
-      response_point_count: 0,
-      algorithm_version: "tw.technical.indicators.v4",
-      parameter_contract: {},
-      status: "warming_up",
-      warmup: {},
-      points: [],
-      structures: {},
-      signals: {},
-      relative: {},
-      technical_revision: "5".repeat(64),
-      limitations: [],
-      warnings: [],
-    },
-    series_fingerprint: bars.identity.series_fingerprint,
-    lineage_digest: bars.identity.lineage_digest,
-    state_digest: bars.identity.state_digest,
-    series_revision: bars.identity.series_revision,
-    session_scope: sessionScope,
-    presentation_trade_date: presentationTradeDate,
-    quote_side:
-      options.quoteSide !== undefined
-        ? options.quoteSide
-        : isIntraday && !isIndex
-          ? {
-              current_observation: intraday.current_observation,
-              previous_close: intraday.previous_close,
-              price_diagnostics: {
-                current_trade_available: intraday.current_trade_available,
-                current_trade_unavailable_reason:
-                  intraday.current_trade_unavailable_reason,
-                latest_actual_trade_time: intraday.latest_actual_trade_time,
-                latest_actual_trade_price: intraday.latest_actual_trade_price,
-                lag_seconds: intraday.lag_seconds,
-              },
-              capabilities: intraday.capabilities,
-              source: intraday.source,
-              trade_date: intraday.trade_date,
-              updated_at: intraday.latest_history_time,
-            }
-          : null,
+    ...series,
+    contract_version: "tw.bar.chart_series_read.v1",
+    bars: series.bars.map((bar) => ({
+      ...bar,
+      technical_eligible: technicalEligibility.get(bar.start_at) !== false,
+    })),
+    presentation_events: [],
+    current_session_coverage: isIntraday
+      ? series.current_session_coverage
+      : null,
   };
 }
 
@@ -1258,6 +1210,16 @@ function quoteDepthResponse(stockId: string) {
     quote_time: "2026-06-15T09:30:00+08:00",
     fetched_at: "2026-06-15T09:30:01+08:00",
     last_price: lastPrice,
+    last_trade_price: lastPrice,
+    actual_trade_occurred: true,
+    actual_trade_price_as_of: "2026-06-15T09:30:00+08:00",
+    headline_price: lastPrice,
+    headline_event_time: "2026-06-15T09:30:00+08:00",
+    headline_source: "twse_mis_quote_depth",
+    headline_decision_usable: true,
+    observation_semantics: "actual_trade",
+    delivery_status: "live",
+    fallback_used: false,
     previous_close: previousClose,
     open_price: previousClose,
     high_price: lastPrice + tick,
@@ -2184,6 +2146,76 @@ function usIntradayResponse(symbol: string) {
   };
 }
 
+function usMarketIndicesResponse() {
+  const definitions = [
+    ["^GSPC", "S&P 500", 948, 940],
+    ["^DJI", "Dow Jones Industrial Average", 48_100, 47_900],
+    ["^IXIC", "Nasdaq Composite", 23_400, 23_200],
+    ["^NDX", "Nasdaq-100", 21_500, 21_300],
+    ["^SOX", "PHLX Semiconductor Sector", 5_800, 5_700],
+    ["^VIX", "CBOE Volatility Index", 15, 16],
+  ] as const;
+  const items = definitions.map(([symbol, label, value, previousClose]) => {
+    const change = value - previousClose;
+    return {
+      contract_version: "omi.market.us_index_item.v1",
+      canonical_symbol: symbol,
+      label,
+      instrument_type: "index",
+      value,
+      previous_close: previousClose,
+      change,
+      change_pct: (change / previousClose) * 100,
+      trade_date: "2026-06-15",
+      event_at: "2026-06-15T09:30:00-04:00",
+      observation_kind: "current_session_trade",
+      comparison_purpose: "headline_change",
+      reference_trade_date: "2026-06-12",
+      reference_kind: "completed_daily",
+      selected_provider: "playwright.fixture",
+      selected_source: "playwright.fixture.quote",
+      selection_reason: "CURRENT_SESSION_SELECTED",
+      fallback_used: false,
+      freshness_status: "live",
+      provider_snapshot_freshness: "fresh",
+      trade_recency: "current",
+      current_for_requested_session: true,
+      facts_usable: true,
+      decision_usable: true,
+      truth_revision: symbol.replace("^", "").padEnd(64, "0"),
+      observation_id: `playwright:${symbol}`,
+      limitations: [],
+    };
+  });
+
+  return {
+    contract_version: "omi.market.us_indices.v1",
+    kind: "us_market_indices",
+    market: "US",
+    status: "ready",
+    evaluated_at: "2026-06-15T13:30:01Z",
+    as_of: "2026-06-15T09:30:00-04:00",
+    oldest_as_of: "2026-06-15T09:30:00-04:00",
+    newest_as_of: "2026-06-15T09:30:00-04:00",
+    mixed_as_of: false,
+    mixed_trade_dates: false,
+    market_session: "regular",
+    current_for_requested_session: true,
+    is_current: true,
+    is_complete: true,
+    coverage_status: "complete",
+    count: 6,
+    expected_count: 6,
+    facts_usable: true,
+    decision_usable: true,
+    observation_mix: ["current_session_trade"],
+    items,
+    source: "app.us_market.market_indices",
+    missing: [],
+    warnings: [],
+  };
+}
+
 function regionalOhlcResponse(symbol: string) {
   return {
     symbol,
@@ -2472,7 +2504,7 @@ type MockOmiApiOptions = {
     | null;
   marketTapeResponder?: (context: {
     market: "tw" | "us" | "jp" | "kr";
-    kind: "summary" | "ohlc" | "quote" | "intraday" | "breadth";
+    kind: "summary" | "indices" | "ohlc" | "quote" | "intraday" | "breadth";
     target: string;
     requestNumber: number;
     url: URL;
@@ -2524,7 +2556,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     route: Route,
     url: URL,
     market: "tw" | "us" | "jp" | "kr",
-    kind: "summary" | "ohlc" | "quote" | "intraday" | "breadth",
+    kind: "summary" | "indices" | "ohlc" | "quote" | "intraday" | "breadth",
     target: string
   ) {
     const key = `${market}:${kind}:${target}`;
@@ -2594,6 +2626,14 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 
     if (path.endsWith("/system/health")) {
       await fulfillJson(route, { status: "ok" });
+      return;
+    }
+
+    if (path.includes("/us-market/active-equity-viewer")) {
+      await fulfillJson(route, {
+        contract_version: "omi.us.active_equity_viewer.v1",
+        status: method === "DELETE" ? "released" : "active",
+      });
       return;
     }
 
@@ -3084,6 +3124,12 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (path.endsWith("/us-market/indices")) {
+      if (await tryFulfillMarketTape(route, url, "us", "indices", "all")) return;
+      await fulfillJson(route, usMarketIndicesResponse());
+      return;
+    }
+
     if (/\/us-market\/ohlc\//.test(path)) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
       if (await tryFulfillMarketTape(route, url, "us", "ohlc", symbol)) return;
@@ -3173,12 +3219,12 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
-    const taiwanChartMatch = path.match(/\/market\/chart\/([^/]+)$/);
+    const taiwanChartMatch = path.match(/\/market\/bars\/([^/]+)\/chart$/);
     if (taiwanChartMatch) {
       const instrumentId = decodeURIComponent(taiwanChartMatch[1]);
       await fulfillJson(
         route,
-        taiwanChartBundleResponse(
+        taiwanChartSeriesResponse(
           instrumentId,
           url.searchParams.get("interval") ?? "1d"
         )
@@ -4215,7 +4261,7 @@ test.describe("OMI dashboard smoke", () => {
     expect(djiOhlc?.url.searchParams.get("provider")).toBeNull();
     expect(
       tapeCalls.some(
-        (call) => call.market === "us" && call.kind === "quote" && call.target === "^DJI"
+        (call) => call.market === "us" && call.kind === "indices" && call.target === "all"
       )
     ).toBe(true);
   });
@@ -4440,11 +4486,11 @@ test.describe("OMI dashboard smoke", () => {
   });
 
   test("US market tape polls live data without refetching its daily reference", async ({ page }) => {
-    await page.clock.setFixedTime(new Date("2026-07-14T15:00:00Z"));
+    await page.clock.setFixedTime(new Date("2026-06-15T14:00:00Z"));
     const tapeRequests: string[] = [];
     page.on("request", (request) => {
       const path = decodeURIComponent(new URL(request.url()).pathname);
-      if (path.endsWith("/us-market/ohlc/^GSPC") || path.endsWith("/us-market/quote/^GSPC")) {
+      if (path.endsWith("/us-market/ohlc/^GSPC") || path.endsWith("/us-market/indices")) {
         tapeRequests.push(path);
       }
     });
@@ -4460,7 +4506,7 @@ test.describe("OMI dashboard smoke", () => {
       path.endsWith("/us-market/ohlc/^GSPC")
     ).length;
     const initialLiveCount = tapeRequests.filter((path) =>
-      path.endsWith("/us-market/quote/^GSPC")
+      path.endsWith("/us-market/indices")
     ).length;
     await page.waitForTimeout(5_500);
 
@@ -4468,8 +4514,189 @@ test.describe("OMI dashboard smoke", () => {
       tapeRequests.filter((path) => path.endsWith("/us-market/ohlc/^GSPC")).length
     ).toBe(initialDailyCount);
     expect(
-      tapeRequests.filter((path) => path.endsWith("/us-market/quote/^GSPC")).length
+      tapeRequests.filter((path) => path.endsWith("/us-market/indices")).length
     ).toBeGreaterThan(initialLiveCount);
+  });
+
+  test("US market tape renders canonical D versus D-1 headline metrics", async ({ page }) => {
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/indices")) {
+          const response = usMarketIndicesResponse();
+          return {
+            body: {
+              ...response,
+              items: response.items.map((item) =>
+                item.canonical_symbol === "^GSPC"
+                  ? {
+                      ...item,
+                      value: 200,
+                      previous_close: 190,
+                      change: 10,
+                      change_pct: (10 / 190) * 100,
+                      trade_date: "2026-09-04",
+                      reference_trade_date: "2026-09-03",
+                      event_at: "2026-09-04T10:30:00-04:00",
+                      truth_revision: "a".repeat(64),
+                    }
+                  : item
+              ),
+            },
+          };
+        }
+        if (!decodeURIComponent(path).endsWith("/us-market/ohlc/^GSPC")) return null;
+        return {
+          body: {
+            ...usOhlcResponse("^GSPC"),
+            point_count: 2,
+            points: [
+              {
+                time: "2026-09-02",
+                open: 180,
+                high: 180,
+                low: 180,
+                close: 180,
+                volume: null,
+              },
+              {
+                time: "2026-09-03",
+                open: 190,
+                high: 190,
+                low: 190,
+                close: 190,
+                volume: null,
+              },
+            ],
+          },
+        };
+      },
+    });
+    await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
+
+    const tape = page.getByTestId("market-tape-us");
+    await expect(tape).toHaveAttribute("data-load-state", "success");
+    const sp500 = tape.locator('[data-symbol="^GSPC"]');
+    await expect(sp500).toContainText("200");
+    await expect(sp500).toContainText("+10 / +5.26%");
+    await expect(sp500).toHaveAttribute("data-reference-trade-date", "2026-09-03");
+    await expect(sp500).toHaveAttribute("data-truth-revision", "a".repeat(64));
+    await expect(sp500).not.toContainText("+20");
+  });
+
+  test("US Today Header and chart share the canonical D-1 reference", async ({ page }) => {
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/quote/AAPL")) {
+          const quote = usQuoteResponse("AAPL");
+          return {
+            body: {
+              ...quote,
+              selected_event_at: "2026-09-04T10:30:00-04:00",
+              quote: {
+                ...quote.quote,
+                trade_date: "2026-09-04",
+                last_trade_price: "200",
+                previous_close: "190",
+                event_at: "2026-09-04T10:30:00-04:00",
+              },
+            },
+          };
+        }
+        if (path.endsWith("/us-market/intraday/AAPL")) {
+          return {
+            body: {
+              ...usIntradayResponse("AAPL"),
+              previous_close: 190,
+              previous_close_trade_date: "2026-09-03",
+              previous_close_status: "current",
+              change_reference_price: 190,
+              change_reference_trade_date: "2026-09-03",
+              change_reference_type: "headline_change",
+              change_reference_status: "current",
+              current_observation: {
+                value: 200,
+                observed_at: "2026-09-04T10:30:00-04:00",
+                confirmed_at: "2026-09-04T14:30:01Z",
+                price_semantics: "resolved_quote_last_trade",
+                provider: "playwright.fixture",
+                source: "playwright.fixture.quote",
+                freshness_status: "live",
+                decision_usable: true,
+                change_reference_price: 190,
+                change_reference_trade_date: "2026-09-03",
+                change_reference_type: "headline_change",
+                change_reference_status: "current",
+              },
+            },
+          };
+        }
+        if (!path.endsWith("/us-market/ohlc/AAPL")) return null;
+        return {
+          body: {
+            ...usOhlcResponse("AAPL"),
+            point_count: 2,
+            points: [
+              {
+                time: "2026-09-02",
+                open: 180,
+                high: 180,
+                low: 180,
+                close: 180,
+                volume: 1_000,
+              },
+              {
+                time: "2026-09-03",
+                open: 190,
+                high: 190,
+                low: 190,
+                close: 190,
+                volume: 1_100,
+              },
+            ],
+            previous_close: 180,
+            previous_close_trade_date: "2026-09-02",
+            previous_close_status: "current",
+          },
+        };
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const detailPanel = page.getByTestId("us-stock-kline-panel");
+    const todayTimeframe = detailPanel.getByRole("button", { name: "今日", exact: true });
+    await expect(async () => {
+      await todayTimeframe.click();
+      await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/, {
+        timeout: 750,
+      });
+    }).toPass({ timeout: 5_000 });
+
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("200");
+    const headlineChange = page.getByTestId("us-stock-header-change");
+    await expect(headlineChange).toContainText("10 / +5.26%");
+    await expect(headlineChange).toHaveAttribute(
+      "data-reference-trade-date",
+      "2026-09-03"
+    );
+    const chartReference = page.getByTestId("us-today-chart-reference");
+    await expect(chartReference).toHaveAttribute("data-reference-price", "190");
+    await expect(chartReference).toHaveAttribute(
+      "data-reference-trade-date",
+      "2026-09-03"
+    );
+    await expect(detailPanel).not.toContainText("20 / +11.11%");
+
+    await detailPanel.getByRole("button", { name: "日K", exact: true }).click();
+    await expect(page.getByTestId("us-stock-header-change")).toContainText(
+      "10 / +5.26%"
+    );
   });
 
   test("US Today keeps a missing current quote distinct from the previous close", async ({
@@ -5124,6 +5351,14 @@ test.describe("OMI dashboard smoke", () => {
     });
     await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
 
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    const idleOvernightDisclosure = page.getByTestId("tw-overnight-impact-disclosure");
+    await expect(idleOvernightDisclosure).toContainText("Overnight");
+    await idleOvernightDisclosure.locator(":scope > summary").click();
+
     const crossMarket = page.getByTestId("cross-market-context-strip");
     const crossMarketToggle = page.getByTestId("cross-market-context-toggle");
     const crossMarketDetails = page.getByTestId("cross-market-context-details");
@@ -5200,7 +5435,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(fxFlow).toContainText("不代表台幣升貶單向造成外資買賣");
   });
 
-  test("Taiwan overnight context executes one bounded refresh job then rereads", async ({
+  test("Taiwan overnight context reports refresh guidance without mutating the read path", async ({
     page,
   }) => {
     const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
@@ -5247,40 +5482,21 @@ test.describe("OMI dashboard smoke", () => {
       freshness: {},
       evidence_passport: {},
     });
-    const completedJob = {
-      id: 91,
-      job_type: "cross_market.context_refresh",
-      status: "success",
-      target: "2330",
-      progress_current: 1,
-      progress_total: 1,
-      message: "Bounded cross-market refresh complete.",
-      error_message: null,
-      request: {},
-      result: { status: "success", success_count: 1, failed_count: 0 },
-      created_at: "2026-08-10T12:00:00Z",
-      started_at: "2026-08-10T12:00:01Z",
-      ended_at: "2026-08-10T12:00:02Z",
-      updated_at: "2026-08-10T12:00:02Z",
-    };
-
     await mockOmiApi(page, {
       apiRequests,
-      apiResponder: ({ method, path, requestNumber }) => {
+      apiResponder: ({ method, path }) => {
         if (method === "GET" && path.endsWith("/market/overnight-impact/2330")) {
-          return { body: reportBody(requestNumber === 1) };
-        }
-        if (method === "POST" && path.endsWith("/market/cross-market/refresh")) {
-          return { body: completedJob };
-        }
-        if (method === "GET" && path.endsWith("/jobs/91")) {
-          return { body: completedJob };
+          return { body: reportBody(true) };
         }
         return null;
       },
     });
 
     await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+    await page
+      .getByTestId("tw-overnight-impact-disclosure")
+      .locator(":scope > summary")
+      .click();
 
     await expect.poll(
       () =>
@@ -5289,16 +5505,13 @@ test.describe("OMI dashboard smoke", () => {
             request.method === "GET" &&
             request.path.endsWith("/market/overnight-impact/2330")
         ).length
-    ).toBe(2);
+    ).toBe(1);
     const refreshRequests = apiRequests.filter(
       (request) =>
         request.method === "POST" &&
         request.path.endsWith("/market/cross-market/refresh")
     );
-    expect(refreshRequests).toHaveLength(1);
-    expect(refreshRequests[0]?.search).toContain("stock_ids=2330");
-    expect(refreshRequests[0]?.search).toContain("max_symbols=1");
-    expect(refreshRequests[0]?.search).toContain("max_runtime_seconds=120");
+    expect(refreshRequests).toHaveLength(0);
   });
 
   test("Taiwan overnight context renders noncausal proxy residual", async ({ page }) => {
@@ -5435,6 +5648,10 @@ test.describe("OMI dashboard smoke", () => {
           : null,
     });
     await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+    await page
+      .getByTestId("tw-overnight-impact-disclosure")
+      .locator(":scope > summary")
+      .click();
 
     const context = page.getByTestId("cross-market-context-strip");
     const toggle = page.getByTestId("cross-market-context-toggle");
@@ -5530,6 +5747,7 @@ test.describe("OMI dashboard smoke", () => {
       short_label: "TPEX",
       market: "TPEX",
       symbol: "^TWOII",
+      previous_close: 100,
       breadth: {
         advance_count: 4,
         decline_count: 3,
@@ -5546,14 +5764,14 @@ test.describe("OMI dashboard smoke", () => {
         if (path.endsWith("/market/indices/TPEX/ohlc")) {
           return { body: ohlcResponse("TPEX") };
         }
-        if (path.endsWith("/market/chart/TPEX")) {
+        if (path.endsWith("/market/bars/TPEX/chart")) {
           if ((url.searchParams.get("interval") ?? "1m").endsWith("m")) {
             requestedChartSessionScopes.push(
               url.searchParams.get("session_scope")
             );
           }
           return {
-            body: taiwanChartBundleResponse(
+            body: taiwanChartSeriesResponse(
               "TPEX",
               url.searchParams.get("interval") ?? "1m",
               {
@@ -5717,7 +5935,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(chart).toContainText("13:30");
     await expect(chart).not.toContainText("2026/06/14");
     await expect(chart).not.toContainText("999");
-    await expect(chart).toContainText("櫃買 5 秒走勢 + MIS 收盤確認");
+    await expect(chart).toContainText("盤中每 5 秒更新");
     await expect(page.getByTestId("index-detail-open")).toContainText("101");
     await expect(page.getByTestId("index-detail-open")).not.toContainText("100");
     await expect(page.getByTestId("professional-chart-panel")).toHaveCount(0);
@@ -5739,9 +5957,9 @@ test.describe("OMI dashboard smoke", () => {
         if (path.endsWith("/market/indices/TPEX/ohlc")) {
           return { body: ohlcResponse("TPEX") };
         }
-        if (path.endsWith("/market/chart/TPEX")) {
+        if (path.endsWith("/market/bars/TPEX/chart")) {
           return {
-            body: taiwanChartBundleResponse(
+            body: taiwanChartSeriesResponse(
               "TPEX",
               url.searchParams.get("interval") ?? "1m",
               {
@@ -5876,9 +6094,9 @@ test.describe("OMI dashboard smoke", () => {
       taiwanWatchlistItems: seededTaiwanWatchlistItems(),
       taiwanRankingRows: seededTaiwanRankingRows(),
       apiResponder: ({ path, url }) => {
-        if (path.endsWith("/market/chart/2330")) {
+        if (path.endsWith("/market/bars/2330/chart")) {
           return {
-            body: taiwanChartBundleResponse(
+            body: taiwanChartSeriesResponse(
               "2330",
               url.searchParams.get("interval") ?? "1d"
             ),
@@ -6006,15 +6224,15 @@ test.describe("OMI dashboard smoke", () => {
     await mockOmiApi(page, {
       apiRequests,
       apiResponder: ({ path, url }) => {
-        if (!path.endsWith("/market/chart/2330")) return null;
+        if (!path.endsWith("/market/bars/2330/chart")) return null;
         const interval = url.searchParams.get("interval") ?? "1d";
         if (interval === "1d") {
-          return { body: taiwanChartBundleResponse("2330", interval) };
+          return { body: taiwanChartSeriesResponse("2330", interval) };
         }
         intradayRequestCount += 1;
         if (intradayRequestCount === 1) {
           return {
-            body: taiwanChartBundleResponse("2330", interval, {
+            body: taiwanChartSeriesResponse("2330", interval, {
               points: tailPoints,
               snapshot: {
                 phase: "warming",
@@ -6030,7 +6248,7 @@ test.describe("OMI dashboard smoke", () => {
         }
         if (url.searchParams.get("limit") === "8") {
           return {
-            body: taiwanChartBundleResponse("2330", interval, {
+            body: taiwanChartSeriesResponse("2330", interval, {
               points: tailPoints,
               snapshot: {
                 phase: "ready",
@@ -6045,7 +6263,7 @@ test.describe("OMI dashboard smoke", () => {
           };
         }
         return {
-          body: taiwanChartBundleResponse("2330", interval, {
+          body: taiwanChartSeriesResponse("2330", interval, {
             points: fullPoints,
             snapshot: {
               phase: "ready",
@@ -6075,7 +6293,6 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByTestId("intraday-trend-empty")).toContainText(
       "正在準備今日完整走勢"
     );
-
     await expect(surface).toHaveAttribute("data-snapshot-phase", "ready", {
       timeout: 10_000,
     });
@@ -6089,13 +6306,12 @@ test.describe("OMI dashboard smoke", () => {
       apiRequests
         .filter(
           (request) =>
-            request.path.endsWith("/market/chart/2330") &&
+            request.path.endsWith("/market/bars/2330/chart") &&
             new URLSearchParams(request.search).get("interval") === "1m"
         )
         .map((request) => new URLSearchParams(request.search).get("limit"));
     expect(intradayLimits().slice(0, 3)).toEqual(["5000", "8", "5000"]);
-    await expect.poll(() => intradayLimits().length, { timeout: 10_000 }).toBeGreaterThanOrEqual(4);
-    expect(intradayLimits().slice(0, 4)).toEqual(["5000", "8", "5000", "8"]);
+    expect(intradayLimits()).toHaveLength(3);
   });
 
   test("Taiwan quote depth replays only persisted auction snapshots", async ({ page }) => {
@@ -6244,7 +6460,6 @@ test.describe("OMI dashboard smoke", () => {
     });
 
     const panel = page.getByTestId("quote-depth-panel");
-    await panel.scrollIntoViewIfNeeded();
     await expect(page.getByTestId("quote-depth-mode-live")).toHaveText("即時成交");
     await expect(page.getByTestId("quote-depth-mode-replay")).toHaveText("試撮");
     await expect(page.getByTestId("quote-recent-trades-status")).toHaveText("即時");
@@ -6759,6 +6974,19 @@ test.describe("OMI dashboard smoke", () => {
     await expect(technicalContext).not.toHaveAttribute("open", "");
     await expect(technicalContext).not.toBeVisible();
 
+    await planDisclosure.locator("summary").click();
+    await overnightDisclosure.locator("summary").click();
+    await expect(plan).toBeVisible();
+    await expect(page.getByTestId("tw-overnight-impact")).toBeVisible();
+    if (await planDisclosure.evaluate((node) => (node as HTMLDetailsElement).open)) {
+      await planDisclosure.locator("summary").click();
+    }
+    await expect(planDisclosure).not.toHaveAttribute("open", "");
+    if (await overnightDisclosure.evaluate((node) => (node as HTMLDetailsElement).open)) {
+      await overnightDisclosure.locator("summary").click();
+    }
+    await expect(overnightDisclosure).not.toHaveAttribute("open", "");
+
     await ladder.locator("summary").click();
     await expect(ladder).toHaveAttribute("open", "");
     await expect(ladder.locator("[data-level-key]").first()).toBeVisible();
@@ -7050,17 +7278,13 @@ test.describe("OMI dashboard smoke", () => {
       "風險：距20日低 -6.88%"
     );
     await expect(page.getByTestId("tw-signal-chip-institutional")).toContainText(
-      "籌碼：單日 +434張"
+      "籌碼：單日 -165張"
     );
     const marginSignal = page.getByTestId("tw-signal-chip-margin");
-    await expect(marginSignal).toContainText("融資：餘額變化 -172");
+    await expect(marginSignal).toContainText("融資：餘額變化");
     await expect(marginSignal).toHaveClass(/omi-signal-chip-neutral/);
-    await expect(page.getByTestId("tw-signal-chip-revenue")).toContainText(
-      "營收：YoY +28.14%"
-    );
-    await expect(page.getByTestId("tw-signal-chip-overnight")).toContainText(
-      "隔夜：隔夜中性 -0.10%"
-    );
+    await expect(page.getByTestId("tw-signal-chip-revenue")).toHaveCount(0);
+    await expect(page.getByTestId("tw-signal-chip-overnight")).toHaveCount(0);
     await expect(page.getByTestId("tw-signal-chip-market-relative")).toHaveCount(0);
 
     const trendEvidence = page.getByTestId("tw-technical-evidence-trend");
@@ -7082,17 +7306,34 @@ test.describe("OMI dashboard smoke", () => {
     await expect(technicalContext).not.toHaveAttribute("open", "");
     await expect(institutionalTab).toHaveClass(/omi-data-tab-active/);
     await expect(institutionalTab).toBeFocused();
+    await expect(page.getByTestId("tw-signal-chip-institutional")).toContainText(
+      "籌碼：單日 +434張"
+    );
 
     const chipTab = dataPanel.locator('[data-data-tab="chips"]');
     await page.getByTestId("tw-signal-chip-margin").click();
     await expect(chipTab).toHaveClass(/omi-data-tab-active/);
     await expect(chipTab).toBeFocused();
+    await expect(page.getByTestId("tw-signal-chip-margin")).toContainText(
+      "融資：餘額變化 -172"
+    );
 
     const revenueTab = dataPanel.locator('[data-data-tab="revenue"]');
+    await revenueTab.click();
+    await expect(page.getByTestId("tw-signal-chip-revenue")).toContainText(
+      "營收：YoY +28.14%"
+    );
     await page.getByTestId("tw-signal-chip-revenue").click();
     await expect(revenueTab).toHaveClass(/omi-data-tab-active/);
     await expect(revenueTab).toBeFocused();
 
+    await page
+      .getByTestId("tw-overnight-impact-disclosure")
+      .locator(":scope > summary")
+      .click();
+    await expect(page.getByTestId("tw-signal-chip-overnight")).toContainText(
+      "隔夜：隔夜中性 -0.10%"
+    );
     await page.getByTestId("tw-signal-chip-overnight").click();
     await expect(technicalContext).toHaveAttribute("open", "");
     await expect(technicalContext).toContainText("法人籌碼");
@@ -7570,10 +7811,10 @@ test.describe("OMI dashboard smoke", () => {
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await mockOmiApi(page, {
       apiResponder: ({ path, url }) => {
-        if (path.endsWith("/market/chart/2330")) {
+        if (path.endsWith("/market/bars/2330/chart")) {
           const interval = url.searchParams.get("interval") ?? "1d";
           return {
-            body: taiwanChartBundleResponse("2330", interval, {
+            body: taiwanChartSeriesResponse("2330", interval, {
               points: interval === "1d" ? duplicateDailyPoints : intradayPoints,
             }),
           };
@@ -7655,9 +7896,9 @@ test.describe("OMI dashboard smoke", () => {
 
     await mockOmiApi(page, {
       apiResponder: ({ method, path, url }) => {
-        if (method === "GET" && path.endsWith("/market/chart/2330")) {
+        if (method === "GET" && path.endsWith("/market/bars/2330/chart")) {
           return {
-            body: taiwanChartBundleResponse(
+            body: taiwanChartSeriesResponse(
               "2330",
               url.searchParams.get("interval") ?? "1d",
               { points: backfillRequested ? fullOhlc.points : initialPoints }
@@ -8126,14 +8367,11 @@ test.describe("OMI dashboard smoke", () => {
           request.method === "POST" &&
           /\/wl\/groups\/7\/refresh-latest$/.test(request.path)
       );
-    await expect.poll(() => refreshRequests().length).toBe(1);
-    const refreshParams = new URLSearchParams(refreshRequests()[0].search);
-    expect(refreshParams.get("include_today")).toBe("false");
-    expect(refreshParams.get("include_children")).toBe("true");
-    expect(refreshParams.get("enabled_only")).toBe("true");
+    await page.waitForTimeout(250);
+    expect(refreshRequests()).toHaveLength(0);
   });
 
-  test("Taiwan ranking refreshes once when the daily price release becomes ready", async ({
+  test("Taiwan ranking observes daily price release without implicit refresh", async ({
     page,
   }) => {
     const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
@@ -8177,9 +8415,7 @@ test.describe("OMI dashboard smoke", () => {
     dailyPriceReleased = true;
     await page.clock.runFor(61_000);
 
-    await expect.poll(() => refreshRequests().length).toBe(1);
-    const refreshParams = new URLSearchParams(refreshRequests()[0].search);
-    expect(refreshParams.get("include_today")).toBe("true");
+    expect(refreshRequests()).toHaveLength(0);
   });
 
   test("Taiwan detail reads do not trigger implicit backfill or companion reloads", async ({
@@ -8194,10 +8430,10 @@ test.describe("OMI dashboard smoke", () => {
       taiwanWatchlistItems: seededTaiwanWatchlistItems(),
       taiwanRankingRows: seededTaiwanRankingRows(),
       apiResponder: ({ method, path, url }) => {
-        if (path.endsWith("/market/chart/2330")) {
+        if (path.endsWith("/market/bars/2330/chart")) {
           const response = stockOhlcResponse("2330");
           return {
-            body: taiwanChartBundleResponse(
+            body: taiwanChartSeriesResponse(
               "2330",
               url.searchParams.get("interval") ?? "1d",
               {

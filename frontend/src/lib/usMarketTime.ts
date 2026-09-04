@@ -129,6 +129,7 @@ export function getUsMarketRefreshState(now = new Date()) {
 
     return {
       dateKey,
+      calendarAuthoritative: true,
       sessionPhase: calendarStatus.phase,
       isPollingWindow: calendarStatus.session.is_polling_window,
       isExtendedPollingWindow: Boolean(calendarStatus.session.is_extended_polling_window),
@@ -161,7 +162,6 @@ export function getUsMarketRefreshState(now = new Date()) {
   const isPreMarketWindow = isTradingDay && nowMs >= preMarketOpenMs && nowMs < openMs;
   const isAfterHoursWindow = isTradingDay && nowMs >= closeMs && nowMs < afterHoursCloseMs;
   const isExtendedPollingWindow = isPreMarketWindow || isAfterHoursWindow;
-  const isAfterClose = isTradingDay && nowMs >= closeMs;
   const nextPollingStartMs = isTradingDay && nowMs < preMarketOpenMs ? preMarketOpenMs : nextOpenMs;
   const sessionPhase = !isTradingDay
     ? "market_closed"
@@ -177,11 +177,14 @@ export function getUsMarketRefreshState(now = new Date()) {
 
   return {
     dateKey,
+    calendarAuthoritative: false,
     sessionPhase,
-    isPollingWindow,
-    isExtendedPollingWindow,
-    isLiveWindow: isPollingWindow || isExtendedPollingWindow,
-    isAfterClose,
+    // Local clock fallback is presentation-only. Acquisition and polling must
+    // fail closed until the backend calendar contract is available.
+    isPollingWindow: false,
+    isExtendedPollingWindow: false,
+    isLiveWindow: false,
+    isAfterClose: false,
     msUntilNextPollingStart: Math.max(1_000, nextPollingStartMs - nowMs),
     intradaySessionScope: isExtendedPollingWindow ? "all" : "regular",
   };
