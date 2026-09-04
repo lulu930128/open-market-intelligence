@@ -6,6 +6,16 @@ baseline_scope = "working_tree_at_2026-08-27"
 # Each entry must identify one rule + path + stable symbol/call-site occurrence.
 
 [[debt]]
+id = "us-market-service-compatibility-facade"
+rule = "us_market_service_compatibility_facade"
+path = "backend/app/us_market/service.py"
+occurrence = "path:exists"
+reason = "The legacy US service module remains a large compatibility facade around canonical Market Truth, daily, provider, and refresh owners."
+owner = "US Market Truth and API compatibility owners"
+closure_gate = "Move bounded compatibility projections to focused modules, prove production references and contract parity, then remove this facade occurrence."
+new_occurrences_allowed = false
+
+[[debt]]
 id = "frontend-kr-stock-refresh-provider"
 rule = "frontend_provider_selection"
 path = "frontend/src/components/KRMarketPanel.tsx"

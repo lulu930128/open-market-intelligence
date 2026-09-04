@@ -184,3 +184,27 @@ roots = [
 extensions = [".py"]
 modules = ["app.db.models"]
 forbidden_names = ["USDailyPrice"]
+
+[[rules]]
+id = "us_outward_canonical_quote_intraday_access"
+kind = "python_forbidden_import_names"
+description = "US outward consumers must use US Market Truth instead of quote, intraday, or lineage storage rows."
+roots = [
+  "backend/app/ai",
+  "backend/app/routers/us_market.py",
+  "backend/app/us_market/market_indices.py",
+  "backend/app/us_market/research_service.py",
+]
+extensions = [".py"]
+modules = ["app.db.models"]
+forbidden_names = [
+  "USQuoteSnapshot",
+  "MarketIntradayBar",
+  "MarketIntradayBarLineage",
+]
+
+[[rules]]
+id = "us_market_service_compatibility_facade"
+kind = "forbidden_path"
+description = "The oversized US service compatibility facade is bounded debt and must be decomposed before it can become a canonical owner."
+paths = ["backend/app/us_market/service.py"]

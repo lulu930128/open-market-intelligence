@@ -4,11 +4,33 @@
 
 ## [Unreleased]
 
+## [4.5.0] - 2026-09-05
+
 ### Changed
 
 - 將專案正式以 Apache License 2.0 開源，著作權人為盧星豪，並補齊 NOTICE、貢獻與第三方資料授權邊界。
 - Windows 發行包不再包含本機 SQLite 或股票主檔 seed；空白安裝首次啟動時改由 backend 以可追蹤、有界的官方 TWSE／TPEx refresh 建立股票代號。
 - 將 launcher 與安裝捷徑圖示由 `ATRI-MyDearMoments.ico` 改名為 `OMI.ico`。
+- 將台股與美股盤中資料收斂到 backend-owned canonical observation、resolution、read model與bounded producer責任，Frontend、AI與MCP只消費同一套 outward truth。
+- 將市場 session、instrument status、freshness、finalization、authority與release維持為獨立語意，並為主要 read／consumer boundary補上architecture guard與精確debt inventory。
+- 重寫公開 README，改以研究流程說明產品，並重畫 Provider → Canonical Observation → Resolver／Control → Market／Research → API／Decision → Consumer 的資料流。
+
+### Fixed
+
+- 修正台股 current-session bars、formal close、index previous close、market coverage、ETF watchlist、technical與official daily在收盤前後的語意落差，不以補零或合成行情掩蓋缺口。
+- 修正美股盤中 materialization、read-model cache、extended-hours freshness與Frontend headline競態，避免較舊或缺少session proof的回應覆蓋較新canonical truth。
+- 修正 AI capability、data-quality與Decision v4 projection在TW／US evidence裁切後遺失freshness、coverage或readiness依據的問題。
+
+## [4.4.1] - 2026-08-31
+
+### Changed
+
+- 強化台股 Fugle realtime resilience，並將台股／美股 quote、intraday與index讀路徑進一步收斂到Shared Market Data Foundation。
+- 補齊多語公開專案導覽與repo首頁語言切換。
+
+### Fixed
+
+- 修正美股缺漏index資料與CI在4.4 contract上的release metadata、architecture、Frontend hydration與smoke-test落差。
 
 ## [4.4.0] - 2026-08-29
 
@@ -103,7 +125,9 @@
 - 修正 production SSR 暫時無法連到 backend 時，URL 分組選擇與區域市場 watchlist 無法在 hydration 後恢復的問題。
 - 修正 Windows release 封裝使用不同 Python ABI 與硬編碼 stdlib 路徑時，安裝包無法啟動的問題，並排除本機 Python bytecode cache。
 
-[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.4.0...HEAD
+[Unreleased]: https://github.com/lulu930128/open-market-intelligence/compare/v4.5.0...HEAD
+[4.5.0]: https://github.com/lulu930128/open-market-intelligence/compare/v4.4.1...v4.5.0
+[4.4.1]: https://github.com/lulu930128/open-market-intelligence/compare/v4.4.0...v4.4.1
 [4.4.0]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.2...v4.4.0
 [4.3.2]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.1...v4.3.2
 [4.3.1]: https://github.com/lulu930128/open-market-intelligence/compare/v4.3.0...v4.3.1

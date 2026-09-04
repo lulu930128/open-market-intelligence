@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img alt="バージョン 4.4.0" src="https://img.shields.io/badge/version-4.4.0-2563eb">
+  <img alt="バージョン 4.5.0" src="https://img.shields.io/badge/version-4.5.0-2563eb">
   <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0f766e">
   <img alt="Apache License 2.0" src="https://img.shields.io/badge/license-Apache--2.0-334155">
 </p>
