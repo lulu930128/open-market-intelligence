@@ -1362,6 +1362,7 @@ def refresh_us_intraday_bars_api(
 def get_us_market_research_api(
     symbol: str,
     bars: int = Query(default=260, ge=1, le=500),
+    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     db: Session = Depends(get_db),
 ):
     """Read bounded research from cached resolved evidence without provider IO."""
@@ -1371,6 +1372,7 @@ def get_us_market_research_api(
             db,
             symbol=symbol,
             bars=bars,
+            timeframe=timeframe,
             include_market_coverage=False,
             include_daily_ohlcv=False,
         )

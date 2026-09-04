@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from collections.abc import Callable
 from statistics import median
 from zoneinfo import ZoneInfo
 
@@ -36,6 +37,7 @@ from app.us_market.intraday_profiles import (
     US_RECURRING_INTRADAY_PROFILE,
     USIntradayOperationProfile,
 )
+from app.us_market.intraday_read_model_cache import invalidate_us_intraday_read_cache
 from app.us_market.intraday_repository import (
     USIntradayBarRepository,
     USIntradayVolumeSession,
@@ -267,6 +269,7 @@ class USIntradayMarketPlatform:
         bar_transaction: USIntradayBarTransaction | None = None,
         quote_descriptors: tuple[ProviderCapabilityDescriptorV2, ...] | None = None,
         bar_descriptors: tuple[ProviderCapabilityDescriptorV2, ...] | None = None,
+        quote_cache_invalidator: Callable[[str], None] = invalidate_us_intraday_read_cache,
     ) -> None:
         self._db = db
         self._gateway = gateway or MarketDataGateway()
@@ -277,6 +280,7 @@ class USIntradayMarketPlatform:
         self._bar_reader = USIntradayBarRepository(db)
         self._quote_transaction = quote_transaction or USQuoteTransaction(db)
         self._bar_transaction = bar_transaction or USIntradayBarTransaction(db)
+        self._quote_cache_invalidator = quote_cache_invalidator
 
     @staticmethod
     def _validate_now(now: datetime) -> None:
@@ -446,6 +450,8 @@ class USIntradayMarketPlatform:
             transaction_port=self._quote_transaction,
             route_resolution_gate=True,
         )
+        if result.persistence.committed and result.persistence.observations_written > 0:
+            self._quote_cache_invalidator(identity.instrument.symbol)
         return self._platform_result(identity=identity, result=result, projection=project_resolved_us_quote(result.resolved), profile=profile)
 
     def read_intraday_bars(self, *, symbol: str, bars: int = 500, now: datetime | None = None, profile: USIntradayOperationProfile = US_RECURRING_INTRADAY_PROFILE) -> USIntradayPlatformResult:

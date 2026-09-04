@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 import inspect
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -415,6 +415,7 @@ def test_volume_pace_has_no_raw_daily_storage_dependency() -> None:
 def test_refresh_persists_then_rereads_quote_and_intraday_candidates() -> None:
     db = _db()
     now = datetime(2026, 8, 28, 14, 32, tzinfo=UTC)
+    invalidate_quote_cache = MagicMock()
 
     def fetch(_route, _requirement):
         return _yahoo_payload(now), "https://query1.finance.yahoo.com/v8/finance/chart/AAPL"
@@ -428,12 +429,14 @@ def test_refresh_persists_then_rereads_quote_and_intraday_candidates() -> None:
             },
             clock=lambda: now,
         ),
+        quote_cache_invalidator=invalidate_quote_cache,
     )
 
     quote = platform.refresh_quote(symbol="AAPL", now=now, max_provider_calls=1)
     bars = platform.refresh_intraday_bars(symbol="AAPL", bars=100, now=now, max_provider_calls=1)
 
     assert quote.result.persistence.committed is True
+    invalidate_quote_cache.assert_called_once_with("AAPL")
     assert quote.result.resolved.quote is not None
     assert quote.result.resolved.quote.lineage.cache_hit is True
     assert db.query(USQuoteSnapshot).count() == 1
@@ -445,6 +448,12 @@ def test_refresh_persists_then_rereads_quote_and_intraday_candidates() -> None:
     stored_lineage = db.query(MarketIntradayBarLineage).one()
     assert stored_lineage.bar_id == stored_bar.id
     assert stored_lineage.raw_result_id > 0
+
+    unchanged_quote = platform.refresh_quote(
+        symbol="AAPL", now=now, max_provider_calls=1
+    )
+    assert unchanged_quote.result.persistence.observations_written == 0
+    invalidate_quote_cache.assert_called_once_with("AAPL")
 
 
 def test_us_quote_projection_exposes_backend_owned_session_date_relation() -> None:
@@ -1011,6 +1020,26 @@ def test_chart_session_scope_does_not_change_headline_or_hide_other_coverage() -
     assert all_sessions["session_coverage"]["requested_point_count"] == 2
     assert all_sessions["response_mode"] == "full"
     assert all_sessions["snapshot_point_count"] == 2
+    assert all_sessions["technical_algorithm_version"] == (
+        "omi.research.technical.intraday.v1"
+    )
+    assert all_sessions["technical_parameter_contract"]["session_reset"] is True
+    assert all_sessions["points"][-1]["twap_value"] is not None
+    assert all_sessions["points"][-1]["technical_algorithm_version"] == (
+        all_sessions["technical_algorithm_version"]
+    )
+    assert all_sessions["points"][-1]["price_basis"] == (
+        "resolved_intraday_bar_close"
+    )
+    assert all_sessions["points"][-1]["calculation_role"] == (
+        "backend_authoritative"
+    )
+    assert all_sessions["points"][0]["bar_status"] == "completed"
+    assert all_sessions["points"][0]["decision_usable"] is True
+    assert all_sessions["points"][0]["volume_based_decision_usable"] is True
+    assert all_sessions["points"][-1]["bar_status"] == "current_partial"
+    assert all_sessions["points"][-1]["decision_usable"] is False
+    assert all_sessions["points"][-1]["volume_based_decision_usable"] is False
     assert len(all_sessions["snapshot_revision"]) == 64
     assert unchanged["response_mode"] == "unchanged"
     assert unchanged["base_revision"] == all_sessions["snapshot_revision"]
@@ -2038,3 +2067,55 @@ def test_persisted_identity_mismatches_fail_closed() -> None:
     assert {
         rejection.reason_code for rejection in bar_read.result.candidate_rejections
     } == {"US_INTRADAY_INSTRUMENT_IDENTITY_MISMATCH"}
+
+
+def test_quote_refresh_invalidates_intraday_read_cache() -> None:
+    db = MagicMock()
+    refreshed = MagicMock()
+    refreshed.result.acquisition.model_dump.return_value = {"status": "completed"}
+    refreshed.result.persistence.model_dump.return_value = {"status": "completed"}
+    refreshed.result.dataset_health = None
+    with (
+        patch.object(
+            us_market_service.USIntradayMarketPlatform,
+            "refresh_quote",
+            return_value=refreshed,
+        ),
+        patch.object(
+            us_market_service,
+            "get_us_quote_snapshot",
+            return_value={"symbol": "TSM", "quote": {"last_trade_price": 210.5}},
+        ),
+    ):
+        result = us_market_service.refresh_us_quote_snapshot(db, symbol="tsm")
+
+    assert result["quote"]["last_trade_price"] == 210.5
+
+
+def test_intraday_revision_changes_with_canonical_quote_identity() -> None:
+    base = {
+        "symbol": "TSM",
+        "effective_interval": "1m",
+        "session_scope": "regular",
+        "session_coverage": {"trade_date": "2026-09-03"},
+        "points": [],
+        "current_observation": None,
+        "quote_snapshot": {
+            "schema_version": "omi.market.quote.snapshot.v1",
+            "selected_source": "twelve_data.quote",
+            "selected_event_at": "2026-09-03T15:59:00-04:00",
+            "quote": {"last_trade_price": "410.00"},
+        },
+    }
+    changed = {
+        **base,
+        "quote_snapshot": {
+            **base["quote_snapshot"],
+            "selected_event_at": "2026-09-03T16:00:00-04:00",
+            "quote": {"last_trade_price": "411.00"},
+        },
+    }
+
+    assert us_market_service._us_intraday_snapshot_revision(base) != (
+        us_market_service._us_intraday_snapshot_revision(changed)
+    )

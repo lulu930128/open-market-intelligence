@@ -425,4 +425,4 @@ def test_internal_canary_projection_survives_tool_compaction_then_is_consumed() 
 
     assert selected is not None
     assert selected["_resolved_market_data"] == resolved_market_data
-    assert "_resolved_market_data" not in tool_run["result_summary"]
+    assert tool_run["result_summary"]["_resolved_market_data"] == resolved_market_data

@@ -137,6 +137,19 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
                 "as_of": None,
                 "reason_codes": ["US_MARKET_COVERAGE_SNAPSHOT_UNAVAILABLE"],
             }
+            weekly = build_us_market_research(
+                db,
+                symbol="AAPL",
+                bars=52,
+                timeframe="weekly",
+                now=datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc),
+                include_market_coverage=False,
+                include_daily_ohlcv=False,
+            )
+            assert weekly["timeframe"] == "weekly"
+            assert weekly["technical_indicators"]["timeframe"] == "1w"
+            assert len(weekly["technical_indicators"]["series"]) == 44
+            assert weekly["technical_indicators"]["series"][-1]["ma"]["ma20"] is not None
     finally:
         engine.dispose()
 
@@ -239,6 +252,13 @@ def test_index_research_uses_not_applicable_volume_and_corporate_actions() -> No
 
             assert db.query(USDailyPrice).count() == before_count
             assert result["technical_indicators"]["bar_count"] == 220
+            assert len(result["technical_indicators"]["series"]) == 220
+            latest_indicator = result["technical_indicators"]["series"][-1]
+            assert latest_indicator["calculation_role"] == "backend_authoritative"
+            assert latest_indicator["algorithm_version"].startswith(
+                "omi.research.technical."
+            )
+            assert latest_indicator["ma"]["ma20"] is not None
             assert result["technical_indicators"]["profile"]["profile_id"] == (
                 "us.index.daily"
             )

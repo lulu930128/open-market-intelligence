@@ -195,6 +195,20 @@ class USIntradayTrendPointRead(BaseModel):
     low: float | None = None
     finalized: bool | None = None
     is_partial: bool | None = None
+    ema_fast: float | None = None
+    ema_slow: float | None = None
+    rsi_value: float | None = None
+    macd_value: float | None = None
+    macd_signal_value: float | None = None
+    macd_histogram_value: float | None = None
+    vwap_value: float | None = None
+    twap_value: float | None = None
+    technical_algorithm_version: str | None = None
+    price_basis: str | None = None
+    calculation_role: str | None = None
+    bar_status: str | None = None
+    decision_usable: bool = False
+    volume_based_decision_usable: bool = False
 
 
 class USIntradaySourceStatusRead(BaseModel):
@@ -353,6 +367,8 @@ class USIntradayTrendRead(BaseModel):
     aggregation_method: str = "session_anchored_ohlcv.v1"
     bar_finalization_status: str = "completed"
     partial_bar_count: int = 0
+    technical_algorithm_version: str | None = None
+    technical_parameter_contract: dict = Field(default_factory=dict)
     session_scope: str = "regular"
     session_phase: str | None = None
     market_phase: str | None = None
@@ -421,6 +437,7 @@ class USMarketResearchRead(BaseModel):
     schema_version: str
     market: str
     symbol: str
+    timeframe: str = "daily"
     status: str
     as_of: str | None = None
     daily_ohlcv: dict = Field(default_factory=dict)

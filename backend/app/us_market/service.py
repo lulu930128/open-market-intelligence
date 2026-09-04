@@ -8,7 +8,6 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import logging
-from threading import RLock
 import time
 
 import requests
@@ -107,6 +106,15 @@ from app.market_data.contracts import (
     TradeObservationState,
 )
 from app.us_market.market_truth import read_us_market_truth_bundle
+from app.us_market.intraday_read_model_cache import (
+    US_INTRADAY_CACHE_CURRENT_MAX_AGE_SECONDS,
+    US_INTRADAY_CACHE_MAX_ENTRIES,
+    US_INTRADAY_CACHE_TTL_SECONDS,
+    _US_INTRADAY_CACHE,
+    get_us_intraday_read_cache as _get_us_intraday_cache,
+    invalidate_us_intraday_read_cache,
+    set_us_intraday_read_cache as _set_us_intraday_cache,
+)
 from app.us_market.sources import (
     MacroSeriesObservationRecord,
     USDailyPriceRecord,
@@ -260,17 +268,6 @@ def _us_daily_price_refresh_result(
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
-# Keep this projection cache just below the canonical 180-second stale boundary
-# so a bounded publisher has the full producer cycle to atomically replace it.
-# The evidence-age guard can still expire it earlier; this cache never upgrades
-# canonical freshness or survives into the stale window as current evidence.
-US_INTRADAY_CACHE_TTL_SECONDS = 170.0
-US_INTRADAY_CACHE_CURRENT_MAX_AGE_SECONDS = 180.0
-US_INTRADAY_CACHE_MAX_ENTRIES = 256
-_US_INTRADAY_CACHE: OrderedDict[
-    tuple[int, str, str, str, str], tuple[float, dict]
-] = OrderedDict()
-_US_INTRADAY_CACHE_LOCK = RLock()
 US_INTRADAY_LAST_GOOD_MAX_ENTRIES = 256
 _US_INTRADAY_LAST_GOOD: OrderedDict[str, dict] = OrderedDict()
 US_CHART_LOOKBACK_MULTIPLIER = {
@@ -329,75 +326,6 @@ SEC_FUNDAMENTAL_METRIC_TAGS = OrderedDict(
 
 def _valid_number(value) -> bool:
     return isinstance(value, (int, float)) and value == value
-
-
-def _get_us_intraday_cache(
-    cache_key: tuple[int, str, str, str, str],
-) -> dict | None:
-    with _US_INTRADAY_CACHE_LOCK:
-        cached = _US_INTRADAY_CACHE.get(cache_key)
-        if cached is None:
-            return None
-
-        cached_at, payload = cached
-        cache_age = time.monotonic() - cached_at
-        claims_current = any(
-            (payload.get(status_key) or {}).get("freshness_status") == "current"
-            for status_key in ("current_source_status", "bar_source_status")
-        )
-        evidence_ages: list[float] = []
-        for observed_at in (
-            (payload.get("current_observation") or {}).get("observed_at"),
-            payload.get("latest_bar_time"),
-        ):
-            if not observed_at:
-                continue
-            try:
-                parsed_observed_at = datetime.fromisoformat(str(observed_at))
-                if parsed_observed_at.tzinfo is None:
-                    parsed_observed_at = parsed_observed_at.replace(tzinfo=timezone.utc)
-                evidence_ages.append(
-                    (
-                        datetime.now(timezone.utc)
-                        - parsed_observed_at.astimezone(timezone.utc)
-                    ).total_seconds()
-                )
-            except (TypeError, ValueError):
-                continue
-        if (
-            cache_age > US_INTRADAY_CACHE_TTL_SECONDS
-            or (
-                claims_current
-                and
-                evidence_ages
-                and max(evidence_ages) > US_INTRADAY_CACHE_CURRENT_MAX_AGE_SECONDS
-            )
-        ):
-            _US_INTRADAY_CACHE.pop(cache_key, None)
-            return None
-
-        _US_INTRADAY_CACHE.move_to_end(cache_key)
-        return deepcopy(payload)
-
-
-def _set_us_intraday_cache(
-    cache_key: tuple[int, str, str, str, str],
-    payload: dict,
-) -> dict:
-    with _US_INTRADAY_CACHE_LOCK:
-        _US_INTRADAY_CACHE[cache_key] = (time.monotonic(), deepcopy(payload))
-        _US_INTRADAY_CACHE.move_to_end(cache_key)
-        while len(_US_INTRADAY_CACHE) > US_INTRADAY_CACHE_MAX_ENTRIES:
-            _US_INTRADAY_CACHE.popitem(last=False)
-    return payload
-
-
-def invalidate_us_intraday_read_cache(symbol: str) -> None:
-    normalized_symbol = normalize_us_symbol(symbol)
-    with _US_INTRADAY_CACHE_LOCK:
-        for cache_key in tuple(_US_INTRADAY_CACHE):
-            if cache_key[1] == normalized_symbol:
-                _US_INTRADAY_CACHE.pop(cache_key, None)
 
 
 def _project_us_intraday_revision_response(
@@ -2551,6 +2479,18 @@ def _us_intraday_snapshot_revision(payload: dict) -> str:
         "trade_date": (payload.get("session_coverage") or {}).get("trade_date"),
         "points": payload.get("points") or [],
         "current_observation": payload.get("current_observation"),
+        "quote_identity": {
+            "schema_version": (payload.get("quote_snapshot") or {}).get(
+                "schema_version"
+            ),
+            "selected_source": (payload.get("quote_snapshot") or {}).get(
+                "selected_source"
+            ),
+            "selected_event_at": (payload.get("quote_snapshot") or {}).get(
+                "selected_event_at"
+            ),
+            "quote": (payload.get("quote_snapshot") or {}).get("quote"),
+        },
         "previous_close": payload.get("previous_close"),
         "change_reference_price": payload.get("change_reference_price"),
         "bar_source_identity": {

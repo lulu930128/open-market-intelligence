@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,6 +23,7 @@ from app.research.technical import (
     build_technical_structure,
 )
 from app.us_market.daily_market_state import resolve_us_instrument_identity
+from app.us_market.daily_ohlcv_chart import read_us_daily_ohlcv_chart
 from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
 from app.us_market.resolved_reads import (
     US_RESOLVED_DAILY_MAX_BARS,
@@ -104,6 +106,7 @@ def build_us_market_research(
     now: datetime | None = None,
     include_market_coverage: bool = True,
     include_daily_ohlcv: bool = True,
+    timeframe: str = "daily",
 ) -> dict[str, Any]:
     """Build bounded research from cache only; never fetch or persist provider data."""
 
@@ -116,6 +119,8 @@ def build_us_market_research(
     if resolved_now.tzinfo is None or resolved_now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     expected_trade_date = expected_us_daily_price_date(now=resolved_now)
+    if timeframe not in {"daily", "weekly", "monthly"}:
+        raise ValueError("timeframe must be one of: daily, weekly, monthly.")
     coverage_gate = (
         _coverage_gate(
             db,
@@ -138,12 +143,22 @@ def build_us_market_research(
     identity = None
     try:
         identity = resolve_us_instrument_identity(db, normalized_symbol)
-        daily_ohlcv = read_resolved_us_daily_bars_for_symbol(
-            db=db,
-            symbol=normalized_symbol,
-            expected_trade_date=expected_trade_date,
-            now=resolved_now,
-            bars=bars,
+        daily_ohlcv = (
+            read_resolved_us_daily_bars_for_symbol(
+                db=db,
+                symbol=normalized_symbol,
+                expected_trade_date=expected_trade_date,
+                now=resolved_now,
+                bars=bars,
+            )
+            if timeframe == "daily"
+            else read_us_daily_ohlcv_chart(
+                db,
+                symbol=normalized_symbol,
+                timeframe=timeframe,
+                bars=bars,
+                now=resolved_now,
+            )
         )
         if not daily_ohlcv:
             missing.append("resolved_daily_ohlcv")
@@ -169,8 +184,20 @@ def build_us_market_research(
     # stocks/ETFs, event rows prove observations but not complete coverage.
     corporate_action_coverage = "not_applicable" if is_index else "unknown"
     technical_profile = US_INDEX_DAILY_PROFILE if is_index else US_DAILY_PROFILE
-    resolved_bars = (
-        daily_ohlcv.get("bars") if isinstance(daily_ohlcv.get("bars"), list) else []
+    if timeframe != "daily":
+        technical_profile = replace(
+            technical_profile,
+            profile_id=f"{technical_profile.profile_id}.{timeframe}",
+            profile_version=f"{technical_profile.profile_version}.{timeframe}.v1",
+            timeframe={"weekly": "1w", "monthly": "1mo"}[timeframe],
+        )
+    resolved_bars = next(
+        (
+            daily_ohlcv.get(key)
+            for key in ("bars", "points")
+            if isinstance(daily_ohlcv.get(key), list)
+        ),
+        [],
     )
     lineage = {
         "selected_provider": daily_ohlcv.get("selected_provider"),
@@ -208,6 +235,7 @@ def build_us_market_research(
         "schema_version": US_RESEARCH_SCHEMA_VERSION,
         "market": "US",
         "symbol": normalized_symbol,
+        "timeframe": timeframe,
         "status": indicators["status"],
         "as_of": indicators.get("as_of"),
         "daily_ohlcv": daily_ohlcv if include_daily_ohlcv else {},

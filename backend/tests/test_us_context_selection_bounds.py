@@ -162,6 +162,17 @@ def test_quote_only_context_uses_cache_only_resolved_quote_projection() -> None:
         context = read_us_stock_context(
             db,
             symbol="AAPL",
+            tool_runs=[
+                {
+                    "tool": "us.refresh_quote",
+                    "status": "success",
+                    "result_summary": {
+                        "status": "ok",
+                        "provider": "twelve_data",
+                        "symbol": "AAPL",
+                    },
+                }
+            ],
             market_data_params={"requested_capabilities": ["quote.snapshot"]},
             dependencies=dependencies,
         )
@@ -300,3 +311,48 @@ def test_us_daily_context_uses_forwarded_selection_bound(symbol: str) -> None:
         bars=260,
         to_date=None,
     )
+
+
+def test_technical_indicators_expand_daily_dependency_and_research_reader() -> None:
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    service = MagicMock()
+    service.build_us_source_health.return_value = {"entries": [], "summary": {}}
+    service.read_us_daily_ohlcv_chart.return_value = {"point_count": 0}
+    service.build_us_market_research.return_value = {
+        "technical_indicators": {"status": "missing"}
+    }
+    dependencies = USContextDependencies(
+        us_market_service=service,
+        latest_profile=MagicMock(),
+        scan_us_stock_gaps=MagicMock(return_value={"missing": [], "warnings": []}),
+        now=lambda: datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc),
+    )
+    platform_result = MagicMock(
+        projection={
+            "bars": [],
+            "selected_provider": None,
+            "latest_trade_date": None,
+            "limitations": [],
+        },
+        postcondition_satisfied=False,
+    )
+
+    with (
+        patch("app.ai.market_context.us_context.USDailyOhlcvPlatform") as platform,
+        patch(
+            "app.ai.market_context.us_context.build_us_calendar_status",
+            return_value={"phase": "pre_market", "previous_trading_day": "2026-09-03"},
+        ),
+    ):
+        platform.return_value.read.return_value = platform_result
+        read_us_stock_context(
+            db,
+            symbol="TSM",
+            market_data_params={"requested_capabilities": ["technical.indicators"]},
+            dependencies=dependencies,
+        )
+
+    platform.return_value.read.assert_called_once()
+    service.read_us_daily_ohlcv_chart.assert_called_once()
+    service.build_us_market_research.assert_called_once()
