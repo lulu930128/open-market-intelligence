@@ -800,6 +800,14 @@ class MarketDailyPrice(Base):
             sqlite_where=text("canonical_market IS NOT NULL"),
             postgresql_where=text("canonical_market IS NOT NULL"),
         ),
+        Index(
+            "ix_market_daily_tw_contribution_read",
+            "trade_date",
+            "venue",
+            "instrument_type",
+            "stock_id",
+            "source_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -4616,6 +4624,48 @@ class USDailyPrice(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanIssuedSharesDaily(Base):
+    __tablename__ = "taiwan_issued_shares_daily"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "market",
+            "stock_id",
+            "trade_date",
+            name="uq_tw_issued_shares_market_stock_date",
+        ),
+        Index(
+            "ix_tw_issued_shares_market_date_stock",
+            "market",
+            "trade_date",
+            "stock_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    issued_shares: Mapped[int] = mapped_column(BigInteger)
+    authority: Mapped[str] = mapped_column(String(32), default="exchange", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
 
 
 class USQuoteSnapshot(Base):

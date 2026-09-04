@@ -8,7 +8,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, MarginTradingDaily, SourceRegistry
+from app.db.models import Base, MarginTradingDaily, MarketIndexDailyStat, SourceRegistry
 from app.market.market_chips import (
     MarketChipFetchError,
     ensure_market_chip_daily,
@@ -386,6 +386,76 @@ class MarketChipPersistenceTests(unittest.TestCase):
         self.assertEqual(result["source_details"], {"sources": []})
         self.assertEqual(result["margin_status"]["status"], "missing")
         self.assertEqual(result["government_bank_status"]["status"], "not_available")
+
+    def test_projection_fills_missing_index_context_from_canonical_daily_owner(
+        self,
+    ) -> None:
+        row = upsert_market_chip_daily(
+            self.db,
+            payload={
+                "index_id": "TAIEX",
+                "market": "TWSE",
+                "trade_date": date(2026, 9, 4),
+                "total_institutional_net_value": 100,
+                "source_details": {"sources": []},
+            },
+        )
+        index_context = SimpleNamespace(
+            close_value=46_551.13,
+            price_change=693.47,
+            trade_value=600_000_000_000,
+        )
+
+        with patch(
+            "app.market.market_chips._latest_market_index_stat",
+            return_value=index_context,
+        ) as reader:
+            result = market_chip_daily_to_dict(row, db=self.db)
+
+        reader.assert_called_once_with(
+            self.db,
+            index_id="TAIEX",
+            trade_date=date(2026, 9, 4),
+        )
+        self.assertEqual(result["close_value"], 46_551.13)
+        self.assertEqual(result["price_change"], 693.47)
+        self.assertAlmostEqual(result["price_change_pct"], 1.5122, places=4)
+        self.assertEqual(result["trade_value"], 600_000_000_000)
+
+    def test_projection_falls_back_to_persisted_index_daily_stat(self) -> None:
+        row = upsert_market_chip_daily(
+            self.db,
+            payload={
+                "index_id": "TAIEX",
+                "market": "TWSE",
+                "trade_date": date(2026, 9, 4),
+                "total_institutional_net_value": 100,
+                "source_details": {"sources": []},
+            },
+        )
+        self.db.add(
+            MarketIndexDailyStat(
+                index_id="TAIEX",
+                market="TWSE",
+                trade_date=date(2026, 9, 4),
+                close_value=46_551.13,
+                price_change=693.47,
+                trade_value=600_000_000_000,
+                source="twse_openapi_fmtqik",
+            )
+        )
+        self.db.commit()
+
+        with patch(
+            "app.market.market_chips.read_taiwan_official_index"
+        ) as official_reader:
+            official_reader.return_value.resolved.market_index = None
+            result = market_chip_daily_to_dict(row, db=self.db)
+
+        self.assertEqual(result["close_value"], 46_551.13)
+        self.assertEqual(result["price_change"], 693.47)
+        self.assertAlmostEqual(result["price_change_pct"], 1.5122, places=4)
+        self.assertEqual(result["trade_value"], 600_000_000_000)
 
     def test_latest_projection_uses_previous_released_margin_snapshot(self) -> None:
         released_date = date(2026, 7, 21)

@@ -25,6 +25,7 @@ from app.market.technical_structure import (
     build_price_range_signals,
     build_technical_current_state,
 )
+from app.market.tw_bar_contracts import TaiwanBarSessionScope
 from app.market.tw_bar_service import TaiwanBarService
 from app.market.tw_technical_service import TaiwanTechnicalService
 
@@ -233,11 +234,12 @@ def _daily_indicator(
 def _canonical_intraday_payload(db: Session, stock_id: str) -> dict[str, Any]:
     """Project canonical Base-1m Bars into the legacy report input shape."""
 
-    series = TaiwanBarService(db).read_bars(
+    series = TaiwanBarService(db).read_scoped_bars(
         instrument_id=stock_id,
         interval="1m",
         limit=500,
         include_partial=True,
+        session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
     )
     points = [
         {
@@ -253,19 +255,43 @@ def _canonical_intraday_payload(db: Session, stock_id: str) -> dict[str, Any]:
         for bar in series.bars
     ]
     latest = series.bars[-1] if series.bars else None
-    return {
-        "source": latest.lineage.source if latest is not None else "tw.bar.series",
-        "point_count": len(points),
-        "previous_close": None,
-        "points": points,
-        "series_coverage": {
+    current_session_coverage = series.current_session_coverage
+    if current_session_coverage is not None:
+        coverage_status = current_session_coverage.status.value
+        continuous_prefix_complete = coverage_status in {
+            "complete_prefix",
+            "complete_session",
+        }
+        opening_covered = coverage_status in {
+            "complete_prefix",
+            "complete_session",
+            "partial_prefix",
+            "sparse",
+        }
+        series_coverage = {
+            **current_session_coverage.model_dump(mode="json"),
+            "opening_covered": opening_covered,
+            "current_window_complete": continuous_prefix_complete,
+            "current_cumulative_volume_complete": continuous_prefix_complete,
+        }
+    else:
+        series_coverage = {
             "status": (
                 "complete_session"
                 if series.history.requested_coverage_satisfied
                 else "partial"
             ),
             "history_status": series.history.history_status.value,
-        },
+            "opening_covered": False,
+            "current_window_complete": False,
+            "current_cumulative_volume_complete": False,
+        }
+    return {
+        "source": latest.lineage.source if latest is not None else "tw.bar.series",
+        "point_count": len(points),
+        "previous_close": None,
+        "points": points,
+        "series_coverage": series_coverage,
         "series_fingerprint": series.identity.series_fingerprint,
         "series_revision": series.identity.series_revision,
     }
@@ -674,6 +700,14 @@ def _today_market_session() -> dict[str, Any]:
     calendar = build_taiwan_calendar_status(now=local_now)
     phase = str(calendar.get("phase") or "market_closed")
     is_trading_day = calendar.get("is_trading_day") is True
+    previous_completed_trading_day = calendar.get(
+        "previous_completed_trading_day"
+    )
+    latest_completed_trade_date = (
+        calendar.get("date")
+        if is_trading_day and phase == "post_close"
+        else previous_completed_trading_day
+    )
     return {
         "date": current_date,
         "is_trading_day": is_trading_day,
@@ -683,7 +717,8 @@ def _today_market_session() -> dict[str, Any]:
         "is_after_close": phase == "post_close",
         "reason": calendar.get("reason"),
         "holiday_name": calendar.get("holiday_name"),
-        "previous_trading_day": calendar.get("previous_trading_day"),
+        "previous_trading_day": previous_completed_trading_day,
+        "latest_completed_trade_date": latest_completed_trade_date,
         "next_trading_day": calendar.get("next_trading_day"),
         "checked_at": local_now,
     }

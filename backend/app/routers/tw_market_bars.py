@@ -144,7 +144,17 @@ def get_taiwan_chart_bars(
             expected_snapshot_revision=expected_snapshot_revision,
             db=db,
         )
-        return project_taiwan_chart_bar_series(series)
+        presentation_events = (
+            TaiwanBarService(db).read_current_session_presentation_events(
+                series=series,
+            )
+            if session_scope is TaiwanBarSessionScope.CURRENT_SESSION
+            else ()
+        )
+        return project_taiwan_chart_bar_series(
+            series,
+            presentation_events=presentation_events,
+        )
     except HTTPException:
         raise
     except ValueError as exc:

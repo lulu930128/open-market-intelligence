@@ -227,7 +227,7 @@ def reconcile_taiwan_intraday_close_tails(
     try:
         universe = universe_resolver(
             db,
-            max_symbols=settings.scheduler_taiwan_intraday_bar_max_symbols,
+            max_symbols=settings.scheduler_taiwan_intraday_close_tail_max_symbols,
         )
         symbols = list(
             dict.fromkeys(

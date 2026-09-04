@@ -89,7 +89,7 @@ def test_session_closeout_uses_bounded_universe_and_short_circuits_final() -> No
         depth_projector=lambda value, **_kwargs: value,
     )
 
-    assert seen_max_symbols == [3]
+    assert seen_max_symbols == [32]
     assert acquired == ["3711"]
     assert result["status"] == "success"
     assert result["confirmed_count"] == 2

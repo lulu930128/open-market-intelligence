@@ -15,8 +15,10 @@ from app.db.models import (
     MarketDailyPriceLineage,
     RawFetchResult,
     SourceRegistry,
+    TaiwanIssuedSharesDaily,
 )
 from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_SOURCE
+from app.market.tw_issued_shares import parse_tpex_issued_shares_payload
 from app.market_data.contracts import BarFinalization, BarObservation, Market
 from app.market_data.gateway import BarAcquisitionResult
 from app.market_data.integration_contracts import (
@@ -74,6 +76,49 @@ def _integer(value: Decimal | None) -> int | None:
     if value != value.to_integral_value():
         raise ValueError("canonical daily integer field contains a fractional value")
     return int(value)
+
+
+def _upsert_tpex_issued_shares(
+    db: Session,
+    *,
+    source: SourceRegistry,
+    raw: RawFetchResult,
+) -> int:
+    records = parse_tpex_issued_shares_payload(raw.raw_text or "")
+    written = 0
+    for record in records:
+        row = (
+            db.query(TaiwanIssuedSharesDaily)
+            .filter(TaiwanIssuedSharesDaily.market == record.venue)
+            .filter(TaiwanIssuedSharesDaily.stock_id == record.symbol)
+            .filter(TaiwanIssuedSharesDaily.trade_date == record.trade_date)
+            .first()
+        )
+        if row is None:
+            row = TaiwanIssuedSharesDaily(
+                market=record.venue,
+                stock_id=record.symbol,
+                trade_date=record.trade_date,
+                issued_shares=record.issued_shares,
+                source_id=source.id,
+                raw_result_id=raw.id,
+                authority="exchange",
+            )
+            db.add(row)
+            written += 1
+            continue
+        if (
+            row.issued_shares != record.issued_shares
+            or row.source_id != source.id
+            or row.raw_result_id != raw.id
+            or row.authority != "exchange"
+        ):
+            row.issued_shares = record.issued_shares
+            row.source_id = source.id
+            row.raw_result_id = raw.id
+            row.authority = "exchange"
+            written += 1
+    return written
 
 
 class TaiwanOfficialDailyTransaction:
@@ -311,6 +356,12 @@ class TaiwanOfficialDailyTransaction:
                 raw = self._raw_receipt(source, receipt)
                 receipts_by_source[key] = (source, raw)
                 raw_ids.append(raw.id)
+                if receipt.source == TPEX_DAILY_QUOTES_SOURCE_NAME and not receipt.error_message:
+                    _upsert_tpex_issued_shares(
+                        self._db,
+                        source=source,
+                        raw=raw,
+                    )
 
             observations_by_source: dict[tuple[str, str], int] = {}
             for observation in acquisition.observations:

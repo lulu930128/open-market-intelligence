@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 import json
 from math import isfinite
 from statistics import median, pstdev
@@ -24,7 +24,7 @@ INTRADAY_STATE_VERSION = "tw.intraday_stock_state.v3"
 INTRADAY_STATE_CALCULATION_VERSION = "tw.stock.intraday.state.derived.v2"
 INTRADAY_SCREENING_VERSION = "tw.screening.intraday.v2"
 HOT_GROUPS_VERSION = "tw.market.hot_groups.v1"
-GROUP_SNAPSHOT_VERSION = "tw.market.group_snapshot.v1"
+GROUP_SNAPSHOT_VERSION = "tw.market.group_snapshot.v2"
 SECTOR_SNAPSHOT_VERSION = "tw.market.sectors.v2"
 SUPPORTED_MARKETS = ("TWSE", "TPEX")
 SUPPORTED_INTRADAY_METRICS = (
@@ -44,6 +44,9 @@ INTRADAY_DECISION_MAX_AGE_SECONDS_BY_SESSION = {
     "closing_auction": 90,
     "post_close": 600,
 }
+GROUP_RANKING_MIN_MEMBER_COUNT = 3
+GROUP_RANKING_MIN_OBSERVED_COUNT = 3
+GROUP_RANKING_MIN_COVERAGE_RATIO = 0.5
 
 
 def _number(value: Any) -> float | None:
@@ -906,31 +909,60 @@ def _group_metrics(
     group_name: str,
     group_type: str,
     membership_source: str,
-    states: list[TaiwanIntradayStockState],
+    member_ids: set[str],
+    received_states: list[TaiwanIntradayStockState],
+    classified_states: list[TaiwanIntradayStockState],
+    generated_at: datetime,
     markets: set[str] | None = None,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     returns = [
         float(state.change_pct)
-        for state in states
+        for state in classified_states
         if state.change_pct is not None
     ]
-    if not returns:
-        return None
     trade_values = [
-        int(state.estimated_trade_value or 0) for state in states
+        int(state.estimated_trade_value or 0) for state in classified_states
     ]
     total_trade_value = sum(trade_values)
     leader_trade_value = max(trade_values, default=0)
     five_minute = [
         float(state.five_minute_return)
-        for state in states
+        for state in classified_states
         if state.five_minute_return is not None
     ]
     fifteen_minute = [
         float(state.fifteen_minute_return)
-        for state in states
+        for state in classified_states
         if state.fifteen_minute_return is not None
     ]
+    member_count = len(member_ids)
+    received_count = len(received_states)
+    classified_count = len(returns)
+    coverage_ratio = classified_count / member_count if member_count else 0.0
+    fresh_snapshot_count = sum(
+        _freshness_status(
+            _aware_taipei(state.snapshot_as_of)
+            or _aware_taipei(state.event_time)
+            or generated_at,
+            now=generated_at,
+        )
+        == "current"
+        for state in received_states
+    )
+    recent_trade_count = sum(
+        state.has_actual_trade
+        and (price_at := _aware_taipei(state.price_as_of)) is not None
+        and _freshness_status(price_at, now=generated_at) == "current"
+        for state in classified_states
+    )
+    ranking_ineligibility_reasons = []
+    if member_count < GROUP_RANKING_MIN_MEMBER_COUNT:
+        ranking_ineligibility_reasons.append("MEMBERSHIP_BELOW_MINIMUM")
+    if classified_count < GROUP_RANKING_MIN_OBSERVED_COUNT:
+        ranking_ineligibility_reasons.append("OBSERVED_COUNT_BELOW_MINIMUM")
+    if coverage_ratio < GROUP_RANKING_MIN_COVERAGE_RATIO:
+        ranking_ineligibility_reasons.append("COVERAGE_BELOW_MINIMUM")
+    ranking_eligible = not ranking_ineligibility_reasons
     return {
         "group_id": group_id,
         "group_name": group_name,
@@ -942,14 +974,31 @@ def _group_metrics(
             else "TW"
         ),
         "markets": sorted(markets or []),
-        "member_count": len(states),
-        "observed_count": len(returns),
+        "member_count": member_count,
+        "received_count": received_count,
+        "classified_count": classified_count,
+        "fresh_snapshot_count": fresh_snapshot_count,
+        "recent_trade_count": recent_trade_count,
+        "observed_count": classified_count,
+        "unknown_count": max(member_count - classified_count, 0),
+        "coverage_ratio": coverage_ratio,
+        "ranking_eligible": ranking_eligible,
+        "ranking_ineligibility_reasons": ranking_ineligibility_reasons,
+        "ranking_policy": {
+            "minimum_member_count": GROUP_RANKING_MIN_MEMBER_COUNT,
+            "minimum_observed_count": GROUP_RANKING_MIN_OBSERVED_COUNT,
+            "minimum_coverage_ratio": GROUP_RANKING_MIN_COVERAGE_RATIO,
+        },
         "advance_count": sum(value > 0 for value in returns),
         "decline_count": sum(value < 0 for value in returns),
         "unchanged_count": sum(value == 0 for value in returns),
-        "advance_ratio": sum(value > 0 for value in returns) / len(returns),
-        "mean_return_pct": sum(returns) / len(returns),
-        "median_return_pct": median(returns),
+        "advance_ratio": (
+            sum(value > 0 for value in returns) / len(returns)
+            if returns
+            else None
+        ),
+        "mean_return_pct": sum(returns) / len(returns) if returns else None,
+        "median_return_pct": median(returns) if returns else None,
         "return_dispersion_pct": (
             pstdev(returns) if len(returns) > 1 else 0.0
         ),
@@ -958,7 +1007,7 @@ def _group_metrics(
             next(iter(trade_value_methods))
             if len(trade_value_methods := {
                 str(state.trade_value_semantics)
-                for state in states
+                for state in classified_states
                 if state.trade_value_semantics
             }) == 1
             else "mixed_member_estimates"
@@ -1025,18 +1074,15 @@ def build_tw_intraday_group_snapshots(
     stocks_by_id = {
         str(stock.stock_id): stock for stock, _state in universe_rows
     }
-    latest_state_by_stock: dict[str, TaiwanIntradayStockState] = {}
+    latest_received_by_stock: dict[str, TaiwanIntradayStockState] = {}
+    latest_classified_by_stock: dict[str, TaiwanIntradayStockState] = {}
     for stock, state in universe_rows:
         if state is None:
             continue
-        if (
-            state.state_contract_version != INTRADAY_STATE_VERSION
-            or not state.has_actual_trade
-            or not state.decision_usable
-        ):
+        if state.state_contract_version != INTRADAY_STATE_VERSION:
             continue
         stock_id = str(stock.stock_id)
-        existing = latest_state_by_stock.get(stock_id)
+        existing = latest_received_by_stock.get(stock_id)
         if existing is None or (
             _aware_taipei(state.event_time)
             or datetime.min.replace(tzinfo=TAIWAN_TZ)
@@ -1044,45 +1090,66 @@ def build_tw_intraday_group_snapshots(
             _aware_taipei(existing.event_time)
             or datetime.min.replace(tzinfo=TAIWAN_TZ)
         ):
-            latest_state_by_stock[stock_id] = state
+            latest_received_by_stock[stock_id] = state
+        if not state.has_actual_trade or state.change_pct is None:
+            continue
+        classified = latest_classified_by_stock.get(stock_id)
+        if classified is None or (
+            _aware_taipei(state.event_time)
+            or datetime.min.replace(tzinfo=TAIWAN_TZ)
+        ) > (
+            _aware_taipei(classified.event_time)
+            or datetime.min.replace(tzinfo=TAIWAN_TZ)
+        ):
+            latest_classified_by_stock[stock_id] = state
     latest_trade_date = max(
         (
             state.trade_date
-            for state in latest_state_by_stock.values()
+            for state in latest_received_by_stock.values()
             if isinstance(state.trade_date, date)
         ),
         default=None,
     )
-    states_by_stock = {
+    received_by_stock = {
         stock_id: state
-        for stock_id, state in latest_state_by_stock.items()
+        for stock_id, state in latest_received_by_stock.items()
         if latest_trade_date is None or state.trade_date == latest_trade_date
     }
-    industry_groups: dict[str, list[TaiwanIntradayStockState]] = defaultdict(
-        list
-    )
+    states_by_stock = {
+        stock_id: state
+        for stock_id, state in latest_classified_by_stock.items()
+        if latest_trade_date is None or state.trade_date == latest_trade_date
+    }
+    industry_members: dict[str, set[str]] = defaultdict(set)
     industry_markets: dict[str, set[str]] = defaultdict(set)
-    for stock_id, state in states_by_stock.items():
-        stock = stocks_by_id.get(stock_id)
-        if stock is None:
-            continue
+    for stock_id, stock in stocks_by_id.items():
         industry = str(stock.industry or stock.category or "").strip()
         if industry:
-            industry_groups[industry].append(state)
+            industry_members[industry].add(stock_id)
             industry_markets[industry].add(str(stock.market or "TW"))
 
     exchange_groups: list[dict[str, Any]] = []
-    for industry, states in industry_groups.items():
+    for industry, member_ids in industry_members.items():
         metrics = _group_metrics(
             group_id=f"industry:{industry}",
             group_name=industry,
             group_type="exchange_industry",
             membership_source="stock_master.industry",
-            states=states,
+            member_ids=member_ids,
+            received_states=[
+                received_by_stock[stock_id]
+                for stock_id in member_ids
+                if stock_id in received_by_stock
+            ],
+            classified_states=[
+                states_by_stock[stock_id]
+                for stock_id in member_ids
+                if stock_id in states_by_stock
+            ],
+            generated_at=generated,
             markets=industry_markets[industry],
         )
-        if metrics is not None:
-            exchange_groups.append(metrics)
+        exchange_groups.append(metrics)
 
     watchlist_rows = []
     if include_watchlist_groups:
@@ -1100,35 +1167,42 @@ def build_tw_intraday_group_snapshots(
             .filter(WatchlistItem.enabled.is_(True))
             .all()
         )
-    watchlist_members: dict[
-        tuple[int, str],
-        list[TaiwanIntradayStockState],
-    ] = defaultdict(list)
+    watchlist_members: dict[tuple[int, str], set[str]] = defaultdict(set)
     watchlist_markets: dict[tuple[int, str], set[str]] = defaultdict(set)
     for group_id, group_name, stock_id in watchlist_rows:
-        state = states_by_stock.get(str(stock_id))
-        if state is not None:
-            key = (int(group_id), str(group_name))
-            watchlist_members[key].append(state)
-            stock = stocks_by_id.get(str(stock_id))
-            if stock is not None:
-                watchlist_markets[key].add(str(stock.market or "TW"))
+        key = (int(group_id), str(group_name))
+        normalized_stock_id = str(stock_id)
+        watchlist_members[key].add(normalized_stock_id)
+        stock = stocks_by_id.get(normalized_stock_id)
+        if stock is not None:
+            watchlist_markets[key].add(str(stock.market or "TW"))
     watchlist_groups: list[dict[str, Any]] = []
-    for (group_id, group_name), states in watchlist_members.items():
+    for (group_id, group_name), member_ids in watchlist_members.items():
         metrics = _group_metrics(
             group_id=f"watchlist:{group_id}",
             group_name=group_name,
             group_type="user_curated_watchlist",
             membership_source="watchlist_group+watchlist_item",
-            states=states,
+            member_ids=member_ids,
+            received_states=[
+                received_by_stock[stock_id]
+                for stock_id in member_ids
+                if stock_id in received_by_stock
+            ],
+            classified_states=[
+                states_by_stock[stock_id]
+                for stock_id in member_ids
+                if stock_id in states_by_stock
+            ],
+            generated_at=generated,
             markets=watchlist_markets[(group_id, group_name)],
         )
-        if metrics is not None:
-            watchlist_groups.append(metrics)
+        watchlist_groups.append(metrics)
 
     groups = [*exchange_groups, *watchlist_groups]
     groups.sort(
         key=lambda item: (
+            not bool(item.get("ranking_eligible")),
             -float(item.get("median_return_pct") or 0),
             -float(item.get("advance_ratio") or 0),
             -int(item.get("estimated_trade_value") or 0),
@@ -1137,6 +1211,7 @@ def build_tw_intraday_group_snapshots(
     )
     exchange_groups.sort(
         key=lambda item: (
+            not bool(item.get("ranking_eligible")),
             -float(item.get("median_return_pct") or 0),
             -float(item.get("advance_ratio") or 0),
             -int(item.get("estimated_trade_value") or 0),
@@ -1153,32 +1228,48 @@ def build_tw_intraday_group_snapshots(
         coverage_count / universe_count if universe_count else 0.0
     )
     current_count = sum(
-        str(state.freshness_status or "").lower() == "current"
-        for state in states_by_stock.values()
+        _freshness_status(
+            _aware_taipei(state.snapshot_as_of)
+            or _aware_taipei(state.event_time)
+            or generated,
+            now=generated,
+        )
+        == "current"
+        for state in received_by_stock.values()
     )
     current_ratio = (
-        current_count / coverage_count if coverage_count else 0.0
+        current_count / len(received_by_stock) if received_by_stock else 0.0
     )
     snapshot_status = (
         "ready"
         if exchange_groups
+        and coverage_count > 0
         and coverage_ratio >= 0.95
         and current_ratio >= 0.95
         else "partial"
-        if exchange_groups
+        if exchange_groups and coverage_count > 0
         else "missing"
     )
     snapshot_decision_usable = snapshot_status == "ready"
     for group in groups:
         member_count = int(group.get("member_count") or 0)
         observed_count = int(group.get("observed_count") or 0)
+        group_coverage_ratio = observed_count / member_count if member_count else 0.0
         group.update(
             {
-                "status": snapshot_status,
-                "coverage_ratio": (
-                    observed_count / member_count if member_count else 0.0
+                "status": (
+                    "ready"
+                    if group_coverage_ratio >= 0.95
+                    else "partial"
+                    if observed_count
+                    else "missing"
                 ),
-                "decision_usable": snapshot_decision_usable,
+                "coverage_ratio": group_coverage_ratio,
+                "decision_usable": bool(
+                    snapshot_decision_usable
+                    and group_coverage_ratio >= 0.95
+                    and group.get("ranking_eligible") is True
+                ),
             }
         )
     observed_trade_date = (
@@ -1194,6 +1285,8 @@ def build_tw_intraday_group_snapshots(
         "scope": "active_stock_master_registered_universe",
         "markets": list(SUPPORTED_MARKETS),
         "universe_count": universe_count,
+        "received_count": len(received_by_stock),
+        "classified_count": coverage_count,
         "coverage_count": coverage_count,
         "unknown_count": max(universe_count - coverage_count, 0),
         "coverage_ratio": coverage_ratio,
@@ -1213,7 +1306,12 @@ def build_tw_intraday_group_snapshots(
             "Intraday group coverage or freshness is incomplete; metrics use "
             "only the scheduler-owned current-trade-date state."
         ]
-        if exchange_groups
+        if coverage_count > 0
+        else [
+            "Intraday group observations were received but none are "
+            "classifiable for ranking."
+        ]
+        if received_by_stock
         else ["No scheduler-owned intraday group state is available yet."]
     )
     source_refs = [
@@ -1251,7 +1349,7 @@ def build_tw_intraday_group_snapshots(
         "is_intraday": True,
         "warnings": shared_warnings,
         "missing": (
-            [] if exchange_groups else ["taiwan_intraday_stock_state"]
+            [] if coverage_count > 0 else ["taiwan_intraday_stock_state"]
         ),
         "source_refs": [
             *source_refs,
@@ -1273,9 +1371,17 @@ def build_tw_intraday_group_snapshots(
             "change_pct": group["mean_return_pct"],
             **{
                 key: group.get(key)
-                for key in (
-                    "member_count",
-                    "observed_count",
+            for key in (
+                "member_count",
+                "received_count",
+                "classified_count",
+                "fresh_snapshot_count",
+                "recent_trade_count",
+                "observed_count",
+                "unknown_count",
+                "ranking_eligible",
+                "ranking_ineligibility_reasons",
+                "ranking_policy",
                     "advance_count",
                     "decline_count",
                     "unchanged_count",

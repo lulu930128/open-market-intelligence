@@ -6,7 +6,7 @@ from hashlib import sha256
 from math import isfinite
 from typing import Any, Iterable
 
-from sqlalchemy import case, or_
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -34,6 +34,8 @@ from app.market.tw_intraday_state import (
     INTRADAY_STATE_VERSION,
     build_tw_hot_groups_snapshot,
 )
+from app.market.tw_instrument import TaiwanInstrumentResolutionError
+from app.market.tw_watchlist_state import read_taiwan_watchlist_instrument_state
 from app.market_data.contracts import MarketIndexObservation
 from app.watchlists.service import list_groups, list_items
 
@@ -320,6 +322,8 @@ def _project_hot_groups_for_dashboard(
     for group in snapshot.get("groups") or []:
         if not isinstance(group, dict):
             continue
+        if group.get("ranking_eligible") is not True:
+            continue
         group_id = str(group.get("group_id") or "")
         group_key = (
             group_id.split(":", 1)[1]
@@ -394,9 +398,8 @@ def _resolve_watchlist_group(
 
 def _build_watchlist(
     db: Session,
-    state_by_stock: dict[tuple[str, str], TaiwanIntradayStockState],
     *,
-    session_phase: str,
+    requested_at: datetime,
     group_id: int | None,
     include_children: bool,
     limit: int,
@@ -438,32 +441,67 @@ def _build_watchlist(
             continue
         seen.add(stock_id)
         market = str(item.get("market") or "").upper()
-        observation = _observation(
-            state_by_stock.get((market, stock_id)),
-            session_phase=session_phase,
-        )
+        try:
+            observation = read_taiwan_watchlist_instrument_state(
+                db,
+                instrument_id=stock_id,
+                requested_at=requested_at,
+            )
+        except TaiwanInstrumentResolutionError:
+            observation = {
+                "instrument_type": "unknown",
+                "market": market or None,
+                "status": "missing",
+                "price": None,
+                "previous_close": None,
+                "change_pct": None,
+                "price_semantics": "unavailable",
+                "trade_date": None,
+                "expected_trade_date": taiwan_presentation_session(requested_at)[
+                    "trade_date"
+                ],
+                "as_of": None,
+                "freshness_status": "missing",
+                "provider": None,
+                "source": None,
+                "reason_code": "WATCHLIST_INSTRUMENT_MAPPING_MISSING",
+                "warning": "Watchlist instrument is not registered in canonical StockMaster.",
+            }
         deduplicated.append(
             {
                 "stock_id": stock_id,
                 "stock_name": item.get("stock_name"),
-                "market": market or None,
+                "instrument_type": observation["instrument_type"],
+                "market": observation["market"] or market or None,
                 "status": observation["status"],
                 "price": observation["price"],
                 "previous_close": observation["previous_close"],
                 "change_pct": observation["change_pct"],
                 "price_semantics": observation["price_semantics"],
+                "trade_date": observation["trade_date"],
+                "expected_trade_date": observation["expected_trade_date"],
                 "as_of": observation["as_of"],
-                "warning": observation["reason"],
+                "freshness_status": observation["freshness_status"],
+                "provider": observation["provider"],
+                "source": observation["source"],
+                "reason_code": observation["reason_code"],
+                "warning": observation["warning"],
             }
         )
         if len(deduplicated) >= limit:
             break
 
-    observed_count = sum(item["status"] == "observed" for item in deduplicated)
+    usable_statuses = {
+        "observed",
+        "session_final",
+        "official_close",
+        "latest_completed_session",
+    }
+    usable_count = sum(item["status"] in usable_statuses for item in deduplicated)
     return {
         "status": (
             "ready"
-            if deduplicated and observed_count == len(deduplicated)
+            if deduplicated and usable_count == len(deduplicated)
             else "partial"
             if deduplicated
             else "missing"
@@ -473,10 +511,10 @@ def _build_watchlist(
         "items": deduplicated,
         "warnings": (
             []
-            if observed_count == len(deduplicated)
+            if usable_count == len(deduplicated)
             else [
-                f"{len(deduplicated) - observed_count} watchlist item(s) "
-                "do not have a classified current-session observation."
+                f"{len(deduplicated) - usable_count} watchlist item(s) "
+                "do not have usable canonical current or completed-session price evidence."
             ]
         ),
     }
@@ -880,8 +918,7 @@ def build_tw_market_dashboard(
     )
     watchlist = _build_watchlist(
         db,
-        state_by_stock,
-        session_phase=session_phase,
+        requested_at=checked_at,
         group_id=watchlist_group_id,
         include_children=include_watchlist_children,
         limit=watchlist_limit,
@@ -1171,13 +1208,13 @@ def build_tw_dashboard_stock_detail(
         db.query(StockMaster)
         .filter(StockMaster.stock_id == normalized_stock_id)
         .filter(StockMaster.market.in_(SUPPORTED_MARKETS))
-        .filter(StockMaster.instrument_type == "stock")
+        .filter(func.lower(StockMaster.instrument_type).in_(("stock", "etf")))
         .filter(StockMaster.is_active.is_(True))
         .first()
     )
     if stock is None:
         raise TaiwanDashboardStockNotFoundError(
-            f"Active Taiwan stock id='{normalized_stock_id}' was not found."
+            f"Active Taiwan stock or ETF id='{normalized_stock_id}' was not found."
         )
     if normalized_timeframe not in {"today", "daily", "weekly", "monthly"}:
         raise ValueError(
@@ -1239,6 +1276,7 @@ def build_tw_dashboard_stock_detail(
         "version": TW_STOCK_DASHBOARD_DETAIL_VERSION,
         "stock_id": normalized_stock_id,
         "stock_name": stock.stock_name,
+        "instrument_type": str(stock.instrument_type or "unknown").lower(),
         "market": stock.market,
         "timeframe": normalized_timeframe,
         "bars": bars,

@@ -56,7 +56,7 @@ def test_current_provider_selection_is_not_owned_by_public_indices_functions() -
     assert "_get_market_index_intraday_prefer_live" not in intraday_source
     assert "_fetch_" not in intraday_source
     assert "read_taiwan_current_index" in intraday_source
-    assert "TaiwanBarService" in intraday_source
+    assert "read_taiwan_index_intraday_bars" in intraday_source
     assert "read_taiwan_index_intraday_series" not in intraday_source
     assert "taiwan_index_minute" not in intraday_source
 

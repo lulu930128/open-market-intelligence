@@ -387,6 +387,25 @@ class TaiwanChartBarPoint(CanonicalModel):
     technical_eligible: bool
 
 
+class TaiwanChartPresentationEvent(CanonicalModel):
+    """Display-only market event aligned with, but not part of, a Bar series."""
+
+    contract_version: str = "tw.bar.chart_presentation_event.v1"
+    event_type: str
+    event_at: datetime
+    price: Decimal
+    price_semantics: str
+    market_session: str
+    finalization: BarFinalization
+    authority: AuthorityClass
+    official: bool = False
+    provider: str
+    source: str
+    volume: Quantity | None = None
+    display_eligible: bool = True
+    technical_eligible: bool = False
+
+
 class TaiwanChartBarSeriesRead(CanonicalModel):
     """Consumer-specific chart projection with canonical revision metadata."""
 
@@ -397,6 +416,7 @@ class TaiwanChartBarSeriesRead(CanonicalModel):
     derived: bool
     aggregation_version: str | None = None
     bars: tuple[TaiwanChartBarPoint, ...] = ()
+    presentation_events: tuple[TaiwanChartPresentationEvent, ...] = ()
     history: TaiwanHistoryCoverage
     current_session_coverage: TaiwanCurrentSessionCoverage | None = None
     identity: TaiwanBarSeriesIdentity
@@ -406,6 +426,8 @@ class TaiwanChartBarSeriesRead(CanonicalModel):
 
 def project_taiwan_chart_bar_series(
     series: TaiwanBarSeriesRead,
+    *,
+    presentation_events: tuple[TaiwanChartPresentationEvent, ...] = (),
 ) -> TaiwanChartBarSeriesRead:
     """Project an already-resolved series without re-reading market data."""
 
@@ -432,6 +454,7 @@ def project_taiwan_chart_bar_series(
             )
             for bar, state in zip(series.bars, series.bar_states, strict=True)
         ),
+        presentation_events=presentation_events,
         history=series.history,
         current_session_coverage=series.current_session_coverage,
         identity=series.identity,

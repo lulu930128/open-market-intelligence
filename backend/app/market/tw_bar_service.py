@@ -45,6 +45,7 @@ from app.market.tw_bar_contracts import (
     TaiwanBarSeriesRead,
     TaiwanBarSessionScope,
     TaiwanBarOutwardState,
+    TaiwanChartPresentationEvent,
     TaiwanHistoryCoverage,
     TaiwanHistoryStatus,
     TaiwanCurrentSessionCoverage,
@@ -360,6 +361,7 @@ def _current_session_snapshot_phase(
     expected_bucket_count: int,
     observed_bucket_count: int,
     missing_bucket_count: int,
+    session_closed: bool,
 ) -> tuple[TaiwanCurrentSessionSnapshotPhase, str]:
     sparse_gap_limit = max(3, (expected_bucket_count + 19) // 20)
     mostly_complete = bool(
@@ -383,6 +385,11 @@ def _current_session_snapshot_phase(
         )
     if status is TaiwanCurrentSessionCoverageStatus.SPARSE:
         if not mostly_complete:
+            if session_closed and observed_bucket_count >= 2:
+                return (
+                    TaiwanCurrentSessionSnapshotPhase.DEGRADED,
+                    "TW_CHART_SNAPSHOT_SPARSE_POST_CLOSE",
+                )
             return (
                 TaiwanCurrentSessionSnapshotPhase.WARMING,
                 "TW_CHART_SNAPSHOT_SPARSE_EXCESSIVE_GAPS",
@@ -419,6 +426,7 @@ def _current_session_coverage(
     snapshot_bars,
     trade_date: date,
     instrument_type: InstrumentType,
+    session_closed: bool,
 ) -> TaiwanCurrentSessionCoverage:
     expected = tuple(item for item in coverage if item.expected_by_trading_policy)
     observed = tuple(
@@ -459,6 +467,7 @@ def _current_session_coverage(
         expected_bucket_count=len(expected),
         observed_bucket_count=len(observed),
         missing_bucket_count=missing_count,
+        session_closed=session_closed,
     )
     snapshot_identity = build_taiwan_bar_series_identity(
         instrument=instrument,
@@ -738,6 +747,49 @@ class TaiwanBarService:
         )
         return _current_session_response_window(full_snapshot, limit=limit)
 
+    def read_current_session_presentation_events(
+        self,
+        *,
+        series: TaiwanBarSeriesRead,
+        requested_at: datetime | None = None,
+    ) -> tuple[TaiwanChartPresentationEvent, ...]:
+        """Read display-only close evidence without changing canonical Bars."""
+
+        coverage = series.current_session_coverage
+        if coverage is None or not series.bars:
+            return ()
+        local_now = _aware_taipei(requested_at or datetime.now(TAIWAN_TZ))
+        formal_close_at = datetime.combine(
+            coverage.trade_date,
+            TAIWAN_SESSION_CLOSE_TIME,
+            tzinfo=TAIWAN_TZ,
+        )
+        if local_now < formal_close_at:
+            return ()
+        component = _qualified_formal_close_component(
+            self._db,
+            instrument=series.instrument,
+            trade_date=coverage.trade_date,
+            requested_at=local_now,
+        )
+        if component is None:
+            return ()
+        return (
+            TaiwanChartPresentationEvent(
+                event_type="session_close_marker",
+                event_at=formal_close_at,
+                price=component.close_price,
+                price_semantics="session_close",
+                market_session="closing_auction",
+                finalization=component.finalization,
+                authority=component.lineage.authority,
+                official=False,
+                provider=component.lineage.provider,
+                source=component.lineage.source,
+                volume=component.volume,
+            ),
+        )
+
     def read_scoped_bars(
         self,
         *,
@@ -888,6 +940,8 @@ class TaiwanBarService:
                     snapshot_bars=session_bars,
                     trade_date=trade_date,
                     instrument_type=instrument.instrument_type,
+                    session_closed=presentation["state"]
+                    in {"completed", "previous_session"},
                 )
                 if current_coverage.repair_recommended:
                     limitations.append(
@@ -1189,27 +1243,30 @@ class TaiwanBarService:
             )
 
         current_date = taiwan_presentation_session(now)["trade_date"]
+        current_session_from = datetime.combine(
+            current_date,
+            TAIWAN_SESSION_OPEN_TIME,
+            tzinfo=TAIWAN_TZ,
+        )
+        current_session_to = min(
+            requested_to,
+            datetime.combine(
+                current_date,
+                TAIWAN_SESSION_CLOSE_TIME,
+                tzinfo=TAIWAN_TZ,
+            ),
+        )
         if (
             include_partial
             and requested_from.date() <= current_date <= requested_to.date()
             and not any(item.start_at.date() == current_date for item in base_bars)
+            and current_session_to > current_session_from
         ):
             current_1m = self.read_bars(
                 instrument_id=instrument.symbol,
                 interval="1m",
-                from_time=datetime.combine(
-                    current_date,
-                    TAIWAN_SESSION_OPEN_TIME,
-                    tzinfo=TAIWAN_TZ,
-                ),
-                to_time=min(
-                    requested_to,
-                    datetime.combine(
-                        current_date,
-                        TAIWAN_SESSION_CLOSE_TIME,
-                        tzinfo=TAIWAN_TZ,
-                    ),
-                ),
+                from_time=current_session_from,
+                to_time=current_session_to,
                 limit=500,
                 include_partial=True,
                 requested_at=now,

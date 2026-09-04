@@ -302,7 +302,7 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertEqual(payload["hot_groups"], [])
         self.assertTrue(
             any(
-                "No scheduler-owned intraday group state" in warning
+                "none are classifiable for ranking" in warning
                 for warning in payload["warnings"]
             )
         )
@@ -626,6 +626,30 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertIsNone(payload["chart"]["intraday_overlay"])
         self.assertEqual(payload["moving_averages"], [])
         self.assertEqual(payload["technical"]["stock_id"], "2330")
+
+    def test_stock_detail_accepts_etf_through_the_same_instrument_owner(self) -> None:
+        self.db.add(
+            StockMaster(
+                stock_id="0050",
+                stock_name="元大台灣50",
+                market="TWSE",
+                instrument_type="ETF",
+                is_active=True,
+            )
+        )
+        self.db.commit()
+
+        payload = build_tw_dashboard_stock_detail(
+            self.db,
+            stock_id="0050",
+            timeframe="daily",
+            bars=90,
+        )
+
+        outward = TaiwanDashboardStockDetailRead.model_validate(payload)
+        self.assertEqual(outward.stock_id, "0050")
+        self.assertEqual(outward.instrument_type, "etf")
+        self.assertTrue(outward.cache_only)
 
     def test_stock_detail_moving_averages_are_backend_computed(self) -> None:
         points = [

@@ -97,7 +97,50 @@ def _watchlist_symbols(db: Session) -> list[str]:
         )
         .all()
     )
-    return _normalized_symbols(row[0] for row in rows)
+    symbols = _normalized_symbols(row[0] for row in rows)
+    if not symbols:
+        return []
+    instrument_types = {
+        row.stock_id: str(row.instrument_type or "").strip().lower()
+        for row in (
+            db.query(StockMaster)
+            .filter(StockMaster.stock_id.in_(symbols))
+            .all()
+        )
+    }
+    # A bounded producer slot should not systematically starve ETFs merely
+    # because ordinary stocks happen to have lower watchlist priorities.
+    # This ordering stays inside the existing Watchlist source boundary.
+    return [
+        *[symbol for symbol in symbols if instrument_types.get(symbol) == "etf"],
+        *[symbol for symbol in symbols if instrument_types.get(symbol) != "etf"],
+    ]
+
+
+def list_taiwan_active_watchlist_instruments(
+    db: Session,
+) -> tuple[StockMaster, ...]:
+    """Return the bounded Stock/ETF identities referenced by active watchlists."""
+
+    symbols = _watchlist_symbols(db)
+    if not symbols:
+        return ()
+    masters = {
+        row.stock_id: row
+        for row in (
+            db.query(StockMaster)
+            .filter(StockMaster.stock_id.in_(symbols))
+            .filter(StockMaster.is_active.is_(True))
+            .all()
+        )
+    }
+    return tuple(
+        master
+        for symbol in symbols
+        if (master := masters.get(symbol)) is not None
+        and str(master.market or "").strip().upper() in SUPPORTED_MARKETS
+        and str(master.instrument_type or "").strip().lower() in {"stock", "etf"}
+    )
 
 
 def _lease_symbols() -> list[str]:
@@ -300,6 +343,7 @@ __all__ = [
     "TIER_A_TARGET_PLAN_VERSION",
     "TaiwanTierATarget",
     "TaiwanTierATargetPlan",
+    "list_taiwan_active_watchlist_instruments",
     "resolve_taiwan_intraday_target_universe",
     "resolve_taiwan_tier_a_target_plan",
 ]

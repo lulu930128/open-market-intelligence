@@ -106,6 +106,29 @@ def test_qualified_formal_close_component_preserves_close_without_making_1m_bar(
     assert component.volume is not None
     assert component.volume.value == Decimal("1000")
 
+    with patch.object(
+        tw_bar_service_module,
+        "_qualified_formal_close_component",
+        return_value=component,
+    ):
+        events = TaiwanBarService(object()).read_current_session_presentation_events(
+            series=SimpleNamespace(
+                current_session_coverage=SimpleNamespace(trade_date=trade_date),
+                bars=(object(),),
+                instrument=instrument,
+            ),
+            requested_at=requested_at,
+        )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == "session_close_marker"
+    assert event.event_at == close_at
+    assert event.price == Decimal("2390")
+    assert event.display_eligible is True
+    assert event.technical_eligible is False
+    assert event.official is False
+
 
 def _db() -> tuple[Session, object]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -595,6 +618,48 @@ def test_current_session_sparse_snapshot_with_excessive_gaps_stays_warming() -> 
         assert coverage.snapshot_reason_codes == (
             "TW_CHART_SNAPSHOT_SPARSE_EXCESSIVE_GAPS",
         )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_completed_session_sparse_snapshot_with_excessive_gaps_is_visible() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=NSTOCK_INTRADAY_PROVIDER,
+            source_name=NSTOCK_INTRADAY_SOURCE,
+            parser_version=NSTOCK_INTRADAY_PARSER_VERSION,
+            authority="vendor",
+            minutes=1,
+        )
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=KGI_INTRADAY_PROVIDER,
+            source_name=KGI_INTRADAY_SOURCE,
+            parser_version=KGI_INTRADAY_PARSER_VERSION,
+            authority="broker",
+            minutes=1,
+            start_minute=264,
+        )
+
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 1, 13, 34, tzinfo=TAIPEI),
+        )
+
+        coverage = result.current_session_coverage
+        assert coverage is not None
+        assert coverage.status.value == "sparse"
+        assert coverage.snapshot_phase.value == "degraded"
+        assert coverage.snapshot_reason_codes == (
+            "TW_CHART_SNAPSHOT_SPARSE_POST_CLOSE",
+        )
+        assert coverage.snapshot_bar_count == 2
     finally:
         db.close()
         engine.dispose()

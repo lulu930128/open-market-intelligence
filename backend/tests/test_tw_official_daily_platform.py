@@ -19,6 +19,9 @@ from app.db.models import (
     RawFetchResult,
     SourceRegistry,
     StockMaster,
+    TaiwanIssuedSharesDaily,
+    WatchlistGroup,
+    WatchlistItem,
 )
 from app.market.daily_ohlcv_acquisition import TaiwanOfficialDailyAcquisitionExecutor
 from app.market.daily_ohlcv_platform import (
@@ -42,6 +45,7 @@ from app.market.providers.tw_official_daily import (
     TWSE_RWD_DAILY_RESOURCE_ID,
     TW_OFFICIAL_DAILY_DESCRIPTORS,
     parse_tpex_official_daily_payload,
+    parse_tpex_issued_shares_payload,
     parse_twse_rwd_official_daily_payload,
     parse_twse_official_daily_payload,
 )
@@ -317,6 +321,94 @@ def test_twse_rwd_venue_refresh_accepts_runtime_scale_universe(
     assert result["fetch_status"] == "success"
     assert result["parsed_count"] == 1
     assert db.query(MarketDailyPrice).one().stock_id == "3711"
+
+
+def test_twse_venue_refresh_includes_only_active_watchlist_etfs_beyond_stock_universe(
+    db: Session,
+) -> None:
+    db.add_all(
+        [
+            StockMaster(
+                stock_id="3711",
+                stock_name="日月光投控",
+                market="TWSE",
+                instrument_type="stock",
+                is_active=True,
+            ),
+            StockMaster(
+                stock_id="0050",
+                stock_name="元大台灣50",
+                market="TWSE",
+                instrument_type="ETF",
+                is_active=True,
+            ),
+            StockMaster(
+                stock_id="0056",
+                stock_name="元大高股息",
+                market="TWSE",
+                instrument_type="ETF",
+                is_active=True,
+            ),
+        ]
+    )
+    group = WatchlistGroup(group_name="ETF", is_active=True)
+    db.add(group)
+    db.flush()
+    db.add(
+        WatchlistItem(
+            group_id=group.id,
+            stock_id="0050",
+            enabled=True,
+        )
+    )
+    db.commit()
+    payload = _fixture("twse_mi_index_allbut0999_excerpt_20260827.json")["payload"]
+    payload["tables"][0]["data"].append(
+        [
+            "0050",
+            "元大台灣50",
+            "10,000,000",
+            "20,000",
+            "1,080,000,000",
+            "107.00",
+            "109.00",
+            "106.00",
+            "108.00",
+            "<p style= color:red>+</p>",
+            "2.00",
+            "107.90",
+            "100",
+            "108.00",
+            "200",
+            "0.00",
+        ]
+    )
+    route_symbol_bounds: list[int] = []
+
+    def fetch(route):
+        route_symbol_bounds.append(route.max_symbols)
+        return FakeResponse(text=json.dumps(payload, ensure_ascii=False))
+
+    executor = TaiwanOfficialDailyAcquisitionExecutor(
+        fetchers={TWSE_RWD_DAILY_RESOURCE_ID: fetch},
+        clock=lambda: datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
+        monotonic=lambda: 10.0,
+    )
+
+    result = refresh_taiwan_official_daily_venue(
+        db,
+        venue="TWSE",
+        trade_date=date(2026, 8, 27),
+        requested_at=datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
+        acquisition=executor,
+    )
+
+    assert route_symbol_bounds == [2]
+    assert result["parsed_count"] == 2
+    assert {row.stock_id for row in db.query(MarketDailyPrice).all()} == {
+        "0050",
+        "3711",
+    }
 
 
 def test_cache_requirement_rejects_unbounded_calendar_range() -> None:
@@ -602,6 +694,14 @@ def test_recorded_tpex_excerpt_parses_legacy_table_shape() -> None:
     assert record.transaction_count == 26_254
     assert str(record.price_change) == "-30.00"
 
+    shares = parse_tpex_issued_shares_payload(
+        _raw_payload("tpex_mainboard_quotes_excerpt_20260825.json")
+    )
+    assert [(item.symbol, item.issued_shares) for item in shares] == [
+        ("6488", 478_113_725),
+        ("8069", 1_154_678_380),
+    ]
+
 
 @pytest.mark.parametrize(
     ("resource_id", "fixture_name", "symbol", "venue", "trade_date", "close"),
@@ -662,6 +762,14 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
     assert db.query(RawFetchResult).count() == 1
     assert db.query(MarketDailyPrice).count() == 1
     assert db.query(DataQualityCheck).count() == 1
+    if venue == "TPEX":
+        assert db.query(TaiwanIssuedSharesDaily).count() == 2
+        shares = (
+            db.query(TaiwanIssuedSharesDaily)
+            .filter(TaiwanIssuedSharesDaily.stock_id == symbol)
+            .one()
+        )
+        assert shares.issued_shares == 478_113_725
     first_raw = db.query(RawFetchResult).one()
     assert first_raw.id == first.persistence.raw_result_ids[0]
     assert first_raw.content_hash == first.result.resolved.bars[0].lineage.content_hash
@@ -678,6 +786,12 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
     assert db.query(RawFetchResult).count() == 2
     assert db.query(MarketDailyPrice).count() == 1
     assert db.query(DataQualityCheck).count() == 2
+    if venue == "TPEX":
+        assert db.query(TaiwanIssuedSharesDaily).count() == 2
+        assert all(
+            item.raw_result_id == second.persistence.raw_result_ids[0]
+            for item in db.query(TaiwanIssuedSharesDaily).all()
+        )
     row = db.query(MarketDailyPrice).one()
     assert row.raw_result_id == second.persistence.raw_result_ids[0]
     assert row.trade_value is not None

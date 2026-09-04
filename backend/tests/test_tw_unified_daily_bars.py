@@ -803,6 +803,34 @@ def test_continuous_minutes_without_formal_close_remain_provisional(
     assert result.bar_states[0].technical_eligible is False
 
 
+def test_preopen_daily_read_does_not_request_a_future_intraday_window(
+    db: Session,
+) -> None:
+    db.add(
+        StockMaster(
+            stock_id="2330",
+            stock_name="台積電",
+            market="TWSE",
+            instrument_type="stock",
+            is_active=True,
+        )
+    )
+    db.commit()
+    service = TaiwanBarService(db)
+
+    result = service._read_daily_bars(
+        instrument_id="2330",
+        requested_interval="1d",
+        from_time=datetime(2026, 9, 4, tzinfo=TAIWAN_TZ),
+        to_time=datetime(2026, 9, 4, 8, 34, tzinfo=TAIWAN_TZ),
+        limit=10,
+        include_partial=True,
+        requested_at=datetime(2026, 9, 4, 8, 34, tzinfo=TAIWAN_TZ),
+    )
+
+    assert result.bars == ()
+
+
 def test_overlapping_current_minutes_fail_open_without_breaking_daily_read(
     db: Session,
 ) -> None:

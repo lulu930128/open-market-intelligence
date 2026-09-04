@@ -508,12 +508,26 @@ def resolve_taiwan_index_quote_state(
         "post_close_snapshot",
         "market_closed",
     }
-    expected_trade_date = (
-        current_date
-        if calendar_status.get("is_trading_day") is True
-        and current_trading_day_phase
-        else presentation_trade_date or previous_trading_day
-    )
+    if (
+        calendar_status.get("is_trading_day") is True
+        and phase in {"preopen_pending", "preopen"}
+    ):
+        # Until regular trading opens there is no qualified current-session
+        # index observation to headline.  The presentation session may already
+        # be rolled to today's pending/observing trade date, so resolve the
+        # latest completed session explicitly instead of making yesterday's
+        # qualified Daily evidence ineligible.
+        expected_trade_date = previous_taiwan_trading_day(
+            current_date,
+            include_value=False,
+        )
+    else:
+        expected_trade_date = (
+            current_date
+            if calendar_status.get("is_trading_day") is True
+            and current_trading_day_phase
+            else presentation_trade_date or previous_trading_day
+        )
 
     latest_point = latest_intraday_point(intraday)
     intraday_time = (

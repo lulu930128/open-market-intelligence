@@ -34,6 +34,10 @@ from app.market_data.provider_catalog import (
     DescriptorTargetKind,
     ProviderCapabilityDescriptorV2,
 )
+from app.market.tw_issued_shares import (
+    OfficialIssuedSharesRecord,
+    parse_tpex_issued_shares_payload,
+)
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
@@ -681,6 +685,7 @@ __all__ = [
     "OfficialDailyParseIssue",
     "OfficialDailyParseResult",
     "OfficialDailyRecord",
+    "OfficialIssuedSharesRecord",
     "TPEX_DAILY_PARSER_VERSION",
     "TPEX_DAILY_RESOURCE_ID",
     "TPEX_OFFICIAL_DAILY_DESCRIPTOR",
@@ -700,6 +705,7 @@ __all__ = [
     "endpoint_for_resource",
     "official_daily_record_to_bar",
     "parse_tpex_official_daily_payload",
+    "parse_tpex_issued_shares_payload",
     "parse_twse_rwd_official_daily_payload",
     "parse_twse_official_daily_payload",
     "parser_version_for_resource",

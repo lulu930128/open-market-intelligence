@@ -119,9 +119,11 @@ def resolve_taiwan_instrument_trading_policy(
         disposition_active=active,
         cache_status=cache_status,
         reason_codes=(
-            "DISPOSITION_BATCH_AUCTION_ACTIVE"
-            if active
-            else "DISPOSITION_NOT_ACTIVE"
+            (
+                "DISPOSITION_BATCH_AUCTION_ACTIVE"
+                if active
+                else "DISPOSITION_NOT_ACTIVE"
+            ),
         ),
     )
 

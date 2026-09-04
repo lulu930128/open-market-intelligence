@@ -432,7 +432,14 @@ def _tw_portfolio_records(frame: Any) -> tuple[list[dict[str, Any]], list[str]]:
             if raw_symbol:
                 short_symbols.add(_normalize_portfolio_symbol(raw_symbol))
 
-        cash_quantity = max(quantities["NETQTY9"], 0) + max(quantities["NETQTY0"], 0)
+        # InventorySum(FType="B") reports NETQTY0 as the total cash position;
+        # NETQTY9 is the odd-lot component of that same position.  Adding both
+        # double-counts odd-lot-only holdings (for example 120/120 -> 240).
+        cash_quantity = max(
+            quantities["NETQTY0"],
+            quantities["NETQTY9"],
+            0,
+        )
         margin_quantity = max(quantities["NETQTY3"], 0)
         quantity = cash_quantity + margin_quantity
         if quantity <= 0:
@@ -494,6 +501,50 @@ def _tw_portfolio_records(frame: Any) -> tuple[list[dict[str, Any]], list[str]]:
     if missing_cost_symbols:
         warnings.append(f"missing_cost_basis:{len(missing_cost_symbols)}")
     return records, warnings
+
+
+def _tw_portfolio_diagnostics(
+    frame: Any,
+    symbols: Any,
+) -> list[dict[str, Any]]:
+    requested = list(dict.fromkeys(
+        _normalize_portfolio_symbol(value)
+        for value in (symbols if isinstance(symbols, list) else [])
+    ))
+    if len(requested) > 5:
+        raise ValueError("KGI portfolio diagnostics support at most 5 symbols.")
+    if not requested:
+        return []
+    fields = (
+        "NETQTY9",
+        "NETQTY0",
+        "NETQTY3",
+        "NETQTY4",
+        "AVG_PRICE0",
+        "AVG_PRICE3",
+    )
+    rows = _frame_records(frame, required_columns={"Symbol", *fields})
+    diagnostics: list[dict[str, Any]] = []
+    for symbol in requested:
+        matching = [
+            row
+            for row in rows
+            if _normalize_portfolio_symbol(row.get("Symbol")) == symbol
+        ]
+        diagnostics.append(
+            {
+                "symbol": symbol,
+                "source_row_count": len(matching),
+                "source_rows": [
+                    {
+                        field: _number(row.get(field))
+                        for field in fields
+                    }
+                    for row in matching
+                ],
+            }
+        )
+    return diagnostics
 
 
 def _us_portfolio_records(frame: Any) -> tuple[list[dict[str, Any]], list[str]]:
@@ -588,7 +639,12 @@ def _portfolio_get(message: dict[str, Any]) -> dict[str, Any]:
         query = getattr(facade, "InventorySum", None)
         if not callable(query):
             raise RuntimeError("KGI Taiwan inventory query is unavailable.")
-        records, warnings = _tw_portfolio_records(query("B"))
+        frame = query("B")
+        records, warnings = _tw_portfolio_records(frame)
+        diagnostics = _tw_portfolio_diagnostics(
+            frame,
+            message.get("diagnostic_symbols"),
+        )
         source_api = "Account.InventorySum"
     else:
         setter = getattr(api, "set_SubAccount", None)
@@ -600,6 +656,7 @@ def _portfolio_get(message: dict[str, Any]) -> dict[str, Any]:
         if not callable(query):
             raise RuntimeError("KGI US position query is unavailable.")
         records, warnings = _us_portfolio_records(query())
+        diagnostics = []
         source_api = "SubAccount.StockPositionReport"
 
     return {
@@ -609,6 +666,7 @@ def _portfolio_get(message: dict[str, Any]) -> dict[str, Any]:
         "holding_count": len(records),
         "records": records,
         "warnings": warnings,
+        "diagnostics": diagnostics,
         "observed_at": datetime.now(timezone.utc).isoformat(),
     }
 

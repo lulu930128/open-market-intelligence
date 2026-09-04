@@ -24,7 +24,14 @@ from app.market.signal_service import calculate_latest_stock_signals
 from app.market.schemas import TechnicalReportRead
 from app.market.technical_evidence import build_tw_stock_technical_evidence
 from app.market.technical_indicator_gateway import calculate_active_daily_indicators
-from app.market.technical_report import TAIPEI_TZ, _fmt_price, build_stock_technical_report
+from app.market.technical_report import (
+    TAIPEI_TZ,
+    _canonical_intraday_payload,
+    _fmt_price,
+    _today_market_session,
+    build_stock_technical_report,
+)
+from app.market.tw_bar_contracts import TaiwanBarSessionScope
 from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
@@ -131,6 +138,76 @@ def add_chip_rows(db: Session, stock_id: str = "2330") -> None:
 
 
 class TechnicalReportTests(unittest.TestCase):
+    def test_post_close_session_separates_previous_from_latest_completed_day(
+        self,
+    ) -> None:
+        with patch(
+            "app.market.technical_report._now",
+            return_value=datetime(2026, 9, 4, 22, 0, tzinfo=TAIPEI_TZ),
+        ):
+            session = _today_market_session()
+
+        self.assertEqual(session["previous_trading_day"], "2026-09-03")
+        self.assertEqual(
+            session["latest_completed_trade_date"],
+            "2026-09-04",
+        )
+
+    def test_canonical_intraday_payload_is_scoped_to_current_session(self) -> None:
+        bar = SimpleNamespace(
+            start_at=datetime(2026, 9, 4, 9, 0, tzinfo=TAIPEI_TZ),
+            open_price=100,
+            high_price=101,
+            low_price=99,
+            close_price=100,
+            volume=SimpleNamespace(value=1000),
+            finalization=SimpleNamespace(value="final"),
+            lineage=SimpleNamespace(source="test_current_session"),
+        )
+        series = SimpleNamespace(
+            bars=[bar],
+            current_session_coverage=SimpleNamespace(
+                status=SimpleNamespace(value="partial_prefix"),
+                model_dump=lambda **_kwargs: {
+                    "status": "partial_prefix",
+                    "observed_bucket_count": 1,
+                    "missing_bucket_count": 1,
+                },
+            ),
+            history=SimpleNamespace(
+                requested_coverage_satisfied=True,
+                history_status=SimpleNamespace(value="ready"),
+            ),
+            identity=SimpleNamespace(
+                series_fingerprint="fingerprint",
+                series_revision="revision",
+            ),
+        )
+
+        with patch(
+            "app.market.technical_report.TaiwanBarService"
+        ) as service_class:
+            service_class.return_value.read_scoped_bars.return_value = series
+
+            payload = _canonical_intraday_payload(object(), "2330")
+
+        service_class.return_value.read_scoped_bars.assert_called_once_with(
+            instrument_id="2330",
+            interval="1m",
+            limit=500,
+            include_partial=True,
+            session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
+        )
+        service_class.return_value.read_bars.assert_not_called()
+        self.assertEqual(payload["point_count"], 1)
+        self.assertEqual(payload["points"][0]["time"].date(), date(2026, 9, 4))
+        self.assertEqual(payload["series_coverage"]["status"], "partial_prefix")
+        self.assertTrue(payload["series_coverage"]["opening_covered"])
+        self.assertFalse(payload["series_coverage"]["current_window_complete"])
+        self.assertFalse(
+            payload["series_coverage"]["current_cumulative_volume_complete"]
+        )
+
     def test_price_display_does_not_strip_integer_trailing_zeroes(self) -> None:
         self.assertEqual(_fmt_price(2350), "2,350")
         self.assertEqual(_fmt_price(2350.0), "2,350")

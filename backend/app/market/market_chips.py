@@ -17,7 +17,10 @@ from app.db.models import (
     MarketChipDaily,
     SourceRegistry,
 )
-from app.market.indices import ensure_market_index_daily_stat_coverage
+from app.market.indices import (
+    ensure_market_index_daily_stat_coverage,
+    read_market_index_daily_stat,
+)
 from app.market.official_index_platform import read_taiwan_official_index
 from app.market_data.contracts import MarketIndexObservation
 from app.market.providers import http_get, http_post
@@ -693,12 +696,19 @@ def _latest_market_index_stat(
     *,
     index_id: str,
     trade_date: date,
-) -> MarketIndexObservation | None:
-    return read_taiwan_official_index(
+) -> MarketIndexObservation | Any | None:
+    resolved = read_taiwan_official_index(
         db,
         index_id=index_id,
         trade_date=trade_date,
     ).resolved.market_index
+    if resolved is not None:
+        return resolved
+    return read_market_index_daily_stat(
+        db,
+        index_id=index_id,
+        trade_date=trade_date,
+    )
 
 
 def _previous_market_chip(
@@ -1682,6 +1692,43 @@ def market_chip_daily_to_dict(
     resolve_expected_margin: bool = False,
 ) -> dict[str, Any]:
     source_details = _load_source_details(row)
+    index_context = None
+    if db is not None and (
+        row.close_value is None
+        or row.price_change is None
+        or row.price_change_pct is None
+    ):
+        index_context = _latest_market_index_stat(
+            db,
+            index_id=row.index_id,
+            trade_date=row.trade_date,
+        )
+    close_value = (
+        row.close_value
+        if row.close_value is not None
+        else float(index_context.close_value)
+        if index_context is not None
+        else None
+    )
+    price_change = (
+        row.price_change
+        if row.price_change is not None
+        else float(index_context.price_change)
+        if index_context is not None and index_context.price_change is not None
+        else None
+    )
+    price_change_pct = (
+        row.price_change_pct
+        if row.price_change_pct is not None
+        else _price_change_pct(close_value, price_change)
+    )
+    trade_value = (
+        row.trade_value
+        if row.trade_value is not None
+        else int(index_context.trade_value)
+        if index_context is not None and index_context.trade_value is not None
+        else None
+    )
     if resolve_expected_margin:
         margin_values, margin_status = _resolve_market_chip_margin(
             row,
@@ -1711,10 +1758,10 @@ def market_chip_daily_to_dict(
         "index_id": row.index_id,
         "market": row.market,
         "trade_date": row.trade_date,
-        "close_value": row.close_value,
-        "price_change": row.price_change,
-        "price_change_pct": row.price_change_pct,
-        "trade_value": row.trade_value,
+        "close_value": close_value,
+        "price_change": price_change,
+        "price_change_pct": price_change_pct,
+        "trade_value": trade_value,
         "foreign_futures_net_oi": row.foreign_futures_net_oi,
         "foreign_futures_net_oi_change": row.foreign_futures_net_oi_change,
         "retail_futures_net_oi": row.retail_futures_net_oi,

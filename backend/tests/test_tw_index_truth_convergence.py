@@ -98,6 +98,65 @@ def test_resolved_truth_confirms_release_qualified_completed_daily_close() -> No
     assert truth.current_observation.previous_close_status == "current"
 
 
+def test_preopen_pending_uses_latest_completed_session_after_presentation_rollover() -> None:
+    checked_at = datetime(2026, 9, 4, 8, 20, tzinfo=TAIPEI)
+    snapshot = {
+        **_snapshot(),
+        "time": "2026-09-03",
+        "as_of": "2026-09-03T13:30:00+08:00",
+        "completed_daily_trade_date": "2026-09-03",
+        "completed_daily_event_time": "2026-09-03T13:30:00+08:00",
+        "completed_daily_previous_close_trade_date": "2026-09-02",
+    }
+    calendar = {
+        **_calendar(),
+        "checked_at": checked_at.isoformat(),
+        "date": checked_at.date().isoformat(),
+        "phase": "preopen_pending",
+        # The calendar's legacy field includes the current trading day and the
+        # presentation session has already rolled to today's pending identity.
+        "previous_trading_day": "2026-09-04",
+        "presentation_session": {
+            "trade_date": "2026-09-04",
+            "state": "today_pending",
+        },
+    }
+
+    truth = resolve_taiwan_index_truth(
+        intraday=None,
+        index_snapshot=snapshot,
+        calendar_status=calendar,
+        index_id="TAIEX",
+        acquisition_policy="cache_only",
+    )
+
+    assert truth.expected_trade_date == "2026-09-03"
+    assert truth.selected_candidate == "completed_daily_bar"
+    assert truth.selected_value == 46_164.72
+    assert truth.selected_previous_close == 45_900.0
+    assert truth.selected_previous_close_status == "current"
+    assert truth.quote_semantics == "official_close"
+    assert truth.freshness_status == "latest_completed_session"
+
+    calendar["phase"] = "preopen"
+    calendar["presentation_session"] = {
+        "trade_date": "2026-09-04",
+        "state": "observing",
+    }
+    auction_truth = resolve_taiwan_index_truth(
+        intraday=None,
+        index_snapshot=snapshot,
+        calendar_status=calendar,
+        index_id="TAIEX",
+        acquisition_policy="cache_only",
+    )
+
+    assert auction_truth.expected_trade_date == "2026-09-03"
+    assert auction_truth.selected_candidate == "completed_daily_bar"
+    assert auction_truth.selected_value == 46_164.72
+    assert auction_truth.freshness_status == "latest_completed_session"
+
+
 def test_tpex_official_close_rolls_over_previous_close_without_derived_mix() -> None:
     checked_at = datetime(2026, 9, 2, 15, 20, tzinfo=TAIPEI)
     calendar = {

@@ -176,13 +176,20 @@ class TaiwanDashboardWatchlistSelectionRead(BaseModel):
 class TaiwanDashboardWatchlistItemRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
+    instrument_type: str
     market: str | None = None
     status: str
     price: float | None = None
     previous_close: float | None = None
     change_pct: float | None = None
     price_semantics: str
+    trade_date: date | None = None
+    expected_trade_date: date
     as_of: datetime | None = None
+    freshness_status: str
+    provider: str | None = None
+    source: str | None = None
+    reason_code: str
     warning: str | None = None
 
 
@@ -284,6 +291,7 @@ class TaiwanDashboardStockDetailRead(BaseModel):
     )
     stock_id: str
     stock_name: str | None = None
+    instrument_type: Literal["stock", "etf", "unknown"] = "unknown"
     market: str
     timeframe: str
     bars: int

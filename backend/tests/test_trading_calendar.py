@@ -120,6 +120,10 @@ class MarketCalendarStatusTests(unittest.TestCase):
         self.assertEqual(status["phase"], "market_closed")
         self.assertEqual(status["reason"], "weekend")
         self.assertEqual(status["previous_trading_day"], "2026-06-12")
+        self.assertEqual(
+            status["previous_completed_trading_day"],
+            "2026-06-12",
+        )
         self.assertEqual(status["next_trading_day"], "2026-06-15")
         self.assertEqual(
             status["release_windows"]["market_daily_price"]["expected_trade_date"],
@@ -178,6 +182,11 @@ class MarketCalendarStatusTests(unittest.TestCase):
         )
 
         self.assertEqual(regular["phase"], "regular")
+        self.assertEqual(regular["previous_trading_day"], "2026-06-15")
+        self.assertEqual(
+            regular["previous_completed_trading_day"],
+            "2026-06-12",
+        )
         self.assertEqual(auction["phase"], "closing_auction")
         self.assertTrue(auction["session"]["is_polling_window"])
         self.assertEqual(close_match["phase"], "closing_auction")

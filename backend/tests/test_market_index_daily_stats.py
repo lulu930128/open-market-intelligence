@@ -7,12 +7,20 @@ from unittest.mock import Mock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, MarketDailyPrice, MarketIndexDailyStat, RawFetchResult, SourceRegistry, StockMaster
+from app.db.models import (
+    Base,
+    MarketDailyPrice,
+    MarketIndexDailyStat,
+    RawFetchResult,
+    SourceRegistry,
+    StockMaster,
+    TaiwanIssuedSharesDaily,
+)
 from app.jobs import scheduler as job_scheduler
 from app.market import index_parsers, indices
 from app.market.official_index_contract import TWSE_INDEX_SOURCE_NAME
 from app.market.providers import twse_mis_current_breadth, twse_mis_current_index
-from app.market.schemas import MarketOhlcChartRead
+from app.market.schemas import MarketIndexContributionRead, MarketOhlcChartRead
 
 
 def make_session() -> Session:
@@ -1577,12 +1585,19 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                     trade_date=date(2026, 6, 15),
                     stock_id="2330",
                     stock_name="台積電",
+                    canonical_market="TW",
+                    venue="TWSE",
+                    instrument_type="stock",
                     open_price=90.0,
                     high_price=105.0,
                     low_price=89.0,
                     close_price=100.0,
                     price_change=10.0,
                     trade_value=1000,
+                    authority="exchange",
+                    finalization="final",
+                    official=True,
+                    release_status="released",
                 ),
                 MarketDailyPrice(
                     source_id=source.id,
@@ -1590,12 +1605,19 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                     trade_date=date(2026, 6, 15),
                     stock_id="2383",
                     stock_name="台光電",
+                    canonical_market="TW",
+                    venue="TWSE",
+                    instrument_type="stock",
                     open_price=55.0,
                     high_price=56.0,
                     low_price=49.0,
                     close_price=50.0,
                     price_change=-5.0,
                     trade_value=800,
+                    authority="exchange",
+                    finalization="final",
+                    official=True,
+                    release_status="released",
                 ),
                 MarketIndexDailyStat(
                     index_id="TAIEX",
@@ -1674,6 +1696,93 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             {"within_tolerance", "outside_tolerance", "unavailable"},
         )
 
+    def test_index_contributions_use_persisted_tpex_issued_shares_cache_only(
+        self,
+    ) -> None:
+        source = SourceRegistry(
+            source_name="TPEx Mainboard Daily Quotes",
+            source_type="api",
+            category="market_data",
+            reliability_level="official",
+        )
+        self.db.add(source)
+        self.db.flush()
+        raw = RawFetchResult(
+            source_id=source.id,
+            status_code=200,
+            fetched_at=datetime(2026, 9, 4, 8, 0, tzinfo=timezone.utc),
+        )
+        self.db.add(raw)
+        self.db.flush()
+        self.db.add_all(
+            [
+                StockMaster(
+                    stock_id="6488",
+                    stock_name="環球晶",
+                    market="TPEX",
+                    instrument_type="stock",
+                    is_active=True,
+                ),
+                MarketDailyPrice(
+                    source_id=source.id,
+                    raw_result_id=raw.id,
+                    trade_date=date(2026, 9, 4),
+                    stock_id="6488",
+                    stock_name="環球晶",
+                    canonical_market="TW",
+                    venue="TPEX",
+                    instrument_type="stock",
+                    open_price=900,
+                    high_price=990,
+                    low_price=890,
+                    close_price=980,
+                    price_change=50,
+                    trade_volume=1000,
+                    authority="exchange",
+                    finalization="final",
+                    official=True,
+                    release_status="released",
+                ),
+                TaiwanIssuedSharesDaily(
+                    source_id=source.id,
+                    raw_result_id=raw.id,
+                    market="TPEX",
+                    stock_id="6488",
+                    trade_date=date(2026, 9, 4),
+                    issued_shares=478_113_725,
+                    authority="exchange",
+                ),
+                MarketIndexDailyStat(
+                    index_id="TPEX",
+                    market="TPEX",
+                    trade_date=date(2026, 9, 4),
+                    close_value=400,
+                    price_change=20,
+                    source="tpex_openapi",
+                ),
+            ]
+        )
+        self.db.commit()
+
+        with patch.object(
+            indices,
+            "_source_contribution_quote_rows",
+            side_effect=AssertionError("cache-only reader called provider"),
+        ):
+            payload = indices.get_market_index_contributions(
+                "TPEX",
+                db=self.db,
+                expected_trade_date=date(2026, 9, 4),
+            )
+
+        self.assertEqual(payload["covered_component_count"], 1)
+        self.assertEqual(payload["components_missing_issued_shares"], 0)
+        self.assertEqual(
+            payload["issued_shares_evidence_source"],
+            "taiwan_issued_shares_daily",
+        )
+        self.assertEqual(payload["positive"][0]["stock_id"], "6488")
+
     def test_index_get_surfaces_do_not_call_provider_acquisition(self) -> None:
         indices._INDEX_OHLC_CACHE.clear()
         indices._CONTRIBUTION_CACHE.clear()
@@ -1718,6 +1827,17 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(chart["missing_session_count"], 90)
         self.assertIn("TW_INDEX_HISTORY_INSUFFICIENT", chart["warnings"])
         self.assertEqual(contributions["source"], "tw.daily.ohlcv:TWSE")
+        outward = MarketIndexContributionRead.model_validate(contributions)
+        self.assertEqual(
+            outward.component_universe_count,
+            contributions["component_universe_count"],
+        )
+        self.assertEqual(
+            outward.covered_component_count,
+            contributions["covered_component_count"],
+        )
+        self.assertEqual(outward.reason_codes, contributions["reason_codes"])
+        self.assertEqual(outward.quality, contributions["quality"])
 
     def test_index_chart_does_not_treat_market_index_daily_stat_as_ohlc(self) -> None:
         source = SourceRegistry(

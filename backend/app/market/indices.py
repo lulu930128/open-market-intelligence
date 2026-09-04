@@ -13,7 +13,14 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry
+from app.db.models import (
+    MarketDailyPrice,
+    MarketIndexDailyStat,
+    SourceRegistry,
+    StockMaster,
+    StockProfile,
+    TaiwanIssuedSharesDaily,
+)
 from app.market.index_resolution import (
     TAIWAN_INDEX_RESOLUTION_VERSION,
     normalize_index_acquisition_policy,
@@ -1630,6 +1637,28 @@ def _latest_market_index_daily_stat(
         db.query(MarketIndexDailyStat)
         .filter(MarketIndexDailyStat.index_id == index_id)
         .order_by(MarketIndexDailyStat.trade_date.desc())
+        .first()
+    )
+
+
+def read_market_index_daily_stat(
+    db: Session,
+    *,
+    index_id: str,
+    trade_date: date,
+) -> MarketIndexDailyStat | None:
+    """Read one persisted index daily statistic without acquisition or writes."""
+
+    normalized_index_id = str(index_id or "").strip().upper()
+    if normalized_index_id not in INDEX_CONFIG_BY_ID:
+        supported = ", ".join(sorted(INDEX_CONFIG_BY_ID))
+        raise ValueError(f"index_id must be one of: {supported}.")
+    return (
+        db.query(MarketIndexDailyStat)
+        .filter(MarketIndexDailyStat.index_id == normalized_index_id)
+        .filter(MarketIndexDailyStat.trade_date == trade_date)
+        .filter(MarketIndexDailyStat.close_value.isnot(None))
+        .order_by(MarketIndexDailyStat.id.desc())
         .first()
     )
 
@@ -3502,7 +3531,7 @@ def get_market_index_intraday(
 
         db = SessionLocal()
     try:
-        from app.market.tw_bar_service import TaiwanBarService
+        from app.market.tw_bar_service import read_taiwan_index_intraday_bars
         from app.market.tw_current_market_platform import (
             project_taiwan_current_index,
             read_taiwan_current_index,
@@ -3511,15 +3540,9 @@ def get_market_index_intraday(
         now = datetime.now(TAIPEI_TZ)
         session = taiwan_presentation_session(now)
         trade_date = session["trade_date"]
-        series = TaiwanBarService(db).read_bars(
-            instrument_id=normalized_index_id,
-            interval="1m",
-            from_time=datetime.combine(
-                trade_date,
-                time(9, 0),
-                tzinfo=TAIPEI_TZ,
-            ),
-            to_time=now,
+        series = read_taiwan_index_intraday_bars(
+            db,
+            index_id=normalized_index_id,
             requested_at=now,
         )
         result = read_taiwan_current_index(db, index_id=normalized_index_id)
@@ -3726,14 +3749,11 @@ def _local_contribution_quote_rows(
     market: str,
     shares_by_code: dict[str, int],
 ) -> tuple[list[dict], dict[str, int], str, dict[str, str]]:
-    # Import lazily to avoid the calendar_status -> market_chips -> indices
-    # cycle while keeping the completed-session owner in Data Core.
-    from app.market.tw_daily_freshness import read_taiwan_daily_freshness
-
-    latest_trade_date = read_taiwan_daily_freshness(
-        db,
+    daily_repository = TaiwanOfficialDailyBarRepository(db)
+    latest_trade_date = daily_repository.latest_market_contribution_date(
         venue=market,
-    ).latest_date
+        expected_date=expected_daily_price_date(now=datetime.now(TAIWAN_TZ)),
+    )
     canonical_source = f"tw.daily.ohlcv:{market}"
 
     if latest_trade_date is None:
@@ -3746,27 +3766,64 @@ def _local_contribution_quote_rows(
             "date": "trade_date",
         }
 
-    universe = TaiwanOfficialDailyBarRepository(db).load_market_universe(
+    contribution_rows = daily_repository.load_market_contribution_rows(
         trade_date=latest_trade_date,
         venue=market,
         max_rows=5000,
     )
+    persisted_shares: dict[str, int] = {}
+    if market == "TWSE":
+        profile_rows = (
+            db.query(StockProfile.stock_id, StockProfile.issued_shares)
+            .join(StockMaster, StockMaster.stock_id == StockProfile.stock_id)
+            .filter(func.upper(StockMaster.market) == market)
+            .filter(StockMaster.is_active.is_(True))
+            .filter(func.lower(StockMaster.instrument_type).in_(("stock", "unknown")))
+            .filter(StockProfile.issued_shares.isnot(None))
+            .filter(StockProfile.issued_shares > 0)
+            .all()
+        )
+        persisted_shares = {
+            str(stock_id): int(issued_shares)
+            for stock_id, issued_shares in profile_rows
+        }
+    else:
+        shares_date = (
+            db.query(func.max(TaiwanIssuedSharesDaily.trade_date))
+            .filter(TaiwanIssuedSharesDaily.market == market)
+            .filter(TaiwanIssuedSharesDaily.trade_date <= latest_trade_date)
+            .scalar()
+        )
+        if shares_date is not None:
+            persisted_shares = {
+                str(stock_id): int(issued_shares)
+                for stock_id, issued_shares in (
+                    db.query(
+                        TaiwanIssuedSharesDaily.stock_id,
+                        TaiwanIssuedSharesDaily.issued_shares,
+                    )
+                    .filter(TaiwanIssuedSharesDaily.market == market)
+                    .filter(TaiwanIssuedSharesDaily.trade_date == shares_date)
+                    .all()
+                )
+            }
+    resolved_shares = {**persisted_shares, **shares_by_code}
     payload_rows = [
         {
-            "stock_id": bar.instrument.symbol,
-            "stock_name": bar.instrument_name,
-            "close_price": float(bar.close_price),
+            "stock_id": row.stock_id,
+            "stock_name": row.stock_name,
+            "close_price": row.close_price,
             "price_change": (
-                float(bar.price_change) if bar.price_change is not None else None
+                row.price_change if row.price_change is not None else None
             ),
             "trade_value": (
-                int(bar.turnover_value) if bar.turnover_value is not None else None
+                row.trade_value if row.trade_value is not None else None
             ),
-            "trade_date": bar.end_at.astimezone(TAIWAN_TZ).date(),
+            "trade_date": row.trade_date,
         }
-        for bar in universe.bars
+        for row in contribution_rows
     ]
-    return payload_rows, shares_by_code, canonical_source, {
+    return payload_rows, resolved_shares, canonical_source, {
         "code": "stock_id",
         "name": "stock_name",
         "close": "close_price",
@@ -3916,6 +3973,12 @@ def assess_market_index_contribution_quality(
                     INDEX_CONTRIBUTION_MIN_COVERAGE_RATIO
                 ),
                 "coverage_ratio": coverage_ratio,
+                "components_missing_issued_shares": int(
+                    payload.get("components_missing_issued_shares") or 0
+                ),
+                "issued_shares_evidence_source": payload.get(
+                    "issued_shares_evidence_source"
+                ),
                 "reconciliation_status": reconciliation_status,
                 "confidence": confidence,
             },
@@ -3996,6 +4059,7 @@ def get_market_index_contributions(
             index_change = latest_stat.price_change
     candidates: list[dict] = []
     component_universe_count = 0
+    components_missing_issued_shares = 0
     total_market_value = 0.0
 
     for row in rows:
@@ -4012,7 +4076,10 @@ def get_market_index_contributions(
         close = _as_float(row.get(keys["close"]))
         change = _as_float(row.get(keys["change"]))
 
-        if shares is None or close is None or change is None or shares <= 0:
+        if shares is None or shares <= 0:
+            components_missing_issued_shares += 1
+            continue
+        if close is None or change is None:
             continue
 
         market_value = close * shares
@@ -4129,6 +4196,12 @@ def get_market_index_contributions(
         "total_market_value": total_market_value if total_market_value > 0 else None,
         "component_universe_count": component_universe_count,
         "covered_component_count": len(candidates),
+        "components_missing_issued_shares": components_missing_issued_shares,
+        "issued_shares_evidence_source": (
+            "stock_profile.issued_shares"
+            if market == "TWSE"
+            else "taiwan_issued_shares_daily"
+        ),
         "coverage_ratio": coverage_ratio,
         "estimated_total_contribution_points": (
             estimated_total_contribution_points

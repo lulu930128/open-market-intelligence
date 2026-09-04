@@ -318,6 +318,10 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         current_date,
         include_value=is_trading_day,
     )
+    previous_completed_trading_day = previous_taiwan_trading_day(
+        current_date,
+        include_value=False,
+    )
     next_trading_day = next_taiwan_trading_day(current_date, include_value=False)
     phase = taiwan_market_session_phase(local_now)
     presentation_session = taiwan_presentation_session(local_now)
@@ -395,6 +399,9 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         ),
         "holiday_name": holiday_name,
         "previous_trading_day": previous_trading_day.isoformat(),
+        "previous_completed_trading_day": (
+            previous_completed_trading_day.isoformat()
+        ),
         "next_trading_day": next_trading_day.isoformat(),
         "session": {
             "preopen_time": TAIWAN_PREOPEN_TIME.strftime("%H:%M"),

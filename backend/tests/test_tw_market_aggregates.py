@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 from app.ai.market_context import taiwan_market, taiwan_screening
 from app.market.indices import assess_market_index_contribution_quality
@@ -293,10 +293,22 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
         self.assertEqual(coverage["universe_count"], 2)
         self.assertEqual(coverage["sample_count_by_market"]["OTHER"], 0)
 
-    def test_contribution_reader_is_not_called_without_external_authority(
+    def test_contribution_reader_is_cache_only_without_external_authority(
         self,
     ) -> None:
-        contribution_reader = Mock()
+        contribution_reader = Mock(
+            return_value={
+                "trade_date": "2026-07-29",
+                "source": "tw.daily.ohlcv:TWSE",
+                "status": "ready",
+                "decision_usable": True,
+                "current_for_requested_session": True,
+                "is_complete": True,
+                "reconciliation_status": "within_tolerance",
+                "positive": [{"stock_id": "2330"}],
+                "negative": [{"stock_id": "2383"}],
+            }
+        )
         dependencies = self._dependencies(
             get_market_index_contributions=contribution_reader,
         )
@@ -315,23 +327,24 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(capability["status"], "not_fetched_due_to_policy")
+        self.assertEqual(capability["status"], "ready")
         self.assertEqual(capability["applicability_status"], "applicable")
-        self.assertEqual(capability["availability_status"], "unknown")
-        self.assertFalse(capability["policy_satisfied"])
-        self.assertEqual(capability["execution_status"], "not_executed")
-        self.assertFalse(capability["decision_usable"])
-        self.assertEqual(
-            capability["reason_codes"],
-            ["EXTERNAL_FETCH_DISABLED_FOR_REQUEST"],
+        self.assertEqual(capability["availability_status"], "available")
+        self.assertTrue(capability["policy_satisfied"])
+        self.assertEqual(capability["execution_status"], "completed")
+        self.assertTrue(capability["decision_usable"])
+        self.assertEqual(capability["reason_codes"], [])
+        self.assertEqual(capability["cache_policy"], "cache_only")
+        self.assertFalse(capability["external_fetch"])
+        self.assertFalse(capability["tool_runs"][0]["external_fetch"])
+        contribution_reader.assert_called_once_with(
+            index_id="TAIEX",
+            limit=5,
+            db=ANY,
+            expected_trade_date="2026-07-29",
         )
-        self.assertEqual(
-            capability["cache_policy"],
-            "external_fetch_required_bounded",
-        )
-        contribution_reader.assert_not_called()
 
-    def test_contribution_reader_records_fetches_and_enforces_budget(
+    def test_contribution_reader_reads_all_requested_cached_indices(
         self,
     ) -> None:
         contribution_reader = Mock(
@@ -366,13 +379,13 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(contribution_reader.call_count, 1)
+        self.assertEqual(contribution_reader.call_count, 2)
         self.assertEqual(
             [run["status"] for run in capability["tool_runs"]],
-            ["success", "skipped_budget"],
+            ["success", "success"],
         )
         self.assertTrue(
-            all(run["external_fetch"] for run in capability["tool_runs"])
+            all(not run["external_fetch"] for run in capability["tool_runs"])
         )
         self.assertFalse(
             any(run["writes_cache"] for run in capability["tool_runs"])
@@ -381,11 +394,8 @@ class TaiwanMarketAggregateTests(unittest.TestCase):
             capability["tool_runs"][0]["requested_capabilities"],
             ["market.index_contributions"],
         )
-        self.assertEqual(
-            capability["missing"],
-            ["market_index_contributions.TPEX"],
-        )
-        self.assertFalse(capability["decision_usable"])
+        self.assertEqual(capability["missing"], [])
+        self.assertTrue(capability["decision_usable"])
 
     def test_contribution_quality_rejects_empty_or_unreconciled_estimate(
         self,

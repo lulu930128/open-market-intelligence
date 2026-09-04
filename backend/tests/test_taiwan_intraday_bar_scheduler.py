@@ -348,6 +348,81 @@ def test_intraday_target_universe_merges_tier_a_sources_and_keeps_etf() -> None:
         engine.dispose()
 
 
+def test_intraday_target_universe_prioritizes_active_watchlist_etfs_within_bound() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    db = Session(engine)
+    try:
+        db.add_all(
+            [
+                StockMaster(
+                    stock_id="2330",
+                    market="TWSE",
+                    instrument_type="stock",
+                ),
+                StockMaster(
+                    stock_id="0050",
+                    market="TWSE",
+                    instrument_type="ETF",
+                ),
+                StockMaster(
+                    stock_id="0056",
+                    market="TWSE",
+                    instrument_type="etf",
+                ),
+            ]
+        )
+        group = WatchlistGroup(group_name="active", is_active=True)
+        db.add(group)
+        db.flush()
+        db.add_all(
+            [
+                WatchlistItem(
+                    group_id=group.id,
+                    stock_id="2330",
+                    priority=1,
+                    enabled=True,
+                ),
+                WatchlistItem(
+                    group_id=group.id,
+                    stock_id="0056",
+                    priority=30,
+                    enabled=True,
+                ),
+                WatchlistItem(
+                    group_id=group.id,
+                    stock_id="0050",
+                    priority=20,
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+        plan = resolve_taiwan_intraday_target_universe(
+            db,
+            max_symbols=2,
+            configured_symbols=[],
+            lease_symbols=[],
+        )
+
+        assert plan["symbols"] == ["0050", "0056"]
+        assert [target["instrument_type"].lower() for target in plan["targets"]] == [
+            "etf",
+            "etf",
+        ]
+        assert plan["skipped_targets"] == [
+            {
+                "stock_id": "2330",
+                "reason": "scheduler_hard_cap",
+                "origins": ["watchlist"],
+            }
+        ]
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_intraday_target_universe_reports_unknown_and_inactive_targets() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)

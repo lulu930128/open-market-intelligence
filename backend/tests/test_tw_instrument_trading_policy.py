@@ -40,8 +40,13 @@ def test_current_disposition_cache_distinguishes_continuous_and_batch_matching()
 
     assert continuous.trading_mode is TaiwanInstrumentTradingMode.CONTINUOUS
     assert continuous.analysis_basis is TaiwanAnalysisBasis.TIME_BARS
+    assert continuous.reason_codes == ("DISPOSITION_NOT_ACTIVE",)
+    assert continuous.projection()["market_semantics_reason_codes"] == [
+        "DISPOSITION_NOT_ACTIVE"
+    ]
     assert batch.trading_mode is TaiwanInstrumentTradingMode.DISPOSITION_BATCH_AUCTION
     assert batch.analysis_basis is TaiwanAnalysisBasis.EFFECTIVE_MATCHES
+    assert batch.reason_codes == ("DISPOSITION_BATCH_AUCTION_ACTIVE",)
 
 
 def test_disposition_batch_matching_is_canonical_intraday_auction() -> None:

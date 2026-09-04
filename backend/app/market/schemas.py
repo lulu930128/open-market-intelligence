@@ -52,6 +52,7 @@ class MarketCalendarMarketStatusRead(BaseModel):
     reason: str
     holiday_name: str | None = None
     previous_trading_day: date
+    previous_completed_trading_day: date | None = None
     next_trading_day: date
     session: MarketCalendarSessionRead
     presentation_session: MarketCalendarPresentationSessionRead | None = None
@@ -799,6 +800,11 @@ class MarketIndexContributionItemRead(BaseModel):
     contribution_points: float | None = None
     market_value_change: float | None = None
     trade_value: int | None = None
+    currency: str = "TWD"
+    price_unit: str = "TWD"
+    market_value_unit: str = "TWD"
+    trade_value_unit: str = "TWD"
+    contribution_unit: str = "index_points"
 
 
 class MarketIndexContributionRead(BaseModel):
@@ -806,11 +812,38 @@ class MarketIndexContributionRead(BaseModel):
     market: str
     source: str
     method: str
+    method_version: str = "v1"
+    is_official: bool = False
+    currency: str = "TWD"
+    price_unit: str = "TWD"
+    market_value_unit: str = "TWD"
+    trade_value_unit: str = "TWD"
+    contribution_unit: str = "index_points"
     as_of: datetime
     trade_date: date | None = None
     index_close: float | None = None
     index_change: float | None = None
     total_market_value: float | None = None
+    component_universe_count: int = 0
+    covered_component_count: int = 0
+    components_missing_issued_shares: int = 0
+    issued_shares_evidence_source: str | None = None
+    coverage_ratio: float | None = None
+    estimated_total_contribution_points: float | None = None
+    actual_index_change_points: float | None = None
+    residual_points: float | None = None
+    residual_pct: float | None = None
+    reconciliation_status: str = "unavailable"
+    confidence: str = "low"
+    component_policy: str = "regular_four_digit_cash_equities_only"
+    corporate_action_adjustment: str = "not_applied"
+    status: str = "unavailable"
+    availability_status: str = "unavailable"
+    is_complete: bool = False
+    decision_usable: bool = False
+    current_for_requested_session: bool = False
+    reason_codes: list[str] = Field(default_factory=list)
+    quality: dict[str, Any] = Field(default_factory=dict)
     positive: list[MarketIndexContributionItemRead]
     negative: list[MarketIndexContributionItemRead]
 

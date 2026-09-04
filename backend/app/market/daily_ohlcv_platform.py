@@ -21,6 +21,9 @@ from app.market.providers.tw_official_daily import (
     TW_OFFICIAL_DAILY_DESCRIPTORS,
 )
 from app.market.tw_universe import list_taiwan_stock_universe
+from app.market.tw_intraday_universe import (
+    list_taiwan_active_watchlist_instruments,
+)
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market_data.contracts import (
     AuthorityClass,
@@ -683,6 +686,22 @@ def refresh_taiwan_official_daily_venue(
             symbol=stock.stock_id,
             instrument_type=InstrumentType.STOCK,
             venue=normalized_venue,
+        )
+    for instrument in list_taiwan_active_watchlist_instruments(db):
+        instrument_venue = str(instrument.market or "").strip().upper()
+        if instrument_venue != normalized_venue:
+            continue
+        instrument_type = str(instrument.instrument_type or "").strip().lower()
+        if instrument_type != "etf":
+            continue
+        instruments.setdefault(
+            instrument.stock_id,
+            InstrumentKey(
+                market=Market.TW,
+                symbol=instrument.stock_id,
+                instrument_type=InstrumentType.ETF,
+                venue=normalized_venue,
+            ),
         )
     if not instruments:
         raise ValueError(

@@ -111,9 +111,88 @@ class KgiSuperPyQuoteTests(unittest.TestCase):
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["symbol"], "2330")
-        self.assertEqual(records[0]["quantity"], 1300)
-        self.assertEqual(records[0]["cost_amount"], 64000)
+        self.assertEqual(records[0]["quantity"], 1200)
+        self.assertEqual(records[0]["cost_amount"], 59000)
         self.assertEqual(warnings, ["excluded_short_positions:1"])
+
+    def test_bridge_does_not_double_count_odd_lot_component_in_cash_total(
+        self,
+    ) -> None:
+        class _Frame:
+            columns = [
+                "Symbol",
+                "SymbolName",
+                "CURRENCY",
+                "NETQTY9",
+                "NETQTY0",
+                "NETQTY3",
+                "NETQTY4",
+                "AVG_PRICE0",
+                "AVG_PRICE3",
+            ]
+
+            def to_dict(self, orient):
+                return [
+                    {
+                        "Symbol": "3711",
+                        "SymbolName": "日月光投控",
+                        "CURRENCY": "TWD",
+                        "NETQTY9": 120,
+                        "NETQTY0": 120,
+                        "NETQTY3": 0,
+                        "NETQTY4": 0,
+                        "AVG_PRICE0": 614.29,
+                        "AVG_PRICE3": 0,
+                    }
+                ]
+
+        records, warnings = _tw_portfolio_records(_Frame())
+
+        self.assertEqual(records[0]["quantity"], 120)
+        self.assertAlmostEqual(records[0]["cost_amount"], 73_714.8)
+        self.assertEqual(warnings, [])
+
+    def test_bridge_portfolio_diagnostics_are_symbol_bounded(self) -> None:
+        from app.market.providers.kgi_superpy_bridge import _tw_portfolio_diagnostics
+
+        class _Frame:
+            columns = [
+                "Symbol",
+                "NETQTY9",
+                "NETQTY0",
+                "NETQTY3",
+                "NETQTY4",
+                "AVG_PRICE0",
+                "AVG_PRICE3",
+            ]
+
+            def to_dict(self, orient):
+                return [
+                    {
+                        "Symbol": "3711",
+                        "NETQTY9": 120,
+                        "NETQTY0": 0,
+                        "NETQTY3": 0,
+                        "NETQTY4": 0,
+                        "AVG_PRICE0": 614.29,
+                        "AVG_PRICE3": 0,
+                    },
+                    {
+                        "Symbol": "2330",
+                        "NETQTY9": 0,
+                        "NETQTY0": 1000,
+                        "NETQTY3": 0,
+                        "NETQTY4": 0,
+                        "AVG_PRICE0": 2000,
+                        "AVG_PRICE3": 0,
+                    },
+                ]
+
+        diagnostics = _tw_portfolio_diagnostics(_Frame(), ["3711"])
+
+        self.assertEqual(diagnostics[0]["symbol"], "3711")
+        self.assertEqual(diagnostics[0]["source_row_count"], 1)
+        self.assertEqual(diagnostics[0]["source_rows"][0]["NETQTY9"], 120)
 
     def test_bridge_normalizes_us_holdings_without_inventing_cost(self) -> None:
         class _Frame:

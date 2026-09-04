@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 import unittest
 from unittest.mock import patch
 
@@ -279,6 +279,93 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         self.assertIn("leader_concentration", semiconductor)
         self.assertEqual(semiconductor["trade_value_unit"], "TWD")
         self.assertTrue(semiconductor["trade_value_is_estimate"])
+
+    def test_group_membership_and_observation_coverage_are_independent(self) -> None:
+        self.db.add_all(
+            [
+                StockMaster(
+                    stock_id="2330",
+                    stock_name="台積電",
+                    market="TWSE",
+                    instrument_type="stock",
+                    industry="半導體業",
+                    is_active=True,
+                ),
+                StockMaster(
+                    stock_id="3711",
+                    stock_name="日月光投控",
+                    market="TWSE",
+                    instrument_type="stock",
+                    industry="半導體業",
+                    is_active=True,
+                ),
+                StockMaster(
+                    stock_id="6488",
+                    stock_name="環球晶",
+                    market="TPEX",
+                    instrument_type="stock",
+                    industry="半導體業",
+                    is_active=True,
+                ),
+            ]
+        )
+        group = WatchlistGroup(
+            group_name="被動元件",
+            sort_order=1,
+            is_active=True,
+        )
+        self.db.add(group)
+        self.db.flush()
+        self.db.add_all(
+            [
+                WatchlistItem(group_id=group.id, stock_id="2330", enabled=True),
+                WatchlistItem(group_id=group.id, stock_id="3711", enabled=True),
+                WatchlistItem(group_id=group.id, stock_id="6488", enabled=True),
+            ]
+        )
+        self.db.commit()
+        observed_at = datetime(2026, 7, 30, 10, 0, tzinfo=TAIWAN_TZ)
+        persist_taiwan_intraday_stock_states(
+            self.db,
+            rows=[self._stock_state_row("2330", "TWSE", 105, 100, observed_at)],
+            now=observed_at,
+        )
+
+        snapshots = build_tw_intraday_group_snapshots(
+            self.db,
+            generated_at=observed_at.replace(minute=5),
+        )
+        hot_groups = snapshots["hot_groups"]
+        semiconductor = next(
+            item
+            for item in hot_groups["groups"]
+            if item["group_id"] == "industry:半導體業"
+        )
+        passive = next(
+            item
+            for item in hot_groups["groups"]
+            if item["group_id"] == f"watchlist:{group.id}"
+        )
+
+        for item in (semiconductor, passive):
+            self.assertEqual(item["member_count"], 3)
+            self.assertEqual(item["received_count"], 1)
+            self.assertEqual(item["classified_count"], 1)
+            self.assertEqual(item["observed_count"], 1)
+            self.assertEqual(item["unknown_count"], 2)
+            self.assertAlmostEqual(item["coverage_ratio"], 1 / 3)
+            self.assertFalse(item["ranking_eligible"])
+            self.assertIn(
+                "OBSERVED_COUNT_BELOW_MINIMUM",
+                item["ranking_ineligibility_reasons"],
+            )
+        sector = next(
+            item
+            for item in snapshots["sectors"]["items"]
+            if item["sector_id"] == "industry:半導體業"
+        )
+        self.assertEqual(sector["member_count"], semiconductor["member_count"])
+        self.assertEqual(sector["observed_count"], semiconductor["observed_count"])
 
     def test_screening_reconciles_price_extremes_across_provider_switch(self) -> None:
         self.db.add(

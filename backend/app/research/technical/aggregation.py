@@ -7,6 +7,11 @@ from typing import Any, Mapping, Sequence
 
 from app.us_market.trading_calendar import US_MARKET_TIMEZONE, us_session_close_time
 from app.us_market.volume_semantics import summarize_intraday_volume
+from app.research.technical.intraday import (
+    INTRADAY_TECHNICAL_ALGORITHM_VERSION,
+    INTRADAY_TECHNICAL_PARAMETER_CONTRACT,
+    enrich_intraday_technical_points,
+)
 
 
 SUPPORTED_INTRADAY_INTERVALS = {
@@ -161,6 +166,7 @@ def aggregate_intraday_payload(
         is_partial = live_window and index == len(aggregated) - 1
         point["is_partial"] = is_partial
         point["finalized"] = not is_partial
+    aggregated = enrich_intraday_technical_points(aggregated)
     result = dict(payload)
     result["source_interval"] = "1m"
     result["effective_interval"] = interval
@@ -182,6 +188,10 @@ def aggregate_intraday_payload(
         "contains_current_partial" if live_window and aggregated else "completed"
     )
     result["partial_bar_count"] = 1 if live_window and aggregated else 0
+    result["technical_algorithm_version"] = INTRADAY_TECHNICAL_ALGORITHM_VERSION
+    result["technical_parameter_contract"] = dict(
+        INTRADAY_TECHNICAL_PARAMETER_CONTRACT
+    )
     return result
 
 

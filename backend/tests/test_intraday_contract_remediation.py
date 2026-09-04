@@ -780,6 +780,52 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(summary["market_status"], "closed")
         self.assertEqual(summary["delivery_status"], "official_close")
 
+    def test_us_intraday_temporal_truth_survives_brief_projection(self) -> None:
+        source_status = {
+            "freshness_status": "current",
+            "current_session_satisfied": True,
+            "provider_snapshot_freshness": "fresh",
+            "trade_recency": "current",
+            "trade_state": "traded",
+        }
+        canonical = _canonical_capability_value(
+            "intraday.bars",
+            {
+                "series": {
+                    "1m": {
+                        "interval": "1m",
+                        "market_phase": "pre_market",
+                        "current_session_expected": True,
+                        "current_session_satisfied": True,
+                        "expected_trade_date": "2026-09-04",
+                        "event_trade_date": "2026-09-04",
+                        "provider_snapshot_freshness": "fresh",
+                        "trade_recency": "current",
+                        "trade_state": "traded",
+                        "capability_expectation": {
+                            "outcome": "ready",
+                            "reason_code": "CURRENT_INTRADAY_BARS_AVAILABLE",
+                        },
+                        "source_status": source_status,
+                        "points": [
+                            {
+                                "time": "2026-09-04T08:59:30-04:00",
+                                "price": 950.05,
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+
+        summary = _brief_capability_summary("intraday.bars", canonical)
+
+        self.assertEqual(summary["market_phase"], "pre_market")
+        self.assertTrue(summary["current_session_satisfied"])
+        self.assertEqual(summary["provider_snapshot_freshness"], "fresh")
+        self.assertEqual(summary["trade_recency"], "current")
+        self.assertEqual(summary["capability_expectation"]["outcome"], "ready")
+
     def test_intraday_summary_uses_max_timestamp_for_latest_point(self) -> None:
         summary = _brief_capability_summary(
             "intraday.bars",
@@ -2169,6 +2215,24 @@ class IntradayContractRemediationTests(unittest.TestCase):
 
         self.assertEqual(freshness["age_seconds"], 3181)
         self.assertEqual(freshness["fetch_age_seconds"], 40)
+        self.assertEqual(freshness["status"], "stale")
+
+    def test_quote_depth_live_label_uses_canonical_realtime_age_limit(self) -> None:
+        row = SimpleNamespace(
+            quote_time=datetime.fromisoformat("2026-09-04T09:05:00+08:00"),
+            fetched_at=datetime.fromisoformat("2026-09-04T09:05:01+08:00"),
+            trade_date=datetime.fromisoformat("2026-09-04T00:00:00+08:00").date(),
+        )
+
+        freshness = _freshness_for_row(
+            row,
+            phase="regular_live",
+            now=datetime.fromisoformat("2026-09-04T09:05:16+08:00"),
+        )
+
+        self.assertEqual(freshness["age_seconds"], 16)
+        self.assertFalse(freshness["is_live"])
+        self.assertTrue(freshness["is_stale"])
         self.assertEqual(freshness["status"], "stale")
 
     def test_provider_http_diagnostics_preserve_status_type_and_content_type(self) -> None:

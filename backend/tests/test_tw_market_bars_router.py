@@ -166,11 +166,19 @@ def test_chart_bar_route_projects_resolved_series_without_second_read(monkeypatc
             reads.append(kwargs)
             return resolved
 
+        def read_current_session_presentation_events(self, **kwargs):
+            assert kwargs["series"] is resolved
+            return ("close-event",)
+
     monkeypatch.setattr(tw_market_bars, "TaiwanBarService", _FakeService)
     monkeypatch.setattr(
         tw_market_bars,
         "project_taiwan_chart_bar_series",
-        lambda series: projected if series is resolved else None,
+        lambda series, *, presentation_events: (
+            projected
+            if series is resolved and presentation_events == ("close-event",)
+            else None
+        ),
     )
 
     result = tw_market_bars.get_taiwan_chart_bars(

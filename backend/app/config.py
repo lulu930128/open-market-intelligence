@@ -203,10 +203,19 @@ class Settings(BaseSettings):
     scheduler_taiwan_quote_contract_max_symbols: int = 3
     enable_taiwan_intraday_bar_scheduler: bool = True
     scheduler_taiwan_intraday_bar_interval_seconds: int = 300
-    scheduler_taiwan_intraday_bar_max_symbols: int = 3
+    scheduler_taiwan_intraday_bar_max_symbols: int = Field(
+        default=32,
+        ge=1,
+        le=100,
+    )
+    scheduler_taiwan_intraday_close_tail_max_symbols: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+    )
     enable_taiwan_session_close_scheduler: bool = True
     scheduler_taiwan_session_close_max_symbols: int = Field(
-        default=3,
+        default=32,
         ge=1,
         le=100,
     )

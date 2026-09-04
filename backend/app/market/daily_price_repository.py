@@ -27,7 +27,6 @@ from app.db.models import (
 from app.market.tw_bar_contracts import (
     TAIEX_OFFICIAL_DAILY_PROVIDER,
     TAIEX_OFFICIAL_DAILY_SOURCE,
-    TAIWAN_DAILY_MATERIALIZATION_VERSION,
     TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
     TPEX_DERIVED_DAILY_KIND,
     TPEX_DERIVED_DAILY_PROVIDER,
@@ -90,6 +89,18 @@ class TaiwanOfficialDailyUniverseRead:
     rows_rejected: int = 0
     duplicate_candidate_count: int = 0
     limitations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TaiwanOfficialDailyContributionRow:
+    """Lightweight official close projection for index-contribution reads."""
+
+    stock_id: str
+    stock_name: str | None
+    close_price: float
+    price_change: float | None
+    trade_value: int | None
+    trade_date: date
 
 
 _SOURCES_BY_VENUE = {
@@ -909,6 +920,165 @@ class TaiwanOfficialDailyBarRepository:
             limitations=tuple(limitations),
         )
 
+    def latest_market_contribution_date(
+        self,
+        *,
+        venue: str,
+        expected_date: date,
+    ) -> date | None:
+        """Return the newest release-qualified official stock session."""
+
+        normalized_venue = str(venue or "").strip().upper()
+        bindings = _SOURCES_BY_VENUE.get(normalized_venue)
+        if bindings is None:
+            raise ValueError("Taiwan contribution read requires venue=TWSE or TPEX")
+        available_at = self._available_at or datetime.now(timezone.utc).replace(
+            tzinfo=None
+        )
+        row = (
+            self._db.query(MarketDailyPrice.trade_date)
+            .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
+            .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+            .join(StockMaster, StockMaster.stock_id == MarketDailyPrice.stock_id)
+            .filter(MarketDailyPrice.trade_date <= expected_date)
+            .filter(MarketDailyPrice.canonical_market == Market.TW.value)
+            .filter(MarketDailyPrice.venue == normalized_venue)
+            .filter(MarketDailyPrice.instrument_type == InstrumentType.STOCK.value)
+            .filter(MarketDailyPrice.authority == AuthorityClass.EXCHANGE.value)
+            .filter(MarketDailyPrice.official.is_(True))
+            .filter(MarketDailyPrice.release_status == "released")
+            .filter(MarketDailyPrice.finalization.in_(("final", "corrected")))
+            .filter(MarketDailyPrice.open_price.isnot(None))
+            .filter(MarketDailyPrice.high_price.isnot(None))
+            .filter(MarketDailyPrice.low_price.isnot(None))
+            .filter(MarketDailyPrice.close_price.isnot(None))
+            .filter(
+                SourceRegistry.source_name.in_(
+                    tuple(binding.source_name for binding in bindings)
+                )
+            )
+            .filter(
+                func.lower(SourceRegistry.reliability_level).in_(
+                    tuple(_TRUSTED_OFFICIAL_RELIABILITY)
+                )
+            )
+            .filter(StockMaster.is_active.is_(True))
+            .filter(func.upper(StockMaster.market) == normalized_venue)
+            .filter(func.lower(StockMaster.instrument_type) == "stock")
+            .filter(RawFetchResult.fetched_at <= available_at)
+            .filter(taiwan_official_daily_release_qualified_filter())
+            .order_by(MarketDailyPrice.trade_date.desc())
+            .first()
+        )
+        return row.trade_date if row is not None else None
+
+    def load_market_contribution_rows(
+        self,
+        *,
+        trade_date: date,
+        venue: str,
+        max_rows: int = 5000,
+    ) -> tuple[TaiwanOfficialDailyContributionRow, ...]:
+        """Load a bounded stock-only close projection for contributions.
+
+        This is the cache-only, read-optimized sibling of ``load_market_universe``.
+        It keeps official source identity, release-qualified receipt, active-stock,
+        finalization, reliability, and required-OHLC gates at the repository owner,
+        while avoiding thousands of full ``BarObservation`` allocations for a
+        consumer that only needs close, change, and turnover.
+        """
+
+        if max_rows < 1 or max_rows > 20_000:
+            raise ValueError("Taiwan contribution read max_rows must be between 1 and 20000")
+        normalized_venue = str(venue or "").strip().upper()
+        bindings = _SOURCES_BY_VENUE.get(normalized_venue)
+        if bindings is None:
+            raise ValueError("Taiwan contribution read requires venue=TWSE or TPEX")
+        source_names = tuple(binding.source_name for binding in bindings)
+
+        rows = (
+            self._db.query(
+                MarketDailyPrice.id,
+                MarketDailyPrice.stock_id,
+                MarketDailyPrice.stock_name,
+                StockMaster.stock_name,
+                MarketDailyPrice.close_price,
+                MarketDailyPrice.price_change,
+                MarketDailyPrice.trade_value,
+                MarketDailyPrice.trade_date,
+                SourceRegistry.priority,
+                SourceRegistry.source_name,
+            )
+            .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
+            .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+            .join(StockMaster, StockMaster.stock_id == MarketDailyPrice.stock_id)
+            .filter(MarketDailyPrice.trade_date == trade_date)
+            .filter(MarketDailyPrice.canonical_market == Market.TW.value)
+            .filter(MarketDailyPrice.venue == normalized_venue)
+            .filter(MarketDailyPrice.instrument_type == InstrumentType.STOCK.value)
+            .filter(MarketDailyPrice.authority == AuthorityClass.EXCHANGE.value)
+            .filter(MarketDailyPrice.official.is_(True))
+            .filter(MarketDailyPrice.release_status == "released")
+            .filter(MarketDailyPrice.finalization.in_(("final", "corrected")))
+            .filter(MarketDailyPrice.open_price.isnot(None))
+            .filter(MarketDailyPrice.high_price.isnot(None))
+            .filter(MarketDailyPrice.low_price.isnot(None))
+            .filter(MarketDailyPrice.close_price.isnot(None))
+            .filter(SourceRegistry.source_name.in_(source_names))
+            .filter(
+                func.lower(SourceRegistry.reliability_level).in_(
+                    tuple(_TRUSTED_OFFICIAL_RELIABILITY)
+                )
+            )
+            .filter(StockMaster.is_active.is_(True))
+            .filter(func.upper(StockMaster.market) == normalized_venue)
+            .filter(func.lower(StockMaster.instrument_type) == "stock")
+            .filter(taiwan_official_daily_release_qualified_filter())
+            .order_by(
+                MarketDailyPrice.stock_id.asc(),
+                SourceRegistry.priority.asc(),
+                MarketDailyPrice.id.desc(),
+            )
+            .limit(max_rows + 1)
+            .all()
+        )
+        if len(rows) > max_rows:
+            raise CandidateReadLimitExceeded(
+                "Taiwan contribution daily read exceeded max_rows"
+            )
+
+        selected: dict[str, TaiwanOfficialDailyContributionRow] = {}
+        for (
+            _storage_row_id,
+            stock_id,
+            stored_stock_name,
+            master_stock_name,
+            close_price,
+            price_change,
+            trade_value,
+            row_trade_date,
+            _source_priority,
+            _source_name,
+        ) in rows:
+            normalized_stock_id = str(stock_id)
+            if normalized_stock_id in selected:
+                continue
+            selected[normalized_stock_id] = TaiwanOfficialDailyContributionRow(
+                stock_id=normalized_stock_id,
+                stock_name=(
+                    str(stored_stock_name or master_stock_name)
+                    if stored_stock_name or master_stock_name
+                    else None
+                ),
+                close_price=float(close_price),
+                price_change=(
+                    float(price_change) if price_change is not None else None
+                ),
+                trade_value=int(trade_value) if trade_value is not None else None,
+                trade_date=row_trade_date,
+            )
+        return tuple(selected.values())
+
     def lineage_metadata(
         self,
         observation_ids: tuple[str, ...],
@@ -947,5 +1117,6 @@ class TaiwanOfficialDailyBarRepository:
 
 __all__ = [
     "TaiwanOfficialDailyBarRepository",
+    "TaiwanOfficialDailyContributionRow",
     "TaiwanOfficialDailyUniverseRead",
 ]

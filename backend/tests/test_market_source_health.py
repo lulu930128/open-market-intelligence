@@ -377,9 +377,9 @@ class TaiwanSourceHealthTests(unittest.TestCase):
                 stock_name="TSMC",
                 session_phase="regular_live",
                 trade_date=date(2026, 7, 22),
-                quote_time=datetime(2026, 7, 22, 9, 9, 40, tzinfo=ZoneInfo("Asia/Taipei")),
+                quote_time=datetime(2026, 7, 22, 9, 9, 50, tzinfo=ZoneInfo("Asia/Taipei")),
                 source="kgi_quote_stream",
-                fetched_at=datetime(2026, 7, 22, 1, 9, 45, tzinfo=timezone.utc),
+                fetched_at=datetime(2026, 7, 22, 1, 9, 55, tzinfo=timezone.utc),
             )
         )
         self.db.add(
@@ -426,10 +426,10 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         entries = {entry["resource"]: entry for entry in health["entries"]}
 
         self.assertEqual(entries["taiwan_stock_quote_snapshot"]["status"], "current")
-        self.assertEqual(entries["taiwan_stock_quote_snapshot"]["age_seconds"], 20)
+        self.assertEqual(entries["taiwan_stock_quote_snapshot"]["age_seconds"], 10)
         self.assertEqual(
             entries["taiwan_stock_quote_snapshot"]["latest_observed_at"],
-            "2026-07-22T09:09:40+08:00",
+            "2026-07-22T09:09:50+08:00",
         )
         self.assertEqual(entries["market_intraday_bar_1m"]["status"], "current")
         self.assertEqual(entries["market_intraday_bar_1m"]["age_seconds"], 60)

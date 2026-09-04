@@ -24,6 +24,7 @@ from app.market.taiwan_quote_evidence import (
     read_taiwan_quote_evidence_bundle,
 )
 from app.market.taiwan_rules import expected_daily_price_date
+from app.market.taiwan_realtime_platform import TW_REALTIME_MAX_AGE_SECONDS
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
@@ -48,7 +49,7 @@ TWSE_MIS_PROVIDER = "twse_mis"
 TWSE_MIS_SOURCE = "twse_mis_quote_depth"
 KGI_SUPERPY_PROVIDER = "kgi_superpy"
 KGI_SUPERPY_SOURCE = "kgi_superpy_quote_all"
-TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS = 180
+TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS = TW_REALTIME_MAX_AGE_SECONDS
 TAIWAN_QUOTE_DEPTH_WAIT_START = time(5, 0)
 TAIWAN_QUOTE_DEPTH_PREOPEN = time(8, 30)
 LIVE_DEPTH_PHASES = {"preopen_auction", "regular_live", "closing_auction"}

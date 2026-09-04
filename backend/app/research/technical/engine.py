@@ -178,6 +178,7 @@ def build_technical_indicators(
                 "provisional_included": False,
             },
             "current": {},
+            "series": [],
             "quality": usability,
             "input_quality": {
                 "input_bar_count": input_bar_count,
@@ -238,6 +239,65 @@ def build_technical_indicators(
         "price_vs_ma20_pct": _pct_difference(latest["close"], ma20),
         "volume_vs_ma20_pct": _pct_difference(latest["volume"], volume_ma),
     }
+    parameter_contract = {
+        "ma_windows": list(profile.moving_average_periods),
+        "volume_ma_windows": [profile.volume_average_period],
+        "ema_fast": profile.exponential_moving_average_periods[0],
+        "ema_slow": profile.exponential_moving_average_periods[-1],
+        "macd_fast": profile.macd_fast_period,
+        "macd_slow": profile.macd_slow_period,
+        "macd_signal": profile.macd_signal_period,
+        "rsi_period": profile.rsi_period,
+        "atr_period": profile.atr_period,
+    }
+    series = [
+        {
+            "time": bar["time"],
+            "algorithm_version": TECHNICAL_ALGORITHM_VERSION,
+            "price_basis": profile.price_basis,
+            "calculation_role": "backend_authoritative",
+            "parameter_contract": parameter_contract,
+            "bar_status": "completed",
+            "session_close_finalization": "completed",
+            "official_daily_confirmed": True,
+            "event_time": bar["time"],
+            "source": (lineage or {}).get("selected_source"),
+            "volume_semantics": profile.volume_unit,
+            "decision_usable": usability["decision_usable"],
+            "volume_based_decision_usable": bool(
+                usability["decision_usable"] and profile.volume_unit
+            ),
+            "warnings": list(usability.get("reason_codes") or []),
+            "close": bar["close"],
+            "volume": bar["volume"],
+            "change": (
+                bar["close"] - closes[index - 1] if index > 0 else None
+            ),
+            "change_pct": (
+                _pct_difference(bar["close"], closes[index - 1])
+                if index > 0
+                else None
+            ),
+            "ma": {
+                key: values[index] for key, values in moving_averages.items()
+            },
+            "volume_ma": {
+                f"volume_ma{profile.volume_average_period}": volume_average[index]
+            },
+            "ema": {
+                key: values[index]
+                for key, values in exponential_moving_averages.items()
+            },
+            "macd": {
+                "line": macd_line[index],
+                "signal": macd_signal[index],
+                "histogram": macd_histogram[index],
+            },
+            "rsi": {f"rsi{profile.rsi_period}": rsi[index]},
+            "atr": {f"atr{profile.atr_period}": atr[index]},
+        }
+        for index, bar in enumerate(normalized)
+    ]
     return {
         "kind": "technical_indicators",
         "schema_version": TECHNICAL_INDICATOR_SCHEMA_VERSION,
@@ -290,6 +350,7 @@ def build_technical_indicators(
             "provisional_included": False,
         },
         "current": current,
+        "series": series,
         "quality": usability,
         "input_quality": {
             "input_bar_count": input_bar_count,
