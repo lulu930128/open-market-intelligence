@@ -1618,6 +1618,76 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         )
         self.assertIn("monthly_revenue", supplemental["missing"])
 
+    def test_v4_official_close_quote_keeps_selected_freshness_current(
+        self,
+    ) -> None:
+        response = _v2_response(
+            freshness_by_domain={"quote": "official_close"}
+        )
+        compact = response["result"]["data"]["compact"]
+        compact["quote"] = {
+            "status": "official_close",
+            "price": 107.9,
+            "trade_date": "2026-09-04",
+            "event_time": "2026-09-04T13:30:00+08:00",
+            "market_status": "closed",
+            "session_phase": "post_close_snapshot",
+            "quote_semantics": "official_close",
+            "official_close_available": True,
+            "official_close_price": 107.9,
+            "official_close_trade_date": "2026-09-04",
+            "is_latest_session_quote": True,
+            "freshness": {"status": "official_close"},
+        }
+        compact["freshness_by_capability"] = {
+            "quote.snapshot": {
+                "status": "official_close",
+                "dataset": "quote",
+                "is_current": True,
+                "latest": "2026-09-04T13:30:00+08:00",
+                "refresh_recommended": False,
+            }
+        }
+        response["freshness"] = {
+            "status": "current",
+            "is_current": True,
+            "expected_dates": {"market_daily_price": "2026-09-04"},
+            "datasets": [
+                {
+                    "key": "market_daily_price",
+                    "latest": "2026-09-04",
+                    "is_current": True,
+                }
+            ],
+            "missing": [],
+            "warnings": [],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"required": ["quote.snapshot"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            target_market="TW",
+            question_intent="quote",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "stock"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        selected_freshness = canonical["evidence"]["data"]["data.freshness"]
+        self.assertEqual(selected_freshness["status"], "current")
+        self.assertTrue(selected_freshness["is_current"])
+        self.assertEqual(canonical["evidence"]["quality"]["status"], "ready")
+        self.assertNotIn(
+            "capability:data.freshness",
+            canonical["limitations"]["missing"],
+        )
+
     def test_v4_watchlist_radar_uses_payload_freshness_when_row_is_absent(
         self,
     ) -> None:

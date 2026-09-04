@@ -954,8 +954,8 @@ class AiFreshnessGuardTests(unittest.TestCase):
                     ],
                 }
 
-            def bar_result(*, instrument_id, **_kwargs):
-                return SimpleNamespace(instrument_id=instrument_id)
+            def bar_result(*, index_id, **_kwargs):
+                return SimpleNamespace(instrument_id=index_id)
 
             with (
                 patch.object(
@@ -965,13 +965,15 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 ),
                 patch.object(
                     ai_ask.tools,
-                    "_read_taiwan_bars",
+                    "_read_taiwan_index_intraday_bars",
                     side_effect=bar_result,
                 ) as intraday,
                 patch.object(
                     taiwan_market,
                     "project_taiwan_bar_series",
-                    side_effect=lambda series: intraday_result(series.instrument_id),
+                    side_effect=lambda series, **_kwargs: intraday_result(
+                        series.instrument_id
+                    ),
                 ),
             ):
                 response = ai_ask.ask(

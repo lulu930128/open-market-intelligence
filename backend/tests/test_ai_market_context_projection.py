@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.ai import agentic_tools, realtime_contract, tools
+from app.ai import agentic_tools, capability_contract, realtime_contract, tools
 from app.ai.market_context import common, us_context
 from app.ai.market_context import taiwan_market, taiwan_projection
 from app.ai.schemas import AiDataEnvelope
@@ -1717,6 +1717,122 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(compact["current_observation"]["close"], 605)
         self.assertEqual(compact["current_observation"]["volume"], 11_106_000)
         self.assertFalse(compact["current_observation"]["decision_usable"])
+
+
+    def test_us_intraday_compact_preserves_typed_source_status(self) -> None:
+        current_status = {"status": "current", "provider": "twelve_data"}
+        bar_status = {
+            "status": "current",
+            "provider": "yahoo_chart",
+            "current_session_expected": True,
+            "current_session_satisfied": True,
+            "expected_trade_date": "2026-09-03",
+            "event_trade_date": "2026-09-03",
+            "provider_snapshot_freshness": "fresh",
+            "trade_recency": "current",
+            "trade_state": "traded",
+            "decision_usable": True,
+        }
+        compact = us_context._us_intraday_compact(
+            {
+                "source": "yahoo_finance_chart",
+                "market_phase": "regular",
+                "point_count": 1,
+                "points": [
+                    {
+                        "time": "2026-09-03T15:59:00-04:00",
+                        "price": 210.5,
+                        "volume": 120,
+                    }
+                ],
+                "current_source_status": current_status,
+                "bar_source_status": bar_status,
+                "source_status": bar_status,
+                "session_coverage": {
+                    "current_session_expected": True,
+                    "current_session_satisfied": True,
+                    "expected_trade_date": "2026-09-03",
+                },
+                "capability_expectation": {
+                    "intraday.bars": {
+                        "outcome": "ready",
+                        "reason_code": "CURRENT_INTRADAY_BARS_AVAILABLE",
+                    }
+                },
+            }
+        )
+
+        series = compact["series"]["1m"]
+        self.assertEqual(series["current_source_status"], current_status)
+        self.assertEqual(series["bar_source_status"], bar_status)
+        self.assertTrue(series["current_session_satisfied"])
+        self.assertEqual(series["provider_snapshot_freshness"], "fresh")
+        self.assertEqual(series["trade_recency"], "current")
+        self.assertEqual(series["trade_state"], "traded")
+        self.assertEqual(series["capability_expectation"]["outcome"], "ready")
+        self.assertEqual(series["expected_trade_date"], "2026-09-03")
+
+    def test_us_fresh_intraday_temporal_truth_survives_outward_projection(self) -> None:
+        now = datetime(2026, 9, 3, 14, 0, tzinfo=timezone.utc)
+        event_time = "2026-09-03T09:59:30-04:00"
+        source_status = {
+            "status": "current",
+            "freshness_status": "current",
+            "market_phase": "regular",
+            "current_session_expected": True,
+            "current_session_satisfied": True,
+            "expected_trade_date": "2026-09-03",
+            "event_trade_date": "2026-09-03",
+            "provider_snapshot_freshness": "fresh",
+            "trade_recency": "current",
+            "trade_state": "traded",
+            "decision_usable": True,
+        }
+        compact = us_context._us_intraday_compact(
+            {
+                "source": "yahoo_finance_chart",
+                "market_phase": "regular",
+                "point_count": 1,
+                "points": [
+                    {
+                        "time": event_time,
+                        "price": 210.5,
+                        "volume": 120,
+                    }
+                ],
+                "current_source_status": source_status,
+                "bar_source_status": source_status,
+                "source_status": source_status,
+                "session_coverage": {
+                    "current_session_expected": True,
+                    "current_session_satisfied": True,
+                    "expected_trade_date": "2026-09-03",
+                },
+                "capability_expectation": {
+                    "intraday.bars": {
+                        "outcome": "ready",
+                        "reason_code": "CURRENT_INTRADAY_BARS_AVAILABLE",
+                    }
+                },
+            }
+        )
+
+        canonical = capability_contract._canonical_intraday_value(compact)
+        assessment = realtime_contract.classify_observation(
+            canonical,
+            market="US",
+            realtime_policy="prefer_live",
+            now=now,
+        )
+
+        self.assertEqual(canonical["market_phase"], "regular")
+        self.assertTrue(canonical["current_session_satisfied"])
+        self.assertEqual(canonical["provider_snapshot_freshness"], "fresh")
+        self.assertEqual(canonical["trade_recency"], "current")
+        self.assertEqual(canonical["capability_expectation"]["outcome"], "ready")
+        self.assertEqual(assessment["state"], "live")
+        self.assertEqual(assessment["capability_outcome"], "ready")
+        self.assertTrue(assessment["decision_usable"])
 
 
 if __name__ == "__main__":

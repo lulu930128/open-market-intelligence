@@ -570,8 +570,8 @@ class CrossMarketAiContractTests(unittest.TestCase):
         )
 
         self.assertEqual(quality["freshness_status"], "stale")
-        self.assertEqual(quality["usability_status"], "unusable")
-        self.assertFalse(quality["facts_usable"])
+        self.assertEqual(quality["usability_status"], "limited")
+        self.assertTrue(quality["facts_usable"])
         self.assertFalse(quality["decision_usable"])
 
 

@@ -1133,6 +1133,7 @@
     "x-omi-capabilities": [
       {
         "capability_id": "target.identity",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "type",
           "id",
@@ -1182,6 +1183,9 @@
       },
       {
         "capability_id": "quote.snapshot",
+        "compatibility_schema_versions": [
+          "tw.quote.snapshot.v2"
+        ],
         "default_fields": [
           "kind",
           "status",
@@ -1590,7 +1594,7 @@
           "stock": "reader_fetch"
         },
         "replacement_capabilities": [],
-        "schema_version": "tw.quote.snapshot.v2",
+        "schema_version": "omi.market.quote.snapshot.v1",
         "scopes": [
           "stock",
           "us_stock",
@@ -1612,6 +1616,7 @@
       },
       {
         "capability_id": "quote.order_book",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "available",
@@ -1717,6 +1722,7 @@
       },
       {
         "capability_id": "quote.auction",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "available",
@@ -1827,6 +1833,7 @@
       },
       {
         "capability_id": "quote.session_close",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "available",
@@ -1940,6 +1947,7 @@
       },
       {
         "capability_id": "quote.official_close",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "available",
@@ -2004,6 +2012,9 @@
       },
       {
         "capability_id": "intraday.bars",
+        "compatibility_schema_versions": [
+          "tw.intraday.bars.v2"
+        ],
         "default_fields": [
           "as_of",
           "enabled",
@@ -2343,7 +2354,7 @@
           "stock": "reader_fetch"
         },
         "replacement_capabilities": [],
-        "schema_version": "tw.intraday.bars.v2",
+        "schema_version": "omi.market.bars.v1",
         "scopes": [
           "stock",
           "us_stock",
@@ -2366,6 +2377,7 @@
       },
       {
         "capability_id": "daily.ohlcv",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "as_of",
           "kind",
@@ -2540,6 +2552,7 @@
       },
       {
         "capability_id": "technical.structure",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "analysis",
           "as_of",
@@ -2690,6 +2703,7 @@
       },
       {
         "capability_id": "technical.indicators",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "schema_version",
           "status",
@@ -2785,6 +2799,7 @@
       },
       {
         "capability_id": "technical.swings",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "method",
@@ -2848,6 +2863,7 @@
       },
       {
         "capability_id": "technical.fibonacci",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "method",
@@ -2917,6 +2933,7 @@
       },
       {
         "capability_id": "technical.divergence",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "method",
@@ -2974,6 +2991,7 @@
       },
       {
         "capability_id": "technical.breakout",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "method",
@@ -3069,6 +3087,7 @@
       },
       {
         "capability_id": "technical.volume_profile",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "status",
@@ -3143,6 +3162,7 @@
       },
       {
         "capability_id": "technical.anchored_vwap",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "status",
@@ -3216,6 +3236,7 @@
       },
       {
         "capability_id": "technical.relative_strength",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "algorithm_version",
           "status",
@@ -3288,6 +3309,7 @@
       },
       {
         "capability_id": "chips.institutional",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "trade_date",
           "foreign_investor_net",
@@ -3347,6 +3369,7 @@
       },
       {
         "capability_id": "chips.margin",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "trade_date",
           "margin_buy",
@@ -3418,6 +3441,7 @@
       },
       {
         "capability_id": "broker_branch.summary",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "trade_date",
           "available_days",
@@ -3490,6 +3514,7 @@
       },
       {
         "capability_id": "ownership.distribution",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "trade_date",
           "distribution",
@@ -3537,6 +3562,7 @@
       },
       {
         "capability_id": "ownership.insider_transactions",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "symbol",
           "status",
@@ -3594,6 +3620,7 @@
       },
       {
         "capability_id": "fundamentals.revenue",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "applicability_status",
@@ -3666,6 +3693,7 @@
       },
       {
         "capability_id": "fundamentals.financials",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "applicability_status",
@@ -3751,6 +3779,7 @@
       },
       {
         "capability_id": "cross_market.overnight",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "as_of",
           "stance",
@@ -3837,6 +3866,7 @@
       },
       {
         "capability_id": "cross_market.relations",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "decision_usable",
@@ -3916,6 +3946,7 @@
       },
       {
         "capability_id": "cross_market.parity",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "is_current",
@@ -3995,6 +4026,7 @@
       },
       {
         "capability_id": "company.profile",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "symbol",
           "stock_id",
@@ -4086,6 +4118,7 @@
       },
       {
         "capability_id": "corporate.actions",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "provider",
           "symbol",
@@ -4185,6 +4218,7 @@
       },
       {
         "capability_id": "news.events",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "kind",
           "schema_version",
@@ -4271,6 +4305,7 @@
       },
       {
         "capability_id": "market.short_volume",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "provider",
           "symbol",
@@ -4321,6 +4356,7 @@
       },
       {
         "capability_id": "market.breadth",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "as_of",
           "trade_date",
@@ -4488,6 +4524,7 @@
       },
       {
         "capability_id": "market.indices",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "market",
@@ -4572,6 +4609,7 @@
       },
       {
         "capability_id": "events.upcoming",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "stock_id",
@@ -4651,6 +4689,7 @@
       },
       {
         "capability_id": "events.calendar",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -4837,6 +4876,7 @@
       },
       {
         "capability_id": "events.history",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "stock_id",
@@ -4923,6 +4963,7 @@
       },
       {
         "capability_id": "regulation.disposition",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "stock_id",
@@ -5002,6 +5043,7 @@
       },
       {
         "capability_id": "regulation.trading_restrictions",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "stock_id",
@@ -5074,6 +5116,7 @@
       },
       {
         "capability_id": "market.sectors",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -5154,6 +5197,7 @@
       },
       {
         "capability_id": "market.index_contributions",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -5281,6 +5325,7 @@
       },
       {
         "capability_id": "market.institutional_flow",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "trade_date",
@@ -5344,6 +5389,7 @@
       },
       {
         "capability_id": "market.margin_short",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "trade_date",
@@ -5409,6 +5455,7 @@
       },
       {
         "capability_id": "market.sample_ranking",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "scope",
@@ -5496,6 +5543,7 @@
       },
       {
         "capability_id": "market.cross_market",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -5546,6 +5594,7 @@
       },
       {
         "capability_id": "market.chips",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -5604,6 +5653,7 @@
       },
       {
         "capability_id": "screening.ranking",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "snapshot_id",
           "status",
@@ -5774,6 +5824,7 @@
       },
       {
         "capability_id": "screening.coverage",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "snapshot_id",
           "status",
@@ -5864,6 +5915,7 @@
       },
       {
         "capability_id": "screening.intraday",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "metric",
@@ -5995,6 +6047,7 @@
       },
       {
         "capability_id": "market.hot_groups",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "groups",
@@ -6079,6 +6132,7 @@
       },
       {
         "capability_id": "market.volume_state",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "as_of",
           "trade_date",
@@ -6182,6 +6236,7 @@
       },
       {
         "capability_id": "derivatives.positioning",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "institutional_position",
           "options_sentiment",
@@ -6223,6 +6278,7 @@
       },
       {
         "capability_id": "derivatives.structure",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -6276,6 +6332,7 @@
       },
       {
         "capability_id": "watchlist.ranking",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "rank_by",
           "sort_order",
@@ -6353,6 +6410,7 @@
       },
       {
         "capability_id": "watchlist.radar",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "mode",
           "ranked_count",
@@ -6431,6 +6489,7 @@
       },
       {
         "capability_id": "watchlist.coverage",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "institutional",
           "margin",
@@ -6492,6 +6551,7 @@
       },
       {
         "capability_id": "portfolio.summary",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "holding_count",
           "priced_holding_count",
@@ -6540,6 +6600,7 @@
       },
       {
         "capability_id": "portfolio.holdings",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "market",
           "symbol",
@@ -6606,6 +6667,7 @@
       },
       {
         "capability_id": "portfolio.valuation",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "cost_by_currency",
           "market_value_by_currency",
@@ -6650,6 +6712,7 @@
       },
       {
         "capability_id": "macro.series",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "series_id",
           "series_name",
@@ -6695,6 +6758,7 @@
       },
       {
         "capability_id": "macro.observations",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "observation_date",
           "value",
@@ -6742,6 +6806,7 @@
       },
       {
         "capability_id": "resource.metadata",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "symbol",
           "display_name",
@@ -6796,6 +6861,7 @@
       },
       {
         "capability_id": "crypto.order_book",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "provider",
           "symbol",
@@ -6869,6 +6935,7 @@
       },
       {
         "capability_id": "crypto.derivatives",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "provider",
           "symbol",
@@ -6939,6 +7006,7 @@
       },
       {
         "capability_id": "diagnostics.capabilities",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "kind",
           "version",
@@ -6994,6 +7062,7 @@
       },
       {
         "capability_id": "diagnostics.data_freshness",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "kind",
           "version",
@@ -7047,6 +7116,7 @@
       },
       {
         "capability_id": "diagnostics.source_health",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -7111,6 +7181,7 @@
       },
       {
         "capability_id": "source.health",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -7160,6 +7231,7 @@
       },
       {
         "capability_id": "data.freshness",
+        "compatibility_schema_versions": [],
         "default_fields": [
           "status",
           "as_of",
@@ -7210,10 +7282,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "7b7b403c7434dece6e529bc760722d43afd1c3faa9850fa596d076fe5ae725fe",
+    "x-omi-capability-registry-digest": "9975cde2e9731270d746b6ef192d564dfe37f17c6e6257d46249fd7730e2f3ee",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "7b7b403c7434dece6e529bc760722d43afd1c3faa9850fa596d076fe5ae725fe",
+    "x-omi-public-contract-digest": "9975cde2e9731270d746b6ef192d564dfe37f17c6e6257d46249fd7730e2f3ee",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -7553,7 +7625,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "7b7b403c7434dece6e529bc760722d43afd1c3faa9850fa596d076fe5ae725fe",
+  "digest": "9975cde2e9731270d746b6ef192d564dfe37f17c6e6257d46249fd7730e2f3ee",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

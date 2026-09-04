@@ -1509,66 +1509,11 @@ def _market_index_contributions_capability(
             "missing": ["market_index_contributions"],
             "warnings": ["Market index contribution reader is not configured."],
         }
-    if data_params.get("external_fetch_allowed") is not True:
-        return {
-            "kind": "tw_market_index_contributions",
-            "status": "not_fetched_due_to_policy",
-            "as_of": None,
-            "indices": {},
-            "applicability_status": "applicable",
-            "availability_status": "unknown",
-            "policy_satisfied": False,
-            "execution_status": "not_executed",
-            "decision_usable": False,
-            "reason_codes": ["EXTERNAL_FETCH_DISABLED_FOR_REQUEST"],
-            "cache_policy": "external_fetch_required_bounded",
-            "missing": [],
-            "warnings": [
-                "Index contributions were not read because bounded external "
-                "fetch is disabled for this request."
-            ],
-        }
-
     rows: dict[str, Any] = {}
     warnings: list[str] = []
     tool_runs: list[dict[str, Any]] = []
-    tool_budget = (
-        data_params.get("tool_budget")
-        if isinstance(data_params.get("tool_budget"), dict)
-        else {}
-    )
-    max_external_fetches = tool_budget.get("max_external_fetches")
-    if (
-        isinstance(max_external_fetches, bool)
-        or not isinstance(max_external_fetches, int)
-    ):
-        max_external_fetches = len(index_ids)
-    max_external_fetches = max(0, max_external_fetches)
-    for position, index_id in enumerate(index_ids):
+    for index_id in index_ids:
         requested_capabilities = ["market.index_contributions"]
-        if position >= max_external_fetches:
-            warnings.append(
-                f"{index_id} contributions skipped because the external "
-                "fetch budget was exhausted."
-            )
-            tool_runs.append(
-                {
-                    "tool": "tw.read_market_index_contributions",
-                    "provider": None,
-                    "status": "skipped_budget",
-                    "external_fetch": True,
-                    "duration_ms": 0,
-                    "writes_cache": False,
-                    "requested_capabilities": requested_capabilities,
-                    "arguments": {
-                        "index_id": index_id,
-                        "limit": limit,
-                        "requested_capabilities": requested_capabilities,
-                    },
-                    "result_status": "skipped_budget",
-                }
-            )
-            continue
         started_at = perf_counter()
         try:
             rows[index_id] = dependencies.get_market_index_contributions(
@@ -1597,7 +1542,7 @@ def _market_index_contributions_capability(
                         if fallback_used
                         else "success"
                     ),
-                    "external_fetch": True,
+                    "external_fetch": False,
                     "duration_ms": max(
                         0,
                         int((perf_counter() - started_at) * 1000),
@@ -1620,7 +1565,7 @@ def _market_index_contributions_capability(
                     "tool": "tw.read_market_index_contributions",
                     "provider": None,
                     "status": "failed",
-                    "external_fetch": True,
+                    "external_fetch": False,
                     "duration_ms": max(
                         0,
                         int((perf_counter() - started_at) * 1000),
@@ -1712,8 +1657,8 @@ def _market_index_contributions_capability(
             if "outside_tolerance" in reconciliation_statuses
             else "unavailable"
         ),
-        "cache_policy": "bounded_external_fetch",
-        "external_fetch": True,
+        "cache_policy": "cache_only",
+        "external_fetch": False,
         "writes_cache": False,
         "tool_runs": tool_runs,
         "provider_attempts": [

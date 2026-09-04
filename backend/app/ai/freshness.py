@@ -636,7 +636,7 @@ def check_stock_daily_price_freshness(db: Session, stock_id: str) -> dict[str, A
     missing = [dataset["key"] for dataset in issues]
     warnings = (
         [
-            "Latest quote evidence is unavailable or stale for "
+            "Latest official daily evidence is unavailable or stale for "
             f"{normalized_stock_id}: {', '.join(missing)}."
         ]
         if issues

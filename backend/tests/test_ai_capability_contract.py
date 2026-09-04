@@ -65,6 +65,83 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
         return quality["capabilities"][capability]
 
+    def test_cache_only_missing_evidence_is_not_a_live_requirement_failure(
+        self,
+    ) -> None:
+        quality = data_quality_contract.build_quality_contract(
+            canonical={
+                "ok": True,
+                "request_status": "completed",
+                "target": {"type": "tw_stock", "market": "TW"},
+                "status": {"readiness": {"decision_required": False}},
+                "evidence": {},
+            },
+            selection={"output": "evidence_only", "realtime_policy": "cache_only"},
+            manifest={
+                "capabilities": [
+                    {
+                        "capability": "quote.snapshot",
+                        "domain": "quote",
+                        "slot": "quote",
+                        "required": True,
+                        "status": "missing",
+                        "returned_count": 0,
+                    }
+                ]
+            },
+            projected_data={},
+            realtime_assessments={
+                "quote.snapshot": {
+                    "policy": "cache_only",
+                    "policy_satisfied": False,
+                    "state": "missing",
+                }
+            },
+            scope_type="stock",
+        )
+
+        item = quality["capabilities"]["quote.snapshot"]
+        self.assertEqual(item["status"], "missing")
+        self.assertNotIn("live_requirement_not_satisfied", item["issues"])
+
+    def test_require_live_missing_evidence_keeps_live_requirement_failure(
+        self,
+    ) -> None:
+        quality = data_quality_contract.build_quality_contract(
+            canonical={
+                "ok": True,
+                "request_status": "completed",
+                "target": {"type": "tw_stock", "market": "TW"},
+                "status": {"readiness": {"decision_required": False}},
+                "evidence": {},
+            },
+            selection={"output": "evidence_only", "realtime_policy": "require_live"},
+            manifest={
+                "capabilities": [
+                    {
+                        "capability": "quote.snapshot",
+                        "domain": "quote",
+                        "slot": "quote",
+                        "required": True,
+                        "status": "missing",
+                        "returned_count": 0,
+                    }
+                ]
+            },
+            projected_data={},
+            realtime_assessments={
+                "quote.snapshot": {
+                    "policy": "require_live",
+                    "policy_satisfied": False,
+                    "state": "missing",
+                }
+            },
+            scope_type="stock",
+        )
+
+        item = quality["capabilities"]["quote.snapshot"]
+        self.assertIn("live_requirement_not_satisfied", item["issues"])
+
     def test_truncated_projection_does_not_demote_canonical_intraday_coverage(
         self,
     ) -> None:
@@ -691,7 +768,26 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
         self.assertEqual(
             manifest["capability_schema_versions"]["quote.snapshot"],
-            "tw.quote.snapshot.v2",
+            "omi.market.quote.snapshot.v1",
+        )
+        quote_spec = next(
+            item
+            for item in manifest["capabilities"]
+            if item["capability_id"] == "quote.snapshot"
+        )
+        intraday_spec = next(
+            item
+            for item in manifest["capabilities"]
+            if item["capability_id"] == "intraday.bars"
+        )
+        self.assertEqual(
+            tuple(quote_spec["compatibility_schema_versions"]),
+            ("tw.quote.snapshot.v2",),
+        )
+        self.assertEqual(intraday_spec["schema_version"], "omi.market.bars.v1")
+        self.assertEqual(
+            tuple(intraday_spec["compatibility_schema_versions"]),
+            ("tw.intraday.bars.v2",),
         )
         self.assertEqual(
             manifest["digest"],
@@ -3495,6 +3591,44 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(daily["effective_limit"], 500)
         self.assertEqual(daily["returned_count"], 500)
         self.assertTrue(daily["truncated"])
+
+
+    def test_market_indices_top_level_usability_cannot_be_upgraded(self) -> None:
+        item = self._quality_item(
+            capability="market.indices",
+            payload={
+                "kind": "us_market_indices",
+                "status": "ready",
+                "facts_usable": True,
+                "decision_usable": False,
+                "items": [{"canonical_symbol": "^GSPC", "value": 6500.0}],
+                "limitations": ["CURRENT_SESSION_EVIDENCE_UNAVAILABLE"],
+            },
+        )
+
+        self.assertTrue(item["facts_usable"])
+        self.assertFalse(item["decision_usable"])
+        self.assertEqual(item["status_class"], "limited")
+
+    def test_negation_preservation_phrases_keep_requested_evidence(self) -> None:
+        for question, capability in (
+            ("TSM 不要省略 technical", "technical.indicators"),
+            ("TSM 不要排除 technical", "technical.indicators"),
+            ("TSM 不要忽略 intraday", "intraday.bars"),
+        ):
+            with self.subTest(question=question):
+                plan = query_plan.build_query_plan(
+                    payload=AiAskRequest(
+                        question=question,
+                        target={"type": "us_stock", "id": "TSM"},
+                    ),
+                    scope_type="us_stock",
+                    question_intent="general",
+                    effective_mode="data_only",
+                    target_market="US",
+                )
+                self.assertIn(capability, plan.selected_capabilities)
+                self.assertNotIn(capability, plan.excluded_capabilities)
 
 
 if __name__ == "__main__":

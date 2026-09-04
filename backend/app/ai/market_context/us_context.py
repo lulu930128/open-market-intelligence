@@ -7,6 +7,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.ai.agentic_common import _json_ready, _list_rows, _row_dict, _safe_int
+from app.ai.capability_resolution_registry import capability_dependency_closure
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_context.common import (
     append_source_ref_once as _append_source_ref_once,
@@ -109,7 +110,7 @@ def _latest_tool_result(tool_runs: list[dict[str, Any]], tool_name: str) -> dict
             summary = run.get("result_summary")
             if isinstance(summary, dict):
                 result = dict(summary)
-                resolved_market_data = summary.pop("_resolved_market_data", None)
+                resolved_market_data = result.pop("_resolved_market_data", None)
                 if isinstance(resolved_market_data, dict):
                     result["_resolved_market_data"] = resolved_market_data
                 return result
@@ -204,6 +205,46 @@ def _us_intraday_compact(
         minimum=0,
         maximum=100000,
     )
+    session_coverage = (
+        intraday_summary.get("session_coverage")
+        if isinstance(intraday_summary.get("session_coverage"), dict)
+        else {}
+    )
+    current_source_status = (
+        intraday_summary.get("current_source_status")
+        if isinstance(intraday_summary.get("current_source_status"), dict)
+        else {}
+    )
+    bar_source_status = (
+        intraday_summary.get("bar_source_status")
+        if isinstance(intraday_summary.get("bar_source_status"), dict)
+        else {}
+    )
+    source_status = (
+        intraday_summary.get("source_status")
+        if isinstance(intraday_summary.get("source_status"), dict)
+        else bar_source_status
+    )
+    raw_capability_expectation = intraday_summary.get("capability_expectation")
+    capability_expectation = (
+        raw_capability_expectation.get("intraday.bars")
+        if isinstance(raw_capability_expectation, dict)
+        and isinstance(raw_capability_expectation.get("intraday.bars"), dict)
+        else raw_capability_expectation
+        if isinstance(raw_capability_expectation, dict)
+        else None
+    )
+
+    def temporal_value(key: str) -> Any:
+        for candidate in (
+            intraday_summary,
+            session_coverage,
+            source_status,
+            bar_source_status,
+        ):
+            if key in candidate and candidate.get(key) is not None:
+                return candidate[key]
+        return None
 
     return {
         "enabled": True,
@@ -227,10 +268,24 @@ def _us_intraday_compact(
                 "provider": "yahoo_chart" if source == "yahoo_finance_chart" else source,
                 "session_scope": intraday_summary.get("session_scope") or "regular",
                 "session_phase": intraday_summary.get("session_phase"),
-                "market_phase": intraday_summary.get("market_phase"),
-                "capability_expectation": intraday_summary.get(
-                    "capability_expectation"
+                "market_phase": temporal_value("market_phase"),
+                "capability_expectation": capability_expectation,
+                "current_source_status": current_source_status or None,
+                "bar_source_status": bar_source_status or None,
+                "source_status": source_status or None,
+                "current_session_expected": temporal_value(
+                    "current_session_expected"
                 ),
+                "current_session_satisfied": temporal_value(
+                    "current_session_satisfied"
+                ),
+                "expected_trade_date": temporal_value("expected_trade_date"),
+                "event_trade_date": temporal_value("event_trade_date"),
+                "provider_snapshot_freshness": temporal_value(
+                    "provider_snapshot_freshness"
+                ),
+                "trade_recency": temporal_value("trade_recency"),
+                "trade_state": temporal_value("trade_state"),
                 "point_count": point_count,
                 "returned_point_count": len(compact_points),
                 "latest": latest,
@@ -786,7 +841,9 @@ def read_us_stock_context(
         if isinstance(requested_capability_values, list)
         else None
     )
-    requested_capability_set = frozenset(requested_capabilities or ())
+    requested_capability_set = capability_dependency_closure(
+        requested_capabilities or ()
+    )
     selection_bounded = requested_capabilities is not None
 
     def wants(*capabilities: str) -> bool:
@@ -794,15 +851,15 @@ def read_us_stock_context(
             requested_capability_set.intersection(capabilities)
         )
 
-    needs_daily = wants("quote.snapshot", "daily.ohlcv", "technical.structure")
+    needs_daily = wants("quote.snapshot", "daily.ohlcv")
     needs_profile = wants("company.profile")
     needs_sec = wants("fundamentals.financials")
     needs_insider = wants("ownership.insider_transactions")
     needs_institutional = wants("ownership.distribution")
     needs_corporate_actions = wants("corporate.actions")
     needs_short_volume = wants("market.short_volume")
-    needs_chart = wants("daily.ohlcv", "technical.structure")
-    needs_research = wants("technical.structure")
+    needs_chart = wants("daily.ohlcv")
+    needs_research = wants("technical.structure", "technical.indicators")
     daily_limit = _market_data_int(market_data_params, "daily_limit", 10, minimum=1, maximum=200)
     timeframe = _market_data_str(market_data_params, "timeframe", "daily") or "daily"
     bars = _market_data_int(market_data_params, "bars", 90, minimum=1, maximum=5000)
@@ -833,26 +890,22 @@ def read_us_stock_context(
         .first()
     )
     context_now = dependencies.now()
-    quote_snapshot = (
-        None
-        if requested_trade_date is not None
-        else _latest_tool_result(tool_runs, "us.refresh_quote")
-    )
-    if not isinstance(quote_snapshot, dict) and isinstance(intraday_summary, dict):
+    quote_snapshot = None
+    if requested_trade_date is None and isinstance(intraday_summary, dict):
         nested_quote = intraday_summary.get("quote_snapshot")
         quote_snapshot = nested_quote if isinstance(nested_quote, dict) else None
     quote_reader = getattr(dependencies.us_market_service, "get_us_quote_snapshot", None)
     if (
-        quote_snapshot is None
-        and requested_trade_date is None
+        requested_trade_date is None
         and wants("quote.snapshot")
         and callable(quote_reader)
     ):
         try:
             candidate = quote_reader(db, symbol=normalized_symbol, now=context_now)
-            quote_snapshot = candidate if isinstance(candidate, dict) else None
+            if isinstance(candidate, dict):
+                quote_snapshot = candidate
         except (LookupError, ValueError):
-            quote_snapshot = None
+            pass
     daily_rows: list[_ResolvedDailyContextRow] = []
     daily_platform_result = None
     daily_projection: dict[str, Any] = {}

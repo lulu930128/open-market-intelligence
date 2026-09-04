@@ -173,6 +173,19 @@ SCOPE_DOMAIN_HINTS = {
     },
 }
 NEGATION_TERMS = ("不查", "不刷新", "不需要", "不要", "排除", "without", "except")
+NEGATION_PRESERVING_TERMS = (
+    "不要省略",
+    "不要排除",
+    "不要忽略",
+    "不要漏掉",
+    "不可省略",
+    "不可排除",
+    "do not omit",
+    "don't omit",
+    "do not exclude",
+    "don't exclude",
+    "not omit",
+)
 RESTRICTIVE_CAPABILITY_TERMS = (
     "只查",
     "只要",
@@ -487,6 +500,38 @@ def _list_param(params: dict[str, Any], key: str) -> tuple[str, ...]:
     )
 
 
+def _hint_negation(question: str, hint: str) -> str | None:
+    """Return an exclusion marker only when every mention is actually negated."""
+
+    matched_negations: list[str] = []
+    for clause in re.split(r"[，,。；;!?]", question):
+        if hint not in clause:
+            continue
+        if any(
+            re.search(
+                rf"{re.escape(term.casefold())}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
+                clause,
+            )
+            for term in NEGATION_PRESERVING_TERMS
+        ):
+            return None
+        negation = next(
+            (
+                term
+                for term in NEGATION_TERMS
+                if re.search(
+                    rf"{re.escape(term.casefold())}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
+                    clause,
+                )
+            ),
+            None,
+        )
+        if negation is None:
+            return None
+        matched_negations.append(negation)
+    return matched_negations[0] if matched_negations else None
+
+
 def _query_domains(
     payload: AiAskRequest,
     question_intent: str,
@@ -524,17 +569,7 @@ def _query_domains(
             normalized_hint = hint.casefold()
             if normalized_hint not in question:
                 continue
-            negated = next(
-                (
-                    negation
-                    for negation in NEGATION_TERMS
-                    if re.search(
-                        rf"{re.escape(negation.casefold())}[^，,。；;!?]{{0,40}}{re.escape(normalized_hint)}",
-                        question,
-                    )
-                ),
-                None,
-            )
+            negated = _hint_negation(question, normalized_hint)
             if negated:
                 excluded.append(domain)
                 negative_terms.append(f"{negated}:{hint}")
@@ -564,13 +599,7 @@ def _query_capabilities(
             normalized_hint = hint.casefold()
             if normalized_hint not in question:
                 continue
-            negated = any(
-                re.search(
-                    rf"{re.escape(negation.casefold())}[^，,。；;!?]{{0,40}}{re.escape(normalized_hint)}",
-                    question,
-                )
-                for negation in NEGATION_TERMS
-            )
+            negated = _hint_negation(question, normalized_hint)
             if negated:
                 excluded.append(capability_id)
             else:

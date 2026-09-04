@@ -867,6 +867,8 @@ def _apply_taiwan_current_price_contract(
         completed_daily_date=completed_daily_date,
         current_session_date=calendar_status.get("date"),
         previous_trading_day=calendar_status.get(
+            "previous_completed_trading_day"
+        ) or calendar_status.get(
             "previous_trading_day"
         ),
         is_trading_day=calendar_status.get("is_trading_day"),

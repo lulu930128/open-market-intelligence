@@ -27,6 +27,7 @@ READY_STATUSES = {
     "latest_session_close",
     "live",
     "ok",
+    "official_close",
     "ready",
     "valid_empty",
 }
@@ -1025,6 +1026,11 @@ def _canonical_coverage_status(
             ),
             None,
         )
+        if (
+            continuity.get("status") == "insufficient_history"
+            and canonical_explicit in {None, "partial"}
+        ):
+            return "insufficient_history"
         if canonical_explicit is not None:
             return canonical_explicit
         if canonical_count is not None and canonical_count <= 0:
@@ -1186,16 +1192,13 @@ def _payload_semantic_quality(
 
     quality = _dict(payload.get("quality"))
     has_typed_top_level_quality = bool(
-        capability_id == "daily.ohlcv"
-        and (
-            _normalized_status(payload.get("freshness_status")) != "unknown"
-            or any(
-                isinstance(payload.get(key), bool)
-                for key in (
-                    "facts_usable",
-                    "research_usable",
-                    "decision_usable",
-                )
+        _normalized_status(payload.get("freshness_status")) != "unknown"
+        or any(
+            isinstance(payload.get(key), bool)
+            for key in (
+                "facts_usable",
+                "research_usable",
+                "decision_usable",
             )
         )
     )
@@ -1383,7 +1386,9 @@ def _quality_for_capability(
         },
     )
     realtime_policy_unsatisfied = bool(
-        realtime and realtime.get("policy_satisfied") is False
+        realtime
+        and str(realtime.get("policy") or "").strip().lower() == "require_live"
+        and realtime.get("policy_satisfied") is False
     )
     if realtime_policy_unsatisfied:
         canonical_candidate = {
@@ -1485,11 +1490,6 @@ def _quality_for_capability(
         status = str(semantic_quality["status"])
         status_class = str(semantic_quality["status_class"])
         canonical_candidate = semantic_quality
-    capability_freshness_status = (
-        _normalized_status(freshness_by_capability.get(capability_id))
-        if freshness_by_capability.get(capability_id) is not None
-        else None
-    )
     completeness = (
         "not_applicable"
         if status_class == "neutral"

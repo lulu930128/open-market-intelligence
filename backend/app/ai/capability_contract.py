@@ -45,6 +45,7 @@ READY_STATUSES = {
     "latest_session_close",
     "live",
     "ok",
+    "official_close",
     "ready",
     "ready_empty",
     "session_final",
@@ -141,6 +142,7 @@ class CapabilitySpec:
     default_fields: tuple[str, ...]
     default_limit: int
     schema_version: str = "omi.capability.v1"
+    compatibility_schema_versions: tuple[str, ...] = ()
     fill_operations: tuple[tuple[str, str], ...] = ()
     writes_cache: bool = False
     title: str = ""
@@ -233,7 +235,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="quote.snapshot",
-        schema_version="tw.quote.snapshot.v2",
+        schema_version="omi.market.quote.snapshot.v1",
+        compatibility_schema_versions=("tw.quote.snapshot.v2",),
         domain="quote",
         slot="quote",
         scopes=(*ALL_INSTRUMENT_SCOPES, "crypto_market"),
@@ -963,7 +966,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
     ),
     CapabilitySpec(
         capability_id="intraday.bars",
-        schema_version="tw.intraday.bars.v2",
+        schema_version="omi.market.bars.v1",
+        compatibility_schema_versions=("tw.intraday.bars.v2",),
         domain="intraday",
         slot="intraday",
         scopes=(*ALL_INSTRUMENT_SCOPES, "market", "crypto_market"),
@@ -5971,6 +5975,18 @@ def _canonical_intraday_value(value: Any) -> Any:
         "session",
         "session_scope",
         "session_phase",
+        "market_phase",
+        "capability_expectation",
+        "current_source_status",
+        "bar_source_status",
+        "source_status",
+        "current_session_expected",
+        "current_session_satisfied",
+        "expected_trade_date",
+        "event_trade_date",
+        "provider_snapshot_freshness",
+        "trade_recency",
+        "trade_state",
         "market_status",
         "official_close_status",
         "delivery_status",

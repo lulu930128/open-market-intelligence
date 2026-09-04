@@ -12,6 +12,7 @@ from app.db.models import (
     MarketChipDaily,
     StockMaster,
 )
+from app.market.market_chips import market_chip_daily_to_dict
 
 
 def _latest_date(db: Session, model: Any) -> Any:
@@ -191,8 +192,12 @@ def _official_market_aggregate(db: Session) -> dict[str, Any]:
         "source_grade",
     )
     serialized = [
-        {field: _json_value(getattr(row, field, None)) for field in fields}
+        {
+            field: _json_value(projected.get(field))
+            for field in fields
+        }
         for row in rows
+        for projected in [market_chip_daily_to_dict(row, db=db)]
     ]
     trade_dates = sorted({str(item["trade_date"]) for item in serialized if item.get("trade_date")})
     markets = [str(item.get("market") or item.get("index_id")) for item in serialized]

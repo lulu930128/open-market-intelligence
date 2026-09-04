@@ -54,7 +54,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "beb515030bdb178be959c267d3776a129a182157b069f6ae752619b6429b6eee"
+    "14517f6e5f06b99b146f82e1d5656e078defb41b38b6136610437a6e84df9a0a"
 )
 
 
@@ -447,9 +447,9 @@ class AIToolBoundaryTests(unittest.TestCase):
             patch.object(tools.market_service, "get_latest_trade_date", return_value=None),
             patch.object(
                 tools,
-                "_read_taiwan_bars",
+                "_read_taiwan_index_intraday_bars",
                 side_effect=lambda **kwargs: SimpleNamespace(
-                    instrument_id=kwargs["instrument_id"]
+                    instrument_id=kwargs["index_id"]
                 ),
             ) as get_intraday,
             patch.object(
@@ -543,11 +543,14 @@ class AIToolBoundaryTests(unittest.TestCase):
 
         self.assertEqual(envelope["generated_at"], fixed_now)
         self.assertEqual(
-            [call.kwargs["instrument_id"] for call in get_intraday.call_args_list],
+            [call.kwargs["index_id"] for call in get_intraday.call_args_list],
             ["TAIEX", "TPEX"],
         )
         self.assertTrue(envelope["data"]["index_intraday"]["enabled"])
-        get_summary.assert_called_once_with(db, force_refresh=False)
+        self.assertEqual(get_summary.call_count, 2)
+        for summary_call in get_summary.call_args_list:
+            self.assertEqual(summary_call.args, (db,))
+            self.assertEqual(summary_call.kwargs, {"force_refresh": False})
         self.assertEqual(envelope["data"]["breadth"]["scope"], "full_market")
         self.assertEqual(envelope["data"]["breadth"]["total_count"], 1050)
         read_cross_market.assert_called_once_with(db=db, now=fixed_now)

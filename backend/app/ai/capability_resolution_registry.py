@@ -151,6 +151,26 @@ DERIVED_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "portfolio.valuation": ("portfolio.holdings", "quote.snapshot"),
     "data.freshness": ("diagnostics.source_health",),
 }
+
+
+def capability_dependency_closure(
+    capability_ids: Iterable[str],
+) -> frozenset[str]:
+    """Return requested capabilities plus their transitive registry dependencies."""
+
+    resolved = {
+        str(capability_id)
+        for capability_id in capability_ids
+        if str(capability_id)
+    }
+    pending = list(resolved)
+    while pending:
+        capability_id = pending.pop()
+        for dependency in DERIVED_DEPENDENCIES.get(capability_id, ()):
+            if dependency not in resolved:
+                resolved.add(dependency)
+                pending.append(dependency)
+    return frozenset(resolved)
 SCHEDULER_OWNED_CAPABILITIES = frozenset(
     {
         "market.sectors",
@@ -166,12 +186,7 @@ SCHEDULER_OWNED_CAPABILITIES = frozenset(
 )
 PRIVATE_SCOPES = frozenset({"portfolio"})
 KEY_REQUIRED_RESOLUTIONS = frozenset({("us_macro", "macro.observations")})
-READER_FETCH_OVERRIDES = frozenset(
-    {
-        ("market", "market.index_contributions"),
-        ("tw_index", "market.index_contributions"),
-    }
-)
+READER_FETCH_OVERRIDES: frozenset[tuple[str, str]] = frozenset()
 
 
 PROVIDER_CONTRACTS_BY_SCOPE_CAPABILITY: dict[
