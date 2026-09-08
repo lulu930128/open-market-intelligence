@@ -547,7 +547,18 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertNotIn("Hidden", {group["group_name"] for group in groups})
 
     def test_unknown_industry_code_has_truthful_display_fallback(self) -> None:
-        self.assertEqual(normalize_tw_industry_label("99"), "產業代碼 99")
+        self.assertEqual(
+            normalize_tw_industry_label("99"),
+            "unmapped_raw_industry",
+        )
+        self.assertEqual(
+            normalize_tw_industry_label("金融業"),
+            "金融保險業",
+        )
+        self.assertEqual(
+            normalize_tw_industry_label("建材營造"),
+            "建材營造業",
+        )
         self.assertEqual(
             normalize_tw_industry_label("Semiconductor"),
             "Semiconductor",

@@ -859,6 +859,7 @@ def run_us_priority_ohlc_reconcile_job(
     max_symbols: int = 20,
     max_external_calls: int = 20,
     max_provider_attempts: int = 2,
+    required_symbols: list[str] | None = None,
 ) -> None:
     def worker(_db: Session, progress: ProgressCallback):
         return reconcile_us_priority_ohlc(
@@ -867,6 +868,7 @@ def run_us_priority_ohlc_reconcile_job(
             max_symbols=max_symbols,
             max_external_calls=max_external_calls,
             max_provider_attempts=max_provider_attempts,
+            required_symbols=required_symbols,
             progress_callback=progress,
         )
 
@@ -938,6 +940,7 @@ def run_cross_market_context_refresh_job(
     provider: str,
     outputsize: str,
     max_runtime_seconds: int,
+    requested_capabilities: list[str] | None = None,
 ) -> None:
     def worker(db: Session, progress: ProgressCallback):
         return refresh_cross_market_context_sources(
@@ -947,6 +950,7 @@ def run_cross_market_context_refresh_job(
             provider=provider,
             outputsize=outputsize,
             max_runtime_seconds=max_runtime_seconds,
+            requested_capabilities=requested_capabilities,
             progress_callback=progress,
         )
 

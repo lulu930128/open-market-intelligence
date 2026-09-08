@@ -2761,6 +2761,8 @@ class TaiwanCurrentBreadthSnapshot(Base):
     provisional: Mapped[bool] = mapped_column(Boolean, default=True)
     decision_usable: Mapped[bool] = mapped_column(Boolean, default=False)
     limitations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auction_observation_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acquisition_diagnostics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import unittest
 from unittest.mock import patch
 
@@ -45,6 +45,28 @@ class _FakeResponse:
 
 
 class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
+    def test_recent_observation_with_old_trade_remains_factual_not_decision_ready(self) -> None:
+        now = datetime(2026, 9, 8, 10, 5, tzinfo=TAIWAN_TZ)
+        self.db.add(StockMaster(stock_id="2454", stock_name="MediaTek", market="TWSE",
+                                instrument_type="stock", industry="半導體業", is_active=True))
+        self.db.commit()
+        row = self._stock_state_row("2454", "TWSE", 110, 100, now)
+        row.update(price_as_of=now - timedelta(minutes=8), has_actual_trade=True, price_source="session_cache")
+        persist_taiwan_intraday_stock_states(self.db, rows=[row], now=now)
+        result = build_tw_intraday_screening_snapshot(self.db, generated_at=now)
+        selected = result["rows"][0]
+        self.assertEqual(selected["observation_received_freshness"], "current")
+        self.assertEqual(selected["last_trade_recency"], "delayed")
+        self.assertTrue(selected["facts_usable_for_ranking"])
+        self.assertFalse(selected["decision_usable"])
+        self.assertFalse(selected["execution_grade_usable"])
+        tomorrow_preopen = now.replace(day=9, hour=8, minute=55)
+        preopen = build_tw_intraday_screening_snapshot(self.db, generated_at=tomorrow_preopen)
+        self.assertEqual(preopen["status"], "not_applicable")
+        self.assertEqual(preopen["rows"], [])
+        self.assertEqual(preopen["expected_trade_date"], "2026-09-09")
+        self.assertFalse(preopen["decision_usable"])
+
     def setUp(self) -> None:
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=self.engine)
@@ -259,7 +281,7 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                str(item["sector_id"]).startswith("industry:")
+                str(item["sector_id"]).startswith("tw.sector.")
                 for item in sectors["items"]
             )
         )
@@ -339,7 +361,7 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         semiconductor = next(
             item
             for item in hot_groups["groups"]
-            if item["group_id"] == "industry:半導體業"
+            if item["group_id"] == "tw.sector.24"
         )
         passive = next(
             item
@@ -362,10 +384,78 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         sector = next(
             item
             for item in snapshots["sectors"]["items"]
-            if item["sector_id"] == "industry:半導體業"
+            if item["sector_id"] == "tw.sector.24"
         )
         self.assertEqual(sector["member_count"], semiconductor["member_count"])
         self.assertEqual(sector["observed_count"], semiconductor["observed_count"])
+
+    def test_hot_groups_distinguishes_weekend_completion_from_open_stale(
+        self,
+    ) -> None:
+        self.db.add_all(
+            [
+                StockMaster(
+                    stock_id=stock_id,
+                    stock_name=stock_id,
+                    market=market,
+                    instrument_type="stock",
+                    industry="半導體業",
+                    is_active=True,
+                )
+                for stock_id, market in (
+                    ("2330", "TWSE"),
+                    ("3711", "TWSE"),
+                    ("6488", "TPEX"),
+                )
+            ]
+        )
+        self.db.commit()
+        friday_close = datetime(2026, 9, 4, 13, 30, tzinfo=TAIWAN_TZ)
+        persist_taiwan_intraday_stock_states(
+            self.db,
+            rows=[
+                self._stock_state_row("2330", "TWSE", 101, 100, friday_close),
+                self._stock_state_row("3711", "TWSE", 99, 100, friday_close),
+                self._stock_state_row("6488", "TPEX", 100, 100, friday_close),
+            ],
+            now=friday_close,
+        )
+
+        weekend = build_tw_intraday_group_snapshots(
+            self.db,
+            generated_at=datetime(2026, 9, 6, 10, 0, tzinfo=TAIWAN_TZ),
+            include_watchlist_groups=False,
+        )["hot_groups"]
+        monday_open = build_tw_intraday_group_snapshots(
+            self.db,
+            generated_at=datetime(2026, 9, 7, 10, 0, tzinfo=TAIWAN_TZ),
+            include_watchlist_groups=False,
+        )["hot_groups"]
+
+        self.assertEqual(weekend["status"], "ready")
+        self.assertEqual(
+            weekend["freshness_status"],
+            "latest_completed_session",
+        )
+        self.assertTrue(weekend["facts_usable"])
+        self.assertFalse(weekend["decision_usable"])
+        self.assertTrue(weekend["current_for_requested_session"])
+        self.assertEqual(
+            weekend["expected_observation_date"],
+            "2026-09-04",
+        )
+        self.assertEqual(monday_open["status"], "partial")
+        self.assertEqual(
+            monday_open["freshness_status"],
+            "stale_for_expected_session",
+        )
+        self.assertFalse(monday_open["facts_usable"])
+        self.assertFalse(monday_open["decision_usable"])
+        self.assertFalse(monday_open["current_for_requested_session"])
+        self.assertEqual(
+            monday_open["expected_observation_date"],
+            "2026-09-07",
+        )
 
     def test_screening_reconciles_price_extremes_across_provider_switch(self) -> None:
         self.db.add(
@@ -670,6 +760,19 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         )
         sector = projected["market.sectors"]
         hot_groups = projected["market.hot_groups"]
+        self.assertTrue(
+            {
+                "expected_observation_date",
+                "latest_completed_trade_date",
+                "session_phase",
+                "session_semantics",
+                "freshness_status",
+                "facts_usable",
+                "decision_usable",
+                "current_for_requested_session",
+                "is_complete",
+            }.issubset(hot_groups)
+        )
         self.assertEqual(sector["data_mode"], "intraday_rolling_state")
         self.assertTrue(sector["is_intraday"])
         self.assertEqual(sector["items"][0]["name"], "半導體業")

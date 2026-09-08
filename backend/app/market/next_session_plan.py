@@ -21,6 +21,11 @@ from app.market.trading_calendar import (
     taiwan_market_session_phase,
     taiwan_now,
 )
+from app.market.taiwan_price_rules import normalize_taiwan_stock_price
+from app.market.technical_parameters import (
+    TechnicalAnalysisParameters,
+    get_technical_analysis_parameters,
+)
 
 
 PLAN_KIND = "tw_stock_next_session_plan"
@@ -29,7 +34,9 @@ METHODOLOGY_ID = "tw_next_session_sma_transition"
 METHODOLOGY_VERSION = "1.0.0"
 HISTORY_LIMIT = 250
 MAX_GAP_DAYS = 10
-TRANSITION_PERIODS = (20, 60)
+# Compatibility export only. Production periods come from the Backend-owned
+# technical parameter contract via get_technical_analysis_parameters().
+TRANSITION_PERIODS = (5, 20, 60)
 KNOWN_RANGE_PERIOD = 20
 SUPPORTED_MARKETS = frozenset({"TWSE", "TPEX"})
 
@@ -126,10 +133,17 @@ def _window_has_acceptable_gaps(
     max_gap_days: int,
 ) -> bool:
     dates = [row["trade_date"] for row in rows]
-    return all(
-        (right - left).days <= max_gap_days
-        for left, right in zip(dates, dates[1:])
-    )
+    for left, right in zip(dates, dates[1:]):
+        if right <= left:
+            return False
+        expected = next_taiwan_trading_day(left, include_value=False)
+        if right == expected:
+            continue
+        # Preserve the legacy bounded fallback only for incomplete historical
+        # holiday configuration. A long calendar gap still fails closed.
+        if (right - left).days > max_gap_days:
+            return False
+    return True
 
 
 def _transition_window_issue(
@@ -160,6 +174,7 @@ def build_transition_level(
     *,
     period: int,
     as_of_close: float,
+    candidate_close: float | None = None,
     max_gap_days: int = MAX_GAP_DAYS,
 ) -> dict[str, Any] | None:
     required = period - 1
@@ -212,10 +227,46 @@ def build_transition_level(
         else None
     )
 
+    normalized_transition_price = normalize_taiwan_stock_price(
+        transition_price,
+        direction="up",
+    )
+    normalized_candidate = (
+        normalize_taiwan_stock_price(candidate_close)
+        if candidate_close is not None
+        else None
+    )
+    projected_ma_at_candidate = (
+        (transition_sum + normalized_candidate) / period
+        if normalized_candidate is not None
+        else None
+    )
+    candidate_relation = (
+        "above"
+        if normalized_candidate is not None
+        and normalized_candidate > normalized_transition_price
+        else "below"
+        if normalized_candidate is not None
+        and normalized_candidate < normalized_transition_price
+        else "at"
+        if normalized_candidate is not None
+        else None
+    )
+    candidate_role = (
+        "support_candidate"
+        if candidate_relation == "above"
+        else "reclaim"
+        if candidate_relation == "below"
+        else "pivot"
+        if candidate_relation == "at"
+        else None
+    )
+
     return {
         "key": f"ma{period}_transition",
         "period": period,
         "transition_price": _round(transition_price),
+        "normalized_transition_price": normalized_transition_price,
         "current_ma": rounded_current_ma,
         "projected_ma_if_flat": rounded_projected,
         "drift_if_flat": _round(drift),
@@ -232,6 +283,10 @@ def build_transition_level(
             "candidate_close_gte_transition_price_means_"
             "candidate_close_gte_projected_ma"
         ),
+        "candidate_close": normalized_candidate,
+        "projected_ma_at_candidate": _round(projected_ma_at_candidate),
+        "candidate_close_relation": candidate_relation,
+        "role_at_candidate_close": candidate_role,
     }
 
 
@@ -279,7 +334,13 @@ def build_known_range(
 def build_scenario_zones(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ordered = sorted(
         (
-            (str(level["key"]), float(level["transition_price"]))
+            (
+                str(level["key"]),
+                float(
+                    level.get("normalized_transition_price")
+                    or level["transition_price"]
+                ),
+            )
             for level in levels
             if _number(level.get("transition_price")) is not None
         ),
@@ -310,15 +371,20 @@ def build_scenario_zones(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
             },
         ]
 
-    low_key, low_price = ordered[0]
-    high_key, high_price = ordered[-1]
-    if low_price == high_price:
-        all_keys = sorted({key for key, _ in ordered})
+    grouped: list[tuple[float, list[str]]] = []
+    for key, price in ordered:
+        if grouped and grouped[-1][0] == price:
+            grouped[-1][1].append(key)
+        else:
+            grouped.append((price, [key]))
+    if len(grouped) == 1:
+        price, keys = grouped[0]
+        all_keys = sorted(set(keys))
         return [
             {
                 "key": "below_confluence",
                 "lower_bound": None,
-                "upper_bound": low_price,
+                "upper_bound": price,
                 "lower_bound_rule": None,
                 "upper_bound_rule": "exclusive",
                 "at_or_above_level_keys": [],
@@ -326,7 +392,7 @@ def build_scenario_zones(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
             },
             {
                 "key": "at_or_above_confluence",
-                "lower_bound": low_price,
+                "lower_bound": price,
                 "upper_bound": None,
                 "lower_bound_rule": "inclusive",
                 "upper_bound_rule": None,
@@ -335,35 +401,55 @@ def build_scenario_zones(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
             },
         ]
 
-    return [
+    zones: list[dict[str, Any]] = []
+    all_keys = [key for _, keys in grouped for key in keys]
+    first_price, _ = grouped[0]
+    zones.append(
         {
-            "key": "below_both",
+            "key": "below_all",
             "lower_bound": None,
-            "upper_bound": low_price,
+            "upper_bound": first_price,
             "lower_bound_rule": None,
             "upper_bound_rule": "exclusive",
             "at_or_above_level_keys": [],
-            "below_level_keys": [key for key, _ in ordered],
-        },
+            "below_level_keys": all_keys,
+        }
+    )
+    for index in range(len(grouped) - 1):
+        lower_price, lower_keys = grouped[index]
+        upper_price, upper_keys = grouped[index + 1]
+        zones.append(
+            {
+                "key": f"between_{index + 1}_{index + 2}",
+                "lower_bound": lower_price,
+                "upper_bound": upper_price,
+                "lower_bound_rule": "inclusive",
+                "upper_bound_rule": "exclusive",
+                "at_or_above_level_keys": [
+                    key
+                    for _, keys in grouped[: index + 1]
+                    for key in keys
+                ],
+                "below_level_keys": [
+                    key
+                    for _, keys in grouped[index + 1 :]
+                    for key in keys
+                ],
+            }
+        )
+    last_price, _ = grouped[-1]
+    zones.append(
         {
-            "key": "between_transition_levels",
-            "lower_bound": low_price,
-            "upper_bound": high_price,
-            "lower_bound_rule": "inclusive",
-            "upper_bound_rule": "exclusive",
-            "at_or_above_level_keys": [low_key],
-            "below_level_keys": [high_key],
-        },
-        {
-            "key": "at_or_above_both",
-            "lower_bound": high_price,
+            "key": "at_or_above_all",
+            "lower_bound": last_price,
             "upper_bound": None,
             "lower_bound_rule": "inclusive",
             "upper_bound_rule": None,
-            "at_or_above_level_keys": [key for key, _ in ordered],
+            "at_or_above_level_keys": all_keys,
             "below_level_keys": [],
-        },
-    ]
+        }
+    )
+    return zones
 
 
 def _trading_day_lag(latest: date | None, expected: date) -> int | None:
@@ -401,6 +487,9 @@ def _base_contract(
     expected_trade_date: date,
     history: list[dict[str, Any]],
     raw_row_count: int,
+    requested_limit: int,
+    transition_periods: tuple[int, ...],
+    candidate_close: float | None,
 ) -> dict[str, Any]:
     latest_trade_date = history[-1]["trade_date"] if history else None
     source_ids = sorted(
@@ -438,6 +527,11 @@ def _base_contract(
         ),
         "target_session_state": "unavailable",
         "as_of_close": _round(history[-1].get("close")) if history else None,
+        "candidate_close": (
+            normalize_taiwan_stock_price(candidate_close)
+            if candidate_close is not None
+            else None
+        ),
         "methodology": {
             "id": METHODOLOGY_ID,
             "version": METHODOLOGY_VERSION,
@@ -468,7 +562,7 @@ def _base_contract(
             "checked_at": local_now,
         },
         "history": {
-            "requested_limit": HISTORY_LIMIT,
+            "requested_limit": requested_limit,
             "raw_row_count": raw_row_count,
             "distinct_trade_date_count": len(history),
             "duplicate_trade_date_count": max(raw_row_count - len(history), 0),
@@ -483,7 +577,9 @@ def _base_contract(
             "decision_usable": False,
             "reason_codes": [],
             "available_level_keys": [],
-            "missing_level_keys": ["ma20_transition", "ma60_transition"],
+            "missing_level_keys": [
+                f"ma{period}_transition" for period in transition_periods
+            ],
         },
         "levels": [],
         "known_range": build_known_range(history),
@@ -500,13 +596,13 @@ def _base_contract(
             "conditional_level_not_price_forecast",
             "intraday_candidate_is_hypothetical_close",
             "corporate_action_adjustment_not_applied",
-            "transition_price_not_tick_rounded",
+            "transition_price_tick_normalized",
         ],
         "limitations": [
             "Transition levels are conditional price thresholds, not target-session price forecasts.",
             "Any intraday candidate price must be interpreted as a hypothetical target-session close.",
             "The v1 price series is raw and unadjusted; corporate-action adjustment and event checks are not applied.",
-            "Transition prices are mathematical thresholds and are not rounded to Taiwan exchange tick sizes.",
+            "Mathematical transition thresholds are retained for audit and paired with the first valid Taiwan stock tick at or above each threshold.",
         ],
         "source_refs": [
             {"type": "table", "name": "market_daily_price"},
@@ -522,12 +618,19 @@ def build_tw_stock_next_session_plan(
     db: Session,
     stock_id: str,
     now: datetime | None = None,
+    candidate_close: float | None = None,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = str(stock_id or "").strip()
     if not normalized_stock_id:
         raise ValueError("stock_id is required.")
 
     local_now = taiwan_now(now)
+    resolved_parameters = parameters or get_technical_analysis_parameters()
+    transition_periods = tuple(resolved_parameters.ma_windows)
+    history_limit = max(HISTORY_LIMIT, max(transition_periods, default=1) + 5)
+    if candidate_close is not None and _number(candidate_close) is None:
+        raise ValueError("candidate_close must be a positive finite number.")
     expected_trade_date = expected_daily_price_date(now=local_now)
     stock = (
         db.query(StockMaster)
@@ -537,7 +640,7 @@ def build_tw_stock_next_session_plan(
     raw_rows = _list_daily_history(
         db=db,
         stock_id=normalized_stock_id,
-        limit=HISTORY_LIMIT,
+        limit=history_limit,
     )
     history, raw_row_count = normalize_daily_history(raw_rows)
     contract = _base_contract(
@@ -547,6 +650,9 @@ def build_tw_stock_next_session_plan(
         expected_trade_date=expected_trade_date,
         history=history,
         raw_row_count=raw_row_count,
+        requested_limit=history_limit,
+        transition_periods=transition_periods,
+        candidate_close=candidate_close,
     )
     target_trade_date = contract["target_trade_date"]
     target_session_state = _target_session_state(target_trade_date, local_now)
@@ -581,12 +687,13 @@ def build_tw_stock_next_session_plan(
 
     levels = [
         level
-        for period in TRANSITION_PERIODS
+        for period in transition_periods
         if (
             level := build_transition_level(
                 history,
                 period=period,
                 as_of_close=as_of_close,
+                candidate_close=candidate_close,
             )
         )
         is not None
@@ -594,12 +701,12 @@ def build_tw_stock_next_session_plan(
     available_level_keys = [str(level["key"]) for level in levels]
     missing_level_keys = [
         f"ma{period}_transition"
-        for period in TRANSITION_PERIODS
+        for period in transition_periods
         if f"ma{period}_transition" not in available_level_keys
     ]
     missing_level_reasons = [
         issue
-        for period in TRANSITION_PERIODS
+        for period in transition_periods
         if f"ma{period}_transition" in missing_level_keys
         if (
             issue := _transition_window_issue(
@@ -615,12 +722,16 @@ def build_tw_stock_next_session_plan(
     contract["readiness"]["available_level_keys"] = available_level_keys
     contract["readiness"]["missing_level_keys"] = missing_level_keys
 
-    if "ma20_transition" not in available_level_keys:
-        contract["missing"].append("market_daily_price.close.ma20_transition_window")
+    primary_period = resolved_parameters.ma_medium_window or transition_periods[0]
+    primary_key = f"ma{primary_period}_transition"
+    if primary_key not in available_level_keys:
+        contract["missing"].append(
+            f"market_daily_price.close.{primary_key}_window"
+        )
         contract["readiness"]["reason_codes"].extend(
             reason
             for reason in missing_level_reasons
-            if reason.startswith("ma20_")
+            if reason.startswith(f"ma{primary_period}_")
         )
         return contract
 

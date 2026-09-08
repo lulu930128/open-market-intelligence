@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.stocks.atlas_news import StockNewsRead, StockNewsRequestError, read_stock_news
 from app.market.schemas import (
     TaiwanDispositionStatusRead,
     TaiwanStockEventHistoryRead,
@@ -33,6 +34,21 @@ from app.stocks.service import (
 )
 
 router = APIRouter()
+
+
+@router.get("/{stock_id}/news", response_model=StockNewsRead)
+def read_stock_company_news(
+    stock_id: str,
+    limit: int = Query(default=20, ge=1, le=50),
+    cursor: str | None = Query(default=None, max_length=2000),
+    db: Session = Depends(get_db),
+):
+    try:
+        return read_stock_news(db, stock_id, limit=limit, cursor=cursor)
+    except StockNewsRequestError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_news_query", "message": str(exc)}) from exc
+    except StockNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def _stock_read(stock) -> StockMasterRead:

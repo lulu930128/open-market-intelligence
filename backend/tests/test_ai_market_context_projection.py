@@ -953,7 +953,7 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(component["classified_count"], 90)
         self.assertEqual(component["unknown_count"], 10)
         self.assertEqual(component["coverage_ratio"], 0.9)
-        self.assertEqual(component["reconciliation_status"], "balanced")
+        self.assertEqual(component["reconciliation_status"], "partial")
         self.assertEqual(breadth["universe_count"], 100)
         self.assertEqual(breadth["coverage_count"], 90)
         self.assertEqual(breadth["classified_count"], 90)

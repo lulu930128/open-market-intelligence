@@ -43,6 +43,7 @@ class TaiwanNextSessionPlanLevelRead(BaseModel):
     key: str
     period: int
     transition_price: float
+    normalized_transition_price: float
     current_ma: float | None = None
     projected_ma_if_flat: float
     drift_if_flat: float | None = None
@@ -56,6 +57,12 @@ class TaiwanNextSessionPlanLevelRead(BaseModel):
     window_end_date: date
     candidate_price_semantics: str
     comparison_rule: str
+    candidate_close: float | None = None
+    projected_ma_at_candidate: float | None = None
+    candidate_close_relation: Literal["above", "below", "at"] | None = None
+    role_at_candidate_close: Literal[
+        "support_candidate", "reclaim", "pivot"
+    ] | None = None
 
 
 class TaiwanNextSessionKnownRangeRead(BaseModel):
@@ -134,6 +141,7 @@ class TaiwanNextSessionPlanRead(BaseModel):
         "expired",
     ]
     as_of_close: float | None = None
+    candidate_close: float | None = None
     methodology: TaiwanNextSessionPlanMethodologyRead
     freshness: TaiwanNextSessionPlanFreshnessRead
     history: TaiwanNextSessionPlanHistoryRead

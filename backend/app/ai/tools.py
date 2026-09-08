@@ -38,6 +38,7 @@ from app.market.tw_corporate_events import (
 from app.market.tw_company_profile import read_taiwan_company_profile
 from app.market.technical_report import build_stock_technical_report
 from app.market.technical_evidence import build_tw_stock_technical_evidence
+from app.market.stock_price_map import build_tw_stock_price_map
 from app.market.tw_bar_service import (
     TaiwanBarService,
     read_taiwan_index_intraday_bars,
@@ -499,6 +500,7 @@ def read_stock_context(
             get_taiwan_stock_event_summary=get_taiwan_stock_event_summary,
             get_taiwan_stock_event_history=get_taiwan_stock_event_history,
             build_tw_stock_technical_evidence=build_tw_stock_technical_evidence,
+            build_tw_stock_price_map=build_tw_stock_price_map,
             now=_now,
         ),
     )
@@ -532,6 +534,7 @@ def read_stock_technical_context(
             get_taiwan_stock_event_history=get_taiwan_stock_event_history,
             read_taiwan_latest_daily_evidence=read_taiwan_latest_daily_evidence,
             build_tw_stock_technical_evidence=build_tw_stock_technical_evidence,
+            build_tw_stock_price_map=build_tw_stock_price_map,
             now=_now,
         ),
     )

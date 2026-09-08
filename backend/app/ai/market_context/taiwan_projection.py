@@ -1049,11 +1049,16 @@ def _component_freshness(
     normalized_status = str(status or "unavailable")
     has_resolved_health = bool(resolved_health)
     resolved_usable = bool(
-        resolved_health.get("research_usable")
-        or resolved_health.get("facts_usable")
+        resolved_health.get("status") in {"selected", "fallback", "partial"}
+        and component_freshness.get("is_current") is not False
+        and (
+            resolved_health.get("research_usable")
+            or resolved_health.get("facts_usable")
+        )
     )
     is_current = bool(
         available
+        and normalized_status not in {"missing", "stale", "unavailable", "pending", "policy_unsatisfied"}
         and (
             resolved_usable
             if has_resolved_health
@@ -1073,6 +1078,7 @@ def _component_freshness(
         "status": normalized_status,
         "dataset": dataset,
         "is_current": is_current,
+        "is_live": is_current and component_freshness.get("is_live") is True,
         "latest": _json_value(selected_event_time),
         "expected": _json_value(
             component_freshness.get("expected_trade_date")
@@ -1118,13 +1124,18 @@ def _component_status(
         else {}
     )
     if resolved_health:
+        health_status = str(resolved_health.get("status") or "unavailable")
+        if health_status not in {"selected", "fallback", "partial"}:
+            return "stale" if health_status == "stale" else "unavailable"
+        freshness = evidence.get("freshness") or {}
+        if freshness.get("is_current") is False:
+            return "stale" if freshness.get("status") == "stale" else "unavailable"
         if (
             resolved_health.get("research_usable") is True
             or resolved_health.get("facts_usable") is True
         ):
-            return "current"
-        health_status = str(resolved_health.get("status") or "unavailable")
-        return "stale" if health_status == "stale" else "unavailable"
+            return "partial" if health_status == "partial" else "current"
+        return "unavailable"
     if available:
         explicit_status = str(evidence.get("status") or "")
         if explicit_status in {"missing", "stale", "unavailable", "pending"}:
@@ -1240,7 +1251,14 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         "kind": "quote_order_book",
         "status": depth_status,
         "available": order_book_available,
-        "live_available": depth_available,
+        "live_available": depth_available and order_book_freshness.get("is_live") is True,
+        "facts_usable": bool((order_book_evidence.get("resolved_health") or {}).get("facts_usable")),
+        "research_usable": bool((order_book_evidence.get("resolved_health") or {}).get("research_usable")),
+        "decision_usable": bool(
+            depth_status == "current" and order_book_freshness["is_current"]
+            and (order_book_evidence.get("resolved_health") or {}).get("research_usable")
+            and not depth_snapshot_available
+        ),
         "snapshot_available": depth_snapshot_available,
         "snapshot_status": quote.get("depth_snapshot_status"),
         "snapshot_semantics": quote.get("depth_snapshot_semantics"),
@@ -2180,6 +2198,8 @@ def _compact_intraday_history(
         "coverage_status": coverage_status,
         "series_coverage": series_coverage,
         "session_scope": history.get("session_scope"),
+        "materialization_state": history.get("materialization_state"),
+        "is_historical": history.get("is_historical", False),
         "expected_trade_date": _json_value(history.get("expected_trade_date")),
         "observed_trade_dates": list(history.get("observed_trade_dates") or []),
         "freshness_status": history.get("freshness_status"),

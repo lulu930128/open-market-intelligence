@@ -2696,6 +2696,7 @@ export type TaiwanNextSessionPlanLevelRead = {
   key: string;
   period: number;
   transition_price: number;
+  normalized_transition_price: number;
   current_ma: number | null;
   projected_ma_if_flat: number;
   drift_if_flat: number | null;
@@ -2709,6 +2710,10 @@ export type TaiwanNextSessionPlanLevelRead = {
   window_end_date: string;
   candidate_price_semantics: string;
   comparison_rule: string;
+  candidate_close: number | null;
+  projected_ma_at_candidate: number | null;
+  candidate_close_relation: "above" | "below" | "at" | null;
+  role_at_candidate_close: "support_candidate" | "reclaim" | "pivot" | null;
 };
 
 export type TaiwanNextSessionScenarioZoneRead = {
@@ -2741,6 +2746,7 @@ export type TaiwanNextSessionPlanRead = {
     | "completed_waiting_refresh"
     | "expired";
   as_of_close: number | null;
+  candidate_close: number | null;
   methodology: {
     id: string;
     version: string;
@@ -2895,6 +2901,181 @@ export type StockIndicatorPoint = {
   support_resistance?: Record<string, number | null>;
   vwap?: number | null;
   twap?: number | null;
+};
+
+export type StockPriceMapStatus = TaiwanNextSessionPlanStatus;
+
+export type StockPriceMapLevelRead = {
+  evidence_id: string;
+  label: string;
+  source_type: string;
+  price: number;
+  raw_price: number;
+  role: string;
+  confirmation: string;
+  strength: string;
+  confidence: string;
+  timeframe: string;
+  evidence_state: string;
+  distance_pct: number | null;
+  source_ref: Record<string, unknown>;
+  limitations: string[];
+};
+
+export type StockPriceMapZoneRead = {
+  zone_id: string;
+  evidence_lower_bound: number;
+  evidence_upper_bound: number;
+  lower_bound: number;
+  upper_bound: number;
+  anchor_price: number;
+  role: string;
+  side: "upside" | "downside" | "current";
+  tier_index: number;
+  tier_label: string;
+  strength: string;
+  confidence: string;
+  distance_pct: number | null;
+  timeframes: string[];
+  evidence_state: string;
+  evidence_count: number;
+  source_count: number;
+  method_family_count: number;
+  strength_components: Record<string, number>;
+  evidence_ids: string[];
+  labels: string[];
+  primary_evidence_id: string;
+  primary_label: string;
+  trigger_ids: string[];
+  limitations: string[];
+};
+
+export type StockPriceMapNearestZoneRead = Pick<
+  StockPriceMapZoneRead,
+  | "zone_id"
+  | "anchor_price"
+  | "lower_bound"
+  | "upper_bound"
+  | "role"
+  | "side"
+  | "tier_index"
+  | "tier_label"
+  | "strength"
+  | "distance_pct"
+>;
+
+export type StockPriceMapRead = {
+  kind: "tw_stock_price_map" | string;
+  version: "tw.stock.price_map.v3" | string;
+  market: string;
+  stock_id: string;
+  stock_name: string | null;
+  status: StockPriceMapStatus;
+  decision_usable: boolean;
+  generated_at: string;
+  basis_revision: string;
+  evidence_timeframes: string[];
+  reference: {
+    price: number | null;
+    trade_date: string | null;
+    finalization: string;
+    authority: string;
+    source_capability: string;
+    freshness_status: string;
+  };
+  axis: {
+    basis_price: number | null;
+    lower_bound: number | null;
+    upper_bound: number | null;
+    range_kind: "display_range" | "unavailable";
+    range_percent: number | null;
+    authority: string;
+    is_legal_limit: boolean;
+    ticks: Array<{
+      percent: number;
+      price: number;
+    }>;
+    limitations: string[];
+  };
+  markers: Array<{
+    kind: "completed_reference" | "current_intraday" | "provisional";
+    label: string;
+    price: number;
+    timeframe: string;
+    finalization: string;
+    decision_usable: boolean;
+  }>;
+  technical: {
+    headline: string;
+    summary: string;
+    score: number;
+    value: number | null;
+    value_label: string;
+    confidence: string;
+    evidence_summary: Array<{
+      key?: string;
+      label?: string;
+      display_value?: string;
+      tone?: string;
+      description?: string;
+    }>;
+  };
+  methodology: {
+    id: string;
+    version: string;
+    owner: string;
+    cluster_rule: string;
+    cluster_threshold_pct: number;
+    cluster_min_ticks: number;
+    zone_padding_pct: number;
+    zone_padding_ticks: number;
+    zone_merge_gap_ticks: number;
+    max_zone_width_pct: number;
+    side_rule: string;
+    tier_rule: string;
+    tick_rule: string;
+    price_basis: string;
+  };
+  parameter_contract: Record<string, unknown>;
+  levels: StockPriceMapLevelRead[];
+  zones: StockPriceMapZoneRead[];
+  nearest_upside: StockPriceMapNearestZoneRead | null;
+  nearest_downside: StockPriceMapNearestZoneRead | null;
+  decision_changes: Array<{
+    key: string;
+    label: string;
+    tone: string;
+    relation: "at_or_above" | "below" | "observe";
+    threshold_price: number | null;
+    level_key: string | null;
+    timeframe: string;
+    evidence_state: string;
+    decision_usable: boolean;
+    zone_id: string | null;
+    tier_label: string | null;
+    result_summary: string;
+    link_status: "linked" | "unlinked";
+    link_reason: string;
+  }>;
+  candidate: {
+    semantics: string;
+    target_trade_date: string | null;
+    candidate_close: number | null;
+    tick_normalized: boolean;
+    projections: Array<{
+      period: number;
+      candidate_close: number;
+      projected_ma: number;
+      transition_price: number;
+      relation: string;
+      role: string;
+    }>;
+  };
+  corporate_action: Record<string, unknown>;
+  missing: string[];
+  warnings: string[];
+  limitations: string[];
+  source_refs: Array<Record<string, unknown>>;
 };
 
 export type TaiwanDispositionStatusRead = {

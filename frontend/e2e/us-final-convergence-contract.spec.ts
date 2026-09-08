@@ -178,7 +178,7 @@ test("US market tape projects backend headline metrics instead of Daily D-2", ()
     limitations: [],
   } satisfies USMarketIndexItemRead;
 
-  const projected = projectUSMarketTapeSnapshot(reference, headline);
+  const projected = projectUSMarketTapeSnapshot(reference, headline, "market_closed");
 
   expect(projected).toMatchObject({
     close: 200,
@@ -187,6 +187,7 @@ test("US market tape projects backend headline metrics instead of Daily D-2", ()
     referenceTradeDate: "2026-09-03",
     source: "market_truth",
     truthRevision: "a".repeat(64),
+    marketSession: "market_closed",
   });
   expect(projected?.change).not.toBe(20);
 });

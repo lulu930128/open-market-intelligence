@@ -11,16 +11,22 @@ from sqlalchemy.orm import Session
 from app.ai.evidence_passport import build_evidence_passport
 from app.db.models import StockMaster, USWatchlistGroup, USWatchlistItem
 from app.market.adr_parity import (
-    AdrMapping,
     build_adr_parity_report,
-    get_adr_mapping,
     resolve_adr_mapping,
 )
 from app.market.calendar_status import expected_us_trade_date
-from app.market.cross_market.refresh import build_cross_market_refresh_plan
+from app.market.cross_market.refresh import (
+    build_cross_market_refresh_plan,
+    refresh_cross_market_context_sources,
+)
+from app.market.cross_market.requirements import (
+    INDEX_FACTORS,
+    factor_weights_for_mapping as _factor_weights_for_mapping,
+    required_factor_symbols,
+    resolve_tw_overnight_mapping as _resolve_tw_mapping,
+)
 from app.market.cross_market.snapshot_store import read_cross_market_target_context
 from app.market.fx_flow_context import build_fx_flow_context
-from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 
 
@@ -30,90 +36,6 @@ def expected_us_daily_price_date() -> date:
         return date.today()
 
     return expected_date
-
-
-INDEX_FACTORS = {
-    "^GSPC": {
-        "label": "S&P 500",
-        "role": "market",
-        "score_cap": 8.0,
-    },
-    "^IXIC": {
-        "label": "Nasdaq Composite",
-        "role": "growth",
-        "score_cap": 8.0,
-    },
-    "^DJI": {
-        "label": "Dow Jones",
-        "role": "cyclical",
-        "score_cap": 8.0,
-    },
-    "^SOX": {
-        "label": "費城半導體",
-        "role": "semiconductor",
-        "score_cap": 10.0,
-    },
-    "QQQ": {
-        "label": "Nasdaq 100 ETF",
-        "role": "growth_etf",
-        "score_cap": 10.0,
-    },
-    "SMH": {
-        "label": "半導體 ETF",
-        "role": "semiconductor_etf",
-        "score_cap": 10.0,
-    },
-    "TSM": {
-        "label": "台積電 ADR",
-        "role": "taiwan_adr",
-        "score_cap": 12.0,
-    },
-    "NVDA": {
-        "label": "NVIDIA",
-        "role": "ai_semiconductor",
-        "score_cap": 12.0,
-    },
-    "MU": {
-        "label": "Micron",
-        "role": "memory",
-        "score_cap": 12.0,
-    },
-}
-
-
-TECH_INDUSTRY_CODES = {"24", "25", "26", "27", "28", "29", "30", "31"}
-SEMICONDUCTOR_TEXT_HINTS = (
-    "半導體",
-    "晶圓",
-    "晶片",
-    "矽",
-    "積體電路",
-    "台積",
-    "聯電",
-    "世界",
-    "力積",
-    "日月光",
-)
-MEMORY_TEXT_HINTS = (
-    "記憶體",
-    "南亞科",
-    "華邦",
-    "威剛",
-    "群聯",
-    "十銓",
-    "創見",
-)
-ELECTRONICS_TEXT_HINTS = (
-    "電子",
-    "電腦",
-    "週邊",
-    "光電",
-    "通信",
-    "網路",
-    "資訊",
-    "電機",
-    "零組件",
-)
 
 
 def _now() -> datetime:
@@ -331,160 +253,17 @@ def _basket_from_group(
     )
 
 
-def _stock_text(stock: StockMaster) -> str:
-    return " ".join(
-        value
-        for value in (
-            stock.stock_id,
-            stock.stock_name,
-            stock.market,
-            stock.instrument_type,
-            stock.industry,
-            stock.category,
-        )
-        if value
-    )
-
-
-def _matches_any(text: str, hints: tuple[str, ...]) -> bool:
-    return any(hint in text for hint in hints)
-
-
-def _resolve_tw_mapping(stock: StockMaster) -> dict[str, Any]:
-    industry = (stock.industry or "").strip()
-    category = (stock.category or "").strip()
-    text = _stock_text(stock)
-    profiles: list[str] = []
-    reasons: list[str] = []
-
-    if industry == "24" or _matches_any(text, SEMICONDUCTOR_TEXT_HINTS):
-        profiles.append("semiconductor")
-        reasons.append("台股產業/名稱符合半導體鏈")
-
-    if _matches_any(text, MEMORY_TEXT_HINTS):
-        profiles.append("memory")
-        reasons.append("名稱符合記憶體/儲存鏈")
-
-    if industry in TECH_INDUSTRY_CODES or _matches_any(text, ELECTRONICS_TEXT_HINTS):
-        profiles.append("technology")
-        reasons.append("台股產業/名稱符合電子科技族群")
-
-    if not profiles:
-        profiles.append("general")
-        reasons.append("未命中特定科技鏈，採用美股大盤組合")
-
-    return {
-        "stock_id": stock.stock_id,
-        "stock_name": stock.stock_name,
-        "market": stock.market,
-        "industry": stock.industry,
-        "category": stock.category,
-        "profiles": list(dict.fromkeys(profiles)),
-        "reason": "；".join(dict.fromkeys(reasons)),
-    }
-
-
-def _factor_weights_for_mapping(mapping: dict[str, Any]) -> tuple[dict[str, float], dict[str, float]]:
-    profiles = set(mapping.get("profiles") or [])
-    factor_weights = {
-        "^GSPC": 0.36,
-        "^DJI": 0.20,
-        "^IXIC": 0.24,
-        "QQQ": 0.20,
-    }
-    basket_weights: dict[str, float] = {}
-
-    if "technology" in profiles:
-        factor_weights = {
-            "^GSPC": 0.18,
-            "^IXIC": 0.24,
-            "QQQ": 0.18,
-            "^SOX": 0.16,
-            "SMH": 0.12,
-            "TSM": 0.12,
-        }
-        basket_weights = {
-            "ETF_科技": 0.12,
-        }
-
-    if "semiconductor" in profiles:
-        factor_weights = {
-            "^GSPC": 0.10,
-            "^IXIC": 0.15,
-            "QQQ": 0.10,
-            "^SOX": 0.24,
-            "SMH": 0.18,
-            "TSM": 0.15,
-            "NVDA": 0.08,
-        }
-        basket_weights = {
-            "半導體_GPU_ASIC": 0.10,
-            "半導體設備_量測": 0.08,
-            "晶圓製造_IDM": 0.10,
-            "ETF_科技": 0.06,
-        }
-
-    if "memory" in profiles:
-        factor_weights = {
-            "^GSPC": 0.08,
-            "^IXIC": 0.14,
-            "QQQ": 0.08,
-            "^SOX": 0.20,
-            "SMH": 0.14,
-            "TSM": 0.08,
-            "NVDA": 0.08,
-            "MU": 0.20,
-        }
-        basket_weights = {
-            "記憶體_儲存": 0.18,
-            "半導體_GPU_ASIC": 0.08,
-            "ETF_科技": 0.05,
-        }
-
-    return factor_weights, basket_weights
-
-
 def _required_factor_symbols(
     mapping: dict[str, Any],
     *,
     max_symbols: int = 8,
-    direct_mapping: AdrMapping | None = None,
+    direct_mapping=None,
 ) -> list[dict[str, Any]]:
-    factor_weights, _basket_weights = _factor_weights_for_mapping(mapping)
-    limit = max(max_symbols, 1)
-    ranked = sorted(
-        factor_weights.items(),
-        key=lambda item: (-item[1], item[0]),
+    return required_factor_symbols(
+        mapping,
+        direct_mapping=direct_mapping,
+        limit=max_symbols,
     )
-    symbols: list[dict[str, Any]] = []
-    direct_mapping = direct_mapping or get_adr_mapping(
-        str(mapping.get("stock_id") or "")
-    )
-    if direct_mapping is not None:
-        symbols.append(
-            {
-                "symbol": direct_mapping.adr_symbol,
-                "label": direct_mapping.adr_name,
-                "role": "direct_adr",
-                "weight": factor_weights.get(direct_mapping.adr_symbol, 0.0),
-            }
-        )
-
-    for symbol, weight in ranked:
-        if any(item["symbol"] == symbol for item in symbols):
-            continue
-        spec = INDEX_FACTORS[symbol]
-        symbols.append(
-            {
-                "symbol": symbol,
-                "label": spec["label"],
-                "role": spec["role"],
-                "weight": weight,
-            }
-        )
-        if len(symbols) >= limit:
-            break
-    return symbols[:limit]
 
 
 def scan_us_overnight_impact_gaps(
@@ -1106,39 +885,41 @@ def ensure_current_us_overnight_impact_report(
         stock_id=stock_id,
         max_symbols=max_symbols,
     )
-    refresh_symbols = list(initial_gaps.get("refresh_symbols") or [])[:max_symbols]
+    refresh_plan = initial_gaps.get("refresh_plan") or {}
+    planned_sources = list(refresh_plan.get("planned_sources") or [])
     refresh_metadata: dict[str, Any] = {
-        "attempted": bool(refresh_symbols),
-        "symbols": refresh_symbols,
+        "attempted": bool(planned_sources),
+        "symbols": [
+            str(item.get("symbol"))
+            for item in planned_sources
+            if item.get("source_kind") == "us_daily_price"
+        ],
         "results": [],
         "errors": [],
     }
-
-    for symbol in refresh_symbols:
-        try:
-            result = refresh_us_daily_ohlcv(
-                db=db,
-                symbol=symbol,
-                outputsize=outputsize,
-                adjusted=False,
-            )
-            refresh_metadata["results"].append(
-                {
-                    "symbol": symbol,
-                    "status": result.get("status"),
-                    "provider": result.get("provider"),
-                    "fetched_count": result.get("fetched_count"),
-                    "inserted_count": result.get("inserted_count"),
-                    "updated_count": result.get("updated_count"),
-                }
-            )
-        except Exception as exc:  # pragma: no cover - exercised through route-level behavior.
-            refresh_metadata["errors"].append(
-                {
-                    "symbol": symbol,
-                    "message": str(exc),
-                }
-            )
+    if planned_sources:
+        refresh_result = refresh_cross_market_context_sources(
+            db,
+            stock_id,
+            max_symbols=max_symbols,
+            provider=provider,
+            outputsize=outputsize,
+            requested_capabilities=(
+                "cross_market.overnight",
+                "cross_market.relations",
+                "cross_market.parity",
+            ),
+        )
+        refresh_metadata["composite"] = refresh_result
+        refresh_metadata["results"] = list(refresh_result.get("results") or [])
+        refresh_metadata["errors"] = [
+            {
+                "symbol": item.get("symbol"),
+                "message": item.get("error") or "postcondition_unsatisfied",
+            }
+            for item in refresh_metadata["results"]
+            if item.get("status") == "failed"
+        ]
 
     refreshed_gaps = scan_us_overnight_impact_gaps(
         db=db,

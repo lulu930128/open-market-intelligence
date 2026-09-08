@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from app.ai import (
+    answer_localization,
     capability_contract,
     contract_manifest,
     data_quality_contract,
@@ -257,6 +258,16 @@ def _freshness_dataset_name(value: Any) -> str | None:
     return text or None
 
 
+def _freshness_row_availability_missing(row: dict[str, Any]) -> bool:
+    availability = capability_contract.normalize_status(
+        row.get("availability_status") or row.get("availability")
+    )
+    if availability not in {"unknown", ""}:
+        return availability in {"missing", "error", "unavailable"}
+    status = capability_contract.normalize_status(row.get("status"))
+    return status in {"missing", "error", "unavailable", "not_available"}
+
+
 def _project_selected_freshness(
     canonical: dict[str, Any],
     *,
@@ -447,7 +458,11 @@ def _project_selected_freshness(
         if status_class == "ready":
             continue
         dataset = _freshness_dataset_name(row.get("dataset"))
-        if dataset and dataset not in selected_missing:
+        if (
+            dataset
+            and _freshness_row_availability_missing(row)
+            and dataset not in selected_missing
+        ):
             selected_missing.append(dataset)
         reason = str(row.get("reason") or "").strip()
         if reason and reason not in selected_warnings:
@@ -843,6 +858,7 @@ def _compact_continuation(continuation: dict[str, Any]) -> None:
                 "refresh_requires_market_open",
                 "writes_cache",
                 "requires_external_fetch",
+                "market_data_params",
             )
             if key in action
         }
@@ -1535,6 +1551,7 @@ def _brief_technical_advanced_summary(
             "as_of",
             "price_basis",
             "source_granularity",
+            "volume_unit",
             "confidence",
             "corporate_action",
             "missing",
@@ -1960,6 +1977,9 @@ def _brief_capability_summary(
                     "sampling_mode",
                     "original_point_count",
                     "session",
+                    "requested_trade_date",
+                    "session_coverage",
+                    "is_partial",
                     "session_phase",
                     "market_phase",
                     "capability_expectation",
@@ -2205,6 +2225,87 @@ def _brief_capability_summary(
         "technical.relative_strength",
     }:
         return _brief_technical_advanced_summary(capability_id, value)
+    if capability_id == "technical.price_map":
+        zones = _list(value.get("zones"))
+        decision_changes = _list(value.get("decision_changes"))
+        return {
+            **_summary_dict(
+                value,
+                fields=(
+                    "kind",
+                    "version",
+                    "market",
+                    "stock_id",
+                    "stock_name",
+                    "status",
+                    "decision_usable",
+                    "generated_at",
+                    "basis_revision",
+                    "evidence_timeframes",
+                    "reference",
+                    "axis",
+                    "markers",
+                    "technical",
+                    "methodology",
+                    "nearest_upside",
+                    "nearest_downside",
+                    "candidate",
+                    "corporate_action",
+                    "missing",
+                    "warnings",
+                    "limitations",
+                    "source_refs",
+                ),
+            ),
+            "zones": _summary_rows(
+                zones,
+                fields=(
+                    "zone_id",
+                    "lower_bound",
+                    "upper_bound",
+                    "anchor_price",
+                    "role",
+                    "side",
+                    "tier_index",
+                    "tier_label",
+                    "strength",
+                    "confidence",
+                    "distance_pct",
+                    "timeframes",
+                    "evidence_state",
+                    "evidence_count",
+                    "source_count",
+                    "method_family_count",
+                    "primary_label",
+                    "trigger_ids",
+                    "limitations",
+                ),
+                limit=8,
+            ),
+            "decision_changes": _summary_rows(
+                decision_changes,
+                fields=(
+                    "key",
+                    "label",
+                    "tone",
+                    "relation",
+                    "threshold_price",
+                    "level_key",
+                    "timeframe",
+                    "evidence_state",
+                    "decision_usable",
+                    "zone_id",
+                    "tier_label",
+                    "result_summary",
+                    "link_status",
+                    "link_reason",
+                ),
+                limit=8,
+            ),
+            "zone_count": len(zones),
+            "decision_change_count": len(decision_changes),
+            "projection_level": "summary",
+        }
     if capability_id == "chips.institutional":
         return {
             **_summary_dict(
@@ -2838,6 +2939,7 @@ def _compact_to_required_core(
                 "refresh_possible_now",
                 "refresh_requires_market_open",
                 "writes_cache",
+                "market_data_params",
             )
             if key in action
         }
@@ -4030,6 +4132,18 @@ def build(
         canonical,
         quality=quality,
     )
+    answer = _dict(canonical.get("answer"))
+    if answer and quality.get("status") == "blocked":
+        preferences = _dict(_dict(canonical.get("execution")).get("policy")).get(
+            "response_preferences"
+        )
+        answer["confidence_label"] = answer_localization.confidence_label(
+            answer.get("confidence"), preferences
+        )
+        answer["text"] = answer_localization.consumer_text(
+            answer, response_preferences=preferences
+        )
+        canonical["answer"] = answer
     canonical["transport_ok"] = True
     canonical["request_valid"] = True
     canonical["execution_completed"] = True
@@ -4051,6 +4165,8 @@ def build(
         scope_type=scope_type,
         tool_runs=tool_runs,
     )
+    reader_data = _dict(_dict(projection_response.get("result")).get("data"))
+    reader_provider_contract = _dict(reader_data.get("provider_contract"))
     execution["refresh_reconciliation"] = (
         capability_contract.build_refresh_reconciliation(
             selection=selection,
@@ -4059,6 +4175,9 @@ def build(
             tool_runs=tool_runs,
             scope_type=scope_type,
             request_policy=_dict(execution.get("policy")),
+            primary_reader_provider_attempts={
+                "quote.snapshot": _list(reader_provider_contract.get("provider_attempts"))
+            },
         )
     )
     canonical["execution"] = execution

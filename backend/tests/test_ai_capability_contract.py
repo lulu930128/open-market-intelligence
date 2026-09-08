@@ -104,6 +104,30 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(item["status"], "missing")
         self.assertNotIn("live_requirement_not_satisfied", item["issues"])
 
+    def test_derivatives_release_delay_preserves_explicit_stale_axis(
+        self,
+    ) -> None:
+        item = self._quality_item(
+            capability="derivatives.structure",
+            market="TW",
+            payload={
+                "status": "partial",
+                "as_of": "2026-09-03",
+                "expected_trade_date": "2026-09-04",
+                "is_stale": True,
+                "release_status": "release_delayed",
+                "retry": {
+                    "retry_status": "retry_exhausted",
+                    "final_failure": True,
+                },
+                "options_chain": {"status": "partial"},
+            },
+        )
+
+        self.assertEqual(item["freshness_status"], "stale")
+        self.assertEqual(item["release_status"], "release_delayed")
+        self.assertFalse(item["decision_usable"])
+
     def test_require_live_missing_evidence_keeps_live_requirement_failure(
         self,
     ) -> None:
@@ -741,6 +765,12 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(sample["coverage_status"], "sample_only")
         self.assertEqual(sample["volume_unit"], "shares")
         self.assertEqual(sample["trade_value_unit"], "TWD")
+        self.assertTrue(sample["deprecated"])
+        self.assertEqual(
+            sample["replacement_capabilities"],
+            ["screening.ranking", "screening.coverage"],
+        )
+        self.assertIn("market.sample_ranking is deprecated", sample["warnings"][-1])
         self.assertFalse(
             data_quality_contract._unit_summary(sample)[
                 "missing_volume_unit"
@@ -2152,9 +2182,9 @@ class AiCapabilityContractTests(unittest.TestCase):
     def test_defaults_preserve_existing_non_stock_context_surfaces(self) -> None:
         expected_by_scope = {
             "market": {
-                "market.sample_ranking",
+                "screening.ranking",
+                "screening.coverage",
                 "market.cross_market",
-                "market.chips",
             },
             "tw_futures": {
                 "derivatives.positioning",
@@ -2529,6 +2559,63 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertIn("volume", plan.requested_domains)
         self.assertIn("market.volume_state", plan.selected_capabilities)
         self.assertIn("market.breadth", plan.selected_capabilities)
+
+    def test_market_chip_nlp_routes_to_market_scope_capabilities(self) -> None:
+        payload = AiAskRequest(
+            question="台股三大法人與融資融券目前狀況？",
+            contract_version="omi.decision.v4",
+            target={"type": "market", "market": "TW"},
+            mode="data_only",
+            output="evidence_only",
+            realtime_policy="cache_only",
+        )
+
+        plan = query_plan.build_query_plan(
+            payload=payload,
+            scope_type="market",
+            question_intent="market_breadth",
+            effective_mode="data_only",
+            target_market="TW",
+        )
+
+        self.assertIn("market.institutional_flow", plan.selected_capabilities)
+        self.assertIn("market.margin_short", plan.selected_capabilities)
+        self.assertNotIn("chips.institutional", plan.selected_capabilities)
+        self.assertNotIn("chips.margin", plan.selected_capabilities)
+        self.assertNotIn("market.chips", plan.selected_capabilities)
+        self.assertEqual(plan.selection["unsupported_capabilities"], [])
+
+    def test_stock_chip_nlp_keeps_stock_scope_capabilities(self) -> None:
+        institutional = query_plan.build_query_plan(
+            payload=AiAskRequest(
+                question="2330 外資今天買賣超？",
+                contract_version="omi.decision.v4",
+                target={"type": "tw_stock", "id": "2330"},
+            ),
+            scope_type="stock",
+            question_intent="general",
+            effective_mode="brief",
+            target_market="TW",
+        )
+        margin = query_plan.build_query_plan(
+            payload=AiAskRequest(
+                question="2303 融資融券",
+                contract_version="omi.decision.v4",
+                target={"type": "tw_stock", "id": "2303"},
+            ),
+            scope_type="stock",
+            question_intent="general",
+            effective_mode="brief",
+            target_market="TW",
+        )
+
+        self.assertIn("chips.institutional", institutional.selected_capabilities)
+        self.assertNotIn(
+            "market.institutional_flow",
+            institutional.selected_capabilities,
+        )
+        self.assertIn("chips.margin", margin.selected_capabilities)
+        self.assertNotIn("market.margin_short", margin.selected_capabilities)
 
     def test_tw_futures_night_volume_selects_contract_quote_and_intraday(self) -> None:
         payload = AiAskRequest(
@@ -3250,6 +3337,31 @@ class AiCapabilityContractTests(unittest.TestCase):
             db=ANY,
             providers=["binance"],
             symbols=["BTC-USDT"],
+        )
+
+    def test_cross_market_tool_preserves_requested_capability_intent(self) -> None:
+        with patch.object(
+            agentic_execution.cross_market_refresh,
+            "refresh_cross_market_context_sources",
+            return_value={"status": "no_refresh_needed"},
+        ) as refresh:
+            agentic_execution._execute_tool(
+                db=object(),
+                tool_name="cross_market.refresh_context",
+                args={
+                    "stock_id": "2330",
+                    "requested_capabilities": ["cross_market.parity"],
+                },
+            )
+
+        refresh.assert_called_once_with(
+            ANY,
+            ["2330"],
+            max_symbols=8,
+            provider="auto",
+            outputsize="compact",
+            max_runtime_seconds=120,
+            requested_capabilities=("cross_market.parity",),
         )
 
     def test_us_fundamental_tool_returns_versioned_contract_and_legacy_summary(self) -> None:

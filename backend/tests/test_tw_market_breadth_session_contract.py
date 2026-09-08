@@ -7,6 +7,24 @@ from app.market.trading_calendar import TAIWAN_TZ
 
 
 class TaiwanMarketBreadthSessionContractTests(unittest.TestCase):
+    def test_partial_attempt_does_not_replace_last_good_snapshot(self) -> None:
+        good = twse_mis_current_breadth._build_payload(
+            "TWSE", ["2330", "2454"],
+            [self._message(), self._message(c="2454")], 0,
+        )
+        twse_mis_current_breadth._cache("TWSE", good)
+        partial = twse_mis_current_breadth._build_payload(
+            "TWSE", ["2330", "2454"], [self._message(t="08:59:30")], 1,
+        )
+        twse_mis_current_breadth._cache("TWSE", partial)
+        self.assertIs(twse_mis_current_breadth._CACHE["TWSE"]["payload"], partial)
+        self.assertEqual(len(twse_mis_current_breadth._STOCK_ROWS["TWSE"]), 1)
+        stale = twse_mis_current_breadth._stale("TWSE", circuit_open=False)
+        self.assertEqual(stale["snapshot_as_of"], good["snapshot_as_of"])
+        self.assertEqual(stale["not_received_count"], 0)
+        self.assertTrue(stale["acquisition_fallback"])
+        self.assertIs(twse_mis_current_breadth._LAST_GOOD["TWSE"], good)
+
     def setUp(self) -> None:
         twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
 
@@ -174,6 +192,7 @@ class TaiwanMarketBreadthSessionContractTests(unittest.TestCase):
         self.assertEqual(payload["market_session"], "preopen")
         self.assertEqual(payload["coverage_count"], 0)
         self.assertEqual(payload["unknown_count"], len(codes))
+        self.assertEqual(payload["coverage_reason_counts"]["unknown"], len(codes))
         self.assertEqual(payload["advance_count"], 0)
         self.assertEqual(payload["decline_count"], 0)
         self.assertEqual(payload["unchanged_count"], 0)
@@ -186,6 +205,31 @@ class TaiwanMarketBreadthSessionContractTests(unittest.TestCase):
             len(codes),
         )
         self.assertEqual(payload["trade_date"], date(2026, 8, 3))
+
+    def test_post_close_zero_volume_is_classified_without_fabricating_unchanged(self) -> None:
+        codes = ["2330", "2303", "2317", "2454"]
+        messages = [
+            self._message(c="2330", t="13:31:00", z="101", v="5", ts="0"),
+            self._message(c="2303", t="13:31:00", z="-", v="0"),
+            self._message(c="2317", t="13:31:00", y="-", z="-", v="0"),
+        ]
+
+        payload = twse_mis_current_breadth._build_payload(
+            "TWSE",
+            codes,
+            messages,
+            0,
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        reasons = payload["coverage_reason_counts"]
+        self.assertEqual(reasons["advance"], 1)
+        self.assertEqual(reasons["valid_no_trade"], 1)
+        self.assertEqual(reasons["mapping_error"], 1)
+        self.assertEqual(reasons["provider_missing"], 1)
+        self.assertEqual(sum(reasons.values()), len(codes))
+        self.assertEqual(payload["unchanged_count"], 0)
 
 
 if __name__ == "__main__":

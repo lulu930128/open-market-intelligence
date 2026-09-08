@@ -30,6 +30,8 @@ from app.market.tw_current_market_capabilities import (
 from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_health
 from app.market_data.candidate_repository import CandidateRowRejection
 from app.market_data.contracts import (
+    AuctionBreadthObservation,
+    BreadthAcquisitionDiagnostics,
     AuthorityClass,
     BarFinalization,
     EvidenceFreshness,
@@ -63,6 +65,41 @@ _RAW_FETCH_LINEAGE_COLUMNS = (
     RawFetchResult.content_hash,
     RawFetchResult.parser_version,
 )
+def _breadth_coverage_reason_counts(
+    limitations_json: str | None,
+    *,
+    universe_count: int,
+    advance_count: int,
+    decline_count: int,
+    unchanged_count: int,
+    received_unclassified_count: int,
+    not_received_count: int,
+) -> dict[str, int]:
+    prefix = "TW_BREADTH_COVERAGE_REASONS:"
+    try:
+        limitations = json.loads(limitations_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        limitations = []
+    for item in limitations if isinstance(limitations, list) else []:
+        if not isinstance(item, str) or not item.startswith(prefix):
+            continue
+        try:
+            explicit = json.loads(item[len(prefix) :])
+            counts = {str(key): int(value) for key, value in explicit.items()}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if sum(counts.values()) == universe_count:
+            return counts
+    return {
+        "advance": advance_count,
+        "decline": decline_count,
+        "unchanged": unchanged_count,
+        "valid_no_trade": 0,
+        "suspended_or_not_tradable": 0,
+        "provider_missing": not_received_count,
+        "mapping_error": 0,
+        "unknown": received_unclassified_count,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,9 +459,11 @@ class TaiwanCurrentMarketRepository:
             dataset_id=TW_CURRENT_BREADTH_DATASET_ID,
             capability_id=TW_CURRENT_BREADTH_CAPABILITY_ID,
         )
-        if not inspect(self._db.get_bind()).has_table(
-            TaiwanCurrentBreadthSnapshot.__tablename__
-        ):
+        schema = inspect(self._db.get_bind())
+        table = TaiwanCurrentBreadthSnapshot.__tablename__
+        if not schema.has_table(table) or not {
+            "auction_observation_json", "acquisition_diagnostics_json",
+        }.issubset({column["name"] for column in schema.get_columns(table)}):
             return MarketBreadthCandidateBatch(
                 dataset_health=evaluate_taiwan_candidate_dataset_health(
                     requirement,
@@ -534,12 +573,29 @@ class TaiwanCurrentMarketRepository:
                     unchanged_count=row.unchanged_count,
                     unknown_count=row.received_unclassified_count,
                     missing_count=row.not_received_count,
+                    coverage_reason_counts=_breadth_coverage_reason_counts(
+                        row.limitations_json,
+                        universe_count=row.universe_count,
+                        advance_count=row.advance_count,
+                        decline_count=row.decline_count,
+                        unchanged_count=row.unchanged_count,
+                        received_unclassified_count=row.received_unclassified_count,
+                        not_received_count=row.not_received_count,
+                    ),
                     trade_value=(
                         Decimal(row.trade_value) if row.trade_value is not None else None
                     ),
                     currency=row.currency,
                     state=ObservationState(row.observation_state),
                     price_semantics=row.price_semantics,
+                    auction=(
+                        AuctionBreadthObservation.model_validate_json(row.auction_observation_json)
+                        if row.auction_observation_json else None
+                    ),
+                    acquisition_diagnostics=(
+                        BreadthAcquisitionDiagnostics.model_validate_json(row.acquisition_diagnostics_json)
+                        if row.acquisition_diagnostics_json else None
+                    ),
                     official=row.official,
                     provisional=row.provisional,
                 )
@@ -559,7 +615,10 @@ class TaiwanCurrentMarketRepository:
                 limitations.extend(json.loads(row.limitations_json or "[]"))
             except (TypeError, ValueError):
                 limitations.append("CURRENT_BREADTH_LIMITATIONS_MALFORMED")
-            freshness = _freshness(requirement, observation.lineage.event_at)
+            freshness = (
+                EvidenceFreshness.STALE if observation.state is ObservationState.STALE
+                else _freshness(requirement, observation.lineage.event_at)
+            )
             event_times.append(observation.lineage.event_at)
             freshness_values.append(freshness)
             partial = partial or observation.state is ObservationState.PARTIAL

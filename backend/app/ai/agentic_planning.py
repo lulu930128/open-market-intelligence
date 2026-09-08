@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime, timezone
 
 from app.ai import agentic_policy, llm
 from app.crypto_market.contract import (
@@ -13,6 +14,17 @@ from app.crypto_market.contract import (
     normalize_symbol as normalize_crypto_symbol,
 )
 from app.us_market.sources import normalize_us_symbol
+from app.us_market.historical_intraday import completed_intraday_window
+
+
+def _completed_us_intraday_request(trade_date: str | None, session_scope: str) -> bool:
+    if trade_date is None:
+        return False
+    try:
+        completed_intraday_window(trade_date, now=datetime.now(timezone.utc), session_scope=session_scope)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 TW_STOCK_REFRESH_KEYS = agentic_policy.TW_STOCK_REFRESH_KEYS
@@ -80,8 +92,8 @@ def _fallback_plan(
     lowered_question = question.lower()
     steps: list[dict[str, Any]] = []
 
-    if "us_intraday_trend" in missing and requested_trade_date is None:
-        if "quote.snapshot" in required:
+    if "us_intraday_trend" in missing and (requested_trade_date is None or _completed_us_intraday_request(requested_trade_date, session_scope)):
+        if "quote.snapshot" in required and requested_trade_date is None:
             steps.append(
                 {
                     "tool": "us.refresh_quote",
@@ -98,6 +110,7 @@ def _fallback_plan(
                         "max_provider_calls": 2,
                         "session_scope": session_scope,
                         "interval": intraday_interval,
+                        **({"trade_date": requested_trade_date} if requested_trade_date else {}),
                     },
                     "reason": "Canonical US intraday bars are missing or stale.",
                 }
@@ -188,7 +201,7 @@ def _selected_us_plan(
         if requested_trade_date is not None:
             if capability == "quote.snapshot":
                 requirements = ("us_daily_price",)
-            else:
+            elif not _completed_us_intraday_request(requested_trade_date, session_scope):
                 requirements = tuple(
                     requirement
                     for requirement in requirements
@@ -210,6 +223,7 @@ def _selected_us_plan(
                         {
                             "session_scope": session_scope,
                             "interval": intraday_interval,
+                            **({"trade_date": requested_trade_date} if requested_trade_date else {}),
                         }
                         if tool_name == "us.refresh_intraday_bars"
                         else {}

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -191,7 +192,12 @@ class AiSupplementalContextTests(unittest.TestCase):
         self.assertIn("tw_futures_basis_term_structure", connected_ids)
         self.assertEqual(result["data"]["slots"]["blocked"]["status"], "not_applicable")
 
-        all_markets = capability_context.read_capability_status(now=NOW)
+        with patch.object(
+            capability_context.settings,
+            "omi_atlas_shadow_enabled",
+            False,
+        ):
+            all_markets = capability_context.read_capability_status(now=NOW)
         blocked_ids = {row["id"] for row in all_markets["data"]["blocked"]}
         self.assertIn("news_events", blocked_ids)
         self.assertIn("hk_market", blocked_ids)

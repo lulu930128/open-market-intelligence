@@ -20,6 +20,7 @@ TECHNICAL_CAPABILITIES = (
     "technical.volume_profile",
     "technical.anchored_vwap",
     "technical.relative_strength",
+    "technical.price_map",
 )
 
 
@@ -104,6 +105,53 @@ class TechnicalCapabilityContractTests(unittest.TestCase):
             ("technical.structure",),
         )
 
+    def test_tw_structure_projection_prefers_canonical_v2_with_corporate_actions(self) -> None:
+        response = {
+            "result": {
+                "data": {
+                    "compact": {
+                        "technical": {"status": "ready", "levels": {}},
+                        "technical_advanced": {
+                            "structure_v2": {
+                                "kind": "tw_technical_current_state_v2",
+                                "status": "partial",
+                                "decision_usable": False,
+                                "as_of": "2026-09-04",
+                                "corporate_action": {
+                                    "coverage_status": "partial",
+                                    "checked_through_date": "2026-09-01",
+                                    "relevant_analysis_end": "2026-09-04",
+                                },
+                                "warnings": [
+                                    "Corporate-action coverage is incomplete."
+                                ],
+                            }
+                        },
+                    }
+                }
+            }
+        }
+
+        projected, unavailable = capability_contract.project_selected_data(
+            response=response,
+            selection={
+                "required": ["technical.structure"],
+                "optional": [],
+                "fields": {},
+                "limits": {},
+            },
+        )
+
+        self.assertEqual(unavailable, [])
+        structure = projected["technical.structure"]
+        self.assertEqual(structure["kind"], "tw_technical_current_state_v2")
+        self.assertEqual(structure["status"], "partial")
+        self.assertFalse(structure["decision_usable"])
+        self.assertEqual(
+            structure["corporate_action"]["checked_through_date"],
+            "2026-09-01",
+        )
+
     def test_natural_language_routes_to_specific_technical_capability(self) -> None:
         cases = (
             ("2408 RSI 是多少？", "technical.indicators"),
@@ -114,6 +162,7 @@ class TechnicalCapabilityContractTests(unittest.TestCase):
             ("2408 的 POC 成本區", "technical.volume_profile"),
             ("2408 anchored VWAP", "technical.anchored_vwap"),
             ("2408 相對大盤強弱", "technical.relative_strength"),
+            ("2408 的 Price Map 價位地圖", "technical.price_map"),
         )
         for question, expected in cases:
             with self.subTest(question=question):
@@ -160,6 +209,7 @@ class TechnicalCapabilityContractTests(unittest.TestCase):
             "technical.volume_profile",
             {
                 "status": "partial",
+                "volume_unit": "shares",
                 "poc": 480.5,
                 "val": 455.0,
                 "vah": 505.0,
@@ -181,8 +231,97 @@ class TechnicalCapabilityContractTests(unittest.TestCase):
             indicator["timeframes"]["daily"]["completed"],
         )
         self.assertEqual(volume_profile["projection_level"], "summary")
+        self.assertEqual(volume_profile["volume_unit"], "shares")
         self.assertEqual(volume_profile["bins_included"], 0)
         self.assertEqual(len(volume_profile["high_volume_nodes"]), 3)
+
+    def test_price_map_projects_from_backend_owner_and_keeps_bounded_summary(self) -> None:
+        response = {
+            "result": {
+                "data": {
+                    "compact": {
+                        "price_map": {
+                            "kind": "tw_stock_price_map",
+                            "version": "tw.stock.price_map.v3",
+                            "market": "TW",
+                            "stock_id": "2408",
+                            "status": "partial",
+                            "decision_usable": False,
+                            "basis_revision": "basis-1",
+                            "reference": {
+                                "price": 42.5,
+                                "trade_date": "2026-09-04",
+                                "freshness_status": "current",
+                            },
+                            "methodology": {
+                                "id": "tw.stock.price_map",
+                                "version": "2.0.0",
+                            },
+                            "zones": [
+                                {
+                                    "zone_id": f"zone-{index}",
+                                    "anchor_price": 42.5 + index,
+                                    "lower_bound": 42.0 + index,
+                                    "upper_bound": 43.0 + index,
+                                    "side": "upside",
+                                    "tier_index": index + 1,
+                                }
+                                for index in range(12)
+                            ],
+                            "decision_changes": [],
+                            "corporate_action": {
+                                "coverage_status": "partial",
+                                "checked_through_date": "2026-09-01",
+                            },
+                            "warnings": ["Corporate-action coverage is incomplete."],
+                        }
+                    }
+                }
+            }
+        }
+        selection = {
+            "required": ["technical.price_map"],
+            "optional": [],
+            "fields": {},
+            "limits": {},
+        }
+
+        projected, unavailable = capability_contract.project_selected_data(
+            response=response,
+            selection=selection,
+        )
+        self.assertEqual(unavailable, [])
+        self.assertEqual(
+            projected["technical.price_map"]["basis_revision"],
+            "basis-1",
+        )
+
+        brief = decision_envelope_v4._brief_capability_summary(
+            "technical.price_map",
+            projected["technical.price_map"],
+        )
+        self.assertEqual(brief["version"], "tw.stock.price_map.v3")
+        self.assertEqual(brief["zone_count"], 12)
+        self.assertEqual(len(brief["zones"]), 8)
+        self.assertEqual(
+            brief["corporate_action"]["coverage_status"],
+            "partial",
+        )
+
+    def test_default_market_selection_uses_screening_not_legacy_sample(self) -> None:
+        selection = capability_contract.normalize_selection(
+            selection={},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="market",
+            target_market="TW",
+            question_intent="market_overview",
+        )
+
+        self.assertIn("screening.ranking", selection["required"])
+        self.assertIn("screening.coverage", selection["required"])
+        self.assertNotIn("market.sample_ranking", selection["required"])
 
     def test_response_budget_keeps_neutral_us_technical_quality(self) -> None:
         indicator = decision_envelope_v4._brief_capability_summary(

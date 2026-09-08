@@ -23,6 +23,7 @@ def project_taiwan_bar_series(
     series: TaiwanBarSeriesRead,
     *,
     session_scope: str | None = None,
+    expected_trade_date: date | None = None,
 ) -> dict[str, Any]:
     states = {item.start_at: item for item in series.bar_states}
     points: list[dict[str, Any]] = []
@@ -101,7 +102,7 @@ def project_taiwan_bar_series(
         "warnings": [*series.warnings, *series.limitations],
     }
     if session_scope is not None:
-        trade_date = _single_session_trade_date(series)
+        trade_date = expected_trade_date or _single_session_trade_date(series)
         expected_trade_date = trade_date.isoformat() if trade_date is not None else None
         unexpected_trade_dates = sorted(
             set(observed_trade_dates)
@@ -116,6 +117,8 @@ def project_taiwan_bar_series(
         freshness_status = (
             "missing"
             if not points
+            else "historical"
+            if session_scope == "history" and not unexpected_trade_dates
             else "current"
             if expected_trade_date is not None
             and not unexpected_trade_dates
@@ -125,9 +128,11 @@ def project_taiwan_bar_series(
         payload.update(
             {
                 "session_scope": session_scope,
+                "is_historical": session_scope == "history",
                 "expected_trade_date": expected_trade_date,
                 "trade_date": expected_trade_date,
                 "freshness_status": freshness_status,
+                "materialization_state": "materialized" if points else "not_materialized",
                 "freshness": {
                     "status": freshness_status,
                     "is_current": freshness_status == "current",

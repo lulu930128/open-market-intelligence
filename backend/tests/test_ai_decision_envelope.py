@@ -136,6 +136,40 @@ def _v2_response(
 
 
 class AiDecisionEnvelopeTests(unittest.TestCase):
+    def test_v4_session_final_keeps_usability_through_default_field_projection(self) -> None:
+        from datetime import datetime
+        from app.ai import realtime_contract
+        from app.market.trading_calendar import TAIWAN_TZ
+
+        response = _v2_response(freshness_by_domain={"quote": "current"})
+        response["result"]["data"]["compact"]["quote"] = {"components": {"session_close": {
+            "status": "session_final", "finalization": "session_final", "available": True,
+            "price": 2460, "trade_date": "2026-09-07", "event_time": "2026-09-07T13:30:00+08:00",
+            "confirmed_at": "2026-09-07T13:33:10+08:00", "provider": "twse_mis",
+            "source": "twse_mis", "authority": "official_exchange_realtime",
+            "facts_usable": True, "research_usable": True, "decision_usable": True,
+            "official_daily": False, "reconciliation_status": "pending",
+            "limitations": ["OFFICIAL_DAILY_RECONCILIATION_PENDING"],
+            "freshness": {"status": "current", "is_current": True},
+        }}}
+        response["query_plan"]["selection"] = capability_contract.normalize_selection(
+            selection={"required": ["quote.session_close"]}, output="evidence_only",
+            realtime_policy="cache_only", payload_level="compact", scope_type="stock",
+            target_market="TW", question_intent="quote",
+        )
+        response["query_plan"]["target_type"] = "stock"
+        annotate = realtime_contract.annotate_selected_data
+        with patch.object(realtime_contract, "annotate_selected_data", side_effect=lambda *args, **kwargs: annotate(
+            *args, **kwargs, now=datetime(2026, 9, 7, 14, tzinfo=TAIWAN_TZ)
+        )):
+            result = decision_envelope.for_requested_contract(response, requested_contract_version="omi.decision.v4")
+        payload = result["evidence"]["data"]["quote.session_close"]
+        quality = result["evidence"]["quality"]["capabilities"]["quote.session_close"]
+        self.assertTrue(payload["facts_usable"])
+        self.assertTrue(quality["facts_usable"])
+        self.assertTrue(quality["decision_usable"])
+        self.assertEqual(quality["usability_status"], "usable")
+
     def test_v3_builds_one_canonical_decision_envelope(self) -> None:
         response = decision_envelope.build(_v2_response())
 
@@ -1674,10 +1708,22 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         response["query_plan"]["selection"] = selection
         response["query_plan"]["target_type"] = "stock"
 
-        canonical = decision_envelope.for_requested_contract(
-            response,
-            requested_contract_version="omi.decision.v4",
-        )
+        # A completed-session fixture must not drift with the wall clock.
+        from datetime import datetime
+        from app.ai import realtime_contract
+        from app.market.trading_calendar import TAIWAN_TZ
+
+        annotate = realtime_contract.annotate_selected_data
+        with patch.object(
+            realtime_contract, "annotate_selected_data",
+            side_effect=lambda *args, **kwargs: annotate(
+                *args, **kwargs, now=datetime(2026, 9, 4, 14, tzinfo=TAIWAN_TZ)
+            ),
+        ):
+            canonical = decision_envelope.for_requested_contract(
+                response,
+                requested_contract_version="omi.decision.v4",
+            )
 
         selected_freshness = canonical["evidence"]["data"]["data.freshness"]
         self.assertEqual(selected_freshness["status"], "current")
@@ -1687,6 +1733,84 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             "capability:data.freshness",
             canonical["limitations"]["missing"],
         )
+
+    def test_v4_partial_capability_does_not_mark_current_dataset_missing(
+        self,
+    ) -> None:
+        response = _v2_response()
+        compact = response["result"]["data"]["compact"]
+        compact["technical"] = {
+            "status": "partial",
+            "decision_usable": False,
+            "coverage_status": "partial",
+            "quality": {
+                "status": "partial",
+                "facts_usable": True,
+                "decision_usable": False,
+                "coverage_status": "partial",
+            },
+            "latest_price": 1000,
+            "warnings": ["corporate_action_coverage_partial"],
+        }
+        compact["freshness_by_capability"] = {
+            "technical.structure": {
+                "status": "partial",
+                "dataset": "tw.daily.ohlcv",
+                "latest": "2026-09-04",
+                "expected": "2026-09-04",
+                "is_current": True,
+                "availability_status": "available",
+                "coverage_status": "partial",
+                "facts_usable": True,
+                "decision_usable": False,
+                "reason": "corporate_action_coverage_partial",
+            }
+        }
+        response["freshness"] = {
+            "status": "partial",
+            "datasets": [
+                {
+                    "key": "tw.daily.ohlcv",
+                    "latest": "2026-09-04",
+                    "expected": "2026-09-04",
+                    "is_current": True,
+                }
+            ],
+            "missing": [],
+            "warnings": [],
+        }
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["technical.structure"]},
+            output="evidence_only",
+            realtime_policy="cache_only",
+            payload_level="compact",
+            scope_type="stock",
+            target_market="TW",
+            question_intent="general",
+        )
+        response["query_plan"]["selection"] = selection
+        response["query_plan"]["target_type"] = "stock"
+
+        canonical = decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version="omi.decision.v4",
+        )
+
+        selected = canonical["evidence"]["data"]["data.freshness"]
+        freshness_row = canonical["evidence"]["freshness_by_capability"][
+            "data.freshness"
+        ]
+        self.assertEqual(selected["missing_datasets"], [])
+        self.assertEqual(freshness_row["missing"], [])
+        self.assertIn(
+            {
+                "capability": "technical.structure",
+                "coverage_status": "partial",
+            },
+            selected["coverage_gaps"],
+        )
+        self.assertIn("technical.structure", selected["decision_unusable"])
+        self.assertNotIn("tw.daily.ohlcv", selected["missing"])
 
     def test_v4_watchlist_radar_uses_payload_freshness_when_row_is_absent(
         self,

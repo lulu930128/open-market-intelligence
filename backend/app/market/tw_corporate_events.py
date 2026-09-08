@@ -32,6 +32,7 @@ from app.market.providers.tw_corporate_events import (
     fetch_twse_ex_dividend_history,
     fetch_twse_ex_dividends,
 )
+from app.market.trading_calendar import latest_completed_taiwan_session_date
 from app.observability.provider_health import record_provider_event
 from app.observability.provider_http import provider_http_failure
 from app.runtime_lock import ProcessFileLock
@@ -1292,14 +1293,22 @@ def refresh_taiwan_corporate_events(
     }
 
 
-def _history_cache_complete(cache: Mapping[str, Any], *, target_start: date) -> bool:
+def _history_cache_complete(
+    cache: Mapping[str, Any],
+    *,
+    target_start: date,
+    target_end: date,
+) -> bool:
     providers = cache.get("providers") or {}
     for provider_key in HISTORY_PROVIDER_KEYS:
         entry = providers.get(provider_key)
         coverage_start = _parse_date(entry.get("coverage_start")) if isinstance(entry, dict) else None
+        coverage_end = _parse_date(entry.get("coverage_end")) if isinstance(entry, dict) else None
         if not isinstance(entry, dict) or entry.get("fetched_at") is None:
             return False
         if coverage_start is None or coverage_start > target_start:
+            return False
+        if coverage_end is None or coverage_end < target_end:
             return False
     return True
 
@@ -1308,6 +1317,7 @@ def _history_refresh_is_recent(
     cache: Mapping[str, Any],
     *,
     now: datetime,
+    target_end: date,
 ) -> bool:
     providers = cache.get("providers") or {}
     refresh_days = max(
@@ -1317,10 +1327,13 @@ def _history_refresh_is_recent(
     for provider_key in HISTORY_PROVIDER_KEYS:
         entry = providers.get(provider_key)
         fetched_at = _parse_datetime(entry.get("fetched_at")) if isinstance(entry, dict) else None
+        coverage_end = _parse_date(entry.get("coverage_end")) if isinstance(entry, dict) else None
         if (
             not isinstance(entry, dict)
             or entry.get("last_error")
             or fetched_at is None
+            or coverage_end is None
+            or coverage_end < target_end
             or now - fetched_at >= timedelta(days=refresh_days)
         ):
             return False
@@ -1362,16 +1375,18 @@ def backfill_taiwan_corporate_event_history(
     )
     mops_max_attempts = _resolved_mops_max_attempts()
     as_of = local_started.date()
-    history_end = as_of - timedelta(days=1)
+    history_end = latest_completed_taiwan_session_date(started_at)
     target_start = date(as_of.year - history_years + 1, 1, 1)
     cache = read_taiwan_corporate_event_cache(path=cache_path)
     full_backfill = force or not _history_cache_complete(
         cache,
         target_start=target_start,
+        target_end=history_end,
     )
     if not force and not full_backfill and _history_refresh_is_recent(
         cache,
         now=started_at,
+        target_end=history_end,
     ):
         return {
             "kind": "taiwan_corporate_event_history_backfill",
@@ -1420,6 +1435,11 @@ def backfill_taiwan_corporate_event_history(
             if isinstance(previous, dict)
             else None
         )
+        previous_coverage_end = (
+            _parse_date(previous.get("coverage_end"))
+            if isinstance(previous, dict)
+            else None
+        )
         previous_failed_years = {
             int(year)
             for year in (
@@ -1450,10 +1470,15 @@ def backfill_taiwan_corporate_event_history(
             provider_years = list(
                 range(target_start.year, previous_coverage_start.year)
             )
-        elif full_backfill and provider_recent:
+        elif (
+            full_backfill
+            and provider_recent
+            and previous_coverage_end is not None
+            and previous_coverage_end >= history_end
+        ):
             provider_years = []
         else:
-            provider_years = [as_of.year]
+            provider_years = [history_end.year]
         requested_years_by_provider[provider_key] = provider_years
 
     updates: dict[str, dict[str, Any]] = {}

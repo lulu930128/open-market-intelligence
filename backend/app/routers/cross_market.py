@@ -84,6 +84,7 @@ def refresh_cross_market_context(
     ),
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     max_runtime_seconds: int = Query(default=120, ge=10, le=300),
+    requested_capabilities: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     try:
@@ -93,12 +94,18 @@ def refresh_cross_market_context(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+    capability_values = (
+        [value.strip() for value in requested_capabilities.split(",") if value.strip()]
+        if isinstance(requested_capabilities, str)
+        else None
+    )
     request = {
         "stock_ids": normalized_stock_ids,
         "max_symbols": max_symbols,
         "provider": provider,
         "outputsize": outputsize,
         "max_runtime_seconds": max_runtime_seconds,
+        "requested_capabilities": capability_values,
     }
     return enqueue_serialized_job(
         db=db,
@@ -114,5 +121,6 @@ def refresh_cross_market_context(
             provider,
             outputsize,
             max_runtime_seconds,
+            capability_values,
         ),
     )

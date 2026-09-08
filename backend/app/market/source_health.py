@@ -511,6 +511,10 @@ def _stock_quote_entry(
         stale_after_seconds=TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS,
         health_dimensions={
             "version": "tw.quote.health.v1",
+            "operation_profile": "request_symbol" if stock_id else scheduler_contract.get("operation_profile"),
+            "scope": "request_symbol" if stock_id else scheduler_contract.get("scope"),
+            "target_count": 1 if stock_id else scheduler_contract.get("target_count"),
+            "full_market": False,
             "request_live": request_live,
             "scheduler_contract": scheduler_contract,
             "public_quote_provider_availability": (
@@ -654,6 +658,10 @@ def _stock_intraday_entry(
         health_dimensions={
             "version": "tw.intraday.health.v1",
             "target_scope": "single_symbol",
+            "operation_profile": "request_symbol",
+            "scope": "request_symbol",
+            "target_count": 1,
+            "full_market": False,
             "requested_symbol_count": 1,
             "current_count": 1 if ok else 0,
             "missing_symbols": [stock_id] if row_count <= 0 else [],
@@ -836,6 +844,10 @@ def _stock_intraday_universe_entry(
         health_dimensions={
             "version": "tw.intraday.health.v1",
             "target_scope": "bounded_tier_a_universe",
+            "operation_profile": universe.get("operation_profile"),
+            "scope": "bounded_tier_a",
+            "selected_count": requested_count,
+            "full_market": False,
             "universe": universe,
             "requested_symbol_count": requested_count,
             "available_count": available_count,
@@ -1418,7 +1430,14 @@ def build_taiwan_source_health(
     index_id: str | None = None,
     now: datetime | None = None,
     sync_snapshots: bool = False,
+    limit: int | None = None,
 ) -> dict[str, Any]:
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500
+    ):
+        raise ValueError("source health limit must be between 1 and 500")
+    if sync_snapshots and limit is not None:
+        raise ValueError("bounded source health projections cannot sync snapshots")
     normalized_stock_id = _normalized_stock_id(stock_id)
     normalized_index_id = _normalized_index_id(index_id)
     normalized_dataset = (dataset or "").strip() or None
@@ -1437,54 +1456,66 @@ def build_taiwan_source_health(
         "market_breadth",
         "taiwan_market_minute_state",
     }
-    entries = [
-        _stock_master_entry(db, stock_id=normalized_stock_id),
+    # Build only selected resources. A response limit also bounds builder work,
+    # and truncation remains explicit rather than implying all-market health.
+    builders = [
+        ("stock_master", lambda: [_stock_master_entry(db, stock_id=normalized_stock_id)]),
         *[
-            _dataset_entry(
+            (spec.key, lambda spec=spec: [_dataset_entry(
                 db,
                 spec=spec,
                 stock=stock,
                 stock_id=normalized_stock_id,
                 calendar_status=calendar_status,
                 now=now,
-            )
+            )])
             for spec in TAIWAN_DATASET_SPECS
         ],
-        _market_chip_entry(
+        (MARKET_CHIP_RESOURCE, lambda: [_market_chip_entry(
             db,
             index_id=normalized_index_id,
             calendar_status=calendar_status,
-        ),
-        _stock_quote_entry(
+        )]),
+        ("taiwan_stock_quote_snapshot", lambda: [_stock_quote_entry(
             db,
             stock_id=normalized_stock_id,
             calendar_status=calendar_status,
             current_time=current_time,
             required=realtime_required,
-        ),
-        _stock_intraday_entry(
+        )]),
+        ("market_intraday_bar_1m", lambda: [_stock_intraday_entry(
             db,
             stock_id=normalized_stock_id,
             calendar_status=calendar_status,
             current_time=current_time,
             required=realtime_required,
-        ),
-        _market_minute_state_entry(
+        )]),
+        ("taiwan_market_minute_state", lambda: [_market_minute_state_entry(
             db,
             calendar_status=calendar_status,
             current_time=current_time,
             required=realtime_required,
-        ),
-        *_market_breadth_entries(
+        )]),
+        ("market_breadth", lambda: _market_breadth_entries(
             db,
             index_id=normalized_index_id,
             calendar_status=calendar_status,
             current_time=current_time,
             required=realtime_required,
-        ),
+        )),
     ]
     if normalized_dataset is not None:
-        entries = [entry for entry in entries if entry.resource == normalized_dataset]
+        builders = [(key, build) for key, build in builders if key == normalized_dataset]
+    entries = []
+    truncated = False
+    for _, build in builders:
+        if limit is not None and len(entries) >= limit:
+            truncated = True
+            break
+        built = build()
+        remaining = len(built) if limit is None else limit - len(entries)
+        entries.extend(built[:remaining])
+        truncated = truncated or len(built) > remaining
     entry_dicts = enrich_source_health_entries(
         db,
         market="tw",
@@ -1508,7 +1539,13 @@ def build_taiwan_source_health(
             "stock_id": normalized_stock_id,
             "dataset": normalized_dataset,
             "index_id": normalized_index_id,
+            "limit": limit,
         },
+        "status": "partial" if truncated else None,
+        "returned_count": len(entry_dicts),
+        "truncated": truncated,
+        "is_partial": truncated,
+        "warnings": ["SOURCE_HEALTH_BUILD_LIMIT_REACHED"] if truncated else [],
         "market_calendar": {
             "checked_at": calendar_status.get("checked_at"),
             "date": calendar_status.get("date"),

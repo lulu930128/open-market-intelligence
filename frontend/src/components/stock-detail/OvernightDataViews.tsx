@@ -184,6 +184,7 @@ function AdrParityStrip({
       : parity.status === "stale"
         ? t("stockDetail.dataViews.overnight.adr.statusStale")
         : null;
+  const isLimited = parity.status === "partial" || parity.status === "stale";
 
   return (
     <details
@@ -203,12 +204,28 @@ function AdrParityStrip({
         </span>
         <span className="flex min-w-0 items-center gap-2 tabular-nums">
           {parity.implied_tw_price_twd !== null ? (
-            <span className="font-bold text-omi-text-strong">
+            <span
+              className={
+                isLimited
+                  ? "font-medium text-omi-text-muted"
+                  : "font-bold text-omi-text-strong"
+              }
+            >
               NT${formatPrice(parity.implied_tw_price_twd)}
             </span>
           ) : null}
           {statusLabel ? (
-            <span className="font-semibold text-omi-warning">{statusLabel}</span>
+            <span className="font-semibold text-omi-warning">
+              {statusLabel}
+              {parity.adr_trade_date ? (
+                <span
+                  data-testid="adr-parity-stale-date"
+                  className="ml-1 font-normal text-omi-text-subtle"
+                >
+                  ({formatDate(parity.adr_trade_date)})
+                </span>
+              ) : null}
+            </span>
           ) : parity.implied_gap_pct !== null ? (
             <span className={`font-bold ${valueTone(parity.implied_gap_pct)}`}>
               {compactParityGapLabel(parity.implied_gap_pct, t)}
@@ -258,7 +275,13 @@ function AdrParityStrip({
               <span>USD/TWD {formatFx(parity.usd_twd)}</span>
               <span>÷ {parity.mapping.local_shares_per_adr}</span>
               <span>=</span>
-              <span className="text-sm font-bold text-omi-text-strong">
+              <span
+                className={
+                  isLimited
+                    ? "text-sm font-medium text-omi-text-muted"
+                    : "text-sm font-bold text-omi-text-strong"
+                }
+              >
                 NT${formatPrice(parity.implied_tw_price_twd)}
               </span>
             </div>
@@ -792,8 +815,8 @@ export function OvernightImpactPanel({
         <StockDetailDisclosure
           testId="tw-overnight-impact-disclosure"
           eyebrow={t("stockDetail.dataViews.overnight.eyebrow")}
-          title={t("stockDetail.dataViews.overnight.insufficientTitle")}
-          description={t("stockDetail.dataViews.overnight.insufficientDescription")}
+          title={t("stockDetail.dataViews.overnight.requestTitle")}
+          description={t("stockDetail.dataViews.overnight.requestDescription")}
           summaryClassName="px-1 py-1.5"
           contentClassName="pt-3"
           onOpen={onDemand}

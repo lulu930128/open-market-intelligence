@@ -626,6 +626,8 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["target"], "TXF/TXO")
         self.assertEqual(kwargs["progress_total"], 5)
         self.assertEqual(kwargs["request"]["provider_request_limit"], 5)
+        self.assertEqual(kwargs["request"]["retry_policy"]["max_attempts"], 3)
+        self.assertEqual(kwargs["request"]["retry_policy"]["provider_request_budget"], 15)
         self.assertEqual(kwargs["request"]["expected_trade_date"], "2026-07-17")
         self.assertEqual(kwargs["task_args"], (date(2026, 7, 17),))
         self.assertEqual(kwargs["reuse_success_within_seconds"], 43200)
@@ -670,8 +672,9 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             added = scheduler._add_taiwan_derivatives_refresh_job(fake_scheduler)
 
         self.assertTrue(added)
-        fake_scheduler.add_job.assert_called_once()
-        kwargs = fake_scheduler.add_job.call_args.kwargs
+        self.assertEqual(fake_scheduler.add_job.call_count, 3)
+        calls = fake_scheduler.add_job.call_args_list
+        kwargs = calls[0].kwargs
         self.assertIs(
             fake_scheduler.add_job.call_args.args[0],
             scheduler.enqueue_taiwan_derivatives_refresh,
@@ -681,6 +684,19 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["hour"], 16)
         self.assertEqual(kwargs["minute"], 20)
         self.assertEqual(kwargs["id"], "taiwan_derivatives_refresh")
+        self.assertEqual(kwargs["kwargs"], {"scheduled_attempt": 1})
+        self.assertEqual(
+            [(call.kwargs["hour"], call.kwargs["minute"]) for call in calls],
+            [(16, 20), (16, 35), (17, 0)],
+        )
+        self.assertEqual(
+            [call.kwargs["id"] for call in calls],
+            [
+                "taiwan_derivatives_refresh",
+                "taiwan_derivatives_refresh_retry_2",
+                "taiwan_derivatives_refresh_retry_3",
+            ],
+        )
 
     def test_jp_market_refresh_job_is_registered_as_cron_job(self) -> None:
         fake_scheduler = SimpleNamespace(add_job=Mock())

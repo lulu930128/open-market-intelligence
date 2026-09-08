@@ -4,6 +4,10 @@
 `omi.decision.v3` 與 `omi.ai.ask.v2` 只保留在 backend 私有 builder 與測試
 seam，不再由 HTTP、SSE、MCP 或 OpenAPI 接受/宣告。
 
+US 指定歷史日期的 `quote.snapshot` 與 `intraday.bars` 可同時選取：quote 使用 canonical Daily 的目標交易日與前一交易日，不以當前 quote 或最後一根 partial intraday bar 替代收盤；盤中讀取保留指定日期、逐分鐘 coverage、partial 與來源限制。Data Quality 完成最終 confidence cap 後，localized confidence label 與回答文字必須由同一最終值重新呈現。
+
+US historical intraday 的 `fill_state` 由 capability contract 依 canonical coverage、completed-session eligibility 與 resolution registry 建立。Fill partition 與 refresh reconciliation 共用此滿足條件；`latest_completed_session` 不代表分鐘資料完整。Quality projection 保留 historical fill requirement，且不得抬高來源的 `decision_usable=false`。Historical continuation 保留並綁定 trade_date、session_scope 與 interval；cache-only 可展示補洞動作，但不執行 provider I/O。完整歷史資料可 satisfied，同時仍維持非即時與非交易決策證據。
+
 ## 架構原則
 
 OMI backend 是 target resolution、capability registry、資料 freshness、
@@ -472,6 +476,15 @@ Temporal evidence 必須遵守 [`MarketTemporalContract.md`](MarketTemporalContr
 | OMI Dock consumer | `frontend/src/components/OmiAskDock.tsx` |
 
 ## 驗證要求
+
+台股 `quote.snapshot` 的頂層 price／OHLC／event time 保留 snapshot evidence；其中 `current_price` 是獨立 resolved current-price 物件，帶有來源、時間、freshness 與 fallback reason。它可以取用 canonical 1m fallback，但不可讓 snapshot quality 因此升級。既有內部 display／decision consumers 使用 `current_price`，HTTP/SSE/MCP 均由同一 capability projection 傳遞；不新增 price alias 或 consumer-side fallback。
+
+`market.breadth.auction_breadth` 來自 canonical indicative companion，各市場有自己的 lineage、時間、coverage 與 freshness。Actual-trade screening 盤前明示 not_applicable；此 checkpoint 不宣稱已實作 auction screening／auction group ranking。Screening/Hot Groups 的 ranking-facts 軸不取代原本 decision gate。Legacy dashboard breadth 仍須等待正式 session acceptance 後才移除。
+
+台股五檔／試撮的自然語言選擇沿用 bounded quote reader，explicit selection 仍優先於 NLP。
+Market source-health-only read 不附帶建立市場 breadth 或 daily universe；dataset 在 builder 前篩選，limit 同時限制建構資源與回傳數量。受限結果明示 truncated／partial，summary 僅描述已檢查部分，不代表全市場已健康。
+
+Reader 內的 canonical provider attempts 另傳入 refresh reconciliation；它可以回報 provider fetch attempted 而 tool run attempted 為 false，不虛構額外 tool invocation。MCP schema fallback 由 backend public-contract generator 產生；source snapshot 通過不代表外部 client 已 reload。
 
 - Contract：v4 normal、partial、clarification、rejected、timeout、fallback，
   並驗證 public v2/v3 rejection。

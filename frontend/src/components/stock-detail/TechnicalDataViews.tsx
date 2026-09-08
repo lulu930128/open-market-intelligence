@@ -908,42 +908,36 @@ export function TechnicalCurrentStateEvidence({
   state: TechnicalCurrentState;
 }) {
   const t = useT();
+  const collapsedSummary = state.evidence.length
+    ? state.evidence
+        .slice(0, 4)
+        .map((item) => `${item.label} ${item.stateLabel}`)
+        .join(" · ")
+    : t("stockDetail.technicalCurrentState.evidenceHint");
 
   return (
     <StockDetailDisclosure
       testId="tw-technical-evidence-disclosure"
       title={t("stockDetail.technicalCurrentState.evidenceTitle")}
-      description={t("stockDetail.technicalCurrentState.evidenceHint")}
+      description={collapsedSummary}
       summaryClassName="px-1 py-1.5"
       contentClassName="space-y-2 pt-2"
     >
       {state.evidence.map((item) => (
-        <details
+        <div
           key={item.key}
           id={`tw-technical-evidence-${item.key}`}
-          className="group/evidence-item border border-omi-border-subtle bg-omi-surface-muted"
+          className="grid gap-1 border border-omi-border-subtle bg-omi-surface-muted px-3.5 py-2.5 sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-3"
           data-testid={`tw-technical-evidence-${item.key}`}
         >
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-2.5 outline-none transition hover:bg-omi-surface focus-visible:ring-2 focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden">
-            <span className="min-w-0">
-              <span className="block text-sm font-semibold text-omi-text-strong">
-                {item.label}
-              </span>
-              <span className={`mt-0.5 block truncate text-xs leading-4 ${technicalToneClass(item.tone)}`}>
-                {item.stateLabel}
-              </span>
-            </span>
-            <span
-              aria-hidden="true"
-              className="shrink-0 text-base text-omi-text-muted transition-transform group-open/evidence-item:rotate-45"
-            >
-              ＋
-            </span>
-          </summary>
-          <div className="border-t border-omi-border-subtle px-3.5 py-2.5 text-sm leading-6 text-omi-text-muted">
-            {item.summary}
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-omi-text-strong">{item.label}</div>
+            <div className={`mt-0.5 truncate text-[11px] leading-4 ${technicalToneClass(item.tone)}`}>
+              {item.stateLabel}
+            </div>
           </div>
-        </details>
+          <div className="text-xs leading-5 text-omi-text-muted">{item.summary}</div>
+        </div>
       ))}
       {children}
     </StockDetailDisclosure>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from dataclasses import replace
 import unittest
 
 from sqlalchemy import create_engine
@@ -21,6 +22,7 @@ from app.market.next_session_plan import (
     normalize_daily_history,
 )
 from app.market.next_session_plan_schemas import TaiwanNextSessionPlanRead
+from app.market.technical_parameters import get_technical_analysis_parameters
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     previous_taiwan_trading_day,
@@ -239,11 +241,11 @@ class NextSessionPlanServiceTests(unittest.TestCase):
         self.assertEqual(validated.target_session_state, "upcoming")
         self.assertEqual(
             [level.key for level in validated.levels],
-            ["ma20_transition", "ma60_transition"],
+            ["ma5_transition", "ma20_transition", "ma60_transition"],
         )
         self.assertEqual(
             [zone.key for zone in validated.scenario_zones],
-            ["below_both", "between_transition_levels", "at_or_above_both"],
+            ["below_all", "between_1_2", "between_2_3", "at_or_above_all"],
         )
 
     def test_regular_session_keeps_previous_close_plan_active(self) -> None:
@@ -324,11 +326,40 @@ class NextSessionPlanServiceTests(unittest.TestCase):
         self.assertTrue(plan["readiness"]["decision_usable"])
         self.assertEqual(
             plan["readiness"]["available_level_keys"],
-            ["ma20_transition"],
+            ["ma5_transition", "ma20_transition"],
         )
         self.assertEqual(
             plan["readiness"]["missing_level_keys"],
             ["ma60_transition"],
+        )
+
+    def test_periods_follow_backend_technical_parameter_contract(self) -> None:
+        add_stock(self.db)
+        add_daily_history(self.db, count=140)
+        parameters = replace(
+            get_technical_analysis_parameters(persisted_settings={}),
+            ma_windows=(10, 30, 120),
+        )
+
+        plan = build_tw_stock_next_session_plan(
+            db=self.db,
+            stock_id="2330",
+            now=datetime(2026, 8, 9, 10, tzinfo=TAIWAN_TZ),
+            candidate_close=210.13,
+            parameters=parameters,
+        )
+
+        self.assertEqual(
+            [level["period"] for level in plan["levels"]],
+            [10, 30, 120],
+        )
+        self.assertEqual(plan["candidate_close"], 210.0)
+        self.assertTrue(
+            all(level["projected_ma_at_candidate"] is not None for level in plan["levels"])
+        )
+        self.assertEqual(
+            plan["readiness"]["missing_level_keys"],
+            [],
         )
 
     def test_insufficient_ma20_history_returns_missing(self) -> None:

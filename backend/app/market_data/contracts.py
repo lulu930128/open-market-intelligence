@@ -443,6 +443,47 @@ class BarObservation(CanonicalModel):
         return self
 
 
+class AuctionBreadthObservation(CanonicalModel):
+    """Indicative participation, never actual-trade breadth or execution evidence."""
+
+    contract_version: str = "omi.market.auction_breadth.v1"
+    market: Market
+    venue: str = Field(min_length=1, max_length=32)
+    lineage: SourceLineage
+    session: MarketSession
+    trade_date: date
+    universe_count: int = Field(ge=0)
+    advance_count: int = Field(ge=0)
+    decline_count: int = Field(ge=0)
+    unchanged_count: int = Field(ge=0)
+    unknown_count: int = Field(ge=0)
+    price_semantics: Literal["auction_indicative"] = "auction_indicative"
+    provisional: Literal[True] = True
+    decision_usable: Literal[False] = False
+
+    @property
+    def classified_count(self) -> int:
+        return self.advance_count + self.decline_count + self.unchanged_count
+
+    @model_validator(mode="after")
+    def _validate_auction(self) -> AuctionBreadthObservation:
+        if self.session not in {MarketSession.PRE_OPEN, MarketSession.OPENING_AUCTION, MarketSession.CLOSING_AUCTION}:
+            raise ValueError("auction breadth requires an auction session")
+        if self.classified_count + self.unknown_count != self.universe_count:
+            raise ValueError("auction breadth partition must equal universe")
+        return self
+
+
+class BreadthAcquisitionDiagnostics(CanonicalModel):
+    auction_error_code: str | None = Field(default=None, max_length=64)
+    failed_batch_count: int = Field(default=0, ge=0)
+    received_count: int = Field(default=0, ge=0)
+    acquisition_complete: bool = True
+    fallback_used: bool = False
+    latest_attempt_status: Literal["complete", "partial", "failed", "blocked"] = "complete"
+    latest_attempt_failed_batch_count: int | None = Field(default=None, ge=0)
+
+
 class MarketBreadthObservation(CanonicalModel):
     contract_version: str = "omi.market.breadth.v1"
     market: Market
@@ -458,6 +499,9 @@ class MarketBreadthObservation(CanonicalModel):
     unchanged_count: int = Field(ge=0)
     unknown_count: int = Field(ge=0)
     missing_count: int = Field(ge=0)
+    coverage_reason_counts: dict[str, int] = Field(default_factory=dict)
+    auction: AuctionBreadthObservation | None = None
+    acquisition_diagnostics: BreadthAcquisitionDiagnostics | None = None
     trade_value: Decimal | None = Field(default=None, ge=0)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     state: ObservationState = ObservationState.AVAILABLE
@@ -471,11 +515,50 @@ class MarketBreadthObservation(CanonicalModel):
 
     @model_validator(mode="after")
     def _validate_partition(self) -> MarketBreadthObservation:
+        if self.auction is not None and (
+            self.auction.market != self.market or self.auction.venue != self.venue
+            or self.auction.trade_date != self.trade_date
+            or self.auction.lineage.provider != self.lineage.provider
+            or self.auction.lineage.content_hash != self.lineage.content_hash
+        ):
+            raise ValueError("auction companion must share acquisition scope and receipt")
         partition = self.classified_count + self.unknown_count + self.missing_count
         if partition != self.universe_count:
             raise ValueError(
                 "breadth classified/unknown/missing counts must equal universe_count"
             )
+        if self.coverage_reason_counts:
+            reason_total = sum(self.coverage_reason_counts.values())
+            if reason_total != self.universe_count:
+                raise ValueError(
+                    "breadth coverage reason counts must equal universe_count"
+                )
+            if any(value < 0 for value in self.coverage_reason_counts.values()):
+                raise ValueError("breadth coverage reason counts cannot be negative")
+            directional_expected = {
+                "advance": self.advance_count,
+                "decline": self.decline_count,
+                "unchanged": self.unchanged_count,
+                "provider_missing": self.missing_count,
+            }
+            for reason, expected_count in directional_expected.items():
+                if self.coverage_reason_counts.get(reason, 0) != expected_count:
+                    raise ValueError(
+                        f"breadth {reason} reason count is inconsistent"
+                    )
+            non_directional_count = sum(
+                self.coverage_reason_counts.get(reason, 0)
+                for reason in (
+                    "valid_no_trade",
+                    "suspended_or_not_tradable",
+                    "mapping_error",
+                    "unknown",
+                )
+            )
+            if non_directional_count != self.unknown_count:
+                raise ValueError(
+                    "breadth non-directional reason counts are inconsistent"
+                )
         incomplete = (
             self.unknown_count > 0
             or self.missing_count > 0

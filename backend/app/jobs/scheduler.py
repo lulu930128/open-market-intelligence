@@ -72,6 +72,9 @@ from app.market.taiwan_market_state import persist_taiwan_market_minute_state
 from app.market.tw_bar_materialization_transaction import (
     TaiwanBarMaterializationTransaction,
 )
+from app.market.cross_market.requirements import (
+    list_active_cross_market_us_requirement_symbols,
+)
 from app.market.tw_bar_materializer import materialize_index_minute_candidates
 from app.market.tw_daily_reconciliation import TaiwanDailyReconciliationTransaction
 from app.market.tw_index_daily_platform import (
@@ -121,6 +124,9 @@ from app.market.trading_calendar import (
 )
 from app.market.tw_derivatives import (
     DERIVATIVES_RELEASE_TIME,
+    DERIVATIVES_MAX_REFRESH_ATTEMPTS,
+    DERIVATIVES_PROVIDER_REQUESTS_PER_ATTEMPT,
+    DERIVATIVES_RETRY_TIMES,
     expected_taiwan_derivatives_date,
 )
 from app.market.tw_futures import (
@@ -895,7 +901,7 @@ def _add_taiwan_futures_collector_job(scheduler: Any) -> bool:
     return True
 
 
-def enqueue_taiwan_derivatives_refresh() -> None:
+def enqueue_taiwan_derivatives_refresh(*, scheduled_attempt: int = 1) -> None:
     now = datetime.now(_timezone())
     if not _is_taiwan_derivatives_refresh_ready(now):
         logger.info(
@@ -907,13 +913,31 @@ def enqueue_taiwan_derivatives_refresh() -> None:
         return
 
     expected_trade_date = expected_taiwan_derivatives_date(now=now)
+    bounded_attempt = min(
+        max(int(scheduled_attempt), 1),
+        DERIVATIVES_MAX_REFRESH_ATTEMPTS,
+    )
     request = {
         "schedule": "taiwan_derivatives_refresh",
         "run_date": now.date().isoformat(),
         "expected_trade_date": expected_trade_date.isoformat(),
         "release_time": DERIVATIVES_RELEASE_TIME.strftime("%H:%M"),
         "provider": "taifex_openapi",
-        "provider_request_limit": 5,
+        "retry_policy": {
+            "attempt_schedule": [
+                DERIVATIVES_RELEASE_TIME.strftime("%H:%M"),
+                *(value.strftime("%H:%M") for value in DERIVATIVES_RETRY_TIMES),
+            ],
+            "max_attempts": DERIVATIVES_MAX_REFRESH_ATTEMPTS,
+            "cooldown": "schedule_controlled",
+            "provider_requests_per_attempt": DERIVATIVES_PROVIDER_REQUESTS_PER_ATTEMPT,
+            "provider_request_budget": (
+                DERIVATIVES_MAX_REFRESH_ATTEMPTS
+                * DERIVATIVES_PROVIDER_REQUESTS_PER_ATTEMPT
+            ),
+            "final_failure_state": "retry_exhausted",
+        },
+        "provider_request_limit": DERIVATIVES_PROVIDER_REQUESTS_PER_ATTEMPT,
     }
     db = SessionLocal()
     try:
@@ -923,7 +947,11 @@ def enqueue_taiwan_derivatives_refresh() -> None:
             target="TXF/TXO",
             request=request,
             progress_total=5,
-            message="Queued by scheduler after the TAIFEX post-close release guard.",
+            message=(
+                "Queued by scheduler after the TAIFEX post-close release guard "
+                f"(bounded attempt {bounded_attempt}/"
+                f"{DERIVATIVES_MAX_REFRESH_ATTEMPTS})."
+            ),
             task=backfill_tasks.run_taiwan_derivatives_refresh_job,
             task_args=(expected_trade_date,),
             reuse_success_within_seconds=max(
@@ -933,10 +961,12 @@ def enqueue_taiwan_derivatives_refresh() -> None:
         )
         logger.info(
             "Scheduled TAIFEX derivatives refresh created=%s job_id=%s "
-            "expected_trade_date=%s.",
+            "expected_trade_date=%s scheduled_attempt=%s/%s.",
             created,
             job.id,
             expected_trade_date.isoformat(),
+            bounded_attempt,
+            DERIVATIVES_MAX_REFRESH_ATTEMPTS,
         )
     finally:
         db.close()
@@ -947,17 +977,29 @@ def _add_taiwan_derivatives_refresh_job(scheduler: Any) -> bool:
         return False
 
     schedule_time = _resolved_taiwan_derivatives_schedule_time()
-    scheduler.add_job(
-        enqueue_taiwan_derivatives_refresh,
-        trigger="cron",
-        day_of_week=settings.scheduler_taiwan_derivatives_refresh_day_of_week,
-        hour=schedule_time.hour,
-        minute=schedule_time.minute,
-        id="taiwan_derivatives_refresh",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
+    retry_times = tuple(
+        value for value in DERIVATIVES_RETRY_TIMES if value > schedule_time
     )
+    schedule_times = (schedule_time, *retry_times)[
+        :DERIVATIVES_MAX_REFRESH_ATTEMPTS
+    ]
+    for attempt, attempt_time in enumerate(schedule_times, start=1):
+        scheduler.add_job(
+            enqueue_taiwan_derivatives_refresh,
+            trigger="cron",
+            day_of_week=settings.scheduler_taiwan_derivatives_refresh_day_of_week,
+            hour=attempt_time.hour,
+            minute=attempt_time.minute,
+            id=(
+                "taiwan_derivatives_refresh"
+                if attempt == 1
+                else f"taiwan_derivatives_refresh_retry_{attempt}"
+            ),
+            kwargs={"scheduled_attempt": attempt},
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
     return True
 
 
@@ -2518,6 +2560,9 @@ def enqueue_us_priority_ohlc_reconcile() -> None:
                 previous_result = None
             if isinstance(previous_result, dict):
                 cursor_symbol = previous_result.get("cursor_symbol")
+        required_symbols = list(
+            list_active_cross_market_us_requirement_symbols(db)
+        )
         request = {
             "max_runtime_seconds": settings.scheduler_us_priority_ohlc_max_runtime_seconds,
             "max_symbols": settings.scheduler_us_priority_ohlc_max_symbols,
@@ -2528,6 +2573,7 @@ def enqueue_us_priority_ohlc_reconcile() -> None:
                 settings.scheduler_us_priority_ohlc_max_provider_attempts
             ),
             "cursor_symbol": cursor_symbol,
+            "required_symbols": required_symbols,
         }
         job, created = job_service.enqueue_job(
             db=db,
@@ -2543,6 +2589,7 @@ def enqueue_us_priority_ohlc_reconcile() -> None:
                 request["max_symbols"],
                 request["max_external_calls"],
                 request["max_provider_attempts"],
+                request["required_symbols"],
             ),
         )
         logger.info(

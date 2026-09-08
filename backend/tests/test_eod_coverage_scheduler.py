@@ -138,6 +138,10 @@ def test_scheduler_enqueues_priority_us_ohlc_with_bounded_request() -> None:
     with (
         patch("app.jobs.scheduler.SessionLocal", return_value=fake_db),
         patch(
+            "app.jobs.scheduler.list_active_cross_market_us_requirement_symbols",
+            return_value=("TSM", "SMH"),
+        ),
+        patch(
             "app.jobs.scheduler.job_service.enqueue_job",
             return_value=(fake_job, True),
         ) as enqueue,
@@ -157,7 +161,9 @@ def test_scheduler_enqueues_priority_us_ohlc_with_bounded_request() -> None:
         "max_external_calls",
         "max_provider_attempts",
         "cursor_symbol",
+        "required_symbols",
     }
+    assert kwargs["request"]["required_symbols"] == ["TSM", "SMH"]
     fake_db.close.assert_called_once()
 
 

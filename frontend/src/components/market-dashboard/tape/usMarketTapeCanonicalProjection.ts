@@ -17,6 +17,7 @@ export type USMarketTapeSnapshot = {
   previousClose: number | null;
   referenceTradeDate: string | null;
   truthRevision: string | null;
+  marketSession?: string | null;
 };
 
 export type USMarketTapeReferenceSnapshot = USMarketTapeSnapshot & {
@@ -35,7 +36,8 @@ function normalizedSymbol(value: string | null | undefined) {
 
 export function projectUSMarketTapeSnapshot(
   reference: USMarketTapeReferenceSnapshot | null,
-  headline: USMarketIndexItemRead | null
+  headline: USMarketIndexItemRead | null,
+  marketSession: string | null = null
 ): USMarketTapeSnapshot | null {
   if (!reference) return null;
   if (
@@ -71,5 +73,6 @@ export function projectUSMarketTapeSnapshot(
     previousClose,
     referenceTradeDate: headline.reference_trade_date,
     truthRevision: headline.truth_revision,
+    marketSession,
   };
 }

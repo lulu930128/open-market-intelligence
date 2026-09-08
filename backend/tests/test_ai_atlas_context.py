@@ -20,6 +20,19 @@ from app.db.models import Base, StockMaster
 NOW = datetime(2026, 8, 23, 4, 0, tzinfo=timezone.utc)
 
 
+def test_events_rejects_previous_and_unknown_atlas_contracts():
+    for version in ("1.1", "2.0"):
+        with patch.object(settings, "omi_atlas_shadow_enabled", True), patch.object(
+            atlas_context.atlas_endpoint, "request_json", return_value=(200, {
+                "contract_version": version, "profile": "evidence_pack_v1", "data": {"events": []}
+            })
+        ):
+            result = atlas_context.read_shadow_context(target={"type": "stock", "id": "2330"}, now=NOW)
+        assert result["status"] == "incompatible"
+        assert result["reason_code"] == "atlas_contract_version_mismatch"
+        assert result["facts_usable"] is False
+
+
 class _Response:
     def __init__(self, payload: object, *, status_code: int = 200) -> None:
         self._payload = payload
@@ -98,7 +111,7 @@ class AtlasContextTests(unittest.TestCase):
 
     def test_successful_read_is_bounded_and_drops_document_body(self) -> None:
         payload = {
-            "contract_version": "1.1",
+            "contract_version": "1.2",
             "profile": "evidence_pack_v1",
             "generated_at": "2026-08-23T03:59:00Z",
             "data": {
@@ -137,7 +150,7 @@ class AtlasContextTests(unittest.TestCase):
             "coverage": {"domain": "technology", "source_count": 4},
             "warnings": ["provider coverage is bounded"],
         }
-        get = Mock(return_value=_Response(payload))
+        get = Mock(return_value=(200, payload))
         with self._settings(
             omi_atlas_shadow_enabled=True,
             omi_atlas_api_base_url="http://127.0.0.1:8790",
@@ -145,14 +158,14 @@ class AtlasContextTests(unittest.TestCase):
             omi_atlas_max_evidence_per_event=2,
             omi_atlas_lookback_hours=168,
             omi_atlas_timeout_seconds=1.5,
-        ), patch.object(atlas_context.http_client, "get", get):
+        ), patch.object(atlas_context.atlas_endpoint, "request_json", get):
             result = atlas_context.read_shadow_context(
                 target={"type": "stock", "id": "2330", "label": "TSMC"},
                 now=NOW,
             )
 
         self.assertEqual(result["status"], "available")
-        self.assertEqual(result["contract_version"], "1.1")
+        self.assertEqual(result["contract_version"], "1.2")
         self.assertEqual(result["returned_count"], 1)
         self.assertEqual(len(result["events"][0]["evidence"]), 2)
         self.assertNotIn("body_excerpt", result["events"][0]["evidence"][0])
@@ -161,13 +174,13 @@ class AtlasContextTests(unittest.TestCase):
         self.assertFalse(result["decision_usable"])
         self.assertEqual(result["absence_interpretation"], "unknown_not_observed")
         self.assertEqual(result["freshness"]["status"], "current")
-        self.assertEqual(get.call_args.args[0], "http://127.0.0.1:8790/api/v1/brief")
-        self.assertEqual(get.call_args.kwargs["params"]["profile"], "evidence_pack_v1")
-        self.assertEqual(get.call_args.kwargs["params"]["q"], "TSMC")
+        self.assertEqual(get.call_args.args[0], "/api/v1/brief")
+        self.assertEqual(get.call_args.args[1]["profile"], "evidence_pack_v1")
+        self.assertEqual(get.call_args.args[1]["q"], "TSMC")
 
     def test_empty_result_is_ready_but_not_negative_evidence(self) -> None:
         payload = {
-            "contract_version": "1.1",
+            "contract_version": "1.2",
             "profile": "evidence_pack_v1",
             "generated_at": "2026-08-23T03:59:00Z",
             "data": {"event_count": 0, "events": []},
@@ -176,9 +189,9 @@ class AtlasContextTests(unittest.TestCase):
             "warnings": [],
         }
         with self._settings(omi_atlas_shadow_enabled=True), patch.object(
-            atlas_context.http_client,
-            "get",
-            return_value=_Response(payload),
+            atlas_context.atlas_endpoint,
+            "request_json",
+            return_value=(200, payload),
         ):
             result = atlas_context.read_shadow_context(
                 target={"type": "market", "market": "TW"},
@@ -193,8 +206,8 @@ class AtlasContextTests(unittest.TestCase):
 
     def test_timeout_and_contract_mismatch_fail_closed(self) -> None:
         with self._settings(omi_atlas_shadow_enabled=True), patch.object(
-            atlas_context.http_client,
-            "get",
+            atlas_context.atlas_endpoint,
+            "request_json",
             side_effect=requests.Timeout(),
         ):
             timeout = atlas_context.read_shadow_context(
@@ -210,9 +223,9 @@ class AtlasContextTests(unittest.TestCase):
             "data": {"events": []},
         }
         with self._settings(omi_atlas_shadow_enabled=True), patch.object(
-            atlas_context.http_client,
-            "get",
-            return_value=_Response(mismatch_payload),
+            atlas_context.atlas_endpoint,
+            "request_json",
+            return_value=(200, mismatch_payload),
         ):
             mismatch = atlas_context.read_shadow_context(
                 target={"type": "stock", "id": "2330"},
@@ -229,7 +242,7 @@ class AtlasContextTests(unittest.TestCase):
         with self._settings(
             omi_atlas_shadow_enabled=True,
             omi_atlas_api_base_url="https://atlas.example.com",
-        ), patch.object(atlas_context.http_client, "get", get):
+        ), patch.object(atlas_context.atlas_endpoint, "request_json", get):
             result = atlas_context.read_shadow_context(
                 target={"type": "stock", "id": "2330"},
                 now=NOW,
@@ -242,8 +255,8 @@ class AtlasContextTests(unittest.TestCase):
     def test_disabled_shadow_does_not_issue_http(self) -> None:
         get = Mock()
         with self._settings(omi_atlas_shadow_enabled=False), patch.object(
-            atlas_context.http_client,
-            "get",
+            atlas_context.atlas_endpoint,
+            "request_json",
             get,
         ):
             result = atlas_context.read_shadow_context(

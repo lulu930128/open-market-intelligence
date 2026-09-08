@@ -35,7 +35,7 @@ export function useTaiwanTechnicalReport({
       !enabled ||
       !stockId ||
       isIndexProduct ||
-      !["today", "daily"].includes(effectiveTimeframe)
+      !["today", "daily", "weekly", "monthly"].includes(effectiveTimeframe)
     ) {
       const resetTimer = window.setTimeout(() => setLoadState("idle"), 0);
       return () => window.clearTimeout(resetTimer);
@@ -46,7 +46,10 @@ export function useTaiwanTechnicalReport({
     let refreshTimer: number | undefined;
     let requestInFlight = false;
     const requestedStockId = stockId;
-    const requestedTimeframe = effectiveTimeframe as "today" | "daily";
+    const requestedTimeframe = effectiveTimeframe;
+    const includeIntraday = requestedTimeframe === "today" || requestedTimeframe === "daily";
+    const includeVolumePace = requestedTimeframe === "today";
+    const shouldPoll = requestedTimeframe === "today" || requestedTimeframe === "daily";
 
     async function loadTechnicalReport() {
       if (requestInFlight) return;
@@ -57,8 +60,8 @@ export function useTaiwanTechnicalReport({
           `/api/market/technical/${requestedStockId}`,
           {
             timeframe: requestedTimeframe,
-            include_intraday: true,
-            include_volume_pace: false,
+            include_intraday: includeIntraday,
+            include_volume_pace: includeVolumePace,
           }
         );
 
@@ -75,7 +78,7 @@ export function useTaiwanTechnicalReport({
     }
 
     function scheduleRefresh() {
-      if (cancelled) return;
+      if (cancelled || !shouldPoll) return;
       refreshTimer = window.setTimeout(() => {
         void loadTechnicalReport().finally(scheduleRefresh);
       }, TAIWAN_TECHNICAL_REPORT_REFRESH_MS);

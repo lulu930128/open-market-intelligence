@@ -925,6 +925,9 @@ def _canonical_freshness_status(
     realtime: dict[str, Any],
     payload_included: bool,
 ) -> str:
+    explicitly_stale = _first_semantic_value(payload, keys={"is_stale"})
+    if explicitly_stale is True:
+        return "stale"
     explicit = _normalized_status(
         realtime.get("state")
         or _first_semantic_value(
@@ -1242,6 +1245,15 @@ def _payload_semantic_quality(
     if explicit_status == "unknown":
         explicit_status = "missing" if facts_usable is False else "partial"
     status_class = _status_class(explicit_status)
+    # Session-close finality is a dataset-specific axis, not a generic status.
+    # A pending official-daily reconciliation does not block this evidence.
+    if (
+        capability_id == "quote.session_close"
+        and explicit_status == "session_final"
+        and payload.get("available") is True
+        and facts_usable is True
+    ):
+        status_class = "ready"
     if facts_usable is False:
         status_class = "blocked"
     elif decision_usable is False and status_class == "ready":
@@ -1490,6 +1502,10 @@ def _quality_for_capability(
         status = str(semantic_quality["status"])
         status_class = str(semantic_quality["status_class"])
         canonical_candidate = semantic_quality
+    if realtime_policy_unsatisfied:
+        status = "live_requirement_not_satisfied"
+        status_class = "blocked"
+        canonical_candidate = {"source": "realtime_policy"}
     completeness = (
         "not_applicable"
         if status_class == "neutral"
@@ -1507,6 +1523,10 @@ def _quality_for_capability(
         and not current_session_limited
         and coverage_status == "complete"
         and not units["missing_volume_unit"]
+        and freshness_status
+        not in {"stale", "delayed", "pending_release", "missing", "error"}
+        and release_status
+        not in {"pending_release", "release_delayed", "delayed", "not_released"}
     )
     stale_intraday_facts_usable = bool(
         capability_id == "intraday.bars"
@@ -1565,6 +1585,8 @@ def _quality_for_capability(
         decision_usable = False
     elif semantic_decision_usable is True:
         decision_usable = bool(decision_usable and facts_usable)
+    if isinstance(item.get("fill_state"), dict) and realtime.get("decision_usable") is False:
+        decision_usable = False
     intraday_research_usable = bool(
         payload_included
         and (
@@ -1723,6 +1745,8 @@ def _quality_for_capability(
         "refresh_possible_now": (
             False
             if applicability_status == "not_applicable"
+            else item["fill_state"]["refresh_possible_now"]
+            if isinstance(item.get("fill_state"), dict)
             else realtime.get("refresh_possible_now")
         ),
         "refresh_allowed": _explicit_bool(
@@ -1736,6 +1760,9 @@ def _quality_for_capability(
             payload.get("refresh_requested") if isinstance(payload, dict) else None,
         ),
         "refresh_recommended": (
+            item["fill_state"]["refresh_required"]
+            if isinstance(item.get("fill_state"), dict)
+            else
             False
             if applicability_status == "not_applicable"
             or (
@@ -2548,6 +2575,12 @@ def apply_quality_contract(
         )
         selected_freshness["release_current"] = not bool(
             freshness_categories["pending_release"]
+            or any(
+                item.get("required") is True
+                and item.get("release_status")
+                in {"release_delayed", "delayed", "not_released"}
+                for item in capability_status.values()
+            )
         )
         selected_freshness["served_at"] = (
             canonical.get("served_at") or canonical.get("generated_at")

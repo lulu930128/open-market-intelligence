@@ -3422,6 +3422,7 @@ def get_us_intraday_trend(
     persist_history: bool = True,
     since_revision: str | None = None,
     bypass_read_cache: bool = False,
+    trade_date: date | str | None = None,
 ) -> dict:
     """Compatibility facade over the canonical US Market Truth owner."""
 
@@ -3431,6 +3432,14 @@ def get_us_intraday_trend(
     if interval not in {"1m", "5m", "15m", "30m", "1h", "4h"}:
         raise ValueError("unsupported US intraday interval")
     normalized_symbol = normalize_us_symbol(symbol)
+    if trade_date is not None:
+        if db is None:
+            raise ValueError("historical intraday requires canonical database context")
+        from app.us_market.market_truth import read_us_historical_intraday_trend
+        return read_us_historical_intraday_trend(
+            db, symbol=normalized_symbol, trade_date=trade_date,
+            evaluated_at=datetime.now(timezone.utc), session_scope=session_scope, interval=interval,
+        )
     if db is None:
         return _get_us_intraday_trend_legacy(
             symbol=normalized_symbol,
@@ -3526,12 +3535,15 @@ def refresh_us_intraday_bars(
     symbol: str,
     require_live: bool = False,
     max_provider_calls: int = 2,
+    trade_date: date | str | None = None,
+    session_scope: str = "regular",
 ) -> dict:
     refreshed = USIntradayMarketPlatform(db).refresh_intraday_bars(
         symbol=symbol,
         bars=5000,
         require_live=require_live,
         max_provider_calls=max_provider_calls,
+        **({"trade_date": trade_date, "session_scope": session_scope} if trade_date is not None else {}),
     )
     invalidate_us_intraday_read_cache(symbol)
     return {

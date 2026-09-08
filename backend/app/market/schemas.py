@@ -562,6 +562,10 @@ class MarketBreadthRead(BaseModel):
     message_count: int | None = None
     missing_count: int | None = None
     not_received_count: int | None = None
+    coverage_reason_counts: dict[str, int | None] = Field(default_factory=dict)
+    reconciliation_status: str | None = None
+    reconciliation_formula: str | None = None
+    partition_total: int | None = None
     warnings: list[str] = Field(default_factory=list)
     source: str | None = None
     provider: str | None = None

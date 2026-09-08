@@ -34,6 +34,20 @@
 | Secondary markets | partial | not_reverified | not_reverified | partial | 2026-08-27 | current market modules／outward contracts | JP／KR／Crypto／Resource 不得推定與 TW／US 同等 acceptance |
 | `omi.decision.v4` | accepted | partial | not_applicable | partial | 2026-08-29 | `docs/architecture/OmiDecisionContract.md`; source capability／projection registries；4.4.0 selection-bound regression；既有running direct/proxy/MCP AAPL evidence | 4.4.0 source已把`daily.ohlcv` effective limit傳入US canonical／chart reader；runtime與MCP host尚未adopt本輪source，不能用先前AAPL readback宣稱新selection path已Product accepted |
 | Market temporal axes | accepted | not_reverified | not_reverified | partial | 2026-08-27 | `backend/app/market_data/contracts.py`; `docs/architecture/MarketTemporalContract.md` | Shared axes 已分離；projection-local release／reconciliation vocabulary 仍需逐 contract 收斂 |
+| Taiwan Stock Detail Radar V2 / Price Map V3 | accepted | accepted | partial | accepted | 2026-09-06 | `docs/exec-plans/completed/tw-stock-price-map-layered-zones-v3-20260906/`; `tw.stock.price_map.v3`; 31 backend tests；14 frontend contract／live browser tests加1次final-restart live rerun；architecture guard；launcher 8458／3000 readback；2330／3711／5488 official／direct／proxy／Browser evidence | Price Map evidence仍只有completed daily；三檔因corporate-action coverage或history深度維持truthful partial／missing、`decision_usable=false`；本輪不宣稱全市場或current-session Live accepted |
+
+## 2026-09-07 Taiwan backend／MCP 離線修復 checkpoint
+
+- Source：accepted。共用 MIS actual-trade 判讀、分離 midpoint alias、修復 planner／session-close quality 與 default projection、exact-date bar window、completed-session breadth／screening、bounded source health 及 reader attempt telemetry；MCP public snapshot 已重建。
+- Evidence：`docs/exec-plans/completed/tw-backend-mcp-convergence-20260907/Progress.md`；16 檔 targeted regression 439 passed，architecture tests 31 passed。最後 health-only 局部修正另有 162 passed／15 subtests，limit 防護最終 49 passed；architecture checker 與 compileall 通過。
+- Runtime／Live／Product：not_reverified。本輪不重啟、不接真實 provider、不修改 production DB；使用者預定隔日實測。15 秒 freshness 門檻未調整，既有 provisional observation 不由讀取時鐘升級。
+
+## 2026-09-08 Taiwan preopen／intraday evidence checkpoint
+
+- Source：accepted（本輪 bounded scope）。stale projection monotonicity、snapshot／resolved current price identity、typed canonical auction breadth、partial attempt diagnostics、screening usability axes 與 health scope 已完成；保留原有 1m fallback resolver policy。
+- Evidence：`docs/exec-plans/active/tw-preopen-evidence-20260908/Progress.md`；safe validation targeted regression 377 passed、architecture tests 31 passed，後續局部 regression 分別 100 passed 與 141 passed。各批次有重疊，不加總。
+- Runtime／Live／Product：pending。新增 migration `20260908_0081` 僅於隔離 DB 驗證；正式 DB、runtime 與 provider 未操作。2454／6488 viewer／Tier-A coverage 待 2026-09-09 正式 session 驗收。
+- Limitations：本輪 canonical auction breadth 不等於已新增 auction group／screening 排名；legacy removal 仍以正式 canonical／consumer parity 驗收為 gate。
 
 ## Architecture Guard v1 known limitations
 
@@ -43,6 +57,23 @@
 - 以上是 Guard v2 candidates，不代表目前已有對應 enforcement。只有出現實際漏網案例時才擴充 rule；不為理論完整建立全 repo call graph 或第二套 compiler system。
 
 Registry／debt manifest 是 executable truth；parity test 只驗證 invariant，不保存 capability、dataset 或 debt 的固定數量，也不建立 YAML／Markdown inventory。
+
+## 2026-09-06 Taiwan Stock Price Map layered zones V3 checkpoint
+
+- Source：`tw.stock.price_map.v3`將exact evidence、raw evidence span、bounded research zone與exact decision trigger分層建模。Backend先依completed reference判斷upside／downside／current，再用台股有效tick與百分比padding形成research band；只有同側且raw gap符合政策的zone可合併。每區提供tier、primary evidence、evidence／method-family／source counts、strength components、trigger links與limitations；V2 bounds語意沒有被靜默改寫。
+- Product：Stock Detail Radar保留既有單一surface，Price Map改為R／P0／S階層、真實比例band、精確trigger虛線與菱形、現價基準、軸外證據摘要及native details完整明細。圖內標籤分成左側zone lane與右側current／trigger lane；2330、3711、5488在1280px CUA實機檢查均無label collision或horizontal overflow。
+- Runtime：21:01由既有official launcher完成最終`RestartServices`；確認repo root、root `.venv`、Backend 8458與Frontend 3000 owner lineage。OpenAPI direct path與Frontend proxy均採用V3；沒有provider refresh、DB migration或DB write。
+- Data audit：唯讀官方盤後資料確認2026-09-04收盤為2330=2410、3711=588、5488=12.10；三檔Price Map reference、canonical daily close與trade date完全一致，direct／proxy的version、reference、basis revision及zone count一致。所有15個研究區皆為positive-width，6個decision trigger皆連回Backend zone。
+- Validation：Backend targeted regression `31 passed`，changed modules compileall通過，architecture guard `23 actual / 23 declared`；Next production build通過；static request-lifecycle與三股live Playwright共`14 passed`，final launcher restart後三股live再跑`1 passed`。檢查涵蓋V3 attributes、11 ticks、reference marker、zone contract、accessible details、label collision、horizontal overflow、page error與console error。
+- Limitation：2330／3711維持truthful `partial`，5488維持truthful `missing`；三檔`decision_usable=false`。V3改善結構與呈現，不把資料限制升級成可交易判斷，也不代表全市場／盤中／current-session Live acceptance。
+
+## 2026-09-06 Taiwan Stock Detail Radar V2 checkpoint
+
+- Source：台股個股右側技術區已收斂為單一`TaiwanStockDetailRadarSurface`；`tw.stock.price_map.v2` additive contract由Backend提供display axis、ticks、reference marker、basis revision、daily horizon與typed Decision Changes。Frontend不推導legal limit、support／resistance、freshness或decision semantics。
+- Product：Price Map使用比例座標與固定26rem skeleton；Scenario改為按需展開，Evidence／External Context可折疊。超出±10% display contract的zone改列於明確「軸外價位」，不再clamp成同一軸頂假位置；週／月／今日切換仍把價位證據標為`[日]`。
+- Runtime：18:02由既有tray owner正式`RestartServices`；launcher採用repo root、root `.venv`、Backend 8458、Frontend 3000且`reload=False`。OpenAPI、direct API與frontend proxy均回`tw.stock.price_map.v2`。
+- Live／data audit：唯讀查詢TWSE／TPEx 2026-09-04官方盤後資料；2330=2410、3711=588、動態抽樣TPEX 5488=12.10，三檔均與canonical daily、Price Map reference及direct／proxy stable fields一致。這是三檔completed-daily抽樣，不代表全市場或intraday Live acceptance。
+- Browser：CUA在1280px實際操作2330情境試算、Evidence與External Context，並檢查3711／5488的比例軸、軸外價位與truthful partial／missing；Playwright live acceptance另在1920x1080與2560x1440通過三檔DOM、11 ticks、reference marker、水平overflow及page-error檢查。
 
 ## 2026-08-28 Taiwan consumer convergence checkpoint
 
@@ -424,6 +455,15 @@ Registry／debt manifest 是 executable truth；parity test 只驗證 invariant�
 - Validation／boundary：Backend relevant matrix `198 passed`、AI／MCP `242 passed / 254 subtests`、migration `7 passed`；Ruff、architecture checks、Frontend TypeScript、diff check與safe quick均通過，log為`.tmp/validation/20260904-231148/`。下一交易時段的ETF 13:30 close-tail及盤中新分鐘telemetry仍是獨立Live gate；本輪未commit／push，未處理shared worktree無關變更。
 
 ## Governance v1 freeze boundary
+
+## 2026-09-07 Taiwan MCP remaining convergence Source／isolated-runtime checkpoint
+
+- AI／outward：market scope NLP改由executable capability registry選擇`market.institutional_flow`與`market.margin_short`，stock scope仍保留`chips.institutional`／`chips.margin`；`market.chips`不再反向拖累預設市場查詢。Freshness projection按availability、freshness、coverage、release與decision axes分流；Price Map有canonical price evidence但CA／plan不完整時為partial而非missing，TAIFEX明示stale／release delayed，不再出現同response標current的矛盾。
+- Taiwan market semantics：Corporate Action history coverage必須到latest completed session；Hot Groups區分current session、latest completed session與stale-for-expected，facts與decision usability分離。Screening／Breadth outward提供不造零值的可閉合reconciliation partition。Sector alias與raw industry code收斂至單一canonical identity，Technical Relative Strength新增同trade-date的canonical sector equal-weight benchmark。
+- Side sources：MOPS parser會區分valid data、valid empty、schema changed、maintenance與anti-bot／invalid response，且只有header／row shape／required fields通過才解析；既有partial fallback及成功cache保留。TAIFEX expected-date guard保留，scheduler採16:20／16:35／17:00三次有界嘗試、每次5 request、總budget 15，read contract會明示pending release、scheduled retry或retry exhausted。
+- Isolated MCP evidence：working-tree Backend以8469、lifespan／scheduler／bootstrap停用方式載入；實際repo MCP JSON-RPC `omi.ask`市場routing通過，fixed-seed四檔8924／2538／8433／2431為4/4 transport、selection、false-missing與REST Price Map semantic parity通過。Hot Groups週末為latest-completed facts usable／decision unusable；2303／2330 sector benchmark均ready且stock／benchmark date為2026-09-04。這不是正式launcher adoption。
+- Source evidence：final affected regression `446 passed / 46 subtests`；architecture checker維持`23 actual / 23 declared`，architecture pytest `31 passed`；safe quick的compileall、Frontend TypeScript與diff check全通過，log `.tmp/validation/20260907-011600/`。Public MCP snapshot為22 targets／69 capabilities，digest `bd3308e3eb3e470fbd660a621b5b139227d332f79f771ce62b7af760248af024`。
+- Acceptance boundary：文件A–J仍未封版。Price Map production files仍untracked，故clean checkout未驗；Corporate Action checked-through仍為2026-09-01、落後analysis end 2026-09-04；Breadth新分類器可read-only把舊TPEX 51筆拆成valid-no-trade 26／mapping-error 25，但outward正式snapshot仍待producer refresh。TAIFEX structure仍為2026-09-03、positioning／expected為2026-09-04；雖已如實明示release-delayed、retry window exhausted與stale，但正式scheduler未restart，沒有本輪三次實際provider attempt的job evidence。本輪未做provider I/O、production DB mutation、正式runtime restart、Git stage／commit／push或Browser Product E2E。
 
 Architecture Governance v1 自 2026-08-27 起視為 frozen：新增未宣告 violation 必須 fail，stale debt 必須 fail，既有 exact debt 僅在 manifest 精確對應時暫時允許；source violation 移除時必須同步移除 debt entry。
 

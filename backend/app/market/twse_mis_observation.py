@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from math import isfinite
 from typing import Any
 
 from app.market.trading_calendar import (
@@ -19,10 +20,11 @@ AUCTION_INSTRUMENT_PHASES = {
 
 
 def _positive(value: Any) -> bool:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return False
     try:
-        return float(value) > 0
+        parsed = float(value)
+        return isfinite(parsed) and parsed > 0
     except (TypeError, ValueError):
         return False
 
@@ -85,6 +87,7 @@ def resolve_twse_mis_actual_trade(
     )
     event_in_trade_window = bool(
         event_time is not None
+        and event_time.date() == observed_date
         and TAIWAN_SESSION_OPEN_TIME
         <= event_time.time()
         <= TAIWAN_CLOSE_RESOLUTION_TIME

@@ -8,6 +8,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.ai import evidence_builder, technical_analysis
+from app.ai.realtime_contract import classify_observation
 from app.ai.market_context import taiwan_events
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
 from app.ai.market_context.taiwan_projection import (
@@ -54,6 +55,7 @@ from app.market.tw_instrument_trading_policy import (
     resolve_taiwan_instrument_trading_policy,
 )
 from app.market.taiwan_quote_evidence import TW_QUOTE_EVIDENCE_CAPABILITIES
+from app.market.tw_bar_service import taiwan_requested_bar_scope
 
 
 normalize_analysis_horizon = technical_analysis.normalize_analysis_horizon
@@ -168,6 +170,84 @@ class TaiwanStockDependencies:
         }
     )
     build_tw_stock_technical_evidence: Callable[..., dict[str, Any]] | None = None
+    build_tw_stock_price_map: Callable[..., dict[str, Any]] | None = None
+
+
+def _requested_price_map(
+    *,
+    db: Session,
+    stock_id: str,
+    market_data_params: dict[str, Any] | None,
+    dependencies: TaiwanStockDependencies,
+) -> tuple[dict[str, Any] | None, str | None]:
+    requested = {
+        str(value)
+        for value in (market_data_params or {}).get("requested_capabilities") or []
+    }
+    if "technical.price_map" not in requested:
+        return None, None
+    if dependencies.build_tw_stock_price_map is None:
+        return None, "Canonical Price Map reader is unavailable."
+    capability_parameters = (market_data_params or {}).get("capability_parameters")
+    price_map_parameters = (
+        capability_parameters.get("technical.price_map")
+        if isinstance(capability_parameters, dict)
+        and isinstance(capability_parameters.get("technical.price_map"), dict)
+        else {}
+    )
+    candidate_close = price_map_parameters.get("candidate_close")
+    try:
+        candidate_close = (
+            float(candidate_close) if candidate_close is not None else None
+        )
+    except (TypeError, ValueError):
+        return None, "technical.price_map candidate_close must be numeric."
+    if candidate_close is not None and candidate_close <= 0:
+        return None, "technical.price_map candidate_close must be greater than zero."
+    try:
+        return (
+            dependencies.build_tw_stock_price_map(
+                db=db,
+                stock_id=stock_id,
+                candidate_close=candidate_close,
+                now=dependencies.now(),
+            ),
+            None,
+        )
+    except Exception as exc:
+        return None, f"Canonical Price Map unavailable: {exc}"
+
+
+def _attach_price_map_to_compact(
+    compact: dict[str, Any],
+    price_map: dict[str, Any] | None,
+) -> None:
+    if not isinstance(price_map, dict) or not price_map:
+        return
+    compact["price_map"] = price_map
+    reference = (
+        price_map.get("reference")
+        if isinstance(price_map.get("reference"), dict)
+        else {}
+    )
+    corporate_action = (
+        price_map.get("corporate_action")
+        if isinstance(price_map.get("corporate_action"), dict)
+        else {}
+    )
+    freshness_by_capability = compact.setdefault("freshness_by_capability", {})
+    freshness_by_capability["technical.price_map"] = {
+        "status": str(price_map.get("status") or "missing"),
+        "evidence_status": str(price_map.get("status") or "missing"),
+        "dataset": "tw.daily.ohlcv",
+        "latest": reference.get("trade_date"),
+        "is_current": reference.get("freshness_status") == "current",
+        "decision_usable": bool(price_map.get("decision_usable")),
+        "coverage_status": corporate_action.get("coverage_status") or "missing",
+        "checked_through_date": corporate_action.get("checked_through_date"),
+        "refresh_recommended": False,
+        "cache_policy": "read_only_derived",
+    }
 
 
 def _company_profile_payload(
@@ -322,7 +402,11 @@ def _compact_intraday_bars(
     )
     cached_fallback_allowed = params.get("fallback_to_cached") is not False
     requested_trade_date = parse_market_trade_date(params.get("trade_date"))
-    current_session_scope = requested_trade_date is None
+    scope, expected_trade_date, read_bounds = taiwan_requested_bar_scope(
+        requested_trade_date,
+        requested_at=_contract_datetime((calendar_status or {}).get("checked_at")),
+    )
+    current_session_scope = scope.value == "current_session"
     # The Taiwan Bar owner reads resolved canonical cache only. AI never
     # triggers acquisition or chooses a provider.
     refresh_allowed = False
@@ -352,22 +436,13 @@ def _compact_intraday_bars(
                 interval=interval,
                 limit=point_limit,
                 include_partial=True,
-                **(
-                    {
-                        "session_scope": "current_session",
-                        "requested_at": _contract_datetime(
-                            calendar_status.get("checked_at")
-                            if isinstance(calendar_status, dict)
-                            else None
-                        ),
-                    }
-                    if current_session_scope
-                    else {}
-                ),
+                session_scope=scope.value,
+                **read_bounds,
             )
             history = project_taiwan_bar_series(
                 bar_series,
-                session_scope=("current_session" if current_session_scope else None),
+                session_scope=scope.value,
+                expected_trade_date=expected_trade_date,
             )
             compact_history = _compact_intraday_history(history, point_limit=point_limit)
             series[interval] = compact_history
@@ -398,11 +473,7 @@ def _compact_intraday_bars(
         "payload_level": payload_level,
         "bar_limit": point_limit,
         "session_scope": "current_session" if current_session_scope else "history",
-        "expected_trade_date": (
-            (series.get(intervals[0]) or {}).get("expected_trade_date")
-            if current_session_scope
-            else None
-        ),
+        "expected_trade_date": expected_trade_date.isoformat(),
         "trade_date": (
             (series.get(intervals[0]) or {}).get("trade_date")
             if len(intervals) == 1
@@ -889,28 +960,38 @@ def _apply_taiwan_current_price_contract(
             if latest_completed_close > 0:
                 resolved["reference_price"] = latest_completed_close
     quote["provider_trade_date"] = provider_trade_date
+    price_observation = {
+        "price": resolved.get("value"),
+        "event_time": resolved.get("event_time"),
+        "trade_date": resolved.get("trade_date"),
+        "session_phase": calendar_status.get("phase"),
+        "quote_semantics": resolved.get("semantics"),
+        "interval": resolved.get("interval"),
+        "kind": "intraday_bar" if resolved.get("source_kind") == "intraday_bar_latest" else "quote_snapshot",
+        "is_live": False,
+    }
+    if resolved.get("source_kind") != "intraday_bar_latest":
+        price_observation["freshness"] = quote.get("freshness")
+        price_observation["is_live"] = quote.get("is_realtime") is True
+    resolved["freshness"] = classify_observation(
+        price_observation, market="TW", realtime_policy="cache_only",
+        now=datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+        if isinstance(checked_at, str) else checked_at,
+    )
     quote["current_price"] = resolved
     quote["current_price_available"] = resolved.get("value") is not None
     quote["current_price_source"] = resolved.get("source_kind")
-    quote["price_source"] = resolved.get("source_kind")
-    quote["price_semantics"] = resolved.get("semantics")
-    quote["price_event_time"] = resolved.get("event_time")
-    quote["price_confidence"] = resolved.get("confidence")
     quote["session_date_relation"] = relation
-    if resolved.get("value") is not None:
-        quote["latest_price"] = resolved["value"]
-        quote["price"] = resolved["value"]
-        quote["last_price"] = resolved["value"]
-        quote["trade_date"] = (
-            resolved_trade_date or provider_trade_date
-        )
-        quote["event_time"] = (
-            resolved.get("event_time") or quote.get("event_time")
-        )
-        quote["facts_usable_for_current_session"] = bool(
-            resolved.get("is_current_session")
-            and resolved.get("is_estimate") is not True
-        )
+    # The resolved display/research price is a separate evidence object. Never
+    # rewrite the snapshot's price, event time, OHLC or source with a bar fallback.
+    if resolved.get("is_estimate") is True:
+        # Keep research estimates separate from trade-price compatibility fields.
+        quote["mid_price_estimate"] = resolved.get("value")
+        quote["mid_price_estimate_source"] = resolved.get("source_kind")
+        quote["mid_price_estimate_usable"] = "research_only"
+        quote.setdefault("latest_price", None)
+        quote.setdefault("price", None)
+        quote.setdefault("last_price", None)
     quote["components"] = _quote_components(quote)
     return resolved
 
@@ -1991,6 +2072,15 @@ def read_stock_technical_context(
         except Exception as exc:
             missing.append("technical_evidence")
             warnings.append(f"Canonical technical evidence unavailable: {exc}")
+    price_map, price_map_error = _requested_price_map(
+        db=db,
+        stock_id=normalized_stock_id,
+        market_data_params=market_data_params,
+        dependencies=dependencies,
+    )
+    if price_map_error:
+        missing.append("technical.price_map")
+        warnings.append(price_map_error)
     source_refs = [
         {"type": "table", "name": "stock_master"},
         {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
@@ -2046,6 +2136,7 @@ def read_stock_technical_context(
         source_refs=source_refs,
         latest_daily_evidence=latest_daily_evidence,
     )
+    _attach_price_map_to_compact(compact, price_map)
     envelope = {
         "kind": "stock_technical_context",
         "generated_at": dependencies.now(),
@@ -2077,6 +2168,7 @@ def read_stock_technical_context(
             "technical_reports": technical_reports,
             "technical_evidence": technical_evidence,
             "technical_indicators": technical_evidence.get("indicators"),
+            "price_map": price_map,
             "analysis": technical_analysis,
             "technical_levels": technical_levels,
             "compact": compact,
@@ -2447,6 +2539,16 @@ def read_stock_context(
             warnings.append(f"Canonical technical evidence unavailable: {exc}")
             missing.append("technical_evidence")
 
+    price_map, price_map_error = _requested_price_map(
+        db=db,
+        stock_id=normalized_stock_id,
+        market_data_params=market_data_params,
+        dependencies=dependencies,
+    )
+    if price_map_error:
+        warnings.append(price_map_error)
+        missing.append("technical.price_map")
+
     resolved_current_price = _apply_taiwan_current_price_contract(
         quote=quote,
         intraday_bars=intraday_bars,
@@ -2617,6 +2719,7 @@ def read_stock_context(
                 if isinstance(event_context.get("data"), dict)
                 else None
             ),
+            "price_map": price_map,
             "regulation": {
                 key.split(".", 1)[1]: value
                 for key, value in (event_context.get("data") or {}).items()
@@ -2734,6 +2837,9 @@ def read_stock_context(
         "warnings": warnings,
         "source_refs": source_refs,
     }
+    compact_payload = envelope["data"].get("compact")
+    if isinstance(compact_payload, dict):
+        _attach_price_map_to_compact(compact_payload, price_map)
     return _with_evidence_passport(
         envelope,
         analysis=technical_analysis,

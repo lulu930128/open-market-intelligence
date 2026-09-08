@@ -617,6 +617,50 @@ class TechnicalEvidenceTests(unittest.TestCase):
         self.assertGreater(evidence["horizons"]["60d"]["excess_return_pct"], 0)
         self.assertIn("not RSI", evidence["limitations"][0])
 
+    def test_relative_strength_includes_aligned_canonical_sector_benchmark(
+        self,
+    ) -> None:
+        stock = _points([100 + index for index in range(70)])
+        market = [
+            {"time": point["time"], "close": 100 + index * 0.5}
+            for index, point in enumerate(stock)
+        ]
+        sector = [
+            {"time": point["time"], "close": 100 + index * 0.75}
+            for index, point in enumerate(stock)
+        ]
+
+        evidence = build_relative_strength(
+            stock,
+            market,
+            sector_points=sector,
+            sector_identity={
+                "sector_id": "tw.sector.24",
+                "name": "半導體業",
+                "identity_status": "canonical",
+            },
+            sector_metadata={
+                "method": "equal_weighted_rebased_canonical_daily_close",
+                "member_count": 100,
+                "observed_member_count": 98,
+                "source": "TaiwanOfficialDailyBarRepository",
+            },
+        )
+
+        self.assertEqual(evidence["benchmark"], "TAIEX")
+        self.assertEqual(evidence["sector"]["status"], "ready")
+        self.assertEqual(
+            evidence["sector"]["benchmark"],
+            "tw.sector.24",
+        )
+        self.assertEqual(
+            evidence["sector"]["horizons"]["60d"]["to_date"],
+            evidence["horizons"]["60d"]["to_date"],
+        )
+        self.assertIsNotNone(
+            evidence["sector"]["horizons"]["60d"]["excess_return_pct"]
+        )
+
     def test_structure_v2_is_shadow_only_and_exposes_counter_evidence(self) -> None:
         indicators = {
             "status": "ready",

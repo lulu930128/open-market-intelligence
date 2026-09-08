@@ -968,6 +968,13 @@ def build_quote_consumer_answer(
                 f"{f'；正常盤排定收盤時間 {us_time_text}' if us_time_text else ''}。"
                 "這是歷史正常盤收盤價，不是盤中或盤後成交價。"
             )
+        if quote.get("current_session_phase") in {"market_closed", "post_close"}:
+            closed_text = (
+                "The US market is currently closed. " if english
+                else "現在、米国市場は閉場しています。" if japanese
+                else "目前美股市場已關閉。"
+            )
+            snapshot = closed_text + snapshot
     elif quote_semantics in {
         "after_hours_last_trade",
         "pre_market_last_trade",

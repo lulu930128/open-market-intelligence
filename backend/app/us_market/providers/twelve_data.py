@@ -106,7 +106,11 @@ def fetch_twelve_data_time_series_payload(
     outputsize: int,
     timezone_name: str,
     timeout_seconds: int,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> tuple[dict[str, Any], str]:
+    if (start_date is None) != (end_date is None):
+        raise ValueError("start_date and end_date must be provided together")
     if outputsize < 1 or outputsize > 5_000:
         raise ValueError("Twelve Data outputsize must be between 1 and 5000")
     return _get_payload(
@@ -119,6 +123,7 @@ def fetch_twelve_data_time_series_payload(
             "outputsize": str(outputsize),
             "timezone": timezone_name,
             "order": "ASC",
+            **({"start_date": start_date, "end_date": end_date} if start_date else {}),
         },
         timeout_seconds=timeout_seconds,
     )

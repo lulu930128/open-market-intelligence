@@ -328,6 +328,65 @@ class TaiwanScreeningTests(unittest.TestCase):
             "latest_completed_session",
         )
 
+    def test_missing_screening_members_have_closed_reconciliation_categories(
+        self,
+    ) -> None:
+        self.db.add_all(
+            [
+                StockMaster(
+                    stock_id="9997",
+                    stock_name="無來源列",
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                ),
+                StockMaster(
+                    stock_id="9998",
+                    stock_name="來源列不可用",
+                    market="TWSE",
+                    instrument_type="stock",
+                    is_active=True,
+                ),
+            ]
+        )
+        self.db.add(
+            InstitutionalTradeDaily(
+                source_id=self.source_a.id,
+                raw_result_id=self.raw_a.id,
+                trade_date=self.day_two,
+                stock_id="9998",
+                stock_name="來源列不可用",
+                foreign_investor_net=None,
+                investment_trust_net=None,
+            )
+        )
+        self.db.commit()
+
+        coverage = build_tw_screening_snapshot(
+            self.db,
+            parameters={
+                "metric": "foreign_investor_net_shares",
+                "window": 1,
+            },
+        )["coverage"]
+        reconciliation = coverage["reconciliation"]
+
+        self.assertEqual(coverage["universe_count"], 5)
+        self.assertEqual(coverage["covered_count"], 3)
+        self.assertEqual(coverage["missing_count"], 2)
+        self.assertEqual(reconciliation["status"], "balanced")
+        self.assertEqual(reconciliation["partition_total"], 5)
+        self.assertEqual(
+            reconciliation["expected_but_missing"]["stock_ids"],
+            ["9997"],
+        )
+        self.assertEqual(
+            reconciliation["observed_but_unusable"]["stock_ids"],
+            ["9998"],
+        )
+        self.assertEqual(reconciliation["source_absent_valid"]["count"], 0)
+        self.assertEqual(reconciliation["unclassified"]["count"], 0)
+
     def test_incomplete_window_rows_require_explicit_opt_in(self) -> None:
         snapshot = build_tw_screening_snapshot(
             self.db,

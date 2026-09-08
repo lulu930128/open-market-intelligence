@@ -902,10 +902,10 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertTrue(ai_tools._has_payload_value({"price": 0}))
 
     def test_stock_context_compact_intraday_includes_quote_and_bars(self) -> None:
-        quote_time = datetime(2026, 3, 21, 10, 5)
+        quote_time = datetime(2026, 3, 20, 10, 5)
 
         def bar_series_result(*, db, instrument_id, interval, **kwargs):
-            start = datetime(2026, 3, 21, 9, 0)
+            start = datetime(2026, 3, 20, 9, 0)
             bars = (
                 SimpleNamespace(
                     start_at=start,
@@ -983,10 +983,10 @@ class TechnicalReportTests(unittest.TestCase):
                     series_revision="d" * 64,
                 ),
                 session_resolution=(
-                    SimpleNamespace(trade_date=date(2026, 3, 21)),
+                    SimpleNamespace(trade_date=date(2026, 3, 20)),
                 ),
                 current_session_coverage=SimpleNamespace(
-                    trade_date=date(2026, 3, 21),
+                    trade_date=date(2026, 3, 20),
                     snapshot_phase=SimpleNamespace(value="ready"),
                     status=SimpleNamespace(value="complete_session"),
                 ),
@@ -1014,7 +1014,7 @@ class TechnicalReportTests(unittest.TestCase):
                     "source": "twse_mis_public_quote",
                     "session_phase": "regular",
                     "phase_label": "regular",
-                    "trade_date": date(2026, 3, 21),
+                    "trade_date": date(2026, 3, 20),
                     "quote_time": quote_time,
                     "fetched_at": quote_time,
                     "last_price": 181.5,
@@ -1048,11 +1048,18 @@ class TechnicalReportTests(unittest.TestCase):
                         "is_live": True,
                         "is_stale": False,
                         "age_seconds": 5,
-                        "expected_trade_date": date(2026, 3, 21),
+                        "expected_trade_date": date(2026, 3, 20),
                         "message": "ok",
                     },
                 },
             ) as quote_depth,
+            patch(
+                "app.ai.tools.build_taiwan_calendar_status",
+                return_value={
+                    "checked_at": "2026-03-20T10:05:00+08:00",
+                    "release_windows": {},
+                },
+            ),
             patch("app.ai.tools._read_taiwan_bars", side_effect=bar_series_result) as bar_reader,
         ):
             context = ai_tools.read_stock_context(
@@ -1085,7 +1092,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(compact["intraday_bars"]["session_scope"], "current_session")
         self.assertEqual(
             compact["intraday_bars"]["series"]["1m"]["expected_trade_date"],
-            "2026-03-21",
+            "2026-03-20",
         )
         self.assertEqual(
             compact["freshness_by_capability"]["intraday.bars"]["status"],

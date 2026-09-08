@@ -359,6 +359,39 @@ class TaiwanDerivativesPersistenceTests(unittest.TestCase):
             self.assertTrue(summary["options_chain"]["rows"])
             self.assertEqual(summary["large_traders"]["status"], "ready")
             self.assertEqual(summary["term_structure"]["curve_shape"], "contango")
+            self.assertEqual(summary["release_status"], "released")
+            self.assertEqual(summary["retry"]["retry_status"], "not_required")
+
+            pending_now = datetime(2026, 7, 20, 8, 25, tzinfo=timezone.utc)
+            with patch.object(
+                tw_derivatives,
+                "expected_taiwan_derivatives_date",
+                return_value=date(2026, 7, 20),
+            ):
+                pending = tw_derivatives.build_taiwan_derivatives_summary(
+                    db,
+                    option_strike_limit=3,
+                    now=pending_now,
+                )
+            self.assertEqual(pending["release_status"], "pending_release")
+            self.assertEqual(pending["retry"]["retry_status"], "retry_scheduled")
+            self.assertTrue(pending["retry"]["next_retry_at"].endswith("16:35:00+08:00"))
+            self.assertEqual(pending["retry"]["provider_request_budget"], 15)
+
+            exhausted_now = datetime(2026, 7, 20, 9, 5, tzinfo=timezone.utc)
+            with patch.object(
+                tw_derivatives,
+                "expected_taiwan_derivatives_date",
+                return_value=date(2026, 7, 20),
+            ):
+                exhausted = tw_derivatives.build_taiwan_derivatives_summary(
+                    db,
+                    option_strike_limit=3,
+                    now=exhausted_now,
+                )
+            self.assertEqual(exhausted["release_status"], "release_delayed")
+            self.assertEqual(exhausted["retry"]["retry_status"], "retry_exhausted")
+            self.assertTrue(exhausted["retry"]["final_failure"])
 
     def test_read_helpers_are_bounded_and_do_not_refresh(self) -> None:
         with self.Session() as db:

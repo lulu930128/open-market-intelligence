@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from time import monotonic
-from typing import Callable
+from typing import Callable, Iterable
 
 from sqlalchemy.orm import Session
 
@@ -110,6 +110,7 @@ def reconcile_us_priority_ohlc(
     session_factory: SessionFactory | None = None,
     platform_factory: PlatformFactory | None = None,
     repair: bool = True,
+    required_symbols: Iterable[str] | None = None,
 ) -> dict:
     """Run a bounded priority read and optional explicit Shared-platform repair."""
 
@@ -126,10 +127,23 @@ def reconcile_us_priority_ohlc(
     resolved_platform_factory = platform_factory or USDailyOhlcvPlatform
     universe_db = resolved_session_factory()
     try:
-        universe_symbols = list_us_priority_ohlc_symbols(universe_db)
+        base_universe_symbols = list_us_priority_ohlc_symbols(universe_db)
+        normalized_required_symbols = tuple(
+            dict.fromkeys(
+                symbol
+                for raw_symbol in required_symbols or ()
+                if (symbol := normalize_us_symbol(raw_symbol))
+            )
+        )
+        universe_symbols = tuple(
+            dict.fromkeys((*base_universe_symbols, *normalized_required_symbols))
+        )
+        base_critical_symbols = list_us_priority_ohlc_critical_symbols(universe_db)
         critical_symbols = tuple(
             symbol
-            for symbol in list_us_priority_ohlc_critical_symbols(universe_db)
+            for symbol in dict.fromkeys(
+                (*base_critical_symbols, *normalized_required_symbols)
+            )
             if symbol in universe_symbols
         )
     finally:
@@ -280,7 +294,8 @@ def reconcile_us_priority_ohlc(
     return {
         "status": status,
         "dataset_id": PRIORITY_DAILY_RESEARCH_CONTRACT.dataset_id,
-        "scope": "indices+active_holdings+enabled_watchlist",
+        "scope": "indices+active_holdings+enabled_watchlist+required_consumers",
+        "required_consumer_symbols": list(normalized_required_symbols),
         "critical_symbol_count": len(critical_symbols),
         "rotatable_symbol_count": len(rotatable_symbols),
         "contract": {

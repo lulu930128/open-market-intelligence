@@ -1999,6 +1999,8 @@ export const zhTW = {
         refreshRecoveredTitle: "跨市場背景已恢復",
         refreshRecoveredMessage: "跨市場資料已完成 bounded refresh 並重新讀取。",
         source: "個股跨市場背景",
+        requestTitle: "美股隔夜與 ADR 背景",
+        requestDescription: "尚未讀取；展開後載入既有快取與資料品質",
         insufficientTitle: "美股隔夜資料不足",
         insufficientDescription: "暫不納入台股映射判斷",
         strongRiskOnTitle: "美股隔夜明顯偏多，{profile}順風",

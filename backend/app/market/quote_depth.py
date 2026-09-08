@@ -37,6 +37,7 @@ from app.market.twse_mis_observation import (
     resolve_twse_mis_observation,
 )
 from app.market_data.contracts import (
+    EvidenceFreshness,
     MarketSession,
     Quantity,
     QuantityUnit,
@@ -1393,6 +1394,7 @@ def _apply_resolved_depth(
     depth = getattr(result.resolved, "depth", None)
     usable = bool(depth is not None and result.resolved.health.facts_usable)
     live_available = usable and phase in LIVE_DEPTH_PHASES
+    selected_freshness = _component_evidence(result, depth)["freshness"]
     depth_event_time = (
         depth.lineage.event_at if depth is not None else None
     )
@@ -1428,7 +1430,7 @@ def _apply_resolved_depth(
             "bid_levels": bid_levels,
             "ask_levels": ask_levels,
             "depth_available": live_available,
-            "depth_live_available": live_available,
+            "depth_live_available": live_available and selected_freshness["is_live"],
             "depth_snapshot_available": snapshot_available,
             "depth_snapshot_status": (
                 snapshot["status"]
@@ -1744,6 +1746,21 @@ def _finalize_shared_projection_semantics(
 
 def _component_evidence(result: Any, observation: Any) -> dict[str, Any]:
     lineage = getattr(observation, "lineage", None)
+    health = result.resolved.health
+    selected = next((
+        candidate for candidate in getattr(result.resolved, "candidates", ())
+        if candidate.provider == health.selected_provider
+        and candidate.source == health.selected_source
+        and candidate.event_at == health.selected_event_at
+    ), None)
+    freshness = selected.freshness if selected is not None else EvidenceFreshness.UNKNOWN
+    if health.status is ResolvedEvidenceStatus.STALE:
+        freshness = EvidenceFreshness.STALE
+    current = bool(
+        observation is not None
+        and health.status in {ResolvedEvidenceStatus.SELECTED, ResolvedEvidenceStatus.FALLBACK, ResolvedEvidenceStatus.PARTIAL}
+        and freshness in {EvidenceFreshness.LIVE, EvidenceFreshness.FRESH}
+    )
     return {
         "result_kind": result.result_kind,
         "provider": (
@@ -1761,6 +1778,11 @@ def _component_evidence(result: Any, observation: Any) -> dict[str, Any]:
             lineage.model_dump(mode="json") if lineage is not None else None
         ),
         "resolved_health": result.resolved.health.model_dump(mode="json"),
+        "freshness": {
+            "status": freshness.value,
+            "is_current": current,
+            "is_live": current and freshness is EvidenceFreshness.LIVE,
+        },
         "dataset_health": (
             result.dataset_health.model_dump(mode="json")
             if result.dataset_health is not None

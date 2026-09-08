@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from copy import deepcopy
+from datetime import datetime
 from types import SimpleNamespace
 
 from app.ai import capability_contract
@@ -11,6 +13,93 @@ from app.ai.market_context.taiwan_projection import (
 
 
 class TaiwanQuoteComponentTests(unittest.TestCase):
+    def test_bar_fallback_preserves_snapshot_identity_and_ohlc(self) -> None:
+        from app.ai.market_context.taiwan_stock import _apply_taiwan_current_price_contract
+
+        quote = {
+            "price": 2470, "latest_price": 2470, "last_price": 2470,
+            "high_price": 2475, "low_price": 2460, "open_price": 2465,
+            "trade_date": "2026-09-08", "event_time": "2026-09-08T09:04:45+08:00",
+            "quote_time": "2026-09-08T09:04:45+08:00",
+            "snapshot_time": "2026-09-08T09:05:00+08:00",
+            "provider": "twse_mis", "source": "twse_mis_quote_depth",
+            "last_trade_available": False,
+            "price_source": "snapshot", "price_semantics": "last_trade",
+            "freshness": {"status": "stale", "is_stale": True},
+        }
+        original = deepcopy(quote)
+        resolved = _apply_taiwan_current_price_contract(
+            quote=quote, latest_daily=None,
+            intraday_bars={"series": {"1m": {
+                "interval": "1m", "provider": "nstock", "source": "canonical_bar",
+                "trade_date": "2026-09-08", "points": [{
+                    "time": "2026-09-08T10:04:00+08:00", "close": 2490, "finalized": True,
+                }],
+            }}},
+            calendar_status={"date": "2026-09-08", "phase": "regular_live", "is_trading_day": True},
+            checked_at=datetime.fromisoformat("2026-09-08T10:06:00+08:00"),
+        )
+        self.assertEqual(resolved["value"], 2490)
+        self.assertEqual(resolved["source_kind"], "intraday_bar_latest")
+        self.assertEqual(resolved["event_time"], "2026-09-08T10:04:00+08:00")
+        for key, value in original.items():
+            self.assertEqual(quote[key], value, key)
+        self.assertEqual(quote["current_price"], resolved)
+        self.assertIn("freshness", resolved)
+        selection = capability_contract.normalize_selection(
+            selection={"required": ["quote.snapshot"]}, output="evidence_only",
+            realtime_policy="cache_only", payload_level="compact", scope_type="stock",
+            target_market="TW", question_intent="quote",
+        )
+        projected, _ = capability_contract.project_selected_data(
+            response={"target": {"type": "tw_stock", "id": "2330", "market": "TW"},
+                      "result": {"data": {"compact": {"quote": quote}}}},
+            selection=selection,
+        )
+        outward = projected["quote.snapshot"]
+        self.assertEqual(outward["price"], 2470)
+        self.assertEqual(outward["high_price"], 2475)
+        self.assertEqual(outward["current_price"]["value"], 2490)
+        self.assertEqual(outward["freshness"]["status"], "stale")
+        from app.ai.data_quality_contract import _quality_for_capability
+        quality = _quality_for_capability(
+            {"capability": "quote.snapshot", "status": "ready", "required": True},
+            canonical={}, projected_data=projected, realtime_assessments={}, market="TW",
+        )
+        self.assertFalse(quality["decision_usable"])
+
+    def test_stale_factual_depth_cannot_be_promoted_to_current(self) -> None:
+        quote = _compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth={
+                "session_phase": "regular_live",
+                "depth_available": True,
+                "depth_status": "current",
+                "freshness": {"status": "current", "is_stale": False},
+                "data_core_components": {
+                    "quote.order_book": {
+                        "resolved_health": {
+                            "status": "stale",
+                            "selected_event_at": "2026-09-08T09:04:45+08:00",
+                            "research_usable": False,
+                            "facts_usable": True,
+                            "selection_reason": "CACHE_ONLY_STALE",
+                        },
+                    },
+                },
+                "best_bid_price": 2470,
+            },
+            quote_error=None,
+        )
+        component = quote["components"]["order_book"]
+        self.assertEqual(component["status"], "stale")
+        self.assertFalse(component["freshness"]["is_current"])
+        self.assertEqual(component["best_bid_price"], 2470)
+        self.assertTrue(component["resolved_health"]["facts_usable"])
+        self.assertFalse(component["freshness"]["is_live"])
+        self.assertFalse(component["decision_usable"])
+        self.assertFalse(component["live_available"])
+
     def test_order_book_freshness_uses_component_health_not_parent_quote(
         self,
     ) -> None:

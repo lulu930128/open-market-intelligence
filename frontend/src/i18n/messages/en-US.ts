@@ -1994,6 +1994,8 @@ export const enUS = {
         backdropLabel: "Market backdrop",
         loading: "Loading US overnight impact",
         loadingShort: "Loading",
+        requestTitle: "US overnight and ADR context",
+        requestDescription: "Not requested yet; expand to read cached evidence and data quality",
         insufficientTitle: "Not enough US overnight data",
         insufficientDescription: "Excluded from Taiwan-stock mapping for now",
         strongRiskOnTitle: "US overnight strongly bullish; {profile} tailwind",

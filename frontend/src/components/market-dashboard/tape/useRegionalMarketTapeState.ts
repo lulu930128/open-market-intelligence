@@ -423,6 +423,7 @@ function useUsMarketHeadlineItems({
   onError: (error: unknown) => void;
 }) {
   const [items, setItems] = useState<Record<string, USMarketIndexItemRead>>({});
+  const [marketSession, setMarketSession] = useState<string | null>(null);
   const onErrorRef = useRef(onError);
 
   useEffect(() => {
@@ -445,6 +446,7 @@ function useUsMarketHeadlineItems({
         );
         if (cancelled) return;
         authoritativeMarketSession = snapshot.market_session;
+        setMarketSession(snapshot.market_session);
 
         const requestedSymbols = new Set(
           configs.map((config) => config.symbol.trim().toUpperCase())
@@ -479,7 +481,7 @@ function useUsMarketHeadlineItems({
     };
   }, [configs]);
 
-  return items;
+  return { items, marketSession };
 }
 
 function usRefreshDelay() {
@@ -552,11 +554,13 @@ export function useUsMarketTapeState({
   const headlineItems = useUsMarketHeadlineItems({ configs, onError });
   const primarySnapshot = projectUSMarketTapeSnapshot(
     referenceState.primarySnapshot,
-    headlineItems[primaryIndex.symbol.toUpperCase()] ?? null
+    headlineItems.items[primaryIndex.symbol.toUpperCase()] ?? null,
+    headlineItems.marketSession
   );
   const contextSnapshot = projectUSMarketTapeSnapshot(
     referenceState.contextSnapshot,
-    headlineItems[contextIndex.symbol.toUpperCase()] ?? null
+    headlineItems.items[contextIndex.symbol.toUpperCase()] ?? null,
+    headlineItems.marketSession
   );
 
   return {

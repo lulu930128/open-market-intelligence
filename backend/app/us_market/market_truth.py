@@ -36,6 +36,8 @@ from app.us_market.close_resolution_policy import (
 from app.us_market.daily_market_state import expected_us_completed_daily_state
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 from app.us_market.intraday_platform import USIntradayMarketPlatform
+from app.us_market.historical_intraday import completed_intraday_window, regular_intraday_coverage
+from app.research.technical.aggregation import aggregate_intraday_payload
 from app.us_market.market_truth_contracts import (
     USChangeCalculationStatus,
     USChangeMetric,
@@ -1321,13 +1323,14 @@ def _compose_us_intraday_series_projection(
             tzinfo=US_MARKET_TIMEZONE,
         )
         scheduled = int((session_close - session_open).total_seconds() // 60)
+    coverage = regular_intraday_coverage([point.start_at for point in regular], trade_date=trade_date) if trade_date is not None else {}
     observed = len(regular)
-    missing = max(scheduled - observed, 0)
+    missing = coverage.get("missing_slot_count", 0)
     continuity = (
         "not_applicable"
         if trade_date is None
         else "complete"
-        if missing == 0
+        if coverage.get("coverage_status") == "complete"
         else "missing"
         if observed == 0
         else "partial"
@@ -1422,6 +1425,67 @@ def read_us_market_truth_bundle(
         latest_available_trade_date=components.latest_intraday_trade_date,
     )
     return USMarketTruthBundle(snapshot=snapshot, series=series)
+
+
+def read_us_historical_intraday_trend(
+    db: Session, *, symbol: str, trade_date: date | str, evaluated_at: datetime,
+    session_scope: str = "regular", interval: str = "1m",
+) -> dict:
+    """Project one explicitly completed session without current-quote fallback."""
+    start, _ = completed_intraday_window(trade_date, now=evaluated_at, session_scope=session_scope)
+    read = USIntradayMarketPlatform(db).read_intraday_bars_for_trade_date(
+        symbol=symbol, trade_date=start.date(), bars=1000, now=evaluated_at,
+    )
+    resolved = read.result.resolved
+    regular_coverage = regular_intraday_coverage([bar.start_at for bar in resolved.bars], trade_date=start.date())
+    points = []
+    for bar in resolved.bars:
+        session = us_session_for_timestamp(bar.start_at)
+        if session not in {MarketSession.CONTINUOUS, MarketSession.PRE_OPEN, MarketSession.POST_CLOSE}:
+            continue
+        if session_scope == "regular" and session is not MarketSession.CONTINUOUS:
+            continue
+        if session_scope == "extended" and session is MarketSession.CONTINUOUS:
+            continue
+        points.append({
+            "time": bar.start_at.isoformat(), "price": float(bar.close_price),
+            "open": float(bar.open_price), "high": float(bar.high_price), "low": float(bar.low_price),
+            "volume": float(bar.volume.value) if bar.volume else None,
+            "session": "regular" if session is MarketSession.CONTINUOUS else "pre_market" if session is MarketSession.PRE_OPEN else "after_hours",
+            "finalized": bar.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED},
+            "is_partial": bar.finalization not in {BarFinalization.FINAL, BarFinalization.CORRECTED},
+        })
+    points.sort(key=lambda point: point["time"])
+    complete = session_scope == "regular" and regular_coverage["coverage_status"] == "complete" and all(point["finalized"] for point in points)
+    status = "historical" if complete else "partial" if points else "missing"
+    source_status = {
+        "status": status, "provider": resolved.health.selected_provider,
+        "source": resolved.health.selected_source, "is_live": False, "is_realtime": False,
+        "facts_usable": resolved.health.facts_usable, "research_usable": resolved.health.research_usable and complete,
+        "decision_usable": False, "event_trade_date": start.date().isoformat(),
+        "requested_trade_date": start.date().isoformat(),
+        "is_historical": True, "is_partial": not complete,
+        "session_coverage": regular_coverage,
+        "selected_event_at": resolved.health.selected_event_at.isoformat() if resolved.health.selected_event_at else None,
+    }
+    payload = aggregate_intraday_payload({
+        "symbol": symbol, "points": points, "point_count": len(points),
+        "latest_point": points[-1] if points else None, "trade_date": start.date().isoformat(),
+        "session_scope": session_scope, "interval": "1m", "source": resolved.health.selected_source,
+    }, interval=interval, session_scope=session_scope)
+    payload.update(
+        requested_trade_date=start.date().isoformat(), status=status, is_partial=not complete,
+        is_live=False, is_realtime=False, decision_usable=False,
+        facts_usable=resolved.health.facts_usable, research_usable=source_status["research_usable"],
+        source_status=source_status, bar_source_status=source_status,
+        session_coverage={"trade_date": start.date().isoformat(), "requested_scope": session_scope, **regular_coverage},
+        warnings=list(resolved.health.limitations) + ([] if complete else ["Historical intraday session coverage is incomplete."]),
+    )
+    for point in payload["points"]:
+        point["decision_usable"] = False
+        point["volume_based_decision_usable"] = False
+    payload["latest_point"] = payload["points"][-1] if payload["points"] else None
+    return payload
 
 
 __all__ = [

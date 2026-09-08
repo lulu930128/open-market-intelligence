@@ -23,7 +23,10 @@ from app.ai.market_payload_contract import (
 from app.db.models import StockMaster
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.index_resolution import project_taiwan_index_headline
-from app.market.taiwan_industries import normalize_tw_industry_label
+from app.market.taiwan_industries import (
+    canonical_tw_sector_identity,
+    normalize_tw_industry_label,
+)
 from app.market.trading_calendar import (
     taiwan_market_session_phase,
 )
@@ -102,6 +105,11 @@ def _compact_source_health(value: dict[str, Any]) -> dict[str, Any]:
         "as_of": value.get("generated_at") or value.get("as_of"),
         "summary": summary,
         "warnings": list(value.get("warnings") or []),
+        "filters": dict(value.get("filters") or {}),
+        "entries": list(value.get("entries") or []),
+        "returned_count": value.get("returned_count"),
+        "truncated": value.get("truncated", False),
+        "is_partial": value.get("is_partial", False),
     }
 
 
@@ -813,12 +821,51 @@ def _market_breadth_from_index_summary(
             )
         breadth["classified_count"] = classified_count
         breadth["unknown_count"] = unknown_count
+        received_unclassified_count = int(
+            breadth.get("received_unclassified_count") or 0
+        )
+        not_received_count = int(
+            breadth.get("not_received_count")
+            if breadth.get("not_received_count") is not None
+            else breadth.get("missing_count") or 0
+        )
+        breadth["received_unclassified_count"] = received_unclassified_count
+        breadth["not_received_count"] = not_received_count
+        breadth["missing_count"] = not_received_count
+        breadth["partition_total"] = (
+            classified_count
+            + received_unclassified_count
+            + not_received_count
+        )
+        supplied_reasons = breadth.get("coverage_reason_counts")
+        reason_counts = (
+            {
+                str(key): int(value)
+                for key, value in supplied_reasons.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+            if isinstance(supplied_reasons, dict)
+            else {}
+        )
+        if sum(reason_counts.values()) != universe_count:
+            reason_counts = {
+                "advance": advance_count,
+                "decline": decline_count,
+                "unchanged": unchanged_count,
+                "valid_no_trade": 0,
+                "suspended_or_not_tradable": 0,
+                "provider_missing": not_received_count,
+                "mapping_error": 0,
+                "unknown": received_unclassified_count,
+            }
+        breadth["coverage_reason_counts"] = reason_counts
         breadth["reconciliation_status"] = (
             "balanced"
             if (
                 universe_count > 0
                 and classified_count == coverage_count
                 and coverage_count + unknown_count == universe_count
+                and breadth["partition_total"] == universe_count
                 and not coverage_overflow
             )
             else "partial"
@@ -878,6 +925,27 @@ def _market_breadth_from_index_summary(
     universe_count = _sum_count("universe_count")
     classified_count = advance_count + decline_count + unchanged_count
     unknown_count = _sum_count("unknown_count")
+    received_unclassified_count = _sum_count(
+        "received_unclassified_count"
+    )
+    not_received_count = _sum_count("not_received_count")
+    coverage_reason_keys = {
+        str(key)
+        for item in breadth_by_market.values()
+        for key in (
+            item.get("coverage_reason_counts", {}).keys()
+            if isinstance(item.get("coverage_reason_counts"), dict)
+            else ()
+        )
+    }
+    aggregate_coverage_reason_counts = {
+        key: sum(
+            int(item.get("coverage_reason_counts", {}).get(key) or 0)
+            for item in breadth_by_market.values()
+            if isinstance(item.get("coverage_reason_counts"), dict)
+        )
+        for key in sorted(coverage_reason_keys)
+    }
     comparison_count = advance_count + decline_count
     trade_dates = {
         str(item.get("trade_date"))
@@ -930,7 +998,11 @@ def _market_breadth_from_index_summary(
         auction_breadth = {
             "market": "TW",
             "status": (
-                "provisional"
+                "stale"
+                if "stale" in auction_statuses
+                else "partial"
+                if missing_markets or "missing" in auction_statuses
+                else "provisional"
                 if "provisional" in auction_statuses
                 else "unavailable"
                 if "unavailable" in auction_statuses
@@ -964,11 +1036,17 @@ def _market_breadth_from_index_summary(
                 0,
             ),
             "price_semantics": "auction_indicative",
-            "is_provisional": "provisional" in auction_statuses,
+            "is_provisional": True,
             "decision_usable": False,
-            "source": "twse_mis_pz_ts",
+            "source": "canonical_auction_breadth",
+            "sources": sorted({str(item["source"]) for item in auction_components.values() if item.get("source")}),
+            "missing_markets": [market for market in ("TWSE", "TPEX")
+                                if market not in auction_components or auction_components[market].get("status") == "missing"],
             "markets": auction_components,
         }
+        if not any(item.get("universe_count") is not None for item in auction_components.values()):
+            for key in ("advance_count", "decline_count", "unchanged_count", "coverage_count", "universe_count", "unknown_count"):
+                auction_breadth[key] = None
     trade_value_included_markets = [
         market
         for market, item in breadth_by_market.items()
@@ -1026,6 +1104,13 @@ def _market_breadth_from_index_summary(
         "as_of": snapshot_as_of,
         "snapshot_as_of": snapshot_as_of,
         "market_session": market_session,
+        "session_semantics": (
+            "latest_completed_session"
+            if breadth_by_market and all(
+                item.get("session_semantics") == "latest_completed_session"
+                for item in breadth_by_market.values()
+            ) else "current_session"
+        ),
         "price_semantics": (
             next(iter(component_price_semantics))
             if len(component_price_semantics) == 1
@@ -1062,11 +1147,26 @@ def _market_breadth_from_index_summary(
         ),
         "classified_count": classified_count,
         "unknown_count": unknown_count,
+        "received_unclassified_count": received_unclassified_count,
+        "not_received_count": not_received_count,
+        "missing_count": not_received_count,
+        "coverage_reason_counts": aggregate_coverage_reason_counts,
+        "partition_total": (
+            classified_count
+            + received_unclassified_count
+            + not_received_count
+        ),
         "reconciliation_status": (
             "balanced"
             if universe_count > 0
             and classified_count == coverage_count
             and coverage_count + unknown_count == universe_count
+            and (
+                classified_count
+                + received_unclassified_count
+                + not_received_count
+                == universe_count
+            )
             and all(
                 item.get("reconciliation_status") == "balanced"
                 for item in breadth_by_market.values()
@@ -2189,8 +2289,7 @@ def _sample_sector_capability(
 ) -> dict[str, Any]:
     rows = [
         {
-            "sector_id": str(item.get("industry") or ""),
-            "name": item.get("industry"),
+            **canonical_tw_sector_identity(item.get("industry")),
             "trade_date": as_of,
             "change_pct": item.get("average_change_pct"),
             "advance_count": item.get("advance_count"),
@@ -2375,7 +2474,6 @@ def read_market_overview(
     dependencies: TaiwanMarketDependencies,
 ) -> dict[str, Any]:
     generated_at = dependencies.now()
-    latest_trade_date = dependencies.market_service.get_latest_trade_date(db)
     missing: list[str] = []
     warnings: list[str] = []
     source_refs: list[dict[str, Any]] = []
@@ -2413,14 +2511,23 @@ def read_market_overview(
         )
     source_health_requested = (
         "source.health" in requested_capabilities
+        or "diagnostics.source_health" in requested_capabilities
         or "source_health" in requested_domains
+    )
+    source_health_only = bool(
+        source_health_requested
+        and requested_domains <= {"source_health", "freshness"}
+        and requested_capabilities <= {
+            "target.identity", "source.health", "diagnostics.source_health", "data.freshness",
+        }
     )
     selective_request = bool(requested_domains)
     explicit_domain_selection = data_params.get("explicit_domain_selection") is True
 
     def wants(domain: str) -> bool:
         return (
-            domain not in excluded_domains
+            not source_health_only
+            and domain not in excluded_domains
             and (not selective_request or domain in requested_domains)
         )
 
@@ -2564,10 +2671,20 @@ def read_market_overview(
     source_health: dict[str, Any] = {}
     if source_health_requested:
         try:
+            health_parameters = _capability_parameters(data_params, "diagnostics.source_health")
+            health_limits = data_params.get("capability_limits") or {}
+            selection_limit = health_limits.get("diagnostics.source_health") or health_limits.get("source.health")
+            build_limit = int(health_parameters.get("limit") or selection_limit or limit)
+            if selection_limit is not None:
+                build_limit = min(build_limit, int(selection_limit))
             source_health = dependencies.build_taiwan_source_health(
                 db,
                 now=generated_at,
                 sync_snapshots=False,
+                limit=max(1, min(build_limit, 500)),
+                dataset=health_parameters.get("dataset"),
+                stock_id=health_parameters.get("stock_id"),
+                index_id=health_parameters.get("index_id"),
             )
         except Exception as exc:
             source_health = {
@@ -2580,6 +2697,23 @@ def read_market_overview(
                 "provider_error": f"{type(exc).__name__}: {exc}",
             }
             warnings.extend(source_health["warnings"])
+    if source_health_only:
+        compact_health = _compact_source_health(source_health)
+        envelope = {
+            "kind": "taiwan_market_source_health",
+            "generated_at": generated_at,
+            "as_of": compact_health.get("as_of"),
+            "data": {
+                "source_health": source_health,
+                "compact": {"source_health": compact_health},
+            },
+            "missing": [],
+            "warnings": list(compact_health.get("warnings") or []),
+            "source_refs": [{"type": "derived", "name": "app.market.source_health"}],
+        }
+        return _with_evidence_passport(envelope, freshness={"status": compact_health["status"]})
+
+    latest_trade_date = dependencies.market_service.get_latest_trade_date(db)
     for source_ref in cross_market.get("source_refs") or []:
         if isinstance(source_ref, dict):
             _append_source_ref_once(source_refs, source_ref)

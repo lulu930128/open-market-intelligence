@@ -9,6 +9,7 @@
 - [Quality Bar](../product/QualityBar.md)：資料、架構、AI、UX 與驗證品質門檻。
 - [Backend Architecture](BackendArchitecture.md)：dependency direction、ownership、transaction、health 與 migration 原則。
 - [OMI Decision Contract](OmiDecisionContract.md)：唯一 outward AI decision contract。
+- [Atlas Company News](AtlasCompanyNews.md)：OLA 個股新聞 Document 的唯讀 API 與 omi.ask 整合。
 - [Financial Date Semantics](FinancialDateSemantics.md)：財務期間與日期語意。
 - [Market Temporal Contract](MarketTemporalContract.md)：Market Session、item finalization、authority、release、reconciliation 與 freshness 的正交 axes。
 - [Radar v2](RadarV2.md)：Radar contract、evaluation 與 legacy audit boundary。

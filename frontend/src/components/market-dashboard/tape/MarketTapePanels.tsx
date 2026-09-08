@@ -315,7 +315,7 @@ function USMarketTapeCard({
               ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${
                   snapshot.source === "daily"
                     ? t("dashboard.marketIndex.daily")
-                    : t("statusLabels.intraday")
+                    : t(`usStockDetail.extendedHours.phases.${snapshot.marketSession ?? "unknown"}`)
                 }`
               : t("dashboard.marketIndex.waitingData")}
           </div>

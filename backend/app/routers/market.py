@@ -75,6 +75,8 @@ from app.market.overnight_impact import (
 from app.market.technical_report import build_stock_technical_report
 from app.market.next_session_plan import build_tw_stock_next_session_plan
 from app.market.next_session_plan_schemas import TaiwanNextSessionPlanRead
+from app.market.stock_price_map import build_tw_stock_price_map
+from app.market.stock_price_map_schemas import StockPriceMapRead
 from app.market.broker_branch import (
     BrokerBranchFetchError,
     get_broker_branch_trade_summary,
@@ -1470,12 +1472,14 @@ def get_index_contract_replay(
 )
 def get_stock_next_session_plan(
     stock_id: str,
+    candidate_close: float | None = Query(default=None, gt=0),
     db: Session = Depends(get_db),
 ):
     try:
         return build_tw_stock_next_session_plan(
             db=db,
             stock_id=stock_id,
+            candidate_close=candidate_close,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -1525,6 +1529,28 @@ def get_stock_overnight_impact(
             db=db,
             stock_id=stock_id,
             suppress_stale_signal=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/technical/{stock_id}/price-map",
+    response_model=StockPriceMapRead,
+)
+def get_stock_price_map(
+    stock_id: str,
+    candidate_close: float | None = Query(default=None, gt=0),
+    db: Session = Depends(get_db),
+):
+    try:
+        return build_tw_stock_price_map(
+            db=db,
+            stock_id=stock_id,
+            candidate_close=candidate_close,
         )
     except ValueError as exc:
         raise HTTPException(

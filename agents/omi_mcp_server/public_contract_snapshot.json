@@ -369,6 +369,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.company_documents",
                 "news.events",
                 "ownership.distribution",
                 "ownership.insider_transactions",
@@ -393,6 +394,7 @@
                 "technical.divergence",
                 "technical.fibonacci",
                 "technical.indicators",
+                "technical.price_map",
                 "technical.relative_strength",
                 "technical.structure",
                 "technical.swings",
@@ -457,6 +459,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.company_documents",
                 "news.events",
                 "ownership.distribution",
                 "ownership.insider_transactions",
@@ -481,6 +484,7 @@
                 "technical.divergence",
                 "technical.fibonacci",
                 "technical.indicators",
+                "technical.price_map",
                 "technical.relative_strength",
                 "technical.structure",
                 "technical.swings",
@@ -548,6 +552,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.company_documents",
                 "news.events",
                 "ownership.distribution",
                 "ownership.insider_transactions",
@@ -572,6 +577,7 @@
                 "technical.divergence",
                 "technical.fibonacci",
                 "technical.indicators",
+                "technical.price_map",
                 "technical.relative_strength",
                 "technical.structure",
                 "technical.swings",
@@ -603,6 +609,32 @@
                     "maximum": 10,
                     "minimum": 1,
                     "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "diagnostics.source_health": {
+                "additionalProperties": false,
+                "properties": {
+                  "dataset": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "index_id": {
+                    "enum": [
+                      "TAIEX",
+                      "TPEX"
+                    ],
+                    "type": "string"
+                  },
+                  "limit": {
+                    "maximum": 500,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "stock_id": {
+                    "minLength": 1,
+                    "type": "string"
                   }
                 },
                 "type": "object"
@@ -790,6 +822,16 @@
                 },
                 "type": "object"
               },
+              "news.company_documents": {
+                "additionalProperties": false,
+                "properties": {
+                  "cursor": {
+                    "maxLength": 2000,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
               "screening.intraday": {
                 "additionalProperties": false,
                 "properties": {
@@ -953,6 +995,16 @@
                   }
                 },
                 "type": "object"
+              },
+              "technical.price_map": {
+                "additionalProperties": false,
+                "properties": {
+                  "candidate_close": {
+                    "exclusiveMinimum": 0,
+                    "type": "number"
+                  }
+                },
+                "type": "object"
               }
             },
             "type": "object"
@@ -997,6 +1049,7 @@
                 "market.sectors",
                 "market.short_volume",
                 "market.volume_state",
+                "news.company_documents",
                 "news.events",
                 "ownership.distribution",
                 "ownership.insider_transactions",
@@ -1021,6 +1074,7 @@
                 "technical.divergence",
                 "technical.fibonacci",
                 "technical.indicators",
+                "technical.price_map",
                 "technical.relative_strength",
                 "technical.structure",
                 "technical.swings",
@@ -1187,6 +1241,7 @@
           "tw.quote.snapshot.v2"
         ],
         "default_fields": [
+          "current_price",
           "kind",
           "status",
           "schema_version",
@@ -1202,6 +1257,9 @@
           "latest_price",
           "last_price",
           "price_available",
+          "mid_price_estimate",
+          "mid_price_estimate_source",
+          "mid_price_estimate_usable",
           "last_trade_available",
           "last_trade_price",
           "last_trade_time",
@@ -1375,6 +1433,7 @@
         "domain": "quote",
         "event_time_basis": "capability_defined",
         "fields": [
+          "current_price",
           "kind",
           "status",
           "schema_version",
@@ -1390,6 +1449,9 @@
           "latest_price",
           "last_price",
           "price_available",
+          "mid_price_estimate",
+          "mid_price_estimate_source",
+          "mid_price_estimate_usable",
           "last_trade_available",
           "last_trade_price",
           "last_trade_time",
@@ -1618,6 +1680,9 @@
         "capability_id": "quote.order_book",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "facts_usable",
+          "research_usable",
+          "decision_usable",
           "status",
           "available",
           "live_available",
@@ -1655,6 +1720,9 @@
         "domain": "quote",
         "event_time_basis": "provider_event_time",
         "fields": [
+          "facts_usable",
+          "research_usable",
+          "decision_usable",
           "kind",
           "status",
           "available",
@@ -1860,6 +1928,8 @@
           "finalization",
           "official_daily",
           "freshness",
+          "facts_usable",
+          "research_usable",
           "decision_usable",
           "reconciliation_status",
           "limitations"
@@ -2040,11 +2110,19 @@
           "original_point_count",
           "session",
           "session_scope",
+          "requested_trade_date",
+          "session_coverage",
+          "is_partial",
+          "trade_date",
+          "expected_trade_date",
+          "materialization_state",
+          "is_historical",
           "session_phase",
           "market_phase",
           "capability_expectation",
           "current_source_status",
           "bar_source_status",
+          "source_status",
           "change_reference_price",
           "change_reference_type",
           "change_reference_trade_date",
@@ -2191,11 +2269,19 @@
           "original_point_count",
           "session",
           "session_scope",
+          "requested_trade_date",
+          "session_coverage",
+          "is_partial",
+          "trade_date",
+          "expected_trade_date",
+          "materialization_state",
+          "is_historical",
           "session_phase",
           "market_phase",
           "capability_expectation",
           "current_source_status",
           "bar_source_status",
+          "source_status",
           "change_reference_price",
           "change_reference_type",
           "change_reference_trade_date",
@@ -2602,7 +2688,20 @@
           "limitations",
           "quality",
           "input_quality",
-          "lineage"
+          "lineage",
+          "decision_usable",
+          "decision_snapshot",
+          "current_period",
+          "momentum_confirmation",
+          "volatility_context",
+          "breakout_context",
+          "swing_context",
+          "fibonacci_context",
+          "cost_context",
+          "relative_strength",
+          "scenarios",
+          "corporate_action",
+          "warnings"
         ],
         "default_limit": 20,
         "deprecated": false,
@@ -2664,7 +2763,20 @@
           "limitations",
           "quality",
           "input_quality",
-          "lineage"
+          "lineage",
+          "decision_usable",
+          "decision_snapshot",
+          "current_period",
+          "momentum_confirmation",
+          "volatility_context",
+          "breakout_context",
+          "swing_context",
+          "fibonacci_context",
+          "cost_context",
+          "relative_strength",
+          "scenarios",
+          "corporate_action",
+          "warnings"
         ],
         "fill_operations": {},
         "frequency": "daily",
@@ -2679,6 +2791,9 @@
         },
         "paths": [
           "data.resolved_research.technical_structure",
+          "compact.technical_advanced.structure_v2",
+          "data.technical_advanced.structure_v2",
+          "data.technical_evidence.structure_v2",
           "compact.technical",
           "compact.analysis",
           "data.technical",
@@ -3095,6 +3210,7 @@
           "source_granularity",
           "confidence",
           "price_basis",
+          "volume_unit",
           "lookback_bars",
           "poc",
           "val",
@@ -3119,6 +3235,7 @@
           "source_granularity",
           "confidence",
           "price_basis",
+          "volume_unit",
           "lookback_bars",
           "source_row_count",
           "poc",
@@ -3305,6 +3422,101 @@
         "slot": "technical",
         "title": "Taiwan stock relative strength versus TAIEX",
         "unit_semantics": "field_defined",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "technical.price_map",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "version",
+          "market",
+          "stock_id",
+          "stock_name",
+          "status",
+          "decision_usable",
+          "generated_at",
+          "basis_revision",
+          "evidence_timeframes",
+          "reference",
+          "axis",
+          "markers",
+          "technical",
+          "methodology",
+          "zones",
+          "nearest_upside",
+          "nearest_downside",
+          "decision_changes",
+          "candidate",
+          "corporate_action",
+          "missing",
+          "warnings",
+          "limitations",
+          "source_refs"
+        ],
+        "default_limit": 12,
+        "deprecated": false,
+        "description": "Backend-owned completed-daily price zones, reference, methodology, decision changes, and corporate-action limitations.",
+        "domain": "technical",
+        "event_time_basis": "latest_resolved_completed_market_period",
+        "fields": [
+          "kind",
+          "version",
+          "market",
+          "stock_id",
+          "stock_name",
+          "status",
+          "decision_usable",
+          "generated_at",
+          "basis_revision",
+          "evidence_timeframes",
+          "reference",
+          "axis",
+          "markers",
+          "technical",
+          "methodology",
+          "parameter_contract",
+          "levels",
+          "zones",
+          "nearest_upside",
+          "nearest_downside",
+          "decision_changes",
+          "candidate",
+          "corporate_action",
+          "missing",
+          "warnings",
+          "limitations",
+          "source_refs"
+        ],
+        "fill_operations": {},
+        "frequency": "daily",
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_close": {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.price_map",
+          "data.price_map"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.stock.price_map.v3",
+        "scopes": [
+          "stock"
+        ],
+        "side_effect_policy": "read_only",
+        "slot": "technical",
+        "title": "Taiwan stock canonical price map",
+        "unit_semantics": "TWD_per_share_and_percent_distance",
         "writes_cache": false
       },
       {
@@ -4141,7 +4353,18 @@
           "result_count",
           "total_count",
           "cache_status",
+          "cache_fetched_at",
           "empty_result_is_valid",
+          "facts_usable",
+          "decision_usable",
+          "coverage_status",
+          "coverage_start",
+          "coverage_end",
+          "checked_through_date",
+          "relevant_analysis_start",
+          "relevant_analysis_end",
+          "source_scope",
+          "absence_semantics",
           "warnings"
         ],
         "default_limit": 20,
@@ -4173,7 +4396,18 @@
           "result_count",
           "total_count",
           "cache_status",
+          "cache_fetched_at",
           "empty_result_is_valid",
+          "facts_usable",
+          "decision_usable",
+          "coverage_status",
+          "coverage_start",
+          "coverage_end",
+          "checked_through_date",
+          "relevant_analysis_start",
+          "relevant_analysis_end",
+          "source_scope",
+          "absence_semantics",
           "warnings",
           "fetched_at"
         ],
@@ -4214,6 +4448,94 @@
         "slot": "news_events",
         "title": "corporate.actions",
         "unit_semantics": "field_defined",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "news.company_documents",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "schema_version",
+          "status",
+          "provider",
+          "stock_id",
+          "market",
+          "stock",
+          "items",
+          "contract_version",
+          "profile",
+          "generated_at",
+          "atlas_generated_at",
+          "freshness",
+          "coverage",
+          "warnings",
+          "pagination",
+          "reason_code",
+          "returned_count",
+          "facts_usable",
+          "decision_usable",
+          "absence_interpretation",
+          "source_refs",
+          "missing",
+          "limitations"
+        ],
+        "default_limit": 20,
+        "deprecated": false,
+        "description": "Exact stock-linked Atlas Documents; preserve original titles, rights and attribution. Supplemental evidence only; no decision score changes.",
+        "domain": null,
+        "event_time_basis": "atlas_document_published_and_observed_timestamps",
+        "fields": [
+          "schema_version",
+          "status",
+          "provider",
+          "stock_id",
+          "market",
+          "stock",
+          "items",
+          "contract_version",
+          "profile",
+          "generated_at",
+          "atlas_generated_at",
+          "freshness",
+          "coverage",
+          "warnings",
+          "pagination",
+          "reason_code",
+          "returned_count",
+          "facts_usable",
+          "decision_usable",
+          "absence_interpretation",
+          "source_refs",
+          "missing",
+          "limitations"
+        ],
+        "fill_operations": {},
+        "frequency": "atlas_scheduler_owned",
+        "markets": [],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "maxLength": 2000,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "paths": [
+          "compact.company_news",
+          "data.company_news"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "omi.external.company_news.v1",
+        "scopes": [
+          "stock"
+        ],
+        "side_effect_policy": "read_only_local_service",
+        "slot": "company_news",
+        "title": "Company news Documents",
+        "unit_semantics": "source_attributed_company_news_documents",
         "writes_cache": false
       },
       {
@@ -4364,6 +4686,9 @@
           "version",
           "state_contract_version",
           "market_session",
+          "session_semantics",
+          "observation_market_session",
+          "finalization",
           "price_semantics",
           "decision_usable",
           "is_provisional",
@@ -4396,6 +4721,11 @@
           "coverage_ratio",
           "classified_count",
           "unknown_count",
+          "received_unclassified_count",
+          "not_received_count",
+          "missing_count",
+          "coverage_reason_counts",
+          "partition_total",
           "reconciliation_status",
           "is_full_market",
           "universe_type",
@@ -4425,6 +4755,9 @@
           "version",
           "state_contract_version",
           "market_session",
+          "session_semantics",
+          "observation_market_session",
+          "finalization",
           "price_semantics",
           "decision_usable",
           "is_provisional",
@@ -4457,6 +4790,11 @@
           "coverage_ratio",
           "classified_count",
           "unknown_count",
+          "received_unclassified_count",
+          "not_received_count",
+          "missing_count",
+          "coverage_reason_counts",
+          "partition_total",
           "reconciliation_status",
           "reconciliation_formula",
           "universe_definition",
@@ -5118,6 +5456,11 @@
         "capability_id": "market.sectors",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
           "status",
           "as_of",
           "observed_trade_date",
@@ -5145,6 +5488,11 @@
         "domain": "sectors",
         "event_time_basis": "taiwan_provider_event_time_or_completed_trade_date",
         "fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
           "kind",
           "version",
           "status",
@@ -5478,6 +5826,8 @@
           "top_industries",
           "weak_industries",
           "industry_strength_label",
+          "deprecated",
+          "replacement_capabilities",
           "warnings"
         ],
         "default_limit": 20,
@@ -5509,6 +5859,8 @@
           "top_industries",
           "weak_industries",
           "industry_strength_label",
+          "deprecated",
+          "replacement_capabilities",
           "warnings"
         ],
         "fill_operations": {},
@@ -5840,6 +6192,7 @@
           "complete_window_count",
           "partial_window_count",
           "missing_count",
+          "reconciliation",
           "coverage_ratio",
           "is_full_market_request",
           "is_full_requested_universe",
@@ -5875,6 +6228,7 @@
           "complete_window_count",
           "partial_window_count",
           "missing_count",
+          "reconciliation",
           "coverage_ratio",
           "is_full_market_request",
           "is_full_requested_universe",
@@ -5917,7 +6271,18 @@
         "capability_id": "screening.intraday",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
+          "expected_trade_date",
+          "price_semantics",
+          "applicability_status",
+          "reason_code",
           "status",
+          "freshness_status",
+          "session_semantics",
           "metric",
           "unit",
           "sort_order",
@@ -5938,9 +6303,20 @@
         "domain": "screening",
         "event_time_basis": "taiwan_provider_event_time",
         "fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
+          "expected_trade_date",
+          "price_semantics",
+          "applicability_status",
+          "reason_code",
           "kind",
           "version",
           "status",
+          "freshness_status",
+          "session_semantics",
           "metric",
           "unit",
           "frequency",
@@ -6049,6 +6425,11 @@
         "capability_id": "market.hot_groups",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
           "status",
           "groups",
           "group_count",
@@ -6062,6 +6443,15 @@
           "trade_value_is_estimate",
           "membership_provenance",
           "observed_trade_date",
+          "expected_observation_date",
+          "latest_completed_trade_date",
+          "session_phase",
+          "session_semantics",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "current_for_requested_session",
+          "is_complete",
           "event_time",
           "computed_at",
           "data_mode",
@@ -6074,6 +6464,11 @@
         "domain": "screening",
         "event_time_basis": "taiwan_provider_event_time",
         "fields": [
+          "facts_usable_for_ranking",
+          "observation_received_freshness",
+          "last_trade_recency",
+          "intraday_research_usable",
+          "execution_grade_usable",
           "kind",
           "version",
           "status",
@@ -6089,6 +6484,15 @@
           "trade_value_is_estimate",
           "membership_provenance",
           "observed_trade_date",
+          "expected_observation_date",
+          "latest_completed_trade_date",
+          "session_phase",
+          "session_semantics",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "current_for_requested_session",
+          "is_complete",
           "event_time",
           "computed_at",
           "data_mode",
@@ -6282,7 +6686,11 @@
         "default_fields": [
           "status",
           "as_of",
+          "expected_trade_date",
           "is_stale",
+          "stale",
+          "release_status",
+          "retry",
           "options_chain",
           "large_traders",
           "term_structure",
@@ -6299,6 +6707,9 @@
           "as_of",
           "expected_trade_date",
           "is_stale",
+          "stale",
+          "release_status",
+          "retry",
           "options_chain",
           "large_traders",
           "term_structure",
@@ -7157,7 +7568,28 @@
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
-          "properties": {},
+          "properties": {
+            "dataset": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "index_id": {
+              "enum": [
+                "TAIEX",
+                "TPEX"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "stock_id": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "paths": [
@@ -7282,10 +7714,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "9975cde2e9731270d746b6ef192d564dfe37f17c6e6257d46249fd7730e2f3ee",
+    "x-omi-capability-registry-digest": "d15f7088ee79b38a5987d34c5bca10a0eae4b232ab4fe02e08be178a24082484",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "9975cde2e9731270d746b6ef192d564dfe37f17c6e6257d46249fd7730e2f3ee",
+    "x-omi-public-contract-digest": "d15f7088ee79b38a5987d34c5bca10a0eae4b232ab4fe02e08be178a24082484",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -7571,6 +8003,7 @@
     "technical.volume_profile",
     "technical.anchored_vwap",
     "technical.relative_strength",
+    "technical.price_map",
     "chips.institutional",
     "chips.margin",
     "broker_branch.summary",
@@ -7583,6 +8016,7 @@
     "cross_market.parity",
     "company.profile",
     "corporate.actions",
+    "news.company_documents",
     "news.events",
     "market.short_volume",
     "market.breadth",
@@ -7625,7 +8059,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "9975cde2e9731270d746b6ef192d564dfe37f17c6e6257d46249fd7730e2f3ee",
+  "digest": "d15f7088ee79b38a5987d34c5bca10a0eae4b232ab4fe02e08be178a24082484",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

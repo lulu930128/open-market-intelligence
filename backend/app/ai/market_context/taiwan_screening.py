@@ -197,12 +197,11 @@ def read_tw_screening_context(
     if intraday_snapshot is not None:
         screening["intraday"] = deepcopy(intraday_snapshot)
         freshness_by_capability["screening.intraday"] = {
-            "status": intraday_snapshot["status"],
-            "is_current": intraday_snapshot["status"] == "ready",
-            "facts_usable": intraday_snapshot["status"]
-            in {"ready", "partial"},
-            "intraday_research_usable": intraday_snapshot["status"]
-            in {"ready", "partial"},
+            "status": intraday_snapshot.get("freshness_status") or intraday_snapshot["status"],
+            "is_current": intraday_snapshot.get("freshness_status") in {"current", "latest_completed_session"},
+            "facts_usable": bool(intraday_snapshot.get("facts_usable")),
+            "facts_usable_for_ranking": bool(intraday_snapshot.get("facts_usable_for_ranking")),
+            "intraday_research_usable": bool(intraday_snapshot.get("intraday_research_usable")),
             "execution_grade_usable": False,
             "dataset": "taiwan_intraday_stock_state",
             "as_of": intraday_snapshot.get("event_time"),
@@ -220,11 +219,10 @@ def read_tw_screening_context(
         screening["hot_groups"] = deepcopy(hot_groups_snapshot)
         freshness_by_capability["market.hot_groups"] = {
             "status": hot_groups_snapshot["status"],
-            "is_current": hot_groups_snapshot["status"] == "ready",
-            "facts_usable": hot_groups_snapshot["status"]
-            in {"ready", "partial"},
-            "intraday_research_usable": hot_groups_snapshot["status"]
-            in {"ready", "partial"},
+            "is_current": hot_groups_snapshot.get("last_trade_recency") == "current" and hot_groups_snapshot.get("current_for_requested_session", hot_groups_snapshot.get("session_semantics") == "current_session"),
+            "facts_usable": bool(hot_groups_snapshot.get("facts_usable")),
+            "facts_usable_for_ranking": bool(hot_groups_snapshot.get("facts_usable_for_ranking")),
+            "intraday_research_usable": bool(hot_groups_snapshot.get("intraday_research_usable")),
             "execution_grade_usable": False,
             "dataset": "taiwan_intraday_stock_state",
             "as_of": hot_groups_snapshot.get("event_time"),
@@ -242,11 +240,10 @@ def read_tw_screening_context(
         market["sectors"] = deepcopy(sector_snapshot)
         freshness_by_capability["market.sectors"] = {
             "status": sector_snapshot["status"],
-            "is_current": sector_snapshot["status"] == "ready",
-            "facts_usable": sector_snapshot["status"]
-            in {"ready", "partial"},
-            "intraday_research_usable": sector_snapshot["status"]
-            in {"ready", "partial"},
+            "is_current": sector_snapshot.get("last_trade_recency") == "current" and sector_snapshot.get("current_for_requested_session", sector_snapshot.get("session_semantics") == "current_session"),
+            "facts_usable": bool(sector_snapshot.get("facts_usable")),
+            "facts_usable_for_ranking": bool(sector_snapshot.get("facts_usable_for_ranking")),
+            "intraday_research_usable": bool(sector_snapshot.get("intraday_research_usable")),
             "execution_grade_usable": False,
             "dataset": "taiwan_intraday_stock_state",
             "as_of": sector_snapshot.get("event_time")

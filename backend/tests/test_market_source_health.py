@@ -544,6 +544,10 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         )
         dimensions = quote["health_dimensions"]
         scheduler = dimensions["scheduler_contract"]
+        self.assertEqual(dimensions["operation_profile"], "acceptance_canary")
+        self.assertEqual(dimensions["scope"], "configured_canary")
+        self.assertEqual(dimensions["target_count"], 2)
+        self.assertFalse(dimensions["full_market"])
 
         self.assertNotEqual(quote["target"], "all")
         self.assertIsNone(quote["provider"])
@@ -592,6 +596,7 @@ class TaiwanSourceHealthTests(unittest.TestCase):
                 "resolve_taiwan_intraday_target_universe",
                 return_value={
                     "version": "tw.intraday.universe.v1",
+                    "operation_profile": "production_intraday",
                     "symbols": ["2330", "3711"],
                     "eligible_count": 2,
                     "selected_count": 2,
@@ -618,6 +623,10 @@ class TaiwanSourceHealthTests(unittest.TestCase):
             if entry["resource"] == "market_intraday_bar_1m"
         )
         dimensions = intraday["health_dimensions"]
+        self.assertEqual(dimensions["operation_profile"], "production_intraday")
+        self.assertEqual(dimensions["scope"], "bounded_tier_a")
+        self.assertEqual(dimensions["selected_count"], 2)
+        self.assertFalse(dimensions["full_market"])
         self.assertEqual(intraday["target"], "bounded_tier_a_universe")
         self.assertEqual(intraday["status"], "partial")
         self.assertFalse(intraday["ok"])

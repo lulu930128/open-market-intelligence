@@ -102,7 +102,7 @@ DOMAIN_HINTS = {
         "support",
         "resistance",
     ),
-    "quote": ("即時報價", "報價", "現價", "股價", "latest quote", "latest price"),
+    "quote": ("即時報價", "即時價", "報價", "現價", "股價", "quote", "latest price"),
     "intraday": ("分k", "分 k", "盤中", "intraday", "realtime", "real-time"),
     "chips": ("法人", "籌碼", "融資", "融券", "chips"),
     "fundamentals": ("營收", "財報", "基本面", "revenue", "fundamental"),
@@ -208,6 +208,12 @@ DOMAIN_HINTS["chips"] = (
 )
 
 CAPABILITY_HINTS = {
+    "quote.order_book": (
+        "五檔", "買五", "賣五", "委買", "委賣", "order book", "depth",
+    ),
+    "quote.auction": (
+        "試撮", "試搓", "盤前", "auction", "indicative",
+    ),
     "technical.indicators": (
         "rsi",
         "macd",
@@ -267,6 +273,13 @@ CAPABILITY_HINTS = {
         "相對強弱",
         "相對大盤",
     ),
+    "technical.price_map": (
+        "price map",
+        "price-map",
+        "價位地圖",
+        "價格地圖",
+        "支撐壓力地圖",
+    ),
     "quote.official_close": (
         "正式收盤價",
         "正式收盤",
@@ -312,6 +325,20 @@ CAPABILITY_HINTS = {
         "集保股權",
         "shareholding distribution",
         "ownership distribution",
+    ),
+}
+
+# These are semantic alternatives only. Target eligibility remains owned by the
+# executable capability registry; the NLP planner selects the first compatible
+# candidate and never teaches a stock capability to accept a market target.
+CAPABILITY_SCOPE_ALTERNATIVES = {
+    "chips.institutional": (
+        "market.institutional_flow",
+        "chips.institutional",
+    ),
+    "chips.margin": (
+        "market.margin_short",
+        "chips.margin",
     ),
 }
 
@@ -590,6 +617,9 @@ def _query_domains(
 
 def _query_capabilities(
     payload: AiAskRequest,
+    *,
+    scope_type: str,
+    target_market: str | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     question = payload.question.casefold()
     requested: list[str] = []
@@ -600,10 +630,26 @@ def _query_capabilities(
             if normalized_hint not in question:
                 continue
             negated = _hint_negation(question, normalized_hint)
+            candidates = CAPABILITY_SCOPE_ALTERNATIVES.get(
+                capability_id,
+                (capability_id,),
+            )
+            resolved_capability = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if capability_contract.capability_supported_for_target(
+                        candidate,
+                        scope_type=scope_type,
+                        target_market=target_market,
+                    )
+                ),
+                capability_id,
+            )
             if negated:
-                excluded.append(capability_id)
+                excluded.append(resolved_capability)
             else:
-                requested.append(capability_id)
+                requested.append(resolved_capability)
     excluded_set = set(excluded)
     return (
         tuple(
@@ -953,7 +999,11 @@ def build_query_plan(
         (
             requested_capabilities,
             excluded_selection_capabilities,
-        ) = _query_capabilities(payload)
+        ) = _query_capabilities(
+            payload,
+            scope_type=scope_type,
+            target_market=target_market,
+        )
         normalized_question = payload.question.casefold()
         restrictive = bool(
             requested_capabilities
@@ -1151,6 +1201,8 @@ def build_query_plan(
         and selected_capability_set
         & {
             "quote.snapshot",
+            "quote.order_book",
+            "quote.auction",
             "quote.session_close",
             "quote.official_close",
             "intraday.bars",
@@ -1159,6 +1211,8 @@ def build_query_plan(
         <= {
             "target.identity",
             "quote.snapshot",
+            "quote.order_book",
+            "quote.auction",
             "quote.session_close",
             "quote.official_close",
             "intraday.bars",
@@ -1181,6 +1235,8 @@ def build_query_plan(
                     allowed_capabilities={
                         "target.identity",
                         "quote.snapshot",
+                        "quote.order_book",
+                        "quote.auction",
                         "quote.session_close",
                         "quote.official_close",
                         "intraday.bars",
@@ -1247,9 +1303,9 @@ def build_query_plan(
     identity_only_selection = bool(
         scope_type == "stock"
         and has_explicit_capability_selection
-        and "target.identity" in selected_capability_set
+        and bool({"target.identity", "news.company_documents"} & selected_capability_set)
         and selected_capability_set
-        <= {"target.identity", "data.freshness", "news.events"}
+        <= {"target.identity", "data.freshness", "news.events", "news.company_documents"}
     )
     if identity_only_selection:
         return QueryPlan(
@@ -1304,6 +1360,7 @@ def build_query_plan(
         "technical.volume_profile",
         "technical.anchored_vwap",
         "technical.relative_strength",
+        "technical.price_map",
     }
     technical_only_selection = bool(
         scope_type == "stock"

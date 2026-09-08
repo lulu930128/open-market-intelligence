@@ -6,7 +6,7 @@ import {
   type StateSurfaceTone,
 } from "@/components/LoadingPlaceholders";
 import type { DataPanelTab } from "@/components/stock-detail/stockDetailTypes";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 
 export type DataPanelSurfaceTab = DataPanelTab | "etf";
 
@@ -15,6 +15,7 @@ export function StockDetailDisclosure({
   className = "",
   contentClassName = "",
   description,
+  defaultOpen = false,
   eyebrow,
   id,
   onOpen,
@@ -27,6 +28,7 @@ export function StockDetailDisclosure({
   className?: string;
   contentClassName?: string;
   description?: ReactNode;
+  defaultOpen?: boolean;
   eyebrow?: ReactNode;
   id?: string;
   onOpen?: () => void;
@@ -35,9 +37,16 @@ export function StockDetailDisclosure({
   title: ReactNode;
   trailing?: ReactNode;
 }) {
+  const initialized = useRef(false);
   return (
     <details
       id={id}
+      ref={(node) => {
+        if (node && !initialized.current) {
+          node.open = defaultOpen;
+          initialized.current = true;
+        }
+      }}
       className={`group/section-disclosure ${className}`}
       data-testid={testId}
       onToggle={(event) => {

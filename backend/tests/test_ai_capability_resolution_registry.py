@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from app.ai import (
     agentic_planning,
@@ -34,7 +35,7 @@ class CapabilityResolutionRegistryTest(unittest.TestCase):
         registry = capability_contract.CAPABILITY_RESOLUTION_REGISTRY
         self.assertEqual(set(registry), expected)
         self.assertEqual(len(registry), len(expected))
-        self.assertEqual(len(capability_contract.CAPABILITY_SPECS), 68)
+        self.assertEqual(len(capability_contract.CAPABILITY_SPECS), len(capability_contract.CAPABILITIES))
 
     def test_registry_entries_use_supported_statuses_and_modes(self) -> None:
         for entry in capability_contract.CAPABILITY_RESOLUTION_REGISTRY.values():
@@ -241,16 +242,21 @@ class CapabilityResolutionRegistryTest(unittest.TestCase):
     def test_capability_status_keeps_provider_and_full_registry_views_separate(
         self,
     ) -> None:
-        result = capability_context.read_capability_status(
-            now=datetime.now(timezone.utc)
-        )
+        with patch.object(
+            capability_context.settings,
+            "omi_atlas_shadow_enabled",
+            False,
+        ):
+            result = capability_context.read_capability_status(
+                now=datetime.now(timezone.utc)
+            )
 
-        self.assertEqual(result["summary"]["provider_contract_count"], 15)
-        self.assertEqual(result["summary"]["registry_capability_count"], 68)
-        self.assertEqual(result["summary"]["registry_resolution_count"], 218)
-        self.assertEqual(len(result["data"]["provider_contracts"]), 15)
-        self.assertEqual(len(result["data"]["capability_registry"]), 68)
-        self.assertEqual(len(result["data"]["resolutions"]), 218)
+        self.assertEqual(result["summary"]["provider_contract_count"], len(capability_context.CAPABILITIES))
+        self.assertEqual(result["summary"]["registry_capability_count"], len(capability_contract.CAPABILITIES))
+        self.assertEqual(result["summary"]["registry_resolution_count"], len(capability_contract.CAPABILITY_RESOLUTION_REGISTRY))
+        self.assertEqual(len(result["data"]["provider_contracts"]), len(capability_context.CAPABILITIES))
+        self.assertEqual(len(result["data"]["capability_registry"]), len(capability_contract.CAPABILITIES))
+        self.assertEqual(len(result["data"]["resolutions"]), len(capability_contract.CAPABILITY_RESOLUTION_REGISTRY))
         blocked_providers = {
             item["id"]: item
             for item in result["data"]["provider_contracts"]

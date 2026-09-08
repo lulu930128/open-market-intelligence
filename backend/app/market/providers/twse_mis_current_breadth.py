@@ -19,9 +19,11 @@ from app.market.providers.twse_mis_guard import (
 from app.market.tw_market_breadth_contract import (
     TW_MARKET_BREADTH_STOCK_STATE_VERSION,
     TW_MARKET_BREADTH_VERSION,
+    classify_twse_mis_breadth_coverage,
     resolve_twse_mis_breadth_price_state,
 )
 from app.market_data.contracts import OperationalStatus
+from app.market.trading_calendar import TAIWAN_SESSION_CLOSE_TIME, TAIWAN_CLOSE_RESOLUTION_TIME
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -83,6 +85,7 @@ def _classify_message(
         snapshot_as_of=snapshot_at,
         last_trade_price=message.get("z"),
         cumulative_volume_lots=message.get("v"),
+        last_trade_volume_lots=message.get("tv"),
         indicative_price=message.get("pz"),
         indicative_volume_lots=message.get("ps"),
         indicative_status=message.get("ts"),
@@ -221,7 +224,7 @@ def _cache(market: str, payload: dict[str, object] | None) -> None:
         "expires_at": monotonic() + _CACHE_TTL_SECONDS,
         "payload": payload,
     }
-    if payload is not None:
+    if payload is not None and payload.get("failed_batch_count", 0) == 0:
         _LAST_GOOD[market] = payload
 
 
@@ -232,6 +235,8 @@ def _stale(market: str, *, circuit_open: bool) -> dict[str, object] | None:
     guard = TWSE_MIS_PROVIDER_GUARD.snapshot()
     return {
         **payload,
+        "acquisition_fallback": True,
+        "latest_attempt_status": "blocked" if circuit_open else "failed",
         "source": "twse_mis_live_breadth_stale",
         "warnings": [
             *[str(item) for item in payload.get("warnings") or []],
@@ -264,6 +269,7 @@ def _build_payload(
         if row is not None and row["code"] in code_set
     ]
     if not rows:
+        _STOCK_ROWS[market] = []
         return None
     _STOCK_ROWS[market] = [dict(row) for row in rows]
     received_codes = {str(row["code"]) for row in rows}
@@ -275,6 +281,10 @@ def _build_payload(
     not_received = max(universe - len(received_codes), 0)
     aggregate_unknown = max(universe - classified, 0)
     received_unclassified = max(aggregate_unknown - not_received, 0)
+    coverage_reason_counts = classify_twse_mis_breadth_coverage(
+        rows,
+        universe_count=universe,
+    )
     event_times = [row["as_of"] for row in rows if isinstance(row.get("as_of"), datetime)]
     price_times = [
         row["price_as_of"]
@@ -380,9 +390,18 @@ def _build_payload(
         "newest_price_as_of": max(price_times) if price_times else None,
         "coverage_count": classified,
         "classified_count": classified,
+        "closing_match_coverage_count": sum(
+            row.get("direction") in {"advance", "decline", "unchanged"}
+            and isinstance(row.get("price_as_of"), datetime)
+            and row["price_as_of"].date() == row.get("trade_date")
+            and TAIWAN_SESSION_CLOSE_TIME <= row["price_as_of"].time()
+            <= TAIWAN_CLOSE_RESOLUTION_TIME
+            for row in rows
+        ),
         "coverage_ratio": classified / universe if universe else 0.0,
         "unknown_count": aggregate_unknown,
         "received_unclassified_count": received_unclassified,
+        "coverage_reason_counts": coverage_reason_counts,
         "message_count": len(received_codes),
         "missing_count": not_received,
         "not_received_count": not_received,
@@ -517,6 +536,8 @@ def read_twse_mis_current_breadth(
                 external_calls=external_calls,
             )
         except Exception as exc:
+            # Rows belong to the latest attempt, not the last successful batch.
+            _STOCK_ROWS[market] = []
             status_code, headers = response_failure_metadata(exc)
             guard = (
                 TWSE_MIS_PROVIDER_GUARD.snapshot()

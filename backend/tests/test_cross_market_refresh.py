@@ -17,6 +17,7 @@ from app.db.models import (
     ProviderEvent,
     ResourceOhlcvBar,
     ResourceQuoteSnapshot,
+    StockMaster,
     USStockMaster,
 )
 from app.jobs import backfill_tasks
@@ -105,27 +106,7 @@ def add_relation(db: Session) -> None:
     db.commit()
 
 
-def add_current_sources(db: Session) -> None:
-    db.add(USStockMaster(symbol="TSM", exchange="NYSE", is_active=True))
-    db.commit()
-    upsert_us_daily_price_records(
-        db,
-        [USDailyPriceRecord(
-            provider="yahoo_chart",
-            symbol="TSM",
-            trade_date=EXPECTED_DATE,
-            open_price=198,
-            high_price=202,
-            low_price=197,
-            close_price=200,
-            adjusted_close=None,
-            trade_volume=1000,
-            dividend_amount=None,
-            split_coefficient=None,
-            source_url=None,
-            raw_payload_hash="tsm-current",
-        )],
-    )
+def add_current_fx(db: Session) -> None:
     db.add(
         ResourceQuoteSnapshot(
             provider="yahoo_chart",
@@ -166,6 +147,30 @@ def add_current_sources(db: Session) -> None:
         )
     )
     db.commit()
+
+
+def add_current_sources(db: Session) -> None:
+    db.add(USStockMaster(symbol="TSM", exchange="NYSE", is_active=True))
+    db.commit()
+    upsert_us_daily_price_records(
+        db,
+        [USDailyPriceRecord(
+            provider="yahoo_chart",
+            symbol="TSM",
+            trade_date=EXPECTED_DATE,
+            open_price=198,
+            high_price=202,
+            low_price=197,
+            close_price=200,
+            adjusted_close=None,
+            trade_volume=1000,
+            dividend_amount=None,
+            split_coefficient=None,
+            source_url=None,
+            raw_payload_hash="tsm-current",
+        )],
+    )
+    add_current_fx(db)
 
 
 def add_proxy_relation(db: Session) -> None:
@@ -254,8 +259,51 @@ class CrossMarketRefreshTests(unittest.TestCase):
         self.assertEqual(plan["requested_source_count"], 2)
         self.assertEqual(plan["planned_source_count"], 1)
         self.assertEqual(plan["deferred_source_count"], 1)
-        self.assertEqual(plan["planned_sources"][0]["symbol"], "USD-TWD")
-        self.assertEqual(plan["deferred_sources"][0]["symbol"], "TSM")
+        self.assertEqual(plan["planned_sources"][0]["symbol"], "TSM")
+        self.assertEqual(plan["deferred_sources"][0]["symbol"], "USD-TWD")
+
+    @patch(
+        "app.market.cross_market.refresh.expected_us_trade_date",
+        return_value=EXPECTED_DATE,
+    )
+    def test_overnight_requirements_are_complete_before_execution_budget(
+        self,
+        _expected,
+    ) -> None:
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="台積電",
+                market="上市",
+                industry="24",
+            )
+        )
+        self.db.commit()
+
+        plan = build_cross_market_refresh_plan(
+            self.db,
+            "2330",
+            max_symbols=1,
+            requested_capabilities=("cross_market.overnight",),
+            now=NOW,
+        )
+
+        requirement_symbols = {
+            item["symbol"] for item in plan["requirements"]
+        }
+        self.assertEqual(
+            requirement_symbols,
+            {"TSM", "^GSPC", "^IXIC", "QQQ", "^SOX", "SMH", "NVDA"},
+        )
+        self.assertEqual(plan["requirement_count"], 7)
+        self.assertEqual(plan["planned_source_count"], 1)
+        self.assertEqual(plan["deferred_source_count"], 6)
+        self.assertTrue(
+            all(
+                item["deferred_reason"] == "execution_symbol_budget_exhausted"
+                for item in plan["deferred_sources"]
+            )
+        )
 
     @patch(
         "app.market.cross_market.refresh.expected_us_trade_date",
@@ -350,15 +398,35 @@ class CrossMarketRefreshTests(unittest.TestCase):
         refresh_resource,
         _expected,
     ) -> None:
-        refresh_resource.return_value = {
-            "status": "success",
-            "refreshed_count": 1,
-            "error_count": 0,
-        }
-        refresh_us.return_value = {
-            "status": "success",
-            "symbol": "TSM",
-        }
+        def refresh_resource_side_effect(*_args, **_kwargs):
+            add_current_fx(self.db)
+            return {"status": "success", "refreshed_count": 1, "error_count": 0}
+
+        def refresh_us_side_effect(**_kwargs):
+            self.db.add(USStockMaster(symbol="TSM", exchange="NYSE", is_active=True))
+            self.db.commit()
+            upsert_us_daily_price_records(
+                self.db,
+                [USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="TSM",
+                    trade_date=EXPECTED_DATE,
+                    open_price=198,
+                    high_price=202,
+                    low_price=197,
+                    close_price=200,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
+                    raw_payload_hash="tsm-refreshed",
+                )],
+            )
+            return {"status": "partial_success", "symbol": "TSM"}
+
+        refresh_resource.side_effect = refresh_resource_side_effect
+        refresh_us.side_effect = refresh_us_side_effect
         progress: list[tuple[int | None, int | None, str | None]] = []
 
         result = refresh_cross_market_context_sources(
@@ -376,6 +444,7 @@ class CrossMarketRefreshTests(unittest.TestCase):
         self.assertEqual(result["attempted_count"], 2)
         self.assertEqual(result["success_count"], 2)
         self.assertEqual(result["failed_count"], 0)
+        self.assertTrue(result["postcondition_satisfied"])
         refresh_resource.assert_called_once_with(
             self.db,
             symbols="USD-TWD",
@@ -405,11 +474,11 @@ class CrossMarketRefreshTests(unittest.TestCase):
         refresh_resource,
         _expected,
     ) -> None:
-        refresh_resource.return_value = {
-            "status": "success",
-            "refreshed_count": 1,
-            "error_count": 0,
-        }
+        def refresh_resource_side_effect(*_args, **_kwargs):
+            add_current_fx(self.db)
+            return {"status": "success", "refreshed_count": 1, "error_count": 0}
+
+        refresh_resource.side_effect = refresh_resource_side_effect
 
         result = refresh_cross_market_context_sources(
             self.db,
@@ -422,7 +491,10 @@ class CrossMarketRefreshTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["success_count"], 1)
         self.assertEqual(result["failed_count"], 1)
-        self.assertIn("provider timeout", result["results"][1]["error"])
+        self.assertFalse(result["postcondition_satisfied"])
+        self.assertTrue(
+            any("provider timeout" in str(item.get("error")) for item in result["results"])
+        )
         event = (
             self.db.query(ProviderEvent)
             .filter(ProviderEvent.market == "cross_market")

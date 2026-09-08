@@ -143,6 +143,8 @@ def _us_intraday_compact(
             "payload_level": payload_level,
             "bar_limit": point_limit,
             "series": {},
+            "requested_trade_date": (market_data_params or {}).get("trade_date"),
+            "session_scope": (market_data_params or {}).get("session_scope", "regular"),
             "warnings": [
                 (
                     "US intraday trend was not requested or did not return data."
@@ -172,7 +174,7 @@ def _us_intraday_compact(
     )
     raw_warnings = intraday_summary.get("warnings")
     warnings = raw_warnings if isinstance(raw_warnings, list) else []
-    status = "ok" if latest or point_count > 0 else "missing"
+    status = str(intraday_summary.get("status") or ("ok" if latest or point_count > 0 else "missing"))
     source = intraday_summary.get("source") or ("yahoo_finance_chart" if status == "ok" else "not_available")
     source_interval = str(
         intraday_summary.get("source_interval")
@@ -265,7 +267,7 @@ def _us_intraday_compact(
                 "sampling_mode": sampling_mode,
                 "original_point_count": original_point_count,
                 "source": source,
-                "provider": "yahoo_chart" if source == "yahoo_finance_chart" else source,
+                "provider": source_status.get("provider") or ("yahoo_chart" if source == "yahoo_finance_chart" else source),
                 "session_scope": intraday_summary.get("session_scope") or "regular",
                 "session_phase": intraday_summary.get("session_phase"),
                 "market_phase": temporal_value("market_phase"),
@@ -273,6 +275,9 @@ def _us_intraday_compact(
                 "current_source_status": current_source_status or None,
                 "bar_source_status": bar_source_status or None,
                 "source_status": source_status or None,
+                "is_partial": intraday_summary.get("is_partial"),
+                "requested_trade_date": intraday_summary.get("requested_trade_date"),
+                "session_coverage": session_coverage,
                 "current_session_expected": temporal_value(
                     "current_session_expected"
                 ),
@@ -874,8 +879,6 @@ def read_us_stock_context(
         if requested_trade_date_value is not None
         else None
     )
-    if requested_trade_date is not None:
-        include_intraday = False
     intraday_summary = (
         None
         if requested_trade_date is not None
@@ -1085,6 +1088,7 @@ def read_us_stock_context(
             )
             intraday_summary = dependencies.us_market_service.get_us_intraday_trend(
                 symbol=normalized_symbol,
+                **({"trade_date": requested_trade_date} if requested_trade_date is not None else {}),
                 session_scope=session_scope,
                 interval=requested_interval,
                 db=db,
@@ -1270,7 +1274,7 @@ def read_us_stock_context(
         instrument_type=instrument_type,
         previous_close_reference=temporal_change_reference,
     )
-    intraday_quote = _us_intraday_quote(
+    intraday_quote = {} if requested_trade_date is not None else _us_intraday_quote(
         intraday_summary,
         calendar_status=us_calendar_status,
         instrument_type=instrument_type,
@@ -1475,7 +1479,7 @@ def read_us_stock_context(
             "requested_trade_date": requested_trade_date,
             "intraday": intraday_summary or {},
             "include_intraday": intraday_requested,
-            "intraday_available": bool(selected_resolved_quote or intraday_quote),
+            "intraday_available": bool((intraday_summary or {}).get("points")),
             "quote_snapshot_available": bool(selected_resolved_quote),
         },
         freshness={
@@ -1506,7 +1510,9 @@ def read_us_stock_context(
                 else "missing"
             ),
             "intraday": (
-                "current"
+                str((intraday_summary or {}).get("status") or "missing")
+                if requested_trade_date is not None
+                else "current"
                 if selected_resolved_quote or intraday_quote
                 else "missing"
                 if intraday_requested

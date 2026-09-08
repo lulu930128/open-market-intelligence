@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import pytest
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
@@ -53,6 +54,46 @@ from app.market_data.policies import RealtimePolicy
 
 TAIPEI = timezone(timedelta(hours=8))
 NOW = datetime(2026, 8, 26, 10, 15, tzinfo=TAIPEI)
+
+
+@pytest.mark.parametrize("confirmed_count,unknown,received_minute,expected_final", [
+    (2, 0, 34, True), (2, 1, 34, True), (1, 0, 34, False),
+    (2, 0, 31, False), (None, 0, 34, False),
+])
+def test_post_close_breadth_keeps_finality_separate_from_coverage(
+    confirmed_count, unknown, received_minute, expected_final,
+) -> None:
+    event_at = NOW.replace(hour=13, minute=30)
+    received_at = NOW.replace(hour=13, minute=received_minute)
+    read_at = NOW.replace(hour=14, minute=0)
+    adapter = CurrentBreadthAdapter(
+        _binding("twse_mis", "twse_mis_live_breadth", TW_CURRENT_BREADTH_CAPABILITY_ID),
+        _payload_reader({
+            "snapshot_as_of": event_at.isoformat(), "trade_date": event_at.date().isoformat(),
+            "universe_count": 2 + unknown, "advance_count": 1, "decline_count": 1,
+            "unchanged_count": 0, "received_unclassified_count": unknown,
+            "not_received_count": 0, "trade_value": 1000,
+            "closing_match_coverage_count": confirmed_count,
+        }, [], "mis-breadth"), clock=lambda: received_at,
+    )
+    db, engine = _db()
+    try:
+        refresh_taiwan_current_breadth(
+            db, venue="TWSE", requested_at=received_at,
+            descriptors=(TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR,),
+            acquisition=TaiwanCurrentBreadthAcquisitionExecutor((adapter,)),
+        )
+        projected = project_taiwan_current_breadth(read_taiwan_current_breadth(db, venue="TWSE", requested_at=read_at))
+        assert projected["market_session"] == "post_close"
+        assert projected["observation_market_session"] == "closing_auction"
+        assert projected["session_semantics"] == "latest_completed_session"
+        assert projected["classified_count"] == 2
+        assert projected["unknown_count"] == unknown
+        assert projected["is_provisional"] is (not expected_final)
+        assert projected["decision_usable"] is (expected_final and unknown == 0)
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_current_market_session_uses_authoritative_close_lifecycle() -> None:
@@ -651,6 +692,69 @@ def test_current_index_repository_rejects_implausible_persisted_change() -> None
         engine.dispose()
 
 
+@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_auction_breadth_round_trip_keeps_actual_lane_empty_and_expires(malformed, fallback) -> None:
+    preopen = datetime(2026, 9, 8, 8, 55, tzinfo=TAIPEI)
+    calls: list[str] = []
+    raw = {
+        "snapshot_as_of": preopen.isoformat(), "trade_date": preopen.date().isoformat(),
+        "universe_count": 3, "advance_count": 0, "decline_count": 0,
+        "unchanged_count": 0, "received_unclassified_count": 3, "not_received_count": 0,
+        "failed_batch_count": 0,
+        "acquisition_fallback": fallback,
+        "auction_breadth": {
+            "status": "provisional", "as_of": preopen.isoformat(),
+            "trade_date": preopen.date().isoformat(), "universe_count": 3,
+            "advance_count": 1, "decline_count": 1, "unchanged_count": 0, "unknown_count": 1,
+        },
+    }
+    adapter = CurrentBreadthAdapter(
+        _binding("twse_mis", "twse_mis_live_breadth", TW_CURRENT_BREADTH_CAPABILITY_ID),
+        _payload_reader(raw, calls, "mis"), clock=lambda: preopen,
+    )
+    if malformed:
+        raw["auction_breadth"]["unknown_count"] = -1
+    db, engine = _db()
+    try:
+        refresh_taiwan_current_breadth(
+            db, venue="TWSE", requested_at=preopen,
+            descriptors=(TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR,),
+            acquisition=TaiwanCurrentBreadthAcquisitionExecutor((adapter,)),
+        )
+        result = _read_without_raw_receipt_body(engine, lambda: read_taiwan_current_breadth(
+            db, venue="TWSE", requested_at=preopen,
+        ))
+        projected = project_taiwan_current_breadth(result)
+        assert projected["coverage_count"] == 0
+        assert projected["price_semantics"] == "current_last_trade_vs_reference"
+        auction = projected["auction_breadth"]
+        if malformed:
+            assert auction["status"] == "missing"
+            assert projected["acquisition_diagnostics"]["auction_error_code"] == "INVALID_AUCTION_BREADTH"
+            return
+        assert auction["coverage_count"] == 2
+        assert auction["status"] == ("stale" if fallback else "provisional")
+        if fallback:
+            assert result.resolved.health.status is ResolvedEvidenceStatus.STALE
+            assert projected["acquisition_diagnostics"]["latest_attempt_status"] == "failed"
+            assert auction["freshness"]["is_current"] is False
+        assert auction["decision_usable"] is False
+        assert auction["lineage"]["raw_receipt_id"].startswith("raw_fetch_result:")
+        assert projected["acquisition_diagnostics"]["failed_batch_count"] == 0
+        for requested_at, status in ((preopen + timedelta(minutes=4), "stale"),
+                                     (preopen.replace(hour=9, minute=1), "not_applicable")):
+            expired = project_taiwan_current_breadth(read_taiwan_current_breadth(
+                db, venue="TWSE", requested_at=requested_at,
+            ))["auction_breadth"]
+            assert expired["status"] == status
+            assert expired["freshness"]["is_current"] is False
+        assert calls == ["mis:TWSE"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_current_breadth_preserves_unknown_and_not_received_partition() -> None:
     calls: list[str] = []
     adapter = CurrentBreadthAdapter(
@@ -703,7 +807,20 @@ def test_current_breadth_preserves_unknown_and_not_received_partition() -> None:
         assert projected["classified_count"] == 995
         assert projected["received_unclassified_count"] == 3
         assert projected["not_received_count"] == 2
+        assert projected["unknown_count"] == 5
         assert projected["universe_count"] == 1000
+        assert projected["partition_total"] == 1000
+        assert projected["reconciliation_status"] == "balanced"
+        assert projected["coverage_reason_counts"] == {
+            "advance": 500,
+            "decline": 400,
+            "unchanged": 95,
+            "valid_no_trade": 0,
+            "suspended_or_not_tradable": 0,
+            "provider_missing": 2,
+            "mapping_error": 0,
+            "unknown": 3,
+        }
         assert projected["decision_usable"] is False
         assert result.dataset_health is not None
         assert result.dataset_health.status is DatasetHealthStatus.PARTIAL
@@ -756,6 +873,7 @@ def test_current_breadth_normalizes_legacy_aggregate_unknown_partition() -> None
         assert projected["classified_count"] == 900
         assert projected["received_unclassified_count"] == 50
         assert projected["not_received_count"] == 50
+        assert projected["unknown_count"] == 100
         assert projected["universe_count"] == 1000
         assert (
             projected["classified_count"]

@@ -74,6 +74,8 @@ def test_current_market_migration_is_additive_and_scoped_on_downgrade() -> None:
                 "received_unclassified_count",
                 "not_received_count",
                 "decision_usable",
+                "auction_observation_json",
+                "acquisition_diagnostics_json",
             } <= breadth_columns
             assert "payload_json" not in breadth_columns
         finally:

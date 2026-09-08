@@ -229,6 +229,40 @@ def test_priority_reconcile_never_rotates_critical_targets_behind_watchlist() ->
         db.close()
 
 
+def test_priority_reconcile_promotes_required_consumer_symbols() -> None:
+    db = _session()
+    try:
+        platform = Mock()
+        platform.read.return_value = _platform_result(satisfied=True)
+        with (
+            patch(
+                "app.us_market.ohlc_priority.list_us_priority_ohlc_symbols",
+                return_value=("^GSPC", "AAPL"),
+            ),
+            patch(
+                "app.us_market.ohlc_priority.list_us_priority_ohlc_critical_symbols",
+                return_value=("^GSPC",),
+            ),
+        ):
+            result = reconcile_us_priority_ohlc(
+                max_runtime_seconds=30,
+                max_symbols=2,
+                required_symbols=("SMH", "TSM", "SMH"),
+                session_factory=lambda: Session(db.get_bind()),
+                platform_factory=lambda _db: platform,
+            )
+
+        checked_symbols = [
+            call.kwargs["symbol"] for call in platform.read.call_args_list
+        ]
+        assert checked_symbols == ["^GSPC", "SMH"]
+        assert result["required_consumer_symbols"] == ["SMH", "TSM"]
+        assert result["critical_symbol_count"] == 3
+        assert result["stopped_reason"] == "symbol_budget_exhausted"
+    finally:
+        db.close()
+
+
 def test_priority_reconcile_repairs_through_same_platform_with_bounded_calls() -> None:
     db = _session()
     try:

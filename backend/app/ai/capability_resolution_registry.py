@@ -145,6 +145,11 @@ DERIVED_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "technical.volume_profile": ("daily.ohlcv",),
     "technical.anchored_vwap": ("technical.swings", "daily.ohlcv"),
     "technical.relative_strength": ("daily.ohlcv", "market.indices"),
+    "technical.price_map": (
+        "daily.ohlcv",
+        "technical.indicators",
+        "corporate.actions",
+    ),
     "market.volume_state": ("intraday.bars", "market.breadth"),
     "watchlist.coverage": ("watchlist.ranking", "watchlist.radar"),
     "portfolio.summary": ("portfolio.holdings", "portfolio.valuation"),
@@ -216,6 +221,7 @@ PROVIDER_CONTRACTS_BY_SCOPE_CAPABILITY: dict[
     ("us_macro", "macro.series"): ("fred_macro",),
     ("us_macro", "macro.observations"): ("fred_macro",),
     ("stock", "news.events"): ("news_events",),
+    ("stock", "news.company_documents"): ("company_news_documents",),
     ("us_stock", "news.events"): ("news_events",),
     ("market", "news.events"): ("news_events",),
 }

@@ -622,6 +622,15 @@ def _execute_tool(
                 minimum=10,
                 maximum=120,
             ),
+            requested_capabilities=(
+                tuple(
+                    str(value).strip()
+                    for value in args.get("requested_capabilities", [])
+                    if str(value).strip()
+                )
+                if isinstance(args.get("requested_capabilities"), list)
+                else None
+            ),
         )
 
     if tool_name == "us.read_intraday_trend":
@@ -635,6 +644,7 @@ def _execute_tool(
             interval = "1m"
         return us_market_service.get_us_intraday_trend(
             symbol=symbol,
+            **({"trade_date": args["trade_date"]} if args.get("trade_date") else {}),
             session_scope=session_scope,
             interval=interval,
             db=db,
@@ -655,6 +665,7 @@ def _execute_tool(
         refresh_result = us_market_service.refresh_us_intraday_bars(
             db,
             symbol=symbol,
+            **({"trade_date": args["trade_date"], "session_scope": str(args.get("session_scope") or "regular")} if args.get("trade_date") else {}),
             require_live=bool(args.get("require_live", False)),
             max_provider_calls=agentic_common._safe_int(
                 args.get("max_provider_calls"), default=2, minimum=1, maximum=2
@@ -663,6 +674,7 @@ def _execute_tool(
         return {
             **us_market_service.get_us_intraday_trend(
                 symbol=symbol,
+                **({"trade_date": args["trade_date"]} if args.get("trade_date") else {}),
                 session_scope=str(args.get("session_scope") or "regular"),
                 interval=str(args.get("interval") or "1m"),
                 db=db,

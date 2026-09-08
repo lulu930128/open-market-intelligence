@@ -87,7 +87,10 @@ test("Taiwan technical report cadence is independent of chart timestamps", () =>
     "}, TAIWAN_TECHNICAL_REPORT_INITIAL_DELAY_MS);"
   );
   expect(contents).not.toContain("todayUpdatedAt");
-  expect(contents).toContain("include_volume_pace: false");
+  expect(contents).toContain('const includeVolumePace = requestedTimeframe === "today"');
+  expect(contents).toContain('const includeIntraday = requestedTimeframe === "today" || requestedTimeframe === "daily"');
+  expect(contents).toContain('const shouldPoll = requestedTimeframe === "today" || requestedTimeframe === "daily"');
+  expect(contents).toContain('["today", "daily", "weekly", "monthly"]');
   expect(contents).toContain("[effectiveTimeframe, enabled, isIndexProduct, stockId]");
 });
 
@@ -136,6 +139,9 @@ test("Taiwan secondary surfaces stay cache-only until demanded", () => {
   const overnight = source(
     "src/components/stock-detail/useTaiwanDetailContext.ts"
   );
+  const priceMap = source(
+    "src/components/stock-detail/useTaiwanStockPriceMap.ts"
+  );
 
   expect(panel).toContain("enabled: dataSurfaceDemanded");
   expect(panel).toContain('useSurfaceDemand("0px", stockId)');
@@ -146,11 +152,13 @@ test("Taiwan secondary surfaces stay cache-only until demanded", () => {
   );
   expect(panel).toContain("demandDataSurface()");
   expect(panel).toContain("overnightEnabled: overnightDemanded");
-  expect(panel).toContain(
-    "enabled: nextSessionDemanded && !isIndexProduct && !isEtfProduct"
-  );
-  expect(panel).toContain("onDemand={() => setNextSessionDemanded(true)}");
-  expect(panel).toContain("onDemand={() => setOvernightDemanded(true)}");
+  expect(panel).toContain("<TaiwanStockDetailRadarSurface");
+  expect(panel).toContain("secondarySurfaceDemanded &&");
+  expect(panel).toContain('(loadState === "success" || loadState === "error")');
+  expect(priceMap).toContain("requestedCandidate === null ? 0 : 250");
+  expect(priceMap).not.toContain("1_800");
+  expect(priceMap).toContain("/price-map");
+  expect(panel).toContain("onOvernightDemand={() => setOvernightDemanded(true)}");
   expect(panel).toContain(
     "todayCurrentObservation ?? quoteDepthCurrentObservation(selectedQuoteDepth)"
   );
@@ -166,6 +174,40 @@ test("Taiwan secondary surfaces stay cache-only until demanded", () => {
   expect(overnight).toContain("{ refresh: false }");
   expect(overnight).not.toContain("requestBackfillJob");
   expect(overnight).not.toContain('method: "POST"');
+});
+
+test("Taiwan Stock Detail Radar v2 is the only production technical surface", () => {
+  const panel = source("src/components/StockDetailPanel.tsx");
+  const radar = source(
+    "src/components/stock-detail/TaiwanStockDetailRadarSurface.tsx"
+  );
+  const priceMap = source("src/components/stock-detail/StockPriceMap.tsx");
+  const marketTypes = source("src/types/market.ts");
+
+  expect(panel.match(/<TaiwanStockDetailRadarSurface/g)).toHaveLength(1);
+  expect(panel).not.toContain("<TechnicalCurrentStateOverview");
+  expect(panel).not.toContain("<TechnicalCurrentStateEvidence");
+  expect(panel).not.toContain("<TechnicalMetricBar");
+  expect(panel).not.toContain("<OvernightImpactPanel");
+  expect(radar).toContain('data-testid="tw-stock-detail-radar-v2"');
+  expect(radar).toContain('data-testid="tw-stock-detail-radar-decision-changes"');
+  expect(radar).toContain('testId="tw-stock-detail-radar-evidence"');
+  expect(radar).toContain('testId="tw-stock-detail-radar-external"');
+  expect(priceMap).toContain('data-testid="tw-stock-price-axis"');
+  expect(priceMap).toContain("axisPosition(zone.anchor_price");
+  expect(priceMap).toContain('data-testid="tw-stock-price-map-outside-axis"');
+  expect(priceMap).toContain("zonesWithinAxis(map)");
+  expect(priceMap).toContain("zonesOutsideAxis(map)");
+  expect(priceMap).not.toContain("space-y-1 before:absolute");
+  expect(marketTypes).toContain('version: "tw.stock.price_map.v3" | string');
+  expect(marketTypes).toContain('range_kind: "display_range" | "unavailable"');
+  expect(marketTypes).toContain("basis_revision: string");
+  expect(marketTypes).toContain("evidence_lower_bound: number");
+  expect(marketTypes).toContain("tier_label: string");
+  expect(marketTypes).toContain("decision_changes: Array");
+  expect(priceMap).toContain("layoutTriggers(map)");
+  expect(priceMap).toContain("data-evidence-bounds");
+  expect(priceMap).toContain('data-testid="tw-stock-price-map-accessible-details"');
 });
 
 test("Taiwan data panel loads stock identity before active-tab resources", () => {

@@ -1462,6 +1462,24 @@ def read_taiwan_index_intraday_bars(
     )
 
 
+def taiwan_requested_bar_scope(
+    trade_date: date | None,
+    *,
+    requested_at: datetime | None = None,
+) -> tuple[TaiwanBarSessionScope, date, dict[str, datetime]]:
+    """Bind an optional exact date to the canonical presentation-session window."""
+
+    now, current_date, _, _ = taiwan_current_session_bar_window(requested_at)
+    if trade_date is None or trade_date == current_date:
+        return TaiwanBarSessionScope.CURRENT_SESSION, current_date, {"requested_at": now}
+    return TaiwanBarSessionScope.HISTORY, trade_date, {
+        "requested_at": now,
+        "from_time": datetime.combine(trade_date, TAIWAN_SESSION_OPEN_TIME, TAIWAN_TZ),
+        "to_time": datetime.combine(trade_date, TAIWAN_SESSION_CLOSE_TIME, TAIWAN_TZ)
+        + timedelta(minutes=1),
+    }
+
+
 def taiwan_current_session_bar_window(
     requested_at: datetime | None = None,
 ) -> tuple[datetime, date, datetime, datetime]:

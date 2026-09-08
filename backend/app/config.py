@@ -490,8 +490,13 @@ class Settings(BaseSettings):
     crypto_market_long_short_ratio_limit: int = 30
     omi_http_trust_env: bool = False
     omi_atlas_shadow_enabled: bool = False
+    omi_atlas_news_enabled: bool = False
     omi_atlas_api_base_url: str = "http://127.0.0.1:8790"
     omi_atlas_timeout_seconds: float = Field(default=1.5, ge=0.2, le=10.0)
+    omi_atlas_endpoint_mode: Literal["static", "discovery"] = "static"
+    omi_atlas_endpoint_state_path: str = ""
+    omi_atlas_endpoint_health_timeout_seconds: float = Field(default=0.5, ge=0.1, le=2.0)
+    omi_atlas_endpoint_cache_ttl_seconds: float = Field(default=5.0, ge=0.0, le=60.0)
     omi_atlas_max_events: int = Field(default=5, ge=1, le=12)
     omi_atlas_max_evidence_per_event: int = Field(default=3, ge=1, le=5)
     omi_atlas_lookback_hours: int = Field(default=168, ge=1, le=720)

@@ -54,7 +54,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "14517f6e5f06b99b146f82e1d5656e078defb41b38b6136610437a6e84df9a0a"
+    "49dffafae6ce215199448eb0edcba690cb9ab5b47b600d8411f8309fb20a39af"
 )
 
 
@@ -433,7 +433,7 @@ class AIToolBoundaryTests(unittest.TestCase):
         self.assertEqual(envelope["evidence_passport"]["kind"], "evidence_passport")
         self.assertEqual(envelope["evidence_passport"]["target_kind"], "data_freshness")
 
-    def test_market_overview_facade_hands_off_runtime_dependencies(self) -> None:
+    def test_market_overview_source_health_selection_is_bounded(self) -> None:
         fixed_now = datetime(2026, 7, 14, 12, 30, tzinfo=timezone.utc)
         db = MagicMock(spec=Session)
         intraday_payload = {
@@ -542,24 +542,19 @@ class AIToolBoundaryTests(unittest.TestCase):
             )
 
         self.assertEqual(envelope["generated_at"], fixed_now)
-        self.assertEqual(
-            [call.kwargs["index_id"] for call in get_intraday.call_args_list],
-            ["TAIEX", "TPEX"],
-        )
-        self.assertTrue(envelope["data"]["index_intraday"]["enabled"])
-        self.assertEqual(get_summary.call_count, 2)
-        for summary_call in get_summary.call_args_list:
-            self.assertEqual(summary_call.args, (db,))
-            self.assertEqual(summary_call.kwargs, {"force_refresh": False})
-        self.assertEqual(envelope["data"]["breadth"]["scope"], "full_market")
-        self.assertEqual(envelope["data"]["breadth"]["total_count"], 1050)
-        read_cross_market.assert_called_once_with(db=db, now=fixed_now)
-        read_market_chips.assert_called_once_with(db=db, limit=10)
-        read_volume_state.assert_called_once_with(db=db)
+        get_intraday.assert_not_called()
+        get_summary.assert_not_called()
+        read_cross_market.assert_not_called()
+        read_market_chips.assert_not_called()
+        read_volume_state.assert_not_called()
         build_source_health.assert_called_once_with(
             db,
             now=fixed_now,
             sync_snapshots=False,
+            limit=10,
+            dataset=None,
+            stock_id=None,
+            index_id=None,
         )
         self.assertEqual(
             envelope["data"]["compact"]["source_health"]["status"],
@@ -569,12 +564,8 @@ class AIToolBoundaryTests(unittest.TestCase):
             envelope["data"]["source_health"]["summary"]["stale_count"],
             1,
         )
-        self.assertEqual(envelope["data"]["slots"]["cross_market"]["status"], "partial")
-        self.assertEqual(envelope["data"]["slots"]["market_chips"]["status"], "partial")
-        self.assertEqual(envelope["data"]["slots"]["market_volume"]["status"], "partial")
-        self.assertIn("market_daily_price", envelope["missing"])
-        self.assertIn("market_breadth.tpex", envelope["missing"])
-        self.assertEqual(envelope["freshness"]["missing"], envelope["missing"])
+        self.assertNotIn("slots", envelope["data"])
+        self.assertNotIn("missing", envelope["freshness"])
 
     def test_futures_facade_hands_off_runtime_dependencies(self) -> None:
         fixed_now = datetime(2026, 7, 14, 13, 0, tzinfo=timezone.utc)
@@ -731,7 +722,18 @@ class AIToolBoundaryTests(unittest.TestCase):
                 "coverage": {"available_days": 20, "complete_days": 1},
                 "windows": {},
             },
-            derivatives={"status": "partial", "as_of": "2026-07-17"},
+            derivatives={
+                "status": "partial",
+                "as_of": "2026-07-17",
+                "expected_trade_date": "2026-07-18",
+                "is_stale": True,
+                "stale": ["taifex_txf_term_structure"],
+                "release_status": "pending_release",
+                "retry": {
+                    "retry_status": "retry_scheduled",
+                    "next_retry_at": "2026-07-18T16:35:00+08:00",
+                },
+            },
             payload_level_value="compact",
         )
 
@@ -756,7 +758,19 @@ class AIToolBoundaryTests(unittest.TestCase):
             "official_daily_post_close_not_live_night_session",
             compact["slots"]["options_sentiment"]["warnings"],
         )
-        self.assertEqual(compact["slots"]["data_quality"]["status"], "partial")
+        self.assertEqual(compact["slots"]["data_quality"]["status"], "stale")
+        self.assertEqual(
+            compact["derivatives"]["release_status"],
+            "pending_release",
+        )
+        self.assertEqual(
+            compact["derivatives"]["retry"]["retry_status"],
+            "retry_scheduled",
+        )
+        self.assertEqual(
+            compact["derivatives"]["stale"],
+            ["taifex_txf_term_structure"],
+        )
         self.assertEqual(compact["source_health"]["status"], "ready")
         self.assertEqual(compact["source_health"]["summary"]["entry_count"], 2)
         self.assertEqual(

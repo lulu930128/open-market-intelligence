@@ -795,6 +795,8 @@ def _build_resolved_indices(
             else unknown
         )
         resolved_breadth[market] = {
+            "auction_breadth": raw_breadth.get("auction_breadth"),
+            "acquisition_diagnostics": raw_breadth.get("acquisition_diagnostics"),
             "market": market,
             "status": str(raw_breadth.get("status") or "missing"),
             "session_phase": str(
@@ -819,10 +821,10 @@ def _build_resolved_indices(
                 "not_received": not_received,
                 "received_unclassified": received_unclassified,
                 "reason_unknown": reason_unknown,
-                "valid_no_trade": None,
-                "not_tradable": None,
-                "provider_missing": None,
-                "mapping_error": None,
+                "valid_no_trade": (raw_breadth.get("coverage_reason_counts") or {}).get("valid_no_trade"),
+                "not_tradable": (raw_breadth.get("coverage_reason_counts") or {}).get("suspended_or_not_tradable"),
+                "provider_missing": (raw_breadth.get("coverage_reason_counts") or {}).get("provider_missing"),
+                "mapping_error": (raw_breadth.get("coverage_reason_counts") or {}).get("mapping_error"),
             },
             "raw_unknown_reason_counts": {
                 key: value

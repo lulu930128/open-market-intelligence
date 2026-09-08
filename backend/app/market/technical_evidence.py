@@ -11,6 +11,7 @@ from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     get_technical_analysis_parameters,
 )
+from app.market.taiwan_industries import build_tw_sector_benchmark
 from app.market.trading_calendar import next_taiwan_trading_day
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_bar_service import TaiwanBarService
@@ -1240,6 +1241,7 @@ def build_volume_profile(
             "kind": "tw_technical_volume_profile",
             "algorithm_version": ADVANCED_ALGORITHM_VERSION,
             "status": "missing",
+            "volume_unit": "shares",
             "bins": [],
         }
     minimum = min(price for price, _ in rows)
@@ -1284,6 +1286,7 @@ def build_volume_profile(
         "status": "partial",
         "method": "daily_bar_typical_price_single_bin_allocation",
         "source_granularity": "daily_ohlcv",
+        "volume_unit": "shares",
         "confidence": "low",
         "price_basis": PRICE_BASIS,
         "lookback_bars": len(selected),
@@ -1346,7 +1349,7 @@ def build_anchored_vwap(
     }
 
 
-def build_relative_strength(
+def _relative_strength_leg(
     stock_points: list[dict[str, Any]],
     benchmark_points: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -1405,28 +1408,76 @@ def build_relative_strength(
         and stock_latest == benchmark_latest == aligned_latest
     )
     return {
-        "kind": "tw_technical_relative_strength",
-        "algorithm_version": ADVANCED_ALGORITHM_VERSION,
         "status": "ready" if len(aligned_dates) > 60 and coverage_aligned else "partial",
-        "method": "aligned_trading_date_total_price_return_difference",
-        "benchmark": "TAIEX",
         "aligned_trade_date_count": len(aligned_dates),
         "as_of": _json_date(aligned_latest),
         "stock_latest_date": _json_date(stock_latest),
         "benchmark_latest_date": _json_date(benchmark_latest),
         "horizons": horizons,
-        "sector": {
-            "status": "not_available",
-            "reason": "Canonical sector benchmark mapping is not connected in v1.",
-        },
-        "price_basis": PRICE_BASIS,
         "freshness": {
             "status": "current" if coverage_aligned else "partial",
             "latest_data_date": _json_date(aligned_latest),
             "stock_latest_date": _json_date(stock_latest),
             "benchmark_latest_date": _json_date(benchmark_latest),
         },
-        "limitations": ["This is price relative strength, not RSI and not total return adjusted for distributions."],
+    }
+
+
+def build_relative_strength(
+    stock_points: list[dict[str, Any]],
+    benchmark_points: list[dict[str, Any]],
+    *,
+    sector_points: list[dict[str, Any]] | None = None,
+    sector_identity: Mapping[str, Any] | None = None,
+    sector_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    market_leg = _relative_strength_leg(stock_points, benchmark_points)
+    sector_leg = (
+        _relative_strength_leg(stock_points, sector_points)
+        if sector_points
+        else {
+            "status": "not_available",
+            "horizons": {},
+            "aligned_trade_date_count": 0,
+            "as_of": None,
+            "freshness": {"status": "missing"},
+        }
+    )
+    sector = {
+        **sector_leg,
+        "identity": dict(sector_identity or {}),
+        "benchmark": (
+            (sector_identity or {}).get("sector_id")
+            if sector_identity
+            else None
+        ),
+        "method": (sector_metadata or {}).get("method"),
+        "member_count": (sector_metadata or {}).get("member_count"),
+        "observed_member_count": (sector_metadata or {}).get(
+            "observed_member_count"
+        ),
+        "source": (sector_metadata or {}).get("source"),
+        "coverage": (sector_metadata or {}).get("coverage"),
+        "reason": (
+            None
+            if sector_points
+            else (sector_metadata or {}).get(
+                "reason",
+                "canonical_sector_benchmark_unavailable",
+            )
+        ),
+    }
+    return {
+        "kind": "tw_technical_relative_strength",
+        "algorithm_version": ADVANCED_ALGORITHM_VERSION,
+        **market_leg,
+        "method": "aligned_trading_date_total_price_return_difference",
+        "benchmark": "TAIEX",
+        "sector": sector,
+        "price_basis": PRICE_BASIS,
+        "limitations": [
+            "This is price relative strength, not RSI and not total return adjusted for distributions."
+        ],
     }
 
 
@@ -1660,6 +1711,7 @@ def _daily_points(
     stock_id: str,
     *,
     to_date: date | None = None,
+    limit: int = MAX_DAILY_BARS,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], Any]:
     to_time = (
         datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIWAN_TZ)
@@ -1670,7 +1722,7 @@ def _daily_points(
         instrument_id=stock_id,
         interval="1d",
         to_time=to_time,
-        limit=MAX_DAILY_BARS,
+        limit=max(1, min(int(limit), MAX_DAILY_BARS)),
         include_partial=False,
     )
     bars = series.bars
@@ -1771,6 +1823,198 @@ def _technical_points(series: Any, parameters: TechnicalAnalysisParameters):
         normalized["time"] = point_date(normalized.get("time"))
         points.append(normalized)
     return points, result
+
+
+def build_tw_stock_price_map_evidence(
+    *,
+    db: Session,
+    stock_id: str,
+    corporate_event_history: Mapping[str, Any] | None = None,
+    to_date: date | None = None,
+) -> dict[str, Any]:
+    """Build the bounded daily evidence slice required by Price Map.
+
+    This is intentionally narrower than the complete technical-evidence graph:
+    it does not load weekly/monthly bars, current partial observations,
+    divergence, or benchmark-relative strength.
+    """
+
+    parameters = get_technical_analysis_parameters()
+    methods = indicator_method_catalog(parameters)
+    maximum_indicator_warmup = max(
+        int(method.get("warmup_bars") or 1)
+        for method in methods.values()
+    )
+    price_map_bar_limit = max(
+        SWING_LOOKBACK,
+        PROFILE_LOOKBACK,
+        maximum_indicator_warmup,
+        parameters.support_resistance_period + BREAKOUT_LIFECYCLE_BARS,
+    ) + 5
+    daily, daily_lineage, daily_series = _daily_points(
+        db,
+        stock_id,
+        to_date=to_date,
+        limit=price_map_bar_limit,
+    )
+    if not daily:
+        return {
+            "kind": "tw_stock_price_map_evidence",
+            "version": "tw.stock.price_map.evidence.v1",
+            "status": "missing",
+            "missing": ["tw.daily.ohlcv"],
+            "warnings": [],
+            "source_refs": [
+                {"type": "resolved_market_data", "name": "tw.daily.ohlcv"}
+            ],
+        }
+    end_date = point_date(daily[-1].get("time"))
+    canonical_daily, daily_technical = _technical_points(daily_series, parameters)
+    daily_snapshot = _snapshot_for_timeframe(
+        daily,
+        timeframe="daily",
+        parameters=parameters,
+        method_catalog=methods,
+        latest_observation_date=end_date,
+        calculated_points=canonical_daily,
+        allow_internal_calculation=False,
+    )
+    daily_corporate_actions = _corporate_contract_for_points(
+        corporate_event_history,
+        daily,
+        lookback_bars=maximum_indicator_warmup,
+    )
+    daily_snapshot["corporate_action"] = _corporate_summary(
+        daily_corporate_actions
+    )
+    daily_snapshot["decision_usable"] = bool(
+        daily_corporate_actions.get("coverage_status") == "complete"
+        and daily_snapshot.get("completed")
+    )
+
+    swing_daily = daily[-SWING_LOOKBACK:]
+    swing_corporate_actions = _corporate_contract_for_points(
+        corporate_event_history,
+        swing_daily,
+    )
+    breakout_corporate_actions = _corporate_contract_for_points(
+        corporate_event_history,
+        daily,
+        lookback_bars=(
+            parameters.support_resistance_period + BREAKOUT_LIFECYCLE_BARS
+        ),
+    )
+    from app.market.tw_technical_service import TaiwanTechnicalService
+
+    advanced = TaiwanTechnicalService().calculate_price_map_capabilities(
+        points=daily,
+        canonical_points=canonical_daily,
+        parameters=parameters,
+        affected_swing_dates=tuple(swing_corporate_actions["affected_dates"]),
+        breakout_corporate_action_contract=dict(breakout_corporate_actions),
+    )
+    profile_corporate_actions = _corporate_contract_for_points(
+        corporate_event_history,
+        daily,
+        lookback_bars=PROFILE_LOOKBACK,
+    )
+    anchored_vwap = advanced["anchored_vwap"]
+    anchored_vwap_corporate_actions = build_corporate_action_contract(
+        corporate_event_history,
+        analysis_start=point_date(anchored_vwap.get("anchor_time")),
+        analysis_end=end_date,
+    )
+    capability_contracts = {
+        "swings": swing_corporate_actions,
+        "fibonacci": swing_corporate_actions,
+        "breakout": breakout_corporate_actions,
+        "volume_profile": profile_corporate_actions,
+        "anchored_vwap": anchored_vwap_corporate_actions,
+    }
+    indicator_source_refs = [
+        {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
+        {"type": "derived", "name": "app.market.technical_evidence"},
+        {
+            "type": "external_or_cache",
+            "name": "taiwan_corporate_event_history",
+        },
+    ]
+    for capability_name, contract in capability_contracts.items():
+        _apply_capability_corporate_contract(
+            advanced[capability_name],
+            contract=contract,
+            source_refs=indicator_source_refs,
+        )
+
+    warnings = list(
+        dict.fromkeys(
+            warning
+            for contract in [daily_corporate_actions, *capability_contracts.values()]
+            for warning in contract.get("warnings") or []
+        )
+    )
+    missing = [
+        capability_name
+        for capability_name in capability_contracts
+        if advanced[capability_name].get("status") in {"missing", "unavailable"}
+    ]
+    status = (
+        "partial"
+        if missing
+        or any(
+            contract.get("coverage_status") != "complete"
+            for contract in [daily_corporate_actions, *capability_contracts.values()]
+        )
+        else "ready"
+    )
+    indicators = {
+        "kind": "tw_technical_indicator_snapshot",
+        "schema_version": INDICATOR_ALGORITHM_VERSION,
+        "algorithm_version": INDICATOR_ALGORITHM_VERSION,
+        "bar_series_fingerprint": daily_technical.bar_series_fingerprint,
+        "bar_series_revision": daily_technical.bar_series_revision,
+        "technical_revision": daily_technical.technical_revision,
+        "calculation_role": "backend_authoritative",
+        "parameter_contract": _indicator_parameter_contract(parameters),
+        "status": (
+            "ready"
+            if daily_corporate_actions["coverage_status"] == "complete"
+            else "partial"
+        ),
+        "stock_id": stock_id,
+        "as_of": _json_date(end_date),
+        "price_basis": PRICE_BASIS,
+        "timeframes": {"daily": daily_snapshot},
+        "corporate_action": daily_corporate_actions,
+        "corporate_action_coverage_by_timeframe": {
+            "daily": _corporate_summary(daily_corporate_actions)
+        },
+        "missing": [],
+        "warnings": list(daily_corporate_actions.get("warnings") or []),
+        "source_refs": indicator_source_refs,
+        "lineage": daily_lineage,
+        "freshness": {
+            "status": "current",
+            "latest_data_date": _json_date(end_date),
+            "finalized_daily_date": _json_date(end_date),
+            "period_semantics": "daily completed snapshot",
+        },
+    }
+    return {
+        "kind": "tw_stock_price_map_evidence",
+        "version": "tw.stock.price_map.evidence.v1",
+        "status": status,
+        "as_of": _json_date(end_date),
+        "price_basis": PRICE_BASIS,
+        "indicators": indicators,
+        **{
+            capability_name: advanced[capability_name]
+            for capability_name in capability_contracts
+        },
+        "missing": missing,
+        "warnings": warnings,
+        "source_refs": indicator_source_refs,
+    }
 
 
 def build_tw_stock_technical_evidence(
@@ -1922,6 +2166,15 @@ def build_tw_stock_technical_evidence(
         points=daily,
         canonical_points=canonical_daily,
         benchmark_points=_benchmark_points(db, to_date=to_date),
+        sector_benchmark=build_tw_sector_benchmark(
+            db,
+            stock_id=stock_id,
+            trade_dates=[
+                parsed
+                for point in daily
+                if (parsed := point_date(point.get("time"))) is not None
+            ],
+        ),
         parameters=parameters,
         affected_swing_dates=tuple(swing_corporate_actions["affected_dates"]),
         breakout_corporate_action_contract=dict(breakout_corporate_actions),
@@ -2096,6 +2349,7 @@ __all__ = [
     "build_fibonacci_evidence",
     "build_relative_strength",
     "build_swing_evidence",
+    "build_tw_stock_price_map_evidence",
     "build_tw_stock_technical_evidence",
     "build_technical_structure_v2",
     "build_volume_profile",

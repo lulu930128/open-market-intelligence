@@ -4,6 +4,7 @@ import math
 import re
 from datetime import date, datetime, time, timezone
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -25,6 +26,9 @@ OPTION_PRODUCT_CODE = "TXO"
 FUTURES_CONTRACT_CODE = "TX"
 FUTURES_SYMBOL = "TXF"
 DERIVATIVES_RELEASE_TIME = time(hour=16, minute=20)
+DERIVATIVES_RETRY_TIMES = (time(hour=16, minute=35), time(hour=17, minute=0))
+DERIVATIVES_MAX_REFRESH_ATTEMPTS = 1 + len(DERIVATIVES_RETRY_TIMES)
+DERIVATIVES_PROVIDER_REQUESTS_PER_ATTEMPT = 5
 RISK_FREE_RATE = 0.0
 DIVIDEND_YIELD = 0.0
 CALCULATION_MODEL = "black_scholes_spot_v1"
@@ -48,6 +52,60 @@ def expected_taiwan_derivatives_date(*, now: datetime | None = None) -> date:
         release_time=DERIVATIVES_RELEASE_TIME,
         now=now,
     )
+
+
+def _derivatives_release_retry_state(
+    *,
+    resource_dates: dict[str, date | None],
+    expected_date: date,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    local_now = (now or datetime.now(timezone.utc)).astimezone(
+        ZoneInfo("Asia/Taipei")
+    )
+    current = bool(resource_dates) and all(
+        trade_date == expected_date for trade_date in resource_dates.values()
+    )
+    schedule = (DERIVATIVES_RELEASE_TIME, *DERIVATIVES_RETRY_TIMES)
+    schedule_labels = [value.strftime("%H:%M") for value in schedule]
+    next_retry_at: str | None = None
+    retry_status = "not_required"
+    release_status = "released"
+
+    if not current:
+        next_time = next(
+            (
+                value
+                for value in schedule
+                if expected_date == local_now.date() and value > local_now.time()
+            ),
+            None,
+        )
+        if next_time is not None:
+            release_status = "pending_release"
+            retry_status = "retry_scheduled"
+            next_retry_at = datetime.combine(
+                local_now.date(),
+                next_time,
+                tzinfo=local_now.tzinfo,
+            ).isoformat()
+        else:
+            release_status = "release_delayed"
+            retry_status = "retry_exhausted"
+
+    return {
+        "release_status": release_status,
+        "retry_status": retry_status,
+        "next_retry_at": next_retry_at,
+        "attempt_schedule": schedule_labels,
+        "max_attempts": DERIVATIVES_MAX_REFRESH_ATTEMPTS,
+        "provider_requests_per_attempt": DERIVATIVES_PROVIDER_REQUESTS_PER_ATTEMPT,
+        "provider_request_budget": (
+            DERIVATIVES_MAX_REFRESH_ATTEMPTS
+            * DERIVATIVES_PROVIDER_REQUESTS_PER_ATTEMPT
+        ),
+        "final_failure": retry_status == "retry_exhausted",
+    }
 
 
 def _clean_text(value: Any) -> str | None:
@@ -943,6 +1001,7 @@ def build_taiwan_derivatives_summary(
     *,
     option_contract_month: str | None = None,
     option_strike_limit: int = 11,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     bounded_strike_limit = min(max(option_strike_limit, 3), 25)
     option_date = _latest_model_date(db, TaiwanOptionChainDaily)
@@ -1035,7 +1094,7 @@ def build_taiwan_derivatives_summary(
     }
     as_of_candidates = [value for value in resource_dates.values() if value is not None]
     as_of = max(as_of_candidates) if as_of_candidates else None
-    expected_date = expected_taiwan_derivatives_date()
+    expected_date = expected_taiwan_derivatives_date(now=now)
     missing: list[str] = []
     if not option_rows:
         missing.append("taifex_txo_option_chain")
@@ -1049,6 +1108,11 @@ def build_taiwan_derivatives_summary(
         if trade_date is not None and trade_date < expected_date
     )
     is_stale = bool(stale) or as_of is None
+    release_retry = _derivatives_release_retry_state(
+        resource_dates=resource_dates,
+        expected_date=expected_date,
+        now=now,
+    )
     status = "missing" if len(missing) == 3 else "partial" if missing or is_stale or calculated_count < len(expiry_rows) else "ready"
     return {
         "status": status,
@@ -1056,6 +1120,12 @@ def build_taiwan_derivatives_summary(
         "expected_trade_date": expected_date,
         "is_stale": is_stale,
         "stale": stale,
+        "release_status": release_retry["release_status"],
+        "retry": {
+            key: value
+            for key, value in release_retry.items()
+            if key != "release_status"
+        },
         "options_chain": {
             "status": "missing" if not option_rows else "partial" if calculated_count < len(expiry_rows) else "ready",
             "trade_date": option_date,
@@ -1099,6 +1169,13 @@ def build_taiwan_derivatives_summary(
             "TAIFEX option chain, Delta, and large-trader concentration are official post-close data, not live night-session positioning.",
             "IV, Gamma, Vega, Theta, basis, annualized basis, and curve shape are OMI-derived research approximations with visible assumptions.",
             "Large-trader concentration must not be interpreted as foreign-investor net long or net short positioning.",
+            *(
+                [
+                    "TAIFEX has not reached the expected released trade date; the bounded post-close retry policy remains visible in retry."
+                ]
+                if is_stale
+                else []
+            ),
         ],
         "source_refs": [
             {"type": "table", "name": "taiwan_option_chain_daily"},
@@ -1112,6 +1189,9 @@ def build_taiwan_derivatives_summary(
 __all__ = [
     "CALCULATION_MODEL",
     "DERIVATIVES_RELEASE_TIME",
+    "DERIVATIVES_RETRY_TIMES",
+    "DERIVATIVES_MAX_REFRESH_ATTEMPTS",
+    "DERIVATIVES_PROVIDER_REQUESTS_PER_ATTEMPT",
     "DIVIDEND_YIELD",
     "FUTURES_SYMBOL",
     "MAX_LARGE_TRADER_READ_LIMIT",

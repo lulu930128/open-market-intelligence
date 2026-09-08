@@ -328,6 +328,8 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
             if tool["name"] == "omi.ask"
         )
         selection = ask_schema["properties"]["selection"]["properties"]
+        self.assertIn("technical.price_map", selection["include"]["items"]["enum"])
+        self.assertIn("diagnostics.source_health", selection["parameters"]["properties"])
         self.assertIn("parameters", selection)
         self.assertIn(
             "screening.ranking",

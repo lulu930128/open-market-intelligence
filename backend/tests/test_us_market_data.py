@@ -1052,6 +1052,11 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self,
         mock_intraday,
     ) -> None:
+        mock_intraday.return_value = {
+            "status": "partial",
+            "trade_date": "2026-07-20",
+            "points": [],
+        }
         self._add_market_identity("AAPL")
         upsert_canonical_us_daily_price_records(
             self.db,
@@ -1107,7 +1112,14 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 },
             )
 
-        mock_intraday.assert_not_called()
+        mock_intraday.assert_called_once_with(
+            symbol="AAPL",
+            trade_date="2026-07-20",
+            session_scope="all",
+            interval="1m",
+            db=self.db,
+            persist_history=False,
+        )
         quote = context["data"]["compact"]["quote"]
         self.assertEqual(context["as_of"], "2026-07-20T16:00:00-04:00")
         self.assertEqual(quote["status"], "historical")
@@ -1128,7 +1140,11 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             [row["trade_date"] for row in context["data"]["daily_prices"]],
             ["2026-07-20"],
         )
-        self.assertFalse(context["data"]["compact"]["resources"]["include_intraday"])
+        self.assertTrue(context["data"]["compact"]["resources"]["include_intraday"])
+        self.assertEqual(
+            context["data"]["compact"]["resources"]["intraday"]["trade_date"],
+            "2026-07-20",
+        )
 
     def test_read_us_stock_context_does_not_fallback_when_trade_date_is_missing(
         self,

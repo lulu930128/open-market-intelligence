@@ -61,6 +61,7 @@ from app.us_market.providers.twelve_data import (
     fetch_twelve_data_time_series_payload,
 )
 from app.us_market.providers.yahoo import fetch_yahoo_chart_payload
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE
 
 
 _TWELVE_PROVIDER_INTERVALS = {
@@ -139,6 +140,8 @@ class USIntradayAcquisitionExecutor:
                 timeout_seconds=route.timeout_seconds,
                 include_prepost=True,
                 resource="us_intraday_shared_core",
+                **({"start_at": requirement.request.start_at, "end_at": requirement.request.end_at}
+                   if isinstance(requirement.request, BarCapabilityRequest) and requirement.request.completed_only else {}),
             )
         if route.resource_id in {
             MASSIVE_INDEX_QUOTE_RESOURCE_ID,
@@ -196,6 +199,10 @@ class USIntradayAcquisitionExecutor:
                 outputsize=requirement.request.max_bars,
                 timezone_name="America/New_York",
                 timeout_seconds=route.timeout_seconds,
+                **({
+                    "start_date": requirement.request.start_at.astimezone(US_MARKET_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_date": (requirement.request.end_at - timedelta(seconds=1)).astimezone(US_MARKET_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
+                } if requirement.request.completed_only else {}),
             )
         raise ValueError(f"unsupported US intraday resource: {route.resource_id}")
 

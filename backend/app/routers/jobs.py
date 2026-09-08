@@ -455,15 +455,21 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         )
 
     if job_type == CROSS_MARKET_CONTEXT_REFRESH_JOB_TYPE:
+        cross_market_args = (
+            _parse_string_list(request.get("stock_ids")),
+            int(request.get("max_symbols", 8)),
+            str(request.get("provider") or "auto"),
+            str(request.get("outputsize") or "compact"),
+            int(request.get("max_runtime_seconds", 120)),
+        )
+        if "requested_capabilities" in request:
+            cross_market_args = (
+                *cross_market_args,
+                _parse_string_list(request.get("requested_capabilities")),
+            )
         return (
             backfill_tasks.run_cross_market_context_refresh_job,
-            (
-                _parse_string_list(request.get("stock_ids")),
-                int(request.get("max_symbols", 8)),
-                str(request.get("provider") or "auto"),
-                str(request.get("outputsize") or "compact"),
-                int(request.get("max_runtime_seconds", 120)),
-            ),
+            cross_market_args,
             request,
         )
 
@@ -507,6 +513,7 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 int(request.get("max_symbols", 20)),
                 int(request.get("max_external_calls", 20)),
                 int(request.get("max_provider_attempts", 2)),
+                _parse_string_list(request.get("required_symbols")),
             ),
             request,
         )

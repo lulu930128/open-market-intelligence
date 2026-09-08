@@ -131,6 +131,13 @@ def _compact_derivatives_summary(derivatives: dict[str, Any] | None) -> dict[str
         "as_of": derivatives.get("as_of"),
         "expected_trade_date": derivatives.get("expected_trade_date"),
         "is_stale": derivatives.get("is_stale"),
+        "stale": list(derivatives.get("stale") or []),
+        "release_status": derivatives.get("release_status"),
+        "retry": (
+            dict(derivatives["retry"])
+            if isinstance(derivatives.get("retry"), dict)
+            else None
+        ),
         "options_chain": {
             key: options_chain.get(key)
             for key in (

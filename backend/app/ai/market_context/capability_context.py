@@ -10,6 +10,12 @@ from app.config import settings
 
 CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
+        "id": "company_news_documents", "market": "tw", "status": "connected",
+        "provider": "Open Intel Atlas", "cadence": "atlas_scheduler_owned",
+        "outward_target": "tw_stock", "payload_ref": "evidence.data.news.company_documents",
+        "notes": "Read-only exact stock Documents; server feature flag and Atlas rights apply. No Event promotion or score changes.",
+    },
+    {
         "id": "tw_full_market_breadth",
         "market": "tw",
         "status": "connected",
@@ -272,6 +278,11 @@ def read_capability_status(
         params.get("scope_type") or params.get("target_type") or ""
     ).strip().lower()
     rows = [dict(item) for item in CAPABILITIES]
+    for row in rows:
+        if row["id"] == "company_news_documents":
+            row["status"] = "connected_readonly" if settings.omi_atlas_news_enabled else "disabled"
+            if not settings.omi_atlas_news_enabled:
+                row["blocking_reason"] = "Atlas Company News is disabled by server policy."
     if settings.omi_atlas_shadow_enabled:
         for row in rows:
             if row.get("id") != "news_events":

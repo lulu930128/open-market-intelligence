@@ -390,6 +390,64 @@ def build_tw_screening_snapshot(
 
     covered_count = len(values)
     universe_count = len(universe_ids)
+    covered_ids = {stock_id for stock_id, _value in values}
+    expected_but_missing_ids = sorted(
+        stock_id
+        for stock_id in universe_ids
+        if stock_id not in rows_by_stock
+    )
+    observed_but_unusable_ids = sorted(
+        stock_id
+        for stock_id in universe_ids
+        if stock_id in rows_by_stock and stock_id not in covered_ids
+    )
+    reconciliation = {
+        "version": "omi.tw.screening.coverage.reconciliation.v1",
+        "partition_formula": (
+            "covered + expected_but_missing + observed_but_unusable = universe"
+        ),
+        "covered": {
+            "count": covered_count,
+        },
+        "source_absent_valid": {
+            "count": 0,
+            "stock_ids": [],
+            "semantics": "not_asserted_without_provider_absence_contract",
+        },
+        "expected_but_missing": {
+            "count": len(expected_but_missing_ids),
+            "stock_ids": expected_but_missing_ids,
+        },
+        "observed_but_unusable": {
+            "count": len(observed_but_unusable_ids),
+            "stock_ids": observed_but_unusable_ids,
+        },
+        "unclassified": {
+            "count": max(
+                universe_count
+                - covered_count
+                - len(expected_but_missing_ids)
+                - len(observed_but_unusable_ids),
+                0,
+            ),
+            "stock_ids": [],
+        },
+    }
+    reconciliation["partition_total"] = sum(
+        int(reconciliation[key]["count"])
+        for key in (
+            "covered",
+            "expected_but_missing",
+            "observed_but_unusable",
+            "unclassified",
+        )
+    )
+    reconciliation["status"] = (
+        "balanced"
+        if reconciliation["partition_total"] == universe_count
+        and reconciliation["unclassified"]["count"] == 0
+        else "inconsistent"
+    )
     available_dates = len(trade_dates)
     complete_window_count = sum(
         1
@@ -499,6 +557,7 @@ def build_tw_screening_snapshot(
             0,
         ),
         "missing_count": max(universe_count - covered_count, 0),
+        "reconciliation": reconciliation,
         "coverage_ratio": (
             round(covered_count / universe_count, 6)
             if universe_count

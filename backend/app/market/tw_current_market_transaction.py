@@ -268,6 +268,15 @@ class TaiwanCurrentMarketTransaction:
             "currency": observation.currency,
             "observation_state": observation.state.value,
             "price_semantics": observation.price_semantics,
+            "auction_observation_json": (
+                observation.auction.model_copy(update={"lineage": observation.auction.lineage.model_copy(
+                    update={"raw_receipt_id": f"raw_fetch_result:{raw.id}"},
+                )}).model_dump_json() if observation.auction else None
+            ),
+            "acquisition_diagnostics_json": (
+                observation.acquisition_diagnostics.model_dump_json()
+                if observation.acquisition_diagnostics else None
+            ),
             "official": observation.official,
             "provisional": observation.provisional,
             "decision_usable": decision_usable,
@@ -280,6 +289,15 @@ class TaiwanCurrentMarketTransaction:
                         (observation.trade_value is None, "TRADE_VALUE_UNAVAILABLE"),
                     )
                     if condition
+                ]
+                + [
+                    "TW_BREADTH_COVERAGE_REASONS:"
+                    + json.dumps(
+                        observation.coverage_reason_counts,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
                 ]
             ),
         }

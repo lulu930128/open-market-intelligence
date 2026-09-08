@@ -200,6 +200,13 @@ def build_taiwan_quote_scheduler_contract(
     return {
         "version": QUOTE_CONTRACT_HEALTH_VERSION,
         "axis": "scheduler_contract",
+        "operation_profile": universe["target_plan"]["operation_profile"],
+        "scope": (
+            "request_symbol" if stock_id else "configured_canary"
+            if universe["target_plan"]["configured_symbol_count"] else "watchlist_canary"
+        ),
+        "target_count": len(scoped_symbols),
+        "full_market": False,
         "status": status,
         "decision_usable": status == "ready",
         "trade_date": trade_date.isoformat() if trade_date else None,

@@ -240,9 +240,9 @@ def _us_market_data_params(
     )
     if requested_trade_date is not None:
         params["trade_date"] = requested_trade_date.isoformat()
-        # Exact close requests are daily-session facts. Current intraday or
-        # extended-hours quotes must not replace the requested close.
-        params["include_intraday"] = False
+        # Keep an explicitly selected historical series alongside Daily close;
+        # the context owner prevents its last minute from replacing that close.
+        params["include_intraday"] = "intraday.bars" in selected_capabilities
     return params
 
 

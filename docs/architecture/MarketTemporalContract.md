@@ -95,6 +95,8 @@ active phase 只接受Backend calendar投影的`current_session_trade_date`。�
 session requirement不滿足，Today series不得回退到latest cached date。Intraday bar
 freshness仍以最新bar event time判斷；off-session才可明示投影latest historical session。
 
+明示 `trade_date` 的 US historical intraday 使用 `historical_intraday.py` 驗證已完成的交易時窗與 bounded horizon；read path 僅從 canonical cache 讀取指定交易日。獲授權的 acquisition 才將該時窗傳入 provider，經 transaction persistence 後 mandatory reread。Regular completeness 依交易日曆（含 early close）的逐分鐘時槽、重複／缺段與 finalization 判定，不以總筆數單獨推定完整。Partial evidence 保持可見，historical projection 與其 points 不宣稱 live／realtime／decision usable。Extended completeness 尚不升級為 complete。
+
 US Quote／Intraday selected evidence 的event recency由
 `evaluate_us_selected_evidence_temporal()`單一pure owner判定，Compatibility service與
 US Market Truth共同消費。Market Truth的`current_observation`只表示observation屬於目前
@@ -198,6 +200,25 @@ Marker可以攜帶兩個獨立的volume facts：closing-match volume與session c
 - Reconciliation 不得 mutate 原始 evidence semantics。
 - `post_close + session_final + pending_release` 是合法組合。
 - release window 已到但 canonical official daily evidence 尚未到達時，必須投影為 released-but-unavailable；不得繼續顯示 `pending_release`，也不得用前一交易日 official close 假裝當日資料。
+
+## 台股 quote、breadth 與 screening 的對外一致性
+
+- MIS 單檔與 batch 的新成交判讀共用 `resolve_twse_mis_actual_trade`；試撮、非有限數值、交易日不符與缺少成交證據不得成為新成交。Batch 可保留同日先前實際成交，但必須保留原 price event time 與 `session_cache` lineage，不能用新試撮時間更新舊價格。
+- Midpoint 是研究估計，只能保存在獨立估計欄位與帶 `is_estimate` 的結構；不能填入 `price`、`latest_price` 或 `last_price`。
+- `quote.session_close` 預設 outward projection 保留 facts／research／decision usability。Quality 按此 dataset 解讀 `session_final`，保留 official-daily reconciliation pending，但不把 pending 本身視為 availability blocker；mismatch 與未滿足 require-live policy 仍會限制 decision。
+- Breadth 的完成 session projection 保留 `observation_market_session`；canonical persisted observation 的 provisional 不因讀取時鐘而變更。只有 classified constituents 全部具 closing-match evidence、exchange authority 與收盤確認邊界後的 receipt，producer 才能持久化非 provisional observation。Unknown／missing coverage 仍獨立存在，不因 finality 歸零。
+- Screening 僅對本次 bounded rows 讀 canonical session-close owner；price、trade date、event time 與 lineage 均符合時才採 completed-session freshness。其餘 rows 仍保留 delayed／stale；coverage ready 不等於價格新鮮。
+- Taiwan Bar owner 將 explicit presentation date 與 implicit current session 綁到同一 window；其他 exact date 限制 from/to，不回退到其他日期。對外保留 expected／observed dates、history identity 與 materialization state；`not_materialized` 不代表任意標的已取得 Tier-A 資格。
+
+## 台股盤前／盤中 evidence lane
+
+- Quote snapshot 的價格、OHLC、quote time 與來源由原 snapshot 擁有。`current_price` 是獨立的 `resolved_current_price` 物件；1m fallback 不覆寫 snapshot 的價格或時間。既有 display／decision consumer 讀取此物件，沒有建立第二份 bar selection policy。
+- Quote component 的 freshness 由選中 canonical candidate 傳遞；Resolved Evidence 為 stale 時，即使 `facts_usable=true`，也不得升為 current/live/decision usable。數值仍可作為帶時間的事實保留。
+- `AuctionBreadthObservation` 是 actual breadth 同次 acquisition 的 typed companion，保存自己的 lineage、event time、session、indicative partition 與 provisional 語意。使用既有 transaction/repository 儲存，GET 不解析 raw receipt 或觸發 acquisition。它不進 actual breadth／regular screening 的計算。
+- Auction breadth 在 requested session 過期時標 stale；離開對應 auction session 標 not_applicable。Unknown coverage 不補成 unchanged。Canonical companion 的持久化需要對應 Alembic migration；舊資料不推算出不存在的試撮 observation。
+- Breadth acquisition diagnostics 分開描述 snapshot failed batches 與 latest attempt/fallback；partial attempt 不取代 transport-complete last-good baseline。Latest stock rows 不合併舊列偽裝 current。
+- Actual-trade screening 只讀 expected session；盤前標 not_applicable。`observation_received_freshness`、`last_trade_recency`、`facts_usable_for_ranking` 與 decision/execution usability 分開；不放寬既有成交 age gate。
+- Health 的 acceptance canary、bounded Tier-A 與 request-symbol scope 必須明示；單一標的缺資料不重定義全域 health。
 
 ## Negative acceptance
 

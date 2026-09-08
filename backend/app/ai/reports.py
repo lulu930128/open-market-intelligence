@@ -393,8 +393,23 @@ def _compact_us_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
     short_volume = data.get("short_volume") if isinstance(data.get("short_volume"), list) else []
     profile = summary.get("profile") if isinstance(summary.get("profile"), dict) else {}
 
-    latest_daily = daily_rows[0] if daily_rows else {}
-    previous_daily = daily_rows[1] if len(daily_rows) > 1 else {}
+    # Context rows follow the canonical projection order, not newest-first.
+    # A supplied canonical anchor must never fall forward to another session.
+    ordered_daily = sorted(
+        (row for row in daily_rows if isinstance(row, dict) and row.get("trade_date")),
+        key=lambda row: str(row["trade_date"]),
+    )
+    anchor = summary.get("latest_trade_date")
+    latest_daily = (
+        next((row for row in reversed(ordered_daily) if str(row["trade_date"]) == str(anchor)), {})
+        if anchor
+        else ordered_daily[-1] if ordered_daily else {}
+    )
+    previous_daily = next(
+        (row for row in reversed(ordered_daily)
+         if latest_daily and str(row["trade_date"]) < str(latest_daily["trade_date"])),
+        {},
+    )
     latest_close = _numeric(latest_daily.get("close_price"))
     previous_close = _numeric(previous_daily.get("close_price"))
     change_pct = None

@@ -4448,26 +4448,28 @@ test.describe("OMI dashboard smoke", () => {
     ).toBe(false);
 
     const todayTimeframe = detailPanel.getByRole("button", { name: "今日", exact: true });
-    const regularScopeResponse = page.waitForResponse((response) => {
+    const todayScopeResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
-      return (
-        decodeURIComponent(url.pathname).endsWith("/us-market/intraday/AAPL") &&
-        url.searchParams.get("session_scope") === "regular"
-      );
+      return decodeURIComponent(url.pathname).endsWith("/us-market/intraday/AAPL");
     });
     await todayTimeframe.click();
-    await regularScopeResponse;
+    const initialScope = new URL((await todayScopeResponse).url()).searchParams.get(
+      "session_scope"
+    );
+    expect(["regular", "extended", "all"]).toContain(initialScope);
     await expect(todayTimeframe).toHaveClass(/omi-timeframe-tab-active/);
     requests.length = 0;
-    const allScopeResponse = page.waitForResponse((response) => {
+    const nextScope = initialScope === "all" ? "regular" : "all";
+    const nextScopeLabel = nextScope === "regular" ? "盤中" : "全部";
+    const nextScopeResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return (
         decodeURIComponent(url.pathname).endsWith("/us-market/intraday/AAPL") &&
-        url.searchParams.get("session_scope") === "all"
+        url.searchParams.get("session_scope") === nextScope
       );
     });
-    await detailPanel.getByRole("button", { name: "全部", exact: true }).click();
-    await allScopeResponse;
+    await detailPanel.getByRole("button", { name: nextScopeLabel, exact: true }).click();
+    await nextScopeResponse;
     await page.waitForTimeout(100);
 
     const aaplScopeRequests = requests.filter((value) =>
@@ -4889,6 +4891,7 @@ test.describe("OMI dashboard smoke", () => {
 
     await expect(page.getByTestId("us-stock-header-price")).toHaveText("416.74");
     await expect(detailPanel).toContainText("盤中 · regular 0 / extended 2");
+    await detailPanel.getByRole("button", { name: "盤中", exact: true }).click();
     await expect(page.getByTestId("us-intraday-coverage-notice")).toContainText(
       "盤中資料尚未取得；盤前／盤後已有 2 筆"
     );
@@ -5355,6 +5358,7 @@ test.describe("OMI dashboard smoke", () => {
       "data-chart-load-state",
       "success"
     );
+    await page.getByTestId("tw-stock-detail-radar-external").getByRole("button").click();
     const idleOvernightDisclosure = page.getByTestId("tw-overnight-impact-disclosure");
     await expect(idleOvernightDisclosure).toContainText("Overnight");
     await idleOvernightDisclosure.locator(":scope > summary").click();
@@ -5364,7 +5368,7 @@ test.describe("OMI dashboard smoke", () => {
     const crossMarketDetails = page.getByTestId("cross-market-context-details");
     const overnightDisclosure = page.getByTestId("tw-overnight-impact-disclosure");
     await expect(overnightDisclosure).toContainText("Overnight · 市場背景");
-    await expect(overnightDisclosure).not.toHaveAttribute("open", "");
+    await expect(overnightDisclosure).toHaveAttribute("open", "");
     await expect(crossMarket).toBeVisible();
     await expect(
       crossMarket.evaluate(
@@ -5414,8 +5418,7 @@ test.describe("OMI dashboard smoke", () => {
     const fxFlow = page.getByTestId("fx-flow-context-strip");
     const fxFlowToggle = page.getByTestId("fx-flow-context-toggle");
     const fxFlowDetails = page.getByTestId("fx-flow-context-details");
-    await expect(fxFlow).toBeHidden();
-    await overnightDisclosure.locator(":scope > summary").click();
+    await expect(fxFlow).toBeVisible();
     await expect(overnightDisclosure).toHaveAttribute("open", "");
     await expect(fxFlow).toBeVisible();
     await expect(fxFlow).not.toHaveAttribute("open", "");
@@ -5493,6 +5496,7 @@ test.describe("OMI dashboard smoke", () => {
     });
 
     await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+    await page.getByTestId("tw-stock-detail-radar-external").getByRole("button").click();
     await page
       .getByTestId("tw-overnight-impact-disclosure")
       .locator(":scope > summary")
@@ -5648,6 +5652,7 @@ test.describe("OMI dashboard smoke", () => {
           : null,
     });
     await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+    await page.getByTestId("tw-stock-detail-radar-external").getByRole("button").click();
     await page
       .getByTestId("tw-overnight-impact-disclosure")
       .locator(":scope > summary")
@@ -6130,11 +6135,8 @@ test.describe("OMI dashboard smoke", () => {
     const technicalCurrentState = page.getByTestId("tw-technical-current-state");
     await expect(technicalCurrentState).toBeVisible();
     await expect(page.getByTestId("tw-technical-position-count")).toContainText("3/3");
-    await expect(technicalCurrentState).toContainText("修復與風險階梯");
-    await expect(technicalCurrentState).toContainText("20 日低點／風險線");
-    await expect(technicalCurrentState).toContainText("站回 MA5");
-    await expect(technicalCurrentState).toContainText("站回 MA60");
-    await expect(technicalCurrentState).toContainText("站回 MA20");
+    await expect(technicalCurrentState).toContainText("空方趨勢延續");
+    await expect(page.getByTestId("tw-stock-detail-radar-decision-changes")).toBeVisible();
 
     await expect(quoteDepthPanel).toContainText("52.4");
     await expect(chartCard).toContainText("成交量(股)");
@@ -6892,14 +6894,11 @@ test.describe("OMI dashboard smoke", () => {
       "data-decision-state-status",
       "official_daily_finalized"
     );
-    await expect(technicalPanel.locator(".omi-technical-summary")).toContainText(
+    await expect(page.getByTestId("tw-stock-detail-radar-summary")).toContainText(
       "正式完成狀態"
     );
-    await expect(technicalPanel.locator(".omi-technical-summary")).not.toContainText(
-      "今日暫估狀態"
-    );
-    const provisional = page.getByTestId("tw-technical-provisional-section");
-    await expect(provisional).toContainText("今日暫估觀察");
+    const provisional = page.getByTestId("tw-stock-detail-radar-provisional");
+    await expect(provisional).toContainText("盤中暫估");
     await expect(provisional).toContainText("今日暫估狀態");
     await expect(provisional).toContainText("605");
     await expect(provisional).toContainText("不可作正式決策");
@@ -6943,123 +6942,30 @@ test.describe("OMI dashboard smoke", () => {
       waitUntil: "domcontentloaded",
     });
 
-    const technicalContext = page.getByTestId("tw-technical-context");
-    const technicalHeader = page.locator(".omi-technical-summary").last();
-    const ladder = page.getByTestId("tw-technical-ladder-disclosure");
-    const nextConditions = page.getByTestId(
-      "tw-technical-next-conditions-disclosure"
+    const radar = page.getByTestId("tw-stock-detail-radar-v2");
+    const summary = page.getByTestId("tw-stock-detail-radar-summary");
+    const priceMap = page.getByTestId("tw-stock-price-map");
+    const evidence = page.getByTestId("tw-stock-detail-radar-evidence");
+    const external = page.getByTestId("tw-stock-detail-radar-external");
+
+    await expect(radar).toBeVisible();
+    await expect(summary).toBeVisible();
+    await expect(summary.locator("details")).toHaveCount(0);
+    await expect(priceMap.getByTestId("tw-stock-price-map-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true"
     );
-    const evidence = page.getByTestId("tw-technical-evidence-disclosure");
-    const plan = page.getByTestId("tw-next-session-plan");
-    const planDisclosure = page.getByTestId("tw-next-session-plan-disclosure");
-    const overnightDisclosure = page.getByTestId(
-      "tw-overnight-impact-disclosure"
-    );
-    const overnightEyebrow = page
-      .getByText("Overnight · 市場背景", { exact: true })
-      .last();
+    await expect(evidence.getByRole("button")).toHaveAttribute("aria-expanded", "false");
+    await expect(external.getByRole("button")).toHaveAttribute("aria-expanded", "false");
 
-    await expect(technicalHeader).toBeVisible();
-    await expect(technicalHeader.locator("details")).toHaveCount(0);
-    for (const disclosure of [
-      ladder,
-      nextConditions,
-      evidence,
-      planDisclosure,
-      overnightDisclosure,
-    ]) {
-      await expect(disclosure).toBeVisible();
-      await expect(disclosure).not.toHaveAttribute("open", "");
-    }
-    await expect(technicalContext).not.toHaveAttribute("open", "");
-    await expect(technicalContext).not.toBeVisible();
+    await evidence.getByRole("button").click();
+    await expect(evidence.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("tw-technical-evidence-trend")).toBeVisible();
 
-    await planDisclosure.locator("summary").click();
-    await overnightDisclosure.locator("summary").click();
-    await expect(plan).toBeVisible();
-    await expect(page.getByTestId("tw-overnight-impact")).toBeVisible();
-    if (await planDisclosure.evaluate((node) => (node as HTMLDetailsElement).open)) {
-      await planDisclosure.locator("summary").click();
-    }
-    await expect(planDisclosure).not.toHaveAttribute("open", "");
-    if (await overnightDisclosure.evaluate((node) => (node as HTMLDetailsElement).open)) {
-      await overnightDisclosure.locator("summary").click();
-    }
-    await expect(overnightDisclosure).not.toHaveAttribute("open", "");
-
-    await ladder.locator("summary").click();
-    await expect(ladder).toHaveAttribute("open", "");
-    await expect(ladder.locator("[data-level-key]").first()).toBeVisible();
-
-    await nextConditions.locator("summary").click();
-    await expect(nextConditions).toHaveAttribute("open", "");
-    await expect(nextConditions.locator("ol")).toBeVisible();
-
-    await evidence.locator("summary").first().click();
-    await expect(evidence).toHaveAttribute("open", "");
-    const trendEvidence = page.getByTestId("tw-technical-evidence-trend");
-    await expect(trendEvidence).toBeVisible();
-    await expect(trendEvidence).not.toHaveAttribute("open", "");
-    expect(
-      await trendEvidence
-        .locator("summary > span")
-        .last()
-        .evaluate((indicator) => getComputedStyle(indicator).transform)
-    ).toBe("none");
-    await expect(technicalContext).toBeVisible();
-    await evidence.locator("summary").first().click();
-    await expect(evidence).not.toHaveAttribute("open", "");
-    await expect(technicalContext).not.toBeVisible();
-
-    await expect(plan).toBeVisible();
-    await expect(plan).toHaveAttribute("data-decision-usable", "true");
-    await expect(plan.getByTestId("tw-next-session-plan-status")).toHaveText(
-      "可使用"
-    );
-    await expect(plan.getByTestId("tw-next-session-level-ma20")).toContainText(
-      "142"
-    );
-    await expect(plan.getByTestId("tw-next-session-level-ma60")).toContainText(
-      "150"
-    );
-    await expect(
-      plan.getByTestId("tw-next-session-zone-between_transition_levels")
-    ).toContainText("142 – 150");
-    await expect(plan.getByTestId("tw-next-session-level-ma20")).not.toBeVisible();
-    await planDisclosure.locator("summary").click();
-    await expect(planDisclosure).toHaveAttribute("open", "");
-    await expect(plan.getByTestId("tw-next-session-level-ma20")).toBeVisible();
-
-    await expect(overnightEyebrow).toBeVisible();
-    await overnightDisclosure.locator("summary").click();
-    await expect(overnightDisclosure).toHaveAttribute("open", "");
-
-    const planHandle = await plan.elementHandle();
-    const overnightHandle = await overnightEyebrow.elementHandle();
-    expect(planHandle).not.toBeNull();
-    expect(overnightHandle).not.toBeNull();
-    expect(
-      await technicalContext.evaluate(
-        (contextNode, planNode) =>
-          Boolean(
-            contextNode.compareDocumentPosition(planNode as Node) &
-              Node.DOCUMENT_POSITION_FOLLOWING
-          ),
-        planHandle
-      )
-    ).toBe(true);
-    expect(
-      await plan.evaluate(
-        (planNode, overnightNode) =>
-          Boolean(
-            planNode.compareDocumentPosition(overnightNode as Node) &
-              Node.DOCUMENT_POSITION_FOLLOWING
-          ),
-        overnightHandle
-      )
-    ).toBe(true);
+    await external.getByRole("button").click();
+    await expect(external.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("tw-overnight-impact-disclosure")).toBeVisible();
   });
-
   test("Taiwan daily technical panel routes signal chips to evidence or source data", async ({
     page,
   }) => {
@@ -7254,12 +7160,16 @@ test.describe("OMI dashboard smoke", () => {
     const technicalCurrentState = page.getByTestId("tw-technical-current-state");
     await expect(technicalCurrentState).toBeVisible();
     await expect(page.getByTestId("tw-technical-position-count")).toContainText("3/3");
-    await expect(technicalCurrentState).toContainText("修復與風險階梯");
-    await expect(technicalCurrentState).toContainText("20 日低點／風險線");
-    await expect(technicalCurrentState).toContainText("站回 MA5");
-    await expect(technicalCurrentState).toContainText("站回 MA60");
-    await expect(technicalCurrentState).toContainText("站回 MA20");
+    await expect(technicalCurrentState).toContainText("空方趨勢延續");
+    await expect(page.getByTestId("tw-stock-detail-radar-decision-changes")).toBeVisible();
 
+    const evidenceDisclosure = page.getByTestId("tw-stock-detail-radar-evidence");
+    const evidenceToggle = evidenceDisclosure.locator(":scope > button");
+    await evidenceToggle.click();
+    await expect(evidenceToggle).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
     const coreSignals = page.getByTestId("tw-signal-chip-group-technical");
     const contextSignals = page.getByTestId("tw-signal-chip-group-context");
     await expect(coreSignals).toContainText("核心訊號");
@@ -7288,22 +7198,19 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByTestId("tw-signal-chip-market-relative")).toHaveCount(0);
 
     const trendEvidence = page.getByTestId("tw-technical-evidence-trend");
-    const evidenceDisclosure = page.getByTestId(
-      "tw-technical-evidence-disclosure"
-    );
-    await expect(evidenceDisclosure).not.toHaveAttribute("open", "");
-    await expect(trendEvidence).not.toHaveAttribute("open", "");
+    await expect(trendEvidence).toBeVisible();
     await page.getByTestId("tw-signal-chip-structure").click();
-    await expect(evidenceDisclosure).toHaveAttribute("open", "");
-    await expect(trendEvidence).toHaveAttribute("open", "");
+    await expect(evidenceToggle).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
+    await expect(trendEvidence).toBeVisible();
+    await expect(trendEvidence).toBeFocused();
     await expect(trendEvidence).toContainText("ADX 30.09");
 
-    const technicalContext = page.getByTestId("tw-technical-context");
-    await expect(technicalContext).not.toHaveAttribute("open", "");
     const dataPanel = page.getByTestId("tw-stock-detail-data-panel");
     const institutionalTab = dataPanel.locator('[data-data-tab="institutional"]');
     await page.getByTestId("tw-signal-chip-institutional").click();
-    await expect(technicalContext).not.toHaveAttribute("open", "");
     await expect(institutionalTab).toHaveClass(/omi-data-tab-active/);
     await expect(institutionalTab).toBeFocused();
     await expect(page.getByTestId("tw-signal-chip-institutional")).toContainText(
@@ -7327,16 +7234,14 @@ test.describe("OMI dashboard smoke", () => {
     await expect(revenueTab).toHaveClass(/omi-data-tab-active/);
     await expect(revenueTab).toBeFocused();
 
-    await page
-      .getByTestId("tw-overnight-impact-disclosure")
-      .locator(":scope > summary")
-      .click();
+    const external = page.getByTestId("tw-stock-detail-radar-external");
+    await external.getByRole("button").click();
     await expect(page.getByTestId("tw-signal-chip-overnight")).toContainText(
       "隔夜：隔夜中性 -0.10%"
     );
     await page.getByTestId("tw-signal-chip-overnight").click();
-    await expect(technicalContext).toHaveAttribute("open", "");
-    await expect(technicalContext).toContainText("法人籌碼");
+    await expect(external.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("tw-overnight-impact-disclosure")).toBeVisible();
     expect(pageErrors).toEqual([]);
   });
 

@@ -34,6 +34,7 @@ from app.market.public_quote_platform import (
 from app.market.schemas import TaiwanStockQuoteDepthRead
 from app.market.taiwan_quote_evidence import (
     acquire_taiwan_quote_evidence_bundle,
+    read_taiwan_quote_evidence_bundle,
 )
 from app.market.taiwan_realtime_platform import (
     acquire_taiwan_depth,
@@ -294,6 +295,22 @@ def test_mis_depth_attempt_does_not_contaminate_cached_kgi_quote_provenance() ->
         assert serialized["acquisition_scope"]["providers_attempted"] == [
             "twse_mis"
         ]
+        assert serialized["depth_live_available"] is True
+        later = read_taiwan_quote_evidence_bundle(
+            db, stock_id="2330", requested_at=now + timedelta(minutes=40),
+        )
+        stale = project_taiwan_quote_evidence_bundle(db=db, stock_id="2330", bundle=later)
+        component = stale["data_core_components"]["quote.order_book"]
+        assert component["resolved_health"]["status"] == "stale"
+        assert component["resolved_health"]["facts_usable"] is True
+        assert component["freshness"]["is_current"] is False
+        assert stale["depth_live_available"] is False
+        assert stale["bid_levels"]
+        from app.ai.market_context.taiwan_projection import _compact_quote_snapshot
+        outward = _compact_quote_snapshot(latest_daily=None, quote_depth=stale, quote_error=None)["components"]["order_book"]
+        assert outward["status"] == "stale"
+        assert outward["decision_usable"] is False
+        assert len(calls) == 1
     finally:
         db.close()
         engine.dispose()

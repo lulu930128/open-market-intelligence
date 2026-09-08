@@ -394,7 +394,10 @@ class OvernightImpactTests(unittest.TestCase):
             "app.market.overnight_impact.expected_us_daily_price_date",
             return_value=expected_date,
         ), patch(
-            "app.market.overnight_impact.refresh_us_daily_ohlcv",
+            "app.market.cross_market.refresh.expected_us_trade_date",
+            return_value=expected_date,
+        ), patch(
+            "app.market.cross_market.refresh.refresh_us_daily_ohlcv",
             side_effect=refresh_daily,
         ) as refresh_mock:
             report = ensure_current_us_overnight_impact_report(
@@ -641,6 +644,7 @@ class OvernightImpactTests(unittest.TestCase):
             provider="auto",
             outputsize="compact",
             max_runtime_seconds=120,
+            requested_capabilities=("cross_market.overnight",),
         )
         self.assertEqual(
             [run["tool"] for run in session["tool_runs"]],

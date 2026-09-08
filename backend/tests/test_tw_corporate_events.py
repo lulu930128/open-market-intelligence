@@ -14,6 +14,7 @@ from app.market.providers.tw_corporate_events import (
     MopsConferenceBatch,
     MopsConferenceWindowFailure,
     fetch_mops_conferences,
+    classify_mops_conference_response,
     parse_mops_conferences,
     parse_tpex_ex_dividend_history,
     parse_tpex_ex_dividends,
@@ -127,6 +128,55 @@ class TaiwanCorporateEventParserTests(unittest.TestCase):
     def test_mops_parser_rejects_schema_drift(self) -> None:
         with self.assertRaises(ValueError):
             parse_mops_conferences("<html></html>", market="TWSE")
+
+    def test_mops_response_classifier_distinguishes_provider_pages(self) -> None:
+        self.assertEqual(
+            classify_mops_conference_response(MOPS_HTML),
+            "valid_data",
+        )
+        self.assertEqual(
+            classify_mops_conference_response(
+                '<table id="myTable"><tr><td>查無資料</td></tr></table>'
+            ),
+            "valid_empty",
+        )
+        self.assertEqual(
+            classify_mops_conference_response("<html><body>系統維護中</body></html>"),
+            "maintenance_page",
+        )
+        self.assertEqual(
+            classify_mops_conference_response(
+                "<html><body>Access Denied - CAPTCHA</body></html>"
+            ),
+            "anti_bot_or_invalid_response",
+        )
+        self.assertEqual(
+            classify_mops_conference_response(
+                "<table><tr><th>完全不同欄位</th></tr><tr><td>x</td></tr></table>"
+            ),
+            "html_schema_changed",
+        )
+
+    def test_mops_parser_supports_header_validated_renamed_table(self) -> None:
+        html = """
+        <table id="conference-result-v2">
+          <tr><th>公司代碼</th><th>公司名稱</th><th>召開日期</th><th>召開時間</th>
+              <th>召開地點</th><th>活動內容</th><th>公司網站</th><th>影音連結</th></tr>
+          <tr><td>2330</td><td>台積電</td><td>115/07/16</td><td>14:00</td>
+              <td>線上</td><td>說明營運概況</td>
+              <td><a href="https://investor.example/2330">網站</a></td>
+              <td><a href="https://video.example/2330">影音</a></td></tr>
+        </table>
+        """
+
+        self.assertEqual(
+            classify_mops_conference_response(html),
+            "html_schema_changed",
+        )
+        rows = parse_mops_conferences(html, market="TWSE")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["stock_id"], "2330")
+        self.assertEqual(rows[0]["company_url"], "https://investor.example/2330")
 
     def test_mops_window_retries_transport_failure_and_reports_recovery(self) -> None:
         context = ProviderRequestContext(
@@ -674,6 +724,54 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
         self.assertEqual(calendar["date_from"], date(2026, 7, 20))
         self.assertEqual(calendar["result_count"], 0)
         self.assertEqual(set(calendar["sources"]), set(tw_corporate_events.CURRENT_PROVIDER_KEYS))
+
+    def test_recent_history_cache_does_not_skip_incomplete_latest_session(
+        self,
+    ) -> None:
+        now = datetime(2026, 9, 6, 2, 0, tzinfo=timezone.utc)
+        fetched_at = datetime(2026, 9, 2, 2, 0, tzinfo=timezone.utc)
+        calls: list[tuple[str, int, date]] = []
+
+        def fetcher(provider_key: str, *, year: int, date_to: date, **_kwargs):
+            calls.append((provider_key, year, date_to))
+            return []
+
+        with _cache_path("history-lagged-latest-session") as cache_path:
+            tw_corporate_events._atomic_write(
+                cache_path,
+                {
+                    "schema_version": tw_corporate_events.CACHE_SCHEMA_VERSION,
+                    "updated_at": fetched_at.isoformat(),
+                    "providers": {
+                        key: {
+                            "fetched_at": fetched_at.isoformat(),
+                            "coverage_start": "2022-01-01",
+                            "coverage_end": "2026-09-03",
+                            "coverage_years": [2022, 2023, 2024, 2025, 2026],
+                            "entries": [],
+                        }
+                        for key in tw_corporate_events.HISTORY_PROVIDER_KEYS
+                    },
+                },
+            )
+            tw_corporate_events.invalidate_taiwan_corporate_event_cache()
+            with patch.object(
+                tw_corporate_events,
+                "ProcessFileLock",
+                _TestProcessLock,
+            ):
+                result = backfill_taiwan_corporate_event_history(
+                    years=5,
+                    force=False,
+                    now=now,
+                    cache_path=cache_path,
+                    fetch_provider=fetcher,
+                )
+
+        self.assertEqual(len(calls), len(tw_corporate_events.HISTORY_PROVIDER_KEYS))
+        self.assertTrue(all(year == 2026 for _, year, _ in calls))
+        self.assertTrue(all(date_to == date(2026, 9, 4) for _, _, date_to in calls))
+        self.assertGreater(result["request_count"], 0)
 
     def test_history_limit_returns_latest_events_after_descending_sort(self) -> None:
         with _cache_path("history-latest-first") as cache_path:

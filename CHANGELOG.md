@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [4.5.1] - 2026-09-08
+
+### Fixed
+
+- 修復美股 K 線的歷史交易日讀取與有界補齊流程，保留指定日期、regular／extended session、bar interval 與 coverage；不讓歷史最後一根分 K 取代正式日線收盤價。
+- 修復 OMI 對外參數與 capability selection 的傳遞，對齊 AI query plan、Backend、Decision v4 與 MCP schema，保留 requested trade date、資料限制與 partial／missing 狀態。
+- 修正跨市場 refresh 的 capability 範圍、必要美股標的與 job retry 參數，並改善美股 Market Tape 的 canonical projection 與請求競態處理。
+
+### Changed
+
+- 整合台股 Price Map 與個股 Radar 顯示，補齊技術、盤中廣度、衍生品及公司事件的 evidence 與 coverage 語意。
+- 新增可獨立啟用的 Atlas 個股 Company News 唯讀整合與 endpoint discovery，保留來源歸屬、使用限制及不可用狀態。
+- 對齊 VERSION、Frontend package／lockfile 與 README 為 4.5.1。本版 source／發布驗證與正式 runtime 採用、live provider／市場時段驗收分開記錄。
+
 ## [4.5.0] - 2026-09-05
 
 ### Changed

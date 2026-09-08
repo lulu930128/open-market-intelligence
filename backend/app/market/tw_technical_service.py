@@ -515,6 +515,7 @@ class TaiwanTechnicalService:
         points: list[dict[str, Any]],
         canonical_points: list[dict[str, Any]],
         benchmark_points: list[dict[str, Any]],
+        sector_benchmark: dict[str, Any] | None = None,
         parameters: TechnicalAnalysisParameters,
         affected_swing_dates: tuple[str, ...] = (),
         breakout_corporate_action_contract: dict[str, Any] | None = None,
@@ -558,7 +559,50 @@ class TaiwanTechnicalService:
             "relative_strength": build_relative_strength(
                 points,
                 benchmark_points,
+                sector_points=list(
+                    (sector_benchmark or {}).get("points") or []
+                ),
+                sector_identity=(sector_benchmark or {}).get("identity"),
+                sector_metadata=sector_benchmark,
             ),
+        }
+
+    def calculate_price_map_capabilities(
+        self,
+        *,
+        points: list[dict[str, Any]],
+        canonical_points: list[dict[str, Any]],
+        parameters: TechnicalAnalysisParameters,
+        affected_swing_dates: tuple[str, ...] = (),
+        breakout_corporate_action_contract: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compose only the advanced capabilities consumed by Price Map.
+
+        Price Map does not consume divergence or benchmark-relative strength.
+        Keeping this focused projection in the canonical technical owner avoids
+        loading weekly/monthly series and benchmark history on its read path.
+        """
+
+        swing_points = points[-260:]
+        swings = build_swing_evidence(
+            swing_points,
+            affected_dates=affected_swing_dates,
+        )
+        return {
+            "algorithm_version": ADVANCED_ALGORITHM_VERSION,
+            "swings": swings,
+            "fibonacci": build_fibonacci_evidence(swings),
+            "breakout": build_breakout_evidence(
+                points,
+                canonical_points,
+                corporate_action_contract=(
+                    breakout_corporate_action_contract
+                    or {"coverage_status": "missing", "affected_dates": []}
+                ),
+                parameters=parameters,
+            ),
+            "volume_profile": build_volume_profile(points),
+            "anchored_vwap": build_anchored_vwap(swing_points, swings),
         }
 
 

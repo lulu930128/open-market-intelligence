@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from app import http_client
+from app.integrations import atlas_endpoint
 from app.config import settings
 
 
@@ -15,10 +15,9 @@ LOGGER = logging.getLogger(__name__)
 
 ATLAS_CAPABILITY_ID = "news.events"
 ATLAS_CONTEXT_SCHEMA_VERSION = "omi.external.news_events.v1"
-ATLAS_CONTRACT_VERSION = "1.1"
+ATLAS_CONTRACT_VERSION = "1.2"
 ATLAS_PROFILE = "evidence_pack_v1"
 SUPPORTED_SCOPES = frozenset({"stock", "us_stock", "market"})
-LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def shadow_enabled() -> bool:
@@ -114,11 +113,11 @@ def read_shadow_context(
         params["q"] = query
 
     try:
-        response = http_client.get(
-            f"{base_url}/api/v1/brief",
-            params=params,
-            timeout=float(settings.omi_atlas_timeout_seconds),
-        )
+        code, payload = atlas_endpoint.request_json("/api/v1/brief", params)
+    except atlas_endpoint.AtlasEndpointError as exc:
+        return _unavailable(base, exc.reason)
+    except (ValueError, UnicodeError, RecursionError):
+        return _incompatible(base, "atlas_invalid_json")
     except requests.Timeout:
         return _unavailable(base, "atlas_timeout")
     except requests.ConnectionError:
@@ -129,12 +128,8 @@ def read_shadow_context(
         LOGGER.exception("Unexpected Atlas shadow read failure")
         return _unavailable(base, "atlas_unexpected_error")
 
-    if response.status_code != 200:
-        return _unavailable(base, f"atlas_http_{int(response.status_code)}")
-    try:
-        payload = response.json()
-    except ValueError:
-        return _incompatible(base, "atlas_invalid_json")
+    if code != 200:
+        return _unavailable(base, f"atlas_http_{int(code)}")
     if not isinstance(payload, dict):
         return _incompatible(base, "atlas_invalid_envelope")
     if str(payload.get("contract_version") or "") != ATLAS_CONTRACT_VERSION:
@@ -274,24 +269,7 @@ def _incompatible(base: dict[str, Any], reason_code: str) -> dict[str, Any]:
 
 
 def _validated_loopback_base_url(value: Any) -> str | None:
-    text = str(value or "").strip().rstrip("/")
-    try:
-        parsed = urlparse(text)
-        port = parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname not in LOCAL_HOSTS
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in ("", "/")
-        or port is None
-    ):
-        return None
-    return text
+    return atlas_endpoint.local_base_url(str(value or "").strip())
 
 
 def _utc_datetime(value: datetime | None) -> datetime:

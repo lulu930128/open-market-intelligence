@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from sqlalchemy.orm import Session
 
@@ -11,10 +11,10 @@ from app.db.models import (
     ResourceOhlcvBar,
     ResourceQuoteSnapshot,
 )
-from app.market.adr_parity import resolve_adr_mapping
 from app.market.calendar_status import expected_us_trade_date
-from app.market.cross_market.proxy_signal_engine import PROXY_BENCHMARK_RULES
-from app.market.cross_market.relation_store import build_relation_registry_read
+from app.market.cross_market.requirements import (
+    resolve_cross_market_source_requirements,
+)
 from app.market.cross_market.types import taiwan_stock_ref
 from app.observability.provider_health import ERROR_STATUSES, record_provider_event
 from app.resource_market import service as resource_market_service
@@ -237,6 +237,7 @@ def build_cross_market_refresh_plan(
     stock_ids: str | list[str],
     *,
     max_symbols: int = MAX_REFRESH_SYMBOLS,
+    requested_capabilities: Iterable[str] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     if max_symbols < 1 or max_symbols > MAX_REFRESH_SYMBOLS:
@@ -248,100 +249,54 @@ def build_cross_market_refresh_plan(
         now=planned_at,
     ) or planned_at.date()
 
-    mapping_entries: list[dict[str, Any]] = []
-    adr_targets: dict[str, list[str]] = {}
-    us_targets: dict[str, set[str]] = {}
-    source_roles: dict[str, set[str]] = {}
-    missing_relations: list[str] = []
-    for stock_id in normalized_stock_ids:
-        resolution = resolve_adr_mapping(
-            db,
-            stock_id,
-            as_of=planned_at.date(),
-            data_available_at=planned_at,
-        )
-        mapping = resolution.mapping
-        mapping_entries.append(
-            {
-                "stock_id": stock_id,
-                "mapping_resolution": resolution.as_payload(),
-                "adr_symbol": mapping.adr_symbol if mapping is not None else None,
-            }
-        )
-        registry = build_relation_registry_read(
-            db,
-            stock_id,
-            as_of=planned_at.date(),
-            generated_at=planned_at,
-            data_available_at=planned_at,
-        )
-        if mapping is not None:
-            adr_targets.setdefault(mapping.adr_symbol, []).append(stock_id)
-            us_targets.setdefault(mapping.adr_symbol, set()).add(stock_id)
-            source_roles.setdefault(mapping.adr_symbol, set()).add("direct_source")
-
-        usable_relations = [item for item in registry.relations if item.decision_usable]
-        for relation in usable_relations:
-            source_symbol = str(relation.source.provider_symbol or "").strip().upper()
-            if relation.source.market == "US" and source_symbol:
-                us_targets.setdefault(source_symbol, set()).add(stock_id)
-                source_roles.setdefault(source_symbol, set()).add(
-                    "direct_source"
-                    if relation.bucket == "direct_equivalent"
-                    else "proxy_source"
-                )
-            rule = PROXY_BENCHMARK_RULES.get(str(relation.relation_subtype or ""))
-            if rule is not None:
-                benchmark_symbol = rule.benchmark_symbol.strip().upper()
-                us_targets.setdefault(benchmark_symbol, set()).add(stock_id)
-                source_roles.setdefault(benchmark_symbol, set()).add(
-                    "proxy_benchmark"
-                )
-
-        if mapping is None and not usable_relations:
-            missing_relations.append(stock_id)
-
+    resolved_requirements = resolve_cross_market_source_requirements(
+        db,
+        normalized_stock_ids,
+        requested_capabilities=requested_capabilities,
+        generated_at=planned_at,
+    )
+    requirements = list(resolved_requirements["requirements"])
     candidates: list[dict[str, Any]] = []
-    fx_status, fx_as_of, fx_freshness = _fx_status(db, now=planned_at)
-    if not bool(fx_freshness.get("usable")) and adr_targets:
-        candidates.append(
-            {
-                "source_kind": "resource_quote",
-                "symbol": "USD-TWD",
-                "targets": sorted({item for values in adr_targets.values() for item in values}),
-                "status": fx_status,
-                "latest": fx_as_of,
+    evaluated_requirements: list[dict[str, Any]] = []
+    fx_evaluation: tuple[str, datetime | None, dict[str, Any]] | None = None
+    for requirement in requirements:
+        source_kind = str(requirement["source_kind"])
+        symbol = str(requirement["symbol"])
+        if source_kind == "resource_quote":
+            if fx_evaluation is None:
+                fx_evaluation = _fx_status(db, now=planned_at)
+            status, latest, freshness = fx_evaluation
+            evaluated = {
+                **requirement,
+                "status": "current" if bool(freshness.get("usable")) else status,
+                "latest": latest,
                 "expected": expected_date,
-                "freshness": fx_freshness,
+                "freshness": freshness,
             }
-        )
-
-    for symbol, targets in sorted(us_targets.items()):
-        latest_date = _latest_us_trade_date(
-            db,
-            symbol,
-            expected_trade_date=expected_date,
-        )
-        status = (
-            "missing"
-            if latest_date is None
-            else "stale"
-            if latest_date < expected_date
-            else "current"
-        )
-        if status == "current":
-            continue
-        candidates.append(
-            {
-                "source_kind": "us_daily_price",
-                "symbol": symbol,
-                "targets": sorted(targets),
-                "roles": sorted(source_roles.get(symbol, set())),
+        elif source_kind == "us_daily_price":
+            latest_date = _latest_us_trade_date(
+                db,
+                symbol,
+                expected_trade_date=expected_date,
+            )
+            status = (
+                "missing"
+                if latest_date is None
+                else "stale"
+                if latest_date < expected_date
+                else "current"
+            )
+            evaluated = {
+                **requirement,
                 "status": status,
                 "latest": latest_date,
                 "expected": expected_date,
             }
-        )
+        else:
+            raise ValueError(f"unsupported source_kind: {source_kind}")
+        evaluated_requirements.append(evaluated)
+        if evaluated["status"] != "current":
+            candidates.append(evaluated)
 
     eligible_sources: list[dict[str, Any]] = []
     cooldown_sources: list[dict[str, Any]] = []
@@ -384,8 +339,24 @@ def build_cross_market_refresh_plan(
     deferred_sources = [
         *session_deferred_sources,
         *cooldown_sources,
-        *eligible_sources[max_symbols:],
+        *(
+            {**source, "deferred_reason": "execution_symbol_budget_exhausted"}
+            for source in eligible_sources[max_symbols:]
+        ),
     ]
+    capability_status: dict[str, dict[str, Any]] = {}
+    for capability in resolved_requirements["requested_capabilities"]:
+        scoped = [
+            item
+            for item in evaluated_requirements
+            if capability in item.get("required_for", [])
+        ]
+        blocking = [item for item in scoped if item["status"] != "current"]
+        capability_status[capability] = {
+            "requirement_count": len(scoped),
+            "blocking_count": len(blocking),
+            "postcondition_satisfied": not blocking,
+        }
     return {
         "kind": "cross_market_context_refresh_plan",
         "planned_at": planned_at,
@@ -394,7 +365,12 @@ def build_cross_market_refresh_plan(
             "resource_fx.USD-TWD": expected_date,
         },
         "requested_stock_ids": normalized_stock_ids,
-        "mapping_entries": mapping_entries,
+        "requested_capabilities": resolved_requirements["requested_capabilities"],
+        "mapping_entries": resolved_requirements["mapping_entries"],
+        "requirement_count": len(evaluated_requirements),
+        "requirements": evaluated_requirements,
+        "capability_status": capability_status,
+        "postcondition_satisfied": not candidates,
         "requested_source_count": len(candidates),
         "planned_source_count": len(planned_sources),
         "deferred_source_count": len(deferred_sources),
@@ -405,7 +381,7 @@ def build_cross_market_refresh_plan(
         "planned_sources": planned_sources,
         "deferred_sources": deferred_sources,
         "cooldown_sources": cooldown_sources,
-        "missing_relations": missing_relations,
+        "missing_relations": resolved_requirements["missing_relations"],
         "read_path_provider_refresh": False,
     }
 
@@ -418,6 +394,7 @@ def refresh_cross_market_context_sources(
     provider: str = "auto",
     outputsize: str = "compact",
     max_runtime_seconds: int = 120,
+    requested_capabilities: Iterable[str] | None = None,
     progress_callback: ProgressCallback | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -432,6 +409,7 @@ def refresh_cross_market_context_sources(
         db,
         stock_ids,
         max_symbols=max_symbols,
+        requested_capabilities=requested_capabilities,
         now=now,
     )
     sources = list(plan["planned_sources"])
@@ -462,7 +440,6 @@ def refresh_cross_market_context_sources(
                     outputsize=outputsize,
                     adjusted=False,
                 )
-                success = result.get("status") in {"success", "partial_success"}
             elif source_kind == "resource_quote":
                 result = resource_market_service.refresh_resource_market_snapshot(
                     db,
@@ -470,35 +447,13 @@ def refresh_cross_market_context_sources(
                     intervals="1d",
                     limit=10,
                 )
-                success = int(result.get("error_count") or 0) == 0 and int(
-                    result.get("refreshed_count") or 0
-                ) > 0
             else:
                 raise ValueError(f"unsupported source_kind: {source_kind}")
-            if success:
-                succeeded += 1
-            else:
-                failed += 1
-                _record_refresh_failure(
-                    db,
-                    source_kind=source_kind,
-                    symbol=symbol,
-                    provider=provider,
-                    error_message=(
-                        str(result.get("error_message") or result.get("message") or "")
-                        or "Provider refresh returned an unsuccessful result."
-                    ),
-                    event_time=refresh_started_at,
-                    detail={
-                        "result_status": result.get("status"),
-                        "error_count": result.get("error_count"),
-                    },
-                )
             results.append(
                 {
                     "source_kind": source_kind,
                     "symbol": symbol,
-                    "status": "success" if success else "failed",
+                    "status": "awaiting_postcondition",
                     "result": result,
                 }
             )
@@ -528,13 +483,59 @@ def refresh_cross_market_context_sources(
                 f"Processed {attempted}/{total} cross-market sources.",
             )
 
+    postcondition_plan = build_cross_market_refresh_plan(
+        db,
+        stock_ids,
+        max_symbols=max_symbols,
+        requested_capabilities=requested_capabilities,
+        now=now,
+    )
+    postcondition_by_source = {
+        (str(item["source_kind"]), str(item["symbol"])): item
+        for item in postcondition_plan["requirements"]
+    }
+    for item in results:
+        if item["status"] == "failed":
+            continue
+        source_key = (str(item["source_kind"]), str(item["symbol"]))
+        postcondition = postcondition_by_source.get(source_key)
+        satisfied = bool(postcondition and postcondition.get("status") == "current")
+        item["postcondition"] = postcondition
+        item["status"] = "success" if satisfied else "failed"
+        if satisfied:
+            succeeded += 1
+            continue
+        failed += 1
+        raw_result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        _record_refresh_failure(
+            db,
+            source_kind=source_key[0],
+            symbol=source_key[1],
+            provider=provider,
+            error_message=(
+                str(raw_result.get("error_message") or raw_result.get("message") or "")
+                or "Canonical postcondition remained unsatisfied after refresh."
+            ),
+            event_time=refresh_started_at,
+            detail={
+                "result_status": raw_result.get("status"),
+                "error_count": raw_result.get("error_count"),
+                "postcondition_status": (
+                    postcondition.get("status") if postcondition else "missing"
+                ),
+            },
+        )
+
+    remaining_blocking = int(postcondition_plan["requested_source_count"])
     status = (
         "cooldown"
-        if total == 0 and int(plan["cooldown_source_count"]) > 0
+        if total == 0 and int(postcondition_plan["cooldown_source_count"]) > 0
         else "no_refresh_needed"
-        if total == 0
+        if total == 0 and remaining_blocking == 0
+        else "partial"
+        if total == 0 and deferred > 0
         else "success"
-        if failed == 0 and deferred == 0
+        if failed == 0 and remaining_blocking == 0
         else "partial"
         if succeeded > 0
         else "failed"
@@ -552,5 +553,8 @@ def refresh_cross_market_context_sources(
         "provider": provider,
         "outputsize": outputsize,
         "plan": plan,
+        "postcondition_plan": postcondition_plan,
+        "postcondition_satisfied": remaining_blocking == 0,
+        "remaining_blocking_count": remaining_blocking,
         "results": results,
     }

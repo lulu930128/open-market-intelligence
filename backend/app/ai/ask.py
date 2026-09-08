@@ -25,7 +25,7 @@ from app.ai import (
     tools,
 )
 from app.ai.schemas import AiAskRequest
-from app.ai.market_context import atlas_context
+from app.ai.market_context import atlas_context, atlas_company_news
 from app.portfolio import service as portfolio_service
 
 
@@ -316,13 +316,16 @@ def ask(
         )
 
     user_selection = dict(payload.selection)
+    news_selection = atlas_company_news.selection_for_question(
+        user_selection, question=payload.question, scope_type=scope_type,
+    ) if payload.contract_version == "omi.decision.v4" else user_selection
     atlas_selection = (
         atlas_context.selection_with_atlas_shadow(
-            user_selection,
+            news_selection,
             scope_type=scope_type,
         )
         if payload.contract_version == "omi.decision.v4"
-        else user_selection
+        else news_selection
     )
     if atlas_selection != user_selection:
         payload = payload.model_copy(update={"selection": atlas_selection})
@@ -457,6 +460,11 @@ def ask(
         atlas_context.attach_to_result(
             result,
             atlas_context.read_shadow_context(target=response_target),
+        )
+    if (payload.contract_version == "omi.decision.v4" and scope_type == "stock"
+            and atlas_company_news.selected(execution_plan.selection)):
+        atlas_company_news.attach_to_result(
+            result, db=db, stock_id=response_target["id"], selection=execution_plan.selection,
         )
     assembled = ask_stages.assemble_response_analysis(
         result=result,

@@ -89,6 +89,12 @@ class MopsConferenceStageError(RuntimeError):
         self.exception_type = exception_type
 
 
+class MopsConferenceResponseError(ValueError):
+    def __init__(self, message: str, *, classification: str) -> None:
+        super().__init__(message)
+        self.classification = classification
+
+
 @dataclass(frozen=True)
 class MopsConferenceBatch:
     entries: list[dict[str, Any]]
@@ -342,31 +348,187 @@ def _first_link(cell: Any) -> str | None:
     return href if href.startswith(("http://", "https://")) else None
 
 
+_MOPS_MAINTENANCE_MARKERS = (
+    "系統維護",
+    "暫停服務",
+    "服務暫停",
+    "maintenance",
+)
+_MOPS_INVALID_RESPONSE_MARKERS = (
+    "access denied",
+    "captcha",
+    "cloudflare",
+    "robot check",
+    "驗證碼",
+    "存取遭拒",
+)
+_MOPS_EMPTY_MARKERS = ("查無資料", "無符合條件", "尚無資料", "no data")
+_MOPS_HEADER_ALIASES = {
+    "stock_id": ("公司代號", "公司代碼", "股票代號", "證券代號"),
+    "stock_name": ("公司名稱", "股票名稱", "證券名稱"),
+    "date_range": ("日期", "召開日期", "法人說明會日期", "活動日期"),
+    "start_time": ("時間", "召開時間", "活動時間"),
+    "location": ("地點", "召開地點", "活動地點"),
+    "summary": ("說明", "摘要", "內容", "活動內容"),
+    "company_url": ("公司網站", "公司網址"),
+    "video_url": ("影音連結", "影音網址", "影音"),
+}
+
+
+def _normalized_mops_text(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).strip().lower()
+
+
+def _mops_header_indexes(table: Any) -> dict[str, int]:
+    header_row = table.find("tr")
+    if header_row is None:
+        return {}
+    header_cells = header_row.find_all(["th", "td"], recursive=False)
+    indexes: dict[str, int] = {}
+    for index, cell in enumerate(header_cells):
+        header = _normalized_mops_text(cell.get_text(" ", strip=True))
+        for field, aliases in _MOPS_HEADER_ALIASES.items():
+            if any(_normalized_mops_text(alias) == header for alias in aliases):
+                indexes.setdefault(field, index)
+                break
+    return indexes
+
+
+def _inspect_mops_conference_response(
+    html: str,
+) -> tuple[str, Any | None, list[Any], dict[str, int]]:
+    raw_html = str(html or "")
+    normalized = raw_html.lower()
+    if any(marker in normalized for marker in _MOPS_MAINTENANCE_MARKERS):
+        return "maintenance_page", None, [], {}
+    if any(marker in normalized for marker in _MOPS_INVALID_RESPONSE_MARKERS):
+        return "anti_bot_or_invalid_response", None, [], {}
+
+    soup = BeautifulSoup(raw_html, "lxml")
+    legacy_table = soup.select_one("table#myTable")
+    if legacy_table is not None:
+        rows = list(legacy_table.select("tr[data-type='body']"))
+        if not rows:
+            table_text = _normalized_mops_text(legacy_table.get_text(" ", strip=True))
+            if not table_text or any(
+                _normalized_mops_text(marker) in table_text
+                for marker in _MOPS_EMPTY_MARKERS
+            ):
+                return "valid_empty", legacy_table, [], {}
+            return "html_schema_changed", legacy_table, [], {}
+        if any(len(row.find_all("td", recursive=False)) < 6 for row in rows):
+            return "html_schema_changed", legacy_table, rows, {}
+        return "valid_data", legacy_table, rows, {}
+
+    for table in soup.find_all("table"):
+        indexes = _mops_header_indexes(table)
+        if not {"stock_id", "date_range", "summary"}.issubset(indexes):
+            continue
+        rows = [
+            row
+            for row in table.find_all("tr")
+            if row.find_all("td", recursive=False)
+            and row is not table.find("tr")
+        ]
+        if rows:
+            return "html_schema_changed", table, rows, indexes
+        return "valid_empty", table, [], indexes
+
+    page_text = _normalized_mops_text(soup.get_text(" ", strip=True))
+    if any(_normalized_mops_text(marker) in page_text for marker in _MOPS_EMPTY_MARKERS):
+        return "valid_empty", None, [], {}
+    if soup.find("table") is not None:
+        return "html_schema_changed", None, [], {}
+    return "anti_bot_or_invalid_response", None, [], {}
+
+
+def classify_mops_conference_response(html: str) -> str:
+    """Classify MOPS HTML without treating schema drift as an empty result."""
+
+    classification, _table, _rows, _indexes = _inspect_mops_conference_response(
+        html
+    )
+    return classification
+
+
 def parse_mops_conferences(
     html: str,
     *,
     market: str,
 ) -> list[dict[str, Any]]:
-    soup = BeautifulSoup(html or "", "lxml")
-    table = soup.select_one("table#myTable")
-    if table is None:
-        raise ValueError("MOPS investor-conference response did not contain #myTable.")
+    classification, _table, rows, header_indexes = (
+        _inspect_mops_conference_response(html)
+    )
+    if classification == "valid_empty":
+        return []
+    if classification in {"maintenance_page", "anti_bot_or_invalid_response"}:
+        raise MopsConferenceResponseError(
+            f"MOPS investor-conference response classified as {classification}.",
+            classification=classification,
+        )
+    if not rows:
+        raise MopsConferenceResponseError(
+            "MOPS investor-conference response schema changed and no usable table was found.",
+            classification="html_schema_changed",
+        )
+
+    legacy_indexes = {
+        "stock_id": 0,
+        "stock_name": 1,
+        "date_range": 2,
+        "start_time": 3,
+        "location": 4,
+        "summary": 5,
+        "company_url": 8,
+        "video_url": 9,
+    }
+    indexes = header_indexes or legacy_indexes
+
+    def cell_at(cells: list[Any], field: str) -> Any | None:
+        index = indexes.get(field)
+        return cells[index] if index is not None and index < len(cells) else None
 
     entries: list[dict[str, Any]] = []
-    for row in table.select("tr[data-type='body']"):
+    for row in rows:
         cells = row.find_all("td", recursive=False)
-        if len(cells) < 11:
+        if len(cells) < 3:
             continue
-        stock_id = cells[0].get_text(" ", strip=True)
-        stock_name = cells[1].get_text(" ", strip=True) or None
-        start_date, end_date = _parse_date_range(cells[2].get_text(" ", strip=True))
+        stock_id_cell = cell_at(cells, "stock_id")
+        date_cell = cell_at(cells, "date_range")
+        summary_cell = cell_at(cells, "summary")
+        stock_id = (
+            stock_id_cell.get_text(" ", strip=True) if stock_id_cell is not None else ""
+        )
+        stock_name_cell = cell_at(cells, "stock_name")
+        stock_name = (
+            stock_name_cell.get_text(" ", strip=True) or None
+            if stock_name_cell is not None
+            else None
+        )
+        start_date, end_date = _parse_date_range(
+            date_cell.get_text(" ", strip=True) if date_cell is not None else ""
+        )
         if not stock_id or start_date is None or end_date is None:
             continue
-        start_time = cells[3].get_text(" ", strip=True) or None
-        location = cells[4].get_text(" ", strip=True) or None
-        summary = cells[5].get_text(" ", strip=True) or None
-        company_url = _first_link(cells[8]) if len(cells) > 8 else None
-        video_url = _first_link(cells[9]) if len(cells) > 9 else None
+        start_time_cell = cell_at(cells, "start_time")
+        location_cell = cell_at(cells, "location")
+        start_time = (
+            start_time_cell.get_text(" ", strip=True) or None
+            if start_time_cell is not None
+            else None
+        )
+        location = (
+            location_cell.get_text(" ", strip=True) or None
+            if location_cell is not None
+            else None
+        )
+        summary = (
+            summary_cell.get_text(" ", strip=True) or None
+            if summary_cell is not None
+            else None
+        )
+        company_url = _first_link(cell_at(cells, "company_url"))
+        video_url = _first_link(cell_at(cells, "video_url"))
         conference_id = _event_id(
             MOPS_PROVIDER,
             "investor_conference",
@@ -419,6 +581,11 @@ def parse_mops_conferences(
                     "related_event_id": conference_id,
                 }
             )
+    if not entries:
+        raise MopsConferenceResponseError(
+            "MOPS investor-conference response contained rows but no usable events.",
+            classification="html_schema_changed",
+        )
     return entries
 
 

@@ -11,7 +11,14 @@ import json
 from typing import Any
 
 from app.market.tw_current_market_capabilities import TaiwanCurrentSourceBinding
+from app.market.trading_calendar import (
+    TAIWAN_CLOSE_RESOLUTION_TIME,
+    TAIWAN_SESSION_CLOSE_TIME,
+    taiwan_market_session,
+)
 from app.market_data.contracts import (
+    AuctionBreadthObservation,
+    BreadthAcquisitionDiagnostics,
     BarFinalization,
     ConnectionStatus,
     EnablementStatus,
@@ -20,6 +27,7 @@ from app.market_data.contracts import (
     Market,
     MarketBreadthObservation,
     MarketIndexObservation,
+    MarketSession,
     ObservationState,
     OperationalStatus,
     ProviderResourceHealth,
@@ -130,6 +138,38 @@ def _breadth_partitions(raw: dict[str, Any]) -> tuple[int, int]:
     else:
         not_received = legacy_missing
     return received_unclassified, not_received
+
+
+def _breadth_coverage_reason_counts(
+    raw: dict[str, Any],
+    *,
+    advance: int,
+    decline: int,
+    unchanged: int,
+    received_unclassified: int,
+    not_received: int,
+) -> dict[str, int]:
+    supplied = raw.get("coverage_reason_counts")
+    if isinstance(supplied, dict):
+        normalized = {
+            str(key): int(value)
+            for key, value in supplied.items()
+            if _integer(value) is not None
+        }
+        if sum(normalized.values()) == (
+            advance + decline + unchanged + received_unclassified + not_received
+        ):
+            return normalized
+    return {
+        "advance": advance,
+        "decline": decline,
+        "unchanged": unchanged,
+        "valid_no_trade": 0,
+        "suspended_or_not_tradable": 0,
+        "provider_missing": not_received,
+        "mapping_error": 0,
+        "unknown": received_unclassified,
+    }
 
 
 def _raw_text(payload: CurrentMarketProviderPayload) -> str:
@@ -243,9 +283,12 @@ def _summary(
     payload: CurrentMarketProviderPayload,
 ) -> AcquisitionSummary:
     completed = error is None and observation_count > 0
+    raw = payload.payload or {}
+    partial = bool(raw.get("failed_batch_count") or raw.get("acquisition_fallback"))
     return AcquisitionSummary(
         attempted=True,
-        status=(AcquisitionStatus.COMPLETED if completed else AcquisitionStatus.FAILED),
+        status=(AcquisitionStatus.PARTIAL if completed and partial
+                else AcquisitionStatus.COMPLETED if completed else AcquisitionStatus.FAILED),
         providers_attempted=(binding.descriptor.provider_key,),
         resource_attempts=(
             AcquisitionResourceAttempt(
@@ -255,7 +298,9 @@ def _summary(
         ),
         external_calls=payload.external_calls,
         limitations=(
-            () if completed else ("PROVIDER_REQUEST_OR_PARSE_FAILED",)
+            ("ACQUISITION_FALLBACK",) if raw.get("acquisition_fallback")
+            else ("BREADTH_BATCH_INCOMPLETE",) if partial
+            else () if completed else ("PROVIDER_REQUEST_OR_PARSE_FAILED",)
         ),
     )
 
@@ -426,6 +471,35 @@ class CurrentBreadthAdapter:
             )
             trade_date = _date(raw.get("trade_date"))
             trade_date = trade_date or event_at.astimezone(TAIPEI_TZ).date()
+            auction = None
+            auction_error_code = None
+            try:
+                raw_auction = raw.get("auction_breadth")
+                if isinstance(raw_auction, dict) and raw_auction.get("status") in {"provisional", "unavailable"}:
+                    auction_at = _datetime(raw_auction.get("as_of"))
+                    if auction_at is None:
+                        raise ValueError("auction breadth requires its own event time")
+                    if _date(raw_auction.get("trade_date")) not in {None, trade_date}:
+                        raise ValueError("auction breadth crosses acquisition date")
+                    if auction_at is not None and taiwan_market_session(auction_at) in {
+                        MarketSession.PRE_OPEN, MarketSession.OPENING_AUCTION, MarketSession.CLOSING_AUCTION,
+                    }:
+                        auction = AuctionBreadthObservation(
+                            market=Market.TW, venue=requirement.target.scope_key,
+                            lineage=_lineage(
+                                binding=self.binding, event_at=auction_at,
+                                fetched_at=fetched_at, content_hash=content_hash,
+                            ),
+                            session=taiwan_market_session(auction_at),
+                            trade_date=_date(raw_auction.get("trade_date")) or trade_date,
+                            universe_count=raw_auction["universe_count"],
+                            advance_count=raw_auction["advance_count"],
+                            decline_count=raw_auction["decline_count"],
+                            unchanged_count=raw_auction["unchanged_count"],
+                            unknown_count=raw_auction["unknown_count"],
+                        )
+            except (KeyError, TypeError, ValueError):
+                auction_error_code = "INVALID_AUCTION_BREADTH"
             observation = MarketBreadthObservation(
                 market=Market.TW,
                 venue=requirement.target.scope_key,
@@ -435,7 +509,7 @@ class CurrentBreadthAdapter:
                     fetched_at=fetched_at,
                     content_hash=content_hash,
                 ),
-                session=requirement.session,
+                session=taiwan_market_session(event_at),
                 trade_date=trade_date,
                 scope=str(raw.get("scope") or "full_market"),
                 universe_source=str(
@@ -449,12 +523,49 @@ class CurrentBreadthAdapter:
                 unchanged_count=int(unchanged),
                 unknown_count=received_unclassified,
                 missing_count=not_received,
+                coverage_reason_counts=_breadth_coverage_reason_counts(
+                    raw,
+                    advance=int(advance),
+                    decline=int(decline),
+                    unchanged=int(unchanged),
+                    received_unclassified=received_unclassified,
+                    not_received=not_received,
+                ),
+                auction=auction,
+                acquisition_diagnostics=BreadthAcquisitionDiagnostics(
+                    auction_error_code=auction_error_code,
+                    failed_batch_count=raw.get("failed_batch_count", 0),
+                    received_count=universe - not_received,
+                    acquisition_complete=raw.get("failed_batch_count", 0) == 0 and not raw.get("acquisition_fallback"),
+                    fallback_used=bool(raw.get("acquisition_fallback")),
+                    latest_attempt_status=(
+                        raw.get("latest_attempt_status", "failed") if raw.get("acquisition_fallback")
+                        else "partial" if raw.get("failed_batch_count", 0) else "complete"
+                    ),
+                    latest_attempt_failed_batch_count=(
+                        None if raw.get("acquisition_fallback") else raw.get("failed_batch_count", 0)
+                    ),
+                ),
                 trade_value=trade_value,
                 currency=("TWD" if trade_value is not None else None),
-                state=(ObservationState.PARTIAL if incomplete else ObservationState.AVAILABLE),
+                state=(
+                    ObservationState.STALE if raw.get("acquisition_fallback") or payload.status == "stale"
+                    else ObservationState.PARTIAL if incomplete else ObservationState.AVAILABLE
+                ),
                 price_semantics="current_last_trade_vs_reference",
                 official=self.binding.descriptor.authority.value == "exchange",
-                provisional=True,
+                provisional=not (
+                    classified > 0
+                    and self.binding.descriptor.authority.value == "exchange"
+                    and raw.get("closing_match_coverage_count") == classified
+                    and event_at.astimezone(TAIPEI_TZ).date() == trade_date
+                    and TAIWAN_SESSION_CLOSE_TIME <= event_at.astimezone(TAIPEI_TZ).time()
+                    <= TAIWAN_CLOSE_RESOLUTION_TIME
+                    and fetched_at >= datetime.combine(
+                        trade_date, TAIWAN_CLOSE_RESOLUTION_TIME, TAIPEI_TZ
+                    )
+                    and event_at <= fetched_at
+                ),
             )
         except (TypeError, ValueError) as exc:
             error = str(exc)

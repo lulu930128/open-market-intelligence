@@ -65,6 +65,8 @@ class TaiwanEventSurfaceTests(unittest.TestCase):
                 "checked_at": NOW,
                 "cache_status": "current",
                 "cache_fetched_at": NOW,
+                "coverage_start": date(2022, 1, 1),
+                "coverage_end": date(2026, 7, 28),
                 "warning": None,
                 "total_count": 1,
                 "result_count": 1,
@@ -109,7 +111,59 @@ class TaiwanEventSurfaceTests(unittest.TestCase):
         self.assertEqual(payload["actions"][0]["currency"], "TWD")
         self.assertEqual(payload["actions"][0]["cash_amount"], 5.0)
         self.assertEqual(payload["actions"][1]["stock_ratio"], 0.1)
+        self.assertEqual(payload["coverage_status"], "complete")
+        self.assertEqual(payload["checked_through_date"], "2026-07-28")
+        self.assertEqual(payload["relevant_analysis_start"], "2022-01-01")
+        self.assertEqual(payload["relevant_analysis_end"], "2026-07-28")
+        self.assertTrue(payload["facts_usable"])
+        self.assertTrue(payload["decision_usable"])
         self.assertEqual(context["missing"], [])
+
+    def test_tw_corporate_actions_keep_current_cache_but_partial_coverage(self) -> None:
+        history = Mock(
+            return_value={
+                "stock_id": "2330",
+                "checked_at": NOW,
+                "cache_status": "current",
+                "cache_fetched_at": NOW,
+                "coverage_start": date(2022, 1, 1),
+                "coverage_end": date(2026, 7, 25),
+                "warning": None,
+                "total_count": 0,
+                "result_count": 0,
+                "results": [],
+            }
+        )
+
+        context = taiwan_events.build_tw_stock_event_context(
+            stock_id="2330",
+            market="TWSE",
+            market_data_params={
+                "requested_capabilities": ["corporate.actions"],
+                "capability_parameters": {
+                    "corporate.actions": {"years": 5, "limit": 20}
+                },
+            },
+            now=NOW,
+            get_event_summary=Mock(),
+            get_event_history=history,
+            get_disposition_status=Mock(),
+        )
+
+        payload = context["data"]["corporate.actions"]
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["cache_status"], "current")
+        self.assertEqual(payload["coverage_status"], "partial")
+        self.assertEqual(payload["checked_through_date"], "2026-07-25")
+        self.assertTrue(payload["facts_usable"])
+        self.assertFalse(payload["decision_usable"])
+        self.assertFalse(payload["empty_result_is_valid"])
+        self.assertEqual(
+            context["freshness_by_capability"]["corporate.actions"][
+                "coverage_status"
+            ],
+            "partial",
+        )
 
     def test_company_profile_is_supported_and_uses_bounded_reader(self) -> None:
         profile = taiwan_stock._company_profile_payload(

@@ -84,6 +84,7 @@ def execute_tool_stages(
             ),
             target=resolution_target(resolution),
             scope_type=scope_type,
+            market_data_params=payload.market_data_params,
         )
     continuation_selected = bool(
         payload.continuation.get("selected_action_ids")

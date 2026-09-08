@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Mapping
 
 from app.market.tw_instrument_trading_policy import (
     TaiwanInstrumentTradingMode,
     resolve_taiwan_instrument_trading_policy,
 )
+from app.market.technical_evidence import build_corporate_action_contract
 
 
 STOCK_EVENT_CAPABILITIES = frozenset(
@@ -248,9 +249,45 @@ def _corporate_actions_payload(
                 }
             )
     actions = actions[:limit]
+    checked_at = result.get("checked_at")
+    checked_date = (
+        checked_at.date()
+        if isinstance(checked_at, datetime)
+        else checked_at
+        if isinstance(checked_at, date)
+        else None
+    )
+    analysis_end = checked_date - timedelta(days=1) if checked_date else None
+    analysis_start = (
+        date(analysis_end.year - years + 1, 1, 1)
+        if analysis_end is not None
+        else None
+    )
+    coverage = build_corporate_action_contract(
+        result,
+        analysis_start=analysis_start,
+        analysis_end=analysis_end,
+    )
+    coverage_status = str(coverage.get("coverage_status") or "missing")
+    facts_usable = bool(
+        actions
+        or (
+            event_payload["cache_status"] not in _MISSING_CACHE_STATUSES
+            and coverage.get("coverage_start")
+            and coverage.get("coverage_end")
+        )
+    )
+    decision_usable = coverage_status == "complete"
+    status = (
+        "ready"
+        if decision_usable
+        else "partial"
+        if facts_usable
+        else "missing"
+    )
     payload = {
         "kind": "tw_corporate_actions",
-        "status": event_payload["status"],
+        "status": status,
         "stock_id": event_payload["stock_id"],
         "as_of": event_payload["as_of"],
         "years": years,
@@ -262,9 +299,26 @@ def _corporate_actions_payload(
         "cache_policy": "cache_only",
         "cache_status": event_payload["cache_status"],
         "cache_fetched_at": event_payload["cache_fetched_at"],
-        "empty_result_is_valid": event_payload["empty_result_is_valid"],
+        "empty_result_is_valid": decision_usable and not actions,
+        "facts_usable": facts_usable,
+        "decision_usable": decision_usable,
+        "coverage_status": coverage_status,
+        "coverage_start": coverage.get("coverage_start"),
+        "coverage_end": coverage.get("coverage_end"),
+        "checked_through_date": coverage.get("checked_through_date"),
+        "relevant_analysis_start": coverage.get("relevant_analysis_start"),
+        "relevant_analysis_end": coverage.get("relevant_analysis_end"),
+        "source_scope": coverage.get("source_scope") or {},
+        "absence_semantics": coverage.get("absence_semantics"),
         "missing": list(event_payload["missing"]),
-        "warnings": list(event_payload["warnings"]),
+        "warnings": list(
+            dict.fromkeys(
+                [
+                    *event_payload["warnings"],
+                    *(str(item) for item in coverage.get("warnings") or []),
+                ]
+            )
+        ),
     }
     freshness = _freshness(
         capability_id="corporate.actions",
@@ -278,6 +332,12 @@ def _corporate_actions_payload(
         reason=(payload["warnings"][0] if payload["warnings"] else None),
     )
     freshness["event_time_basis"] = "official_corporate_action_effective_date"
+    freshness["coverage_status"] = coverage_status
+    freshness["coverage_start"] = coverage.get("coverage_start")
+    freshness["coverage_end"] = coverage.get("coverage_end")
+    freshness["checked_through_date"] = coverage.get("checked_through_date")
+    freshness["facts_usable"] = facts_usable
+    freshness["decision_usable"] = decision_usable
     return payload, freshness
 
 

@@ -632,6 +632,54 @@ def project_taiwan_current_index(result: MarketDataResultV1) -> dict[str, object
     }
 
 
+def _project_auction_breadth(result: MarketDataResultV1) -> dict[str, object]:
+    observation = result.resolved.breadth
+    auction = observation.auction if observation else None
+    requested_at = result.requirement.requested_at
+    session = taiwan_market_session(requested_at)
+    applicable = session in {MarketSession.PRE_OPEN, MarketSession.OPENING_AUCTION, MarketSession.CLOSING_AUCTION}
+    if auction is None:
+        return {
+            "status": "missing" if applicable else "not_applicable",
+            "price_semantics": "auction_indicative",
+            "decision_usable": False,
+            "is_provisional": True,
+            "freshness": {"is_current": False, "is_live": False},
+        }
+    age = (requested_at - auction.lineage.event_at).total_seconds()
+    current = bool(
+        applicable and session == auction.session
+        and auction.trade_date == requested_at.astimezone(TAIWAN_TZ).date()
+        and 0 <= age <= result.requirement.freshness.max_age_seconds
+        and not (observation.acquisition_diagnostics and observation.acquisition_diagnostics.fallback_used)
+    )
+    return {
+        "version": auction.contract_version,
+        "status": "not_applicable" if not applicable else "stale" if not current
+        else "provisional" if auction.classified_count else "unavailable",
+        "market": auction.venue,
+        "market_session": auction.session.value,
+        "trade_date": auction.trade_date,
+        "as_of": auction.lineage.event_at,
+        "advance_count": auction.advance_count,
+        "decline_count": auction.decline_count,
+        "unchanged_count": auction.unchanged_count,
+        "coverage_count": auction.classified_count,
+        "universe_count": auction.universe_count,
+        "unknown_count": auction.unknown_count,
+        "price_semantics": auction.price_semantics,
+        "is_provisional": True,
+        "decision_usable": False,
+        "source": auction.lineage.source,
+        "provider": auction.lineage.provider,
+        "lineage": auction.lineage.model_dump(mode="json"),
+        "freshness": {
+            "status": "current" if current else "stale",
+            "is_current": current, "is_live": False, "age_seconds": age,
+        },
+    }
+
+
 def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, object]:
     observation = result.resolved.breadth
     if observation is None:
@@ -639,6 +687,7 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
             "status": "missing",
             "market": result.requirement.target.scope_key,
             "source": "unavailable",
+            "auction_breadth": _project_auction_breadth(result),
             "decision_usable": False,
             "provisional": True,
             "resolved_health": result.resolved.health.model_dump(mode="json"),
@@ -649,11 +698,38 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         if observation.universe_count > 0
         else 0.0
     )
+    received_unclassified_count = observation.unknown_count
+    not_received_count = observation.missing_count
+    aggregate_unknown_count = (
+        received_unclassified_count + not_received_count
+    )
+    partition_total = observation.classified_count + aggregate_unknown_count
+    reconciliation_status = (
+        "balanced"
+        if partition_total == observation.universe_count
+        else "inconsistent"
+    )
+    presentation = taiwan_presentation_session(result.requirement.requested_at)
+    completed_session = bool(
+        presentation["state"] in {"completed", "previous_session"}
+        and observation.trade_date == presentation["trade_date"]
+        and observation.session in {
+            MarketSession.CLOSING_AUCTION, MarketSession.CLOSE_RESOLUTION,
+            MarketSession.POST_CLOSE,
+        }
+    )
+    session_final = bool(
+        completed_session and not observation.provisional
+        and reconciliation_status == "balanced"
+    )
     return {
         "version": observation.contract_version,
         "status": observation.state.value,
         "market": observation.venue,
-        "market_session": observation.session.value,
+        "market_session": "post_close" if completed_session else observation.session.value,
+        "observation_market_session": observation.session.value,
+        "session_semantics": "latest_completed_session" if completed_session else "current_session",
+        "finalization": "session_final" if session_final else "provisional",
         "price_semantics": observation.price_semantics,
         "scope": observation.scope,
         "trade_date": observation.trade_date,
@@ -663,10 +739,22 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "decline_count": observation.decline_count,
         "unchanged_count": observation.unchanged_count,
         "classified_count": observation.classified_count,
-        "received_unclassified_count": observation.unknown_count,
-        "not_received_count": observation.missing_count,
-        "unknown_count": observation.unknown_count,
-        "missing_count": observation.missing_count,
+        "received_unclassified_count": received_unclassified_count,
+        "not_received_count": not_received_count,
+        "unknown_count": aggregate_unknown_count,
+        "missing_count": not_received_count,
+        "coverage_reason_counts": dict(observation.coverage_reason_counts),
+        "auction_breadth": _project_auction_breadth(result),
+        "acquisition_diagnostics": (
+            observation.acquisition_diagnostics.model_dump(mode="json")
+            if observation.acquisition_diagnostics else None
+        ),
+        "reconciliation_status": reconciliation_status,
+        "reconciliation_formula": (
+            "classified_count + received_unclassified_count + "
+            "not_received_count = universe_count"
+        ),
+        "partition_total": partition_total,
         "universe_count": observation.universe_count,
         "total_count": observation.universe_count,
         "coverage_count": observation.classified_count,
@@ -681,7 +769,10 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "raw_result_id": observation.lineage.raw_receipt_id,
         "is_provisional": observation.provisional,
         "provisional": observation.provisional,
-        "decision_usable": result.resolved.health.research_usable,
+        "decision_usable": (
+            session_final and aggregate_unknown_count == 0
+            if completed_session else result.resolved.health.research_usable
+        ),
         "resolved_health": result.resolved.health.model_dump(mode="json"),
         "candidate_rejections": [
             item.model_dump(mode="json") for item in result.candidate_rejections

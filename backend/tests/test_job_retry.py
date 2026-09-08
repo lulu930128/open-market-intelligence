@@ -677,6 +677,7 @@ class JobRetryTests(unittest.TestCase):
         request = {
             "max_runtime_seconds": 600,
             "cursor_symbol": "UMC",
+            "required_symbols": ["^GSPC", "^SOX"],
         }
         job = SimpleNamespace(
             id=202,
@@ -698,7 +699,7 @@ class JobRetryTests(unittest.TestCase):
         task, task_args, retried_request = _retry_config(job)
 
         self.assertIs(task, backfill_tasks.run_us_priority_ohlc_reconcile_job)
-        self.assertEqual(task_args, (600, "UMC", 20, 20, 2))
+        self.assertEqual(task_args, (600, "UMC", 20, 20, 2, ["^GSPC", "^SOX"]))
         self.assertEqual(retried_request, request)
 
     def test_retry_config_recreates_bounded_us_intraday_minute_repair(self) -> None:
