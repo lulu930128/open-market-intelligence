@@ -5940,7 +5940,10 @@ test.describe("OMI dashboard smoke", () => {
     await expect(chart).toContainText("13:30");
     await expect(chart).not.toContainText("2026/06/14");
     await expect(chart).not.toContainText("999");
-    await expect(chart).toContainText("盤中每 5 秒更新");
+    const intradayDetails = page.getByTestId("intraday-data-details");
+    await intradayDetails.locator("summary").click();
+    await expect(intradayDetails).toContainText("盤中每 5 秒更新");
+    await intradayDetails.locator("summary").click();
     await expect(page.getByTestId("index-detail-open")).toContainText("101");
     await expect(page.getByTestId("index-detail-open")).not.toContainText("100");
     await expect(page.getByTestId("professional-chart-panel")).toHaveCount(0);
@@ -6184,7 +6187,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(stockTodayChart).toBeVisible();
     await expect(stockTodayChart).toHaveAttribute("data-volume-rendered", "true");
     await expect(page.getByTestId("intraday-current-price-status")).toContainText(
-      "MIS 成交 09:30:00"
+      "成交價已確認"
     );
     expect(pageErrors).toEqual([]);
   });

@@ -8,6 +8,7 @@ import IntradayTrendChart, {
   type IntradayIndicatorSettings,
 } from "@/components/IntradayTrendChart";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import { taiwanIntradaySessionStats } from "@/components/chart/intradayPresentation";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
 } from "@/components/ProfessionalChartPanel";
@@ -60,6 +61,7 @@ import { useChartDrawingPersistence } from "@/components/stock-detail/useChartDr
 import { useTaiwanDetailContext } from "@/components/stock-detail/useTaiwanDetailContext";
 import { useTaiwanDataPanel } from "@/components/stock-detail/useTaiwanDataPanel";
 import { useTaiwanQuoteDepth } from "@/components/stock-detail/useTaiwanQuoteDepth";
+import { useTaiwanSessionSummary } from "@/components/chart/useTaiwanSessionSummary";
 import { useTaiwanStockChartData } from "@/components/stock-detail/useTaiwanStockChartData";
 import { useTaiwanTechnicalReport } from "@/components/stock-detail/useTaiwanTechnicalReport";
 import { useTaiwanCorporateEventChartHistory } from "@/components/stock-detail/useTaiwanCorporateEventChartHistory";
@@ -416,6 +418,7 @@ export default function StockDetailPanel({
   );
   const [timeframe, setTimeframe] = useState<Timeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
+  const [intradayDetailsTarget, setIntradayDetailsTarget] = useState<HTMLDivElement | null>(null);
   const [chartFocusMode, setChartFocusMode] = useState(false);
   const [professionalTimeframe, setProfessionalTimeframe] =
     useState<ProfessionalTimeframe>("daily");
@@ -761,6 +764,7 @@ export default function StockDetailPanel({
     t,
     todayInterval: todayBarInterval,
   });
+  const sessionSummary = useTaiwanSessionSummary(stockId, todayTradeDate, effectiveTimeframe === "today" && !isIndexProduct);
   const canonicalIndicatorParameters = useMemo(() => {
     const defaults =
       technicalParameterContract ?? technicalContract?.parameter_contract.defaults;
@@ -1289,6 +1293,51 @@ export default function StockDetailPanel({
   }
 
 
+  const historicalEventsControl = (historicalCorporateEvents.length ? (
+                <details className={effectiveTimeframe === "today" ? "group max-w-[720px] text-sm" : "group relative max-w-[720px] text-sm"}>
+                  <summary className="inline-flex cursor-pointer list-none items-center gap-2 border border-omi-border bg-omi-surface-subtle px-3 py-1.5 text-xs font-bold text-omi-text-muted hover:border-omi-control hover:text-omi-text">
+                    <span>{t("stockDetail.corporateEvents.historyTitle")}</span>
+                    <span className="text-omi-text-strong">
+                      {stockInfo?.event_history?.total_count ?? historicalCorporateEvents.length}
+                    </span>
+                    <span aria-hidden="true" className="transition group-open:rotate-180">⌄</span>
+                  </summary>
+                  <div className={effectiveTimeframe === "today" ? "absolute bottom-full right-0 z-30 mb-2 max-h-64 w-[min(40rem,calc(100vw-4rem))] overflow-y-auto border border-omi-border-subtle bg-omi-surface shadow-lg" : "mt-2 max-h-56 overflow-y-auto border border-omi-border-subtle bg-omi-surface-subtle"}>
+                    {historicalCorporateEvents.map((event) => (
+                      <div
+                        key={event.event_id}
+                        className="grid gap-2 border-b border-omi-border-subtle px-3 py-2 last:border-b-0 sm:grid-cols-[92px_88px_minmax(0,1fr)_auto] sm:items-center"
+                      >
+                        <span className="font-mono text-xs text-omi-text-muted">
+                          {event.start_date}
+                        </span>
+                        <span className={`w-fit border px-2 py-0.5 text-[11px] font-bold ${corporateEventTone(event.event_type)}`}>
+                          {t(`stockDetail.corporateEvents.types.${event.event_type}`)}
+                        </span>
+                        <span className="min-w-0 truncate text-xs text-omi-text" title={event.summary ?? event.title}>
+                          {event.title}
+                          {event.cash_dividend !== null
+                            ? ` · ${t("settings.calendar.cashDividend", { amount: event.cash_dividend })}`
+                            : ""}
+                        </span>
+                        <a
+                          href={event.source_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs font-semibold text-omi-accent hover:underline"
+                        >
+                          {t("settings.calendar.sourceLink")}
+                        </a>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ) : corporateEventHistorySourceUncertain ? (
+                <div className="mt-2 text-xs font-semibold text-omi-warning">
+                  {t("stockDetail.corporateEvents.historyUnavailable")}
+                </div>
+              ) : null);
+
   return (
     <section
       data-testid="stock-detail-panel"
@@ -1393,50 +1442,7 @@ export default function StockDetailPanel({
                 ·{" "}
                 {displayTime}
               </div>
-              {historicalCorporateEvents.length ? (
-                <details className="group mt-3 max-w-[720px] text-sm">
-                  <summary className="inline-flex cursor-pointer list-none items-center gap-2 border border-omi-border bg-omi-surface-subtle px-3 py-1.5 text-xs font-bold text-omi-text-muted hover:border-omi-control hover:text-omi-text">
-                    <span>{t("stockDetail.corporateEvents.historyTitle")}</span>
-                    <span className="text-omi-text-strong">
-                      {stockInfo?.event_history?.total_count ?? historicalCorporateEvents.length}
-                    </span>
-                    <span aria-hidden="true" className="transition group-open:rotate-180">⌄</span>
-                  </summary>
-                  <div className="mt-2 max-h-56 overflow-y-auto border border-omi-border-subtle bg-omi-surface-subtle">
-                    {historicalCorporateEvents.map((event) => (
-                      <div
-                        key={event.event_id}
-                        className="grid gap-2 border-b border-omi-border-subtle px-3 py-2 last:border-b-0 sm:grid-cols-[92px_88px_minmax(0,1fr)_auto] sm:items-center"
-                      >
-                        <span className="font-mono text-xs text-omi-text-muted">
-                          {event.start_date}
-                        </span>
-                        <span className={`w-fit border px-2 py-0.5 text-[11px] font-bold ${corporateEventTone(event.event_type)}`}>
-                          {t(`stockDetail.corporateEvents.types.${event.event_type}`)}
-                        </span>
-                        <span className="min-w-0 truncate text-xs text-omi-text" title={event.summary ?? event.title}>
-                          {event.title}
-                          {event.cash_dividend !== null
-                            ? ` · ${t("settings.calendar.cashDividend", { amount: event.cash_dividend })}`
-                            : ""}
-                        </span>
-                        <a
-                          href={event.source_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-xs font-semibold text-omi-accent hover:underline"
-                        >
-                          {t("settings.calendar.sourceLink")}
-                        </a>
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              ) : corporateEventHistorySourceUncertain ? (
-                <div className="mt-2 text-xs font-semibold text-omi-warning">
-                  {t("stockDetail.corporateEvents.historyUnavailable")}
-                </div>
-              ) : null}
+              {effectiveTimeframe !== "today" ? <div className="mt-3">{historicalEventsControl}</div> : null}
             </div>
 
             <div className="flex items-start gap-5">
@@ -1495,7 +1501,8 @@ export default function StockDetailPanel({
                 </div>
 
                 {effectiveTimeframe === "today" ? (
-                  <div className="relative">
+                  <div className="relative flex items-center gap-2">
+                    <div ref={setIntradayDetailsTarget} data-testid="intraday-details-slot" />
                     <button
                       type="button"
                       data-testid="chart-indicator-menu-toggle"
@@ -1507,7 +1514,7 @@ export default function StockDetailPanel({
                     {indicatorMenuOpen ? (
                       <div
                         data-testid="intraday-indicator-menu"
-                        className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg"
+                        className="absolute right-0 top-full z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg"
                       >
                         <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("stockDetail.displayItems")}</div>
                         {todayIndicatorOptions.map((option) => (
@@ -1726,6 +1733,8 @@ export default function StockDetailPanel({
               data-snapshot-phase={todaySnapshotPhase}
             >
               <IntradayTrendChart
+                detailsTarget={intradayDetailsTarget}
+                footerActions={historicalEventsControl}
                 points={todayTrend}
                 previousClose={resolvedTodayPreviousClose}
                 referenceType={isIndexProduct ? "prior_regular_close" : selectedQuoteDepth?.change_reference?.type ?? "unavailable"}
@@ -1741,6 +1750,9 @@ export default function StockDetailPanel({
                 priceDiagnostics={resolvedTodayPriceDiagnostics}
                 tradeDate={todayTradeDate}
                 currentObservation={resolvedTodayCurrentObservation}
+                sessionStats={isIndexProduct ? null : taiwanIntradaySessionStats(selectedQuoteDepth, todayTradeDate)}
+                sessionSummary={sessionSummary.data}
+                sessionSummaryStatus={isIndexProduct ? undefined : sessionSummary.status}
                 historyStatus={todayHistoryStatus}
                 snapshotPhase={todaySnapshotPhase}
                 snapshotReasonCodes={todaySnapshotReasonCodes}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { StateSurface } from "@/components/LoadingPlaceholders";
 import type {
   IntradayCurrentObservation,
@@ -8,6 +8,11 @@ import type {
   IntradayTrendPoint,
 } from "@/types/market";
 import { useT, type TranslationFunction } from "@/i18n";
+import { compactIntradayTimestamp, intradayBarIsForming, intradayCandle, selectIntradayTimeTicks, type IntradaySessionStats } from "@/components/chart/intradayPresentation";
+import { IntradaySessionStrip } from "@/components/chart/IntradaySessionSummary";
+import type { TaiwanSessionSummary } from "@/components/chart/useTaiwanSessionSummary";
+import IntradayChartHeader from "@/components/chart/IntradayChartHeader";
+import { useIntradayChartMode } from "@/components/chart/useIntradayChartMode";
 import {
   TAIWAN_SESSION_END_MINUTES,
   TAIWAN_SESSION_START_MINUTES,
@@ -17,6 +22,8 @@ import {
 } from "@/lib/taiwanMarketTime";
 
 type Props = {
+  detailsTarget?: HTMLElement | null;
+  footerActions?: ReactNode;
   points: IntradayTrendPoint[];
   previousClose: number | null;
   referenceType?: string;
@@ -32,6 +39,9 @@ type Props = {
   updatedAt?: string | null;
   priceLimitEnabled?: boolean;
   totalVolume?: number | null;
+  sessionStats?: IntradaySessionStats | null;
+  sessionSummary?: TaiwanSessionSummary | null;
+  sessionSummaryStatus?: string;
   volumeLabel?: string;
   priceDiagnostics?: IntradayPriceDiagnostics | null;
   tradeDate?: string | null;
@@ -198,7 +208,7 @@ function average(values: Array<number | null | undefined>) {
 }
 
 function formatLots(value: number | null | undefined) {
-  if (!validNumber(value) || value <= 0) return "-";
+  if (!validNumber(value) || value < 0) return "—";
 
   return new Intl.NumberFormat("zh-TW", {
     minimumFractionDigits: 0,
@@ -467,8 +477,8 @@ export function aggregateIntradayPoints(
     point.bar_type === "session_close_marker";
   const regularPoints = displayPoints.filter(
     (point) =>
-      session.isRegularSessionPoint(point.time) ||
-      point.bar_type === "closing_auction"
+      !isCloseMarker(point) && (session.isRegularSessionPoint(point.time) ||
+      point.bar_type === "closing_auction")
   );
   const closeMarkers = displayPoints.filter(isCloseMarker);
 
@@ -477,9 +487,9 @@ export function aggregateIntradayPoints(
       .sort((left, right) => new Date(left.time).getTime() - new Date(right.time).getTime())
       .map((point) => ({
         ...point,
-        open: point.open ?? point.price,
-        high: point.high ?? point.price,
-        low: point.low ?? point.price,
+        open: point.open,
+        high: point.high,
+        low: point.low,
       }));
   }
 
@@ -515,14 +525,19 @@ export function aggregateIntradayPoints(
       const volume = bucketPoints.reduce((sum, point) => {
         return sum + (validNumber(point.volume) && point.volume > 0 ? point.volume : 0);
       }, 0);
+      const validOhlc = bucketPoints.every((point) => intradayCandle(point) !== null);
 
       return {
         time: first.time,
         price: last.price,
-        volume: volume > 0 ? volume : null,
-        open: first.open ?? first.price,
-        high: highs.length > 0 ? Math.max(...highs) : last.price,
-        low: lows.length > 0 ? Math.min(...lows) : last.price,
+        volume: bucketPoints.every((point) => validNumber(point.volume) && point.volume >= 0) ? volume : null,
+        open: validOhlc ? first.open : null,
+        high: validOhlc ? Math.max(...highs) : null,
+        low: validOhlc ? Math.min(...lows) : null,
+        close: last.close ?? last.price,
+        is_partial: bucketPoints.some(intradayBarIsForming),
+        finalized: bucketPoints.every((point) => point.finalized === true) ? true : undefined,
+        synthetic: bucketPoints.some((point) => point.synthetic === true),
         cumulative_volume: last.cumulative_volume ?? null,
         trade_value: last.trade_value ?? null,
         bar_type: last.bar_type,
@@ -743,6 +758,8 @@ function buildBaselineAreaPath(
 }
 
 export default function IntradayTrendChart({
+  detailsTarget,
+  footerActions,
   points,
   previousClose,
   referenceType,
@@ -758,10 +775,14 @@ export default function IntradayTrendChart({
   updatedAt,
   priceLimitEnabled = true,
   totalVolume,
+  sessionStats,
+  sessionSummary,
+  sessionSummaryStatus,
   volumeLabel,
   priceDiagnostics,
   tradeDate,
   currentObservation,
+  historyStatus,
   snapshotPhase = "ready",
   snapshotReasonCodes = [],
   canonicalIndicatorAuthority = "presentation",
@@ -775,9 +796,12 @@ export default function IntradayTrendChart({
   const [hoverPriceGuide, setHoverPriceGuide] = useState<HoverPriceGuideState | null>(null);
   const [showLimitRange, setShowLimitRange] = useState(false);
   const [localInterval, setLocalInterval] = useState<IntradayInterval>(1);
+  const [preferredChartMode, setChartMode] = useIntradayChartMode();
   const interval = controlledInterval ?? localInterval;
   const [activeRevealKey, setActiveRevealKey] = useState<string | null>(null);
   const revealCoverRef = useRef<HTMLDivElement | null>(null);
+  const chartViewportRef = useRef<HTMLDivElement | null>(null);
+  const [viewportWidth, setViewportWidth] = useState(1000);
 
   const data = useMemo(() => {
     if (canonicalIndicatorAuthority === "backend") {
@@ -787,11 +811,26 @@ export default function IntradayTrendChart({
       aggregateIntradayPoints(points, interval, session, tradeDate)
     );
   }, [canonicalIndicatorAuthority, points, interval, session, tradeDate]);
+  const candleCount = data.filter((point) => intradayCandle(point) !== null).length;
+  const chartMode = preferredChartMode === "candles" && candleCount > 0 ? "candles" : "line";
+  const missingCandleCount = data.filter((point) =>
+    !point.bar_type?.endsWith("_marker") && intradayCandle(point) === null
+  ).length;
 
   const safeHoverIndex =
     hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
   const stableRevealKey = revealKey ?? label;
   const dataReadyForReveal = data.length >= 2;
+
+  useEffect(() => {
+    const element = chartViewportRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width > 0) setViewportWidth(Math.max(280, Math.round(entry.contentRect.width)));
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [dataReadyForReveal, snapshotPhase]);
 
   useEffect(() => {
     if (!dataReadyForReveal) return;
@@ -874,25 +913,26 @@ export default function IntradayTrendChart({
           tone={quoteAvailable ? "info" : "empty"}
           className="h-[388px]"
         />
+        {footerActions ? <div className="relative flex justify-end pt-2">{footerActions}</div> : null}
       </div>
     );
   }
 
-  const width = 1000;
+  const width = viewportWidth;
   const showVolume =
     indicators.volume &&
     data.some((point) => validNumber(point.volume) && point.volume > 0);
   const indicatorHeight = 48;
   const indicatorGap = 14;
-  const paddingLeft = 84;
-  const paddingRight = 90;
+  const paddingLeft = width < 480 ? 54 : 72;
+  const paddingRight = width < 480 ? 62 : 84;
   const priceTop = 30;
-  const priceHeight = showVolume ? 260 : 300;
+  const priceHeight = width < 480 ? 210 : showVolume ? 260 : 300;
   const priceBottom = priceTop + priceHeight;
-  const volumeTop = showVolume ? 322 : priceBottom;
+  const volumeTop = showVolume ? priceBottom + 32 : priceBottom;
   const volumeHeight = showVolume ? 62 : 0;
-  const labelY = showVolume ? 406 : priceBottom + 26;
-  const lowerPanelStartTop = showVolume ? 428 : labelY + 22;
+  const labelY = showVolume ? volumeTop + volumeHeight + 22 : priceBottom + 26;
+  const lowerPanelStartTop = labelY + 22;
   const lowerPanelKeys: Array<"rsi" | "macd"> = [];
 
   if (indicators.rsi) lowerPanelKeys.push("rsi");
@@ -914,7 +954,7 @@ export default function IntradayTrendChart({
         (lowerPanelKeys.length - 1) * (indicatorHeight + indicatorGap) +
         indicatorHeight
       : volumeTop + volumeHeight;
-  const height = lowerPanelKeys.length > 0 ? indicatorBottom + 28 : showVolume ? 420 : 370;
+  const height = lowerPanelKeys.length > 0 ? indicatorBottom + 28 : labelY + 14;
   const usableWidth = width - paddingLeft - paddingRight;
   const latestPrice = data[data.length - 1]?.price ?? null;
   const change =
@@ -922,6 +962,7 @@ export default function IntradayTrendChart({
 
   const priceValues = [
     ...data.map((point) => point.price),
+    ...data.flatMap((point) => [point.high, point.low]),
     ...(indicators.vwap ? data.map((point) => point.vwap) : []),
     ...(indicators.twap ? data.map((point) => point.twap) : []),
     ...(indicators.ema ? data.flatMap((point) => [point.emaFast, point.emaSlow]) : []),
@@ -942,23 +983,22 @@ export default function IntradayTrendChart({
     .map((point) => point.volume)
     .filter(validNumber);
   const maxVolume = Math.max(...volumes, 1);
-  const cumulativeVolumes = data.reduce<number[]>((result, point, index) => {
+  const cumulativeVolumes = data.reduce<Array<number | null>>((result, point, index) => {
     const previous = index > 0 ? result[index - 1] : 0;
-    const volume = validNumber(point.volume) && point.volume > 0 ? point.volume : 0;
+    const volume = validNumber(point.volume) && point.volume >= 0 ? point.volume : null;
     const providerCumulative =
       validNumber(point.cumulative_volume) && point.cumulative_volume >= 0
         ? point.cumulative_volume
         : null;
 
-    result.push(providerCumulative ?? previous + volume);
+    result.push(providerCumulative ?? (previous !== null && volume !== null ? previous + volume : null));
 
     return result;
   }, []);
   const pointTotalVolume = cumulativeVolumes[cumulativeVolumes.length - 1] ?? null;
-  const displayedVolume =
-    safeHoverIndex !== null
-      ? cumulativeVolumes[safeHoverIndex] ?? null
-      : validNumber(totalVolume)
+  const displayedVolume = sessionStats
+    ? sessionStats.totalVolume
+    : validNumber(totalVolume)
         ? totalVolume
         : pointTotalVolume;
   const rangeHigh = data.reduce<{ index: number; value: number } | null>(
@@ -1013,7 +1053,7 @@ export default function IntradayTrendChart({
     return top + ((max - value) / range) * indicatorHeight;
   }
 
-  function handleMouseMove(event: React.MouseEvent<SVGRectElement>) {
+  function handlePointerMove(event: React.PointerEvent<SVGRectElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
     const localX = paddingLeft + ratio * usableWidth;
@@ -1130,153 +1170,67 @@ export default function IntradayTrendChart({
   const clipAboveId = `${safeChartId}-above`;
   const clipBelowId = `${safeChartId}-below`;
   const shouldShowRevealCover = activeRevealKey === stableRevealKey;
+  const lastCandleIndex = data.findLastIndex((point) => intradayCandle(point) !== null);
+  const readoutIndex = safeHoverIndex ?? (lastCandleIndex >= 0 ? lastCandleIndex : data.length - 1);
+  const readoutPoint = data[readoutIndex];
+  const readoutCandle = intradayCandle(readoutPoint);
   const barWidth = clamp((usableWidth / sessionMinutes) * interval * 0.7, 1, 10);
-  const timeTicks = session.timeTicks;
+  const timeTicks = selectIntradayTimeTicks(session.timeTicks, session.startMinutes, session.endMinutes, usableWidth);
   const formatVolumeValue = session.volumeFormatter ?? formatLots;
 
   return (
     <div
       className="border border-omi-border-subtle bg-omi-surface"
       data-testid="intraday-trend-chart"
+      data-chart-mode={chartMode}
       data-rendered-point-count={data.length}
       data-volume-rendered={showVolume ? "true" : "false"}
       data-snapshot-phase={snapshotPhase}
       data-snapshot-reasons={snapshotReasonCodes.join(",")}
     >
-      <div className="flex min-h-16 items-start justify-between gap-4 border-b border-omi-border-subtle px-4 py-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-omi-text">
-            <span>{t("stockDetail.intraday.title")}</span>
-            {snapshotPhase === "degraded" ? (
-              <span
-                className="border border-omi-warning/40 bg-omi-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-omi-warning-strong"
-                data-testid="intraday-snapshot-degraded"
-              >
-                {t("stockDetail.intraday.snapshotDegraded")}
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-1 text-xs text-omi-text-muted">
-            {label} · {formatSource(t, source)} ·{" "}
-            {t("stockDetail.intraday.pointCount", { count: data.length })}
-          </div>
-          {refreshIntervalMs ? (
-            <div className="mt-1 text-xs text-omi-text-muted">
-              {t(
-                refreshMode === "cache_poll"
-                  ? updatedAt
-                    ? "stockDetail.intraday.cachePollEveryUpdated"
-                    : "stockDetail.intraday.cachePollEvery"
-                  : updatedAt
-                    ? "stockDetail.intraday.refreshEveryUpdated"
-                    : "stockDetail.intraday.refreshEvery",
-                {
-                  seconds: Math.round(refreshIntervalMs / 1000),
-                  updatedAt,
-                }
-              )}
-            </div>
-          ) : null}
-          {priceDiagnostics ? (
-            <div
-              className={[
-                "mt-1 text-xs",
-                (priceDiagnostics.current_price_confirmed || priceDiagnostics.current_trade_available)
-                  ? "text-omi-success-strong"
-                  : "text-omi-warning-strong",
-              ].join(" ")}
-              data-testid="intraday-current-price-status"
-            >
-              {priceDiagnostics.current_price_basis === "official_close" || priceDiagnostics.current_price_basis === "session_close"
-                ? t(priceDiagnostics.current_price_confirmed
-                    ? priceDiagnostics.current_price_basis === "official_close"
-                      ? "stockDetail.intraday.officialCloseConfirmed"
-                      : "stockDetail.intraday.sessionCloseConfirmed"
-                    : "stockDetail.intraday.closeUnconfirmed")
-                : priceDiagnostics.current_trade_available
-                ? t("stockDetail.intraday.currentTradeAvailable", {
-                    time: priceDiagnostics.latest_actual_trade_time?.slice(11, 19) ?? "-",
-                    lag: Math.round(priceDiagnostics.lag_seconds ?? 0),
-                  })
-                : t("stockDetail.intraday.currentTradeUnavailable", {
-                    reason:
-                      priceDiagnostics.current_trade_unavailable_reason ?? "UNKNOWN",
-                  })}
-            </div>
-          ) : null}
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <div className="inline-flex border border-omi-border bg-omi-surface">
-              {intervalOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => {
-                    setHoverIndex(null);
-                    setHoverPriceGuide(null);
-                    if (controlledInterval === undefined) {
-                      setLocalInterval(option.value);
-                    }
-                    onIntervalChange?.(option.value);
-                  }}
-                  className={[
-                    "h-7 px-2.5 text-xs font-semibold transition",
-                    interval === option.value
-                      ? "bg-omi-control text-omi-text-inverse"
-                      : "text-omi-text-muted hover:bg-omi-surface-muted",
-                  ].join(" ")}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div
-          className={[
-            "grid shrink-0 grid-cols-2 gap-x-8 gap-y-2 text-right",
-            showVolume ? "sm:grid-cols-4" : "sm:grid-cols-3",
-          ].join(" ")}
-        >
-          <div>
-            <span className="text-xs text-omi-text-subtle">
-              {t(referenceType && referenceType !== "prior_regular_close" ? "stockDetail.intraday.referencePrice" : "stockDetail.intraday.previousClose")}
-            </span>
-            <div className="mt-1 text-base font-bold text-omi-text">
-              <span data-testid="intraday-reference-price" data-reference-price={previousClose ?? ""} data-reference-status={referenceStatus ?? "unknown"}>{formatPrice(previousClose)}</span>
-              {referenceStatus && referenceStatus !== "current" ? <span className="ml-2 text-xs text-omi-warning-strong" title={referenceReason}>{referenceStatus}</span> : null}
-            </div>
-          </div>
-          <div>
-            <span className="text-xs text-omi-text-subtle">
-              {t("stockDetail.intraday.low")}
-            </span>
-            <div className="mt-1 text-base font-bold text-omi-market-down">
-              {formatPrice(rangeLow?.value)}
-            </div>
-          </div>
-          <div>
-            <span className="text-xs text-omi-text-subtle">
-              {t("stockDetail.intraday.high")}
-            </span>
-            <div className="mt-1 text-base font-bold text-omi-market-up">
-              {formatPrice(rangeHigh?.value)}
-            </div>
-          </div>
-          {showVolume ? (
-            <div>
-              <span className="text-xs text-omi-text-subtle">
-                {volumeLabel ?? t("stockDetail.intraday.volumeLots")}
-              </span>
-              <div className="mt-1 text-base font-bold text-omi-text">
-                {formatVolumeValue(displayedVolume)}
-              </div>
-            </div>
-          ) : null}
-        </div>
+      <IntradayChartHeader
+        detailsTarget={detailsTarget}
+        chartMode={chartMode}
+        onChartModeChange={(mode) => { setChartMode(mode); setHoverIndex(null); setHoverPriceGuide(null); }}
+        candleCount={candleCount}
+        missingCandleCount={missingCandleCount}
+        intervalControls={<div role="group" aria-label={t("stockDetail.intraday.barInterval")} className="inline-flex border border-omi-border">
+          {intervalOptions.map((option) => <button
+            key={option.value} type="button" aria-pressed={interval === option.value}
+            onClick={() => {
+              setHoverIndex(null); setHoverPriceGuide(null);
+              if (controlledInterval === undefined) setLocalInterval(option.value);
+              onIntervalChange?.(option.value);
+            }}
+            className={`min-h-8 px-2.5 text-xs font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-omi-text ${interval === option.value ? "bg-omi-control text-omi-text-inverse" : "text-omi-text-muted hover:bg-omi-surface-muted"}`}
+          >{option.label}</button>)}
+        </div>}
+        details={<>
+          <div>{label} · {formatSource(t, source)} · {t("stockDetail.intraday.pointCount", { count: data.length })}</div>
+          {refreshIntervalMs ? <div>{t(refreshMode === "cache_poll" ? "stockDetail.intraday.cachePollEveryUpdated" : "stockDetail.intraday.refreshEveryUpdated", { seconds: Math.round(refreshIntervalMs / 1000), updatedAt: updatedAt ?? "—" })}</div> : null}
+          {snapshotReasonCodes.map((reason) => <div key={reason}>{reason}</div>)}
+        </>}
+        updatedAt={updatedAt} diagnostics={priceDiagnostics} observation={currentObservation}
+        historyStatus={historyStatus} degraded={snapshotPhase === "degraded"}
+        reference={previousClose} referenceType={referenceType} referenceStatus={referenceStatus} referenceReason={referenceReason}
+        high={rangeHigh?.value ?? null} low={rangeLow?.value ?? null}
+        volume={displayedVolume} showVolume={showVolume}
+        volumeLabel={volumeLabel ?? t("stockDetail.intraday.volumeLots")}
+        summary={sessionSummary} summaryStatus={sessionSummaryStatus}
+        stats={sessionStats} formatPrice={formatPrice} formatVolume={formatVolumeValue}
+      />
+      <div className="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-1 border-b border-omi-border-subtle px-4 py-2 text-xs tabular-nums" data-testid="intraday-bar-readout">
+        <span className="text-omi-text-muted">{t(safeHoverIndex === null ? "stockDetail.intraday.latestBar" : "stockDetail.intraday.selectedBar")} <time>{compactIntradayTimestamp(readoutPoint.time)}</time></span>
+        {([
+          ["open", readoutCandle?.open], ["high", readoutCandle?.high],
+          ["low", readoutCandle?.low], ["close", readoutCandle?.close ?? readoutPoint.price],
+        ] as const).map(([key, value]) => <span key={key} className="text-omi-text-muted">{t(`stockDetail.intraday.${key}`)} <strong className="font-medium text-omi-text">{validNumber(value) ? formatPrice(value) : "—"}</strong></span>)}
+        {showVolume ? <span className="text-omi-text-muted">{t("stockDetail.intraday.barVolume")} <strong className="font-medium text-omi-text">{validNumber(readoutPoint.volume) ? formatVolumeValue(readoutPoint.volume) : "—"}</strong></span> : null}
+        {intradayBarIsForming(readoutPoint) ? <span className="text-omi-warning-strong">{t("stockDetail.intraday.formingBar")}</span> : null}
+        {readoutPoint.bar_type?.endsWith("_marker") ? <span className="text-omi-text-muted">{t("stockDetail.intraday.closeEvent")}</span> : null}
       </div>
 
-      <div className="relative overflow-hidden">
+      <div ref={chartViewportRef} className="relative w-full overflow-hidden">
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
         <rect x="0" y="0" width={width} height={height} className="fill-omi-surface" />
         <defs>
@@ -1419,7 +1373,22 @@ export default function IntradayTrendChart({
           </g>
         ) : null}
 
-        {previousCloseY !== null ? (
+        {chartMode === "candles" ? (
+          <g data-testid="intraday-candles">
+            {data.map((point, index) => {
+              const candle = intradayCandle(point);
+              if (!candle) return null;
+              const x = getPointX(point);
+              const bodyTop = Math.min(getPriceY(candle.open), getPriceY(candle.close));
+              const bodyHeight = Math.max(Math.abs(getPriceY(candle.open) - getPriceY(candle.close)), 1);
+              const tone = candle.close > candle.open ? "stroke-omi-market-up fill-omi-market-up" : candle.close < candle.open ? "stroke-omi-market-down fill-omi-market-down" : "stroke-omi-text-muted fill-omi-text-muted";
+              return <g key={`${point.time}-${index}`} data-candle-time={point.time} data-candle-forming={intradayBarIsForming(point)} className={tone} opacity={intradayBarIsForming(point) ? 0.65 : 1}>
+                <line x1={x} x2={x} y1={getPriceY(candle.high)} y2={getPriceY(candle.low)} strokeWidth="1" />
+                <rect x={x - barWidth / 2} y={bodyTop} width={barWidth} height={bodyHeight} strokeWidth="0.8" />
+              </g>;
+            })}
+          </g>
+        ) : previousCloseY !== null ? (
           <>
             <path d={areaPath} className="fill-omi-market-up-soft opacity-50" clipPath={`url(#${clipAboveId})`} />
             <path
@@ -1777,8 +1746,24 @@ export default function IntradayTrendChart({
           width={usableWidth}
           height={indicatorBottom - priceTop}
           fill="transparent"
-          onMouseMove={handleMouseMove}
-          onMouseLeave={() => {
+          onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+            event.preventDefault();
+            setHoverPriceGuide(null);
+            const index = readoutIndex;
+            setHoverIndex(event.key === "Escape" ? null : event.key === "Home" ? 0 : event.key === "End" ? data.length - 1 : clamp(index + (event.key === "ArrowLeft" ? -1 : 1), 0, data.length - 1));
+          }}
+          onBlur={() => { setHoverIndex(null); setHoverPriceGuide(null); }}
+          data-testid="intraday-chart-interaction"
+          role="slider"
+          aria-label={t("stockDetail.intraday.inspectBar")}
+          aria-valuemin={0}
+          aria-valuemax={data.length - 1}
+          aria-valuenow={readoutIndex}
+          aria-valuetext={`${compactIntradayTimestamp(readoutPoint.time)} ${formatPrice(readoutPoint.price)}`}
+          tabIndex={0}
+          onPointerMove={handlePointerMove}
+          onPointerLeave={() => {
             setHoverIndex(null);
             setHoverPriceGuide(null);
           }}
@@ -1797,8 +1782,11 @@ export default function IntradayTrendChart({
         ) : null}
       </div>
 
+      {sessionSummaryStatus || priceLimitEnabled || footerActions ? <div className="relative flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-omi-border-subtle px-4 py-2">
+      {sessionSummaryStatus ? <IntradaySessionStrip summary={sessionSummary ?? null} /> : null}
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+        {footerActions}
       {priceLimitEnabled ? (
-        <div className="flex items-center justify-end border-t border-omi-border-subtle px-4 py-2">
           <button
             type="button"
             onClick={() => setShowLimitRange((value) => !value)}
@@ -1811,8 +1799,9 @@ export default function IntradayTrendChart({
           >
             {t("stockDetail.intraday.showPriceLimit")}
           </button>
-        </div>
       ) : null}
+      </div>
+      </div> : null}
     </div>
   );
 }

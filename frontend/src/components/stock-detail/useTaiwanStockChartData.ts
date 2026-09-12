@@ -1047,7 +1047,9 @@ export function useTaiwanStockChartData({
   const currentDailyState =
     stockId !== null && dailyState?.stockId === stockId ? dailyState : null;
   const currentTodayState =
-    stockId !== null && todayState?.stockId === stockId ? todayState : null;
+    stockId !== null && todayState?.stockId === stockId && todayState.interval === `${todayInterval}m`
+      ? todayState
+      : null;
   const currentRequestKey = stockId
     ? chartRequestKey({
         chartFocusMode,

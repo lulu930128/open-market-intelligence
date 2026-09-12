@@ -160,14 +160,14 @@ test("Taiwan secondary surfaces stay cache-only until demanded", () => {
   expect(priceMap).toContain("/price-map");
   expect(panel).toContain("onOvernightDemand={() => setOvernightDemanded(true)}");
   expect(panel).toContain(
-    "todayCurrentObservation ?? quoteDepthCurrentObservation(selectedQuoteDepth)"
+    "quoteDepthCurrentObservation(selectedQuoteDepth)"
   );
   expect(panel).toContain("quoteDepth?.last_trade_price ?? null");
   expect(panel).not.toContain(
     "quoteDepth.actual_trade_occurred === true ? currentPrice : null"
   );
-  expect(panel).toContain("todayPreviousClose ??");
-  expect(panel).toContain("selectedQuoteDepth?.previous_close ??");
+  expect(panel).toContain("taiwanReferencePrice(selectedQuoteDepth,");
+  expect(panel).not.toContain("todayPreviousClose ??");
   expect(panel).toContain(
     "isIndexProduct ? selectedIndexSnapshot?.previous_close ?? null : null"
   );

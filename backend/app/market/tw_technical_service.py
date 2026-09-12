@@ -398,6 +398,27 @@ def build_taiwan_technical_capability_contract() -> dict[str, Any]:
 class TaiwanTechnicalService:
     """Calculate from one exact resolved Bar object; never read DB/provider."""
 
+    def session_average(self, bars: TaiwanBarSeriesRead) -> dict[str, Any]:
+        """Fixed-basis session estimate, reusing canonical indicator math.
+
+        Explicit zero-volume bars have no weight. Missing volume or an
+        ineligible bar cannot silently restart a session-wide average.
+        """
+        if bars.requested_interval != "1m" or not bars.bars:
+            return {"vwap": None}
+        if any(not state.technical_eligible for state in bars.bar_states):
+            return {"vwap": None}
+        raw = _bar_points(bars)
+        if any(point["volume"] is None or point["volume"] < 0 for point in raw):
+            return {"vwap": None}
+        weighted = [point for point in raw if point["volume"] > 0]
+        if not weighted:
+            return {"vwap": None}
+        points = calculate_canonical_indicator_points(
+            weighted, parameters=get_technical_analysis_parameters(), interval="1m",
+        )
+        return {"vwap": points[-1].get("vwap"), "time": bars.bars[-1].end_at.isoformat()}
+
     def calculate(
         self,
         bars: TaiwanBarSeriesRead,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -11,6 +11,7 @@ from app.db.session import get_db
 from app.market.technical_parameters import get_technical_analysis_parameters
 from app.market.tw_bar_contracts import TaiwanBarSessionScope
 from app.market.tw_bar_service import TaiwanBarService
+from app.market.tw_session_summary import TaiwanSessionSummaryRead, read_taiwan_session_summary
 from app.market.tw_chart_service import (
     TaiwanChartBundleRead,
     TaiwanChartService,
@@ -26,6 +27,18 @@ from app.market.tw_technical_service import (
 
 
 router = APIRouter()
+
+
+@router.get("/technical/{instrument_id}/session-summary", response_model=TaiwanSessionSummaryRead)
+def get_taiwan_session_summary(
+    instrument_id: str,
+    trade_date: date,
+    db: Session = Depends(get_db),
+) -> TaiwanSessionSummaryRead:
+    try:
+        return read_taiwan_session_summary(db, instrument_id=instrument_id, expected_trade_date=trade_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=409 if str(exc) == "SESSION_SUMMARY_TRADE_DATE_MISMATCH" else 422, detail=str(exc)) from exc
 
 
 def _technical(

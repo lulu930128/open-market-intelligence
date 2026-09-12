@@ -226,6 +226,15 @@ Marker可以攜帶兩個獨立的volume facts：closing-match volume與session c
 - Actual-trade screening 只讀 expected session；盤前標 not_applicable。`observation_received_freshness`、`last_trade_recency`、`facts_usable_for_ranking` 與 decision/execution usability 分開；不放寬既有成交 age gate。
 - Health 的 acceptance canary、bounded Tier-A 與 request-symbol scope 必須明示；單一標的缺資料不重定義全域 health。
 
+## Today 行情摘要
+
+`tw_session_summary.py` 是既有台股 market owner 的唯讀顯示投影；typed contract 擁有實際欄位。它不新增 persistence、provider selection 或 refresh。前端的圖表週期只改視圖，行情摘要固定引用同一顯示交易日的 1m canonical bars。
+
+- 分時均價由 `TaiwanTechnicalService.session_average` 重用 canonical HLC3-volume 指標方法；明示估算、coverage 與 bars 範圍。零量沒有權重，缺量或不合格 bar 不可重啟後綴均價冒充整個 session。
+- 分時成交值不含獨立 close marker；缺少真實 turnover 時的 close-volume 乘積只能標估算。部分有值只呈現 partial subtotal。
+- 昨量錨定顯示交易日的前一交易日，保留 official daily aggregate 與 quote cumulative 的範圍差異；同時段相對量引用既有 volume-pace owner。
+- Quote freshness、官方收盤確認及各欄位時間仍各自保留。摘要不因收盤價確認而升格 stale quote，不以 bar 尾端時刻重新推定 canonical coverage。
+
 ## Negative acceptance
 
 任何下列變更都必須被 architecture／contract review 拒絕：
