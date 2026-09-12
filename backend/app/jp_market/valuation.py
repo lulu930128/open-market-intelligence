@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.jp_market.service import _latest_distinct_jp_daily_rows
 from app.market_data.contracts import Market
 from app.market_data.valuation import ValuationPriceEvidence
@@ -18,7 +19,18 @@ def read_jp_valuation_price(
     symbol: str,
     requested_at: datetime,
 ) -> ValuationPriceEvidence:
-    del requested_at
+    if settings.jp_canonical_daily_mode == "on":
+        from app.jp_market.daily_projection import read_daily_rows
+        rows = read_daily_rows(db, symbol=symbol, limit=1, requested_at=requested_at)
+        row = rows[0] if rows else None
+        return ValuationPriceEvidence(
+            market=Market.JP, symbol=symbol,
+            price=Decimal(str(row.close_price)) if row else None, currency="JPY",
+            as_of=row.trade_date if row else None, provider=row.provider if row else None,
+            source="jp.daily.ohlcv", source_kind="canonical_completed_daily_close" if row else "missing",
+            facts_usable=bool(row and row.facts_usable), research_usable=bool(row and row.research_usable),
+            resolved_status=row.resolved_status if row else "missing", limitations=row.limitations if row else (),
+        )
     rows = _latest_distinct_jp_daily_rows(db=db, symbol=symbol, limit=1)
     row = rows[0] if rows else None
     price = (

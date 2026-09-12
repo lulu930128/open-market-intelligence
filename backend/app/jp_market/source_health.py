@@ -6,7 +6,10 @@ from typing import Any
 
 from sqlalchemy.orm import Query, Session
 
+from app.config import settings
+from app.jp_market.daily_health import read_daily_attempts
 from app.db.models import (
+    JPBarEvidence,
     JPCompanyFundamental,
     JPDailyPrice,
     JPInvestorType,
@@ -162,10 +165,17 @@ def _daily_price_entries(
     expected_daily_price_date: date | None,
 ) -> list[JPSourceHealthEntry]:
     entries: list[JPSourceHealthEntry] = []
-    for provider in DAILY_PRICE_PROVIDERS:
-        query = db.query(JPDailyPrice).filter(JPDailyPrice.provider == provider)
+    canonical = settings.jp_canonical_daily_mode == "on"
+    from app.jp_market.market_data.descriptors import JP_DAILY_DESCRIPTORS
+    model = JPBarEvidence if canonical else JPDailyPrice
+    providers = tuple(d.provider_key for d in JP_DAILY_DESCRIPTORS) if canonical else DAILY_PRICE_PROVIDERS
+    fetched_column = model.available_at if canonical else model.fetched_at
+    for provider in providers:
+        query = db.query(model).filter(model.provider == provider)
+        if canonical:
+            query = query.filter(model.interval == "1d")
         if symbol is not None:
-            query = query.filter(JPDailyPrice.symbol == symbol)
+            query = query.filter(model.symbol == symbol)
         entries.append(
             _entry_from_query(
                 query=query,
@@ -173,12 +183,12 @@ def _daily_price_entries(
                 provider=provider,
                 target=_target(symbol),
                 latest_data_attr="trade_date",
-                latest_fetched_attr="fetched_at",
+                latest_fetched_attr="available_at" if canonical else "fetched_at",
                 expected_data_date=expected_daily_price_date,
                 order_by=(
-                    JPDailyPrice.trade_date.desc(),
-                    JPDailyPrice.fetched_at.desc(),
-                    JPDailyPrice.id.desc(),
+                    model.trade_date.desc(),
+                    fetched_column.desc(),
+                    model.id.desc(),
                 ),
             )
         )
@@ -278,7 +288,7 @@ def _investor_types_entry(
     )
 
 
-def build_jp_source_health(
+def _build_jp_source_health(
     db: Session,
     *,
     symbol: str | None = None,
@@ -323,13 +333,14 @@ def build_jp_source_health(
         market="jp",
         entries=[entry.to_dict() for entry in entries],
     )
-    checked_at = generated_at()
-    sync_source_health_snapshots(
-        db,
-        market="jp",
-        entries=entry_dicts,
-        checked_at=checked_at,
-    )
+    checked_at = now or generated_at()
+    attempts = read_daily_attempts(db, symbol=normalized_symbol, now=checked_at) if normalized_symbol and settings.jp_canonical_daily_mode == "on" else ()
+    attempts_by_provider = {item.latest_attempt.provider: item for item in attempts}
+    for entry in entry_dicts:
+        attempt = attempts_by_provider.get(entry.get("provider"))
+        if entry.get("resource") == "daily_price" and attempt:
+            entry["latest_attempt"] = attempt.latest_attempt.model_dump(mode="json")
+            entry["last_good"] = attempt.last_good.model_dump(mode="json") if attempt.last_good else None
     return {
         "kind": "jp_source_health",
         "generated_at": checked_at.isoformat(),
@@ -355,7 +366,30 @@ def build_jp_source_health(
             counted_statuses=("empty", "stale", "error"),
         ),
         "entries": entry_dicts,
+        "daily_provider_attempts": [item.model_dump(mode="json") for item in attempts],
     }
 
 
-__all__ = ["JPSourceHealthEntry", "build_jp_source_health"]
+def build_jp_source_health(
+    db: Session, *, symbol: str | None = None, is_index: bool = False,
+    expected_daily_price_date: date | None = None, use_expected_date: bool = True,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Read diagnostics without flushing pending work or publishing snapshots."""
+    with db.no_autoflush:
+        return _build_jp_source_health(
+            db, symbol=symbol, is_index=is_index,
+            expected_daily_price_date=expected_daily_price_date,
+            use_expected_date=use_expected_date, now=now,
+        )
+
+
+def publish_jp_source_health(db: Session, **kwargs) -> dict[str, Any]:
+    """Explicit publisher boundary; never called by GET/read consumers."""
+    result = build_jp_source_health(db, **kwargs)
+    sync_source_health_snapshots(db, market="jp", entries=result["entries"],
+                                 checked_at=datetime.fromisoformat(result["generated_at"]))
+    return result
+
+
+__all__ = ["JPSourceHealthEntry", "build_jp_source_health", "publish_jp_source_health"]

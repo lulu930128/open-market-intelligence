@@ -186,6 +186,8 @@ Kuro 不重做市場研究、provider fallback、freshness 或 Portfolio valuati
 
 JP / KR / Crypto / Resource 預設為 secondary / context market。新增能力時優先使用共同 canonical/outward contract，不建立平行架構。
 
+2026-09-12 已確認 JP 升級為可獨立研究的產品方向。依 Daily、Quote／Intraday、非價格 Research 的順序收斂到共同 Foundation／Decision contract，包含圖表、排行、Portfolio、跨市場與健康狀態；這是已核准的實作方向，正式能力仍以 executable registry 與各階段 runtime／live／product 驗收為準。
+
 ## 10. Realtime Policy
 
 Backend public policy：

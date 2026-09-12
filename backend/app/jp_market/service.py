@@ -74,7 +74,7 @@ from app.jp_market.trading_calendar import (
     expected_jp_daily_price_date,
     previous_jp_trading_day,
 )
-from app.jp_market.source_health import build_jp_source_health
+from app.jp_market.source_health import build_jp_source_health, publish_jp_source_health
 from app.market.calendar_status import build_jp_calendar_status
 from app.market.stock_volume_pace import (
     build_stock_volume_pace,
@@ -741,6 +741,9 @@ def _latest_distinct_jp_daily_rows(
     symbol: str,
     limit: int = 2,
 ) -> list[JPDailyPrice]:
+    if settings.jp_canonical_daily_mode == "on":
+        from app.jp_market.daily_projection import read_daily_rows
+        return read_daily_rows(db, symbol=symbol, limit=limit)
     rows = (
         db.query(JPDailyPrice)
         .filter(JPDailyPrice.symbol == symbol)
@@ -977,6 +980,9 @@ def _jp_market_overview_recent_rows(
     *,
     expected_trade_date: date,
 ) -> dict[str, list[dict]]:
+    if settings.jp_canonical_daily_mode == "on":
+        from app.jp_market.daily_projection import read_overview_rows
+        return read_overview_rows(db, expected_trade_date=expected_trade_date)
     provider_ranked = (
         db.query(
             JPDailyPrice.id.label("price_id"),
@@ -1524,6 +1530,19 @@ def refresh_jp_daily_prices_from_yahoo_chart(
     )
     result = upsert_jp_daily_price_records(db, records)
 
+    shadow = None
+    if settings.jp_canonical_daily_mode == "shadow":
+        from app.jp_market.daily_shadow import persist_and_compare_yahoo
+        from app.jp_market.identity import read_jp_instrument
+        try:
+            shadow = persist_and_compare_yahoo(
+                db, payload=payload, instrument=read_jp_instrument(db, normalized_symbol),
+                source_url=source_url, fetched_at=utc_now(), legacy_records=records,
+            )
+        except (ValueError, SQLAlchemyError):
+            db.rollback()
+            shadow = {"status": "failed", "limitations": ["CANONICAL_SHADOW_FAILED"]}
+
     return {
         "status": "success",
         "provider": "yahoo_chart",
@@ -1532,6 +1551,7 @@ def refresh_jp_daily_prices_from_yahoo_chart(
         "inserted_count": result["inserted_count"],
         "updated_count": result["updated_count"],
         "message": "JP daily prices refreshed from Yahoo chart.",
+        "canonical_shadow": shadow,
     }
 
 
@@ -1543,15 +1563,44 @@ def refresh_jp_daily_prices(
     outputsize: str = "compact",
     provider: str = "auto",
 ) -> dict:
+    if settings.jp_canonical_daily_mode == "on":
+        if provider not in ("auto", ""):
+            raise ValueError("Canonical JP refresh uses backend provider policy")
+        if outputsize not in ("compact", "full"):
+            raise ValueError("outputsize must be one of: compact, full.")
+        from app.jp_market.daily_platform import JPDailyPlatform
+        from app.jp_market.identity import read_jp_instrument
+        now = utc_now()
+        expected = expected_jp_daily_price_date(now=now)
+        result = JPDailyPlatform(db).refresh_daily_ohlcv(
+            instrument=read_jp_instrument(db, symbol), requested_at=now,
+            start_date=expected - timedelta(days=365 if outputsize == "compact" else 3649),
+            end_date=expected, max_bars=500 if outputsize == "compact" else 2500,
+        )
+        health = result.resolved.health
+        publish_jp_source_health(db, symbol=normalize_jp_symbol(symbol),
+                                 is_index=symbol.startswith("^"), now=utc_now())
+        return {
+            "status": "success" if health.research_usable else "partial_success" if health.facts_usable else "error",
+            "provider": health.selected_provider or "unavailable", "symbol": normalize_jp_symbol(symbol),
+            "fetched_count": (result.persistence.observations_written + result.persistence.observations_unchanged),
+            "inserted_count": result.persistence.observations_inserted,
+            "updated_count": result.persistence.observations_updated,
+            "message": health.selection_reason,
+            "limitations": list(dict.fromkeys((*result.limitations, *health.limitations, *result.acquisition.limitations))),
+        }
     normalized_provider = provider.strip().lower()
     if normalized_provider not in {"auto", "yahoo_chart"}:
         raise ValueError("provider must be one of: auto, yahoo_chart.")
 
-    return refresh_jp_daily_prices_from_yahoo_chart(
+    result = refresh_jp_daily_prices_from_yahoo_chart(
         db=db,
         symbol=symbol,
         outputsize=outputsize,
     )
+    publish_jp_source_health(db, symbol=normalize_jp_symbol(symbol),
+                             is_index=symbol.startswith("^"), now=utc_now())
+    return result
 
 
 def upsert_jp_company_fundamental_records(
@@ -2683,8 +2732,15 @@ def list_jp_daily_prices(
     to_date: date | None = None,
     limit: int = 500,
     offset: int = 0,
+    requested_at: datetime | None = None,
 ) -> list[JPDailyPrice]:
     normalized_symbol = _valid_symbol(symbol)
+    if settings.jp_canonical_daily_mode == "on":
+        if provider not in (None, "auto"):
+            raise ValueError("Canonical JP reads do not accept production provider selection")
+        from app.jp_market.daily_projection import read_daily_rows
+        return read_daily_rows(db, symbol=normalized_symbol, from_date=from_date,
+                               to_date=to_date, limit=limit, offset=offset, requested_at=requested_at)
     query = db.query(JPDailyPrice).filter(JPDailyPrice.symbol == normalized_symbol)
 
     if provider is not None:
@@ -2705,6 +2761,15 @@ def list_jp_daily_prices(
 
 
 def _jp_daily_price_resource_slot(db: Session, symbol: str) -> dict:
+    if settings.jp_canonical_daily_mode == "on":
+        rows = list_jp_daily_prices(db, symbol=symbol, limit=2500)
+        latest = rows[0] if rows else None
+        return {
+            "key": "daily_price", "status": "available" if rows else "empty",
+            "available": bool(rows), "source": latest.provider if latest else None,
+            "latest_date": latest.trade_date if latest else None, "row_count": len(rows),
+            "metrics": {"price_basis": "raw", "canonical": True},
+        }
     query = db.query(JPDailyPrice).filter(JPDailyPrice.symbol == symbol)
     row_count = query.count()
     latest_row = query.order_by(JPDailyPrice.trade_date.desc()).first()
@@ -2942,6 +3007,7 @@ def _list_jp_ohlc_source_rows(
     symbol: str,
     from_date: date,
     to_date: date,
+    requested_at: datetime | None = None,
 ) -> list[JPDailyPrice]:
     rows = list_jp_daily_prices(
         db=db,
@@ -2950,6 +3016,7 @@ def _list_jp_ohlc_source_rows(
         to_date=to_date,
         limit=5000,
         offset=0,
+        requested_at=requested_at,
     )
     return sorted(rows, key=lambda row: row.trade_date)
 
@@ -3035,6 +3102,7 @@ def list_jp_ohlc_chart_data(
     provider: str = "auto",
     to_date: date | None = None,
     expected_data_date: date | None = None,
+    requested_at: datetime | None = None,
 ) -> dict:
     if timeframe not in JP_CHART_LOOKBACK_MULTIPLIER:
         raise ValueError("timeframe must be one of: daily, weekly, monthly.")
@@ -3046,25 +3114,29 @@ def list_jp_ohlc_chart_data(
         raise ValueError(f"bars must be less than or equal to {MAX_JP_CHART_BARS}.")
 
     normalized_symbol = _valid_symbol(symbol)
-    end_date = to_date or datetime.now(JP_MARKET_TIMEZONE).date()
+    evaluation_at = requested_at or datetime.now(JP_MARKET_TIMEZONE)
+    end_date = to_date or evaluation_at.astimezone(JP_MARKET_TIMEZONE).date()
     resolved_expected_data_date = expected_data_date
     if resolved_expected_data_date is None:
         resolved_expected_data_date = (
             previous_jp_trading_day(end_date, include_value=True)
             if to_date is not None
-            else expected_jp_daily_price_date()
+            else expected_jp_daily_price_date(now=evaluation_at)
         )
     lookback_days = bars * JP_CHART_LOOKBACK_MULTIPLIER[timeframe]
     start_date = end_date - timedelta(days=lookback_days)
+    if settings.jp_canonical_daily_mode == "on":
+        start_date = max(start_date, end_date - timedelta(days=3649))
 
     rows = _list_jp_ohlc_source_rows(
         db=db,
         symbol=normalized_symbol,
         from_date=start_date,
         to_date=end_date,
+        requested_at=evaluation_at,
     )
     points = _aggregate_jp_daily_rows(rows=rows, timeframe=timeframe)[-bars:]
-    latest_data_date = points[-1].get("time") if points else None
+    latest_data_date = max((row.trade_date for row in rows), default=None)
     backfill_result = _refresh_jp_ohlc_history_if_needed(
         db=db,
         symbol=normalized_symbol,
@@ -3084,9 +3156,10 @@ def list_jp_ohlc_chart_data(
             symbol=normalized_symbol,
             from_date=start_date,
             to_date=end_date,
+            requested_at=utc_now() if backfill_result is not None else evaluation_at,
         )
         points = _aggregate_jp_daily_rows(rows=rows, timeframe=timeframe)[-bars:]
-        latest_data_date = points[-1].get("time") if points else None
+        latest_data_date = max((row.trade_date for row in rows), default=None)
 
     freshness_status = (
         "missing"
@@ -3099,8 +3172,21 @@ def list_jp_ohlc_chart_data(
     )
     has_volume = any(point.get("volume") is not None for point in points)
     is_index = normalized_symbol.startswith("^")
+    canonical_quality = {}
+    if settings.jp_canonical_daily_mode == "on":
+        selected = rows[-1] if rows else None
+        canonical_quality = {
+            "schema_version": "omi.market.bars.v1", "source": "jp.daily.ohlcv",
+            "selected_provider": selected.provider if selected else None,
+            "facts_usable": bool(selected and selected.facts_usable),
+            "research_usable": bool(selected and selected.research_usable),
+            "decision_usable": False,
+            "limitations": list(selected.limitations) if selected else ["CANONICAL_DAILY_MISSING"],
+            "price_basis": "raw",
+        }
 
     return {
+        **canonical_quality,
         "symbol": normalized_symbol,
         "timeframe": timeframe,
         "bars": bars,
@@ -3128,7 +3214,7 @@ def list_jp_ohlc_chart_data(
         "latest_data_date": latest_data_date,
         "expected_data_date": resolved_expected_data_date,
         "freshness_status": freshness_status,
-        "is_current": freshness_status in {"current", "future"},
+        "is_current": freshness_status == "current",
         "refresh_recommended": freshness_status in {"missing", "stale"},
     }
 
@@ -3204,9 +3290,16 @@ def _latest_jp_daily_close_reference(
         if _valid_float(close):
             return {
                 "previous_close": float(close),
-                "previous_close_source": "jp_daily_price",
+                "previous_close_source": "jp.daily.ohlcv" if getattr(row, "evidence_id", None) else "jp_daily_price",
                 "previous_close_trade_date": row.trade_date.isoformat(),
                 "previous_close_provider": row.provider,
+                **({"change_reference": {
+                    "price": float(close), "trade_date": row.trade_date.isoformat(),
+                    "source": "jp.daily.ohlcv", "provider": row.provider,
+                    "price_basis": row.price_basis, "evidence_id": row.evidence_id,
+                    "raw_receipt_id": row.raw_receipt_id,
+                    "kind": "previous_completed_daily_close", "status": "available",
+                }} if getattr(row, "evidence_id", None) else {}),
             }
 
     return None
@@ -3227,6 +3320,20 @@ def _apply_jp_intraday_previous_close_reference(
     result.setdefault("previous_close_provider", None)
 
     latest_trade_date = _jp_intraday_latest_trade_date(result)
+    if settings.jp_canonical_daily_mode == "on" and db is not None and latest_trade_date:
+        reference = _latest_jp_daily_close_reference(db, symbol=symbol, before_date=latest_trade_date)
+        expected_reference_date = previous_jp_trading_day(latest_trade_date, include_value=False).isoformat()
+        result["provider_previous_close"] = result.get("provider_previous_close", result.get("previous_close"))
+        if reference and reference["previous_close_trade_date"] == expected_reference_date:
+            result.update(reference)
+        elif result.get("previous_close_trade_date") != expected_reference_date:
+            # Yahoo chartPreviousClose can precede the entire five-day window.
+            # It has no proven previous-session identity for the latest bar.
+            result.update({"previous_close": None, "previous_close_source": None,
+                           "previous_close_trade_date": None, "previous_close_provider": None,
+                           "change_reference": None})
+            result.setdefault("warnings", []).append("PREVIOUS_SESSION_REFERENCE_UNAVAILABLE")
+        return result
     if (
         _valid_float(result.get("previous_close"))
         and not result.get("previous_close_trade_date")
@@ -3257,6 +3364,9 @@ def _apply_jp_intraday_previous_close_reference(
 
 
 def _jp_daily_volume_totals(db: Session, *, symbol: str) -> dict[date, int]:
+    if settings.jp_canonical_daily_mode == "on":
+        return {r.trade_date: r.trade_volume for r in list_jp_daily_prices(db, symbol=symbol, limit=60)
+                if r.trade_volume is not None}
     rows = (
         db.query(JPDailyPrice)
         .filter(JPDailyPrice.symbol == symbol)
@@ -3311,6 +3421,8 @@ def _project_jp_intraday_payload(
     db: Session | None,
     symbol: str,
 ) -> dict:
+    from app.jp_market.session_policy import jp_session_phase
+
     result = _copy_jp_intraday_payload(payload)
     history_points = [
         point for point in result.get("points") or [] if isinstance(point, dict)
@@ -3319,6 +3431,13 @@ def _project_jp_intraday_payload(
         history_points,
         market_timezone=JP_MARKET_TIMEZONE,
     )
+    for point in current_points:
+        stamp = datetime.fromisoformat(str(point["time"]).replace("Z", "+00:00"))
+        if stamp.tzinfo is not None:
+            point["market_session_phase"] = jp_session_phase(stamp)
+            if point["market_session_phase"] == "closing_auction":
+                point.update({"bar_ohlc_semantics": "closing_auction_reference",
+                              "bar_close_time": stamp.isoformat(), "finalized": False})
     result["points"] = current_points
     result["point_count"] = len(current_points)
     result["regular_point_count"] = sum(
@@ -3367,8 +3486,12 @@ def get_jp_intraday_trend(
     symbol: str,
     db: Session | None = None,
     refresh: bool = False,
-    external_fetch_allowed: bool = True,
+    external_fetch_allowed: bool | None = None,
 ) -> dict:
+    # Only explicit refresh commands may acquire on a cache miss. A legacy
+    # caller passing refresh=True remains a bounded command compatibility seam.
+    if external_fetch_allowed is None:
+        external_fetch_allowed = refresh
     normalized_symbol = _valid_symbol(symbol)
     cache_key = f"JP:{normalized_symbol}"
 

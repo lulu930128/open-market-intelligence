@@ -135,7 +135,6 @@ export function useJpRankingState({
             include_children: true,
             enabled_only: true,
             outputsize: "compact",
-            provider: "auto",
             sleep_seconds: getRefreshExecutionSeconds(
               refreshExecutionSettingsRef.current,
               "jp",

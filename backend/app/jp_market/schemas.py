@@ -4,6 +4,8 @@ from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from app.jp_market.daily_health import JPDailyProviderAttempt
+from app.market_data.contracts import ProviderResourceHealth
 
 
 class JPStockMasterRead(BaseModel):
@@ -58,6 +60,14 @@ class JPDailyPriceRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    evidence_id: str | None = None
+    raw_receipt_id: str | None = None
+    price_basis: str | None = None
+    facts_usable: bool | None = None
+    research_usable: bool | None = None
+    resolved_status: str | None = None
+    limitations: tuple[str, ...] = ()
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -69,6 +79,8 @@ class JPDailyPriceRefreshResultRead(BaseModel):
     inserted_count: int
     updated_count: int
     message: str
+    canonical_shadow: dict[str, Any] | None = None
+    limitations: list[str] = []
 
 
 class JPResourceRefreshResultRead(BaseModel):
@@ -82,6 +94,8 @@ class JPResourceRefreshResultRead(BaseModel):
 
 
 class JPSourceHealthEntryRead(BaseModel):
+    latest_attempt: ProviderResourceHealth | None = None
+    last_good: ProviderResourceHealth | None = None
     resource: str
     provider: str
     target: str
@@ -114,6 +128,7 @@ class JPSourceHealthSummaryRead(BaseModel):
 
 
 class JPSourceHealthRead(BaseModel):
+    daily_provider_attempts: list[JPDailyProviderAttempt] = Field(default_factory=list)
     kind: str
     generated_at: datetime
     filters: dict[str, str | None] = Field(default_factory=dict)
@@ -205,6 +220,10 @@ class JPStockMasterSyncResultRead(BaseModel):
 
 
 class JPOhlcPointRead(BaseModel):
+    evidence_id: str | None = None
+    price_basis: str | None = None
+    raw_receipt_id: str | None = None
+    provider: str | None = None
     time: date
     open: float | None = None
     high: float | None = None
@@ -214,6 +233,14 @@ class JPOhlcPointRead(BaseModel):
 
 
 class JPOhlcChartRead(BaseModel):
+    schema_version: str | None = None
+    source: str | None = None
+    selected_provider: str | None = None
+    facts_usable: bool = False
+    research_usable: bool = False
+    decision_usable: bool = False
+    limitations: list[str] = Field(default_factory=list)
+    price_basis: str | None = None
     symbol: str
     timeframe: str
     bars: int
@@ -236,6 +263,10 @@ class JPOhlcChartRead(BaseModel):
 class JPIntradayTrendPointRead(BaseModel):
     time: str
     session: str = "regular"
+    market_session_phase: str | None = None
+    bar_ohlc_semantics: str | None = None
+    bar_close_time: str | None = None
+    finalized: bool | None = None
     price: float
     volume: int | None = None
     open: float | None = None
@@ -253,6 +284,8 @@ class JPIntradayTrendRead(BaseModel):
     regular_point_count: int = 0
     extended_point_count: int = 0
     previous_close: float | None = None
+    provider_previous_close: float | None = None
+    change_reference: dict[str, Any] | None = None
     previous_close_source: str | None = None
     previous_close_trade_date: str | None = None
     previous_close_provider: str | None = None

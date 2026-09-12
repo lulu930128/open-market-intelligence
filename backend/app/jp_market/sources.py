@@ -10,6 +10,7 @@ from typing import Any
 from app.jp_market.errors import JPMarketDataFetchError
 from app.jp_market.providers import jpx, jquants, yahoo
 from app.jp_market.symbols import local_code_from_symbol, normalize_jp_symbol
+from app.jp_market.session_policy import jp_session_phase
 
 
 YAHOO_INSTRUMENT_TYPES = {
@@ -675,18 +676,8 @@ def parse_yahoo_daily_prices(
 
 
 def _jp_intraday_session(value: datetime) -> str:
-    local = value.astimezone(timezone(timedelta(hours=9)))
-    minutes = local.hour * 60 + local.minute + local.second / 60
-
-    if 9 * 60 <= minutes <= 11 * 60 + 30:
-        return "regular"
-    if 12 * 60 + 30 <= minutes <= 15 * 60 + 30:
-        return "regular"
-    if 11 * 60 + 30 < minutes < 12 * 60 + 30:
-        return "lunch_break"
-    if minutes < 9 * 60:
-        return "pre_market"
-    return "post_close"
+    phase = jp_session_phase(value)
+    return "regular" if phase == "closing_auction" else phase
 
 
 def parse_yahoo_intraday_prices(
@@ -721,6 +712,7 @@ def parse_yahoo_intraday_prices(
             {
                 "time": point_time.isoformat(),
                 "session": _jp_intraday_session(point_time),
+                "market_session_phase": jp_session_phase(point_time),
                 "price": price,
                 "volume": _parse_int(_list_value(volumes, index)),
                 "open": _parse_float(_list_value(opens, index)),

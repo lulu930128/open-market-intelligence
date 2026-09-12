@@ -55,6 +55,7 @@ def health_check():
             "python_executable": sys.executable,
             "python_version": sys.version.split()[0],
             "canonical_market_data_mode": settings.canonical_market_data_mode,
+            "jp_canonical_daily_mode": settings.jp_canonical_daily_mode,
             "us_canonical_market_data_mode": us_canonical_mode,
             "canonical_market_data_rollout_stage": us_canonical_mode,
             "us_canonical_market_data_enabled": (

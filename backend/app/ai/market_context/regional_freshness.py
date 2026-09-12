@@ -7,6 +7,8 @@ from typing import Any, Callable
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.jp_market.daily_projection import read_daily_rows, read_overview_rows
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_payload_contract import slot_envelope
 from app.db.models import (
@@ -106,6 +108,23 @@ def _table_state(
     symbol: str | None,
     checked_at: datetime,
 ) -> dict[str, Any]:
+    if spec.name == "jp_daily_price" and settings.jp_canonical_daily_mode == "on":
+        expected = _jp_expected(checked_at)
+        if symbol:
+            rows = read_daily_rows(db, symbol=symbol, limit=90, requested_at=checked_at)
+            latest = rows[0].trade_date if rows else None
+            count = len(rows)
+            current = bool(rows and latest == expected and rows[0].research_usable)
+        else:
+            snapshot = read_overview_rows(db, expected_trade_date=expected, requested_at=checked_at)
+            latest = max((rows[0]["trade_date"] for rows in snapshot.values()), default=None)
+            count = len(snapshot)
+            # A snapshot of observed symbols cannot establish full-universe coverage.
+            current = False
+        return {"latest": _json_value(latest), "row_count": count,
+                "availability": "available" if count else "missing",
+                "freshness": "missing" if not count else "unknown" if not symbol else "current" if current else "stale",
+                "expected": _json_value(expected)}
     if spec.name == "us_daily_price":
         expected = _us_expected(checked_at)
         if expected is None:

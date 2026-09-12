@@ -5,6 +5,7 @@ from datetime import datetime, time
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
+from app.config import settings
 
 from app.ai.agentic_common import _json_ready, _json_value, _list_rows, _row_dict, _safe_int
 from app.ai.evidence_passport import build_evidence_passport
@@ -28,7 +29,7 @@ from app.jp_market.sources import normalize_jp_symbol
 from app.jp_market.trading_calendar import JP_MARKET_TIMEZONE
 from app.market.calendar_status import build_jp_calendar_status
 from app.market.intraday_aggregation import aggregate_regular_session_ohlcv
-from app.market.live_snapshot import classify_market_snapshot
+from app.jp_market.quote_projection import project_jp_intraday_reference as _jp_intraday_quote
 
 
 @dataclass(frozen=True)
@@ -222,107 +223,6 @@ def _jp_intraday_compact(
     }
 
 
-def _jp_intraday_quote(
-    intraday_summary: dict[str, Any] | None,
-    *,
-    calendar_status: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    latest = _jp_intraday_latest(intraday_summary)
-    if latest is None:
-        return {}
-
-    price = latest.get("price")
-    previous_close = intraday_summary.get("previous_close") if intraday_summary else None
-    change = None
-    change_pct = None
-    if (
-        isinstance(price, (int, float))
-        and isinstance(previous_close, (int, float))
-        and previous_close
-    ):
-        change = float(price) - float(previous_close)
-        change_pct = change / float(previous_close) * 100
-
-    freshness = classify_market_snapshot(
-        calendar_status=calendar_status or build_jp_calendar_status(),
-        quote_time=latest.get("time"),
-    )
-    last_trade_available = isinstance(price, (int, float))
-    quote_semantics = (
-        "live_trade_only"
-        if last_trade_available and freshness["is_live"]
-        else "delayed_current_session_trade"
-        if last_trade_available and freshness["is_current_session_quote"]
-        else "latest_completed_session_trade"
-        if last_trade_available and freshness["is_latest_session_quote"]
-        else "unavailable"
-    )
-    return {
-        "source": (
-            intraday_summary.get("source") if intraday_summary else None
-        )
-        or "yahoo_finance_chart",
-        "price": price,
-        "latest_price": price,
-        "last_price": price,
-        "price_available": last_trade_available,
-        "last_trade_available": last_trade_available,
-        "last_trade_price": price if last_trade_available else None,
-        "last_trade_time": latest.get("time") if last_trade_available else None,
-        "last_trade_is_current_session": bool(
-            freshness["is_current_session_quote"]
-        ),
-        "depth_available": False,
-        "depth_status": "unavailable",
-        "indicative_match_available": False,
-        "indicative_match_price": None,
-        "indicative_match_volume_lots": None,
-        "auction_indicative_available": False,
-        "official_close_available": False,
-        "official_close_status": "not_requested",
-        "official_close_price": None,
-        "fallback_used": False,
-        "change": change,
-        "change_pct": change_pct,
-        "volume": latest.get("volume"),
-        "quote_time": latest.get("time"),
-        "is_realtime": freshness["is_realtime"],
-        "is_live": freshness["is_live"],
-        "is_latest_session_quote": freshness["is_latest_session_quote"],
-        "latency_ms": None,
-        "session_phase": freshness["current_session_phase"],
-        "current_session_phase": freshness["current_session_phase"],
-        "market_status": freshness["market_status"],
-        "quote_semantics": quote_semantics,
-        "delivery_status": freshness["delivery_status"],
-        "is_current_session_quote": freshness["is_current_session_quote"],
-        "freshness": freshness,
-        "provider": "yahoo_chart",
-        "previous_close": previous_close,
-        "previous_close_source": (
-            intraday_summary.get("previous_close_source")
-            if intraday_summary
-            else None
-        ),
-        "previous_close_trade_date": (
-            intraday_summary.get("previous_close_trade_date")
-            if intraday_summary
-            else None
-        ),
-        "volume_unit": (
-            intraday_summary.get("volume_unit") if intraday_summary else None
-        ),
-        "volume_semantics": (
-            intraday_summary.get("volume_semantics") if intraday_summary else None
-        ),
-        "volume_status": (
-            intraday_summary.get("volume_status") if intraday_summary else None
-        ),
-        "point_count": (
-            intraday_summary.get("point_count") if intraday_summary else None
-        ),
-    }
-
 
 def _jp_expected_intraday_date(calendar_status: dict[str, Any]) -> str | None:
     if (
@@ -354,14 +254,11 @@ def read_jp_stock_context(
         "include_intraday",
         False,
     )
-    params = market_data_params if isinstance(market_data_params, dict) else {}
-    refresh_intraday = bool(
-        str(params.get("realtime_policy") or "prefer_live") != "cache_only"
-        and params.get("external_fetch_allowed") is not False
-    )
     payload_level = _market_payload_level(market_data_params)
-    intraday_summary = _latest_tool_result(tool_runs, "jp.read_intraday_trend")
-    calendar_status = build_jp_calendar_status(now=dependencies.now())
+    intraday_summary = (_latest_tool_result(tool_runs, "jp.refresh_intraday_trend")
+                        or _latest_tool_result(tool_runs, "jp.read_intraday_trend"))
+    evaluation_at = dependencies.now()
+    calendar_status = build_jp_calendar_status(now=evaluation_at)
     stock = (
         db.query(JPStockMaster)
         .filter(JPStockMaster.symbol == normalized_symbol)
@@ -375,7 +272,7 @@ def read_jp_stock_context(
     resource_summary: dict[str, Any] | None = None
     source_health: dict[str, Any] = {}
     warnings: list[str] = [
-        "Japan daily, fundamental, and resource evidence uses local cache; optional intraday evidence is a bounded provider read when explicitly enabled.",
+        "Japan context reads local evidence only; acquisition requires a separate bounded refresh command.",
     ]
     missing: list[str] = []
 
@@ -392,6 +289,7 @@ def read_jp_stock_context(
             db=db,
             symbol=normalized_symbol,
             limit=10,
+            requested_at=evaluation_at,
         )
     except Exception as exc:
         missing.append("jp_daily_price")
@@ -406,6 +304,7 @@ def read_jp_stock_context(
             ensure_history=False,
             outputsize="compact",
             provider=provider,
+            requested_at=evaluation_at,
         )
     except Exception as exc:
         if "jp_daily_price" not in missing:
@@ -432,8 +331,8 @@ def read_jp_stock_context(
             intraday_summary = dependencies.jp_market_service.get_jp_intraday_trend(
                 symbol=normalized_symbol,
                 db=db,
-                refresh=refresh_intraday,
-                external_fetch_allowed=refresh_intraday,
+                refresh=False,
+                external_fetch_allowed=False,
             )
         except Exception as exc:
             missing.append("jp_intraday_trend")
@@ -444,7 +343,7 @@ def read_jp_stock_context(
             db=db,
             symbol=normalized_symbol,
             is_index=is_index,
-            now=dependencies.now(),
+            now=evaluation_at,
         )
     except Exception as exc:
         warnings.append(f"JP source health unavailable: {exc}")
@@ -458,6 +357,14 @@ def read_jp_stock_context(
         intraday_summary,
         market_data_params=market_data_params,
     )
+    if intraday_quote:
+        # Observation-session labels on individual bars do not describe the
+        # current market session. Consume the JP owner's evaluated clock.
+        intraday_bars.update({
+            "market_status": intraday_quote.get("market_status"),
+            "session_phase": intraday_quote.get("current_session_phase"),
+            "freshness": intraday_quote.get("freshness"),
+        })
     intraday_latest = _jp_intraday_latest(intraday_summary)
     intraday_as_of = (
         str(intraday_latest.get("time"))
@@ -563,6 +470,10 @@ def read_jp_stock_context(
         )
 
     latest_daily = daily_rows[0] if daily_rows else None
+    canonical_daily = settings.jp_canonical_daily_mode == "on"
+    daily_source_name = "jp.daily.ohlcv" if canonical_daily else "jp_daily_price"
+    daily_limits = list(getattr(latest_daily, "limitations", ()) or ())
+    warnings.extend(daily_limits)
     chart_points = (
         chart.get("points")
         if isinstance(chart, dict) and isinstance(chart.get("points"), list)
@@ -588,6 +499,13 @@ def read_jp_stock_context(
     source_refs: list[dict[str, Any]] = []
     market_breadth: dict[str, Any] = {}
     for row in daily_rows[:3]:
+        if getattr(row, "evidence_id", None):
+            source_refs.append({
+                "type": "database", "kind": "jp.daily.ohlcv", "provider": row.provider,
+                "symbol": row.symbol, "date": row.trade_date.isoformat(),
+                "evidence_id": row.evidence_id, "raw_receipt_id": row.raw_receipt_id,
+                "price_basis": row.price_basis,
+            })
         if row.source_url:
             source_refs.append(
                 {
@@ -619,12 +537,12 @@ def read_jp_stock_context(
             },
         )
 
-    _append_source_ref_once(source_refs, {"type": "table", "name": "jp_daily_price"})
+    _append_source_ref_once(source_refs, {"type": "dataset" if canonical_daily else "table", "name": daily_source_name})
     if is_index:
         try:
             market_overview = dependencies.jp_market_service.get_jp_market_overview(
                 db=db,
-                now=dependencies.now(),
+                now=evaluation_at,
             )
             candidate_breadth = market_overview.get("breadth")
             if isinstance(candidate_breadth, dict):
@@ -728,6 +646,13 @@ def read_jp_stock_context(
                     "adjusted_close",
                     "trade_volume",
                     "fetched_at",
+                    "evidence_id",
+                    "raw_receipt_id",
+                    "price_basis",
+                    "facts_usable",
+                    "research_usable",
+                    "resolved_status",
+                    "limitations",
                 ),
             ),
             "chart": _json_ready(chart),
@@ -784,6 +709,7 @@ def read_jp_stock_context(
             "tool_runs": tool_runs,
         },
         "data_limitations": [
+            *daily_limits,
             "No JP-specific AI decision adapter or persisted LLM report path is enabled yet.",
             "Company fundamentals and chip resources depend on local cache coverage and free/provider availability.",
             "JP disclosures currently expose company-statement metadata from cached fundamentals, not a complete TDnet disclosure feed.",
@@ -799,11 +725,23 @@ def read_jp_stock_context(
             **(
                 intraday_quote
                 or {
-                    "source": "jp_daily_price",
+                    "source": daily_source_name,
                     "price": latest_close,
                     "volume": latest_volume,
                     "quote_time": latest_trade_date,
                     "is_realtime": False,
+                    "is_live": False,
+                    "quote_semantics": "daily_close_reference",
+                    "source_kind": "daily_bar_close",
+                    "last_trade_available": False,
+                    "last_trade_price": None,
+                    "decision_usable": False,
+                    "fallback_used": True,
+                    "evidence_id": getattr(latest_daily, "evidence_id", None),
+                    "price_basis": getattr(latest_daily, "price_basis", None),
+                    "facts_usable": getattr(latest_daily, "facts_usable", False),
+                    "research_usable": getattr(latest_daily, "research_usable", False),
+                    "limitations": [*daily_limits, "QUOTE_SNAPSHOT_NOT_PROVIDED", "DAILY_CLOSE_REFERENCE_ONLY"],
                     "provider": latest_daily.provider if latest_daily else None,
                     "fallback_reason": "intraday_not_available"
                     if intraday_requested

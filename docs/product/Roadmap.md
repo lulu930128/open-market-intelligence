@@ -129,6 +129,8 @@ AI decision 必須建立在可信 evidence 之上，而不是靠 provider-specif
 
 JP / KR / Crypto / Resource 逐步遷移到共同 Foundation。
 
+JP 已於 2026-09-12 核准獨立研究的長計畫：先完成多來源 Daily 與所有 consumers，再處理 Quote／Intraday 的交易時段與品質，最後收斂非價格研究。Twelve 等額外供應商以實際 entitlement／coverage 證據決定接入；runtime 採用與產品驗收分階段記錄，不能由 adapter 或 source tests 推定整個市場完成。
+
 原則：
 
 - 不複製 provider selection architecture。

@@ -418,20 +418,15 @@ def _point_time(point: dict[str, Any]) -> datetime | None:
     return None
 
 
-def _is_known_jp_lunch_gap(
+def _is_known_jp_session_gap(
     previous: datetime,
     current: datetime,
     *,
     market: str,
 ) -> bool:
-    if market.upper() != "JP" or previous.date() != current.date():
-        return False
-    return (
-        previous.hour == 11
-        and previous.minute >= 25
-        and current.hour == 12
-        and current.minute <= 35
-    )
+    from app.jp_market.session_policy import is_expected_jp_bar_gap
+
+    return market.upper() == "JP" and is_expected_jp_bar_gap(previous, current)
 
 
 def _has_taiwan_auction_close_evidence(value: Any, *, depth: int = 0) -> bool:
@@ -610,7 +605,7 @@ def _continuity_summary(value: Any, *, market: str) -> dict[str, Any]:
                 recognized_session_gap_count += 1
                 overnight_session_gap_count += 1
                 continue
-            elif _is_known_jp_lunch_gap(previous, current, market=market):
+            elif _is_known_jp_session_gap(previous, current, market=market):
                 recognized_session_gap_count += 1
                 continue
             elif _is_known_taiwan_closing_auction_gap(

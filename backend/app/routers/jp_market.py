@@ -718,13 +718,15 @@ def get_jp_ohlc_chart_data(
     to_date: date | None = None,
     db: Session = Depends(get_db),
 ):
+    if ensure_history:
+        raise HTTPException(status_code=400, detail="GET is cache-only; use POST /ohlc/{symbol}/refresh for history acquisition.")
     try:
         return list_jp_ohlc_chart_data(
             db=db,
             symbol=symbol,
             timeframe=timeframe,
             bars=bars,
-            ensure_history=ensure_history,
+            ensure_history=False,
             outputsize=outputsize,
             provider=provider,
             to_date=to_date,
@@ -744,14 +746,46 @@ def get_jp_intraday_trend_api(
     refresh: bool = False,
     db: Session = Depends(get_db),
 ):
+    if refresh:
+        raise HTTPException(status_code=400, detail="GET is cache-only; use POST /intraday/{symbol}/refresh.")
     try:
         return get_jp_intraday_trend(
             db=db,
             symbol=symbol,
-            refresh=refresh,
+            refresh=False,
+            external_fetch_allowed=False,
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.post("/intraday/{symbol}/refresh", response_model=JPIntradayTrendRead)
+def refresh_jp_intraday_trend_api(symbol: str, db: Session = Depends(get_db)):
+    try:
+        return get_jp_intraday_trend(db=db, symbol=symbol, refresh=True, external_fetch_allowed=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except JPMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.post("/ohlc/{symbol}/refresh", response_model=JPOhlcChartRead)
+def refresh_jp_ohlc_chart_data(
+    symbol: str,
+    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    bars: int = Query(default=90, ge=1, le=5000),
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return list_jp_ohlc_chart_data(
+            db=db, symbol=symbol, timeframe=timeframe, bars=bars,
+            ensure_history=True, outputsize=outputsize,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except JPMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc

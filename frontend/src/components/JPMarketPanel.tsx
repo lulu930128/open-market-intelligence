@@ -308,9 +308,14 @@ function toChartPoint(point: JPOhlcPointRead): ChartPoint {
 }
 
 async function fetchJpIntradayTrend(symbol: string, refresh = false) {
+  if (refresh) {
+    return requestJson<IntradayTrendResponse>(
+      `/api/jp-market/intraday/${encodeURIComponent(symbol)}/refresh`,
+      { method: "POST" }
+    );
+  }
   return fetchJson<IntradayTrendResponse>(
-    `/api/jp-market/intraday/${encodeURIComponent(symbol)}`,
-    refresh ? { refresh: true } : undefined
+    `/api/jp-market/intraday/${encodeURIComponent(symbol)}`
   );
 }
 
@@ -1257,13 +1262,12 @@ export default function JPMarketPanel({
           nextTimeframe === "today" ? "daily" : nextTimeframe;
         const isIndexSymbol = getJpMarketIndexConfig(symbol) !== null;
         const [chartResult, resourceResult, fundamentalResult] = await Promise.allSettled([
-          fetchJson<JPOhlcChartRead>(
-            `/api/jp-market/ohlc/${encodeURIComponent(symbol)}`,
-            {
+          requestJson<JPOhlcChartRead>(
+            `/api/jp-market/ohlc/${encodeURIComponent(symbol)}/refresh?${new URLSearchParams({
               timeframe: requestTimeframe,
-              bars: barsByTimeframe[requestTimeframe],
-              ensure_history: true,
-            }
+              bars: String(barsByTimeframe[requestTimeframe]),
+            })}`,
+            { method: "POST" }
           ),
           isIndexSymbol
             ? Promise.resolve<JPResourceSummaryRead | null>(null)
@@ -1577,7 +1581,7 @@ export default function JPMarketPanel({
       }
 
       try {
-        const today = await fetchJpIntradayTrend(effectSymbol);
+        const today = await fetchJpIntradayTrend(effectSymbol, true);
 
         if (cancelled) return;
 

@@ -15,6 +15,9 @@ def sum_nullable(values: list[int | None]) -> int | None:
 
 def ohlc_point(row: JPDailyPrice, time_value: date | None = None) -> dict:
     return {
+        **({"evidence_id": row.evidence_id, "price_basis": row.price_basis,
+             "raw_receipt_id": row.raw_receipt_id, "provider": row.provider}
+           if getattr(row, "evidence_id", None) else {}),
         "time": time_value or row.trade_date,
         "open": row.open_price,
         "high": row.high_price,

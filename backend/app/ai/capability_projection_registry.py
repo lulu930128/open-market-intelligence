@@ -80,6 +80,13 @@ class CapabilityProjectionSpec:
 
 
 CAPABILITY_PROJECTION_SPECS: tuple[CapabilityProjectionSpec, ...] = (
+    *(CapabilityProjectionSpec(
+        capability_id="daily.ohlcv", scope_type=scope, market="JP",
+        dataset_ids=("jp.daily.ohlcv",), projector_name="capability_contract.paths",
+        projector=_capability_contract_projector("daily.ohlcv"),
+        fixture_context={"data": {"chart": {"schema_version": "omi.market.bars.v1", "points": [{"time": "2026-09-10", "close": 105, "evidence_id": "fixture"}]}}},
+        canonical_schema_version="omi.market.bars.v1",
+    ) for scope in ("jp_stock", "jp_index")),
     CapabilityProjectionSpec(
         capability_id="quote.session_close",
         scope_type="stock",

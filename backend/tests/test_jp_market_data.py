@@ -998,7 +998,7 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(automatic["expected_daily_price_date"], "2026-06-18")
         self.assertEqual(exact["freshness_policy"]["mode"], "expected_date")
         self.assertEqual(entries[("daily_price", "yahoo_chart")]["status"], "current")
-        self.assertGreater(self.db.query(SourceHealthSnapshot).count(), 0)
+        self.assertEqual(self.db.query(SourceHealthSnapshot).count(), 0)
         self.assertEqual(JPSourceHealthRead.model_validate(exact).kind, "jp_source_health")
 
         self.db.add(
@@ -1812,8 +1812,8 @@ class JPMarketDataTests(unittest.TestCase):
         intraday_reader.assert_called_once_with(
             symbol="7203.T",
             db=self.db,
-            refresh=True,
-            external_fetch_allowed=True,
+            refresh=False,
+            external_fetch_allowed=False,
         )
         compact = context["data"]["compact"]
         self.assertEqual(context["as_of"], "2026-07-15T10:00:00+09:00")
