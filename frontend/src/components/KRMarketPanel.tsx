@@ -316,17 +316,15 @@ function toChartPoint(point: KROhlcPointRead): ChartPoint {
   };
 }
 
-async function fetchKrIndexIntradayTrend(indexId: string, refresh = false) {
+async function fetchKrIndexIntradayTrend(indexId: string) {
   return fetchJson<IntradayTrendResponse>(
-    `/api/kr-market/indices/${encodeURIComponent(indexId)}/intraday`,
-    refresh ? { refresh: true } : undefined
+    `/api/kr-market/indices/${encodeURIComponent(indexId)}/intraday`
   );
 }
 
-async function fetchKrStockIntradayTrend(symbol: string, refresh = false) {
+async function fetchKrStockIntradayTrend(symbol: string) {
   return fetchJson<IntradayTrendResponse>(
-    `/api/kr-market/stocks/${encodeURIComponent(symbol)}/intraday`,
-    refresh ? { refresh: true } : undefined
+    `/api/kr-market/stocks/${encodeURIComponent(symbol)}/intraday`
   );
 }
 
@@ -952,7 +950,6 @@ export default function KRMarketPanel({
             {
               timeframe: historicalTimeframe,
               bars: barsByTimeframe[historicalTimeframe],
-              ensure_history: true,
             }
           ),
           isIndexSymbol
@@ -1102,7 +1099,11 @@ export default function KRMarketPanel({
       const indexConfig = getKrMarketIndexConfig(selectedStock.symbol);
       if (indexConfig) {
         if (timeframe === "today") {
-          const today = await fetchKrIndexIntradayTrend(indexConfig.indexId, true);
+          await requestJson<IntradayTrendResponse>(
+            `/api/kr-market/indices/${encodeURIComponent(indexConfig.indexId)}/intraday/refresh`,
+            { method: "POST" }
+          );
+          const today = await fetchKrIndexIntradayTrend(indexConfig.indexId);
           applyTodayTrend(today);
           publishStatus({
             type: today.warnings?.length ? "warning" : "success",
@@ -1128,6 +1129,22 @@ export default function KRMarketPanel({
           }),
         });
         await loadStockData(selectedStock.symbol, timeframe);
+        return;
+      }
+
+      if (timeframe === "today") {
+        await requestJson<IntradayTrendResponse>(
+          `/api/kr-market/stocks/${encodeURIComponent(selectedStock.symbol)}/intraday/refresh`,
+          { method: "POST" }
+        );
+        const today = await fetchKrStockIntradayTrend(selectedStock.symbol);
+        applyTodayTrend(today);
+        publishStatus({
+          type: today.warnings?.length ? "warning" : "success",
+          text: t("dashboard.marketIndex.krUpdated", {
+            asOf: formatKoreaDateTime(today.points[today.points.length - 1]?.time),
+          }),
+        });
         return;
       }
 

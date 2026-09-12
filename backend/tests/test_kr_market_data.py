@@ -22,6 +22,9 @@ from app.kr_market.schemas import (
 from app.kr_market.service import (
     create_kr_watchlist_group,
     create_kr_watchlist_item,
+    ensure_kr_stock_history,
+    refresh_kr_stock_intraday_trend,
+    refresh_kr_index_intraday_trend,
     get_kr_index_summary,
     get_kr_index_intraday_trend,
     get_kr_market_breadth,
@@ -426,7 +429,7 @@ class KRMarketDataTests(unittest.TestCase):
                 "https://query1.finance.yahoo.com/v8/finance/chart/005930.KS",
             ),
         ) as fetch_chart:
-            first = get_kr_stock_intraday_trend(self.db, symbol="005930")
+            first = refresh_kr_stock_intraday_trend(self.db, symbol="005930")
             second = get_kr_stock_intraday_trend(self.db, symbol="005930")
 
         self.assertEqual(first["point_count"], 2)
@@ -441,10 +444,9 @@ class KRMarketDataTests(unittest.TestCase):
             "app.kr_market.service.fetch_yahoo_chart_payload",
             side_effect=KRMarketDataFetchError("rate limited"),
         ):
-            unavailable = get_kr_stock_intraday_trend(
+            unavailable = refresh_kr_stock_intraday_trend(
                 self.db,
                 symbol="005930",
-                refresh=True,
             )
 
         self.assertEqual(unavailable["source"], "yahoo_finance_chart")
@@ -472,7 +474,7 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(replay["cache_status"], "persisted_hit")
         self.assertTrue(replay["cache_hit"])
 
-    def test_get_kr_stock_intraday_trend_reconciles_after_close_daily_auction(self) -> None:
+    def test_daily_close_never_synthesizes_intraday_auction_bar_or_volume(self) -> None:
         upsert_kr_daily_price_records(
             self.db,
             [
@@ -512,28 +514,26 @@ class KRMarketDataTests(unittest.TestCase):
                     2026,
                     7,
                     15,
-                    16,
+                    17,
                     0,
                     tzinfo=timezone(timedelta(hours=9)),
                 ),
             ),
         ):
-            result = get_kr_stock_intraday_trend(
+            result = refresh_kr_stock_intraday_trend(
                 self.db,
                 symbol="005930",
-                refresh=True,
             )
 
-        self.assertEqual(result["point_count"], 3)
-        self.assertEqual(result["points"][-1]["time"], "2026-07-15T15:30:00+09:00")
-        self.assertEqual(result["points"][-1]["price"], 74000.0)
-        self.assertEqual(result["points"][-1]["volume"], 600)
-        self.assertEqual(result["points"][-1]["cumulative_volume"], 2600)
-        self.assertEqual(result["total_volume"], 2600)
-        self.assertEqual(result["regular_session_close_source"], "kr_daily_price")
-        self.assertEqual(result["regular_session_close_provider"], "yahoo_chart")
-        self.assertFalse(result["is_partial"])
-        self.assertEqual(KRStockIntradayTrendRead.model_validate(result).point_count, 3)
+        self.assertEqual(result["point_count"], 2)
+        self.assertNotEqual(result["points"][-1]["time"], "2026-07-15T15:30:00+09:00")
+        self.assertEqual(result["points"][-1]["cumulative_volume"], 2000)
+        self.assertEqual(result["total_volume"], 2000)
+        self.assertIsNone(result["regular_session_close"])
+        self.assertEqual(result["daily_close_reference"]["price"], 74000.0)
+        self.assertFalse(result["daily_close_reference"]["decision_usable"])
+        self.assertTrue(result["is_partial"])
+        self.assertEqual(KRStockIntradayTrendRead.model_validate(result).point_count, 2)
 
     def test_parse_naver_index_daily_prices(self) -> None:
         records = parse_naver_index_daily_prices(
@@ -608,7 +608,7 @@ class KRMarketDataTests(unittest.TestCase):
                 return_value="20260707184700",
             ),
         ):
-            result = get_kr_index_intraday_trend(
+            result = refresh_kr_index_intraday_trend(
                 self.db,
                 index_id="KOSPI",
                 reload_all=True,
@@ -644,10 +644,9 @@ class KRMarketDataTests(unittest.TestCase):
                 return_value="20260707184700",
             ),
         ):
-            result = get_kr_index_intraday_trend(
+            result = refresh_kr_index_intraday_trend(
                 self.db,
                 index_id="KOSPI",
-                refresh=True,
                 max_pages=1,
             )
 
@@ -734,16 +733,15 @@ class KRMarketDataTests(unittest.TestCase):
                 return_value="20260707184700",
             ),
         ):
-            first = get_kr_index_intraday_trend(
+            first = refresh_kr_index_intraday_trend(
                 self.db,
                 index_id="KOSPI",
                 reload_all=True,
                 max_pages=1,
             )
-            second = get_kr_index_intraday_trend(
+            second = refresh_kr_index_intraday_trend(
                 self.db,
                 index_id="KOSPI",
-                refresh=True,
                 max_pages=3,
             )
 
@@ -936,21 +934,17 @@ class KRMarketDataTests(unittest.TestCase):
                 },
             ],
         ) as refresh_mock:
-            chart = list_kr_ohlc_chart_data(
+            chart = ensure_kr_stock_history(
                 self.db,
                 symbol="005930",
                 bars=2,
-                ensure_history=True,
-                provider="auto",
                 to_date=date(2026, 7, 16),
             )
 
-            cooldown_chart = list_kr_ohlc_chart_data(
+            cooldown_chart = ensure_kr_stock_history(
                 self.db,
                 symbol="005930",
                 bars=2,
-                ensure_history=True,
-                provider="auto",
                 to_date=date(2026, 7, 16),
             )
 

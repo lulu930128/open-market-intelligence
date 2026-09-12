@@ -41,7 +41,7 @@ def aggregate_daily_rows(rows: list[KRDailyPrice], timeframe: str) -> list[dict]
         highs = [row.high_price for row in sorted_rows if row.high_price is not None]
         lows = [row.low_price for row in sorted_rows if row.low_price is not None]
         closes = [close_value(row) for row in sorted_rows if close_value(row) is not None]
-        volumes = [row.trade_volume or 0 for row in sorted_rows]
+        volumes = [row.trade_volume for row in sorted_rows if row.trade_volume is not None]
         aggregated.append(
             {
                 "time": bucket_key,
@@ -49,7 +49,7 @@ def aggregate_daily_rows(rows: list[KRDailyPrice], timeframe: str) -> list[dict]
                 "high": max(highs) if highs else None,
                 "low": min(lows) if lows else None,
                 "close": closes[-1] if closes else None,
-                "volume": sum(volumes) if volumes else None,
+                "volume": sum(volumes) if len(volumes) == len(sorted_rows) else None,
             }
         )
     return aggregated
@@ -82,7 +82,7 @@ def aggregate_index_daily_rows(rows: list[KRIndexDailyPrice], timeframe: str) ->
         highs = [row.high_value for row in sorted_rows if row.high_value is not None]
         lows = [row.low_value for row in sorted_rows if row.low_value is not None]
         closes = [row.close_value for row in sorted_rows if row.close_value is not None]
-        volumes = [row.trade_volume or 0 for row in sorted_rows]
+        volumes = [row.trade_volume for row in sorted_rows if row.trade_volume is not None]
         aggregated.append(
             {
                 "time": bucket_key,
@@ -90,7 +90,7 @@ def aggregate_index_daily_rows(rows: list[KRIndexDailyPrice], timeframe: str) ->
                 "high": max(highs) if highs else None,
                 "low": min(lows) if lows else None,
                 "close": closes[-1] if closes else None,
-                "volume": sum(volumes) if volumes else None,
+                "volume": sum(volumes) if len(volumes) == len(sorted_rows) else None,
             }
         )
     return aggregated

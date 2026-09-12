@@ -78,6 +78,7 @@ from app.kr_market.sources import (
     parse_yahoo_stock_record,
 )
 from app.kr_market.trading_calendar import (
+    KR_DAILY_PRICE_RELEASE_TIME,
     KR_MARKET_TIMEZONE,
     expected_kr_daily_price_date,
     previous_kr_trading_day,
@@ -1138,6 +1139,11 @@ def refresh_kr_daily_prices(
     provider: str = "auto",
     trade_date: date | None = None,
 ) -> dict:
+    if settings.kr_canonical_daily_enabled:
+        from app.kr_market.daily_projection import refresh_daily
+        if provider != "auto":
+            raise ValueError("KR canonical provider selection belongs to backend policy; use auto")
+        return refresh_daily(db, symbol=symbol, outputsize=outputsize, to_date=trade_date)
     normalized_provider = _valid_provider(provider)
 
     if normalized_provider == "yahoo_chart":
@@ -1184,6 +1190,12 @@ def list_kr_daily_prices(
     limit: int = 500,
     offset: int = 0,
 ) -> list[KRDailyPrice]:
+    if settings.kr_canonical_daily_enabled:
+        from app.kr_market.daily_projection import read_daily_rows
+        if provider not in (None, "auto"):
+            raise ValueError("KR canonical provider selection belongs to backend policy; use auto")
+        return read_daily_rows(db, symbol=symbol, limit=limit, offset=offset,
+            from_date=from_date, to_date=to_date)
     normalized_symbol = _valid_symbol(symbol)
     query = db.query(KRDailyPrice).filter(KRDailyPrice.symbol == normalized_symbol)
 
@@ -1208,6 +1220,9 @@ def _latest_distinct_kr_daily_rows(
     symbol: str,
     limit: int,
 ) -> list[KRDailyPrice]:
+    if settings.kr_canonical_daily_enabled:
+        from app.kr_market.daily_projection import read_daily_rows
+        return read_daily_rows(db, symbol=symbol, limit=limit)
     rows = (
         db.query(KRDailyPrice)
         .filter(KRDailyPrice.symbol == symbol)
@@ -1816,7 +1831,9 @@ def get_kr_watchlist_readiness(
         symbol = normalize_kr_symbol(item.symbol)
         stock = stocks_by_symbol.get(symbol)
         latest_daily = _latest_kr_daily_row(db, symbol=symbol)
-        daily_count = db.query(KRDailyPrice).filter(KRDailyPrice.symbol == symbol).count()
+        daily_count = (len(list_kr_daily_prices(db, symbol=symbol, limit=2500))
+                       if settings.kr_canonical_daily_enabled else
+                       db.query(KRDailyPrice).filter(KRDailyPrice.symbol == symbol).count())
         latest_investor = (
             db.query(KRInvestorTradeDaily)
             .filter(KRInvestorTradeDaily.symbol == symbol)
@@ -2278,13 +2295,18 @@ def _resource_slot(
 
 def get_kr_resource_summary(db: Session, *, symbol: str) -> dict:
     normalized_symbol = _valid_symbol(symbol)
-    latest_daily = (
-        db.query(KRDailyPrice)
-        .filter(KRDailyPrice.symbol == normalized_symbol)
-        .order_by(KRDailyPrice.trade_date.desc(), KRDailyPrice.id.desc())
-        .first()
-    )
-    daily_count = db.query(KRDailyPrice).filter(KRDailyPrice.symbol == normalized_symbol).count()
+    if settings.kr_canonical_daily_enabled:
+        canonical_rows = list_kr_daily_prices(db, symbol=symbol, limit=2500)
+        latest_daily = canonical_rows[0] if canonical_rows else None
+        daily_count = len(canonical_rows)
+    else:
+        latest_daily = (
+            db.query(KRDailyPrice)
+            .filter(KRDailyPrice.symbol == normalized_symbol)
+            .order_by(KRDailyPrice.trade_date.desc(), KRDailyPrice.id.desc())
+            .first()
+        )
+        daily_count = db.query(KRDailyPrice).filter(KRDailyPrice.symbol == normalized_symbol).count()
     latest_financial = (
         db.query(KRCompanyFundamental)
         .filter(KRCompanyFundamental.symbol == normalized_symbol)
@@ -2365,15 +2387,18 @@ def _kr_stock_daily_close_reference(
     symbol: str,
     before_date: date,
 ) -> dict | None:
-    rows = (
-        db.query(KRDailyPrice)
-        .filter(KRDailyPrice.symbol == symbol)
-        .filter(KRDailyPrice.trade_date < before_date)
-        .filter(KRDailyPrice.close_price.isnot(None))
-        .order_by(KRDailyPrice.trade_date.desc(), KRDailyPrice.id.desc())
-        .limit(10)
-        .all()
-    )
+    if settings.kr_canonical_daily_enabled:
+        rows = list_kr_daily_prices(db, symbol=symbol, to_date=before_date - timedelta(days=1), limit=1)
+    else:
+        rows = (
+            db.query(KRDailyPrice)
+            .filter(KRDailyPrice.symbol == symbol)
+            .filter(KRDailyPrice.trade_date < before_date)
+            .filter(KRDailyPrice.close_price.isnot(None))
+            .order_by(KRDailyPrice.trade_date.desc(), KRDailyPrice.id.desc())
+            .limit(10)
+            .all()
+        )
     if not rows:
         return None
 
@@ -2383,7 +2408,7 @@ def _kr_stock_daily_close_reference(
     row = latest_rows[0]
     return {
         "previous_close": row.close_price,
-        "previous_close_source": "kr_daily_price",
+        "previous_close_source": "kr.daily.ohlcv" if settings.kr_canonical_daily_enabled else "kr_daily_price",
         "previous_close_trade_date": row.trade_date.isoformat(),
         "previous_close_provider": row.provider,
     }
@@ -2426,6 +2451,9 @@ def _kr_stock_daily_close_on_date(
     symbol: str,
     trade_date: date,
 ) -> KRDailyPrice | None:
+    if settings.kr_canonical_daily_enabled:
+        rows = list_kr_daily_prices(db, symbol=symbol, from_date=trade_date, to_date=trade_date, limit=1)
+        return rows[0] if rows else None
     rows = (
         db.query(KRDailyPrice)
         .filter(KRDailyPrice.symbol == symbol)
@@ -2448,97 +2476,48 @@ def _reconcile_kr_stock_intraday_close(
     db: Session,
     symbol: str,
 ) -> dict:
+    """Expose a daily reference without inventing or replacing intraday bars."""
     result = _copy_payload(payload)
-    points = result.get("points") if isinstance(result.get("points"), list) else []
-    latest_point = points[-1] if points and isinstance(points[-1], dict) else None
-    latest_time_value = latest_point.get("time") if latest_point is not None else None
-    if not isinstance(latest_time_value, str):
+    points = result.get("points") or []
+    if not points or not isinstance(points[-1], dict):
         return result
-
     try:
-        latest_time = datetime.fromisoformat(latest_time_value)
+        latest_time = datetime.fromisoformat(str(points[-1].get("time")))
     except ValueError:
         return result
-
-    seoul_tz = timezone(timedelta(hours=9))
     if latest_time.tzinfo is None:
-        latest_time = latest_time.replace(tzinfo=seoul_tz)
-    latest_time = latest_time.astimezone(seoul_tz)
-    session_close = latest_time.replace(hour=15, minute=30, second=0, microsecond=0)
-    now = _seoul_now()
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=seoul_tz)
-    now = now.astimezone(seoul_tz)
-    if latest_time.date() > now.date() or (
-        latest_time.date() == now.date() and now < session_close
-    ):
         return result
-
-    daily_row = _kr_stock_daily_close_on_date(
-        db,
-        symbol=symbol,
-        trade_date=latest_time.date(),
-    )
-    if daily_row is None or daily_row.close_price is None:
+    latest_time = latest_time.astimezone(KR_MARKET_TIMEZONE)
+    now = _seoul_now().astimezone(KR_MARKET_TIMEZONE)
+    release = datetime.combine(latest_time.date(), KR_DAILY_PRICE_RELEASE_TIME, KR_MARKET_TIMEZONE)
+    if now < release:
         return result
-
-    current_cumulative = next(
-        (
-            point.get("cumulative_volume")
-            for point in reversed(points)
-            if isinstance(point, dict)
-            and isinstance(point.get("cumulative_volume"), int)
-            and point.get("cumulative_volume") >= 0
-        ),
-        None,
-    )
-    daily_volume = daily_row.trade_volume if daily_row.trade_volume is not None else None
-    reconciled_total_volume = current_cumulative
-    closing_interval_volume = None
-    if daily_volume is not None and daily_volume >= 0:
-        reconciled_total_volume = max(daily_volume, current_cumulative or 0)
-        if current_cumulative is not None and daily_volume >= current_cumulative:
-            closing_interval_volume = daily_volume - current_cumulative
-
-    close_price = float(daily_row.close_price)
-    latest_price = latest_point.get("price")
-    open_price = float(latest_price) if isinstance(latest_price, (int, float)) else close_price
-    closing_point = {
-        "time": session_close.isoformat(),
-        "session": "regular",
-        "price": close_price,
-        "volume": closing_interval_volume,
-        "open": open_price,
-        "high": max(open_price, close_price),
-        "low": min(open_price, close_price),
-        "cumulative_volume": reconciled_total_volume,
-        "trade_value": None,
-    }
-
-    if latest_time < session_close:
-        points = [*points, closing_point]
-    elif latest_time == session_close:
-        points = [*points[:-1], closing_point]
-    else:
-        return result
-
-    result.update(
-        {
-            "regular_point_count": len(points),
-            "point_count": len(points),
-            "points": points,
-            "as_of": session_close.isoformat(),
-            "total_volume": reconciled_total_volume,
-            "regular_session_close": close_price,
-            "regular_session_close_time": session_close.isoformat(),
-            "regular_session_close_source": "kr_daily_price",
-            "regular_session_close_provider": daily_row.provider,
+    daily_row = _kr_stock_daily_close_on_date(db, symbol=symbol, trade_date=latest_time.date())
+    if daily_row is not None and daily_row.close_price is not None:
+        result["daily_close_reference"] = {
+            "price": float(daily_row.close_price),
+            "trade_date": daily_row.trade_date.isoformat(),
+            "provider": daily_row.provider,
+            "source": "kr.daily.ohlcv" if settings.kr_canonical_daily_enabled else "kr_daily_price",
+            "price_semantics": "daily_close",
+            "decision_usable": False,
+            "limitations": daily_row.limitations if settings.kr_canonical_daily_enabled else ["KR_LEGACY_DAILY_REFERENCE_NOT_CANONICAL"],
+            "evidence_id": getattr(daily_row, "evidence_id", None),
+            "raw_receipt_id": getattr(daily_row, "raw_receipt_id", None),
         }
-    )
+    if latest_time < latest_time.replace(hour=15, minute=29, second=0, microsecond=0):
+        result["is_partial"] = True
+        warning = "KR intraday closing coverage is missing; daily close does not fill minute bars or volume."
+        result.setdefault("warnings", [])
+        if warning not in result["warnings"]:
+            result["warnings"].append(warning)
     return result
 
 
 def _kr_daily_volume_totals(db: Session, *, symbol: str) -> dict[date, int]:
+    if settings.kr_canonical_daily_enabled:
+        rows = list_kr_daily_prices(db, symbol=symbol, limit=90)
+        return {row.trade_date: row.trade_volume for row in rows if row.trade_volume is not None}
     rows = (
         db.query(KRDailyPrice)
         .filter(KRDailyPrice.symbol == symbol)
@@ -2604,8 +2583,8 @@ def _project_kr_stock_intraday_payload(payload: dict) -> dict:
     result["session_phase"] = "regular" if current_points else None
     if current_points:
         latest_point = current_points[-1]
-        result["regular_session_close"] = latest_point.get("price")
-        result["regular_session_close_time"] = latest_point.get("time")
+        result["regular_session_close"] = None
+        result["regular_session_close_time"] = None
         result["as_of"] = latest_point.get("time")
         result["total_volume"] = latest_point.get("cumulative_volume")
         current_trade_date = datetime.fromisoformat(str(latest_point["time"])).date()
@@ -2651,7 +2630,7 @@ def _finalize_kr_stock_intraday_payload(
     return reconciled
 
 
-def get_kr_stock_intraday_trend(
+def _load_get_kr_stock_intraday_trend(
     db: Session,
     *,
     symbol: str,
@@ -3071,7 +3050,7 @@ def _fetch_kr_index_intraday_pages(
 
 
 @_translate_kr_provider_errors
-def get_kr_index_intraday_trend(
+def _load_get_kr_index_intraday_trend(
     db: Session,
     *,
     index_id: str,
@@ -3397,53 +3376,54 @@ def get_kr_index_summary(
     *,
     expected_daily_date: date | None = None,
 ) -> dict:
-    expected_date = expected_daily_date or expected_kr_daily_price_date()
-    index_rows = list_kr_market_indices(db=db, is_active=True)
-    snapshots = []
+    with db.no_autoflush:
+        expected_date = expected_daily_date or expected_kr_daily_price_date()
+        index_rows = list_kr_market_indices(db=db, is_active=True)
+        snapshots = []
 
-    for index_row in index_rows:
-        latest = _latest_kr_index_daily_row(db, index_id=str(index_row["index_id"]))
-        if latest is None:
-            status = "empty"
-        elif expected_date is not None and latest.trade_date < expected_date:
-            status = "stale"
-        else:
-            status = "current"
+        for index_row in index_rows:
+            latest = _latest_kr_index_daily_row(db, index_id=str(index_row["index_id"]))
+            if latest is None:
+                status = "empty"
+            elif expected_date is not None and latest.trade_date < expected_date:
+                status = "stale"
+            else:
+                status = "current"
 
-        snapshots.append(
-            {
-                **index_row,
-                "latest_date": latest.trade_date if latest else None,
-                "close": latest.close_value if latest else None,
-                "change": latest.price_change if latest else None,
-                "change_pct": latest.change_pct if latest else None,
-                "volume": latest.trade_volume if latest else None,
-                "latest_provider": latest.provider if latest else None,
-                "latest_source_url": latest.source_url if latest else None,
-                "status": status,
-                "breadth": get_kr_market_breadth(
-                    db=db,
-                    index_id=str(index_row["index_id"]),
-                    trade_date=latest.trade_date if latest else None,
-                ),
-            }
-        )
+            snapshots.append(
+                {
+                    **index_row,
+                    "latest_date": latest.trade_date if latest else None,
+                    "close": latest.close_value if latest else None,
+                    "change": latest.price_change if latest else None,
+                    "change_pct": latest.change_pct if latest else None,
+                    "volume": latest.trade_volume if latest else None,
+                    "latest_provider": latest.provider if latest else None,
+                    "latest_source_url": latest.source_url if latest else None,
+                    "status": status,
+                    "breadth": get_kr_market_breadth(
+                        db=db,
+                        index_id=str(index_row["index_id"]),
+                        trade_date=latest.trade_date if latest else None,
+                    ),
+                }
+            )
 
-    return {
-        "kind": "kr_index_summary",
-        "generated_at": utc_now(),
-        "expected_daily_price_date": expected_date,
-        "summary": {
-            "index_count": len(snapshots),
-            "current_count": sum(1 for row in snapshots if row["status"] == "current"),
-            "stale_count": sum(1 for row in snapshots if row["status"] == "stale"),
-            "empty_count": sum(1 for row in snapshots if row["status"] == "empty"),
-        },
-        "indices": snapshots,
-    }
+        return {
+            "kind": "kr_index_summary",
+            "generated_at": utc_now(),
+            "expected_daily_price_date": expected_date,
+            "summary": {
+                "index_count": len(snapshots),
+                "current_count": sum(1 for row in snapshots if row["status"] == "current"),
+                "stale_count": sum(1 for row in snapshots if row["status"] == "stale"),
+                "empty_count": sum(1 for row in snapshots if row["status"] == "empty"),
+            },
+            "indices": snapshots,
+        }
 
 
-def list_kr_index_ohlc_chart_data(
+def _load_list_kr_index_ohlc_chart_data(
     db: Session,
     *,
     index_id: str,
@@ -3590,7 +3570,7 @@ def list_kr_index_ohlc_chart_data(
 
 
 @_translate_kr_provider_errors
-def list_kr_ohlc_chart_data(
+def _load_list_kr_ohlc_chart_data(
     db: Session,
     *,
     symbol: str,
@@ -3791,3 +3771,116 @@ def list_kr_ohlc_chart_data(
         "refresh_recommended": freshness_status in {"missing", "stale"}
         or (backfill_result or {}).get("status") in {"error", "partial_success"},
     }
+
+
+def _with_kr_price_reference(payload: dict) -> dict:
+    from app.kr_market.intraday_reference import build_intraday_price_reference
+    from app.market.calendar_status import build_kr_calendar_status
+    result = _copy_payload(payload)
+    result["price_reference"] = build_intraday_price_reference(
+        result, calendar_status=build_kr_calendar_status(now=_seoul_now()))
+    return result
+
+
+# Temporary KR-owned acquisition seam: public readers always disable external IO.
+# Remove these private legacy loaders as each dataset moves to its Gateway platform.
+def get_kr_stock_intraday_trend(
+    db: Session, *, symbol: str, refresh: bool = False,
+    external_fetch_allowed: bool = False,
+) -> dict:
+    if refresh or external_fetch_allowed:
+        raise ValueError("KR reads are cache-only; use the explicit intraday refresh command.")
+    with db.no_autoflush:
+        payload = _load_get_kr_stock_intraday_trend(
+            db, symbol=symbol, refresh=False, external_fetch_allowed=False,
+        )
+        return _with_kr_price_reference(payload)
+
+
+def refresh_kr_stock_intraday_trend(db: Session, *, symbol: str) -> dict:
+    payload = _load_get_kr_stock_intraday_trend(
+        db, symbol=symbol, refresh=True, external_fetch_allowed=True,
+    )
+    return _with_kr_price_reference(payload)
+
+
+def get_kr_index_intraday_trend(
+    db: Session, *, index_id: str, refresh: bool = False, reload_all: bool = False,
+    max_pages: int = KR_INDEX_INTRADAY_FULL_MAX_PAGES, external_fetch_allowed: bool = False,
+) -> dict:
+    if refresh or reload_all or external_fetch_allowed:
+        raise ValueError("KR reads are cache-only; use the explicit intraday refresh command.")
+    with db.no_autoflush:
+        payload = _load_get_kr_index_intraday_trend(
+            db, index_id=index_id, refresh=False, reload_all=False,
+            max_pages=max_pages, external_fetch_allowed=False,
+        )
+        return _with_kr_price_reference(payload)
+
+
+def refresh_kr_index_intraday_trend(
+    db: Session, *, index_id: str, reload_all: bool = False,
+    max_pages: int = KR_INDEX_INTRADAY_FULL_MAX_PAGES,
+) -> dict:
+    if not 1 <= max_pages <= KR_INDEX_INTRADAY_FULL_MAX_PAGES:
+        raise ValueError("max_pages is outside the bounded KR index refresh range.")
+    payload = _load_get_kr_index_intraday_trend(
+        db, index_id=index_id, refresh=True, reload_all=reload_all,
+        max_pages=max_pages, external_fetch_allowed=True,
+    )
+    return _with_kr_price_reference(payload)
+
+
+def list_kr_index_ohlc_chart_data(
+    db: Session, *, index_id: str, timeframe: str = "daily", bars: int = 90,
+    ensure_history: bool = False, outputsize: str = "compact", to_date: date | None = None,
+) -> dict:
+    if ensure_history:
+        raise ValueError("KR reads are cache-only; use the explicit history command.")
+    with db.no_autoflush:
+        return _load_list_kr_index_ohlc_chart_data(
+            db, index_id=index_id, timeframe=timeframe, bars=bars,
+            ensure_history=False, outputsize=outputsize, to_date=to_date,
+        )
+
+
+def ensure_kr_index_history(
+    db: Session, *, index_id: str, timeframe: str = "daily", bars: int = 90,
+    outputsize: str = "compact", to_date: date | None = None,
+) -> dict:
+    return _load_list_kr_index_ohlc_chart_data(
+        db, index_id=index_id, timeframe=timeframe, bars=bars,
+        ensure_history=True, outputsize=outputsize, to_date=to_date,
+    )
+
+
+def list_kr_ohlc_chart_data(
+    db: Session, *, symbol: str, timeframe: str = "daily", bars: int = 90,
+    ensure_history: bool = False, outputsize: str = "compact", provider: str = "auto",
+    to_date: date | None = None,
+) -> dict:
+    if ensure_history:
+        raise ValueError("KR reads are cache-only; use the explicit history command.")
+    if settings.kr_canonical_daily_enabled:
+        from app.kr_market.daily_projection import read_chart
+        if provider != "auto":
+            raise ValueError("KR canonical provider selection belongs to backend policy; use auto")
+        return read_chart(db, symbol=symbol, timeframe=timeframe, bars=bars, to_date=to_date)
+    with db.no_autoflush:
+        return _load_list_kr_ohlc_chart_data(
+            db, symbol=symbol, timeframe=timeframe, bars=bars,
+            ensure_history=False, outputsize=outputsize, provider=provider, to_date=to_date,
+        )
+
+
+def ensure_kr_stock_history(
+    db: Session, *, symbol: str, timeframe: str = "daily", bars: int = 90,
+    outputsize: str = "compact", to_date: date | None = None,
+) -> dict:
+    if settings.kr_canonical_daily_enabled:
+        from app.kr_market.daily_projection import read_chart
+        return read_chart(db, symbol=symbol, timeframe=timeframe, bars=bars, to_date=to_date, acquire=True)
+    return _load_list_kr_ohlc_chart_data(
+        db, symbol=symbol, timeframe=timeframe, bars=bars,
+        ensure_history=True, outputsize=outputsize, provider="auto", to_date=to_date,
+    )

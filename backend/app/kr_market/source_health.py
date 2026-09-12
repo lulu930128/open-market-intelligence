@@ -5,6 +5,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.orm import Query, Session
+from app.config import settings
 
 from app.db.models import (
     KRCompanyFundamental,
@@ -13,11 +14,10 @@ from app.db.models import (
     KRInvestorTradeDaily,
     KRStockMaster,
 )
-from app.kr_market.sources import normalize_kr_index_id, normalize_kr_symbol
+from app.kr_market.sources import KR_INDEX_CONFIG_BY_ID, normalize_kr_index_id
 from app.kr_market.trading_calendar import expected_kr_daily_price_date
 from app.observability.provider_health import (
     enrich_source_health_entries,
-    sync_source_health_snapshots,
 )
 from app.observability.source_health_contract import (
     daily_row_status,
@@ -262,6 +262,27 @@ def _summary(entries: list[KRSourceHealthEntry]) -> dict[str, int]:
     )
 
 
+def read_kr_resolved_dataset_health(db: Session, *, target: str | None, now: datetime | None = None) -> dict:
+    """Read selected dataset health without changing stored provider snapshots."""
+    resolved_datasets = {}
+    if target and normalize_kr_index_id(target) not in KR_INDEX_CONFIG_BY_ID:
+        from app.kr_market.daily_ohlcv_platform import KRDailyOhlcvPlatform
+        from app.kr_market.identity import KRIdentityError
+        try:
+            daily = KRDailyOhlcvPlatform(db).read(symbol=target, bars=1, now=now)
+            resolved_datasets["kr.daily.ohlcv"] = {key: value for key, value in daily.projection.items() if key != "points"}
+        except KRIdentityError as exc:
+            resolved_datasets["kr.daily.ohlcv"] = {"freshness_status": "missing", "facts_usable": False,
+                "decision_usable": False, "limitations": ["KR_IDENTITY_UNRESOLVED"], "reason": str(exc)}
+        resolved_daily = resolved_datasets["kr.daily.ohlcv"]
+        resolved_daily["active_reader"] = "shared_gateway" if settings.kr_canonical_daily_enabled else "legacy_daily_compatibility"
+        resolved_daily["rollout_status"] = "enabled" if settings.kr_canonical_daily_enabled else "disabled"
+        if not settings.kr_canonical_daily_enabled:
+            resolved_daily["decision_usable"] = False
+            resolved_daily["limitations"] = [*resolved_daily["limitations"], "KR_CANONICAL_DAILY_ROLLOUT_DISABLED"]
+    return resolved_datasets
+
+
 def build_kr_source_health(
     db: Session,
     *,
@@ -270,55 +291,60 @@ def build_kr_source_health(
     now: datetime | None = None,
     expected_daily_price_date: date | None = None,
 ) -> dict[str, Any]:
-    if symbol and index_id:
-        raise ValueError("symbol and index_id are mutually exclusive.")
-    normalized_symbol = normalize_kr_symbol(symbol) if symbol else None
-    normalized_index_id = normalize_kr_index_id(index_id) if index_id else None
-    expected_date = expected_daily_price_date or expected_kr_daily_price_date(now=now)
-    entries = (
-        [
-            _index_daily_price_entry(
-                db,
-                index_id=normalized_index_id,
-                expected_daily_price_date=expected_date,
-            )
-        ]
-        if normalized_index_id
-        else [
-            _symbol_master_entry(db, symbol=normalized_symbol),
-            *_daily_price_entries(
-                db,
-                symbol=normalized_symbol,
-                expected_daily_price_date=expected_date,
-            ),
-            _fundamentals_entry(db, symbol=normalized_symbol),
-            _investor_trade_entry(db, symbol=normalized_symbol),
-        ]
-    )
-    generated_at = _generated_at()
-    entry_dicts = enrich_source_health_entries(
-        db,
-        market="kr",
-        entries=[entry.to_dict() for entry in entries],
-    )
-    sync_source_health_snapshots(
-        db,
-        market="kr",
-        entries=entry_dicts,
-        checked_at=generated_at,
-    )
+    with db.no_autoflush:
+        if symbol and index_id:
+            raise ValueError("symbol and index_id are mutually exclusive.")
+        normalized_symbol = None
+        if symbol:
+            from app.kr_market.identity import KRIdentityError, resolve_kr_instrument_identity
+            try:
+                normalized_symbol = resolve_kr_instrument_identity(db, symbol).storage_symbol
+            except KRIdentityError:
+                # Diagnostics must not turn an unresolved bare KOSDAQ code into KS.
+                normalized_symbol = symbol.strip().upper()
+        normalized_index_id = normalize_kr_index_id(index_id) if index_id else None
+        expected_date = expected_daily_price_date or expected_kr_daily_price_date(now=now)
+        entries = (
+            [
+                _index_daily_price_entry(
+                    db,
+                    index_id=normalized_index_id,
+                    expected_daily_price_date=expected_date,
+                )
+            ]
+            if normalized_index_id
+            else [
+                _symbol_master_entry(db, symbol=normalized_symbol),
+                *_daily_price_entries(
+                    db,
+                    symbol=normalized_symbol,
+                    expected_daily_price_date=expected_date,
+                ),
+                _fundamentals_entry(db, symbol=normalized_symbol),
+                _investor_trade_entry(db, symbol=normalized_symbol),
+            ]
+        )
+        generated_at = _generated_at()
+        entry_dicts = enrich_source_health_entries(
+            db,
+            market="kr",
+            entries=[entry.to_dict() for entry in entries],
+        )
 
-    return {
-        "kind": "kr_source_health",
-        "generated_at": generated_at.isoformat(),
-        "filters": {
-            "symbol": normalized_symbol,
-            "index_id": normalized_index_id,
-        },
-        "expected_daily_price_date": expected_date.isoformat() if expected_date else None,
-        "summary": _summary(entries),
-        "entries": entry_dicts,
-    }
+
+        resolved_datasets = read_kr_resolved_dataset_health(db, target=symbol, now=now)
+        return {
+            "kind": "kr_source_health",
+            "generated_at": generated_at.isoformat(),
+            "filters": {
+                "symbol": normalized_symbol,
+                "index_id": normalized_index_id,
+            },
+            "expected_daily_price_date": expected_date.isoformat() if expected_date else None,
+            "summary": _summary(entries),
+            "entries": entry_dicts,
+            "resolved_datasets": resolved_datasets,
+        }
 
 
 __all__ = [

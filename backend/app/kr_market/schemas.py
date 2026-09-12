@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -69,6 +70,12 @@ class KRDailyPriceRead(BaseModel):
 
     created_at: datetime
     updated_at: datetime
+    evidence_id: str | None = None
+    raw_receipt_id: str | None = None
+    price_basis: str | None = None
+    facts_usable: bool = False
+    decision_usable: bool = False
+    limitations: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -81,6 +88,7 @@ class KRDailyPriceRefreshResultRead(BaseModel):
     inserted_count: int
     updated_count: int
     message: str
+    resolved_evidence: dict | None = None
 
 
 class KRMarketIndexRead(BaseModel):
@@ -316,6 +324,8 @@ class KROhlcPointRead(BaseModel):
     low: float | None = None
     close: float | None = None
     volume: int | None = None
+    lineage: dict | None = None
+    finalization: str | None = None
 
 
 class KROhlcChartRead(BaseModel):
@@ -336,6 +346,7 @@ class KROhlcChartRead(BaseModel):
     freshness_status: str = "missing"
     is_current: bool = False
     refresh_recommended: bool = True
+    resolved_evidence: dict | None = None
 
 
 class KRIndexOhlcChartRead(BaseModel):
@@ -374,6 +385,7 @@ class KRIndexIntradayTrendPointRead(BaseModel):
 
 
 class KRIndexIntradayTrendRead(BaseModel):
+    price_reference: dict | None = None
     stock_id: str
     symbol: str | None = None
     source: str
@@ -404,10 +416,23 @@ class KRIndexIntradayTrendRead(BaseModel):
     polling_interval_seconds: int | None = None
 
 
+class KRDailyCloseReferenceRead(BaseModel):
+    price: float
+    trade_date: date
+    provider: str
+    source: Literal["kr_daily_price", "kr.daily.ohlcv"]
+    price_semantics: Literal["daily_close"]
+    decision_usable: Literal[False] = False
+    limitations: list[str] = Field(default_factory=list)
+    evidence_id: str | None = None
+    raw_receipt_id: str | None = None
+
+
 class KRStockIntradayTrendRead(KRIndexIntradayTrendRead):
     volume_unit: str = "shares"
     trade_value_unit: str = "krw"
     volume_pace: dict | None = None
+    daily_close_reference: KRDailyCloseReferenceRead | None = None
 
 
 class KRResourceSlotRead(BaseModel):
@@ -461,6 +486,7 @@ class KRSourceHealthSummaryRead(BaseModel):
 
 
 class KRSourceHealthRead(BaseModel):
+    resolved_datasets: dict = Field(default_factory=dict)
     kind: str
     generated_at: datetime
     filters: dict[str, str | None] = Field(default_factory=dict)

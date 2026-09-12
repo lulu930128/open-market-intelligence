@@ -62,6 +62,10 @@ from app.kr_market.service import (
     create_kr_watchlist_item,
     delete_kr_watchlist_group,
     delete_kr_watchlist_item,
+    ensure_kr_index_history,
+    ensure_kr_stock_history,
+    refresh_kr_index_intraday_trend,
+    refresh_kr_stock_intraday_trend,
     get_kr_index_summary,
     get_kr_index_intraday_trend,
     get_kr_market_breadth,
@@ -305,12 +309,13 @@ def get_kr_index_ohlc_chart(
     db: Session = Depends(get_db),
 ):
     try:
+        if ensure_history:
+            raise ValueError("KR GET is cache-only; use the corresponding POST command.")
         return list_kr_index_ohlc_chart_data(
             db=db,
             index_id=index_id,
             timeframe=timeframe,
             bars=bars,
-            ensure_history=ensure_history,
             outputsize=outputsize,
             to_date=to_date,
         )
@@ -329,11 +334,11 @@ def get_kr_index_intraday_chart(
     db: Session = Depends(get_db),
 ):
     try:
+        if refresh or reload_all:
+            raise ValueError("KR GET is cache-only; use the corresponding POST command.")
         return get_kr_index_intraday_trend(
             db=db,
             index_id=index_id,
-            refresh=refresh,
-            reload_all=reload_all,
             max_pages=max_pages,
         )
     except ValueError as exc:
@@ -387,10 +392,11 @@ def get_kr_stock_intraday_chart(
     db: Session = Depends(get_db),
 ):
     try:
+        if refresh:
+            raise ValueError("KR GET is cache-only; use the corresponding POST command.")
         return get_kr_stock_intraday_trend(
             db=db,
             symbol=symbol,
-            refresh=refresh,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -872,17 +878,69 @@ def get_kr_ohlc_chart_data(
     db: Session = Depends(get_db),
 ):
     try:
+        if ensure_history:
+            raise ValueError("KR GET is cache-only; use the corresponding POST command.")
         return list_kr_ohlc_chart_data(
             db=db,
             symbol=symbol,
             timeframe=timeframe,
             bars=bars,
-            ensure_history=ensure_history,
             outputsize=outputsize,
             provider=provider,
             to_date=to_date,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except KRMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.post("/stocks/{symbol}/intraday/refresh", response_model=KRStockIntradayTrendRead)
+def refresh_kr_stock_intraday_api(symbol: str, db: Session = Depends(get_db)):
+    try:
+        return refresh_kr_stock_intraday_trend(db, symbol=symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KRMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.post("/indices/{index_id}/intraday/refresh", response_model=KRIndexIntradayTrendRead)
+def refresh_kr_index_intraday_api(
+    index_id: str, reload_all: bool = False,
+    max_pages: int = Query(default=80, ge=1, le=80), db: Session = Depends(get_db),
+):
+    try:
+        return refresh_kr_index_intraday_trend(db, index_id=index_id, reload_all=reload_all, max_pages=max_pages)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KRMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.post("/stocks/{symbol}/daily/ensure-history", response_model=KROhlcChartRead)
+def ensure_kr_stock_history_api(
+    symbol: str, timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    bars: int = Query(default=90, ge=1, le=5000), to_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return ensure_kr_stock_history(db, symbol=symbol, timeframe=timeframe, bars=bars, to_date=to_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KRMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.post("/indices/{index_id}/daily/ensure-history", response_model=KRIndexOhlcChartRead)
+def ensure_kr_index_history_api(
+    index_id: str, timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    bars: int = Query(default=90, ge=1, le=5000), to_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return ensure_kr_index_history(db, index_id=index_id, timeframe=timeframe, bars=bars, to_date=to_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc

@@ -727,6 +727,13 @@ def _resolve_kr_stock_symbol(
     allow_unknown: bool = False,
 ) -> ScopeResolution | None:
     normalized_symbol = normalize_kr_symbol(symbol)
+    from app.config import settings
+    if settings.kr_canonical_daily_enabled and db is not None and symbol:
+        from app.kr_market.identity import resolve_kr_instrument_identity, KRIdentityError
+        try:
+            normalized_symbol = resolve_kr_instrument_identity(db, symbol).storage_symbol
+        except KRIdentityError:
+            return None
     if not _looks_like_kr_symbol(normalized_symbol):
         return None
 

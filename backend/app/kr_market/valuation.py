@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
+from app.config import settings
 
 from app.kr_market.service import _latest_kr_daily_row
 from app.market_data.contracts import Market
@@ -18,6 +19,17 @@ def read_kr_valuation_price(
     symbol: str,
     requested_at: datetime,
 ) -> ValuationPriceEvidence:
+    if settings.kr_canonical_daily_enabled:
+        from app.kr_market.daily_ohlcv_platform import KRDailyOhlcvPlatform
+        result = KRDailyOhlcvPlatform(db).read(symbol=symbol, bars=1, now=requested_at)
+        selected = result.result.resolved.bars
+        bar = selected[-1] if selected else None
+        return ValuationPriceEvidence(market=Market.KR, symbol=result.identity.instrument.symbol,
+            price=bar.close_price if bar else None, currency=result.identity.currency,
+            as_of=bar.end_at if bar else None, provider=bar.lineage.provider if bar else None,
+            source=bar.lineage.source if bar else None, source_kind="canonical_daily_close" if bar else "missing",
+            facts_usable=result.projection["facts_usable"], research_usable=result.projection["decision_usable"],
+            resolved_status=result.projection["freshness_status"], limitations=tuple(result.projection["limitations"]))
     del requested_at
     row = _latest_kr_daily_row(db, symbol=symbol)
     price = (
